@@ -1,0 +1,169 @@
+package cluster
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"k8s.io/client-go/rest"
+)
+
+type recordingFactory struct {
+	mu      sync.Mutex
+	configs []*rest.Config
+	closes  int
+}
+
+func (f *recordingFactory) New(config *rest.Config) (BackendClients, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.configs = append(f.configs, rest.CopyConfig(config))
+	return BackendClients{Close: func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.closes++
+	}}, nil
+}
+
+func TestSessionRegistryOpensIndependentSessionsWithSharedClients(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog(t, "https://cluster.example.test")
+	factory := &recordingFactory{}
+	registry := NewSessionRegistry(factory)
+	t.Cleanup(registry.CloseAll)
+
+	first, err := registry.Open(catalog, "local")
+	if err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	second, err := registry.Open(catalog, "local")
+	if err != nil {
+		t.Fatalf("Open second: %v", err)
+	}
+	if first.ID() == second.ID() {
+		t.Fatal("two workspace windows received the same session ID")
+	}
+	if first.backend != second.backend {
+		t.Fatal("same catalog/context did not share Kubernetes authority")
+	}
+	if len(factory.configs) != 1 {
+		t.Fatalf("client factory calls = %d, want 1", len(factory.configs))
+	}
+	config := factory.configs[0]
+	if config.QPS != DefaultClientQPS || config.Burst != DefaultClientBurst {
+		t.Fatalf("rate limit = %v/%d", config.QPS, config.Burst)
+	}
+	if config.UserAgent != "kmgr-engine" {
+		t.Fatalf("user agent = %q", config.UserAgent)
+	}
+
+	if !registry.Close(first.ID()) || factory.closes != 0 {
+		t.Fatal("closing one session closed shared clients")
+	}
+	if _, ok := registry.Get(second.ID()); !ok {
+		t.Fatal("second session disappeared")
+	}
+	if !registry.Close(second.ID()) || factory.closes != 1 {
+		t.Fatalf("final close count = %d, want 1", factory.closes)
+	}
+	if registry.Close(second.ID()) {
+		t.Fatal("closing an absent session succeeded")
+	}
+}
+
+func TestDifferentCatalogSnapshotsDoNotSilentlyReuseCredentials(t *testing.T) {
+	t.Parallel()
+	firstCatalog := testCatalog(t, "https://cluster.example.test")
+	secondCatalog := testCatalog(t, "https://cluster.example.test")
+	factory := &recordingFactory{}
+	registry := NewSessionRegistry(factory)
+	t.Cleanup(registry.CloseAll)
+	if _, err := registry.Open(firstCatalog, "local"); err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	if _, err := registry.Open(secondCatalog, "local"); err != nil {
+		t.Fatalf("Open second: %v", err)
+	}
+	if len(factory.configs) != 2 {
+		t.Fatalf("client factory calls = %d, want 2 catalog generations", len(factory.configs))
+	}
+}
+
+func TestSessionRegistryRejectsUnsupportedAuthenticationBeforeFactory(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config")
+	contents := `
+apiVersion: v1
+kind: Config
+clusters:
+- name: target
+  cluster: {server: https://cluster.example.test}
+users:
+- name: plugin
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: never-run
+      interactiveMode: Never
+contexts:
+- name: local
+  context: {cluster: target, user: plugin}
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	catalog := discoverExplicit(t, path)
+	factory := &recordingFactory{}
+	registry := NewSessionRegistry(factory)
+	if _, err := registry.Open(catalog, "local"); err == nil {
+		t.Fatal("unsupported authentication was accepted")
+	}
+	if len(factory.configs) != 0 {
+		t.Fatal("client factory ran for unsupported authentication")
+	}
+}
+
+func TestSessionRegistryRateLimitCanOnlyChangeWhileIdle(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog(t, "https://cluster.example.test")
+	registry := NewSessionRegistry(&recordingFactory{})
+	if err := registry.SetRateLimit(100, 200); err != nil {
+		t.Fatalf("SetRateLimit idle: %v", err)
+	}
+	session, err := registry.Open(catalog, "local")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := registry.SetRateLimit(1, 1); err == nil {
+		t.Fatal("rate limit changed with an open session")
+	}
+	registry.Close(session.ID())
+	if err := registry.SetRateLimit(0, 1); err == nil {
+		t.Fatal("invalid rate limit accepted")
+	}
+}
+
+func testCatalog(t *testing.T, server string) *Catalog {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config")
+	contents := `
+apiVersion: v1
+kind: Config
+clusters:
+- name: target
+  cluster:
+    server: ` + server + `
+users:
+- name: static
+  user: {token: token}
+contexts:
+- name: local
+  context: {cluster: target, user: static}
+current-context: local
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return discoverExplicit(t, path)
+}
