@@ -103,10 +103,10 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
             form.addArrangedSubview(warning)
             primaryButton.title = "Restart"
         case .metadata:
-            labelsField.placeholderString = "key=value, team=platform"
-            annotationsField.placeholderString = "key=value, note=free form"
-            removeLabelsField.placeholderString = "old-key, another-key"
-            removeAnnotationsField.placeholderString = "old-note"
+            labelsField.placeholderString = "One key=value entry per line"
+            annotationsField.placeholderString = "One key=value entry per line"
+            removeLabelsField.placeholderString = "One key per line"
+            removeAnnotationsField.placeholderString = "One key per line"
             form.addArrangedSubview(row("Set labels", labelsField))
             form.addArrangedSubview(row("Set annotations", annotationsField))
             form.addArrangedSubview(row("Remove labels", removeLabelsField))
@@ -170,20 +170,26 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
             guard let self else { return }
             do {
                 let detail = try await detailProvider.getObject(identity: identity)
+                let target = try OptimisticResourceMutationTarget(
+                    selectedIdentity: identity,
+                    authoritativeDetail: detail
+                )
                 let stream: AsyncThrowingStream<OperationProgress, Error>
                 switch draft {
                 case .scale(let replicas):
                     stream = try await operationProvider.scaleResource(
-                        identity: identity, replicas: replicas,
-                        expectedResourceVersion: detail.resourceVersion
+                        identity: target.identity, replicas: replicas,
+                        expectedResourceVersion: target.expectedResourceVersion
                     )
                 case .restart:
                     stream = try await operationProvider.rolloutRestart(
-                        identity: identity, expectedResourceVersion: detail.resourceVersion
+                        identity: target.identity,
+                        expectedResourceVersion: target.expectedResourceVersion
                     )
                 case .metadata(let changes):
                     stream = try await operationProvider.updateMetadata(
-                        identity: identity, expectedResourceVersion: detail.resourceVersion,
+                        identity: target.identity,
+                        expectedResourceVersion: target.expectedResourceVersion,
                         changes: changes
                     )
                 }
@@ -223,46 +229,20 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     private func mutationDraft() throws -> MutationDraft {
         switch mutation {
         case .scale:
-            guard let replicas = Int32(replicasField.stringValue), replicas >= 0 else {
-                throw validation("Replicas must be a non-negative 32-bit integer.")
-            }
-            return .scale(replicas)
+            return .scale(try ResourceMutationDraftValidator.replicaCount(
+                replicasField.stringValue
+            ))
         case .rolloutRestart:
+            try ResourceMutationDraftValidator.validateRolloutRestart(identity)
             return .restart
         case .metadata:
-            let changes = ResourceMetadataChanges(
-                labels: try parseAssignments(labelsField.stringValue),
-                annotations: try parseAssignments(annotationsField.stringValue),
-                removeLabelKeys: parseKeys(removeLabelsField.stringValue),
-                removeAnnotationKeys: parseKeys(removeAnnotationsField.stringValue)
-            )
-            guard !changes.isEmpty else { throw validation("Enter at least one metadata change.") }
-            return .metadata(changes)
+            return .metadata(try ResourceMetadataDraftParser.changes(
+                labels: labelsField.stringValue,
+                annotations: annotationsField.stringValue,
+                removeLabels: removeLabelsField.stringValue,
+                removeAnnotations: removeAnnotationsField.stringValue
+            ))
         }
-    }
-
-    private func parseAssignments(_ value: String) throws -> [String: String] {
-        var result: [String: String] = [:]
-        for item in value.split(separator: ",", omittingEmptySubsequences: true) {
-            let pair = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard pair.count == 2 else { throw validation("Set entries use key=value, separated by commas.") }
-            let key = pair[0].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !key.isEmpty, result[key] == nil else { throw validation("Metadata keys must be non-empty and unique.") }
-            result[key] = pair[1].trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return result
-    }
-
-    private func parseKeys(_ value: String) -> [String] {
-        value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
-
-    private func validation(_ message: String) -> ClusterManagerIssue {
-        ClusterManagerIssue(
-            category: .validation, reason: "InvalidMutation", message: message,
-            contextName: session.contextName, operation: mutation.title
-        )
     }
 
     private func show(_ error: Error) {
