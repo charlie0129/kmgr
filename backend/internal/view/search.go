@@ -114,10 +114,12 @@ func (r *Runtime) SearchCached(query CachedSearchQuery) (CachedSearchResult, err
 	})
 
 	retained := newBoundedSearchResults(limit)
+	normalizedQuery := strings.ToLower(query.Query)
 	seen := make(map[string]struct{}, min(examinationLimit, 4096))
 	result := CachedSearchResult{}
 	for _, entry := range entries {
-		for _, value := range entry.store.Snapshot() {
+		for _, indexed := range entry.store.SearchSnapshot() {
+			value := indexed.Object
 			if value == nil || value.GetUID() == "" {
 				continue
 			}
@@ -139,7 +141,9 @@ func (r *Runtime) SearchCached(query CachedSearchQuery) (CachedSearchResult, err
 			if !includesSearchNamespace(value.GetNamespace(), resource, query.NamespaceScope) {
 				continue
 			}
-			if rank, match := searchRank(query.Query, value.GetNamespace(), value.GetName()); match {
+			if rank, match := searchRankNormalized(
+				normalizedQuery, indexed.NormalizedName, indexed.NormalizedQualified,
+			); match {
 				retained.Add(makeSearchResult(query.SessionID, resource, value, rank, true))
 			}
 		}
@@ -226,14 +230,18 @@ func (r *Runtime) Search(
 	}
 	r.mu.Unlock()
 	cachedResults := newBoundedSearchResults(limit)
+	normalizedQuery := strings.ToLower(query.Query)
 	var examined uint64
 	for _, entry := range cachedEntries {
-		for _, value := range entry.store.Snapshot() {
+		for _, indexed := range entry.store.SearchSnapshot() {
+			value := indexed.Object
 			examined++
 			if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
 				continue
 			}
-			if rank, match := searchRank(query.Query, value.GetNamespace(), value.GetName()); match {
+			if rank, match := searchRankNormalized(
+				normalizedQuery, indexed.NormalizedName, indexed.NormalizedQualified,
+			); match {
 				cachedResults.Add(makeSearchResult(query.SessionID, query.Resource, value, rank, true))
 			}
 		}
@@ -350,9 +358,13 @@ func rankSearchObjects(query SearchQuery, objects []*unstructured.Unstructured, 
 }
 
 func searchRank(query, namespace, name string) (float64, bool) {
-	query = strings.ToLower(query)
 	name = strings.ToLower(name)
-	qualified := strings.ToLower(namespace + "/" + name)
+	return searchRankNormalized(
+		strings.ToLower(query), name, strings.ToLower(namespace)+"/"+name,
+	)
+}
+
+func searchRankNormalized(query, name, qualified string) (float64, bool) {
 	switch {
 	case name == query:
 		return 1000, true

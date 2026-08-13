@@ -4,6 +4,7 @@ package store
 import (
 	"cmp"
 	"slices"
+	"strings"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,6 +22,15 @@ type Change struct {
 	Created     bool
 }
 
+// SearchIdentity is the compact, immutable name index used by command-palette
+// searches. Normalization happens once when an object enters the UID store,
+// rather than once per query over every retained object.
+type SearchIdentity struct {
+	Object              *unstructured.Unstructured
+	NormalizedName      string
+	NormalizedQualified string
+}
+
 // UIDStore indexes immutable unstructured objects by Kubernetes UID. Objects
 // supplied to Upsert must not be mutated after insertion.
 type UIDStore struct {
@@ -30,15 +40,17 @@ type UIDStore struct {
 	byName      map[NamespacedName]types.UID
 	byOwnerUID  map[types.UID]map[types.UID]struct{}
 	byNodeName  map[string]map[types.UID]struct{}
+	bySearchUID map[types.UID]SearchIdentity
 	resourceVer string
 }
 
 func New() *UIDStore {
 	return &UIDStore{
-		byUID:      make(map[types.UID]*unstructured.Unstructured),
-		byName:     make(map[NamespacedName]types.UID),
-		byOwnerUID: make(map[types.UID]map[types.UID]struct{}),
-		byNodeName: make(map[string]map[types.UID]struct{}),
+		byUID:       make(map[types.UID]*unstructured.Unstructured),
+		byName:      make(map[NamespacedName]types.UID),
+		byOwnerUID:  make(map[types.UID]map[types.UID]struct{}),
+		byNodeName:  make(map[string]map[types.UID]struct{}),
+		bySearchUID: make(map[types.UID]SearchIdentity),
 	}
 }
 
@@ -151,6 +163,29 @@ func (s *UIDStore) Snapshot() []*unstructured.Unstructured {
 	return objects
 }
 
+// SearchSnapshot returns the same deterministic identity order as Snapshot,
+// plus normalized name keys maintained by Upsert. The retained object remains
+// immutable and is not copied.
+func (s *UIDStore) SearchSnapshot() []SearchIdentity {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	identities := make([]SearchIdentity, 0, len(s.bySearchUID))
+	for _, identity := range s.bySearchUID {
+		identities = append(identities, identity)
+	}
+	slices.SortFunc(identities, func(a, b SearchIdentity) int {
+		if result := cmp.Compare(a.Object.GetNamespace(), b.Object.GetNamespace()); result != 0 {
+			return result
+		}
+		if result := cmp.Compare(a.Object.GetName(), b.Object.GetName()); result != 0 {
+			return result
+		}
+		return cmp.Compare(a.Object.GetUID(), b.Object.GetUID())
+	})
+	return identities
+}
+
 func (s *UIDStore) ResourceVersion() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -190,6 +225,12 @@ func (s *UIDStore) ReconcileSnapshot(present map[types.UID]struct{}, resourceVer
 
 func (s *UIDStore) addIndexesLocked(object *unstructured.Unstructured) {
 	uid := object.GetUID()
+	name := strings.ToLower(object.GetName())
+	s.bySearchUID[uid] = SearchIdentity{
+		Object:              object,
+		NormalizedName:      name,
+		NormalizedQualified: strings.ToLower(object.GetNamespace()) + "/" + name,
+	}
 	for _, owner := range object.GetOwnerReferences() {
 		addToIndex(s.byOwnerUID, owner.UID, uid)
 	}
@@ -200,6 +241,7 @@ func (s *UIDStore) addIndexesLocked(object *unstructured.Unstructured) {
 
 func (s *UIDStore) removeIndexesLocked(object *unstructured.Unstructured) {
 	uid := object.GetUID()
+	delete(s.bySearchUID, uid)
 	for _, owner := range object.GetOwnerReferences() {
 		removeFromIndex(s.byOwnerUID, owner.UID, uid)
 	}

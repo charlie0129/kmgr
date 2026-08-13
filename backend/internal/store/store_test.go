@@ -115,6 +115,40 @@ func TestSnapshotUsesStableIdentityOrder(t *testing.T) {
 	}
 }
 
+func TestSearchIndexNormalizesOnceAndFollowsUIDLifecycle(t *testing.T) {
+	t.Parallel()
+	s := New()
+	s.Upsert(object("uid-old", "Team-A", "API-Server", ""))
+	entries := s.SearchSnapshot()
+	if len(entries) != 1 || entries[0].NormalizedName != "api-server" ||
+		entries[0].NormalizedQualified != "team-a/api-server" ||
+		entries[0].Object.GetUID() != "uid-old" {
+		t.Fatalf("initial search index = %#v", entries)
+	}
+
+	// A same-name recreation replaces every index by UID.
+	s.Upsert(object("uid-new", "Team-A", "API-Server", ""))
+	entries = s.SearchSnapshot()
+	if len(entries) != 1 || entries[0].Object.GetUID() != "uid-new" {
+		t.Fatalf("recreated search index = %#v", entries)
+	}
+	if !s.Delete("uid-new") || len(s.SearchSnapshot()) != 0 {
+		t.Fatal("deleted object remained in search index")
+	}
+}
+
+func TestSearchIndexReconcilesCompletedSnapshot(t *testing.T) {
+	t.Parallel()
+	s := New()
+	s.Upsert(object("keep", "ns", "Keep", ""))
+	s.Upsert(object("remove", "ns", "Remove", ""))
+	s.ReconcileSnapshot(map[types.UID]struct{}{"keep": {}}, "rv-2")
+	entries := s.SearchSnapshot()
+	if len(entries) != 1 || entries[0].Object.GetUID() != "keep" {
+		t.Fatalf("reconciled search index = %#v", entries)
+	}
+}
+
 func object(uid, namespace, name, node string) *unstructured.Unstructured {
 	value := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
