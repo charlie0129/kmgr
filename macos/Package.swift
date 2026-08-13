@@ -33,6 +33,10 @@ let package = Package(
         .package(
             url: "https://github.com/apple/swift-protobuf.git",
             exact: "1.33.1"
+        ),
+        .package(
+            url: "https://github.com/migueldeicaza/SwiftTerm.git",
+            exact: "1.18.0"
         )
     ],
     targets: [
@@ -73,7 +77,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "Kmgr",
-            dependencies: ["KmgrCore", "KmgrProto", "KmgrIPC"],
+            dependencies: [
+                "KmgrCore",
+                "KmgrProto",
+                "KmgrIPC",
+                .product(name: "SwiftTerm", package: "SwiftTerm")
+            ],
             path: "Kmgr",
             exclude: ["Resources"],
             linkerSettings: [
