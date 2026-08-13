@@ -82,3 +82,110 @@ import Testing
     #expect(document.views[0].columns[2].type == .number)
     #expect(!NativeColumnCatalog.normalizeLegacyTypes(in: &document))
 }
+
+@Test func nativePickerCatalogFiltersByExactGVRAndMarksExtractorDuplicates() {
+    let existing = [
+        ColumnDefinition(
+            id: "cpu-custom-id", title: "Processor", source: .metric,
+            value: "cpu", type: .resourceUsage
+        ),
+        ColumnDefinition(
+            id: "status", title: "Custom Status", source: .cel,
+            expression: "object.status.phase", type: .string
+        ),
+    ]
+    let podItems = NativeColumnCatalog.items(
+        group: "", version: "v1", resource: "pods", existingColumns: existing
+    )
+    #expect(podItems.contains { $0.descriptor.value == "ready" })
+    #expect(!podItems.contains { $0.descriptor.value == "pod-count" })
+    #expect(podItems.first { $0.descriptor.value == "cpu" }?.isAlreadyAdded == true)
+    #expect(podItems.first { $0.descriptor.value == "status" }?.isAlreadyAdded == true)
+    #expect(podItems.first { $0.descriptor.value == "memory" }?.isAlreadyAdded == false)
+    #expect(podItems.first { $0.descriptor.value == "memory" }?.exactIdentity == "metric:memory")
+
+    let nodeValues = Set(NativeColumnCatalog.items(
+        group: "", version: "v1", resource: "nodes", existingColumns: []
+    ).map(\.descriptor.value))
+    #expect(nodeValues.contains("pod-count"))
+    #expect(!nodeValues.contains("ready"))
+
+    let customValues = Set(NativeColumnCatalog.items(
+        group: "example.test", version: "v1", resource: "widgets", existingColumns: []
+    ).map(\.descriptor.value))
+    #expect(customValues.contains("name"))
+    #expect(!customValues.contains("cpu"))
+}
+
+@Test func exactResourceDefinitionsValidateAndPreserveFullQualifiedIdentity() throws {
+    let resources = [
+        "hugepages-2Mi",
+        "hugepages-1Gi",
+        "nvidia.com/gpu",
+        "aliyun.com/ppu",
+        "example.com/vendor_gpu.v2",
+    ]
+    var definitions: [ColumnDefinition] = []
+    for resourceName in resources {
+        let definition = try NativeColumnCatalog.exactResourceDefinition(
+            resourceName: "  \(resourceName)  ",
+            group: "", version: "v1", resource: "pods"
+        )
+        #expect(definition.id == NativeColumnCatalog.exactResourceColumnID(
+            resourceName: resourceName
+        ))
+        #expect(definition.title == resourceName)
+        #expect(definition.source == .metric)
+        #expect(definition.value == "resource:\(resourceName)")
+        #expect(definition.type == .resourceUsage)
+        #expect(!definition.isEnabled)
+        definitions.append(definition)
+    }
+    #expect(Set(definitions.map(\.id)).count == resources.count)
+
+    let titled = try NativeColumnCatalog.exactResourceDefinition(
+        resourceName: "aliyun.com/ppu", title: "PPU",
+        group: "", version: "v1", resource: "nodes"
+    )
+    #expect(titled.title == "PPU")
+    #expect(titled.id == NativeColumnCatalog.exactResourceColumnID(
+        resourceName: "aliyun.com/ppu"
+    ))
+    #expect(titled.value == "resource:aliyun.com/ppu")
+    #expect(
+        NativeColumnCatalog.exactResourceColumnID(resourceName: "vendor-a.example/gpu") !=
+            NativeColumnCatalog.exactResourceColumnID(resourceName: "vendor-b.example/gpu")
+    )
+}
+
+@Test func exactResourceValidationMatchesKubernetesQualifiedNameBoundaries() {
+    let valid = [
+        "cpu", "hugepages-2Mi", "nvidia.com/gpu", "example.io/a_b.c-D",
+        String(repeating: "a", count: 63),
+        "\(String(repeating: "a", count: 63)).\(String(repeating: "b", count: 63)).com/gpu",
+    ]
+    for value in valid {
+        #expect(KubernetesQualifiedName.isValid(value), "Expected valid: \(value)")
+    }
+    let invalid = [
+        "", "/gpu", "nvidia.com/", "bad/resource/name", "Upper.Example/gpu",
+        "nvidia.com/-gpu", "nvidia.com/gpu-", "nvidia_com/gpu", "has space",
+        String(repeating: "a", count: 64),
+        "\(String(repeating: "a", count: 64)).com/gpu",
+    ]
+    for value in invalid {
+        #expect(!KubernetesQualifiedName.isValid(value), "Expected invalid: \(value)")
+        #expect(throws: NativeColumnCatalogError.self) {
+            try NativeColumnCatalog.exactResourceDefinition(
+                resourceName: value,
+                group: "", version: "v1", resource: "pods"
+            )
+        }
+    }
+    #expect(throws: NativeColumnCatalogError.exactResourcesUnsupported) {
+        try NativeColumnCatalog.exactResourceDefinition(
+            resourceName: "nvidia.com/gpu",
+            group: "apps", version: "v1", resource: "deployments"
+        )
+    }
+}

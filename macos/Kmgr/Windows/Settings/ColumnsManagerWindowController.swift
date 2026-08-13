@@ -15,6 +15,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private var persistenceAvailable: Bool
     private var dirty = false
     private var editorController: CELColumnEditorWindowController?
+    private var catalogController: NativeColumnPickerWindowController?
 
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
@@ -206,6 +207,11 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        let addNativeButton = NSButton(
+            title: "Add Built-in/Metric…",
+            target: self,
+            action: #selector(addNative)
+        )
         let addButton = NSButton(title: "Add CEL…", target: self, action: #selector(addCEL))
         editButton.target = self
         editButton.action = #selector(editSelected)
@@ -217,7 +223,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         let reloadButton = NSButton(title: "Reload File", target: self, action: #selector(reloadFile))
         let openButton = NSButton(title: "Open in Editor", target: self, action: #selector(openInEditor))
         let controls = NSStackView(views: [
-            addButton, editButton, moveUpButton, moveDownButton, resetButton,
+            addNativeButton, addButton, editButton, moveUpButton, moveDownButton, resetButton,
             NSView(), reloadButton, openButton,
         ])
         controls.orientation = .horizontal
@@ -347,6 +353,26 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         presentEditor(existingIndex: nil)
     }
 
+    @objc private func addNative() {
+        guard catalogController == nil, let parent = window else { return }
+        let picker = NativeColumnPickerWindowController(
+            match: match,
+            existingColumns: draft.columns
+        )
+        picker.onCommit = { [weak self] definition in
+            guard let self else { return }
+            do {
+                try self.draft.appendNative(definition)
+                self.markChanged(selecting: self.draft.columns.count - 1)
+            } catch {
+                self.showStatus(error.localizedDescription, error: true)
+            }
+        }
+        picker.onDismiss = { [weak self] in self?.catalogController = nil }
+        catalogController = picker
+        picker.beginSheet(for: parent)
+    }
+
     @objc private func editSelected() {
         guard let index = selectedIndex, draft.columns[index].source == .cel else {
             NSSound.beep()
@@ -469,6 +495,330 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         case .resourceUsage: "Resource usage"
         default: type.rawValue.capitalized
         }
+    }
+}
+
+@MainActor
+private final class NativeColumnPickerWindowController: NSWindowController,
+    NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate
+{
+    private let match: ColumnResourceMatch
+    private let draft: ResourceColumnDraft
+    private let items: [NativeColumnCatalogItem]
+    private let exactResourceSupported: Bool
+    private let tableView = NSTableView()
+    private let addSelectedButton = NSButton(title: "Add Disabled", target: nil, action: nil)
+    private let exactResourceField = NSTextField()
+    private let exactTitleField = NSTextField()
+    private let addExactButton = NSButton(title: "Add Exact Resource Disabled", target: nil, action: nil)
+    private let exactErrorLabel = NSTextField(wrappingLabelWithString: "")
+
+    var onCommit: ((ColumnDefinition) -> Void)?
+    var onDismiss: (() -> Void)?
+
+    init(match: ColumnResourceMatch, existingColumns: [ColumnDefinition]) {
+        self.match = match
+        draft = ResourceColumnDraft(match: match, columns: existingColumns)
+        exactResourceSupported = NativeColumnCatalog.supportsExactResources(
+            group: match.group,
+            version: match.version,
+            resource: match.resource
+        )
+        items = NativeColumnCatalog.items(
+            group: match.group,
+            version: match.version,
+            resource: match.resource,
+            existingColumns: existingColumns
+        )
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Add Built-in or Metric Column"
+        panel.minSize = NSSize(width: 650, height: 480)
+        panel.isReleasedWhenClosed = false
+        super.init(window: panel)
+        panel.delegate = self
+        configureContent(in: panel)
+        updateSelection()
+        validateExactResource()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("programmatic") }
+
+    func beginSheet(for parent: NSWindow) {
+        guard let window else { return }
+        parent.beginSheet(window) { [weak self] _ in self?.onDismiss?() }
+        window.makeFirstResponder(tableView)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+
+    func tableView(
+        _ tableView: NSTableView,
+        viewFor tableColumn: NSTableColumn?,
+        row: Int
+    ) -> NSView? {
+        guard items.indices.contains(row), let tableColumn else { return nil }
+        let item = items[row]
+        let identifier = NSUserInterfaceItemIdentifier(
+            "native-picker-\(tableColumn.identifier.rawValue)"
+        )
+        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
+            ?? makeTextCell(identifier: identifier)
+        guard let label = cell.textField else { return cell }
+        label.textColor = item.isAlreadyAdded ? .tertiaryLabelColor : .labelColor
+        label.font = .systemFont(ofSize: NSFont.systemFontSize)
+        cell.toolTip = item.exactIdentity
+        switch tableColumn.identifier {
+        case .nativeTitle:
+            label.stringValue = item.descriptor.title
+            label.toolTip = item.exactIdentity
+        case .nativeSource:
+            label.stringValue = item.descriptor.source.rawValue.uppercased()
+        case .nativeType:
+            label.stringValue = ColumnsManagerWindowController.resultTypeTitle(
+                item.descriptor.type
+            )
+        case .nativeIdentity:
+            label.stringValue = item.exactIdentity
+            label.toolTip = item.exactIdentity
+            label.font = .monospacedSystemFont(
+                ofSize: NSFont.smallSystemFontSize,
+                weight: .regular
+            )
+        case .nativeAvailability:
+            label.stringValue = item.isAlreadyAdded ? "Already added" : "Available"
+        default:
+            label.stringValue = ""
+        }
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateSelection()
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        validateExactResource()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if let parent = sender.sheetParent {
+            parent.endSheet(sender, returnCode: .cancel)
+            return false
+        }
+        return true
+    }
+
+    private func configureContent(in panel: NSPanel) {
+        let columns: [(NSUserInterfaceItemIdentifier, String, CGFloat)] = [
+            (.nativeTitle, "Title", 145),
+            (.nativeSource, "Source", 75),
+            (.nativeType, "Type", 120),
+            (.nativeIdentity, "Exact identity", 225),
+            (.nativeAvailability, "Status", 100),
+        ]
+        for (identifier, title, width) in columns {
+            let column = NSTableColumn(identifier: identifier)
+            column.title = title
+            column.width = width
+            column.minWidth = 65
+            column.resizingMask = .userResizingMask
+            tableView.addTableColumn(column)
+        }
+        tableView.delegate = self
+        tableView.dataSource = self
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.allowsEmptySelection = true
+        tableView.allowsMultipleSelection = false
+        tableView.rowSizeStyle = .medium
+        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        tableView.target = self
+        tableView.doubleAction = #selector(addSelected)
+        tableView.setAccessibilityLabel("Available built-in and metric columns")
+
+        let scrollView = NSScrollView()
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        let catalogHelp = NSTextField(wrappingLabelWithString:
+            "Only extractors supported for this exact GVR are listed. Added columns start disabled, so metrics and scheduler-accounting providers remain idle until you explicitly enable the column in the manager."
+        )
+        catalogHelp.textColor = .secondaryLabelColor
+        catalogHelp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+
+        exactResourceField.delegate = self
+        exactResourceField.placeholderString = "nvidia.com/gpu or hugepages-2Mi"
+        exactResourceField.setAccessibilityLabel("Exact Kubernetes resource name")
+        exactTitleField.delegate = self
+        exactTitleField.placeholderString = "Optional display title"
+        exactTitleField.setAccessibilityLabel("Exact resource display title")
+        let exactGrid = NSGridView(views: [
+            gridRow("Resource name", exactResourceField),
+            gridRow("Title", exactTitleField),
+        ])
+        exactGrid.rowSpacing = 7
+        exactGrid.columnSpacing = 10
+        exactGrid.column(at: 0).xPlacement = .trailing
+        exactGrid.column(at: 1).xPlacement = .fill
+
+        exactErrorLabel.textColor = .systemRed
+        exactErrorLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        exactErrorLabel.maximumNumberOfLines = 2
+        exactErrorLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addExactButton.target = self
+        addExactButton.action = #selector(addExactResource)
+        let exactFooter = NSStackView(views: [exactErrorLabel, NSView(), addExactButton])
+        exactFooter.orientation = .horizontal
+        exactFooter.alignment = .centerY
+        exactFooter.spacing = 8
+
+        var exactBox: NSBox?
+        if exactResourceSupported {
+            let exactStack = NSStackView(views: [exactGrid, exactFooter])
+            exactStack.orientation = .vertical
+            exactStack.alignment = .leading
+            exactStack.spacing = 8
+            exactGrid.widthAnchor.constraint(equalTo: exactStack.widthAnchor).isActive = true
+            exactFooter.widthAnchor.constraint(equalTo: exactStack.widthAnchor).isActive = true
+
+            let box = NSBox()
+            box.title = "Arbitrary Exact Scheduler Resource"
+            box.contentViewMargins = NSSize(width: 12, height: 10)
+            box.contentView = exactStack
+            box.translatesAutoresizingMaskIntoConstraints = false
+            exactBox = box
+        }
+
+        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancel))
+        addSelectedButton.target = self
+        addSelectedButton.action = #selector(addSelected)
+        addSelectedButton.keyEquivalent = "\r"
+        let footer = NSStackView(views: [NSView(), cancelButton, addSelectedButton])
+        footer.orientation = .horizontal
+        footer.alignment = .centerY
+        footer.spacing = 8
+        footer.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = NSView()
+        for view in [scrollView, catalogHelp] + [exactBox].compactMap({ $0 }) + [footer] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(view)
+        }
+        var constraints = [
+            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            scrollView.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 210),
+            catalogHelp.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            catalogHelp.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            catalogHelp.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 7),
+            footer.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            footer.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+        ]
+        if let exactBox {
+            constraints += [
+                exactBox.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+                exactBox.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+                exactBox.topAnchor.constraint(equalTo: catalogHelp.bottomAnchor, constant: 11),
+                footer.topAnchor.constraint(equalTo: exactBox.bottomAnchor, constant: 11),
+            ]
+        } else {
+            constraints.append(
+                footer.topAnchor.constraint(equalTo: catalogHelp.bottomAnchor, constant: 11)
+            )
+        }
+        NSLayoutConstraint.activate(constraints)
+        panel.contentView = root
+    }
+
+    private func makeTextCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
+        let cell = NSTableCellView()
+        cell.identifier = identifier
+        let label = NSTextField(labelWithString: "")
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        cell.textField = label
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 5),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -5),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
+    private func gridRow(_ title: String, _ control: NSView) -> [NSView] {
+        let label = NSTextField(labelWithString: title)
+        label.alignment = .right
+        return [label, control]
+    }
+
+    private func updateSelection() {
+        let row = tableView.selectedRow
+        addSelectedButton.isEnabled = items.indices.contains(row) && !items[row].isAlreadyAdded
+    }
+
+    private func exactDefinition() throws -> ColumnDefinition {
+        try NativeColumnCatalog.exactResourceDefinition(
+            resourceName: exactResourceField.stringValue,
+            title: exactTitleField.stringValue,
+            group: match.group,
+            version: match.version,
+            resource: match.resource
+        )
+    }
+
+    private func validateExactResource() {
+        guard exactResourceSupported else { return }
+        do {
+            let definition = try exactDefinition()
+            guard draft.canAppendNative(definition) else {
+                throw ColumnDraftError.invalidOrDuplicateNativeColumn
+            }
+            exactErrorLabel.stringValue = "Full identity: metric:\(definition.value ?? "")"
+            exactErrorLabel.textColor = .secondaryLabelColor
+            exactErrorLabel.toolTip = definition.value
+            addExactButton.isEnabled = true
+        } catch {
+            exactErrorLabel.stringValue = error.localizedDescription
+            exactErrorLabel.textColor = .systemRed
+            exactErrorLabel.toolTip = error.localizedDescription
+            addExactButton.isEnabled = false
+        }
+    }
+
+    @objc private func addSelected() {
+        let row = tableView.selectedRow
+        guard items.indices.contains(row), !items[row].isAlreadyAdded else { return }
+        finish(with: items[row].descriptor.definition(enabled: false))
+    }
+
+    @objc private func addExactResource() {
+        guard let definition = try? exactDefinition(), draft.canAppendNative(definition) else {
+            validateExactResource()
+            return
+        }
+        finish(with: definition)
+    }
+
+    private func finish(with definition: ColumnDefinition) {
+        guard let sheet = window, let parent = sheet.sheetParent else { return }
+        onCommit?(definition)
+        parent.endSheet(sheet, returnCode: .OK)
+    }
+
+    @objc private func cancel() {
+        guard let sheet = window, let parent = sheet.sheetParent else { return }
+        parent.endSheet(sheet, returnCode: .cancel)
     }
 }
 
@@ -705,4 +1055,9 @@ private extension NSUserInterfaceItemIdentifier {
     static let columnType = Self("column-type")
     static let columnValue = Self("column-value")
     static let columnWidth = Self("column-width")
+    static let nativeTitle = Self("native-title")
+    static let nativeSource = Self("native-source")
+    static let nativeType = Self("native-type")
+    static let nativeIdentity = Self("native-identity")
+    static let nativeAvailability = Self("native-availability")
 }

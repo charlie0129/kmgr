@@ -244,8 +244,44 @@ public struct ResourceColumnDraft: Hashable, Sendable {
         }
         columns.append(definition)
     }
+
+    public func containsNativeColumn(source: ColumnSource, value: String) -> Bool {
+        columns.contains { definition in
+            definition.source == source && definition.value == value
+        }
+    }
+
+    public func canAppendNative(_ definition: ColumnDefinition) -> Bool {
+        guard definition.source == .builtin || definition.source == .metric,
+            !definition.id.isEmpty,
+            definition.value?.isEmpty == false,
+            definition.expression == nil,
+            !columns.contains(where: { $0.id == definition.id })
+        else { return false }
+        return !containsNativeColumn(
+            source: definition.source,
+            value: definition.value ?? ""
+        )
+    }
+
+    public mutating func appendNative(_ definition: ColumnDefinition) throws {
+        guard canAppendNative(definition) else {
+            throw ColumnDraftError.invalidOrDuplicateNativeColumn
+        }
+        columns.append(definition)
+    }
 }
 
-public enum ColumnDraftError: Error, Hashable, Sendable {
+public enum ColumnDraftError: Error, Hashable, Sendable, LocalizedError {
     case invalidOrDuplicateCELColumn
+    case invalidOrDuplicateNativeColumn
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidOrDuplicateCELColumn:
+            "The CEL column is invalid or its ID is already present."
+        case .invalidOrDuplicateNativeColumn:
+            "The built-in or metric column is invalid, or its ID/exact extractor is already present."
+        }
+    }
 }

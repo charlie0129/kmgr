@@ -107,3 +107,39 @@ import Testing
     #expect(draft.columns == [name])
     #expect(draft.match == match)
 }
+
+@Test func resourceColumnDraftAddsDisabledNativeColumnsByExactExtractorIdentity() throws {
+    let match = ColumnResourceMatch(group: "", version: "v1", resource: "pods")
+    let cpu = try #require(NativeColumnCatalog.descriptor(source: .metric, value: "cpu"))
+        .definition(enabled: false)
+    var draft = ResourceColumnDraft(match: match, columns: [])
+    #expect(draft.canAppendNative(cpu))
+    try draft.appendNative(cpu)
+    #expect(draft.columns == [cpu])
+    #expect(!draft.columns[0].isEnabled)
+    #expect(draft.containsNativeColumn(source: .metric, value: "cpu"))
+
+    let aliasedCPU = ColumnDefinition(
+        id: "processor", title: "Processor", source: .metric,
+        value: "cpu", type: .resourceUsage, enabled: false
+    )
+    #expect(!draft.canAppendNative(aliasedCPU))
+    #expect(throws: ColumnDraftError.invalidOrDuplicateNativeColumn) {
+        try draft.appendNative(aliasedCPU)
+    }
+
+    let ppu = try NativeColumnCatalog.exactResourceDefinition(
+        resourceName: "aliyun.com/ppu", title: "PPU",
+        group: "", version: "v1", resource: "pods"
+    )
+    let gpu = try NativeColumnCatalog.exactResourceDefinition(
+        resourceName: "nvidia.com/gpu", title: "GPU",
+        group: "", version: "v1", resource: "pods"
+    )
+    try draft.appendNative(ppu)
+    try draft.appendNative(gpu)
+    #expect(draft.columns.map(\.value) == [
+        "cpu", "resource:aliyun.com/ppu", "resource:nvidia.com/gpu",
+    ])
+    #expect(Set(draft.columns.map(\.id)).count == 3)
+}

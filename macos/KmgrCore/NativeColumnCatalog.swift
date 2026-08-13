@@ -63,6 +63,36 @@ public struct NativeColumnDescriptor: Hashable, Sendable {
     }
 }
 
+/// One resource-filtered catalog entry and whether the current draft already
+/// contains its display ID or exact native extractor identity.
+public struct NativeColumnCatalogItem: Hashable, Sendable {
+    public var descriptor: NativeColumnDescriptor
+    public var isAlreadyAdded: Bool
+
+    public init(descriptor: NativeColumnDescriptor, isAlreadyAdded: Bool) {
+        self.descriptor = descriptor
+        self.isAlreadyAdded = isAlreadyAdded
+    }
+
+    public var exactIdentity: String {
+        "\(descriptor.source.rawValue):\(descriptor.value)"
+    }
+}
+
+public enum NativeColumnCatalogError: Error, Hashable, Sendable, LocalizedError {
+    case exactResourcesUnsupported
+    case invalidExactResourceName(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .exactResourcesUnsupported:
+            "Exact scheduler resources are supported only for core/v1 Pods and Nodes."
+        case .invalidExactResourceName(let value):
+            "\(value.debugDescription) is not a valid Kubernetes qualified resource name."
+        }
+    }
+}
+
 public enum NativeColumnCatalog {
     public static let descriptors: [NativeColumnDescriptor] = [
         builtin("namespace", "Namespace", .string, .leading, 150, .any),
@@ -94,6 +124,78 @@ public enum NativeColumnCatalog {
 
     public static func descriptor(value: String) -> NativeColumnDescriptor? {
         descriptors.first { $0.value == value }
+    }
+
+    public static func items(
+        group: String,
+        version: String,
+        resource: String,
+        existingColumns: [ColumnDefinition]
+    ) -> [NativeColumnCatalogItem] {
+        let usedIDs = Set(existingColumns.map(\.id))
+        return descriptors.compactMap { descriptor -> NativeColumnCatalogItem? in
+            guard descriptor.resourceScope.supports(
+                group: group,
+                version: version,
+                resource: resource
+            ) else { return nil }
+            let defaultDefinition = descriptor.definition()
+            let alreadyAdded = usedIDs.contains(defaultDefinition.id) ||
+                existingColumns.contains { definition in
+                    definition.source == descriptor.source && definition.value == descriptor.value
+                }
+            return NativeColumnCatalogItem(
+                descriptor: descriptor,
+                isAlreadyAdded: alreadyAdded
+            )
+        }
+    }
+
+    public static func supportsExactResources(
+        group: String,
+        version: String,
+        resource: String
+    ) -> Bool {
+        group.isEmpty && version == "v1" && (resource == "pods" || resource == "nodes")
+    }
+
+    /// Builds a disabled definition for one exact scheduler resource. The full
+    /// qualified name is retained in the extractor value. The stable UI ID is
+    /// derived reversibly from that value, so even characters AppKit reserves
+    /// for identifier paths cannot weaken or conflate the resource identity.
+    public static func exactResourceDefinition(
+        resourceName input: String,
+        title inputTitle: String? = nil,
+        group: String,
+        version: String,
+        resource: String
+    ) throws -> ColumnDefinition {
+        guard supportsExactResources(group: group, version: version, resource: resource) else {
+            throw NativeColumnCatalogError.exactResourcesUnsupported
+        }
+        let resourceName = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard KubernetesQualifiedName.isValid(resourceName) else {
+            throw NativeColumnCatalogError.invalidExactResourceName(resourceName)
+        }
+        let preferredTitle = inputTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = "resource:\(resourceName)"
+        return ColumnDefinition(
+            id: exactResourceColumnID(resourceName: resourceName),
+            title: preferredTitle?.isEmpty == false ? preferredTitle! : resourceName,
+            source: .metric,
+            value: value,
+            type: .resourceUsage,
+            alignment: .trailing,
+            width: 230,
+            enabled: false
+        )
+    }
+
+    public static func exactResourceColumnID(resourceName: String) -> String {
+        "resource-" + Data(resourceName.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 
     /// Useful native defaults for a resource list. Optional exact resources
@@ -181,5 +283,52 @@ public enum NativeColumnCatalog {
             width: width,
             resourceScope: scope
         )
+    }
+}
+
+/// Kubernetes qualified-name validation shared by exact resource entry and
+/// other GUI-side inputs. It mirrors `validation.IsQualifiedName`: an optional
+/// lowercase DNS subdomain prefix and one 63-byte alphanumeric-delimited name.
+public enum KubernetesQualifiedName {
+    public static func isValid(_ value: String) -> Bool {
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        switch parts.count {
+        case 1:
+            return validName(String(parts[0]))
+        case 2:
+            return validDNSSubdomain(String(parts[0])) && validName(String(parts[1]))
+        default:
+            return false
+        }
+    }
+
+    private static func validName(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        return !bytes.isEmpty && bytes.count <= 63 && isAlphaNumeric(bytes[0]) &&
+            isAlphaNumeric(bytes[bytes.count - 1]) && bytes.allSatisfy(isNameByte)
+    }
+
+    private static func validDNSSubdomain(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard !bytes.isEmpty, bytes.count <= 253 else { return false }
+        return value.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { segment in
+            let segmentBytes = Array(segment.utf8)
+            return !segmentBytes.isEmpty && segmentBytes.count <= 63 &&
+                isLowerAlphaNumeric(segmentBytes[0]) &&
+                isLowerAlphaNumeric(segmentBytes[segmentBytes.count - 1]) &&
+                segmentBytes.allSatisfy { isLowerAlphaNumeric($0) || $0 == 45 }
+        }
+    }
+
+    private static func isNameByte(_ byte: UInt8) -> Bool {
+        isAlphaNumeric(byte) || byte == 45 || byte == 46 || byte == 95
+    }
+
+    private static func isAlphaNumeric(_ byte: UInt8) -> Bool {
+        isLowerAlphaNumeric(byte) || (65...90).contains(byte)
+    }
+
+    private static func isLowerAlphaNumeric(_ byte: UInt8) -> Bool {
+        (97...122).contains(byte) || (48...57).contains(byte)
     }
 }
