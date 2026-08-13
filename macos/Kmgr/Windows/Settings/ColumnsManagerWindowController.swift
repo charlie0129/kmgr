@@ -14,6 +14,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private var lastAppliedColumns: [ColumnDefinition]
     private var persistenceAvailable: Bool
     private var dirty = false
+    private var didFinishDismissal = false
     private var editorController: CELColumnEditorWindowController?
     private var catalogController: NativeColumnPickerWindowController?
 
@@ -87,8 +88,10 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     }
 
     func beginSheet(for parent: NSWindow) {
-        guard let window else { return }
-        parent.beginSheet(window)
+        guard let window, window.sheetParent == nil else { return }
+        parent.beginSheet(window) { [weak self] _ in
+            self?.finishDismissal()
+        }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { draft.columns.count }
@@ -143,6 +146,19 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard approveDismissal() else { return false }
+        if let parent = sender.sheetParent {
+            parent.endSheet(sender, returnCode: .cancel)
+            return false
+        }
+        return true
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        finishDismissal()
+    }
+
+    private func approveDismissal() -> Bool {
         guard dirty else { return true }
         let alert = NSAlert()
         alert.messageText = "Save column changes?"
@@ -161,10 +177,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         }
     }
 
-    func windowWillClose(_ notification: Notification) {
-        if let parent = window?.sheetParent, let sheet = window {
-            parent.endSheet(sheet)
-        }
+    private func finishDismissal() {
+        guard !didFinishDismissal else { return }
+        didFinishDismissal = true
         onClose?()
     }
 
@@ -487,7 +502,12 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     }
 
     @objc private func closeWindow() {
-        window?.performClose(nil)
+        guard let window, approveDismissal() else { return }
+        if let parent = window.sheetParent {
+            parent.endSheet(window, returnCode: .cancel)
+        } else {
+            window.close()
+        }
     }
 
     fileprivate static func resultTypeTitle(_ type: ColumnResultType) -> String {
@@ -680,21 +700,20 @@ private final class NativeColumnPickerWindowController: NSWindowController,
         exactFooter.alignment = .centerY
         exactFooter.spacing = 8
 
-        var exactBox: NSBox?
+        var exactSection: NSStackView?
         if exactResourceSupported {
-            let exactStack = NSStackView(views: [exactGrid, exactFooter])
-            exactStack.orientation = .vertical
-            exactStack.alignment = .leading
-            exactStack.spacing = 8
-            exactGrid.widthAnchor.constraint(equalTo: exactStack.widthAnchor).isActive = true
-            exactFooter.widthAnchor.constraint(equalTo: exactStack.widthAnchor).isActive = true
-
-            let box = NSBox()
-            box.title = "Arbitrary Exact Scheduler Resource"
-            box.contentViewMargins = NSSize(width: 12, height: 10)
-            box.contentView = exactStack
-            box.translatesAutoresizingMaskIntoConstraints = false
-            exactBox = box
+            let separator = NSBox()
+            separator.boxType = .separator
+            let heading = NSTextField(labelWithString: "Arbitrary Exact Scheduler Resource")
+            heading.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+            let section = NSStackView(views: [separator, heading, exactGrid, exactFooter])
+            section.orientation = .vertical
+            section.alignment = .leading
+            section.spacing = 7
+            for view in [separator, exactGrid, exactFooter] {
+                view.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
+            }
+            exactSection = section
         }
 
         let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancel))
@@ -707,33 +726,32 @@ private final class NativeColumnPickerWindowController: NSWindowController,
         footer.spacing = 8
         footer.translatesAutoresizingMaskIntoConstraints = false
 
+        let arrangedViews = [scrollView, catalogHelp]
+            + [exactSection].compactMap { $0 }
+            + [footer]
+        let contentStack = NSStackView(views: arrangedViews)
+        contentStack.orientation = .vertical
+        contentStack.alignment = .leading
+        contentStack.spacing = 10
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.setContentHuggingPriority(.init(1), for: .vertical)
+        scrollView.setContentCompressionResistancePriority(.init(1), for: .vertical)
+
         let root = NSView()
-        for view in [scrollView, catalogHelp] + [exactBox].compactMap({ $0 }) + [footer] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(view)
-        }
+        root.addSubview(contentStack)
         var constraints = [
-            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            scrollView.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 210),
-            catalogHelp.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
-            catalogHelp.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
-            catalogHelp.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 7),
-            footer.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
-            footer.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+            contentStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            contentStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            contentStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
+            contentStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 150),
+            scrollView.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            catalogHelp.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            footer.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
         ]
-        if let exactBox {
-            constraints += [
-                exactBox.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
-                exactBox.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
-                exactBox.topAnchor.constraint(equalTo: catalogHelp.bottomAnchor, constant: 11),
-                footer.topAnchor.constraint(equalTo: exactBox.bottomAnchor, constant: 11),
-            ]
-        } else {
+        if let exactSection {
             constraints.append(
-                footer.topAnchor.constraint(equalTo: catalogHelp.bottomAnchor, constant: 11)
+                exactSection.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
             )
         }
         NSLayoutConstraint.activate(constraints)
