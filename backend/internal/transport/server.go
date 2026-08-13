@@ -24,14 +24,15 @@ import (
 const DefaultGracefulStopTimeout = 5 * time.Second
 
 type ServerOptions struct {
-	Version       string
-	Logger        *slog.Logger
-	CatalogLoader CatalogLoader
-	ClientFactory cluster.ClientFactory
-	SessionProber SessionProber
-	ProbeTimeout  time.Duration
-	ColumnsPath   string
-	GRPCOptions   []grpc.ServerOption
+	Version                string
+	Logger                 *slog.Logger
+	CatalogLoader          CatalogLoader
+	ClientFactory          cluster.ClientFactory
+	SessionProber          SessionProber
+	ProbeTimeout           time.Duration
+	ColumnsPath            string
+	MetricsRefreshInterval time.Duration
+	GRPCOptions            []grpc.ServerOption
 }
 
 // Server wires authentication, safe RPC logging, engine lifecycle, catalogs,
@@ -84,8 +85,10 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		return nil, fmt.Errorf("load columns configuration: %w", err)
 	}
 	viewRuntime, err := view.NewRuntime(view.RuntimeConfig{
-		Source:  view.ClusterResourceSource{Sessions: sessions},
-		Metrics: &view.KubernetesMetricSource{Sessions: sessions},
+		Source: view.ClusterResourceSource{Sessions: sessions},
+		Metrics: &view.KubernetesMetricSource{
+			Sessions: sessions, RefreshInterval: options.MetricsRefreshInterval,
+		},
 		Columns: columnManager,
 	})
 	if err != nil {

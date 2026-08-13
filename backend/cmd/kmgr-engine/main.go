@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	"github.com/charlie0129/kmgr/backend/internal/transport"
 )
 
@@ -27,18 +28,26 @@ func run(arguments []string) int {
 	socketPath := flags.String("socket", "", "absolute path to the private Unix-domain socket")
 	launchToken := flags.String("token", "", "per-launch bearer token (at least 32 bytes)")
 	columnsPath := flags.String("columns", "", "path to the versioned programmable-columns configuration")
+	metricsRefresh := flags.Duration(
+		"metrics-refresh", metrics.DefaultRefreshInterval,
+		"refresh interval for active Metrics API consumers",
+	)
 	logLevel := flags.String("log-level", "info", "stderr log level: debug, info, warn, or error")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 
-	if *showVersion {
-		fmt.Printf("kmgr-engine %s\n", version)
-		return 0
-	}
 	if flags.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "kmgr-engine: unexpected positional arguments")
 		return 2
+	}
+	if *metricsRefresh <= 0 {
+		fmt.Fprintln(os.Stderr, "kmgr-engine: --metrics-refresh must be positive")
+		return 2
+	}
+	if *showVersion {
+		fmt.Printf("kmgr-engine %s\n", version)
+		return 0
 	}
 	if *socketPath == "" {
 		fmt.Fprintln(os.Stderr, "kmgr-engine: --socket is required")
@@ -67,9 +76,10 @@ func run(arguments []string) int {
 	}()
 
 	server, err := transport.NewServer(*launchToken, transport.ServerOptions{
-		Version:     version,
-		Logger:      logger,
-		ColumnsPath: *columnsPath,
+		Version:                version,
+		Logger:                 logger,
+		ColumnsPath:            *columnsPath,
+		MetricsRefreshInterval: *metricsRefresh,
 	})
 	if err != nil {
 		logger.Error("failed to initialize engine server", "error_kind", "configuration")

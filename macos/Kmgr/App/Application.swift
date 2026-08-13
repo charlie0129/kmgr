@@ -43,6 +43,7 @@ final class Application: NSObject, NSApplicationDelegate {
         self.engineColumnsConfigurationPath = preferences.current.columnsConfigurationPath
         var engineConfiguration = EngineSupervisor.Configuration.bundled()
         engineConfiguration.columnsConfigurationPath = preferences.current.columnsConfigurationPath
+        engineConfiguration.metricsRefreshSeconds = preferences.current.metricsRefreshSeconds
         let supervisor = EngineSupervisor(configuration: engineConfiguration)
         self.engineSupervisor = supervisor
         self.restorationStore = WorkspaceRestorationStore()

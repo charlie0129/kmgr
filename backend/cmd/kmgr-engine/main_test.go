@@ -39,3 +39,15 @@ func TestColumnsFlagIsAccepted(t *testing.T) {
 		t.Fatalf("run(--version --columns) = %d, want success", code)
 	}
 }
+
+func TestMetricsRefreshFlagIsValidated(t *testing.T) {
+	if code := run([]string{"--version", "--metrics-refresh", "45s"}); code != 0 {
+		t.Fatalf("run(valid --metrics-refresh) = %d, want success", code)
+	}
+	if code := run([]string{"--version", "--metrics-refresh", "0s"}); code != 2 {
+		t.Fatalf("run(zero --metrics-refresh) = %d, want usage error", code)
+	}
+	if code := run([]string{"--version", "--metrics-refresh", "not-a-duration"}); code != 2 {
+		t.Fatalf("run(invalid --metrics-refresh) = %d, want usage error", code)
+	}
+}

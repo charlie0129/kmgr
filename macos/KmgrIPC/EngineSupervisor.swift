@@ -104,6 +104,7 @@ public final class EngineSupervisor {
         public var shutdownTimeout: Duration
         public var clientVersion: String
         public var columnsConfigurationPath: String?
+        public var metricsRefreshSeconds: Int?
 
         public init(
             helperURL: URL,
@@ -113,7 +114,8 @@ public final class EngineSupervisor {
             handshakeTimeout: Duration = .seconds(2),
             shutdownTimeout: Duration = .seconds(5),
             clientVersion: String = "dev",
-            columnsConfigurationPath: String? = nil
+            columnsConfigurationPath: String? = nil,
+            metricsRefreshSeconds: Int? = nil
         ) {
             self.helperURL = helperURL
             self.temporaryDirectoryURL = temporaryDirectoryURL
@@ -123,6 +125,7 @@ public final class EngineSupervisor {
             self.shutdownTimeout = shutdownTimeout
             self.clientVersion = clientVersion
             self.columnsConfigurationPath = columnsConfigurationPath
+            self.metricsRefreshSeconds = metricsRefreshSeconds
         }
 
         public static func bundled(bundle: Bundle = .main) -> Self {
@@ -351,12 +354,9 @@ public final class EngineSupervisor {
         let stderrPipe = Pipe()
         let exitWaiter = ProcessExitWaiter()
         process.executableURL = configuration.helperURL
-        var helperArguments = endpoint.helperArguments
-        if let columnsConfigurationPath = configuration.columnsConfigurationPath,
-            !columnsConfigurationPath.isEmpty
-        {
-            helperArguments += ["--columns", columnsConfigurationPath]
-        }
+        let helperArguments = configuration.helperArguments(
+            appendingTo: endpoint.helperArguments
+        )
         process.arguments = helperArguments
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
@@ -538,6 +538,21 @@ public final class EngineSupervisor {
             return description
         }
         return "The Kubernetes engine disconnected unexpectedly."
+    }
+}
+
+extension EngineSupervisor.Configuration {
+    /// Adds only non-sensitive engine behavior settings. Endpoint credentials
+    /// stay in the launch endpoint and are never exposed through preferences.
+    func helperArguments(appendingTo base: [String]) -> [String] {
+        var arguments = base
+        if let columnsConfigurationPath, !columnsConfigurationPath.isEmpty {
+            arguments += ["--columns", columnsConfigurationPath]
+        }
+        if let metricsRefreshSeconds, metricsRefreshSeconds > 0 {
+            arguments += ["--metrics-refresh", "\(metricsRefreshSeconds)s"]
+        }
+        return arguments
     }
 }
 

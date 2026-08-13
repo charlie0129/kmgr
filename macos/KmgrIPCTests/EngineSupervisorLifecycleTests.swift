@@ -5,6 +5,30 @@ import Testing
 @Suite("Engine supervisor lifecycle")
 @MainActor
 struct EngineSupervisorLifecycleTests {
+    @Test("helper launch arguments include validated behavior settings")
+    func helperArgumentsIncludeBehaviorSettings() {
+        let configuration = EngineSupervisor.Configuration(
+            helperURL: URL(fileURLWithPath: "/tmp/kmgr-engine"),
+            columnsConfigurationPath: "/tmp/columns.yaml",
+            metricsRefreshSeconds: 45
+        )
+        #expect(configuration.helperArguments(appendingTo: ["--socket", "/tmp/a.sock"]) == [
+            "--socket", "/tmp/a.sock",
+            "--columns", "/tmp/columns.yaml",
+            "--metrics-refresh", "45s",
+        ])
+    }
+
+    @Test("invalid optional behavior settings are not forwarded")
+    func invalidOptionalBehaviorSettingsAreNotForwarded() {
+        let configuration = EngineSupervisor.Configuration(
+            helperURL: URL(fileURLWithPath: "/tmp/kmgr-engine"),
+            columnsConfigurationPath: "",
+            metricsRefreshSeconds: 0
+        )
+        #expect(configuration.helperArguments(appendingTo: ["base"]) == ["base"])
+    }
+
     @Test("missing helper reaches a bounded failure and shutdown is clean")
     func missingHelperFailsWithoutRestartLoop() async {
         let missing = FileManager.default.temporaryDirectory
