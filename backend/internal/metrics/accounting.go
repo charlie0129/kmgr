@@ -228,6 +228,10 @@ type DiscoveredResources struct {
 	EphemeralStorage bool
 	HugePages        []corev1.ResourceName
 	Accelerators     []corev1.ResourceName
+	// Present distinguishes configured accelerator keys that are available for
+	// opt-in even when no retained Node or Pod currently declares them. Keys in
+	// HugePages are always present; accelerator keys may be present or absent.
+	Present map[corev1.ResourceName]bool
 }
 
 // DiscoverResources finds optional resource keys without requiring a metrics
@@ -236,9 +240,12 @@ type DiscoveredResources struct {
 func DiscoverResources(nodes []*corev1.Node, pods []*corev1.Pod, acceleratorConfig AcceleratorConfig) DiscoveredResources {
 	hugePages := make(map[corev1.ResourceName]struct{})
 	accelerators := make(map[corev1.ResourceName]struct{}, len(acceleratorConfig.Resources))
+	configuredAccelerators := make(map[corev1.ResourceName]struct{}, len(acceleratorConfig.Resources))
 	for configuredName := range acceleratorConfig.Resources {
 		if configuredName != "" {
-			accelerators[corev1.ResourceName(configuredName)] = struct{}{}
+			name := corev1.ResourceName(configuredName)
+			accelerators[name] = struct{}{}
+			configuredAccelerators[name] = struct{}{}
 		}
 	}
 
@@ -246,16 +253,23 @@ func DiscoverResources(nodes []*corev1.Node, pods []*corev1.Pod, acceleratorConf
 	if suffixes == nil {
 		suffixes = defaultAcceleratorSuffixes[:]
 	}
-	discovered := DiscoveredResources{}
+	discovered := DiscoveredResources{Present: make(map[corev1.ResourceName]bool)}
 	inspect := func(resources corev1.ResourceList) {
 		for name := range resources {
 			switch {
 			case name == corev1.ResourceEphemeralStorage:
 				discovered.EphemeralStorage = true
+				discovered.Present[name] = true
 			case isHugePageResource(name):
 				hugePages[name] = struct{}{}
+				discovered.Present[name] = true
 			case hasAnySuffix(string(name), suffixes):
 				accelerators[name] = struct{}{}
+				discovered.Present[name] = true
+			default:
+				if _, configured := configuredAccelerators[name]; configured {
+					discovered.Present[name] = true
+				}
 			}
 		}
 	}

@@ -171,9 +171,14 @@ func TestDiscoverAcceleratorsExactKeysAndConfiguredResources(t *testing.T) {
 		"aliyun.com/ppu", "another.example/gpu", "custom.example/fpga-card", "limit-only.example/dcu",
 		"nvidia.com/gpu", "pod-only.example/ppu", "vendor.example/dcu",
 	}
-	got := DiscoverResources(nodes, pods, config).Accelerators
+	discovered := DiscoverResources(nodes, pods, config)
+	got := discovered.Accelerators
 	if !slices.Equal(got, want) {
 		t.Fatalf("accelerator keys = %q; want %q", got, want)
+	}
+	if discovered.Present["custom.example/fpga-card"] ||
+		!discovered.Present["aliyun.com/ppu"] || !discovered.Present["limit-only.example/dcu"] {
+		t.Fatalf("accelerator presence = %#v", discovered.Present)
 	}
 	if AcceleratorDisplayName("aliyun.com/ppu", config) != "PPU" ||
 		AcceleratorDisplayName("custom.example/fpga-card", config) != "FPGA" ||

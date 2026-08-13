@@ -177,6 +177,19 @@ type CachedChild struct {
 	Object   *unstructured.Unstructured
 }
 
+// OptionalResourceCatalog is one cache-only scheduler-resource discovery
+// result. Coverage is reported separately because namespace/selector-scoped
+// Pod stores can prove presence but generally cannot prove cluster absence.
+type OptionalResourceCatalog struct {
+	Discovered            metrics.DiscoveredResources
+	Accelerators          metrics.AcceleratorConfig
+	NodesCacheAvailable   bool
+	PodsCacheAvailable    bool
+	NodesSnapshotComplete bool
+	PodsSnapshotComplete  bool
+	PotentiallyIncomplete bool
+}
+
 type resourceKey struct {
 	authorityID string
 	group       string
@@ -952,6 +965,117 @@ func (r *Runtime) ActiveResourceCount() int {
 		}
 	}
 	return count
+}
+
+// DiscoverOptionalResources inspects only core/v1 Node and Pod stores that are
+// already active or warm for the requested session authority. It deliberately
+// does not call OpenResource, create a Metrics API provider, or change any
+// watcher lifetime. Results may therefore be partial while the base view is
+// loading or when retained Pod stores are namespace/selector scoped.
+func (r *Runtime) DiscoverOptionalResources(ctx context.Context, sessionID string) (OptionalResourceCatalog, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return OptionalResourceCatalog{}, err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return OptionalResourceCatalog{}, fmt.Errorf("%w: cluster session is required", ErrInvalidView)
+	}
+	authoritySource, ok := r.source.(interface {
+		AuthorityID(string) (string, bool)
+	})
+	if !ok {
+		return OptionalResourceCatalog{}, ErrSessionNotFound
+	}
+	authorityID, ok := authoritySource.AuthorityID(sessionID)
+	if !ok {
+		return OptionalResourceCatalog{}, ErrSessionNotFound
+	}
+
+	type cachedStore struct {
+		key      resourceKey
+		store    *store.UIDStore
+		complete bool
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return OptionalResourceCatalog{}, ErrViewClosed
+	}
+	entries := make([]cachedStore, 0, len(r.resources))
+	for key, entry := range r.resources {
+		if key.authorityID != authorityID || key.group != "" || key.version != "v1" ||
+			(key.resource != "nodes" && key.resource != "pods") || entry == nil || entry.store == nil {
+			continue
+		}
+		entries = append(entries, cachedStore{
+			key: key, store: entry.store, complete: entry.accountingReady || entry.store.ResourceVersion() != "",
+		})
+	}
+	acceleratorProvider, _ := r.columns.(AcceleratorConfigProvider)
+	r.mu.Unlock()
+
+	accelerators := metrics.AcceleratorConfig{}
+	if acceleratorProvider != nil {
+		accelerators = acceleratorProvider.AcceleratorConfig()
+	}
+	nodesByUID := make(map[types.UID]*corev1.Node)
+	podsByUID := make(map[types.UID]*corev1.Pod)
+	result := OptionalResourceCatalog{Accelerators: accelerators}
+	nodesClusterWideComplete, podsClusterWideComplete := false, false
+	conversionIncomplete := false
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return OptionalResourceCatalog{}, err
+		}
+		switch entry.key.resource {
+		case "nodes":
+			result.NodesCacheAvailable = true
+			if entry.complete && entry.key.namespace == "" && entry.key.labels == "" && entry.key.fields == "" {
+				nodesClusterWideComplete = true
+			}
+			for _, object := range entry.store.Snapshot() {
+				var node corev1.Node
+				if object != nil && k8sruntime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &node) == nil {
+					nodesByUID[node.UID] = &node
+				} else {
+					conversionIncomplete = true
+				}
+			}
+		case "pods":
+			result.PodsCacheAvailable = true
+			if entry.complete && entry.key.namespace == "" && entry.key.labels == "" && entry.key.fields == "" {
+				podsClusterWideComplete = true
+			}
+			for _, object := range entry.store.Snapshot() {
+				var pod corev1.Pod
+				if object != nil && k8sruntime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &pod) == nil {
+					podsByUID[pod.UID] = &pod
+				} else {
+					conversionIncomplete = true
+				}
+			}
+		}
+	}
+	nodes := make([]*corev1.Node, 0, len(nodesByUID))
+	for _, node := range nodesByUID {
+		nodes = append(nodes, node)
+	}
+	pods := make([]*corev1.Pod, 0, len(podsByUID))
+	for _, pod := range podsByUID {
+		pods = append(pods, pod)
+	}
+	result.Discovered = metrics.DiscoverResources(nodes, pods, accelerators)
+	result.NodesSnapshotComplete = nodesClusterWideComplete
+	result.PodsSnapshotComplete = podsClusterWideComplete
+	// Nodes alone are an authoritative cluster-wide source for capacity-based
+	// optional resources. Pods supplement keys that are requested despite not
+	// appearing on a Node. Until the Node store is complete, absence is never
+	// conclusive; scoped Pod caches likewise keep coverage explicitly partial.
+	result.PotentiallyIncomplete = conversionIncomplete || !nodesClusterWideComplete || !podsClusterWideComplete
+	return result, nil
 }
 
 // CachedChildren returns only children visible in existing view caches for the

@@ -19,12 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ViewService_StreamView_FullMethodName          = "/kmgr.v1.ViewService/StreamView"
-	ViewService_CancelView_FullMethodName          = "/kmgr.v1.ViewService/CancelView"
-	ViewService_PreviewColumn_FullMethodName       = "/kmgr.v1.ViewService/PreviewColumn"
-	ViewService_SearchCachedObjects_FullMethodName = "/kmgr.v1.ViewService/SearchCachedObjects"
-	ViewService_SearchObjects_FullMethodName       = "/kmgr.v1.ViewService/SearchObjects"
-	ViewService_CancelSearch_FullMethodName        = "/kmgr.v1.ViewService/CancelSearch"
+	ViewService_StreamView_FullMethodName                = "/kmgr.v1.ViewService/StreamView"
+	ViewService_CancelView_FullMethodName                = "/kmgr.v1.ViewService/CancelView"
+	ViewService_PreviewColumn_FullMethodName             = "/kmgr.v1.ViewService/PreviewColumn"
+	ViewService_DiscoverOptionalResources_FullMethodName = "/kmgr.v1.ViewService/DiscoverOptionalResources"
+	ViewService_SearchCachedObjects_FullMethodName       = "/kmgr.v1.ViewService/SearchCachedObjects"
+	ViewService_SearchObjects_FullMethodName             = "/kmgr.v1.ViewService/SearchObjects"
+	ViewService_CancelSearch_FullMethodName              = "/kmgr.v1.ViewService/CancelSearch"
 )
 
 // ViewServiceClient is the client API for ViewService service.
@@ -34,6 +35,7 @@ type ViewServiceClient interface {
 	StreamView(ctx context.Context, in *OpenViewRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ViewEvent], error)
 	CancelView(ctx context.Context, in *CancelViewRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
 	PreviewColumn(ctx context.Context, in *PreviewColumnRequest, opts ...grpc.CallOption) (*PreviewColumnResponse, error)
+	DiscoverOptionalResources(ctx context.Context, in *DiscoverOptionalResourcesRequest, opts ...grpc.CallOption) (*DiscoverOptionalResourcesResponse, error)
 	SearchCachedObjects(ctx context.Context, in *SearchCachedObjectsRequest, opts ...grpc.CallOption) (*SearchCachedObjectsResponse, error)
 	SearchObjects(ctx context.Context, in *SearchObjectsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SearchObjectsEvent], error)
 	CancelSearch(ctx context.Context, in *CancelSearchRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
@@ -86,6 +88,16 @@ func (c *viewServiceClient) PreviewColumn(ctx context.Context, in *PreviewColumn
 	return out, nil
 }
 
+func (c *viewServiceClient) DiscoverOptionalResources(ctx context.Context, in *DiscoverOptionalResourcesRequest, opts ...grpc.CallOption) (*DiscoverOptionalResourcesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DiscoverOptionalResourcesResponse)
+	err := c.cc.Invoke(ctx, ViewService_DiscoverOptionalResources_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *viewServiceClient) SearchCachedObjects(ctx context.Context, in *SearchCachedObjectsRequest, opts ...grpc.CallOption) (*SearchCachedObjectsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SearchCachedObjectsResponse)
@@ -132,6 +144,7 @@ type ViewServiceServer interface {
 	StreamView(*OpenViewRequest, grpc.ServerStreamingServer[ViewEvent]) error
 	CancelView(context.Context, *CancelViewRequest) (*Acknowledgement, error)
 	PreviewColumn(context.Context, *PreviewColumnRequest) (*PreviewColumnResponse, error)
+	DiscoverOptionalResources(context.Context, *DiscoverOptionalResourcesRequest) (*DiscoverOptionalResourcesResponse, error)
 	SearchCachedObjects(context.Context, *SearchCachedObjectsRequest) (*SearchCachedObjectsResponse, error)
 	SearchObjects(*SearchObjectsRequest, grpc.ServerStreamingServer[SearchObjectsEvent]) error
 	CancelSearch(context.Context, *CancelSearchRequest) (*Acknowledgement, error)
@@ -153,6 +166,9 @@ func (UnimplementedViewServiceServer) CancelView(context.Context, *CancelViewReq
 }
 func (UnimplementedViewServiceServer) PreviewColumn(context.Context, *PreviewColumnRequest) (*PreviewColumnResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PreviewColumn not implemented")
+}
+func (UnimplementedViewServiceServer) DiscoverOptionalResources(context.Context, *DiscoverOptionalResourcesRequest) (*DiscoverOptionalResourcesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DiscoverOptionalResources not implemented")
 }
 func (UnimplementedViewServiceServer) SearchCachedObjects(context.Context, *SearchCachedObjectsRequest) (*SearchCachedObjectsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SearchCachedObjects not implemented")
@@ -231,6 +247,24 @@ func _ViewService_PreviewColumn_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ViewService_DiscoverOptionalResources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DiscoverOptionalResourcesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ViewServiceServer).DiscoverOptionalResources(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ViewService_DiscoverOptionalResources_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ViewServiceServer).DiscoverOptionalResources(ctx, req.(*DiscoverOptionalResourcesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ViewService_SearchCachedObjects_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SearchCachedObjectsRequest)
 	if err := dec(in); err != nil {
@@ -292,6 +326,10 @@ var ViewService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PreviewColumn",
 			Handler:    _ViewService_PreviewColumn_Handler,
+		},
+		{
+			MethodName: "DiscoverOptionalResources",
+			Handler:    _ViewService_DiscoverOptionalResources_Handler,
 		},
 		{
 			MethodName: "SearchCachedObjects",

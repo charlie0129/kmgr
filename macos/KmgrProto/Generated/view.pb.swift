@@ -120,6 +120,48 @@ public enum Kmgr_V1_ViewFreshness: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
+public enum Kmgr_V1_OptionalResourceCategory: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case ephemeralStorage // = 1
+  case hugePage // = 2
+  case accelerator // = 3
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .ephemeralStorage
+    case 2: self = .hugePage
+    case 3: self = .accelerator
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .ephemeralStorage: return 1
+    case .hugePage: return 2
+    case .accelerator: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Kmgr_V1_OptionalResourceCategory] = [
+    .unspecified,
+    .ephemeralStorage,
+    .hugePage,
+    .accelerator,
+  ]
+
+}
+
 /// PreviewColumn compiles one draft CEL definition in the authoritative Go
 /// environment and evaluates it against either the selected object (after a
 /// fresh UID-pinned GET) or a deterministic, non-sensitive sample object.
@@ -748,6 +790,111 @@ public struct Kmgr_V1_CancelSearchRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
+/// DiscoverOptionalResources is a cache-only, point-in-time query. It inspects
+/// core/v1 Node and Pod objects already retained for this cluster session and
+/// never opens a resource client or starts a LIST/WATCH or metrics provider.
+/// Callers run it after base rows are visible and may repeat it as caches fill.
+public struct Kmgr_V1_DiscoverOptionalResourcesRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var applicableResource: Kmgr_V1_ResourceType {
+    get {return _applicableResource ?? Kmgr_V1_ResourceType()}
+    set {_applicableResource = newValue}
+  }
+  /// Returns true if `applicableResource` has been explicitly set.
+  public var hasApplicableResource: Bool {return self._applicableResource != nil}
+  /// Clears the value of `applicableResource`. Subsequent reads from it will return its default value.
+  public mutating func clearApplicableResource() {self._applicableResource = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+  fileprivate var _applicableResource: Kmgr_V1_ResourceType? = nil
+}
+
+public struct Kmgr_V1_OptionalResource: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// exact_key is the Kubernetes ResourceName identity. Different keys are
+  /// never merged even when their display names are equal.
+  public var exactKey: String = String()
+
+  public var category: Kmgr_V1_OptionalResourceCategory = .unspecified
+
+  /// Configured accelerator keys remain in the catalog with present=false so
+  /// users may opt into an empty exact-resource column deliberately.
+  public var present: Bool = false
+
+  public var displayName: String = String()
+
+  public var applicableResource: Kmgr_V1_ResourceType {
+    get {return _applicableResource ?? Kmgr_V1_ResourceType()}
+    set {_applicableResource = newValue}
+  }
+  /// Returns true if `applicableResource` has been explicitly set.
+  public var hasApplicableResource: Bool {return self._applicableResource != nil}
+  /// Clears the value of `applicableResource`. Subsequent reads from it will return its default value.
+  public mutating func clearApplicableResource() {self._applicableResource = nil}
+
+  public var explicitlyConfigured: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _applicableResource: Kmgr_V1_ResourceType? = nil
+}
+
+public struct Kmgr_V1_DiscoverOptionalResourcesResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var resources: [Kmgr_V1_OptionalResource] = []
+
+  public var nodesCacheAvailable: Bool = false
+
+  public var podsCacheAvailable: Bool = false
+
+  public var nodesSnapshotComplete: Bool = false
+
+  public var podsSnapshotComplete: Bool = false
+
+  public var potentiallyIncomplete: Bool = false
+
+  public var error: Kmgr_V1_StructuredError {
+    get {return _error ?? Kmgr_V1_StructuredError()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {return self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: Kmgr_V1_StructuredError? = nil
+}
+
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate let _protobuf_package = "kmgr.v1"
@@ -758,6 +905,10 @@ extension Kmgr_V1_SortDirection: SwiftProtobuf._ProtoNameProviding {
 
 extension Kmgr_V1_ViewFreshness: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0VIEW_FRESHNESS_UNSPECIFIED\0\u{1}VIEW_FRESHNESS_LOADING\0\u{1}VIEW_FRESHNESS_STALE\0\u{1}VIEW_FRESHNESS_RESUMING\0\u{1}VIEW_FRESHNESS_RELISTING\0\u{1}VIEW_FRESHNESS_WATCHING\0\u{1}VIEW_FRESHNESS_RECONNECTING\0\u{1}VIEW_FRESHNESS_FAILED\0\u{1}VIEW_FRESHNESS_COMPLETE\0")
+}
+
+extension Kmgr_V1_OptionalResourceCategory: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0OPTIONAL_RESOURCE_CATEGORY_UNSPECIFIED\0\u{1}OPTIONAL_RESOURCE_CATEGORY_EPHEMERAL_STORAGE\0\u{1}OPTIONAL_RESOURCE_CATEGORY_HUGE_PAGE\0\u{1}OPTIONAL_RESOURCE_CATEGORY_ACCELERATOR\0")
 }
 
 extension Kmgr_V1_PreviewColumnRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -1907,6 +2058,173 @@ extension Kmgr_V1_CancelSearchRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.searchID != rhs.searchID {return false}
     if lhs.generation != rhs.generation {return false}
     if lhs.queryRevision != rhs.queryRevision {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_DiscoverOptionalResourcesRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DiscoverOptionalResourcesRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}applicable_resource\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._applicableResource) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._applicableResource {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_DiscoverOptionalResourcesRequest, rhs: Kmgr_V1_DiscoverOptionalResourcesRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs._applicableResource != rhs._applicableResource {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_OptionalResource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".OptionalResource"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}exact_key\0\u{1}category\0\u{1}present\0\u{3}display_name\0\u{3}applicable_resource\0\u{3}explicitly_configured\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.exactKey) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.category) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.present) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.displayName) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._applicableResource) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.explicitlyConfigured) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.exactKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.exactKey, fieldNumber: 1)
+    }
+    if self.category != .unspecified {
+      try visitor.visitSingularEnumField(value: self.category, fieldNumber: 2)
+    }
+    if self.present != false {
+      try visitor.visitSingularBoolField(value: self.present, fieldNumber: 3)
+    }
+    if !self.displayName.isEmpty {
+      try visitor.visitSingularStringField(value: self.displayName, fieldNumber: 4)
+    }
+    try { if let v = self._applicableResource {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    if self.explicitlyConfigured != false {
+      try visitor.visitSingularBoolField(value: self.explicitlyConfigured, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_OptionalResource, rhs: Kmgr_V1_OptionalResource) -> Bool {
+    if lhs.exactKey != rhs.exactKey {return false}
+    if lhs.category != rhs.category {return false}
+    if lhs.present != rhs.present {return false}
+    if lhs.displayName != rhs.displayName {return false}
+    if lhs._applicableResource != rhs._applicableResource {return false}
+    if lhs.explicitlyConfigured != rhs.explicitlyConfigured {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_DiscoverOptionalResourcesResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DiscoverOptionalResourcesResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}resources\0\u{3}nodes_cache_available\0\u{3}pods_cache_available\0\u{3}nodes_snapshot_complete\0\u{3}pods_snapshot_complete\0\u{3}potentially_incomplete\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.resources) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.nodesCacheAvailable) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.podsCacheAvailable) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.nodesSnapshotComplete) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.podsSnapshotComplete) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.potentiallyIncomplete) }()
+      case 8: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.resources.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.resources, fieldNumber: 2)
+    }
+    if self.nodesCacheAvailable != false {
+      try visitor.visitSingularBoolField(value: self.nodesCacheAvailable, fieldNumber: 3)
+    }
+    if self.podsCacheAvailable != false {
+      try visitor.visitSingularBoolField(value: self.podsCacheAvailable, fieldNumber: 4)
+    }
+    if self.nodesSnapshotComplete != false {
+      try visitor.visitSingularBoolField(value: self.nodesSnapshotComplete, fieldNumber: 5)
+    }
+    if self.podsSnapshotComplete != false {
+      try visitor.visitSingularBoolField(value: self.podsSnapshotComplete, fieldNumber: 6)
+    }
+    if self.potentiallyIncomplete != false {
+      try visitor.visitSingularBoolField(value: self.potentiallyIncomplete, fieldNumber: 7)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_DiscoverOptionalResourcesResponse, rhs: Kmgr_V1_DiscoverOptionalResourcesResponse) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.resources != rhs.resources {return false}
+    if lhs.nodesCacheAvailable != rhs.nodesCacheAvailable {return false}
+    if lhs.podsCacheAvailable != rhs.podsCacheAvailable {return false}
+    if lhs.nodesSnapshotComplete != rhs.nodesSnapshotComplete {return false}
+    if lhs.podsSnapshotComplete != rhs.podsSnapshotComplete {return false}
+    if lhs.potentiallyIncomplete != rhs.potentiallyIncomplete {return false}
+    if lhs._error != rhs._error {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

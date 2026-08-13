@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 )
 
@@ -112,6 +113,81 @@ func (s *GRPCService) PreviewColumn(
 	}
 	response.Preview = cellForCELValue(definition.GetId(), value)
 	return response, nil
+}
+
+// DiscoverOptionalResources returns one typed, point-in-time catalog from
+// stores the runtime already retains. Keeping this separate from StreamView
+// ensures optional scheduler discovery can never delay base rows or wake a
+// Pod, Node, or Metrics API watcher merely to populate the Columns UI.
+func (s *GRPCService) DiscoverOptionalResources(
+	ctx context.Context,
+	request *kmgrv1.DiscoverOptionalResourcesRequest,
+) (*kmgrv1.DiscoverOptionalResourcesResponse, error) {
+	if request == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	requestID, operationContext, cancel, err := previewRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	applicable := request.GetApplicableResource()
+	if applicable == nil || applicable.GetGroup() != "" || applicable.GetVersion() != "v1" ||
+		(applicable.GetResource() != "pods" && applicable.GetResource() != "nodes") {
+		return nil, status.Error(codes.InvalidArgument, "optional resources apply only to core/v1 Pods and Nodes")
+	}
+	canonicalResource := optionalCatalogResourceType(applicable.GetResource())
+	response := &kmgrv1.DiscoverOptionalResourcesResponse{RequestId: requestID}
+	catalog, err := s.runtime.DiscoverOptionalResources(operationContext, request.GetContext().GetClusterSessionId())
+	if err != nil {
+		response.Error = structuredOptionalResourceError(err)
+		return response, nil
+	}
+	response.NodesCacheAvailable = catalog.NodesCacheAvailable
+	response.PodsCacheAvailable = catalog.PodsCacheAvailable
+	response.NodesSnapshotComplete = catalog.NodesSnapshotComplete
+	response.PodsSnapshotComplete = catalog.PodsSnapshotComplete
+	response.PotentiallyIncomplete = catalog.PotentiallyIncomplete
+	response.Resources = optionalResourceMessages(catalog, canonicalResource)
+	return response, nil
+}
+
+func optionalResourceMessages(
+	catalog OptionalResourceCatalog,
+	applicable *kmgrv1.ResourceType,
+) []*kmgrv1.OptionalResource {
+	result := make([]*kmgrv1.OptionalResource, 0,
+		1+len(catalog.Discovered.HugePages)+len(catalog.Discovered.Accelerators))
+	result = append(result, &kmgrv1.OptionalResource{
+		ExactKey: "ephemeral-storage", DisplayName: "Ephemeral Storage",
+		Category: kmgrv1.OptionalResourceCategory_OPTIONAL_RESOURCE_CATEGORY_EPHEMERAL_STORAGE,
+		Present:  catalog.Discovered.EphemeralStorage, ApplicableResource: applicable,
+	})
+	for _, name := range catalog.Discovered.HugePages {
+		exact := string(name)
+		result = append(result, &kmgrv1.OptionalResource{
+			ExactKey: exact, DisplayName: "Huge Pages (" + strings.TrimPrefix(exact, "hugepages-") + ")",
+			Category: kmgrv1.OptionalResourceCategory_OPTIONAL_RESOURCE_CATEGORY_HUGE_PAGE,
+			Present:  catalog.Discovered.Present[name], ApplicableResource: applicable,
+		})
+	}
+	for _, name := range catalog.Discovered.Accelerators {
+		_, configured := catalog.Accelerators.Resources[string(name)]
+		result = append(result, &kmgrv1.OptionalResource{
+			ExactKey: string(name), DisplayName: metrics.AcceleratorDisplayName(name, catalog.Accelerators),
+			Category: kmgrv1.OptionalResourceCategory_OPTIONAL_RESOURCE_CATEGORY_ACCELERATOR,
+			Present:  catalog.Discovered.Present[name], ApplicableResource: applicable,
+			ExplicitlyConfigured: configured,
+		})
+	}
+	return result
+}
+
+func optionalCatalogResourceType(resource string) *kmgrv1.ResourceType {
+	if resource == "nodes" {
+		return &kmgrv1.ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"}
+	}
+	return &kmgrv1.ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true}
 }
 
 func (s *GRPCService) previewObject(
@@ -431,6 +507,31 @@ func structuredCachedSearchError(err error) *kmgrv1.StructuredError {
 	case errors.Is(err, ErrInvalidView):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION
 		result.Reason = "InvalidCachedSearch"
+		result.Message = err.Error()
+	case errors.Is(err, ErrViewClosed):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
+		result.Reason = "ViewRuntimeClosed"
+		result.Message = "The in-memory object cache is unavailable."
+		result.Retryable = true
+	}
+	return result
+}
+
+func structuredOptionalResourceError(err error) *kmgrv1.StructuredError {
+	result := &kmgrv1.StructuredError{
+		Category:  kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL,
+		Reason:    "OptionalResourceDiscoveryFailed",
+		Message:   "The in-memory optional resource catalog could not be read.",
+		Operation: "discover optional scheduler resources",
+	}
+	switch {
+	case errors.Is(err, ErrSessionNotFound):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
+		result.Reason = "ClusterSessionNotFound"
+		result.Message = "The cluster session was not found."
+	case errors.Is(err, ErrInvalidView):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION
+		result.Reason = "InvalidOptionalResourceDiscovery"
 		result.Message = err.Error()
 	case errors.Is(err, ErrViewClosed):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE

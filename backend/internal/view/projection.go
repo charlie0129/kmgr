@@ -120,6 +120,12 @@ func cloneNodeAccountingSnapshot(snapshot NodeAccountingSnapshot) NodeAccounting
 	result.Discovered.EphemeralStorage = snapshot.Discovered.EphemeralStorage
 	result.Discovered.HugePages = slices.Clone(snapshot.Discovered.HugePages)
 	result.Discovered.Accelerators = slices.Clone(snapshot.Discovered.Accelerators)
+	if snapshot.Discovered.Present != nil {
+		result.Discovered.Present = make(map[corev1.ResourceName]bool, len(snapshot.Discovered.Present))
+		for name, present := range snapshot.Discovered.Present {
+			result.Discovered.Present[name] = present
+		}
+	}
 	if snapshot.Nodes == nil {
 		return result
 	}

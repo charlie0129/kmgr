@@ -11,6 +11,7 @@ service ViewService {
   rpc StreamView(OpenViewRequest) returns (stream ViewEvent);
   rpc CancelView(CancelViewRequest) returns (Acknowledgement);
   rpc PreviewColumn(PreviewColumnRequest) returns (PreviewColumnResponse);
+  rpc DiscoverOptionalResources(DiscoverOptionalResourcesRequest) returns (DiscoverOptionalResourcesResponse);
   rpc SearchCachedObjects(SearchCachedObjectsRequest) returns (SearchCachedObjectsResponse);
   rpc SearchObjects(SearchObjectsRequest) returns (stream SearchObjectsEvent);
   rpc CancelSearch(CancelSearchRequest) returns (Acknowledgement);
@@ -188,4 +189,44 @@ message CancelSearchRequest {
   string search_id = 2;
   uint64 generation = 3;
   uint64 query_revision = 4;
+}
+
+// DiscoverOptionalResources is a cache-only, point-in-time query. It inspects
+// core/v1 Node and Pod objects already retained for this cluster session and
+// never opens a resource client or starts a LIST/WATCH or metrics provider.
+// Callers run it after base rows are visible and may repeat it as caches fill.
+message DiscoverOptionalResourcesRequest {
+  RequestContext context = 1;
+  ResourceType applicable_resource = 2;
+}
+
+enum OptionalResourceCategory {
+  OPTIONAL_RESOURCE_CATEGORY_UNSPECIFIED = 0;
+  OPTIONAL_RESOURCE_CATEGORY_EPHEMERAL_STORAGE = 1;
+  OPTIONAL_RESOURCE_CATEGORY_HUGE_PAGE = 2;
+  OPTIONAL_RESOURCE_CATEGORY_ACCELERATOR = 3;
+}
+
+message OptionalResource {
+  // exact_key is the Kubernetes ResourceName identity. Different keys are
+  // never merged even when their display names are equal.
+  string exact_key = 1;
+  OptionalResourceCategory category = 2;
+  // Configured accelerator keys remain in the catalog with present=false so
+  // users may opt into an empty exact-resource column deliberately.
+  bool present = 3;
+  string display_name = 4;
+  ResourceType applicable_resource = 5;
+  bool explicitly_configured = 6;
+}
+
+message DiscoverOptionalResourcesResponse {
+  string request_id = 1;
+  repeated OptionalResource resources = 2;
+  bool nodes_cache_available = 3;
+  bool pods_cache_available = 4;
+  bool nodes_snapshot_complete = 5;
+  bool pods_snapshot_complete = 6;
+  bool potentially_incomplete = 7;
+  StructuredError error = 8;
 }
