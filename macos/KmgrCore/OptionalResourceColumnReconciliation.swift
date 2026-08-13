@@ -90,6 +90,11 @@ public struct OptionalResourceColumnOverlay: Hashable, Sendable {
                 version: applicableResource.version,
                 resource: applicableResource.resource
             )
+            // Unlike persisted definitions, this transient definition is not
+            // present in the Go column resolver. Use the raw native extractor
+            // as its display/wire ID so the projector's protocol-compatible
+            // fallback can evaluate it without an on-disk configuration edit.
+            definition.id = definition.value!
             // Detected resources appear after discovery; configured-but-absent
             // resources stay available in Columns without adding an empty
             // visible column automatically.

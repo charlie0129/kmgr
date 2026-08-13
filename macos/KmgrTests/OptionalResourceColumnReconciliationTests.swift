@@ -199,6 +199,7 @@ struct OptionalResourceColumnOverlayTests {
             "resource:aliyun.com/ppu",
             "resource:hugepages-2Mi",
         ])
+        #expect(overlay.definitions.map(\.id) == overlay.definitions.map(\.value))
         #expect(overlay.definitions.map(\.title) == ["GPU", "Huge Pages (2Mi)"])
         #expect(overlay.definitions.allSatisfy { $0.isEnabled })
 
@@ -235,6 +236,7 @@ struct OptionalResourceColumnOverlayTests {
         let definition = try #require(overlay.definitions.first)
         #expect(overlay.definitions.count == 1)
         #expect(definition.value == "resource:custom.example/fpga-card")
+        #expect(definition.id == "resource:custom.example/fpga-card")
         #expect(definition.title == "FPGA Cards")
         #expect(!definition.isEnabled)
     }
@@ -292,6 +294,44 @@ struct OptionalResourceColumnOverlayTests {
             enabled: false
         )
         #expect(overlay.applying(to: [persisted]) == [persisted])
+    }
+
+    @Test("raw transient wire IDs cannot duplicate persisted IDs or extractors")
+    func rawWireIdentityDoesNotDuplicatePersistedColumns() throws {
+        let entry = Self.entry(
+            key: "aliyun.com/ppu",
+            category: .accelerator,
+            present: true,
+            title: "PPU"
+        )
+        let rawIDCollision = ColumnDefinition(
+            id: "resource:aliyun.com/ppu",
+            title: "Unrelated CEL",
+            source: .cel,
+            expression: "object.metadata.name",
+            type: .string
+        )
+        var overlay = OptionalResourceColumnOverlay()
+        try overlay.reconcile(
+            Self.catalog(resources: [entry]),
+            applicableResource: Self.pods,
+            persistedDefinitions: [rawIDCollision]
+        )
+        #expect(overlay.definitions.isEmpty)
+
+        let extractorCollision = ColumnDefinition(
+            id: "configured-ppu",
+            title: "Configured PPU",
+            source: .metric,
+            value: "resource:aliyun.com/ppu",
+            type: .resourceUsage
+        )
+        try overlay.reconcile(
+            Self.catalog(resources: [entry]),
+            applicableResource: Self.pods,
+            persistedDefinitions: [extractorCollision]
+        )
+        #expect(overlay.definitions.isEmpty)
     }
 
     @Test("entries for another GVR are ignored")
