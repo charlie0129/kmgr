@@ -15,24 +15,38 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onClose: (() -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
+    var onOpenLogWindow: ((LogWindowController) -> Void)?
+    var onOpenTerminalWindow: ((TerminalWindowController) -> Void)?
 
     private let provider: any WorkspaceResourceProviding
     private let objectDetailProvider: any ObjectDetailProviding
+    private let operationProvider: any ResourceOperationProviding
+    private let logProvider: any LogStreamProviding
+    private let execProvider: any ExecSessionProviding
     private let portForwards: PortForwardCoordinator
     private let workspaceController: ClusterWorkspaceViewController
     private var portForwardConfigurationController: PortForwardConfigurationWindowController?
+    private var logConfigurationController: LogConfigurationWindowController?
+    private var execConfigurationController: ExecConfigurationWindowController?
+    private var deleteResourcesController: DeleteResourcesWindowController?
 
     init(
         session: OpenedClusterSession,
         provider: any WorkspaceResourceProviding,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
+        operationProvider: any ResourceOperationProviding,
+        logProvider: any LogStreamProviding,
+        execProvider: any ExecSessionProviding,
         portForwards: PortForwardCoordinator,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
         self.session = session
         self.provider = provider
         self.objectDetailProvider = objectDetailProvider
+        self.operationProvider = operationProvider
+        self.logProvider = logProvider
+        self.execProvider = execProvider
         self.portForwards = portForwards
 
         let window = NSWindow(
@@ -62,6 +76,15 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
         workspaceController.onShowColumns = { [weak self] request in
             self?.onShowColumns?(request)
+        }
+        workspaceController.onOpenLogs = { [weak self] identities in
+            self?.showLogConfiguration(identities)
+        }
+        workspaceController.onOpenExec = { [weak self] identity in
+            self?.showExecConfiguration(identity)
+        }
+        workspaceController.onDelete = { [weak self] targets in
+            self?.showDeleteResources(targets)
         }
         window.delegate = self
         window.contentViewController = workspaceController
@@ -107,6 +130,55 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         controller.beginSheet(for: window)
     }
 
+    private func showLogConfiguration(_ identities: [ResourceIdentity]) {
+        guard let window, logConfigurationController == nil else { NSSound.beep(); return }
+        let controller = LogConfigurationWindowController(
+            session: session,
+            pods: identities,
+            detailProvider: objectDetailProvider,
+            logProvider: logProvider
+        )
+        controller.onOpenWindow = { [weak self] in self?.onOpenLogWindow?($0) }
+        controller.onDismiss = { [weak self, weak controller] in
+            guard self?.logConfigurationController === controller else { return }
+            self?.logConfigurationController = nil
+        }
+        logConfigurationController = controller
+        controller.beginSheet(for: window)
+    }
+
+    private func showExecConfiguration(_ identity: ResourceIdentity) {
+        guard let window, execConfigurationController == nil else { NSSound.beep(); return }
+        let controller = ExecConfigurationWindowController(
+            session: session,
+            podIdentity: identity,
+            objectDetailProvider: objectDetailProvider,
+            execProvider: execProvider
+        )
+        controller.onOpenWindow = { [weak self] in self?.onOpenTerminalWindow?($0) }
+        controller.onDismiss = { [weak self, weak controller] in
+            guard self?.execConfigurationController === controller else { return }
+            self?.execConfigurationController = nil
+        }
+        execConfigurationController = controller
+        controller.beginSheet(for: window)
+    }
+
+    private func showDeleteResources(_ targets: [ResourceDeleteTarget]) {
+        guard let window, deleteResourcesController == nil else { NSSound.beep(); return }
+        let controller = DeleteResourcesWindowController(
+            session: session,
+            targets: targets,
+            provider: operationProvider
+        )
+        controller.onDismiss = { [weak self, weak controller] in
+            guard self?.deleteResourcesController === controller else { return }
+            self?.deleteResourcesController = nil
+        }
+        deleteResourcesController = controller
+        controller.beginSheet(for: window)
+    }
+
     @objc func showCommandPalette(_ sender: Any?) {
         workspaceController.presentCommandPalette()
     }
@@ -136,6 +208,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var detailController: ObjectDetailViewController?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
+    var onOpenLogs: (([ResourceIdentity]) -> Void)?
+    var onOpenExec: ((ResourceIdentity) -> Void)?
+    var onDelete: (([ResourceDeleteTarget]) -> Void)?
 
     init(
         session: OpenedClusterSession,
@@ -181,6 +256,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onShowColumns = { [weak self] request in
             self?.onShowColumns?(request)
+        }
+        contentController.onOpenLogs = { [weak self] identities in
+            self?.onOpenLogs?(identities)
+        }
+        contentController.onOpenExec = { [weak self] identity in
+            self?.onOpenExec?(identity)
+        }
+        contentController.onDelete = { [weak self] targets in
+            self?.onDelete?(targets)
         }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
         addSplitViewItem(NSSplitViewItem(viewController: contentController))
@@ -747,6 +831,9 @@ private final class ResourceListViewController: NSViewController,
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
+    var onOpenLogs: (([ResourceIdentity]) -> Void)?
+    var onOpenExec: ((ResourceIdentity) -> Void)?
+    var onDelete: (([ResourceDeleteTarget]) -> Void)?
 
     init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
@@ -1286,6 +1373,19 @@ private final class ResourceListViewController: NSViewController,
                 identity.resource == "pods" || identity.resource == "services"
             else { return }
             onStartPortForward?(identity)
+        case .openLogs:
+            let identities = model.selectedIdentities
+            guard !identities.isEmpty, identities.count <= 128,
+                identities.allSatisfy({
+                    $0.group.isEmpty && $0.version == "v1" && $0.resource == "pods"
+                })
+            else { NSSound.beep(); return }
+            onOpenLogs?(identities)
+        case .openExec:
+            guard let identity = model.selectedIdentities.only,
+                identity.group.isEmpty, identity.version == "v1", identity.resource == "pods"
+            else { NSSound.beep(); return }
+            onOpenExec?(identity)
         case .selectAll:
             model.selectAllVisible()
             suppressSelectionCallbacks = true
@@ -1293,7 +1393,15 @@ private final class ResourceListViewController: NSViewController,
             suppressSelectionCallbacks = false
             updateStatusLine()
         case .delete:
-            NSSound.beep()
+            let visible = Set(model.orderedVisibleUIDs)
+            let targets = model.selectedIdentities.map { identity in
+                ResourceDeleteTarget(
+                    identity: identity,
+                    hiddenByFilter: !visible.contains(identity.uid)
+                )
+            }
+            guard !targets.isEmpty else { NSSound.beep(); return }
+            onDelete?(targets)
         case .moveDown, .moveUp:
             let delta = command == .moveDown ? 1 : -1
             let next = min(max(tableView.selectedRow + delta, 0), max(0, tableView.numberOfRows - 1))
@@ -1304,7 +1412,8 @@ private final class ResourceListViewController: NSViewController,
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, open, openYAML, openEvents, startPortForward, selectAll, delete, moveUp, moveDown
+    case focusFilter, open, openYAML, openEvents, openLogs, openExec
+    case startPortForward, selectAll, delete, moveUp, moveDown
 }
 
 @MainActor
@@ -1321,6 +1430,8 @@ private final class ResourceTableView: NSTableView {
         case (_, 36, false): onCommand?(.open)
         case ("y", _, false), ("Y", _, false): onCommand?(.openYAML)
         case ("e", _, false), ("E", _, false): onCommand?(.openEvents)
+        case ("l", _, false), ("L", _, false): onCommand?(.openLogs)
+        case ("s", _, false), ("S", _, false): onCommand?(.openExec)
         case ("p", _, false), ("P", _, false): onCommand?(.startPortForward)
         case ("a", _, true): onCommand?(.selectAll)
         case (_, 51, true): onCommand?(.delete)

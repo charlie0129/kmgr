@@ -14,11 +14,16 @@ final class Application: NSObject, NSApplicationDelegate {
     private let workspaceResourceProvider: any WorkspaceResourceProviding
     private let objectSearchProvider: any ObjectSearchProviding
     private let objectDetailProvider: any ObjectDetailProviding
+    private let operationProvider: any ResourceOperationProviding
+    private let logProvider: any LogStreamProviding
+    private let execProvider: any ExecSessionProviding
     private let preferencesStore: AppPreferencesStore
     private let settingsWindowController: SettingsWindowController
     private let portForwardCoordinator: PortForwardCoordinator
     private let portForwardsWindowController: PortForwardsWindowController
     private let engineSupervisor: EngineSupervisor
+    private var logWindowControllers: [ObjectIdentifier: LogWindowController] = [:]
+    private var terminalWindowControllers: [ObjectIdentifier: TerminalWindowController] = [:]
     private var isTerminating = false
     private var terminationTask: Task<Void, Never>?
 
@@ -41,6 +46,9 @@ final class Application: NSObject, NSApplicationDelegate {
         self.objectDetailProvider = EngineObjectDetailProvider(
             connection: supervisor.connection
         )
+        self.operationProvider = EngineOperationProvider(connection: supervisor.connection)
+        self.logProvider = EngineLogStreamProvider(connection: supervisor.connection)
+        self.execProvider = EngineExecSessionProvider(connection: supervisor.connection)
         let portForwards = PortForwardCoordinator(
             provider: EnginePortForwardProvider(connection: supervisor.connection)
         )
@@ -141,6 +149,9 @@ final class Application: NSObject, NSApplicationDelegate {
             provider: workspaceResourceProvider,
             objectSearchProvider: objectSearchProvider,
             objectDetailProvider: objectDetailProvider,
+            operationProvider: operationProvider,
+            logProvider: logProvider,
+            execProvider: execProvider,
             portForwards: portForwardCoordinator,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
@@ -155,9 +166,37 @@ final class Application: NSObject, NSApplicationDelegate {
         controller.onStartPortForward = { [weak controller] identity in
             controller?.showPortForwardConfiguration(identity)
         }
+        controller.onOpenLogWindow = { [weak self] logController in
+            self?.retainAndShow(logController)
+        }
+        controller.onOpenTerminalWindow = { [weak self] terminalController in
+            self?.retainAndShow(terminalController)
+        }
         controller.onShowColumns = { [weak self, weak controller] request in
             guard let self, let controller else { return }
             self.showColumns(request, for: controller)
+        }
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func retainAndShow(_ controller: LogWindowController) {
+        let identifier = ObjectIdentifier(controller)
+        logWindowControllers[identifier] = controller
+        controller.onClose = { [weak self, weak controller] in
+            guard self?.logWindowControllers[identifier] === controller else { return }
+            self?.logWindowControllers.removeValue(forKey: identifier)
+        }
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func retainAndShow(_ controller: TerminalWindowController) {
+        let identifier = ObjectIdentifier(controller)
+        terminalWindowControllers[identifier] = controller
+        controller.onClose = { [weak self, weak controller] in
+            guard self?.terminalWindowControllers[identifier] === controller else { return }
+            self?.terminalWindowControllers.removeValue(forKey: identifier)
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
