@@ -1,0 +1,24 @@
+PROMPT.md
+
+# Go
+/bin/
+/coverage.out
+
+# Swift Package Manager
+/.build/
+/macos/.build/
+/macos/.swiftpm/
+/macos/Package.resolved
+
+# Xcode
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# App bundles and local tooling
+/build/
+/dist/
+/.tools/
+
+# macOS
+.DS_Store
