@@ -2,6 +2,7 @@ package operation
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 )
 
 func TestPrepareYamlEditReturnsValidationAndSemanticDiff(t *testing.T) {
@@ -102,7 +105,7 @@ func TestApplyYamlRejectsArbitraryFieldManagerAndDuplicateID(t *testing.T) {
 		Context: operationContext("bad"), OperationId: "bad", Identity: operationIdentity(),
 		YamlUtf8: []byte("yaml"), ExpectedResourceVersion: "rv", FieldManager: "kubectl",
 	})
-	if err != nil || bad.GetAccepted() || bad.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL {
+	if err != nil || bad.GetAccepted() || bad.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION {
 		t.Fatalf("bad field manager response = %#v, error = %v", bad, err)
 	}
 	request := &kmgrv1.ApplyYamlRequest{
@@ -129,6 +132,11 @@ type fakeYAMLEditor struct {
 	err         error
 	block       chan struct{}
 	lastPayload string
+	object      *unstructured.Unstructured
+	resource    dynamic.ResourceInterface
+	dataResult  object.Data
+	dataErr     error
+	mutations   []object.DataMutation
 }
 
 func (e *fakeYAMLEditor) PrepareYAML(
@@ -137,6 +145,36 @@ func (e *fakeYAMLEditor) PrepareYAML(
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.prepared, e.err
+}
+
+func (e *fakeYAMLEditor) UpdateData(
+	_ context.Context, _ object.Identity, _ string, mutations []object.DataMutation,
+) (object.Data, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.mutations = cloneDataMutations(mutations)
+	return e.dataResult, e.dataErr
+}
+
+func (e *fakeYAMLEditor) Get(context.Context, object.Identity) (*unstructured.Unstructured, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.err != nil {
+		return nil, e.err
+	}
+	if e.object == nil {
+		return nil, errors.New("no fake object")
+	}
+	return e.object.DeepCopy(), nil
+}
+
+func (e *fakeYAMLEditor) Resource(object.Identity) (dynamic.ResourceInterface, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.err != nil {
+		return nil, e.err
+	}
+	return e.resource, nil
 }
 
 func (e *fakeYAMLEditor) ApplyYAML(
@@ -174,7 +212,7 @@ func (s *recordingOperationStream) Send(value *kmgrv1.OperationEvent) error {
 	return nil
 }
 
-func testOperationService(t *testing.T, editor YAMLEditor) *GRPCService {
+func testOperationService(t *testing.T, editor *fakeYAMLEditor) *GRPCService {
 	t.Helper()
 	service, err := NewGRPCService(editor, nil)
 	if err != nil {

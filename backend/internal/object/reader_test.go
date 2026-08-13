@@ -28,6 +28,34 @@ func TestGetRejectsSameNameRecreatedUID(t *testing.T) {
 	}
 }
 
+func TestResourceReturnsExactNamespacedAndClusterScopedInterfaces(t *testing.T) {
+	t.Parallel()
+	resolver := &recordingResolver{resource: &fakeResourceInterface{}}
+	reader, err := NewReader(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespaced := Identity{
+		SessionID: "session", Group: "apps", Version: "v1", Resource: "deployments",
+		Namespace: "team-a", Name: "web", UID: "uid-web",
+	}
+	resource, err := reader.Resource(namespaced)
+	if err != nil || resource != resolver.resource {
+		t.Fatalf("Resource() = %#v, %v", resource, err)
+	}
+	if resolver.sessionID != "session" || resolver.gvr != namespaced.GVR() || resolver.namespace != "team-a" {
+		t.Fatalf("resolver call = %q %#v %q", resolver.sessionID, resolver.gvr, resolver.namespace)
+	}
+	clusterScoped := namespaced
+	clusterScoped.Namespace = ""
+	clusterScoped.Name = "node-a"
+	clusterScoped.Resource = "nodes"
+	clusterScoped.Group = ""
+	if _, err := reader.Resource(clusterScoped); err != nil || resolver.namespace != "" || resolver.gvr != clusterScoped.GVR() {
+		t.Fatalf("cluster-scoped Resource() = %v, call = %#v %q", err, resolver.gvr, resolver.namespace)
+	}
+}
+
 func TestDetailReturnsReadableYAMLWithoutJSONCrossingBoundary(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "uid")
@@ -194,6 +222,20 @@ func (r fakeResolver) Resource(_ string, gvr schema.GroupVersionResource, namesp
 	}
 	return resource, nil
 }
+
+type recordingResolver struct {
+	resource  dynamic.ResourceInterface
+	sessionID string
+	gvr       schema.GroupVersionResource
+	namespace string
+}
+
+func (r *recordingResolver) Resource(sessionID string, gvr schema.GroupVersionResource, namespace string) (dynamic.ResourceInterface, error) {
+	r.sessionID, r.gvr, r.namespace = sessionID, gvr, namespace
+	return r.resource, nil
+}
+
+type fakeResourceInterface struct{ dynamic.ResourceInterface }
 
 func testReader(t *testing.T, objects ...runtime.Object) *Reader {
 	t.Helper()

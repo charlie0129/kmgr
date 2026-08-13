@@ -8,19 +8,19 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/charlie0129/kmgr/backend/internal/object"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 )
 
-const DefaultDeleteConcurrency = 4
+const (
+	DefaultDeleteConcurrency = 4
+	MaxDeleteConcurrency     = 16
+)
 
 type DeleteTarget struct {
-	GVR       schema.GroupVersionResource
-	Namespace string
-	Name      string
-	UID       types.UID
+	Identity object.Identity
 }
 
 type DeleteOptions struct {
@@ -34,36 +34,50 @@ type DeleteResult struct {
 	Err    error
 }
 
-type DynamicResourceProvider interface {
-	Resource(schema.GroupVersionResource) dynamic.NamespaceableResourceInterface
+type DeleteResourceProvider interface {
+	Resource(object.Identity) (dynamic.ResourceInterface, error)
 }
+
+type DeleteProgress func(index int, state ItemState, result DeleteResult)
 
 // DeleteMany captures exact identities before execution and applies UID
 // preconditions to every request. Cancellation prevents not-yet-started work;
 // already dispatched destructive requests are never retried automatically.
 func DeleteMany(
 	ctx context.Context,
-	client DynamicResourceProvider,
+	client DeleteResourceProvider,
 	targets []DeleteTarget,
 	options DeleteOptions,
+) []DeleteResult {
+	return DeleteManyWithProgress(ctx, client, targets, options, nil)
+}
+
+func DeleteManyWithProgress(
+	ctx context.Context,
+	client DeleteResourceProvider,
+	targets []DeleteTarget,
+	options DeleteOptions,
+	progress DeleteProgress,
 ) []DeleteResult {
 	results := make([]DeleteResult, len(targets))
 	for index, target := range targets {
 		results[index].Target = target
 	}
-	if client == nil {
-		err := errors.New("delete resource client is nil")
-		for index := range results {
-			results[index].Err = err
-		}
+	if len(targets) == 0 {
 		return results
+	}
+	if client == nil {
+		return failAllDeletes(results, errors.New("delete resource client is nil"), progress)
+	}
+	if err := validateDeleteOptions(options); err != nil {
+		return failAllDeletes(results, err, progress)
 	}
 
 	concurrency := options.MaxConcurrency
 	if concurrency <= 0 {
 		concurrency = DefaultDeleteConcurrency
 	}
-	concurrency = min(concurrency, max(1, len(targets)))
+	concurrency = min(concurrency, MaxDeleteConcurrency, max(1, len(targets)))
 
 	jobs := make(chan int)
 	var workers sync.WaitGroup
@@ -72,29 +86,40 @@ func DeleteMany(
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				// The dispatcher and a newly available worker may become ready at
-				// the same instant as cancellation. Go select intentionally chooses
-				// among ready cases nondeterministically, so recheck after handoff:
-				// receiving a job is not yet dispatching its destructive API call.
+				// Receiving a job is not yet dispatching its destructive API call.
+				// Recheck after handoff so cancellation wins before resolution.
 				if err := context.Cause(ctx); err != nil {
 					results[index].Err = err
+					reportDelete(progress, index, ItemStateCancelled, results[index])
 					continue
 				}
 				target := targets[index]
 				if err := validateTarget(target); err != nil {
 					results[index].Err = err
+					reportDelete(progress, index, ItemStateFailed, results[index])
 					continue
 				}
-				resource := client.Resource(target.GVR)
-				var scoped dynamic.ResourceInterface = resource
-				if target.Namespace != "" {
-					scoped = resource.Namespace(target.Namespace)
+				resource, err := client.Resource(target.Identity)
+				if err != nil {
+					results[index].Err = err
+					reportDelete(progress, index, ItemStateFailed, results[index])
+					continue
 				}
-				results[index].Err = scoped.Delete(ctx, target.Name, metav1.DeleteOptions{
+				reportDelete(progress, index, ItemStateRunning, results[index])
+				uid := types.UID(target.Identity.UID)
+				err = resource.Delete(ctx, target.Identity.Name, metav1.DeleteOptions{
 					GracePeriodSeconds: options.GracePeriodSeconds,
 					PropagationPolicy:  &options.PropagationPolicy,
-					Preconditions:      &metav1.Preconditions{UID: &target.UID},
+					Preconditions:      &metav1.Preconditions{UID: &uid},
 				})
+				results[index].Err = err
+				state := ItemStateSucceeded
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					state = ItemStateCancelled
+				} else if err != nil {
+					state = ItemStateFailed
+				}
+				reportDelete(progress, index, state, results[index])
 			}
 		}()
 	}
@@ -106,6 +131,7 @@ sendLoop:
 		case <-ctx.Done():
 			for pending := index; pending < len(results); pending++ {
 				results[pending].Err = context.Cause(ctx)
+				reportDelete(progress, pending, ItemStateCancelled, results[pending])
 			}
 			break sendLoop
 		}
@@ -116,14 +142,34 @@ sendLoop:
 }
 
 func validateTarget(target DeleteTarget) error {
-	if target.GVR.Version == "" || target.GVR.Resource == "" {
-		return errors.New("delete target has incomplete GVR")
-	}
-	if target.Name == "" {
-		return errors.New("delete target has no name")
-	}
-	if target.UID == "" {
-		return fmt.Errorf("delete target %q has no UID precondition", target.Name)
+	if err := target.Identity.Validate(); err != nil {
+		return fmt.Errorf("invalid delete target: %w", err)
 	}
 	return nil
+}
+
+func validateDeleteOptions(options DeleteOptions) error {
+	switch options.PropagationPolicy {
+	case metav1.DeletePropagationBackground, metav1.DeletePropagationForeground, metav1.DeletePropagationOrphan:
+	default:
+		return errors.New("delete propagation policy is invalid")
+	}
+	if options.GracePeriodSeconds != nil && *options.GracePeriodSeconds < 0 {
+		return errors.New("delete grace period must not be negative")
+	}
+	return nil
+}
+
+func failAllDeletes(results []DeleteResult, err error, progress DeleteProgress) []DeleteResult {
+	for index := range results {
+		results[index].Err = err
+		reportDelete(progress, index, ItemStateFailed, results[index])
+	}
+	return results
+}
+
+func reportDelete(progress DeleteProgress, index int, state ItemState, result DeleteResult) {
+	if progress != nil {
+		progress(index, state, result)
+	}
 }

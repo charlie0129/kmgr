@@ -106,13 +106,21 @@ func NewReader(resolver Resolver) (*Reader, error) {
 	return &Reader{resolver: resolver}, nil
 }
 
-// Get always performs an API GET. Cached command-palette or view identities
-// therefore cannot enable authoritative details or mutations without refresh.
-func (r *Reader) Get(ctx context.Context, identity Identity) (*unstructured.Unstructured, error) {
+// Resource resolves the exact namespaced or cluster-scoped dynamic resource
+// selected by identity. Callers still need Get when they require a fresh UID
+// check; this narrow seam exists for operations such as UID-preconditioned
+// deletes and subresource updates.
+func (r *Reader) Resource(identity Identity) (dynamic.ResourceInterface, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
-	resource, err := r.resolver.Resource(identity.SessionID, identity.GVR(), identity.Namespace)
+	return r.resolver.Resource(identity.SessionID, identity.GVR(), identity.Namespace)
+}
+
+// Get always performs an API GET. Cached command-palette or view identities
+// therefore cannot enable authoritative details or mutations without refresh.
+func (r *Reader) Get(ctx context.Context, identity Identity) (*unstructured.Unstructured, error) {
+	resource, err := r.Resource(identity)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/object"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -21,8 +22,8 @@ func TestDeleteManyAppliesExactUIDPreconditionsAndReturnsPartialFailures(t *test
 	client := &recordingProvider{errors: map[string]error{"forbidden": fmt.Errorf("forbidden")}}
 	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 	targets := []DeleteTarget{
-		{GVR: gvr, Namespace: "team-a", Name: "ok", UID: "uid-ok"},
-		{GVR: gvr, Namespace: "team-b", Name: "forbidden", UID: "uid-forbidden"},
+		{Identity: deleteIdentity(gvr, "team-a", "ok", "uid-ok")},
+		{Identity: deleteIdentity(gvr, "team-b", "forbidden", "uid-forbidden")},
 	}
 	grace := int64(5)
 	results := DeleteMany(context.Background(), client, targets, DeleteOptions{
@@ -59,8 +60,8 @@ func TestDeleteManyRejectsMissingUIDWithoutCallingAPI(t *testing.T) {
 	t.Parallel()
 	client := &recordingProvider{}
 	results := DeleteMany(context.Background(), client, []DeleteTarget{{
-		GVR: schema.GroupVersionResource{Version: "v1", Resource: "pods"}, Name: "replacement-risk",
-	}}, DeleteOptions{})
+		Identity: deleteIdentity(schema.GroupVersionResource{Version: "v1", Resource: "pods"}, "", "replacement-risk", ""),
+	}}, DeleteOptions{PropagationPolicy: metav1.DeletePropagationBackground})
 	if len(results) != 1 || results[0].Err == nil {
 		t.Fatalf("results = %#v", results)
 	}
@@ -75,10 +76,14 @@ func TestDeleteManyBoundsConcurrency(t *testing.T) {
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	targets := make([]DeleteTarget, 10)
 	for index := range targets {
-		targets[index] = DeleteTarget{GVR: gvr, Name: fmt.Sprintf("pod-%d", index), UID: types.UID(fmt.Sprintf("uid-%d", index))}
+		targets[index] = DeleteTarget{Identity: deleteIdentity(gvr, "", fmt.Sprintf("pod-%d", index), fmt.Sprintf("uid-%d", index))}
 	}
 	done := make(chan []DeleteResult, 1)
-	go func() { done <- DeleteMany(context.Background(), client, targets, DeleteOptions{MaxConcurrency: 3}) }()
+	go func() {
+		done <- DeleteMany(context.Background(), client, targets, DeleteOptions{
+			PropagationPolicy: metav1.DeletePropagationBackground, MaxConcurrency: 3,
+		})
+	}()
 	eventuallyDelete(t, func() bool { return client.peak.Load() == 3 }, "three concurrent delete calls")
 	if peak := client.peak.Load(); peak > 3 {
 		t.Fatalf("peak concurrency = %d", peak)
@@ -93,12 +98,16 @@ func TestDeleteManyCancellationSkipsPendingTargets(t *testing.T) {
 	client := &recordingProvider{started: make(chan struct{}, 1), block: make(chan struct{})}
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	targets := []DeleteTarget{
-		{GVR: gvr, Name: "first", UID: "one"},
-		{GVR: gvr, Name: "second", UID: "two"},
-		{GVR: gvr, Name: "third", UID: "three"},
+		{Identity: deleteIdentity(gvr, "", "first", "one")},
+		{Identity: deleteIdentity(gvr, "", "second", "two")},
+		{Identity: deleteIdentity(gvr, "", "third", "three")},
 	}
 	done := make(chan []DeleteResult, 1)
-	go func() { done <- DeleteMany(ctx, client, targets, DeleteOptions{MaxConcurrency: 1}) }()
+	go func() {
+		done <- DeleteMany(ctx, client, targets, DeleteOptions{
+			PropagationPolicy: metav1.DeletePropagationBackground, MaxConcurrency: 1,
+		})
+	}()
 	<-client.started
 	cancel()
 	close(client.block)
@@ -129,8 +138,8 @@ type recordingProvider struct {
 	peak    atomic.Int32
 }
 
-func (p *recordingProvider) Resource(gvr schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
-	return &recordingResource{provider: p}
+func (p *recordingProvider) Resource(identity object.Identity) (dynamic.ResourceInterface, error) {
+	return &recordingResource{provider: p, namespace: identity.Namespace}, nil
 }
 
 type recordingResource struct {
@@ -210,3 +219,10 @@ func eventuallyDelete(t *testing.T, condition func() bool, description string) {
 }
 
 var _ dynamic.NamespaceableResourceInterface = (*recordingResource)(nil)
+
+func deleteIdentity(gvr schema.GroupVersionResource, namespace, name, uid string) object.Identity {
+	return object.Identity{
+		SessionID: "session", Group: gvr.Group, Version: gvr.Version, Resource: gvr.Resource,
+		Namespace: namespace, Name: name, UID: uid,
+	}
+}
