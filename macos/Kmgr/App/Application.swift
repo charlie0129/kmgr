@@ -451,6 +451,31 @@ final class Application: NSObject, NSApplicationDelegate {
         workspace?.showCommandPalette(sender)
     }
 
+    @objc private func cycleWindowsForward(_ sender: Any?) {
+        cycleKeyWindow(backward: false, sender: sender)
+    }
+
+    @objc private func cycleWindowsBackward(_ sender: Any?) {
+        cycleKeyWindow(backward: true, sender: sender)
+    }
+
+    private func cycleKeyWindow(backward: Bool, sender: Any?) {
+        let candidates = NSApp.orderedWindows.filter {
+            $0.isVisible && $0.canBecomeKey && $0.parent == nil
+                && !$0.collectionBehavior.contains(.ignoresCycle)
+        }
+        guard candidates.count > 1 else { return }
+
+        if backward {
+            candidates.last?.makeKeyAndOrderFront(sender)
+        } else {
+            let current = NSApp.keyWindow
+            let next = candidates.first { $0 !== current }
+            current?.orderBack(sender)
+            next?.makeKeyAndOrderFront(sender)
+        }
+    }
+
     private func applyAppearance(_ preference: AppearancePreference) {
         switch preference {
         case .system: NSApp.appearance = nil
@@ -460,150 +485,16 @@ final class Application: NSObject, NSApplicationDelegate {
     }
 
     private func installMainMenu() {
-        let mainMenu = NSMenu()
-
-        let appItem = NSMenuItem()
-        let appMenu = NSMenu()
-        let settingsItem = appMenu.addItem(
-            withTitle: "Settings…",
-            action: #selector(showSettings(_:)),
-            keyEquivalent: ","
-        )
-        settingsItem.target = self
-        appMenu.addItem(.separator())
-        appMenu.addItem(
-            withTitle: "Quit \(Product.applicationName)",
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
-        )
-        appItem.submenu = appMenu
-        mainMenu.addItem(appItem)
-
-        let fileItem = NSMenuItem()
-        let fileMenu = NSMenu(title: "File")
-        let newWindowItem = fileMenu.addItem(
-            withTitle: "New Cluster Window…",
-            action: #selector(showClusterManager),
-            keyEquivalent: "n"
-        )
-        newWindowItem.target = self
-        fileItem.submenu = fileMenu
-        mainMenu.addItem(fileItem)
-
-        let resourceItem = NSMenuItem()
-        let resourceMenu = NSMenu(title: "Resource")
-        let detailsItem = resourceMenu.addItem(
-            withTitle: "Open Details",
-            action: #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
-            keyEquivalent: "\r"
-        )
-        detailsItem.keyEquivalentModifierMask = []
-        resourceMenu.addItem(
-            withTitle: "Open YAML",
-            action: #selector(ClusterWorkspaceWindowController.openResourceYAML(_:)),
-            keyEquivalent: "y"
-        ).keyEquivalentModifierMask = []
-        resourceMenu.addItem(
-            withTitle: "Open Events",
-            action: #selector(ClusterWorkspaceWindowController.openResourceEvents(_:)),
-            keyEquivalent: "e"
-        ).keyEquivalentModifierMask = []
-        resourceMenu.addItem(.separator())
-        resourceMenu.addItem(
-            withTitle: "Open Logs…",
-            action: #selector(ClusterWorkspaceWindowController.openResourceLogs(_:)),
-            keyEquivalent: "l"
-        ).keyEquivalentModifierMask = []
-        resourceMenu.addItem(
-            withTitle: "Open Terminal…",
-            action: #selector(ClusterWorkspaceWindowController.openResourceExec(_:)),
-            keyEquivalent: "s"
-        ).keyEquivalentModifierMask = []
-        resourceMenu.addItem(
-            withTitle: "Start Port Forward…",
-            action: #selector(ClusterWorkspaceWindowController.startResourcePortForward(_:)),
-            keyEquivalent: "p"
-        ).keyEquivalentModifierMask = []
-        resourceMenu.addItem(.separator())
-        resourceMenu.addItem(
-            withTitle: "Scale…",
-            action: #selector(ClusterWorkspaceWindowController.scaleResourceSelection(_:)),
-            keyEquivalent: ""
-        )
-        resourceMenu.addItem(
-            withTitle: "Rollout Restart…",
-            action: #selector(ClusterWorkspaceWindowController.restartResourceSelection(_:)),
-            keyEquivalent: ""
-        )
-        resourceMenu.addItem(
-            withTitle: "Edit Labels / Annotations…",
-            action: #selector(ClusterWorkspaceWindowController.editResourceMetadata(_:)),
-            keyEquivalent: ""
-        )
-        resourceMenu.addItem(.separator())
-        resourceMenu.addItem(
-            withTitle: "Copy Name",
-            action: #selector(ClusterWorkspaceWindowController.copyResourceName(_:)),
-            keyEquivalent: ""
-        )
-        resourceMenu.addItem(
-            withTitle: "Copy Namespace/Name",
-            action: #selector(ClusterWorkspaceWindowController.copyResourceNamespacedName(_:)),
-            keyEquivalent: ""
-        )
-        resourceMenu.addItem(
-            withTitle: "Copy kubectl Reference",
-            action: #selector(ClusterWorkspaceWindowController.copyResourceReference(_:)),
-            keyEquivalent: ""
-        )
-        resourceMenu.addItem(.separator())
-        let deleteItem = resourceMenu.addItem(
-            withTitle: "Delete…",
-            action: #selector(ClusterWorkspaceWindowController.deleteResourceSelection(_:)),
-            keyEquivalent: "\u{8}"
-        )
-        deleteItem.keyEquivalentModifierMask = .command
-        resourceItem.submenu = resourceMenu
-        mainMenu.addItem(resourceItem)
-
-        let windowItem = NSMenuItem()
-        let windowMenu = NSMenu(title: "Window")
-        windowMenu.addItem(
-            withTitle: "Minimize",
-            action: #selector(NSWindow.performMiniaturize(_:)),
-            keyEquivalent: "m"
-        )
-        windowMenu.addItem(.separator())
-        let backItem = windowMenu.addItem(
-            withTitle: "Back",
-            action: #selector(ClusterWorkspaceWindowController.navigateBack(_:)),
-            keyEquivalent: "["
-        )
-        backItem.keyEquivalentModifierMask = .command
-        let forwardItem = windowMenu.addItem(
-            withTitle: "Forward",
-            action: #selector(ClusterWorkspaceWindowController.navigateForward(_:)),
-            keyEquivalent: "]"
-        )
-        forwardItem.keyEquivalentModifierMask = .command
-        windowMenu.addItem(.separator())
-        let paletteItem = windowMenu.addItem(
-            withTitle: "Command Palette…",
-            action: #selector(showCommandPalette(_:)),
-            keyEquivalent: "k"
-        )
-        paletteItem.keyEquivalentModifierMask = .command
-        paletteItem.target = self
-        let portForwardsItem = windowMenu.addItem(
-            withTitle: "Port Forwards",
-            action: #selector(showPortForwards(_:)),
-            keyEquivalent: ""
-        )
-        portForwardsItem.target = self
-        windowItem.submenu = windowMenu
-        mainMenu.addItem(windowItem)
-        NSApp.windowsMenu = windowMenu
-
-        NSApp.mainMenu = mainMenu
+        let menu = NativeMainMenuBuilder.make(actions: NativeMainMenuActions(
+            target: self,
+            showSettings: #selector(showSettings(_:)),
+            newClusterWindow: #selector(showClusterManager),
+            showCommandPalette: #selector(showCommandPalette(_:)),
+            showPortForwards: #selector(showPortForwards(_:)),
+            cycleWindowsForward: #selector(cycleWindowsForward(_:)),
+            cycleWindowsBackward: #selector(cycleWindowsBackward(_:))
+        ))
+        NSApp.windowsMenu = menu.window
+        NSApp.mainMenu = menu.main
     }
 }
