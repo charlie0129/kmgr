@@ -155,10 +155,13 @@ grammar and structured terms are documented in
 
 Metrics are optional enrichment. Pod and Node CPU/memory usage is fetched
 lazily from `metrics.k8s.io`; absence or RBAC denial leaves base objects and
-Pod scheduler request/limit accounting available. The engine has tested
-accounting primitives for ephemeral storage, huge pages, accelerators, and
-Node Pod allocation, but dynamic resource discovery and Node allocation
-watching are not yet wired into the app's standard table runtime.
+Pod scheduler request/limit accounting available. Configured Node allocation
+columns for CPU, memory, ephemeral storage, Pod count, huge pages, and exact
+accelerator resources start a shared cluster-wide Pod dependency
+asynchronously, initially render **Calculating…**, and update as bound Pods
+change without delaying the base Node list. Exact configured huge-page and
+accelerator keys remain distinct. Automatic live discovery and insertion of
+those optional columns is not implemented yet.
 
 ## Architecture and security
 
@@ -178,8 +181,13 @@ The app creates a short per-launch directory with mode `0700`, places a Unix
 socket inside it with user-only access, and gives the helper a random launch
 token. Every RPC carries that token. The GUI supervises one helper and removes
 the private endpoint on shutdown; a helper crash cannot corrupt the AppKit
-process. The supervisor can restart the helper process, but reopening prior
-cluster sessions/views automatically after that restart is not implemented.
+process. After an unexpected helper restart, visible workspaces reopen their
+context through the normal authenticated probe and rebind safe resource and
+UID-pinned detail views to the new session. Cached table rows remain visibly
+disconnected and cannot perform network actions until a complete fresh UID
+snapshot validates them. Mutations and exec commands are never replayed, and
+old helper-owned port-forwards remain visible as failed records rather than
+being recreated silently.
 
 Kmgr does not copy kubeconfig credentials into app storage. It rejects
 `users[].user.exec` and legacy `auth-provider` entries before connection and
@@ -222,23 +230,36 @@ authorizes read-only checks; it does not authorize creating or deleting test
 objects. With separate approval, mutation tests should be isolated to a
 temporary `kmgr-smoke` namespace in a disposable cluster. Then:
 
-1. Open two windows, list/filter Pods, and verify updates preserve selection.
+1. Open two windows, then list, filter, and sort Pods independently.
 2. Open Nodes, switch away long enough for its watch debounce, then return and
    verify cached rows appear while state changes through Resuming or Relisting.
-3. Exercise Command-K cached, exact-name, and explicitly scoped Pod search.
-4. Open independent log and exec windows.
-5. Start a Service forward, hide its manager and close its workspace, verify it
+3. Create a multi-selection with a Shift anchor, cause updates that reorder the
+   sorted rows, and verify the selected UIDs and anchor still identify the same
+   objects rather than the same row indexes.
+4. Exercise Command-K commands and kinds, then choose the Pod search entry and
+   exercise a cached object match, exact object GET, and scoped partial search.
+   Verify the cached search does not restart a stopped watch and that object
+   search stays within the selected kind/scope: it must not perform an
+   all-resource search or start a search-only WATCH.
+5. Open independent log windows for one and multiple Pods, then an exec window.
+6. Start a Service forward, hide its manager and close its workspace, verify it
    remains active and reconnects, then stop it explicitly.
-6. Start a direct Pod forward, replace that Pod with the same name/new UID, and
+7. Start a direct Pod forward, replace that Pod with the same name/new UID, and
    verify the record remains Failed rather than switching identity.
-7. Edit a ConfigMap key and a decoded Secret key; exercise a YAML
+8. Edit a ConfigMap key and a decoded Secret key; exercise a YAML
    resource-version conflict.
-8. If mutation authorization was given, bulk-delete only approved disposable
+9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
-9. Compare metrics behavior with Metrics API available and unavailable.
-10. In Relationships, verify cached results are labeled potentially incomplete;
+10. Compare metrics behavior with Metrics API available and unavailable. Enable
+    configured Node request/limit and exact-resource columns and verify the
+    asynchronous Pod accounting does not block the base Node snapshot.
+11. In Relationships, verify cached results are labeled potentially incomplete;
     run **Scan All Resources…** only against a cluster where that read load is
     acceptable.
+12. While a safe resource or detail view is visible, terminate the helper and
+    verify the workspace shows a disconnected state, reopens through a fresh
+    authenticated session, and does not replay mutations, exec commands, or
+    port-forwards.
 
 No real-cluster test runs as part of `make test`. A real smoke run requires an
 explicit context name and begins read-only. Creating/deleting the `kmgr-smoke`
@@ -258,17 +279,17 @@ issue LIST requests across every discoverable listable type.
 - The Columns UI has no selected-object expression preview or built-in/metric
   column catalog yet; built-in defaults can be enabled/reordered/reset and CEL
   columns can be edited.
-- Node Pod-allocation watching and automatic huge-page/accelerator column
-  discovery are not connected to live views yet. The typed accounting helpers
-  and projection paths are covered by deterministic tests.
+- Automatic live discovery and insertion of huge-page/accelerator columns is
+  not implemented yet. Exact configured resource columns and configured Node
+  Pod-allocation columns are connected to live views.
 - Exec reconnect starts a new process; it cannot preserve the original remote
   process.
 - Relationship cache results are deliberately incomplete by default, and even
   an explicit full scan is limited by discovery and RBAC visibility.
-- Port-forwards and other live sessions are not restored after app/engine
-  relaunch. Confirmed application quit stops active listeners.
-- An unexpected helper restart does not yet reopen active cluster sessions and
-  resource views automatically; reopen the affected workspace.
+- Port-forwards and other live sessions are not restored after an app relaunch.
+  An unexpected helper restart reopens safe cluster resource/detail views, but
+  it does not replay mutations or exec commands; old forwards become failed
+  tombstones. Confirmed application quit stops active listeners.
 - Metrics Server generally does not provide accelerator, huge-page, or
   ephemeral-storage utilization. Kmgr labels scheduler allocation separately
   and does not manufacture usage.
