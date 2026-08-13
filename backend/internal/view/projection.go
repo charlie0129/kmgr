@@ -4,6 +4,7 @@ package view
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
@@ -89,6 +91,11 @@ type Projector struct {
 	now         func() time.Time
 	workerLimit int
 }
+
+// projectionWorkerGate bounds aggregate row work across all Projectors. A
+// per-Projector WorkerLimit still controls one batch's share of this capacity,
+// but concurrent views cannot each create an independent full worker pool.
+var projectionWorkerGate = make(chan struct{}, min(max(goruntime.GOMAXPROCS(0), 1), defaultProjectionWorkerCap))
 
 // WithMetrics returns an immutable projection revision for one optional
 // metrics snapshot. Base object projection and metric refreshes may therefore
@@ -203,8 +210,7 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 	}
 	workerLimit := spec.WorkerLimit
 	if workerLimit == 0 {
-		workerLimit = min(goruntime.GOMAXPROCS(0), defaultProjectionWorkerCap)
-		workerLimit = max(workerLimit, 1)
+		workerLimit = cap(projectionWorkerGate)
 	}
 	return &Projector{
 		spec: spec, filter: compiledFilter, namespaces: namespaces,
@@ -216,9 +222,23 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 // supplied objects are treated as immutable and may safely be a UIDStore
 // snapshot.
 func (p *Projector) Project(objects []*unstructured.Unstructured) []*kmgrv1.ResourceRow {
+	rows, _ := p.ProjectContext(context.Background(), objects)
+	return rows
+}
+
+// ProjectContext returns all visible rows in deterministic typed sort order
+// and stops stale projection work when ctx is canceled. CEL runtime failures
+// remain error cells; only context cancellation aborts the complete batch.
+func (p *Projector) ProjectContext(ctx context.Context, objects []*unstructured.Unstructured) ([]*kmgrv1.ResourceRow, error) {
+	if ctx == nil {
+		return nil, errors.New("projection context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	batch := p.beginBatch()
 	if batch == nil || len(objects) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	type result struct {
@@ -226,9 +246,17 @@ func (p *Projector) Project(objects []*unstructured.Unstructured) []*kmgrv1.Reso
 		visible bool
 	}
 	projected := make([]result, len(objects))
-	projectBounded(len(objects), batch.workerLimit, func(index int) {
-		projected[index].row, projected[index].visible = batch.projectOne(objects[index])
+	err := projectBoundedContext(ctx, len(objects), batch.workerLimit, func(index int) error {
+		row, visible, err := batch.projectOneAdmitted(ctx, objects[index])
+		if err != nil {
+			return err
+		}
+		projected[index].row, projected[index].visible = row, visible
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	rows := make([]*kmgrv1.ResourceRow, 0, len(objects))
 	for _, result := range projected {
@@ -236,40 +264,82 @@ func (p *Projector) Project(objects []*unstructured.Unstructured) []*kmgrv1.Reso
 			rows = append(rows, result.row)
 		}
 	}
-	slices.SortStableFunc(rows, batch.compareRows)
-	return rows
+	if err := sortRowsContext(ctx, rows, batch.compareRows); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // projectBounded is kept separate from Kubernetes row logic so the worker
 // ceiling can be tested deterministically. Each index is visited exactly once;
 // callers own distinct result slots and therefore need no per-row lock.
 func projectBounded(count, workerLimit int, project func(index int)) {
+	if project == nil {
+		return
+	}
+	_ = projectBoundedContext(context.Background(), count, workerLimit, func(index int) error {
+		project(index)
+		return nil
+	})
+}
+
+func projectBoundedContext(ctx context.Context, count, workerLimit int, project func(index int) error) error {
+	if ctx == nil {
+		return errors.New("projection context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if count <= 0 || project == nil {
-		return
+		return nil
 	}
-	workerCount := min(max(workerLimit, 1), count)
-	if workerCount == 1 {
-		for index := range count {
-			project(index)
-		}
-		return
-	}
-	jobs := make(chan int)
+	workerCount := min(max(workerLimit, 1), count, cap(projectionWorkerGate))
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var next atomic.Int64
+	var firstErr error
+	var errOnce sync.Once
 	var workers sync.WaitGroup
 	workers.Add(workerCount)
 	for range workerCount {
 		go func() {
 			defer workers.Done()
-			for index := range jobs {
-				project(index)
+			for {
+				if workerCtx.Err() != nil {
+					return
+				}
+				index := int(next.Add(1) - 1)
+				if index >= count {
+					return
+				}
+				if err := runProjectionWorker(workerCtx, func() error { return project(index) }); err != nil {
+					errOnce.Do(func() {
+						firstErr = err
+						cancel()
+					})
+					return
+				}
 			}
 		}()
 	}
-	for index := range count {
-		jobs <- index
-	}
-	close(jobs)
 	workers.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
+}
+
+func runProjectionWorker(ctx context.Context, project func() error) error {
+	select {
+	case projectionWorkerGate <- struct{}{}:
+		defer func() { <-projectionWorkerGate }()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return project()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ProjectOne computes a single compact row and whether it belongs to the
@@ -296,8 +366,21 @@ func (p *Projector) beginBatch() *Projector {
 }
 
 func (p *Projector) projectOne(object *unstructured.Unstructured) (*kmgrv1.ResourceRow, bool) {
+	var row *kmgrv1.ResourceRow
+	var visible bool
+	_ = runProjectionWorker(context.Background(), func() error {
+		row, visible, _ = p.projectOneAdmitted(context.Background(), object)
+		return nil
+	})
+	return row, visible
+}
+
+func (p *Projector) projectOneAdmitted(ctx context.Context, object *unstructured.Unstructured) (*kmgrv1.ResourceRow, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if object == nil || object.GetUID() == "" || !p.includesNamespace(object.GetNamespace()) {
-		return nil, false
+		return nil, false, nil
 	}
 
 	cells := make([]*kmgrv1.Cell, 0, len(p.spec.ColumnIDs))
@@ -310,7 +393,11 @@ func (p *Projector) projectOne(object *unstructured.Unstructured) (*kmgrv1.Resou
 				activation := p.celActivationForObject(object)
 				celActivation = &activation
 			}
-			cell = p.celCell(program, *celActivation)
+			var err error
+			cell, err = p.celCellContext(ctx, program, *celActivation)
+			if err != nil {
+				return nil, false, err
+			}
 		} else {
 			cell = p.builtinCell(object, columnID)
 		}
@@ -335,7 +422,7 @@ func (p *Projector) projectOne(object *unstructured.Unstructured) (*kmgrv1.Resou
 		Fields:      fields,
 		VisibleText: visibleText,
 	}) {
-		return nil, false
+		return nil, false, nil
 	}
 
 	return &kmgrv1.ResourceRow{
@@ -349,7 +436,7 @@ func (p *Projector) projectOne(object *unstructured.Unstructured) (*kmgrv1.Resou
 			Uid:              string(object.GetUID()),
 		},
 		Cells: cells,
-	}, true
+	}, true, nil
 }
 
 func (p *Projector) includesNamespace(namespace string) bool {
@@ -478,6 +565,11 @@ func (p *Projector) celActivationForObject(object *unstructured.Unstructured) vi
 }
 
 func (p *Projector) celCell(program *viewcolumns.Program, activation viewcolumns.Activation) *kmgrv1.Cell {
+	cell, _ := p.celCellContext(context.Background(), program, activation)
+	return cell
+}
+
+func (p *Projector) celCellContext(ctx context.Context, program *viewcolumns.Program, activation viewcolumns.Activation) (*kmgrv1.Cell, error) {
 	definition := program.Definition()
 	missing := definition.Missing
 	if missing == "" {
@@ -487,11 +579,14 @@ func (p *Projector) celCell(program *viewcolumns.Program, activation viewcolumns
 		ColumnId: definition.ID, DisplayText: missing,
 		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 	}
-	value, err := program.Evaluate(activation)
+	value, err := program.EvaluateContext(ctx, activation)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return nil, ctxErr
+		}
 		cell.Tooltip = err.Error()
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
-		return cell
+		return cell, nil
 	}
 	cell.DisplayText = value.Display
 	switch {
@@ -510,7 +605,7 @@ func (p *Projector) celCell(program *viewcolumns.Program, activation viewcolumns
 	case value.Duration != nil:
 		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: value.Duration.Seconds()}
 	}
-	return cell
+	return cell, nil
 }
 
 func quantityCellValue(value resource.Quantity, display string) *kmgrv1.Cell_QuantityValue {
@@ -958,6 +1053,36 @@ func (p *Projector) compareRows(left, right *kmgrv1.ResourceRow) int {
 		return result
 	}
 	return cmp.Compare(left.GetIdentity().GetUid(), right.GetIdentity().GetUid())
+}
+
+// sortRowsContext uses the same stable ordering as slices.SortStableFunc, but
+// checks cancellation during comparisons so an obsolete large sort does not
+// continue after its projection revision has been superseded.
+func sortRowsContext(
+	ctx context.Context,
+	rows []*kmgrv1.ResourceRow,
+	compare func(left, right *kmgrv1.ResourceRow) int,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var canceled atomic.Bool
+	slices.SortStableFunc(rows, func(left, right *kmgrv1.ResourceRow) int {
+		if canceled.Load() {
+			return 0
+		}
+		select {
+		case <-ctx.Done():
+			canceled.Store(true)
+			return 0
+		default:
+			return compare(left, right)
+		}
+	})
+	if canceled.Load() {
+		return ctx.Err()
+	}
+	return nil
 }
 
 func defaultColumns(resource ResourceType) []string {

@@ -1,9 +1,11 @@
 package columns
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -155,6 +157,80 @@ func TestRuntimeCostLimitStopsExpensiveExpression(t *testing.T) {
 		t.Fatalf("cost-limited Evaluate error = %v", err)
 	}
 }
+
+func TestEvaluateContextRejectsPreCanceledEvaluation(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	program, err := compiler.Compile(Definition{
+		ID: "name", Expression: `object.metadata.name`, ResultType: ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = program.EvaluateContext(ctx, Activation{Object: map[string]any{
+		"metadata": map[string]any{"name": "must-not-evaluate"},
+	}})
+	var runtimeError *RuntimeError
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &runtimeError) || runtimeError.ColumnID != "name" {
+		t.Fatalf("EvaluateContext error = %T %v", err, err)
+	}
+}
+
+func TestEvaluateContextInterruptsRunningComprehension(t *testing.T) {
+	compiler := newCompiler(t, 1_000_000_000)
+	program, err := compiler.Compile(Definition{
+		ID:         "scan",
+		Expression: `object.values.exists(value, value == -1)`,
+		ResultType: ResultBoolean,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make([]any, 1_000_000)
+	for index := range values {
+		values[index] = int64(index)
+	}
+	ctx := newControlledCancelContext()
+	done := make(chan error, 1)
+	go func() {
+		_, err := program.EvaluateContext(ctx, Activation{Object: map[string]any{"values": values}})
+		done <- err
+	}()
+	<-ctx.observed
+	ctx.cancel()
+	err = <-done
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "operation interrupted") {
+		t.Fatalf("running EvaluateContext error = %T %v", err, err)
+	}
+}
+
+type controlledCancelContext struct {
+	done     chan struct{}
+	observed chan struct{}
+	once     sync.Once
+}
+
+func newControlledCancelContext() *controlledCancelContext {
+	return &controlledCancelContext{done: make(chan struct{}), observed: make(chan struct{})}
+}
+
+func (*controlledCancelContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *controlledCancelContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.done
+}
+func (c *controlledCancelContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+func (*controlledCancelContext) Value(any) any { return nil }
+func (c *controlledCancelContext) cancel()     { close(c.done) }
 
 func TestSecretActivationRemovesPayloadWithoutMutatingSource(t *testing.T) {
 	t.Parallel()

@@ -2,6 +2,7 @@
 package columns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -21,9 +22,14 @@ import (
 const (
 	EnvironmentVersion = "kmgr.cel/v1"
 	DefaultCostLimit   = uint64(10_000)
-	MaxListElements    = 128
-	MaxDisplayBytes    = 4 * 1024
-	DefaultMissing     = "—"
+	// InterruptCheckFrequency checks cancellation periodically during CEL
+	// comprehensions. The runtime cost limit already bounds total iterations,
+	// while this frequency keeps stale projection revisions responsive without
+	// adding a context-channel check to every iteration.
+	InterruptCheckFrequency = uint(100)
+	MaxListElements         = 128
+	MaxDisplayBytes         = 4 * 1024
+	DefaultMissing          = "—"
 )
 
 type ResultType string
@@ -168,7 +174,11 @@ func (c *Compiler) Compile(definition Definition) (*Program, error) {
 	if err := validateStaticType(ast.OutputType(), definition.ResultType); err != nil {
 		return nil, fmt.Errorf("column %q: %w", definition.ID, err)
 	}
-	program, err := c.environment.Program(ast, cel.CostLimit(c.costLimit))
+	program, err := c.environment.Program(
+		ast,
+		cel.CostLimit(c.costLimit),
+		cel.InterruptCheckFrequency(InterruptCheckFrequency),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("build column %q program: %w", definition.ID, err)
 	}
@@ -225,6 +235,17 @@ func expressionReferencesIdentifier(expression *exprpb.Expr, identifier string) 
 }
 
 func (p *Program) Evaluate(activation Activation) (Value, error) {
+	return p.EvaluateContext(context.Background(), activation)
+}
+
+// EvaluateContext evaluates one compiled column with cancellation. Successful
+// evaluation and coercion are identical to Evaluate; cancellation is wrapped
+// in RuntimeError so callers retain the column identity and can still use
+// errors.Is to distinguish context cancellation from a cell-local CEL error.
+func (p *Program) EvaluateContext(ctx context.Context, activation Activation) (Value, error) {
+	if err := ctx.Err(); err != nil {
+		return Value{}, &RuntimeError{ColumnID: p.definition.ID, Err: err}
+	}
 	if activation.Object == nil {
 		activation.Object = map[string]any{}
 	}
@@ -234,7 +255,7 @@ func (p *Program) Evaluate(activation Activation) (Value, error) {
 	if activation.Context == nil {
 		activation.Context = map[string]any{}
 	}
-	result, _, err := p.program.Eval(map[string]any{
+	result, _, err := p.program.ContextEval(ctx, map[string]any{
 		"object":  activation.Object,
 		"metrics": activation.Metrics,
 		"context": activation.Context,

@@ -1,9 +1,12 @@
 package view
 
 import (
+	"context"
+	"errors"
 	"math"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,6 +69,99 @@ func TestProjectBoundedNeverExceedsWorkerLimitAndVisitsEveryIndex(t *testing.T) 
 		if got := visits[index].Load(); got != 1 {
 			t.Fatalf("index %d visits = %d, want 1", index, got)
 		}
+	}
+}
+
+func TestProjectionWorkerGateBoundsAggregateConcurrentBatches(t *testing.T) {
+	gateLimit := cap(projectionWorkerGate)
+	batchCount := gateLimit * 3
+	started := make(chan struct{}, batchCount)
+	release := make(chan struct{})
+	var active atomic.Int32
+	var peak atomic.Int32
+	var batches sync.WaitGroup
+	batches.Add(batchCount)
+	for range batchCount {
+		go func() {
+			defer batches.Done()
+			err := projectBoundedContext(context.Background(), 1, 1, func(int) error {
+				current := active.Add(1)
+				for {
+					previous := peak.Load()
+					if current <= previous || peak.CompareAndSwap(previous, current) {
+						break
+					}
+				}
+				started <- struct{}{}
+				<-release
+				active.Add(-1)
+				return nil
+			})
+			if err != nil {
+				t.Errorf("projectBoundedContext: %v", err)
+			}
+		}()
+	}
+	for range gateLimit {
+		<-started
+	}
+	if got := peak.Load(); got != int32(gateLimit) {
+		t.Fatalf("aggregate peak workers = %d, want global limit %d", got, gateLimit)
+	}
+	close(release)
+	batches.Wait()
+	if got := peak.Load(); got > int32(gateLimit) {
+		t.Fatalf("aggregate peak workers = %d, exceeds global limit %d", got, gateLimit)
+	}
+}
+
+func TestProjectBoundedContextCancellationReleasesWorkersWaitingForGlobalGate(t *testing.T) {
+	// This top-level test intentionally does not call t.Parallel. Parallel tests
+	// remain paused while it temporarily occupies the package-global gate.
+	for range cap(projectionWorkerGate) {
+		projectionWorkerGate <- struct{}{}
+	}
+	defer func() {
+		for range cap(projectionWorkerGate) {
+			<-projectionWorkerGate
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- projectBoundedContext(ctx, 100, MaxProjectionWorkerLimit, func(int) error {
+			t.Error("projection ran without global worker capacity")
+			return nil
+		})
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("projectBoundedContext error = %v, want context cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("workers remained blocked on the global projection gate after cancellation")
+	}
+}
+
+func TestProjectContextRejectsPreCanceledBatch(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rows, err := projector.ProjectContext(ctx, []*unstructured.Unstructured{
+		pod("must-not-project", "ns", "pod", "Running", 0, nil, time.Time{}),
+	})
+	if !errors.Is(err, context.Canceled) || rows != nil {
+		t.Fatalf("ProjectContext = %#v, %v", rows, err)
 	}
 }
 
