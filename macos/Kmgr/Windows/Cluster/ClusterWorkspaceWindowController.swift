@@ -9,7 +9,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onStartPortForward: ((ResourceIdentity) -> Void)?
 
     private let provider: any WorkspaceResourceProviding
+    private let objectDetailProvider: any ObjectDetailProviding
+    private let portForwards: PortForwardCoordinator
     private let workspaceController: ClusterWorkspaceViewController
+    private var portForwardConfigurationController: PortForwardConfigurationWindowController?
 
     init(
         session: OpenedClusterSession,
@@ -21,6 +24,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     ) {
         self.session = session
         self.provider = provider
+        self.objectDetailProvider = objectDetailProvider
+        self.portForwards = portForwards
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
@@ -70,12 +75,25 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         onClose?()
     }
 
-    func showPortForwardConfigurationPlaceholder(_ identity: ResourceIdentity) {
-        let alert = NSAlert()
-        alert.messageText = "Start Port Forward"
-        alert.informativeText = "Port-forward configuration for \(identity.namespace)/\(identity.name) will open here. The selected Kubernetes UID remains pinned."
-        alert.addButton(withTitle: "OK")
-        if let window { alert.beginSheetModal(for: window) }
+    func showPortForwardConfiguration(_ identity: ResourceIdentity) {
+        guard let window else { return }
+        if let current = portForwardConfigurationController {
+            current.window?.makeKeyAndOrderFront(nil)
+            NSSound.beep()
+            return
+        }
+        let controller = PortForwardConfigurationWindowController(
+            session: session,
+            targetIdentity: identity,
+            objectDetailProvider: objectDetailProvider,
+            coordinator: portForwards
+        )
+        controller.onDismiss = { [weak self, weak controller] in
+            guard self?.portForwardConfigurationController === controller else { return }
+            self?.portForwardConfigurationController = nil
+        }
+        portForwardConfigurationController = controller
+        controller.beginSheet(for: window)
     }
 
     @objc func showCommandPalette(_ sender: Any?) {
@@ -1017,7 +1035,14 @@ private final class ResourceListViewController: NSViewController,
     private func configureColumns(for resource: DiscoveredResource) {
         columnIDs = resource.namespaced ? ["namespace", "name"] : ["name"]
         if resource.resource == "pods" {
-            columnIDs += ["ready", "status", "restarts", "node", "age"]
+            columnIDs += [
+                "ready", "status", "restarts", "node",
+                "cpu", "memory", "ephemeral-storage", "age",
+            ]
+        } else if resource.group.isEmpty && resource.version == "v1"
+            && resource.resource == "nodes"
+        {
+            columnIDs += ["status", "cpu", "memory", "ephemeral-storage", "age"]
         } else {
             columnIDs += ["status", "age"]
         }
@@ -1033,11 +1058,20 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func columnTitle(_ id: String) -> String {
-        ["namespace": "Namespace", "name": "Name", "ready": "Ready", "status": "Status", "restarts": "Restarts", "node": "Node", "age": "Age"][id] ?? id
+        [
+            "namespace": "Namespace", "name": "Name", "ready": "Ready",
+            "status": "Status", "restarts": "Restarts", "node": "Node",
+            "cpu": "CPU", "memory": "Memory",
+            "ephemeral-storage": "Ephemeral Storage", "age": "Age",
+        ][id] ?? id
     }
 
     private func columnWidth(_ id: String) -> CGFloat {
-        ["namespace": 150, "name": 280, "ready": 70, "status": 130, "restarts": 75, "node": 180, "age": 75][id] ?? 120
+        [
+            "namespace": 150, "name": 280, "ready": 70, "status": 130,
+            "restarts": 75, "node": 180, "cpu": 190, "memory": 210,
+            "ephemeral-storage": 230, "age": 75,
+        ][id] ?? 120
     }
 
     private func navigationState() -> ResourceNavigationState? {
@@ -1149,6 +1183,8 @@ private final class ResourceListViewController: NSViewController,
             openSelectedObjectFromTable()
         case .openYAML:
             openSelectedObject(initialTab: .yaml)
+        case .openEvents:
+            openSelectedObject(initialTab: .events)
         case .startPortForward:
             guard let identity = model.selectedIdentities.only,
                 identity.group.isEmpty,
@@ -1174,7 +1210,7 @@ private final class ResourceListViewController: NSViewController,
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, open, openYAML, startPortForward, selectAll, delete, moveUp, moveDown
+    case focusFilter, open, openYAML, openEvents, startPortForward, selectAll, delete, moveUp, moveDown
 }
 
 @MainActor
@@ -1190,6 +1226,7 @@ private final class ResourceTableView: NSTableView {
         case ("k", _, false): onCommand?(.moveUp)
         case (_, 36, false): onCommand?(.open)
         case ("y", _, false), ("Y", _, false): onCommand?(.openYAML)
+        case ("e", _, false), ("E", _, false): onCommand?(.openEvents)
         case ("p", _, false), ("P", _, false): onCommand?(.startPortForward)
         case ("a", _, true): onCommand?(.selectAll)
         case (_, 51, true): onCommand?(.delete)
