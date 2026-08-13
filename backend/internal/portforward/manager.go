@@ -1,0 +1,370 @@
+package portforward
+
+import (
+	"context"
+	"errors"
+	"net"
+	"sort"
+	"sync"
+	"time"
+)
+
+const (
+	DefaultMaxReconnectAttempts = 8
+	DefaultInitialBackoff       = 250 * time.Millisecond
+	DefaultMaxBackoff           = 15 * time.Second
+)
+
+type Config struct {
+	Sessions             SessionResolver
+	MaxReconnectAttempts int
+	Backoff              Backoff
+	Now                  func() time.Time
+}
+
+type entry struct {
+	mu       sync.RWMutex
+	request  StartRequest
+	session  Session
+	snapshot Snapshot
+	cancel   context.CancelFunc
+	runDone  chan struct{}
+	revision uint64
+}
+
+func (e *entry) Snapshot() Snapshot {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	result := e.snapshot
+	if result.ResolvedPod != nil {
+		copy := *result.ResolvedPod
+		result.ResolvedPod = &copy
+	}
+	return result
+}
+
+type subscription struct {
+	id      uint64
+	updates chan Snapshot
+}
+
+type Manager struct {
+	mu       sync.RWMutex
+	config   Config
+	entries  map[string]*entry
+	watchers map[uint64]*subscription
+	nextID   uint64
+	closed   bool
+}
+
+func NewManager(config Config) (*Manager, error) {
+	if config.Sessions == nil {
+		return nil, errors.New("port-forward session resolver must not be nil")
+	}
+	if config.MaxReconnectAttempts == 0 {
+		config.MaxReconnectAttempts = DefaultMaxReconnectAttempts
+	}
+	if config.MaxReconnectAttempts < 0 {
+		return nil, errors.New("maximum reconnect attempts must not be negative")
+	}
+	if config.Backoff == nil {
+		config.Backoff = exponentialBackoff{initial: DefaultInitialBackoff, maximum: DefaultMaxBackoff}
+	}
+	if config.Now == nil {
+		config.Now = time.Now
+	}
+	return &Manager{
+		config: config, entries: make(map[string]*entry), watchers: make(map[uint64]*subscription),
+	}, nil
+}
+
+func (m *Manager) Start(request StartRequest) (Snapshot, error) {
+	if err := request.normalize(); err != nil {
+		return Snapshot{}, err
+	}
+	session, err := m.config.Sessions.ResolveSession(request.Target.SessionID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if session.Resolver == nil || session.Forwarder == nil {
+		return Snapshot{}, errors.New("port-forward session is incomplete")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	now := m.config.Now()
+	current := &entry{
+		request: request, session: session, cancel: cancel, runDone: make(chan struct{}), revision: 1,
+		snapshot: Snapshot{
+			ID: request.ID, ContextName: session.ContextName, Target: request.Target,
+			RemotePort: request.RemotePort, LocalPort: request.LocalPort, BindAddress: request.BindAddress,
+			Label: request.Label, NonLoopbackBind: !isLoopback(request.BindAddress), State: StateStarting,
+			StartedAt: now, UpdatedAt: now,
+		},
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		cancel()
+		return Snapshot{}, ErrManagerClosed
+	}
+	if _, duplicate := m.entries[request.ID]; duplicate {
+		m.mu.Unlock()
+		cancel()
+		return Snapshot{}, ErrDuplicatePortForward
+	}
+	m.entries[request.ID] = current
+	m.mu.Unlock()
+	m.publish(current.Snapshot())
+	go m.run(ctx, current, current.revision)
+	return current.Snapshot(), nil
+}
+
+func (m *Manager) Stop(id, sessionID string) bool {
+	current := m.lookup(id, sessionID)
+	if current == nil {
+		return false
+	}
+	current.cancel()
+	return true
+}
+
+func (m *Manager) Restart(id, sessionID string) bool {
+	current := m.lookup(id, sessionID)
+	if current == nil {
+		return false
+	}
+	current.mu.Lock()
+	if current.snapshot.State != StateFailed && current.snapshot.State != StateStopped {
+		current.mu.Unlock()
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	current.cancel = cancel
+	current.runDone = make(chan struct{})
+	current.revision++
+	revision := current.revision
+	current.snapshot.State = StateStarting
+	current.snapshot.LastError = nil
+	current.snapshot.UpdatedAt = m.config.Now()
+	current.mu.Unlock()
+	m.publish(current.Snapshot())
+	go m.run(ctx, current, revision)
+	return true
+}
+
+func (m *Manager) List(sessionID string, includeStopped bool) []Snapshot {
+	m.mu.RLock()
+	values := make([]*entry, 0, len(m.entries))
+	for _, value := range m.entries {
+		values = append(values, value)
+	}
+	m.mu.RUnlock()
+	result := make([]Snapshot, 0, len(values))
+	for _, value := range values {
+		current := value.Snapshot()
+		if sessionID != "" && current.Target.SessionID != sessionID {
+			continue
+		}
+		if !includeStopped && current.State == StateStopped {
+			continue
+		}
+		result = append(result, current)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].StartedAt.Equal(result[j].StartedAt) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].StartedAt.Before(result[j].StartedAt)
+	})
+	return result
+}
+
+func (m *Manager) Subscribe() (<-chan Snapshot, func()) {
+	m.mu.Lock()
+	m.nextID++
+	value := &subscription{id: m.nextID, updates: make(chan Snapshot, 64)}
+	m.watchers[value.id] = value
+	m.mu.Unlock()
+	var once sync.Once
+	return value.updates, func() {
+		once.Do(func() {
+			m.mu.Lock()
+			delete(m.watchers, value.id)
+			m.mu.Unlock()
+		})
+	}
+}
+
+func (m *Manager) Close() {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	m.closed = true
+	entries := make([]*entry, 0, len(m.entries))
+	for _, value := range m.entries {
+		entries = append(entries, value)
+	}
+	clear(m.watchers)
+	m.mu.Unlock()
+	for _, value := range entries {
+		value.cancel()
+	}
+	for _, value := range entries {
+		<-value.runDone
+	}
+}
+
+func (m *Manager) run(ctx context.Context, current *entry, revision uint64) {
+	current.mu.RLock()
+	done := current.runDone
+	current.mu.RUnlock()
+	defer close(done)
+	request := current.request
+	for attempt := 0; ; attempt++ {
+		resolved, err := current.session.Resolver.Resolve(ctx, request.Target, request.RemotePort)
+		pod := resolved.Pod
+		if err == nil && request.Target.IsPod() && pod.UID != request.Target.UID {
+			err = ErrPodRecreated
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				m.transition(current, revision, StateStopped, nil, nil, 0)
+				return
+			}
+			// Direct Pod forwards are UID-pinned. Any loss/recreation is terminal
+			// until the user explicitly restarts or creates another forward.
+			if request.Target.IsPod() || attempt >= m.config.MaxReconnectAttempts {
+				m.transition(current, revision, StateFailed, err, nil, 0)
+				return
+			}
+			m.transition(current, revision, StateReconnecting, err, nil, 0)
+			if m.config.Backoff.Wait(ctx, attempt) != nil {
+				m.transition(current, revision, StateStopped, nil, nil, 0)
+				return
+			}
+			continue
+		}
+		running, err := current.session.Forwarder.Start(ctx, ForwardRequest{
+			Pod: pod, RemotePort: resolved.RemotePort, LocalPort: current.Snapshot().LocalPort,
+			BindAddress: request.BindAddress,
+		})
+		if err == nil {
+			m.transition(current, revision, StateListening, nil, &pod, running.LocalPort())
+			waitResult := make(chan error, 1)
+			go func() { waitResult <- running.Wait() }()
+			select {
+			case err = <-waitResult:
+			case <-ctx.Done():
+				_ = running.Close()
+				err = <-waitResult
+			}
+			_ = running.Close()
+		}
+		if ctx.Err() != nil {
+			m.transition(current, revision, StateStopped, nil, &pod, 0)
+			return
+		}
+		if request.Target.IsPod() || attempt >= m.config.MaxReconnectAttempts {
+			m.transition(current, revision, StateFailed, err, &pod, 0)
+			return
+		}
+		m.transition(current, revision, StateReconnecting, err, &pod, 0)
+		if m.config.Backoff.Wait(ctx, attempt) != nil {
+			m.transition(current, revision, StateStopped, nil, &pod, 0)
+			return
+		}
+	}
+}
+
+func (m *Manager) transition(
+	current *entry,
+	revision uint64,
+	state State,
+	err error,
+	pod *Identity,
+	localPort uint16,
+) {
+	current.mu.Lock()
+	if current.revision != revision {
+		current.mu.Unlock()
+		return
+	}
+	current.snapshot.State = state
+	current.snapshot.LastError = err
+	if pod != nil {
+		copy := *pod
+		current.snapshot.ResolvedPod = &copy
+	}
+	if localPort != 0 {
+		current.snapshot.LocalPort = localPort
+	}
+	current.snapshot.UpdatedAt = m.config.Now()
+	snapshot := current.snapshot
+	current.mu.Unlock()
+	m.publish(snapshot)
+}
+
+func (m *Manager) publish(snapshot Snapshot) {
+	m.mu.RLock()
+	watchers := make([]*subscription, 0, len(m.watchers))
+	for _, watcher := range m.watchers {
+		watchers = append(watchers, watcher)
+	}
+	m.mu.RUnlock()
+	for _, watcher := range watchers {
+		select {
+		case watcher.updates <- snapshot:
+		default:
+			// State is authoritative in List. A slow UI watcher may coalesce
+			// intermediate transitions, but producers never block.
+			select {
+			case <-watcher.updates:
+			default:
+			}
+			select {
+			case watcher.updates <- snapshot:
+			default:
+			}
+		}
+	}
+}
+
+func (m *Manager) lookup(id, sessionID string) *entry {
+	m.mu.RLock()
+	current := m.entries[id]
+	m.mu.RUnlock()
+	if current == nil || (sessionID != "" && current.Snapshot().Target.SessionID != sessionID) {
+		return nil
+	}
+	return current
+}
+
+type exponentialBackoff struct {
+	initial time.Duration
+	maximum time.Duration
+}
+
+func (b exponentialBackoff) Wait(ctx context.Context, attempt int) error {
+	delay := b.initial
+	for range min(attempt, 16) {
+		delay *= 2
+		if delay >= b.maximum {
+			delay = b.maximum
+			break
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isLoopback(value string) bool {
+	ip := net.ParseIP(value)
+	return ip != nil && ip.IsLoopback()
+}
