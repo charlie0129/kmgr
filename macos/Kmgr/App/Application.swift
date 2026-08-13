@@ -141,7 +141,7 @@ final class Application: NSObject, NSApplicationDelegate {
             self?.workspaceControllers.removeValue(forKey: identifier)
         }
         controller.onStartPortForward = { [weak controller] identity in
-            controller?.showPortForwardConfigurationPlaceholder(identity)
+            controller?.showPortForwardConfiguration(identity)
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
