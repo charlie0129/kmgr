@@ -137,6 +137,34 @@ public protocol LogStreamProviding: Sendable {
     func cancelLogs(sessionID: String, streamID: String, generation: UInt64) async
 }
 
+/// Owns the active log generation and admits messages only after their cursor
+/// has passed both exact-generation and monotonic-sequence checks. Calling
+/// `begin` before replacing a stream prevents a late callback from the canceled
+/// stream becoming the first accepted message of the new stream.
+public struct LogStreamGenerationGate: Hashable, Sendable {
+    public private(set) var expectedGeneration: UInt64?
+    public private(set) var sequenceGate = GenerationSequenceGate()
+
+    public init() {}
+
+    public mutating func begin(generation: UInt64) {
+        precondition(generation > 0)
+        expectedGeneration = generation
+        sequenceGate = GenerationSequenceGate()
+    }
+
+    @discardableResult
+    public mutating func accept(_ cursor: StreamCursor) -> StreamMessageDisposition {
+        guard cursor.generation == expectedGeneration else {
+            return .ignoredStaleGeneration
+        }
+        guard cursor.sequence > 0 else {
+            return .ignoredStaleOrDuplicateSequence
+        }
+        return sequenceGate.accept(cursor)
+    }
+}
+
 /// A byte-bounded ring which never assumes one Kubernetes log record is a
 /// complete UTF-8 line. Oldest records are discarded first under pressure.
 public struct LogRecordRing: Sendable {

@@ -117,7 +117,73 @@ private actor LogRPCCapture: LogRPC {
         for try await _ in provider.streamLogs(request: request) {}
         Issue.record("cross-stream event was accepted")
     } catch let issue as ClusterManagerIssue {
-        #expect(issue.reason == "LogStreamIDMismatch")
+        #expect(issue.reason == "LogStreamCursorMismatch")
+    } catch {
+        Issue.record("unexpected error: \(error)")
+    }
+}
+
+@Test func logProviderRejectsPreviousGenerationAndNonMonotonicEvents() async {
+    for cursor in [
+        (generation: UInt64(6), sequence: UInt64(1)),
+        (generation: UInt64(8), sequence: UInt64(1)),
+        (generation: UInt64(7), sequence: UInt64(0)),
+    ] {
+        let rpc = LogRPCCapture()
+        var event = Kmgr_V1_LogEvent()
+        event.cursor.streamID = "logs"
+        event.cursor.generation = cursor.generation
+        event.cursor.sequence = cursor.sequence
+        event.batch = Kmgr_V1_LogBatch()
+        await rpc.setEvents([event])
+
+        let provider = EngineLogStreamProvider(rpc: rpc)
+        let request = LogStreamRequest(
+            sessionID: "session", streamID: "logs", generation: 7,
+            sources: [LogSource(
+                identity: ResourceIdentity(
+                    clusterSessionID: "session", group: "", version: "v1", resource: "pods",
+                    namespace: "default", name: "pod", uid: "uid"
+                ),
+                container: "main", sourceID: "pod/main", label: "pod/main"
+            )]
+        )
+        do {
+            for try await _ in provider.streamLogs(request: request) {}
+            Issue.record("invalid log cursor was accepted: \(cursor)")
+        } catch let issue as ClusterManagerIssue {
+            #expect(issue.reason == "LogStreamCursorMismatch")
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+}
+
+@Test func logProviderRejectsDuplicateSequence() async {
+    let rpc = LogRPCCapture()
+    var event = Kmgr_V1_LogEvent()
+    event.cursor.streamID = "logs"
+    event.cursor.generation = 7
+    event.cursor.sequence = 1
+    event.batch = Kmgr_V1_LogBatch()
+    await rpc.setEvents([event, event])
+
+    let provider = EngineLogStreamProvider(rpc: rpc)
+    let request = LogStreamRequest(
+        sessionID: "session", streamID: "logs", generation: 7,
+        sources: [LogSource(
+            identity: ResourceIdentity(
+                clusterSessionID: "session", group: "", version: "v1", resource: "pods",
+                namespace: "default", name: "pod", uid: "uid"
+            ),
+            container: "main", sourceID: "pod/main", label: "pod/main"
+        )]
+    )
+    do {
+        for try await _ in provider.streamLogs(request: request) {}
+        Issue.record("duplicate log cursor was accepted")
+    } catch let issue as ClusterManagerIssue {
+        #expect(issue.reason == "LogStreamCursorMismatch")
     } catch {
         Issue.record("unexpected error: \(error)")
     }

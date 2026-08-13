@@ -97,13 +97,12 @@ public struct EngineLogStreamProvider: LogStreamProviding {
         let rpc = self.rpc
         let timeout = streamTimeout
         let limit = maximumBufferedMessages
+        let cursorValidator = LogStreamCursorValidator(request: request)
         return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(limit)) { continuation in
             let task = Task.detached(priority: .userInitiated) {
                 do {
                     try await rpc.streamLogs(request: rpcRequest, timeout: timeout) { event in
-                        guard event.cursor.streamID == request.streamID else {
-                            throw LogStreamBridgeError.streamIDMismatch
-                        }
+                        try cursorValidator.validate(event.cursor)
                         switch continuation.yield(Self.message(from: event)) {
                         case .enqueued:
                             break
@@ -253,11 +252,11 @@ public struct EngineLogStreamProvider: LogStreamProviding {
                 safeDetails: ["buffered_message_limit": String(limit)]
             )
         }
-        if case LogStreamBridgeError.streamIDMismatch = error {
+        if case LogStreamBridgeError.cursorMismatch = error {
             return ClusterManagerIssue(
                 category: .internalFailure,
-                reason: "LogStreamIDMismatch",
-                message: "The engine returned an event for a different log stream.",
+                reason: "LogStreamCursorMismatch",
+                message: "The engine returned an event outside the requested log stream generation or sequence.",
                 operation: "stream Pod logs"
             )
         }
@@ -277,5 +276,29 @@ public struct EngineLogStreamProvider: LogStreamProviding {
 
 private enum LogStreamBridgeError: Error {
     case bufferExceeded(Int)
-    case streamIDMismatch
+    case cursorMismatch
+}
+
+private final class LogStreamCursorValidator: @unchecked Sendable {
+    private let streamID: String
+    private let generation: UInt64
+    private let lock = NSLock()
+    private var lastSequence: UInt64 = 0
+
+    init(request: LogStreamRequest) {
+        streamID = request.streamID
+        generation = request.generation
+    }
+
+    func validate(_ cursor: Kmgr_V1_StreamCursor) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard cursor.streamID == streamID,
+            cursor.generation == generation,
+            cursor.sequence > lastSequence
+        else {
+            throw LogStreamBridgeError.cursorMismatch
+        }
+        lastSequence = cursor.sequence
+    }
 }

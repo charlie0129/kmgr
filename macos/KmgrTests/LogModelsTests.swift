@@ -2,6 +2,48 @@ import Foundation
 import Testing
 @testable import KmgrCore
 
+@Test func logStreamGateKeepsLatePreviousGenerationOutOfBufferAfterOptionsReset() {
+    let old = LogRecord(sourceID: "pod", data: Data("old".utf8), endsWithNewline: true)
+    let stale = LogRecord(sourceID: "pod", data: Data("stale".utf8), endsWithNewline: true)
+    let current = LogRecord(sourceID: "pod", data: Data("current".utf8), endsWithNewline: true)
+    var gate = LogStreamGenerationGate()
+    var buffer = LogRecordRing(recordLimit: 10, byteLimit: 100)
+    gate.begin(generation: 1)
+    let oldDisposition = gate.accept(StreamCursor(generation: 1, sequence: 1))
+    #expect(oldDisposition == .acceptedNewGeneration)
+    if isAccepted(oldDisposition) { buffer.append(contentsOf: [old]) }
+
+    // An options change replaces the stream before cancellation can guarantee
+    // that every already-enqueued callback has drained.
+    gate.begin(generation: 2)
+    let staleDisposition = gate.accept(StreamCursor(generation: 1, sequence: 2))
+    #expect(staleDisposition == .ignoredStaleGeneration)
+    if isAccepted(staleDisposition) { buffer.append(contentsOf: [stale]) }
+
+    let currentDisposition = gate.accept(StreamCursor(generation: 2, sequence: 1))
+    #expect(currentDisposition == .acceptedNewGeneration)
+    if isAccepted(currentDisposition) { buffer.append(contentsOf: [current]) }
+    #expect(buffer.records.map { String(decoding: $0.data, as: UTF8.self) } == ["old", "current"])
+}
+
+@Test func logStreamGatePreservesMonotonicityWithinRequestedGeneration() {
+    var gate = LogStreamGenerationGate()
+    gate.begin(generation: 4)
+
+    #expect(gate.accept(StreamCursor(generation: 4, sequence: 1)) == .acceptedNewGeneration)
+    #expect(gate.accept(
+        StreamCursor(generation: 4, sequence: 1)
+    ) == .ignoredStaleOrDuplicateSequence)
+    #expect(gate.accept(
+        StreamCursor(generation: 4, sequence: 0)
+    ) == .ignoredStaleOrDuplicateSequence)
+    #expect(gate.accept(StreamCursor(generation: 4, sequence: 2)) == .acceptedNextSequence)
+}
+
+private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
+    disposition == .acceptedNewGeneration || disposition == .acceptedNextSequence
+}
+
 @Test func logRingEvictsOldestByRecordAndByteLimits() {
     var ring = LogRecordRing(recordLimit: 2, byteLimit: 7)
     ring.append(contentsOf: [

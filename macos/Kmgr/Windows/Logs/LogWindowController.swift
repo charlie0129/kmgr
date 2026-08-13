@@ -13,7 +13,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var generation: UInt64 = 0
     private var streamTask: Task<Void, Never>?
     private var renderTask: Task<Void, Never>?
-    private var gate = GenerationSequenceGate()
+    private var streamGate = LogStreamGenerationGate()
     private let recordStore: LogRecordStore
     private var options: LogOptions
     private var displayConfiguration: LogDisplayConfiguration
@@ -236,7 +236,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             }
         }
         generation &+= 1
-        gate.reset()
+        if generation == 0 { generation = 1 }
+        streamGate.begin(generation: generation)
         statusLabel.stringValue = "Connecting…"
         let request = LogStreamRequest(
             sessionID: session.sessionID,
@@ -273,7 +274,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func receive(_ message: LogStreamMessage) async {
-        let disposition = gate.accept(message.cursor)
+        let disposition = streamGate.accept(message.cursor)
         guard disposition == .acceptedNewGeneration || disposition == .acceptedNextSequence else { return }
         switch message {
         case .records(_, let records, _):
