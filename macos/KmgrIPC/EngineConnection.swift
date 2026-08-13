@@ -90,6 +90,26 @@ public final class EngineConnection: @unchecked Sendable {
     public func viewClient() throws -> Kmgr_V1_ViewService.Client<Transport> {
         Kmgr_V1_ViewService.Client(wrapping: try currentClient())
     }
+
+    public func objectClient() throws -> Kmgr_V1_ObjectService.Client<Transport> {
+        Kmgr_V1_ObjectService.Client(wrapping: try currentClient())
+    }
+
+    public func operationClient() throws -> Kmgr_V1_OperationService.Client<Transport> {
+        Kmgr_V1_OperationService.Client(wrapping: try currentClient())
+    }
+
+    public func logClient() throws -> Kmgr_V1_LogService.Client<Transport> {
+        Kmgr_V1_LogService.Client(wrapping: try currentClient())
+    }
+
+    public func execClient() throws -> Kmgr_V1_ExecService.Client<Transport> {
+        Kmgr_V1_ExecService.Client(wrapping: try currentClient())
+    }
+
+    public func portForwardClient() throws -> Kmgr_V1_PortForwardService.Client<Transport> {
+        Kmgr_V1_PortForwardService.Client(wrapping: try currentClient())
+    }
 }
 
 private extension NSLock {
