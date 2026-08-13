@@ -641,6 +641,12 @@ func structuredOperationError(err error, identity *kmgrv1.ResourceIdentity, oper
 	case errors.Is(err, context.DeadlineExceeded):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TIMEOUT
 		result.Reason, result.Message, result.Retryable = "OperationTimedOut", "The operation timed out.", true
+	case errors.Is(err, ErrManagerClosed):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
+		result.Reason, result.Message = "EngineStopping", "The operation manager is shutting down."
+	case errors.Is(err, ErrManagerFull):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
+		result.Reason, result.Message = "TooManyOperations", "Too many mutations are still being tracked."
 	case apierrors.IsConflict(err):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
 		result.Reason, result.Message = "ApplyConflict", "The object changed or another field manager owns an edited field."

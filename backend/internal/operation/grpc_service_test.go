@@ -218,7 +218,26 @@ func testOperationService(t *testing.T, editor *fakeYAMLEditor) *GRPCService {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(service.manager.Close)
 	return service
+}
+
+func TestStructuredOperationErrorReportsManagerCapacityAndShutdown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err      error
+		category kmgrv1.ErrorCategory
+		reason   string
+	}{
+		{ErrManagerFull, kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED, "TooManyOperations"},
+		{ErrManagerClosed, kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE, "EngineStopping"},
+	}
+	for _, test := range tests {
+		value := structuredOperationError(test.err, nil, "scale")
+		if value.GetCategory() != test.category || value.GetReason() != test.reason {
+			t.Fatalf("structured error for %v = %#v", test.err, value)
+		}
+	}
 }
 
 func operationContext(requestID string) *kmgrv1.RequestContext {

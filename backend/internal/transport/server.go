@@ -39,17 +39,18 @@ type ServerOptions struct {
 // and cluster sessions. Additional protocol services may be registered through
 // GRPC before Serve starts.
 type Server struct {
-	grpc      *grpc.Server
-	engine    *EngineService
-	cluster   *ClusterService
-	catalogs  *CatalogRegistry
-	sessions  *cluster.SessionRegistry
-	views     *view.Runtime
-	logs      *streamlogs.Manager
-	exec      *execstream.Manager
-	forwards  *portforward.Manager
-	logger    *slog.Logger
-	closeOnce sync.Once
+	grpc       *grpc.Server
+	engine     *EngineService
+	cluster    *ClusterService
+	catalogs   *CatalogRegistry
+	sessions   *cluster.SessionRegistry
+	views      *view.Runtime
+	operations *operation.Manager
+	logs       *streamlogs.Manager
+	exec       *execstream.Manager
+	forwards   *portforward.Manager
+	logger     *slog.Logger
+	closeOnce  sync.Once
 }
 
 func NewServer(launchToken string, options ServerOptions) (*Server, error) {
@@ -110,8 +111,10 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		viewRuntime.Close()
 		return nil, err
 	}
-	operationService, err := operation.NewGRPCService(objectReader, nil)
+	operationManager := operation.NewManager()
+	operationService, err := operation.NewGRPCService(objectReader, operationManager)
 	if err != nil {
+		operationManager.Close()
 		viewRuntime.Close()
 		return nil, err
 	}
@@ -119,12 +122,14 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		Resolver: streamlogs.ClusterResolver{Sessions: sessions},
 	})
 	if err != nil {
+		operationManager.Close()
 		viewRuntime.Close()
 		return nil, err
 	}
 	logService, err := streamlogs.NewGRPCService(logManager)
 	if err != nil {
 		logManager.Close()
+		operationManager.Close()
 		viewRuntime.Close()
 		return nil, err
 	}
@@ -133,6 +138,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	})
 	if err != nil {
 		logManager.Close()
+		operationManager.Close()
 		viewRuntime.Close()
 		return nil, err
 	}
@@ -140,6 +146,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	if err != nil {
 		execManager.Close()
 		logManager.Close()
+		operationManager.Close()
 		viewRuntime.Close()
 		return nil, err
 	}
@@ -149,6 +156,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	if err != nil {
 		execManager.Close()
 		logManager.Close()
+		operationManager.Close()
 		viewRuntime.Close()
 		return nil, err
 	}
@@ -157,6 +165,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		forwardManager.Close()
 		execManager.Close()
 		logManager.Close()
+		operationManager.Close()
 		viewRuntime.Close()
 		return nil, err
 	}
@@ -182,16 +191,17 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	kmgrv1.RegisterPortForwardServiceServer(grpcServer, forwardService)
 
 	return &Server{
-		grpc:     grpcServer,
-		engine:   engine,
-		cluster:  clusterService,
-		catalogs: catalogs,
-		sessions: sessions,
-		views:    viewRuntime,
-		logs:     logManager,
-		exec:     execManager,
-		forwards: forwardManager,
-		logger:   options.Logger,
+		grpc:       grpcServer,
+		engine:     engine,
+		cluster:    clusterService,
+		catalogs:   catalogs,
+		sessions:   sessions,
+		views:      viewRuntime,
+		operations: operationManager,
+		logs:       logManager,
+		exec:       execManager,
+		forwards:   forwardManager,
+		logger:     options.Logger,
 	}, nil
 }
 
@@ -219,6 +229,7 @@ func (s *Server) Shutdown(timeout time.Duration) {
 		s.logs.Close()
 		s.exec.Close()
 		s.forwards.Close()
+		s.operations.Close()
 		stopped := make(chan struct{})
 		go func() {
 			s.grpc.GracefulStop()

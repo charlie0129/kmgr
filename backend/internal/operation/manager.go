@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/object"
 )
@@ -117,11 +118,62 @@ type Reporter func(index int, update ItemUpdate)
 type MultiRunner func(context.Context, Reporter) error
 
 type Manager struct {
-	mu         sync.RWMutex
-	operations map[string]*TrackedOperation
+	mu                sync.RWMutex
+	operations        map[string]*TrackedOperation
+	terminalOrder     []terminalOperation
+	ctx               context.Context
+	cancel            context.CancelCauseFunc
+	closed            bool
+	maxTracked        int
+	maxTerminal       int
+	terminalRetention time.Duration
+	now               func() time.Time
 }
 
-func NewManager() *Manager { return &Manager{operations: make(map[string]*TrackedOperation)} }
+const (
+	DefaultMaxTrackedOperations  = 512
+	DefaultMaxTerminalOperations = 256
+	DefaultTerminalRetention     = 15 * time.Minute
+)
+
+var (
+	ErrManagerClosed = errors.New("operation manager is closed")
+	ErrManagerFull   = errors.New("operation manager reached its tracked-operation limit")
+)
+
+type ManagerConfig struct {
+	MaxTrackedOperations  int
+	MaxTerminalOperations int
+	TerminalRetention     time.Duration
+}
+
+type terminalOperation struct {
+	id         string
+	operation  *TrackedOperation
+	finishedAt time.Time
+}
+
+func NewManager() *Manager { return NewManagerWithConfig(ManagerConfig{}) }
+
+func NewManagerWithConfig(config ManagerConfig) *Manager {
+	maxTracked := config.MaxTrackedOperations
+	if maxTracked == 0 {
+		maxTracked = DefaultMaxTrackedOperations
+	}
+	maxTerminal := config.MaxTerminalOperations
+	if maxTerminal == 0 {
+		maxTerminal = DefaultMaxTerminalOperations
+	}
+	retention := config.TerminalRetention
+	if retention == 0 {
+		retention = DefaultTerminalRetention
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	return &Manager{
+		operations: make(map[string]*TrackedOperation), ctx: ctx, cancel: cancel,
+		maxTracked: maxTracked, maxTerminal: maxTerminal, terminalRetention: retention, now: time.Now,
+	}
+}
 
 // Start preserves the original single-item API and assigns the historical
 // apply-yaml operation name. New RPCs use StartOne so errors identify the
@@ -150,7 +202,7 @@ func (m *Manager) StartOne(
 		resourceVersion, err := run(ctx)
 		state := ItemStateSucceeded
 		switch {
-		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		case context.Cause(ctx) != nil:
 			state = ItemStateCancelled
 		case err != nil:
 			state = ItemStateFailed
@@ -193,7 +245,9 @@ func (m *Manager) StartMany(
 		items[index] = ItemStatus{Identity: identity, State: ItemStatePending}
 	}
 
-	ctx, cancel := context.WithCancel(parent)
+	operationParent, releaseParent := context.WithCancel(m.ctx)
+	stopParent := context.AfterFunc(parent, releaseParent)
+	ctx, cancel := context.WithCancel(operationParent)
 	operation := &TrackedOperation{
 		status: Status{
 			OperationID: operationID, Operation: operationName, SessionID: identities[0].SessionID,
@@ -203,16 +257,40 @@ func (m *Manager) StartMany(
 		done: make(chan struct{}), changed: make(chan struct{}), cancel: cancel,
 	}
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		stopParent()
+		releaseParent()
+		cancel()
+		return nil, ErrManagerClosed
+	}
+	m.evictTerminalLocked(m.now())
 	if _, duplicate := m.operations[operationID]; duplicate {
 		m.mu.Unlock()
+		stopParent()
+		releaseParent()
 		cancel()
 		return nil, fmt.Errorf("operation ID %q already exists", operationID)
+	}
+	m.evictForCapacityLocked()
+	if m.maxTracked >= 0 && len(m.operations) >= m.maxTracked {
+		m.mu.Unlock()
+		stopParent()
+		releaseParent()
+		cancel()
+		return nil, ErrManagerFull
 	}
 	m.operations[operationID] = operation
 	m.mu.Unlock()
 
 	go func() {
-		defer close(operation.done)
+		defer func() {
+			stopParent()
+			releaseParent()
+			cancel()
+			m.recordTerminal(operationID, operation)
+			close(operation.done)
+		}()
 		operation.update(func(status *Status) bool {
 			status.State = StateRunning
 			return true
@@ -333,8 +411,9 @@ func firstOperationError(items []ItemStatus, values ...error) error {
 }
 
 func (m *Manager) Get(operationID string) (*TrackedOperation, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.evictTerminalLocked(m.now())
 	operation, found := m.operations[operationID]
 	return operation, found
 }
@@ -345,4 +424,61 @@ func (m *Manager) Cancel(operationID string) bool {
 		operation.Cancel()
 	}
 	return found
+}
+
+// Close cancels every in-flight mutation and waits until each worker has
+// released its request payload and published a terminal state.
+func (m *Manager) Close() {
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		m.cancel(ErrManagerClosed)
+	}
+	operations := make([]*TrackedOperation, 0, len(m.operations))
+	for _, operation := range m.operations {
+		operations = append(operations, operation)
+	}
+	m.mu.Unlock()
+	for _, operation := range operations {
+		<-operation.Done()
+	}
+}
+
+func (m *Manager) recordTerminal(operationID string, operation *TrackedOperation) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current, found := m.operations[operationID]; !found || current != operation {
+		return
+	}
+	m.terminalOrder = append(m.terminalOrder, terminalOperation{
+		id: operationID, operation: operation, finishedAt: m.now(),
+	})
+	m.evictTerminalLocked(m.now())
+}
+
+func (m *Manager) evictTerminalLocked(now time.Time) {
+	for len(m.terminalOrder) > 0 {
+		oldest := m.terminalOrder[0]
+		overCount := m.maxTerminal >= 0 && len(m.terminalOrder) > m.maxTerminal
+		expired := m.terminalRetention >= 0 && !now.Before(oldest.finishedAt.Add(m.terminalRetention))
+		if !overCount && !expired {
+			break
+		}
+		if current, found := m.operations[oldest.id]; found && current == oldest.operation {
+			delete(m.operations, oldest.id)
+		}
+		m.terminalOrder[0] = terminalOperation{}
+		m.terminalOrder = m.terminalOrder[1:]
+	}
+}
+
+func (m *Manager) evictForCapacityLocked() {
+	for m.maxTracked >= 0 && len(m.operations) >= m.maxTracked && len(m.terminalOrder) > 0 {
+		oldest := m.terminalOrder[0]
+		if current, found := m.operations[oldest.id]; found && current == oldest.operation {
+			delete(m.operations, oldest.id)
+		}
+		m.terminalOrder[0] = terminalOperation{}
+		m.terminalOrder = m.terminalOrder[1:]
+	}
 }
