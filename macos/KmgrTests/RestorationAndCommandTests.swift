@@ -96,6 +96,31 @@ func destructiveTableCommandIsDisabledWhileTyping(responder: ResponderContext) {
     #expect(CommandValidator.isEnabled(.startPortForward, in: one))
     #expect(CommandValidator.isEnabled(.startPortForward, in: many) == false)
     #expect(CommandValidator.isEnabled(.openLogs, in: many))
+    #expect(CommandValidator.isEnabled(.editMetadata, in: one))
+    #expect(CommandValidator.isEnabled(.editMetadata, in: many) == false)
+    #expect(CommandValidator.isEnabled(.copyName, in: many))
+    #expect(CommandValidator.isEnabled(.copyNamespacedName, in: none) == false)
+    #expect(CommandValidator.isEnabled(.copyReference, in: many))
+}
+
+@Test func workloadCommandsValidateExactResourceCompatibility() {
+    var deployment = identity("deployment")
+    deployment.group = "apps"
+    deployment.resource = "deployments"
+    var daemonSet = deployment
+    daemonSet.resource = "daemonsets"
+    var pod = identity("pod")
+    pod.resource = "pods"
+
+    let context: (ResourceIdentity) -> CommandContext = { value in
+        CommandContext(firstResponder: .resourceTable, selectedIdentities: [value])
+    }
+    #expect(CommandValidator.isEnabled(.scale, in: context(deployment)))
+    #expect(CommandValidator.isEnabled(.restart, in: context(deployment)))
+    #expect(CommandValidator.isEnabled(.scale, in: context(daemonSet)) == false)
+    #expect(CommandValidator.isEnabled(.restart, in: context(daemonSet)))
+    #expect(CommandValidator.isEnabled(.scale, in: context(pod)) == false)
+    #expect(CommandValidator.isEnabled(.restart, in: context(pod)) == false)
 }
 
 @Test func commandSaveBelongsOnlyToActiveDirtyEditor() {

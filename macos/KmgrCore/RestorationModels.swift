@@ -361,6 +361,12 @@ public enum CommandID: String, Hashable, Codable, Sendable {
     case openExec
     case startPortForward
     case delete
+    case scale
+    case restart
+    case editMetadata
+    case copyName
+    case copyNamespacedName
+    case copyReference
     case selectAll
     case focusFilter
     case save
@@ -426,11 +432,29 @@ public enum CommandValidator {
             return context.firstResponder == .resourceTable && count == 1 && context.portForwardCompatibleSelection
         case .delete:
             return context.firstResponder == .resourceTable && count > 0
+        case .scale:
+            return context.firstResponder == .resourceTable && count == 1 && isScalable(context.selectedIdentities[0])
+        case .restart:
+            return context.firstResponder == .resourceTable && count == 1 && supportsRestart(context.selectedIdentities[0])
+        case .editMetadata:
+            return context.firstResponder == .resourceTable && count == 1
+        case .copyName, .copyNamespacedName, .copyReference:
+            return context.firstResponder == .resourceTable && count > 0
         case .selectAll, .focusFilter:
             return context.firstResponder == .resourceTable
         case .save:
             return (context.firstResponder == .yamlEditor || context.firstResponder == .keyValueEditor)
                 && context.activeEditorHasChanges
         }
+    }
+
+    private static func isScalable(_ identity: ResourceIdentity) -> Bool {
+        !identity.namespace.isEmpty
+            && ["deployments", "statefulsets", "replicasets"].contains(identity.resource)
+    }
+
+    private static func supportsRestart(_ identity: ResourceIdentity) -> Bool {
+        identity.group == "apps" && identity.version == "v1"
+            && ["deployments", "statefulsets", "daemonsets"].contains(identity.resource)
     }
 }
