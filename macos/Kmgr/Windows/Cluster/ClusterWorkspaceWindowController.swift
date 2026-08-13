@@ -6,6 +6,7 @@ struct ResourceColumnsRequest {
     var resourceTitle: String
     var match: ColumnResourceMatch
     var defaultColumns: [ColumnDefinition]
+    var previewContext: ColumnPreviewContext
     var apply: @MainActor ([ColumnDefinition]) -> Void
 }
 
@@ -1710,6 +1711,12 @@ private final class ResourceListViewController: NSViewController,
                 resource: resource.resource
             ),
             defaultColumns: defaultColumnDefinitions(for: resource),
+            previewContext: ColumnPreviewContext(
+                sessionID: session.sessionID,
+                resource: resource,
+                namespaceScope: scope,
+                selectedObject: model.selectedIdentities.only
+            ),
             apply: { [weak self] definitions in
                 self?.applyColumns(definitions, forResourceID: resourceID)
             }

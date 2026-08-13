@@ -8,6 +8,8 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private let resourceTitle: String
     private let match: ColumnResourceMatch
     private let defaultColumns: [ColumnDefinition]
+    private let previewProvider: any ColumnPreviewProviding
+    private let previewContext: ColumnPreviewContext
     private let fileStore: ColumnConfigurationFileStore
     private var configurationDocument: ColumnsConfigurationDocument
     private var draft: ResourceColumnDraft
@@ -35,11 +37,15 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         resourceTitle: String,
         match: ColumnResourceMatch,
         defaultColumns: [ColumnDefinition],
+        previewProvider: any ColumnPreviewProviding,
+        previewContext: ColumnPreviewContext,
         configurationPath: String = AppPreferences.defaultColumnsConfigurationPath
     ) {
         self.resourceTitle = resourceTitle
         self.match = match
         self.defaultColumns = defaultColumns
+        self.previewProvider = previewProvider
+        self.previewContext = previewContext
         fileStore = ColumnConfigurationFileStore(path: configurationPath)
 
         var loadedDocument = ColumnsConfigurationDocument()
@@ -403,7 +409,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         if let existing { reservedIDs.remove(existing.id) }
         let editor = CELColumnEditorWindowController(
             definition: existing,
-            reservedIDs: reservedIDs
+            reservedIDs: reservedIDs,
+            previewProvider: previewProvider,
+            previewContext: previewContext
         )
         editor.onCommit = { [weak self] definition in
             guard let self else { return }
@@ -846,6 +854,8 @@ private final class CELColumnEditorWindowController: NSWindowController,
 {
     private let original: ColumnDefinition?
     private let reservedIDs: Set<String>
+    private let previewProvider: any ColumnPreviewProviding
+    private let previewContext: ColumnPreviewContext
     private let idField = NSTextField()
     private let titleField = NSTextField()
     private let expressionView = NSTextView()
@@ -854,16 +864,29 @@ private final class CELColumnEditorWindowController: NSWindowController,
     private let missingField = NSTextField()
     private let widthField = NSTextField()
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private let previewStateLabel = NSTextField(labelWithString: "")
+    private let previewValueLabel = NSTextField(wrappingLabelWithString: "")
+    private let previewSourceLabel = NSTextField(labelWithString: "")
+    private let previewEnvironmentLabel = NSTextField(labelWithString: "")
     private let commitButton = NSButton(title: "Add", target: nil, action: nil)
+    private var previewValidation = ColumnPreviewValidationState()
+    private var previewTask: Task<Void, Never>?
 
     var onCommit: ((ColumnDefinition) -> Void)?
     var onDismiss: (() -> Void)?
 
-    init(definition: ColumnDefinition?, reservedIDs: Set<String>) {
+    init(
+        definition: ColumnDefinition?,
+        reservedIDs: Set<String>,
+        previewProvider: any ColumnPreviewProviding,
+        previewContext: ColumnPreviewContext
+    ) {
         original = definition
         self.reservedIDs = reservedIDs
+        self.previewProvider = previewProvider
+        self.previewContext = previewContext
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 610, height: 470),
+            contentRect: NSRect(x: 0, y: 0, width: 610, height: 600),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -941,9 +964,32 @@ private final class CELColumnEditorWindowController: NSWindowController,
         help.textColor = .secondaryLabelColor
         help.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
 
+        previewStateLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        previewValueLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        previewValueLabel.maximumNumberOfLines = 3
+        previewValueLabel.lineBreakMode = .byTruncatingTail
+        previewValueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        previewSourceLabel.textColor = .secondaryLabelColor
+        previewSourceLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        previewEnvironmentLabel.textColor = .tertiaryLabelColor
+        previewEnvironmentLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let previewStack = NSStackView(views: [
+            previewStateLabel,
+            previewValueLabel,
+            previewSourceLabel,
+            previewEnvironmentLabel,
+        ])
+        previewStack.orientation = .vertical
+        previewStack.alignment = .leading
+        previewStack.spacing = 4
+        previewStack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        previewStack.wantsLayer = true
+        previewStack.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        previewStack.layer?.cornerRadius = 6
+
         errorLabel.textColor = .systemRed
         errorLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        errorLabel.maximumNumberOfLines = 2
+        errorLabel.maximumNumberOfLines = 3
         let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         commitButton.title = original == nil ? "Add" : "Apply"
         commitButton.target = self
@@ -954,13 +1000,14 @@ private final class CELColumnEditorWindowController: NSWindowController,
         footer.alignment = .centerY
         footer.spacing = 8
 
-        let stack = NSStackView(views: [grid, help, footer])
+        let stack = NSStackView(views: [grid, help, previewStack, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
         grid.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         help.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        previewStack.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         footer.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
         let root = NSView()
@@ -997,6 +1044,10 @@ private final class CELColumnEditorWindowController: NSWindowController,
 
     private func definitionFromControls() -> ColumnDefinition? {
         guard validationMessage() == nil else { return nil }
+        return locallyValidDefinition()
+    }
+
+    private func locallyValidDefinition() -> ColumnDefinition {
         let type = ColumnResultType.allCases[typeButton.indexOfSelectedItem]
         let alignment = ColumnAlignment.allCases[alignmentButton.indexOfSelectedItem]
         let missing = missingField.stringValue.isEmpty ? nil : missingField.stringValue
@@ -1036,28 +1087,127 @@ private final class CELColumnEditorWindowController: NSWindowController,
     }
 
     private func validate() {
+        previewTask?.cancel()
+        previewTask = nil
         let message = validationMessage()
-        errorLabel.stringValue = message ?? ""
-        commitButton.isEnabled = message == nil
+        guard message == nil else {
+            _ = previewValidation.beginRevision(localFailure: message)
+            renderPreviewValidation()
+            return
+        }
+
+        let definition = locallyValidDefinition()
+        let revision = previewValidation.beginRevision()
+        renderPreviewValidation()
+        let request = ColumnPreviewRequest(context: previewContext, column: definition)
+        previewTask = Task { [weak self, previewProvider] in
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                let result = try await previewProvider.previewColumn(request)
+                guard !Task.isCancelled else { return }
+                self?.acceptPreview(result, revision: revision)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.rejectPreview(error, revision: revision)
+            }
+        }
+    }
+
+    private func acceptPreview(_ result: ColumnPreviewResult, revision: UInt64) {
+        guard previewValidation.accept(result, for: revision) else { return }
+        previewTask = nil
+        renderPreviewValidation()
+    }
+
+    private func rejectPreview(_ error: Error, revision: UInt64) {
+        let message: String
+        if let issue = error as? ClusterManagerIssue {
+            let metadata = issue.presentationMetadata
+            message = metadata.isEmpty ? issue.message : "\(issue.message) · \(metadata)"
+        } else {
+            message = error.localizedDescription
+        }
+        guard previewValidation.reject(message, for: revision) else { return }
+        previewTask = nil
+        renderPreviewValidation()
+    }
+
+    private func renderPreviewValidation() {
+        commitButton.isEnabled = previewValidation.canCommit
+        switch previewValidation.phase {
+        case .idle:
+            errorLabel.stringValue = ""
+            previewStateLabel.stringValue = "Preview"
+            previewValueLabel.stringValue = ""
+            previewSourceLabel.stringValue = ""
+            previewEnvironmentLabel.stringValue = ""
+        case .localFailure(let message):
+            errorLabel.stringValue = message
+            previewStateLabel.stringValue = "Preview unavailable"
+            previewValueLabel.stringValue = ""
+            previewSourceLabel.stringValue = ""
+            previewEnvironmentLabel.stringValue = ""
+        case .validating:
+            errorLabel.stringValue = ""
+            previewStateLabel.stringValue = "Validating…"
+            previewValueLabel.stringValue = ""
+            previewSourceLabel.stringValue = previewContext.selectedObject == nil
+                ? "Source: Sample object"
+                : "Source: Selected object (fresh UID-pinned lookup)"
+            previewEnvironmentLabel.stringValue = ""
+        case .failed(let message):
+            errorLabel.stringValue = message
+            previewStateLabel.stringValue = "Preview failed"
+            previewValueLabel.stringValue = ""
+            previewSourceLabel.stringValue = ""
+            previewEnvironmentLabel.stringValue = ""
+        case .succeeded(let result):
+            errorLabel.stringValue = ""
+            previewStateLabel.stringValue = "Preview"
+            previewValueLabel.stringValue = result.preview.displayText.isEmpty
+                ? "(empty value)" : result.preview.displayText
+            previewValueLabel.toolTip = result.preview.tooltip.isEmpty
+                ? result.preview.displayText : result.preview.tooltip
+            if result.usedSampleObject {
+                previewSourceLabel.stringValue = "Source: Sample object"
+            } else if let identity = result.evaluatedObject {
+                let name = identity.namespace.isEmpty
+                    ? identity.name : "\(identity.namespace)/\(identity.name)"
+                previewSourceLabel.stringValue = "Source: Selected \(name)"
+            } else {
+                previewSourceLabel.stringValue = "Source: Selected object"
+            }
+            previewEnvironmentLabel.stringValue = "CEL environment: \(result.celEnvironment)"
+        }
     }
 
     @objc private func choiceChanged() { validate() }
 
     @objc private func commit() {
-        guard let definition = definitionFromControls(), let sheet = window,
+        guard previewValidation.canCommit,
+            let definition = definitionFromControls(), let sheet = window,
             let parent = sheet.sheetParent
         else { return }
+        previewTask?.cancel()
+        previewTask = nil
         onCommit?(definition)
         parent.endSheet(sheet, returnCode: .OK)
     }
 
     @objc private func cancel() {
         guard let sheet = window, let parent = sheet.sheetParent else { return }
+        previewTask?.cancel()
+        previewTask = nil
         parent.endSheet(sheet, returnCode: .cancel)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if let parent = sender.sheetParent {
+            previewTask?.cancel()
+            previewTask = nil
             parent.endSheet(sender, returnCode: .cancel)
             return false
         }
