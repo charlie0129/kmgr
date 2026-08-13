@@ -2,6 +2,7 @@ package columns
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +145,30 @@ func TestSecretActivationRemovesPayloadWithoutMutatingSource(t *testing.T) {
 	value, err := program.Evaluate(Activation{Object: sanitized})
 	if err != nil || value.Display != "absent" {
 		t.Fatalf("Evaluate sanitized = %#v, %v", value, err)
+	}
+}
+
+func TestObjectActivationAvoidsDeepCopiesOutsideSecretPayloadBoundary(t *testing.T) {
+	t.Parallel()
+	nested := map[string]any{"large": []any{map[string]any{"value": "retained"}}}
+	object := map[string]any{"metadata": nested}
+	if got := SanitizeObjectActivation(object, false); reflect.ValueOf(got).Pointer() != reflect.ValueOf(object).Pointer() {
+		t.Fatal("non-Secret activation copied the immutable object")
+	}
+
+	secret := map[string]any{
+		"metadata": nested,
+		"data":     map[string]any{"token": "redacted"},
+	}
+	sanitized := SanitizeObjectActivation(secret, true)
+	if reflect.ValueOf(sanitized).Pointer() == reflect.ValueOf(secret).Pointer() {
+		t.Fatal("Secret activation reused the payload-bearing top-level map")
+	}
+	if reflect.ValueOf(sanitized["metadata"]).Pointer() != reflect.ValueOf(nested).Pointer() {
+		t.Fatal("Secret activation recursively copied a safe nested field")
+	}
+	if _, found := sanitized["data"]; found {
+		t.Fatal("Secret activation retained data")
 	}
 }
 

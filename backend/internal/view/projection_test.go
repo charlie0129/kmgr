@@ -4,6 +4,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,67 @@ import (
 
 	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 )
+
+func TestProjectBoundedNeverExceedsWorkerLimitAndVisitsEveryIndex(t *testing.T) {
+	t.Parallel()
+	const (
+		count       = 97
+		workerLimit = 4
+	)
+	started := make(chan struct{}, workerLimit)
+	release := make(chan struct{})
+	var active atomic.Int32
+	var peak atomic.Int32
+	visits := make([]atomic.Int32, count)
+	done := make(chan struct{})
+	go func() {
+		projectBounded(count, workerLimit, func(index int) {
+			current := active.Add(1)
+			for {
+				previous := peak.Load()
+				if current <= previous || peak.CompareAndSwap(previous, current) {
+					break
+				}
+			}
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			visits[index].Add(1)
+			active.Add(-1)
+		})
+		close(done)
+	}()
+	for range workerLimit {
+		<-started
+	}
+	if got := peak.Load(); got != workerLimit {
+		t.Fatalf("peak workers = %d, want %d", got, workerLimit)
+	}
+	close(release)
+	<-done
+	if got := peak.Load(); got > workerLimit {
+		t.Fatalf("peak workers = %d, exceeds %d", got, workerLimit)
+	}
+	for index := range count {
+		if got := visits[index].Load(); got != 1 {
+			t.Fatalf("index %d visits = %d, want 1", index, got)
+		}
+	}
+}
+
+func TestProjectorRejectsUnboundedWorkerConfiguration(t *testing.T) {
+	t.Parallel()
+	_, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		WorkerLimit:      MaxProjectionWorkerLimit + 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "worker limit") {
+		t.Fatalf("NewProjector error = %v", err)
+	}
+}
 
 func TestProjectorFiltersAndSortsTypedValues(t *testing.T) {
 	t.Parallel()

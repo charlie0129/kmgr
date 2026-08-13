@@ -413,36 +413,20 @@ func validateStaticType(actual *cel.Type, declared ResultType) error {
 	return fmt.Errorf("expression has static type %s, incompatible with declared %s", actual, declared)
 }
 
-// SanitizeObjectActivation makes a shallow path copy and removes Secret
-// payload fields. It is the security boundary for CEL activation: callers must
-// pass isSecret from the authoritative GVR/GVK, not infer it from expressions.
+// SanitizeObjectActivation removes Secret payload fields without copying the
+// rest of a potentially large Kubernetes object. It is the security boundary
+// for CEL activation: callers must pass isSecret from the authoritative
+// GVR/GVK, not infer it from expressions. CEL activations are read-only, so a
+// non-Secret can use the immutable store snapshot directly and a Secret needs
+// only a top-level copy before data and stringData are removed.
 func SanitizeObjectActivation(object map[string]any, isSecret bool) map[string]any {
-	copy := cloneMap(object)
-	if isSecret {
-		delete(copy, "data")
-		delete(copy, "stringData")
+	if !isSecret || object == nil {
+		return object
 	}
-	return copy
-}
-
-func cloneMap(value map[string]any) map[string]any {
-	copy := make(map[string]any, len(value))
-	for key, item := range value {
-		switch typed := item.(type) {
-		case map[string]any:
-			copy[key] = cloneMap(typed)
-		case []any:
-			items := make([]any, len(typed))
-			for index, child := range typed {
-				if childMap, ok := child.(map[string]any); ok {
-					items[index] = cloneMap(childMap)
-				} else {
-					items[index] = child
-				}
-			}
-			copy[key] = items
-		default:
-			copy[key] = item
+	copy := make(map[string]any, len(object))
+	for key, value := range object {
+		if key != "data" && key != "stringData" {
+			copy[key] = value
 		}
 	}
 	return copy

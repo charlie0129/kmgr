@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
@@ -24,8 +26,10 @@ import (
 )
 
 const (
-	DefaultMissingCell = "—"
-	MaxColumnsPerView  = 64
+	DefaultMissingCell         = "—"
+	MaxColumnsPerView          = 64
+	MaxProjectionWorkerLimit   = 32
+	defaultProjectionWorkerCap = 8
 )
 
 // ProjectionSpec contains only presentation choices. Server-side namespace
@@ -42,6 +46,9 @@ type ProjectionSpec struct {
 	Metrics          metrics.Snapshot
 	NodeAccounting   NodeAccountingSnapshot
 	Now              time.Time
+	// WorkerLimit bounds concurrent row projection for large snapshots. Zero
+	// selects a conservative process-wide default capped below GOMAXPROCS.
+	WorkerLimit int
 }
 
 // NodeAccountingSnapshot is an immutable scheduler-allocation revision for a
@@ -76,10 +83,11 @@ type SortDescriptor struct {
 }
 
 type Projector struct {
-	spec       ProjectionSpec
-	filter     *viewfilter.Filter
-	namespaces map[string]struct{}
-	now        func() time.Time
+	spec        ProjectionSpec
+	filter      *viewfilter.Filter
+	namespaces  map[string]struct{}
+	now         func() time.Time
+	workerLimit int
 }
 
 // WithMetrics returns an immutable projection revision for one optional
@@ -147,6 +155,9 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 	if len(spec.ColumnIDs) > MaxColumnsPerView {
 		return nil, fmt.Errorf("view has %d columns; maximum is %d", len(spec.ColumnIDs), MaxColumnsPerView)
 	}
+	if spec.WorkerLimit < 0 || spec.WorkerLimit > MaxProjectionWorkerLimit {
+		return nil, fmt.Errorf("projection worker limit must be between 1 and %d", MaxProjectionWorkerLimit)
+	}
 	seenColumns := make(map[string]struct{}, len(spec.ColumnIDs))
 	for _, id := range spec.ColumnIDs {
 		if strings.TrimSpace(id) == "" {
@@ -184,7 +195,15 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 			namespaces[namespace] = struct{}{}
 		}
 	}
-	return &Projector{spec: spec, filter: compiledFilter, namespaces: namespaces, now: now}, nil
+	workerLimit := spec.WorkerLimit
+	if workerLimit == 0 {
+		workerLimit = min(goruntime.GOMAXPROCS(0), defaultProjectionWorkerCap)
+		workerLimit = max(workerLimit, 1)
+	}
+	return &Projector{
+		spec: spec, filter: compiledFilter, namespaces: namespaces,
+		now: now, workerLimit: workerLimit,
+	}, nil
 }
 
 // Project returns all visible rows in deterministic typed sort order. The
@@ -192,14 +211,59 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 // snapshot.
 func (p *Projector) Project(objects []*unstructured.Unstructured) []*kmgrv1.ResourceRow {
 	batch := p.beginBatch()
+	if batch == nil || len(objects) == 0 {
+		return nil
+	}
+
+	type result struct {
+		row     *kmgrv1.ResourceRow
+		visible bool
+	}
+	projected := make([]result, len(objects))
+	projectBounded(len(objects), batch.workerLimit, func(index int) {
+		projected[index].row, projected[index].visible = batch.projectOne(objects[index])
+	})
+
 	rows := make([]*kmgrv1.ResourceRow, 0, len(objects))
-	for _, object := range objects {
-		if row, visible := batch.projectOne(object); visible {
-			rows = append(rows, row)
+	for _, result := range projected {
+		if result.visible {
+			rows = append(rows, result.row)
 		}
 	}
 	slices.SortStableFunc(rows, batch.compareRows)
 	return rows
+}
+
+// projectBounded is kept separate from Kubernetes row logic so the worker
+// ceiling can be tested deterministically. Each index is visited exactly once;
+// callers own distinct result slots and therefore need no per-row lock.
+func projectBounded(count, workerLimit int, project func(index int)) {
+	if count <= 0 || project == nil {
+		return
+	}
+	workerCount := min(max(workerLimit, 1), count)
+	if workerCount == 1 {
+		for index := range count {
+			project(index)
+		}
+		return
+	}
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				project(index)
+			}
+		}()
+	}
+	for index := range count {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
 }
 
 // ProjectOne computes a single compact row and whether it belongs to the
@@ -232,8 +296,18 @@ func (p *Projector) projectOne(object *unstructured.Unstructured) (*kmgrv1.Resou
 
 	cells := make([]*kmgrv1.Cell, 0, len(p.spec.ColumnIDs))
 	visibleText := make([]string, 0, len(p.spec.ColumnIDs))
+	var celActivation *viewcolumns.Activation
 	for _, columnID := range p.spec.ColumnIDs {
-		cell := p.builtinCell(object, columnID)
+		var cell *kmgrv1.Cell
+		if program := p.spec.CELPrograms[columnID]; program != nil {
+			if celActivation == nil {
+				activation := p.celActivationForObject(object)
+				celActivation = &activation
+			}
+			cell = p.celCell(program, *celActivation)
+		} else {
+			cell = p.builtinCell(object, columnID)
+		}
 		cells = append(cells, cell)
 		visibleText = append(visibleText, cell.GetDisplayText())
 	}
@@ -284,9 +358,6 @@ func (p *Projector) includesNamespace(namespace string) bool {
 }
 
 func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID string) *kmgrv1.Cell {
-	if program := p.spec.CELPrograms[columnID]; program != nil {
-		return p.celCell(object, program)
-	}
 	extractorID := p.extractorID(columnID)
 	if extractorID == NodePodCountColumn && isNodeResource(p.spec.Resource) {
 		return p.nodePodCountCell(object, columnID)
@@ -382,19 +453,10 @@ func (p *Projector) extractorSource(columnID string) string {
 	return ""
 }
 
-func (p *Projector) celCell(object *unstructured.Unstructured, program *viewcolumns.Program) *kmgrv1.Cell {
-	definition := program.Definition()
-	missing := definition.Missing
-	if missing == "" {
-		missing = viewcolumns.DefaultMissing
-	}
-	cell := &kmgrv1.Cell{
-		ColumnId: definition.ID, DisplayText: missing,
-		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
-	}
+func (p *Projector) celActivationForObject(object *unstructured.Unstructured) viewcolumns.Activation {
 	isSecret := p.spec.Resource.Group == "" && p.spec.Resource.Version == "v1" &&
 		p.spec.Resource.Resource == "secrets"
-	value, err := program.Evaluate(viewcolumns.Activation{
+	return viewcolumns.Activation{
 		Object:  viewcolumns.SanitizeObjectActivation(object.Object, isSecret),
 		Metrics: p.metricsForObject(object),
 		Context: map[string]any{
@@ -406,7 +468,20 @@ func (p *Projector) celCell(object *unstructured.Unstructured, program *viewcolu
 			"namespaces":    append([]string(nil), p.spec.NamespaceScope.Namespaces...),
 		},
 		Now: p.spec.Now,
-	})
+	}
+}
+
+func (p *Projector) celCell(program *viewcolumns.Program, activation viewcolumns.Activation) *kmgrv1.Cell {
+	definition := program.Definition()
+	missing := definition.Missing
+	if missing == "" {
+		missing = viewcolumns.DefaultMissing
+	}
+	cell := &kmgrv1.Cell{
+		ColumnId: definition.ID, DisplayText: missing,
+		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+	}
+	value, err := program.Evaluate(activation)
 	if err != nil {
 		cell.Tooltip = err.Error()
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
