@@ -238,7 +238,10 @@ Performance harness instructions are in
 
 `make test` requires no real Kubernetes cluster. It uses fake clients,
 `httptest` API fixtures, deterministic stream doubles, and AppKit-independent
-Swift reducers. This includes LIST/WATCH continuity, 410 relists, cache
+Swift reducers. It also launches a real Go helper through an isolated private
+Unix socket to verify Swift authentication, bad-token rejection, crash restart,
+and endpoint cleanup without reading kubeconfigs or contacting a cluster. This
+includes LIST/WATCH continuity, 410 relists, cache
 retention/eviction, UID replacement safety, Secret sanitization, CEL limits,
 resource accounting, bounded streams, port-forward reconnects, and a 100,000
 row synthetic view harness.
