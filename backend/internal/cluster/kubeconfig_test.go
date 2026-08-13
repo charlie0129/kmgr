@@ -3,6 +3,7 @@ package cluster
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -111,6 +112,151 @@ current-context: beta
 	}
 	if beta.SourcePath != secondPath || !reflect.DeepEqual(beta.SourcePaths, []string{secondPath}) {
 		t.Errorf("beta provenance = %#v", beta)
+	}
+}
+
+func TestDiscoverFindsTopLevelKubeconfigsThroughSymlinkedHomeDirectory(t *testing.T) {
+	home := t.TempDir()
+	documents := filepath.Join(home, "Documents", "kube")
+	if err := os.MkdirAll(documents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(documents, filepath.Join(home, ".kube")); err != nil {
+		t.Fatal(err)
+	}
+	defaultPath := filepath.Join(home, ".kube", "config")
+	writeFile(t, defaultPath, kubeconfigForContext("orbstack", "shared", "https://orbstack.example.test"))
+	for index := 0; index < 90; index++ {
+		name := fmt.Sprintf("cluster-%02d", index)
+		writeFile(t, filepath.Join(documents, name+".kubeconfig"),
+			kubeconfigForContext(name, name, "https://"+name+".example.test"))
+	}
+	writeFile(t, filepath.Join(documents, "extra.yaml"),
+		kubeconfigForContext("yaml-context", "yaml", "https://yaml.example.test"))
+	writeFile(t, filepath.Join(documents, "without-extension"),
+		kubeconfigForContext("bare-context", "bare", "https://bare.example.test"))
+	writeFile(t, filepath.Join(documents, "init.sh"), "export KUBECONFIG=/must/not/run\n")
+	writeFile(t, filepath.Join(documents, "broken.yml"), "apiVersion: v1\nkind: Config\ncontexts: [\n")
+	if err := os.Mkdir(filepath.Join(documents, "cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(documents, "cache", "nested.kubeconfig"),
+		kubeconfigForContext("nested", "nested", "https://nested.example.test"))
+
+	t.Setenv("HOME", home)
+	t.Setenv(clientcmd.RecommendedConfigPathEnvVar, "")
+	withRecommendedHomeFile(t, defaultPath)
+	catalog, err := Discover()
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	contexts := catalog.Contexts()
+	if len(contexts) != 93 {
+		t.Fatalf("context count = %d, want 93; names=%v", len(contexts), contextNames(contexts))
+	}
+	for _, name := range []string{"orbstack", "cluster-00", "cluster-89", "yaml-context", "bare-context"} {
+		if _, ok := catalog.Context(name); !ok {
+			t.Errorf("context %q was not discovered", name)
+		}
+	}
+	if _, ok := catalog.Context("nested"); ok {
+		t.Fatal("discovery recursed into a subdirectory")
+	}
+	info, _ := catalog.Context("cluster-00")
+	if info.ContextSourcePath != filepath.Join(home, ".kube", "cluster-00.kubeconfig") {
+		t.Fatalf("symlinked source provenance = %q", info.ContextSourcePath)
+	}
+}
+
+func TestHomeKubeconfigDiscoveryUsesDefaultThenFilenamePrecedence(t *testing.T) {
+	home := t.TempDir()
+	kubeDirectory := filepath.Join(home, ".kube")
+	defaultPath := filepath.Join(kubeDirectory, "config")
+	writeFile(t, defaultPath, `
+apiVersion: v1
+kind: Config
+clusters:
+- name: shared
+  cluster: {server: https://default.example.test}
+contexts:
+- name: duplicate
+  context: {cluster: shared}
+current-context: duplicate
+`)
+	writeFile(t, filepath.Join(kubeDirectory, "a.kubeconfig"), `
+apiVersion: v1
+kind: Config
+clusters:
+- name: shared
+  cluster: {server: https://a.example.test}
+- name: a-only
+  cluster: {server: https://a-only.example.test}
+contexts:
+- name: duplicate
+  context: {cluster: a-only}
+- name: lexical-duplicate
+  context: {cluster: a-only}
+- name: from-a
+  context: {cluster: a-only}
+current-context: lexical-duplicate
+`)
+	writeFile(t, filepath.Join(kubeDirectory, "z.kubeconfig"), `
+apiVersion: v1
+kind: Config
+clusters:
+- name: shared
+  cluster: {server: https://z.example.test}
+- name: z-only
+  cluster: {server: https://z-only.example.test}
+contexts:
+- name: lexical-duplicate
+  context: {cluster: z-only}
+- name: from-z
+  context: {cluster: z-only}
+current-context: from-z
+`)
+
+	t.Setenv("HOME", home)
+	t.Setenv(clientcmd.RecommendedConfigPathEnvVar, "")
+	withRecommendedHomeFile(t, defaultPath)
+	catalog, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, ok := catalog.Context("duplicate")
+	if !ok || duplicate.ServerHostname != "default.example.test" ||
+		duplicate.ContextSourcePath != defaultPath ||
+		duplicate.ClusterSourcePath != defaultPath {
+		t.Fatalf("duplicate precedence/provenance = %#v", duplicate)
+	}
+	lexical, ok := catalog.Context("lexical-duplicate")
+	if !ok || lexical.ServerHostname != "a-only.example.test" ||
+		lexical.ContextSourcePath != filepath.Join(kubeDirectory, "a.kubeconfig") {
+		t.Fatalf("lexical duplicate precedence/provenance = %#v", lexical)
+	}
+	fromZ, ok := catalog.Context("from-z")
+	if !ok || fromZ.ServerHostname != "z-only.example.test" {
+		t.Fatalf("from-z = %#v", fromZ)
+	}
+	if current, _ := catalog.Context("duplicate"); !current.Current {
+		t.Fatalf("default current-context did not retain precedence: %#v", current)
+	}
+}
+
+func TestDiscoverWithKUBECONFIGDoesNotScanHomeDirectory(t *testing.T) {
+	home := t.TempDir()
+	homeConfig := filepath.Join(home, ".kube", "extra.kubeconfig")
+	envConfig := filepath.Join(t.TempDir(), "explicit")
+	writeFile(t, homeConfig, kubeconfigForContext("home-only", "home", "https://home.example.test"))
+	writeFile(t, envConfig, kubeconfigForContext("env-only", "env", "https://env.example.test"))
+	t.Setenv("HOME", home)
+	t.Setenv(clientcmd.RecommendedConfigPathEnvVar, envConfig)
+	catalog, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := contextNames(catalog.Contexts()); !reflect.DeepEqual(names, []string{"env-only"}) {
+		t.Fatalf("KUBECONFIG contexts = %v", names)
 	}
 }
 
@@ -409,4 +555,30 @@ func writeExecutable(t *testing.T, path, contents string) {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func kubeconfigForContext(contextName, clusterName, server string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Config
+clusters:
+- name: %s
+  cluster: {server: %s}
+contexts:
+- name: %s
+  context: {cluster: %s}
+current-context: %s
+`, clusterName, server, contextName, clusterName, contextName)
+}
+
+func withRecommendedHomeFile(t *testing.T, path string) {
+	t.Helper()
+	previousDirectory := clientcmd.RecommendedConfigDir
+	previousFile := clientcmd.RecommendedHomeFile
+	clientcmd.RecommendedConfigDir = filepath.Dir(path)
+	clientcmd.RecommendedHomeFile = path
+	t.Cleanup(func() {
+		clientcmd.RecommendedConfigDir = previousDirectory
+		clientcmd.RecommendedHomeFile = previousFile
+	})
 }

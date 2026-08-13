@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -97,9 +98,15 @@ func (e *UnsupportedAuthenticationError) Error() string {
 }
 
 // Discover loads kubeconfig using client-go's normal rules: KUBECONFIG is a
-// path-list whose earlier entries win, otherwise ~/.kube/config is used.
+// path-list whose earlier entries win. When KUBECONFIG is unset, the normal
+// ~/.kube/config has first precedence and other valid, regular kubeconfig
+// files directly beside it are merged in deterministic filename order.
 func Discover() (*Catalog, error) {
-	return DiscoverWithRules(clientcmd.NewDefaultClientConfigLoadingRules())
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if os.Getenv(clientcmd.RecommendedConfigPathEnvVar) != "" {
+		return DiscoverWithRules(rules)
+	}
+	return discoverHomeDirectory(rules)
 }
 
 // DiscoverPaths loads an explicitly supplied kubeconfig precedence list using
@@ -155,6 +162,54 @@ func DiscoverWithRules(rules *clientcmd.ClientConfigLoadingRules) (*Catalog, err
 	}
 	catalog.contexts = buildContextInfo(config, catalog.byID)
 	return catalog, nil
+}
+
+// discoverHomeDirectory extends the standards-compliant default file with
+// top-level kubeconfigs stored alongside it. Candidate inspection is entirely
+// local: it does not construct transports or contact an API server.
+func discoverHomeDirectory(rules *clientcmd.ClientConfigLoadingRules) (*Catalog, error) {
+	if rules == nil || len(rules.Precedence) == 0 {
+		return DiscoverWithRules(rules)
+	}
+	defaultPath := filepath.Clean(rules.Precedence[0])
+	directory := filepath.Dir(defaultPath)
+	candidates, err := homeKubeconfigCandidates(directory, defaultPath)
+	if err != nil {
+		// Preserve client-go behavior when the default directory does not exist
+		// or cannot be inspected; loading the normal default remains authoritative.
+		return DiscoverWithRules(rules)
+	}
+	loadingRules := *rules
+	loadingRules.ExplicitPath = ""
+	loadingRules.Precedence = candidates
+	loadingRules.WarnIfAllMissing = false
+	return DiscoverWithRules(&loadingRules)
+}
+
+func homeKubeconfigCandidates(directory, defaultPath string) ([]string, error) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, err
+	}
+	defaultPath = filepath.Clean(defaultPath)
+	result := []string{defaultPath}
+	for _, entry := range entries {
+		path := filepath.Join(directory, entry.Name())
+		if filepath.Clean(path) == defaultPath {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		config, err := clientcmd.LoadFromFile(path)
+		if err != nil || clientcmdapi.IsConfigEmpty(config) ||
+			(len(config.Contexts) == 0 && len(config.Clusters) == 0 && len(config.AuthInfos) == 0) {
+			continue
+		}
+		result = append(result, path)
+	}
+	return result, nil
 }
 
 // Contexts returns a copy sorted by exact context name. It never contains
