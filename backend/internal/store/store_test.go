@@ -1,6 +1,7 @@
 package store
 
 import (
+	"slices"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -90,6 +91,28 @@ func TestUpsertPanicsWithoutUID(t *testing.T) {
 		}
 	}()
 	New().Upsert(object("", "ns", "missing", ""))
+}
+
+func TestSnapshotUsesStableIdentityOrder(t *testing.T) {
+	t.Parallel()
+	s := New()
+	for _, value := range []*unstructured.Unstructured{
+		object("uid-c", "z", "same", ""),
+		object("uid-b", "a", "same", ""),
+		object("uid-a", "a", "first", ""),
+	} {
+		s.Upsert(value)
+	}
+
+	snapshot := s.Snapshot()
+	got := make([]types.UID, 0, len(snapshot))
+	for _, value := range snapshot {
+		got = append(got, value.GetUID())
+	}
+	want := []types.UID{"uid-a", "uid-b", "uid-c"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Snapshot UIDs = %v, want %v", got, want)
+	}
 }
 
 func object(uid, namespace, name, node string) *unstructured.Unstructured {

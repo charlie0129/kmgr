@@ -126,6 +126,31 @@ func (s *UIDStore) Len() int {
 	return len(s.byUID)
 }
 
+// Snapshot returns the immutable objects currently retained by the store in a
+// deterministic namespace/name/UID order. The object pointers are not copied:
+// callers must treat them as immutable, just as they do values returned by
+// Get. Taking one slice snapshot avoids holding the store lock while a view
+// performs filtering, CEL evaluation, or row projection.
+func (s *UIDStore) Snapshot() []*unstructured.Unstructured {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	objects := make([]*unstructured.Unstructured, 0, len(s.byUID))
+	for _, object := range s.byUID {
+		objects = append(objects, object)
+	}
+	slices.SortFunc(objects, func(a, b *unstructured.Unstructured) int {
+		if result := cmp.Compare(a.GetNamespace(), b.GetNamespace()); result != 0 {
+			return result
+		}
+		if result := cmp.Compare(a.GetName(), b.GetName()); result != 0 {
+			return result
+		}
+		return cmp.Compare(a.GetUID(), b.GetUID())
+	})
+	return objects
+}
+
 func (s *UIDStore) ResourceVersion() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
