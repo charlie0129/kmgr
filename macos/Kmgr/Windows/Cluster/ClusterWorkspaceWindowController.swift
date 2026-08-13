@@ -2332,7 +2332,27 @@ private final class ResourceListViewController: NSViewController,
         row: Int
     ) -> NSView? {
         guard model.orderedVisibleUIDs.indices.contains(row), let tableColumn else { return nil }
-        let identifier = NSUserInterfaceItemIdentifier("cell.\(tableColumn.identifier.rawValue)")
+        let columnID = tableColumn.identifier.rawValue
+        let uid = model.orderedVisibleUIDs[row]
+        let value = model.rowByUID[uid]?[columnID]
+        let alignment = columnDefinitionsByID[columnID]?.alignment ?? .leading
+        if let value, let presentation = ResourceUsageCellPresentation(cell: value) {
+            let identifier = NSUserInterfaceItemIdentifier("usage-cell.\(columnID)")
+            let cell = tableView.makeView(
+                withIdentifier: identifier,
+                owner: self
+            ) as? ResourceUsageTableCellView ?? ResourceUsageTableCellView()
+            cell.identifier = identifier
+            cell.configure(
+                presentation: presentation,
+                toolTip: value.tooltip.isEmpty ? nil : value.tooltip,
+                alignment: textAlignment(alignment),
+                textColor: textColor(value.severity)
+            )
+            return cell
+        }
+
+        let identifier = NSUserInterfaceItemIdentifier("cell.\(columnID)")
         let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
             ?? NSTableCellView()
         cell.identifier = identifier
@@ -2348,23 +2368,29 @@ private final class ResourceListViewController: NSViewController,
                 label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             ])
         }
-        let uid = model.orderedVisibleUIDs[row]
-        let value = model.rowByUID[uid]?[tableColumn.identifier.rawValue]
         cell.textField?.stringValue = value?.displayText ?? "—"
-        cell.textField?.toolTip = value?.tooltip
-        switch columnDefinitionsByID[tableColumn.identifier.rawValue]?.alignment ?? .leading {
-        case .leading: cell.textField?.alignment = .left
-        case .center: cell.textField?.alignment = .center
-        case .trailing: cell.textField?.alignment = .right
-        }
-        switch value?.severity {
-        case .warning: cell.textField?.textColor = .systemOrange
-        case .critical: cell.textField?.textColor = .systemRed
-        case .informational: cell.textField?.textColor = .systemBlue
-        case .muted: cell.textField?.textColor = .secondaryLabelColor
-        default: cell.textField?.textColor = .labelColor
-        }
+        cell.textField?.toolTip = value?.tooltip.isEmpty == false ? value?.tooltip : nil
+        cell.textField?.alignment = textAlignment(alignment)
+        cell.textField?.textColor = textColor(value?.severity)
         return cell
+    }
+
+    private func textAlignment(_ alignment: ColumnAlignment) -> NSTextAlignment {
+        switch alignment {
+        case .leading: .left
+        case .center: .center
+        case .trailing: .right
+        }
+    }
+
+    private func textColor(_ severity: CellSeverity?) -> NSColor {
+        switch severity {
+        case .warning: .systemOrange
+        case .critical: .systemRed
+        case .informational: .systemBlue
+        case .muted: .secondaryLabelColor
+        default: .labelColor
+        }
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
