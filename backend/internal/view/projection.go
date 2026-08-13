@@ -549,6 +549,7 @@ func (p *Projector) resourceUsageCell(
 		)
 		cell.Tooltip = formatUsageTooltip(
 			measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil, nil,
+			p.spec.Now,
 		)
 	case metrics.NodeMetrics:
 		var node corev1.Node
@@ -573,7 +574,7 @@ func (p *Projector) resourceUsageCell(
 		)
 		cell.Tooltip = formatUsageTooltip(
 			measurement, request, limit, optionalQuantity(allocatable, hasAllocatable),
-			optionalQuantity(capacity, hasCapacity),
+			optionalQuantity(capacity, hasCapacity), p.spec.Now,
 		)
 		if p.spec.NodeAccounting.Err != nil {
 			cell.Tooltip += "\nScheduler accounting: unavailable (" + p.spec.NodeAccounting.Err.Error() + ")"
@@ -798,6 +799,7 @@ func quantityDisplay(quantity *resource.Quantity) string {
 func formatUsageTooltip(
 	measurement metrics.Measurement,
 	request, limit, allocatable, capacity *resource.Quantity,
+	now time.Time,
 ) string {
 	parts := make([]string, 0, 6)
 	if measurement.HasValue() {
@@ -810,6 +812,9 @@ func formatUsageTooltip(
 		}
 		if !measurement.Timestamp.IsZero() {
 			parts = append(parts, "Measured: "+measurement.Timestamp.Format(time.RFC3339))
+			if !now.IsZero() && !now.Before(measurement.Timestamp) {
+				parts = append(parts, "Metric age: "+formatAge(now.Sub(measurement.Timestamp)))
+			}
 		}
 		if measurement.State == metrics.MeasurementStale {
 			parts = append(parts, "State: stale (the latest refresh failed)")

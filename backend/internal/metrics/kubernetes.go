@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -135,6 +136,10 @@ func MeasurementFor(sample Sample, resourceName corev1.ResourceName, provider, s
 func resourceQuantity(name corev1.ResourceName, value int64) *resource.Quantity {
 	if name == corev1.ResourceCPU {
 		return resource.NewScaledQuantity(value, resource.Nano)
+	}
+	if name == corev1.ResourceMemory || name == corev1.ResourceEphemeralStorage ||
+		strings.HasPrefix(string(name), corev1.ResourceHugePagesPrefix) {
+		return resource.NewQuantity(value, resource.BinarySI)
 	}
 	return resource.NewQuantity(value, resource.DecimalSI)
 }

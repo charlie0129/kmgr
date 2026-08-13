@@ -57,6 +57,14 @@ func TestKubernetesPodMetricsFetcherAggregatesContainersAndPreservesExactKeys(t 
 	if !measurement.HasValue() || measurement.Quantity.MilliValue() != 150 || measurement.Provider != "metrics.k8s.io" {
 		t.Fatalf("measurement = %#v", measurement)
 	}
+	memory := MeasurementFor(sample, corev1.ResourceMemory, "metrics.k8s.io", "Pod containers")
+	if got := memory.Quantity.String(); got != "80Mi" {
+		t.Fatalf("memory quantity = %q, want 80Mi", got)
+	}
+	extended := MeasurementFor(sample, "vendor.example/gpu-memory", "metrics.k8s.io", "Pod containers")
+	if got := extended.Quantity.String(); got != "5" {
+		t.Fatalf("extended-resource quantity = %q, want 5", got)
+	}
 }
 
 func TestKubernetesNodeMetricsFetcherAndRealZero(t *testing.T) {
@@ -82,6 +90,10 @@ func TestKubernetesNodeMetricsFetcherAndRealZero(t *testing.T) {
 	missing := MeasurementFor(sample, corev1.ResourceEphemeralStorage, "metrics.k8s.io", "Node")
 	if !zero.HasValue() || zero.Quantity.MilliValue() != 0 || missing.HasValue() {
 		t.Fatalf("zero=%#v missing=%#v", zero, missing)
+	}
+	memory := MeasurementFor(sample, corev1.ResourceMemory, "metrics.k8s.io", "Node")
+	if got := memory.Quantity.String(); got != "1Gi" {
+		t.Fatalf("memory quantity = %q, want 1Gi", got)
 	}
 }
 

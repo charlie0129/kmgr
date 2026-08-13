@@ -384,6 +384,7 @@ func TestProjectorEmitsPodResourceUsageWithEffectiveAccounting(t *testing.T) {
 				},
 			},
 		},
+		Now: measuredAt.Add(90 * time.Second),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -406,6 +407,10 @@ func TestProjectorEmitsPodResourceUsageWithEffectiveAccounting(t *testing.T) {
 	}
 	if got := cellByID(row, PodCPUColumn).GetDisplayText(); got != "420m / 500m / 1" {
 		t.Fatalf("CPU display = %q", got)
+	}
+	if tooltip := cellByID(row, PodCPUColumn).GetTooltip(); !strings.Contains(tooltip, "Measured: "+measuredAt.Format(time.RFC3339)) ||
+		!strings.Contains(tooltip, "Metric age: 1m") {
+		t.Fatalf("CPU tooltip = %q", tooltip)
 	}
 	memory := cellByID(row, PodMemoryColumn).GetUsage()
 	if !memory.GetUsageAvailable() || memory.GetUsed() != 64*1024*1024 || memory.GetRequested() != 128*1024*1024 {
