@@ -1,0 +1,326 @@
+// Package metrics contains scheduler resource accounting and optional usage
+// enrichment for Pods and Nodes.
+package metrics
+
+import (
+	"slices"
+	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	resourcehelper "k8s.io/component-helpers/resource"
+)
+
+// MeasurementState distinguishes a real measurement (including a real zero)
+// from unavailable metrics. Stale measurements retain their last value so the
+// UI can display it with an age instead of replacing it with a fabricated zero.
+type MeasurementState uint8
+
+const (
+	MeasurementUnavailable MeasurementState = iota
+	MeasurementCurrent
+	MeasurementStale
+)
+
+// Measurement is actual utilization reported by a provider. Requests and
+// limits are scheduler allocations, not measurements.
+type Measurement struct {
+	Quantity  resource.Quantity
+	State     MeasurementState
+	Provider  string
+	Scope     string
+	Timestamp time.Time
+	Message   string
+}
+
+// CurrentMeasurement creates a current provider-backed utilization value.
+func CurrentMeasurement(quantity resource.Quantity, provider, scope string, timestamp time.Time) Measurement {
+	return Measurement{
+		Quantity: quantity.DeepCopy(), State: MeasurementCurrent, Provider: provider,
+		Scope: scope, Timestamp: timestamp,
+	}
+}
+
+// StaleMeasurement creates a provider-backed value that is no longer fresh.
+func StaleMeasurement(quantity resource.Quantity, provider, scope string, timestamp time.Time, message string) Measurement {
+	return Measurement{
+		Quantity: quantity.DeepCopy(), State: MeasurementStale, Provider: provider,
+		Scope: scope, Timestamp: timestamp, Message: message,
+	}
+}
+
+// UnavailableMeasurement creates a value with no utilization measurement.
+func UnavailableMeasurement(message string) Measurement {
+	return Measurement{State: MeasurementUnavailable, Message: message}
+}
+
+// HasValue reports whether the measurement contains a provider-supplied value.
+// Both current and stale measurements have values.
+func (m Measurement) HasValue() bool {
+	return m.State == MeasurementCurrent || m.State == MeasurementStale
+}
+
+// ResourceMeasurements retains utilization by exact Kubernetes resource name.
+// Different huge-page sizes and accelerator vendors are never conflated.
+type ResourceMeasurements map[corev1.ResourceName]Measurement
+
+// For returns an exact-key measurement. A missing entry is explicitly
+// unavailable, which is distinct from a present current measurement of zero.
+func (m ResourceMeasurements) For(name corev1.ResourceName) Measurement {
+	measurement, ok := m[name]
+	if !ok {
+		return UnavailableMeasurement("no usage provider reported this resource")
+	}
+	measurement.Quantity = measurement.Quantity.DeepCopy()
+	return measurement
+}
+
+func (m ResourceMeasurements) deepCopy() ResourceMeasurements {
+	if m == nil {
+		return nil
+	}
+	result := make(ResourceMeasurements, len(m))
+	for name, measurement := range m {
+		measurement.Quantity = measurement.Quantity.DeepCopy()
+		result[name] = measurement
+	}
+	return result
+}
+
+// PodAccounting contains the effective scheduler request and limit plus
+// optional, provider-backed actual utilization for one Pod.
+type PodAccounting struct {
+	Requests corev1.ResourceList
+	Limits   corev1.ResourceList
+	Usage    ResourceMeasurements
+}
+
+// UsageFor returns actual utilization for an exact resource name.
+func (a PodAccounting) UsageFor(name corev1.ResourceName) Measurement {
+	return a.Usage.For(name)
+}
+
+// EffectivePodResources applies the Kubernetes scheduling formula for regular
+// containers, restartable and non-restartable init containers, Pod-level
+// resources, and Pod overhead. Status resources are intentionally not used:
+// this reports the resources declared to the scheduler, independent of the
+// cluster's in-place resize feature-gate configuration.
+func EffectivePodResources(pod *corev1.Pod) (requests, limits corev1.ResourceList) {
+	if pod == nil {
+		return corev1.ResourceList{}, corev1.ResourceList{}
+	}
+	options := resourcehelper.PodResourcesOptions{}
+	return resourcehelper.PodRequests(pod, options), resourcehelper.PodLimits(pod, options)
+}
+
+// AccountPod combines effective scheduler accounting with optional usage.
+func AccountPod(pod *corev1.Pod, usage ResourceMeasurements) PodAccounting {
+	requests, limits := EffectivePodResources(pod)
+	return PodAccounting{Requests: requests, Limits: limits, Usage: usage.deepCopy()}
+}
+
+// NodeAccounting contains allocation totals for relevant Pods bound to a Node.
+// Capacity and Allocatable are copied from Node status. Requested and Limited
+// are summed independently for every exact resource key.
+type NodeAccounting struct {
+	Name        string
+	Capacity    corev1.ResourceList
+	Allocatable corev1.ResourceList
+	Requested   corev1.ResourceList
+	Limited     corev1.ResourceList
+	Usage       ResourceMeasurements
+	PodCount    int64
+}
+
+// UsageFor returns actual utilization for an exact resource name.
+func (a NodeAccounting) UsageFor(name corev1.ResourceName) Measurement {
+	return a.Usage.For(name)
+}
+
+// IsRelevantBoundPod reports whether a Pod still consumes scheduler allocation
+// on nodeName. Bound Pending, Running, and Unknown Pods are relevant; terminal
+// Succeeded and Failed Pods and unbound Pods are not. A terminating Pod remains
+// relevant until it becomes terminal or disappears from the API.
+func IsRelevantBoundPod(pod *corev1.Pod, nodeName string) bool {
+	if pod == nil || nodeName == "" || pod.Spec.NodeName != nodeName {
+		return false
+	}
+	return pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed
+}
+
+// AggregateNodes computes allocation for all supplied Nodes in one pass over
+// the Pods. Pods bound to an unknown Node are ignored.
+func AggregateNodes(nodes []*corev1.Node, pods []*corev1.Pod, usageByNode map[string]ResourceMeasurements) map[string]NodeAccounting {
+	result := make(map[string]NodeAccounting, len(nodes))
+	for _, node := range nodes {
+		if node == nil || node.Name == "" {
+			continue
+		}
+		result[node.Name] = NodeAccounting{
+			Name: node.Name, Capacity: node.Status.Capacity.DeepCopy(),
+			Allocatable: node.Status.Allocatable.DeepCopy(), Requested: make(corev1.ResourceList),
+			Limited: make(corev1.ResourceList), Usage: usageByNode[node.Name].deepCopy(),
+		}
+	}
+
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		accounting, found := result[pod.Spec.NodeName]
+		if !found || !IsRelevantBoundPod(pod, accounting.Name) {
+			continue
+		}
+		requests, limits := EffectivePodResources(pod)
+		addResourceList(accounting.Requested, requests)
+		addResourceList(accounting.Limited, limits)
+		accounting.PodCount++
+		result[accounting.Name] = accounting
+	}
+	return result
+}
+
+// AccountNode computes allocation for one Node.
+func AccountNode(node *corev1.Node, pods []*corev1.Pod, usage ResourceMeasurements) NodeAccounting {
+	if node == nil {
+		return NodeAccounting{Requested: corev1.ResourceList{}, Limited: corev1.ResourceList{}}
+	}
+	accounting := AggregateNodes([]*corev1.Node{node}, pods, map[string]ResourceMeasurements{node.Name: usage})
+	return accounting[node.Name]
+}
+
+func addResourceList(total, values corev1.ResourceList) {
+	for name, quantity := range values {
+		current, found := total[name]
+		if !found {
+			total[name] = quantity.DeepCopy()
+			continue
+		}
+		current.Add(quantity)
+		total[name] = current
+	}
+}
+
+var defaultAcceleratorSuffixes = [...]string{"/gpu", "/ppu", "/dcu"}
+
+// AcceleratorResourceConfig configures the label for one exact extended
+// resource. An empty DisplayName deliberately falls back to the exact key.
+type AcceleratorResourceConfig struct {
+	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty"`
+}
+
+// AcceleratorConfig controls exact-key accelerator discovery. A nil suffix
+// slice uses /gpu, /ppu, and /dcu; an empty non-nil slice disables auto-detect.
+type AcceleratorConfig struct {
+	AutoDetectSuffixes []string                             `json:"autoDetectSuffixes,omitempty" yaml:"autoDetectSuffixes,omitempty"`
+	Resources          map[string]AcceleratorResourceConfig `json:"resources,omitempty" yaml:"resources,omitempty"`
+}
+
+// DefaultAcceleratorSuffixes returns a caller-owned copy of the defaults.
+func DefaultAcceleratorSuffixes() []string {
+	return append([]string(nil), defaultAcceleratorSuffixes[:]...)
+}
+
+// DiscoveredResources lists scheduler-accounted optional resources. Names are
+// sorted and exact; hugepages-2Mi and hugepages-1Gi remain independent entries.
+type DiscoveredResources struct {
+	EphemeralStorage bool
+	HugePages        []corev1.ResourceName
+	Accelerators     []corev1.ResourceName
+}
+
+// DiscoverResources finds optional resource keys without requiring a metrics
+// provider. It inspects Node capacity/allocatable and effective Pod resources.
+// Configured accelerator keys are returned even when currently absent.
+func DiscoverResources(nodes []*corev1.Node, pods []*corev1.Pod, acceleratorConfig AcceleratorConfig) DiscoveredResources {
+	hugePages := make(map[corev1.ResourceName]struct{})
+	accelerators := make(map[corev1.ResourceName]struct{}, len(acceleratorConfig.Resources))
+	for configuredName := range acceleratorConfig.Resources {
+		if configuredName != "" {
+			accelerators[corev1.ResourceName(configuredName)] = struct{}{}
+		}
+	}
+
+	suffixes := acceleratorConfig.AutoDetectSuffixes
+	if suffixes == nil {
+		suffixes = defaultAcceleratorSuffixes[:]
+	}
+	discovered := DiscoveredResources{}
+	inspect := func(resources corev1.ResourceList) {
+		for name := range resources {
+			switch {
+			case name == corev1.ResourceEphemeralStorage:
+				discovered.EphemeralStorage = true
+			case isHugePageResource(name):
+				hugePages[name] = struct{}{}
+			case hasAnySuffix(string(name), suffixes):
+				accelerators[name] = struct{}{}
+			}
+		}
+	}
+
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		inspect(node.Status.Capacity)
+		inspect(node.Status.Allocatable)
+	}
+	for _, pod := range pods {
+		requests, limits := EffectivePodResources(pod)
+		inspect(requests)
+		inspect(limits)
+	}
+
+	discovered.HugePages = sortedResourceNames(hugePages)
+	discovered.Accelerators = sortedResourceNames(accelerators)
+	return discovered
+}
+
+func isHugePageResource(name corev1.ResourceName) bool {
+	value := string(name)
+	return strings.HasPrefix(value, corev1.ResourceHugePagesPrefix) && value != corev1.ResourceHugePagesPrefix
+}
+
+func hasAnySuffix(name string, suffixes []string) bool {
+	for _, suffix := range suffixes {
+		if suffix != "" && strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedResourceNames(values map[corev1.ResourceName]struct{}) []corev1.ResourceName {
+	names := make([]corev1.ResourceName, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	slices.SortFunc(names, func(a, b corev1.ResourceName) int {
+		return strings.Compare(string(a), string(b))
+	})
+	return names
+}
+
+// AcceleratorDisplayName returns the configured label, a built-in generic
+// label, or the exact key. Full keys remain identity regardless of this label.
+func AcceleratorDisplayName(name corev1.ResourceName, config AcceleratorConfig) string {
+	exact := string(name)
+	if configured, ok := config.Resources[exact]; ok {
+		if label := strings.TrimSpace(configured.DisplayName); label != "" {
+			return label
+		}
+		return exact
+	}
+	component := exact
+	if slash := strings.LastIndexByte(component, '/'); slash >= 0 {
+		component = component[slash+1:]
+	}
+	switch component {
+	case "gpu", "ppu", "dcu":
+		return strings.ToUpper(component)
+	default:
+		return exact
+	}
+}
