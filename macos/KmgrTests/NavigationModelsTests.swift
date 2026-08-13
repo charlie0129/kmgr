@@ -83,6 +83,36 @@ import Testing
     #expect(history.entries == [state("pods"), state("nodes"), state("events")])
 }
 
+@Test func helperRecoveryRebindsEveryObjectHistoryEntryToTheNewSession() {
+    let table = ResourceNavigationState(
+        group: "", version: "v1", resource: "pods", kind: "Pod",
+        namespaceSelection: .namespace("team-a")
+    )
+    var first = identity("pod-1")
+    var second = identity("pod-2")
+    first.clusterSessionID = "old-session"
+    second.clusterSessionID = "old-session"
+    var history = WorkspaceNavigationHistory(initial: .resource(table))
+    history.navigate(to: .object(first, returnState: table))
+    history.navigate(to: .object(second, returnState: table))
+
+    history.rebindClusterSessionID("new-session")
+
+    let objectSessions = history.entries.compactMap { destination -> String? in
+        guard case .object(let identity, _) = destination else { return nil }
+        return identity.clusterSessionID
+    }
+    #expect(objectSessions == ["new-session", "new-session"])
+    #expect(history.current == .object(
+        ResourceIdentity(
+            clusterSessionID: "new-session", group: second.group,
+            version: second.version, resource: second.resource,
+            namespace: second.namespace, name: second.name, uid: second.uid
+        ),
+        returnState: table
+    ))
+}
+
 @Test func sidebarPinsAreStableGVRsNotDisplayNames() {
     #expect(DefaultSidebarPins.values.count == 9)
     #expect(DefaultSidebarPins.values.map(\.id).contains("apps/v1/deployments"))

@@ -14,6 +14,7 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
     private let browserButton = NSButton(title: "Open in Browser", target: nil, action: nil)
     private var records: [PortForwardRecord] = []
     private var observerToken: UUID?
+    private var helperGenerationAvailable = false
 
     init(coordinator: PortForwardCoordinator) {
         self.coordinator = coordinator
@@ -191,6 +192,7 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
             records.indices.contains(index) ? records[index].id : nil
         })
         records = snapshot.records
+        helperGenerationAvailable = snapshot.helperGenerationAvailable
         tableView.reloadData()
         let indexes = IndexSet(records.indices.filter { selectedIDs.contains(records[$0].id) })
         tableView.selectRowIndexes(indexes, byExtendingSelection: false)
@@ -221,7 +223,9 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
         let selected = selectedRecords
         stopButton.isEnabled = selected.contains { $0.state.isActive }
         restartButton.isEnabled = selected.contains {
-            $0.state == .failed || $0.state == .stopped
+            ($0.state == .failed || $0.state == .stopped)
+                && $0.lastIssue?.reason != "EngineRestarted"
+                && helperGenerationAvailable
         }
         copyButton.isEnabled = selected.count == 1 && selected[0].address != nil
         browserButton.isEnabled = selected.count == 1
@@ -246,7 +250,8 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
 
     @objc private func restartSelected() {
         let selected = selectedRecords.filter {
-            $0.state == .failed || $0.state == .stopped
+            ($0.state == .failed || $0.state == .stopped)
+                && $0.lastIssue?.reason != "EngineRestarted"
         }
         guard !selected.isEmpty else { return }
         statusLabel.stringValue = "Restarting \(selected.count.formatted()) port-forward(s)…"

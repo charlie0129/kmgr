@@ -128,6 +128,21 @@ public struct WorkspaceNavigationHistory: Hashable, Codable, Sendable {
         self.index = index + 1
         return current
     }
+
+    /// Helper generations issue new cluster-session IDs. Navigation identity
+    /// remains pinned to Kubernetes UID, but every future GET/mutation must use
+    /// the freshly authenticated session rather than a dead helper's ID.
+    public mutating func rebindClusterSessionID(_ sessionID: String) {
+        entries = entries.map { destination in
+            switch destination {
+            case .resource:
+                return destination
+            case .object(var identity, let returnState):
+                identity.clusterSessionID = sessionID
+                return .object(identity, returnState: returnState)
+            }
+        }
+    }
 }
 
 public struct SidebarPin: Hashable, Codable, Sendable, Identifiable {

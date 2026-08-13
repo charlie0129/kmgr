@@ -17,7 +17,7 @@ enum ObjectDetailInitialTab {
 final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     NSTableViewDelegate, NSTextViewDelegate
 {
-    let identity: ResourceIdentity
+    private(set) var identity: ResourceIdentity
     private let provider: any ObjectDetailProviding
     private let initialTab: ObjectDetailInitialTab
     private let segmented = NSSegmentedControl(
@@ -76,6 +76,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var relationshipScanTask: Task<Void, Never>?
     private var activeRelationshipScan: (id: String, generation: UInt64)?
     private var operationTask: Task<Void, Never>?
+    private var recoveryTask: Task<Void, Never>?
+    private var dataConflictController: DataConflictWindowController?
     private var secretRevealed = false
     private var selectedDataOriginalBytes: Data?
     private var selectedDataBinaryDraft: Data?
@@ -112,6 +114,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relationshipsTask?.cancel()
         relationshipScanTask?.cancel()
         operationTask?.cancel()
+        recoveryTask?.cancel()
     }
 
     override func loadView() {
@@ -172,7 +175,80 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relationshipsTask?.cancel()
         relationshipScanTask?.cancel()
         operationTask?.cancel()
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        dataConflictController?.close()
+        dataConflictController = nil
         releaseDataDrafts()
+    }
+
+    /// Helper restart invalidates the session behind this detail. Keep any
+    /// local editor buffer visible, but stop all work and disable mutation
+    /// controls until the workspace fresh-GETs this exact UID in a new session.
+    func engineDidDisconnect() {
+        loadTask?.cancel()
+        loadTask = nil
+        watchTask?.cancel()
+        watchTask = nil
+        eventsTask?.cancel()
+        eventsTask = nil
+        relationshipsTask?.cancel()
+        relationshipsTask = nil
+        relationshipScanTask?.cancel()
+        relationshipScanTask = nil
+        operationTask?.cancel()
+        operationTask = nil
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        dataConflictController?.close()
+        dataConflictController = nil
+        activeRelationshipScan = nil
+        statusLabel.stringValue = isEditingYAML || hasDataDraftChanges
+            ? "Engine disconnected · local edit preserved"
+            : "Engine disconnected · reopening this UID when ready"
+        statusLabel.textColor = .systemOrange
+        editButton.isEnabled = false
+        saveButton.isEnabled = false
+        disableEditingAfterDeletion()
+    }
+
+    /// Rebinds this exact UID to a newly authenticated helper session. Drafts
+    /// stay local and no interrupted operation is replayed. The fresh GET also
+    /// detects a same-name replacement because the identity remains UID-pinned.
+    func recover(
+        sessionID: String,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        guard recoveryTask == nil else { return }
+        var reboundIdentity = identity
+        reboundIdentity.clusterSessionID = sessionID
+        statusLabel.stringValue = "Reopening this UID…"
+        statusLabel.textColor = .secondaryLabelColor
+        recoveryTask = Task { [weak self, provider] in
+            guard let self else { return }
+            defer { recoveryTask = nil }
+            do {
+                if supportsDataEditor {
+                    let detailIdentity = reboundIdentity
+                    let dataIdentity = reboundIdentity
+                    async let fetchedDetail = provider.getObject(identity: detailIdentity)
+                    async let fetchedData = provider.getData(identity: dataIdentity)
+                    let (updatedDetail, updatedData) = try await (fetchedDetail, fetchedData)
+                    guard !Task.isCancelled else { return }
+                    try installRecovery(detail: updatedDetail, data: updatedData)
+                } else {
+                    let updatedDetail = try await provider.getObject(identity: reboundIdentity)
+                    guard !Task.isCancelled else { return }
+                    try installRecovery(detail: updatedDetail, data: nil)
+                }
+                completion(.success(()))
+            } catch {
+                guard !Task.isCancelled else { return }
+                statusLabel.stringValue = error.localizedDescription
+                statusLabel.textColor = .systemRed
+                completion(.failure(error))
+            }
+        }
     }
 
     private var breadcrumbText: String {
@@ -411,6 +487,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func install(detail: ObjectDetail, data: ObjectData?) {
         releaseDataDrafts()
+        identity = detail.identity
         self.detail = detail
         objectData = data
         originalYAML = detail.yamlUTF8
@@ -425,6 +502,87 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         if initialTab == .automatic, supportsDataEditor {
             segmented.selectedSegment = 5
             tabChanged()
+        }
+    }
+
+    private func installRecovery(
+        detail updatedDetail: ObjectDetail,
+        data updatedData: ObjectData?
+    ) throws {
+        guard updatedDetail.identity.uid == identity.uid else {
+            terminalObjectState = true
+            disableEditingAfterDeletion()
+            throw ClusterManagerIssue(
+                category: .conflict,
+                reason: "ObjectRecreated",
+                message: "A same-name object has a different UID and cannot replace this detail view.",
+                operation: "recover object details"
+            )
+        }
+        if let updatedData, updatedData.identity.uid != identity.uid {
+            throw ClusterManagerIssue(
+                category: .conflict,
+                reason: "ObjectRecreated",
+                message: "The key/value response belongs to a different Kubernetes UID.",
+                operation: "recover key/value data"
+            )
+        }
+        let preserveYAML = isEditingYAML
+        let preserveData = hasDataDraftChanges
+        let selectedRow = keysTable.selectedRow
+
+        identity = updatedDetail.identity
+        terminalObjectState = false
+        editButton.isEnabled = true
+        saveButton.isEnabled = isEditingYAML
+        originalYAML = updatedDetail.yamlUTF8
+        if preserveYAML, var editingBasis = detail {
+            editingBasis.identity = updatedDetail.identity
+            detail = editingBasis
+        } else {
+            detail = updatedDetail
+            yamlTextView.string = String(decoding: updatedDetail.yamlUTF8, as: UTF8.self)
+        }
+        renderSummary(updatedDetail.summaryFields)
+        renderMetrics(updatedDetail.metrics)
+
+        if let updatedData {
+            if preserveData {
+                if var editingBasis = objectData {
+                    editingBasis.identity = updatedData.identity
+                    objectData = editingBasis
+                }
+                dataValueTextView.isEditable = (!updatedData.secret || secretRevealed)
+                    && selectedDataBinaryDraft == nil
+            } else {
+                releaseDataDrafts()
+                objectData = updatedData
+                keysTable.reloadData()
+                let row = updatedData.entries.indices.contains(selectedRow) ? selectedRow : -1
+                if row >= 0 {
+                    keysTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                    selectedDataEntry = updatedData.entries[row]
+                    secretRevealed = !updatedData.secret
+                    displaySelectedData()
+                } else {
+                    selectedDataEntry = nil
+                    dataValueTextView.string = ""
+                }
+            }
+        }
+        watchTask?.cancel()
+        watchTask = nil
+        startObjectWatch(resourceVersion: updatedDetail.resourceVersion)
+        eventsLoaded = false
+        relationshipsLoaded = false
+        tabChanged()
+        updateDataEditorControls()
+        if preserveYAML || preserveData {
+            statusLabel.stringValue = "Reconnected · server refreshed · local edit preserved"
+            statusLabel.textColor = .systemOrange
+        } else {
+            statusLabel.stringValue = "Reconnected · resource version \(updatedDetail.resourceVersion)"
+            statusLabel.textColor = .secondaryLabelColor
         }
     }
 
@@ -1176,10 +1334,24 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func performDataMutation(_ mutation: DataMutationKind, successMessage: String) {
         guard let data = objectData, operationTask == nil else { return }
+        submitDataMutation(
+            mutation,
+            expectedResourceVersion: data.resourceVersion,
+            successMessage: successMessage,
+            recoverConflicts: true
+        )
+    }
+
+    private func submitDataMutation(
+        _ mutation: DataMutationKind,
+        expectedResourceVersion: String,
+        successMessage: String,
+        recoverConflicts: Bool
+    ) {
+        guard operationTask == nil else { return }
         updateDataEditorControls()
         statusLabel.stringValue = "Saving key/value data…"
         statusLabel.textColor = .secondaryLabelColor
-        operationTask?.cancel()
         operationTask = Task { [weak self, provider, identity] in
             guard let self else { return }
             defer {
@@ -1189,7 +1361,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             do {
                 let stream = try await provider.updateData(
                     identity: identity,
-                    expectedResourceVersion: data.resourceVersion,
+                    expectedResourceVersion: expectedResourceVersion,
                     mutations: [mutation]
                 )
                 for try await progress in stream where progress.state.isTerminal {
@@ -1208,10 +1380,203 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     loadObject()
                 }
             } catch {
-                show(error: error)
+                if recoverConflicts, Self.clusterIssue(from: error)?.category == .conflict {
+                    await prepareDataConflictRecovery(
+                        mutation: mutation,
+                        successMessage: successMessage
+                    )
+                } else {
+                    show(error: error)
+                }
             }
         }
         updateDataEditorControls()
+    }
+
+    private func prepareDataConflictRecovery(
+        mutation: DataMutationKind,
+        successMessage: String
+    ) async {
+        statusLabel.stringValue = "Conflict detected · loading the current key…"
+        statusLabel.textColor = .systemOrange
+        do {
+            let currentData = try await provider.getData(identity: identity)
+            guard !Task.isCancelled else { return }
+            guard currentData.identity.uid == identity.uid else {
+                throw ClusterManagerIssue(
+                    category: .conflict,
+                    reason: "ObjectRecreated",
+                    message: "A same-name object has a different UID, so the local change cannot be retried.",
+                    operation: "resolve key/value conflict"
+                )
+            }
+            let currentEntry = currentData.entries.first { $0.id == mutation.sourceKey }
+            let destinationExists = mutation.destinationKey.map { destination in
+                currentData.entries.contains { $0.id == destination }
+            } ?? false
+            let retryPlan = mutation.conflictRetryPlan(
+                currentContentHash: currentEntry?.contentHash,
+                destinationExists: destinationExists
+            )
+            presentDataConflict(
+                mutation: mutation,
+                successMessage: successMessage,
+                currentData: currentData,
+                currentEntry: currentEntry,
+                retryPlan: retryPlan
+            )
+        } catch {
+            statusLabel.stringValue = "Conflict · current server data could not be loaded · local edit preserved"
+            statusLabel.textColor = .systemRed
+        }
+    }
+
+    private func presentDataConflict(
+        mutation: DataMutationKind,
+        successMessage: String,
+        currentData: ObjectData,
+        currentEntry: ObjectDataEntry?,
+        retryPlan: DataConflictRetryPlan
+    ) {
+        guard let window = view.window else {
+            statusLabel.stringValue = "Conflict · local edit preserved"
+            statusLabel.textColor = .systemOrange
+            return
+        }
+        let localDisplay = localConflictDisplay(for: mutation, secret: currentData.secret)
+        let currentDisplay = currentEntry.map {
+            conflictDisplay(entry: $0, secret: currentData.secret)
+        } ?? .missing()
+        let retryUnavailableReason: String?
+        if case .unavailable(let reason) = retryPlan {
+            retryUnavailableReason = reason
+        } else {
+            retryUnavailableReason = nil
+        }
+        let canCopyLocal: Bool
+        switch mutation {
+        case .set:
+            canCopyLocal = currentDraftBytes != nil
+                && (!currentData.secret || secretRevealed)
+        case .delete, .rename:
+            canCopyLocal = false
+        }
+        let controller = DataConflictWindowController(
+            key: mutation.sourceKey,
+            resourceVersion: currentData.resourceVersion,
+            local: localDisplay,
+            current: currentDisplay,
+            canCopyLocal: canCopyLocal,
+            retryUnavailableReason: retryUnavailableReason
+        ) { [weak self] choice in
+            guard let self else { return }
+            dataConflictController = nil
+            switch choice {
+            case .reload:
+                installCurrentDataAfterConflict(currentData, selecting: mutation.sourceKey)
+                statusLabel.stringValue = "Reloaded current server data"
+                statusLabel.textColor = .secondaryLabelColor
+            case .copyLocal:
+                copyLocalConflictValueToPasteboard(mutation: mutation)
+                statusLabel.stringValue = "Copied local value · local edit preserved"
+                statusLabel.textColor = .secondaryLabelColor
+            case .retry:
+                guard case .retry(let retryMutation) = retryPlan else { return }
+                submitDataMutation(
+                    retryMutation,
+                    expectedResourceVersion: currentData.resourceVersion,
+                    successMessage: successMessage,
+                    recoverConflicts: true
+                )
+            case .keepEditing:
+                statusLabel.stringValue = "Conflict · local edit preserved"
+                statusLabel.textColor = .systemOrange
+            }
+        }
+        dataConflictController = controller
+        controller.beginSheet(for: window)
+    }
+
+    private func localConflictDisplay(
+        for mutation: DataMutationKind,
+        secret: Bool
+    ) -> DataConflictValueDisplay {
+        switch mutation {
+        case .set(_, let kind, let value, _):
+            return DataConflictValueDisplay(
+                secret: secret,
+                kind: kind,
+                byteCount: value.count,
+                contentHash: DataConflictValueDisplay.contentHash(of: value),
+                decodedText: secret ? nil : safeUTF8(value)
+            )
+        case .delete:
+            return .missing("Local action deletes this key.")
+        case .rename(_, let newKey, _):
+            return .missing("Local action renames this key to \(newKey).")
+        }
+    }
+
+    private func conflictDisplay(
+        entry: ObjectDataEntry,
+        secret: Bool
+    ) -> DataConflictValueDisplay {
+        var bytes = copyBytes(from: entry)
+        defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
+        return DataConflictValueDisplay(
+            secret: secret,
+            kind: entry.kind,
+            byteCount: bytes.count,
+            contentHash: entry.contentHash,
+            decodedText: secret ? nil : safeUTF8(bytes)
+        )
+    }
+
+    private func safeUTF8(_ value: Data) -> String? {
+        guard let text = String(data: value, encoding: .utf8), !text.contains("\0") else {
+            return nil
+        }
+        return text
+    }
+
+    private func copyLocalConflictValueToPasteboard(mutation: DataMutationKind) {
+        guard case .set(_, _, let localValue, _) = mutation else { return }
+        var bytes = localValue
+        defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        if let text = safeUTF8(bytes) {
+            pasteboard.setString(text, forType: .string)
+        } else {
+            pasteboard.setData(bytes, forType: NSPasteboard.PasteboardType("public.data"))
+        }
+    }
+
+    private func installCurrentDataAfterConflict(
+        _ currentData: ObjectData,
+        selecting key: String
+    ) {
+        releaseDataDrafts()
+        objectData = currentData
+        keysTable.reloadData()
+        guard let row = currentData.entries.firstIndex(where: { $0.id == key }) else {
+            selectedDataEntry = nil
+            keysTable.deselectAll(nil)
+            dataValueTextView.string = ""
+            updateDataEditorControls()
+            return
+        }
+        keysTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        selectedDataEntry = currentData.entries[row]
+        secretRevealed = !currentData.secret
+        revealButton.title = "Reveal"
+        displaySelectedData()
+        updateDataEditorControls()
+    }
+
+    private static func clusterIssue(from error: Error) -> ClusterManagerIssue? {
+        if let issue = error as? ClusterManagerIssue { return issue }
+        return nil
     }
 
     private func showValidation(_ message: String) {

@@ -148,3 +148,51 @@ import Testing
     #expect(model.selectedUIDs.isEmpty)
     #expect(model.selectionAnchorUID == nil)
 }
+
+@Test func helperRecoveryRebindsCachedRowSessionWithoutChangingUIDSelection() {
+    let uid: ResourceUID = "pod-uid"
+    var model = ResourceTableModel(rows: [row(uid)])
+    model.selectExclusively(uid)
+
+    model.rebindClusterSessionID("session-after-restart")
+
+    #expect(model.rowByUID[uid]?.identity.clusterSessionID == "session-after-restart")
+    #expect(model.selectedUIDs == [uid])
+    #expect(model.selectedIdentities.only?.uid == uid)
+}
+
+@Test func helperRecoveryBlocksNetworkActionsUntilFreshUIDSnapshotCompletes() {
+    let cached: ResourceUID = "cached-uid"
+    let fresh: ResourceUID = "fresh-uid"
+    var trust = RecoveredResourceTrust()
+    trust.requireValidation()
+
+    #expect(!trust.permitsNetworkActions(for: [row(cached).identity]))
+    trust.receiveDelta(upsertedUIDs: [cached], removedUIDs: [])
+    #expect(!trust.permitsNetworkActions(for: [row(cached).identity]))
+
+    trust.receiveSnapshot(uids: [cached], first: true, last: false)
+    #expect(!trust.permitsNetworkActions(for: [row(cached).identity]))
+    trust.receiveSnapshot(uids: [fresh], first: false, last: true)
+
+    #expect(trust.permitsNetworkActions(for: [row(cached).identity]))
+    #expect(trust.permitsNetworkActions(for: [row(fresh).identity]))
+}
+
+@Test func helperRecoveryNeverTrustsCachedUIDOmittedFromFreshSnapshot() {
+    let omitted: ResourceUID = "old-uid"
+    let authoritative: ResourceUID = "new-uid"
+    var trust = RecoveredResourceTrust()
+    trust.requireValidation()
+    trust.receiveSnapshot(uids: [authoritative], first: true, last: true)
+
+    #expect(!trust.permitsNetworkActions(for: [row(omitted).identity]))
+    #expect(trust.permitsNetworkActions(for: [row(authoritative).identity]))
+
+    trust.receiveDelta(upsertedUIDs: [], removedUIDs: [authoritative])
+    #expect(!trust.permitsNetworkActions(for: [row(authoritative).identity]))
+}
+
+private extension Collection {
+    var only: Element? { count == 1 ? first : nil }
+}

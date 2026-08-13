@@ -67,4 +67,34 @@ struct EngineSupervisorLifecycleTests {
         await supervisor.shutdown()
         #expect(supervisor.state == .stopped)
     }
+
+    @Test("state observers receive current state and can unsubscribe")
+    func stateObserversReceiveCurrentStateAndCanUnsubscribe() async {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-missing-\(UUID().uuidString)")
+        let supervisor = EngineSupervisor(configuration: .init(
+            helperURL: missing,
+            restartPolicy: .init(
+                maximumAttempts: 1,
+                initialDelayMilliseconds: 0,
+                maximumDelayMilliseconds: 0
+            )
+        ))
+        var observed: [EngineConnectionState] = []
+        let token = supervisor.observeState { observed.append($0) }
+        #expect(observed == [.stopped])
+
+        supervisor.start()
+        for _ in 0..<100 {
+            if case .failed = supervisor.state { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(observed.contains { if case .starting = $0 { true } else { false } })
+        #expect(observed.contains { if case .failed = $0 { true } else { false } })
+
+        supervisor.removeStateObserver(token)
+        let count = observed.count
+        await supervisor.shutdown()
+        #expect(observed.count == count)
+    }
 }

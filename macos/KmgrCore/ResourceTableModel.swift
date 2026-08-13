@@ -381,6 +381,17 @@ public struct ResourceTableModel: Hashable, Sendable {
         return saved
     }
 
+    /// Compact cached rows survive a helper restart only as presentation
+    /// state. Rebind their request identity before enabling actions so no
+    /// operation can carry the previous helper generation's session ID.
+    public mutating func rebindClusterSessionID(_ sessionID: String) {
+        for uid in Array(rowByUID.keys) {
+            guard var row = rowByUID[uid] else { continue }
+            row.identity.clusterSessionID = sessionID
+            rowByUID[uid] = row
+        }
+    }
+
     private func makeUpdatePlan(capture: ResourceTableUpdateCapture) -> ResourceTableUpdatePlan {
         let selectedRowIndexes = orderedVisibleUIDs.enumerated().compactMap {
             selectedUIDs.contains($0.element) ? $0.offset : nil
@@ -403,5 +414,66 @@ public struct ResourceTableModel: Hashable, Sendable {
         return proposed.filter { uid in
             rowByUID[uid] != nil && seen.insert(uid).inserted
         }
+    }
+}
+
+/// Tracks which cached row UIDs have been observed from the freshly opened
+/// helper generation. Until a complete first snapshot arrives, callers must
+/// not use rebound cached identities for Kubernetes operations.
+public struct RecoveredResourceTrust: Hashable, Sendable {
+    public private(set) var requiresValidation = false
+    public private(set) var hasCompleteSnapshot = true
+    private var sawFirstSnapshotChunk = false
+    private var pendingSnapshotUIDs: Set<ResourceUID> = []
+    private var trustedUIDs: Set<ResourceUID> = []
+
+    public init() {}
+
+    public mutating func requireValidation() {
+        requiresValidation = true
+        hasCompleteSnapshot = false
+        sawFirstSnapshotChunk = false
+        pendingSnapshotUIDs.removeAll(keepingCapacity: true)
+        trustedUIDs.removeAll(keepingCapacity: true)
+    }
+
+    public mutating func receiveSnapshot(
+        uids: some Sequence<ResourceUID>,
+        first: Bool,
+        last: Bool
+    ) {
+        guard requiresValidation else { return }
+        let uids = Array(uids)
+        if hasCompleteSnapshot {
+            // Later authenticated relists may reveal rows that were absent
+            // from the recovery snapshot because of filtering.
+            trustedUIDs.formUnion(uids)
+            return
+        }
+        if first {
+            sawFirstSnapshotChunk = true
+            pendingSnapshotUIDs.removeAll(keepingCapacity: true)
+        }
+        guard sawFirstSnapshotChunk else { return }
+        pendingSnapshotUIDs.formUnion(uids)
+        guard last else { return }
+        trustedUIDs = pendingSnapshotUIDs
+        pendingSnapshotUIDs.removeAll(keepingCapacity: true)
+        hasCompleteSnapshot = true
+    }
+
+    public mutating func receiveDelta(
+        upsertedUIDs: some Sequence<ResourceUID>,
+        removedUIDs: Set<ResourceUID>
+    ) {
+        guard requiresValidation, hasCompleteSnapshot else { return }
+        trustedUIDs.formUnion(upsertedUIDs)
+        trustedUIDs.subtract(removedUIDs)
+    }
+
+    public func permitsNetworkActions(for identities: [ResourceIdentity]) -> Bool {
+        guard requiresValidation else { return true }
+        return hasCompleteSnapshot
+            && identities.allSatisfy { trustedUIDs.contains($0.uid) }
     }
 }

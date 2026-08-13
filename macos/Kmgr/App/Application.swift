@@ -24,6 +24,10 @@ final class Application: NSObject, NSApplicationDelegate {
     private let portForwardCoordinator: PortForwardCoordinator
     private let portForwardsWindowController: PortForwardsWindowController
     private let engineSupervisor: EngineSupervisor
+    private var engineStateObserver: UUID?
+    private var readyEngineInstanceID: String?
+    private var helperRecoveryRequired = false
+    private var workspaceRecoveryTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
     private var logWindowControllers: [ObjectIdentifier: LogWindowController] = [:]
     private var terminalWindowControllers: [ObjectIdentifier: TerminalWindowController] = [:]
     private var isTerminating = false
@@ -83,10 +87,84 @@ final class Application: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
         applyAppearance(preferencesStore.current.appearance)
+        engineStateObserver = engineSupervisor.observeState { [weak self] state in
+            self?.engineStateChanged(state)
+        }
         engineSupervisor.start()
         restoreWorkspacesOrShowChooser()
         NSApp.activate(ignoringOtherApps: true)
         logger.info("Kmgr application launched")
+    }
+
+    private func engineStateChanged(_ state: EngineConnectionState) {
+        switch state {
+        case .ready(let information):
+            let isNewGeneration = readyEngineInstanceID.map {
+                $0 != information.instanceID
+            } ?? false
+            readyEngineInstanceID = information.instanceID
+            guard helperRecoveryRequired || isNewGeneration else { return }
+            helperRecoveryRequired = false
+            recoverWorkspacesAfterHelperRestart()
+        case .disconnected(let message):
+            guard readyEngineInstanceID != nil, !isTerminating else { return }
+            beginHelperRecovery(message: message)
+        case .failed(let message):
+            guard readyEngineInstanceID != nil, !isTerminating else { return }
+            beginHelperRecovery(message: message)
+            for controller in workspaceControllers.values {
+                controller.engineRecoveryFailed(ClusterManagerIssue(
+                    category: .unavailable,
+                    reason: "EngineRestartFailed",
+                    message: message,
+                    retryable: true,
+                    contextName: controller.session.contextName,
+                    operation: "restart Kubernetes engine"
+                ))
+            }
+        case .stopped, .starting, .restarting, .stopping:
+            break
+        }
+    }
+
+    private func beginHelperRecovery(message: String) {
+        if !helperRecoveryRequired {
+            helperRecoveryRequired = true
+            for task in workspaceRecoveryTasks.values { task.cancel() }
+            workspaceRecoveryTasks.removeAll()
+            portForwardCoordinator.engineDidDisconnect(message: message)
+        }
+        for controller in workspaceControllers.values {
+            controller.engineDidDisconnect(message: message)
+        }
+    }
+
+    private func recoverWorkspacesAfterHelperRestart() {
+        for task in workspaceRecoveryTasks.values { task.cancel() }
+        workspaceRecoveryTasks.removeAll()
+        for (identifier, controller) in workspaceControllers {
+            let contextReference = controller.session.contextReference
+            let task = Task { [weak self, weak controller, clusterContextProvider] in
+                guard let self, let controller else { return }
+                do {
+                    let session = try await clusterContextProvider.openContext(
+                        reference: contextReference
+                    )
+                    guard !Task.isCancelled,
+                        self.workspaceControllers[identifier] === controller
+                    else { return }
+                    controller.recover(with: session)
+                    portForwardCoordinator.register(sessionID: session.sessionID)
+                } catch {
+                    guard !Task.isCancelled,
+                        self.workspaceControllers[identifier] === controller
+                    else { return }
+                    controller.engineRecoveryFailed(error)
+                }
+                workspaceRecoveryTasks.removeValue(forKey: identifier)
+            }
+            workspaceRecoveryTasks[identifier] = task
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -116,6 +194,12 @@ final class Application: NSObject, NSApplicationDelegate {
             }
         }
         isTerminating = true
+        if let engineStateObserver {
+            engineSupervisor.removeStateObserver(engineStateObserver)
+            self.engineStateObserver = nil
+        }
+        for task in workspaceRecoveryTasks.values { task.cancel() }
+        workspaceRecoveryTasks.removeAll()
         terminationTask = Task { [engineSupervisor, portForwardCoordinator] in
             await portForwardCoordinator.stopAllActive()
             portForwardCoordinator.stopWatching()
@@ -188,6 +272,7 @@ final class Application: NSObject, NSApplicationDelegate {
                 try? self?.restorationStore.remove(id: restoration.id)
             }
             self?.columnsManagerControllers.removeValue(forKey: identifier)?.close()
+            self?.workspaceRecoveryTasks.removeValue(forKey: identifier)?.cancel()
             self?.workspaceControllers.removeValue(forKey: identifier)
         }
         controller.onStartPortForward = { [weak controller] identity in

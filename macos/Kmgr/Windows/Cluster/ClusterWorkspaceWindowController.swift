@@ -13,7 +13,8 @@ struct ResourceColumnsRequest {
 final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate,
     NSMenuItemValidation
 {
-    let session: OpenedClusterSession
+    private(set) var session: OpenedClusterSession
+    var restorationID: String { restoration.id }
     var onClose: (() -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
@@ -85,6 +86,13 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             onShowPortForwards: onShowPortForwards
         )
         super.init(window: window)
+        installWorkspaceCallbacks()
+        window.delegate = self
+        window.contentViewController = workspaceController
+        window.toolbar = workspaceController.makeToolbar()
+    }
+
+    private func installWorkspaceCallbacks() {
         workspaceController.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
         }
@@ -108,9 +116,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             self.restoration.state = state
             self.onRestorationCheckpoint?(self.restoration)
         }
-        window.delegate = self
-        window.contentViewController = workspaceController
-        window.toolbar = workspaceController.makeToolbar()
     }
 
     @available(*, unavailable)
@@ -121,6 +126,44 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
         workspaceController.start(restoring: restoration.state)
+    }
+
+    /// Keep the last rendered view visible while the shared helper is down.
+    /// No operation is replayed from this transition.
+    func engineDidDisconnect(message: String) {
+        workspaceController.engineDidDisconnect(message: message)
+    }
+
+    func engineRecoveryFailed(_ error: Error) {
+        workspaceController.engineRecoveryFailed(error)
+    }
+
+    /// Rebind the visible workspace to a freshly authenticated session after
+    /// a helper generation change. Compact rows and local editor buffers stay
+    /// in place; network views are opened afresh. Mutation sheets are
+    /// intentionally dismissed instead of replayed.
+    func recover(with recoveredSession: OpenedClusterSession) {
+        dismissTransientOperationsForEngineRecovery()
+        session = recoveredSession
+        window?.title = "\(recoveredSession.contextName) — \(Product.applicationName)"
+        window?.subtitle = recoveredSession.serverHostname
+        workspaceController.recover(with: recoveredSession)
+        restoration.state = workspaceController.restorationState()
+        onRestorationCheckpoint?(restoration)
+    }
+
+    private func dismissTransientOperationsForEngineRecovery() {
+        if let sheet = window?.attachedSheet { window?.endSheet(sheet) }
+        portForwardConfigurationController?.close()
+        logConfigurationController?.close()
+        execConfigurationController?.close()
+        deleteResourcesController?.close()
+        resourceMutationController?.close()
+        portForwardConfigurationController = nil
+        logConfigurationController = nil
+        execConfigurationController = nil
+        deleteResourcesController = nil
+        resourceMutationController = nil
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -273,7 +316,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 private final class ClusterWorkspaceViewController: NSSplitViewController,
     NSToolbarDelegate, NSSearchFieldDelegate
 {
-    private let session: OpenedClusterSession
+    private var session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
     private let objectSearchProvider: any ObjectSearchProviding
     private let objectDetailProvider: any ObjectDetailProviding
@@ -377,6 +420,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     func start(restoring state: ClusterWindowRestorationState? = nil) {
         pendingRestorationState = state
+        connectionLabel.stringValue = "Connected"
+        connectionLabel.textColor = .secondaryLabelColor
         sidebarController.start { [weak self] resources in
             guard let self else { return }
             let restored = pendingRestorationState.flatMap {
@@ -408,6 +453,52 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             contextReference: session.contextReference,
             isSidebarVisible: !splitViewItems[0].isCollapsed
         )
+    }
+
+    func engineDidDisconnect(message: String) {
+        namespaceTask?.cancel()
+        objectOpenTask?.cancel()
+        detailController?.engineDidDisconnect()
+        contentController.engineDidDisconnect()
+        connectionLabel.stringValue = "Engine disconnected · reconnecting…"
+        connectionLabel.toolTip = message
+        connectionLabel.textColor = .systemOrange
+    }
+
+    func engineRecoveryFailed(_ error: Error) {
+        connectionLabel.stringValue = "Reconnect failed"
+        connectionLabel.toolTip = error.localizedDescription
+        connectionLabel.textColor = .systemRed
+    }
+
+    func recover(with recoveredSession: OpenedClusterSession) {
+        session = recoveredSession
+        sidebarController.recover(session: recoveredSession) { [weak self] _ in
+            guard let self else { return }
+            sidebarController.reconcileSelection(
+                matching: contentController.currentResourceID
+            )
+        }
+        contentController.recover(session: recoveredSession)
+        loadNamespaces()
+        portForwards.register(sessionID: recoveredSession.sessionID)
+        if let detailController {
+            connectionLabel.stringValue = "Reopening view…"
+            detailController.recover(sessionID: recoveredSession.sessionID) { [weak self] result in
+                switch result {
+                case .success:
+                    self?.connectionLabel.stringValue = "Connected"
+                    self?.connectionLabel.toolTip = nil
+                    self?.connectionLabel.textColor = .secondaryLabelColor
+                case .failure(let error):
+                    self?.engineRecoveryFailed(error)
+                }
+            }
+        } else {
+            connectionLabel.stringValue = "Connected"
+            connectionLabel.toolTip = nil
+            connectionLabel.textColor = .secondaryLabelColor
+        }
     }
 
     private func checkpointRestoration() {
@@ -609,7 +700,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 resources: resources,
                 namespaces: namespaces,
                 namespaceScope: selectedNamespaceScope(),
-                selectedIdentities: contentController.selectedIdentities
+                selectedIdentities: contentController.selectedIdentitiesForNetworkActions
             ),
             objectSearchProvider: objectSearchProvider
         )
@@ -827,7 +918,7 @@ private final class ResourceSidebarViewController: NSViewController,
         var resources: [DiscoveredResource]
     }
 
-    private let session: OpenedClusterSession
+    private var session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
     private let pinStore: SidebarPinStore
     private let outlineView = NSOutlineView()
@@ -945,6 +1036,18 @@ private final class ResourceSidebarViewController: NSViewController,
             pinStore.removeObserver(pinObserver)
             self.pinObserver = nil
         }
+    }
+
+    func recover(
+        session: OpenedClusterSession,
+        onLoaded: (([DiscoveredResource]) -> Void)? = nil
+    ) {
+        task?.cancel()
+        task = nil
+        self.session = session
+        statusLabel.stringValue = "Reloading discovery…"
+        statusLabel.textColor = .secondaryLabelColor
+        start(onLoaded: onLoaded)
     }
 
     @objc private func searchChanged() { rebuildSections() }
@@ -1151,6 +1254,23 @@ private final class ResourceSidebarViewController: NSViewController,
         select(resource: resource, notify: false)
     }
 
+    /// Keep the current GVR selected when it still exists after helper
+    /// rediscovery. If it disappeared, move to a fresh default instead of
+    /// leaving the workspace attached to a resource the new API catalog does
+    /// not expose.
+    func reconcileSelection(matching resourceID: String?) {
+        if let resourceID,
+            let resource = allResources.first(where: { $0.id == resourceID })
+        {
+            select(resource: resource, notify: false)
+            return
+        }
+        let fallback = allResources.first {
+            $0.group.isEmpty && $0.resource == "pods"
+        } ?? allResources.first
+        if let fallback { select(resource: fallback, notify: true) }
+    }
+
     func selectDefaultResource() {
         guard !didChooseInitialResource else { return }
         didChooseInitialResource = true
@@ -1176,7 +1296,7 @@ private final class ResourceSidebarViewController: NSViewController,
 private final class ResourceListViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate
 {
-    private let session: OpenedClusterSession
+    private var session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
     private let columnsConfigurationPath: String
     private let titleLabel = NSTextField(labelWithString: "Resources")
@@ -1210,6 +1330,7 @@ private final class ResourceListViewController: NSViewController,
     private var pendingSelectionUIDs: Set<ResourceUID>?
     private var restorationCheckpointTask: Task<Void, Never>?
     private var suppressPresentationCheckpoint = false
+    private var recoveredResourceTrust = RecoveredResourceTrust()
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
     var onShowCommandPalette: (() -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
@@ -1351,6 +1472,31 @@ private final class ResourceListViewController: NSViewController,
         suspend()
     }
 
+    /// Preserve the last compact rows as an explicitly disconnected snapshot.
+    /// A new helper generation receives a fresh session and opens a new view;
+    /// the stale session is never reused for mutations.
+    func engineDidDisconnect() {
+        filterTask?.cancel()
+        filterTask = nil
+        streamTask?.cancel()
+        streamTask = nil
+        generationGate.reset()
+        recoveredResourceTrust.requireValidation()
+        freshnessLabel.stringValue = "Disconnected"
+        errorLabel.stringValue = "The Kubernetes engine restarted. Rows shown here are from the last connected generation."
+        errorLabel.textColor = .systemOrange
+        errorLabel.isHidden = false
+        updateStatusLine()
+    }
+
+    func recover(session: OpenedClusterSession) {
+        self.session = session
+        history.rebindClusterSessionID(session.sessionID)
+        model.rebindClusterSessionID(session.sessionID)
+        recoveredResourceTrust.requireValidation()
+        if resource != nil { openStream() }
+    }
+
     func suspend() {
         filterTask?.cancel()
         filterTask = nil
@@ -1372,6 +1518,12 @@ private final class ResourceListViewController: NSViewController,
     var currentResourceID: String? { resource?.id }
 
     var selectedIdentities: [ResourceIdentity] { model.selectedIdentities }
+
+    var selectedIdentitiesForNetworkActions: [ResourceIdentity] {
+        let selected = model.selectedIdentities
+        guard recoveredResourceTrust.permitsNetworkActions(for: selected) else { return [] }
+        return selected
+    }
 
     @discardableResult
     func handleEscape() -> Bool {
@@ -1595,6 +1747,11 @@ private final class ResourceListViewController: NSViewController,
                 snapshotUIDs.removeAll(keepingCapacity: true)
             }
             snapshotUIDs.append(contentsOf: chunk.rows.map { $0.identity.uid })
+            recoveredResourceTrust.receiveSnapshot(
+                uids: chunk.rows.map { $0.identity.uid },
+                first: chunk.first,
+                last: chunk.last
+            )
             if let pendingScrollAnchor,
                 chunk.last || chunk.rows.contains(where: { $0.identity.uid == pendingScrollAnchor.uid })
             {
@@ -1630,6 +1787,10 @@ private final class ResourceListViewController: NSViewController,
             ), capture: capture)
             plan = restoringPendingSelection(in: plan, chunkIsComplete: false)
             applyTablePlan(plan)
+            recoveredResourceTrust.receiveDelta(
+                upsertedUIDs: delta.upserts.map { $0.identity.uid },
+                removedUIDs: delta.removedUIDs
+            )
         case .failure(_, let issue):
             show(error: issue)
         }
@@ -2038,6 +2199,10 @@ private final class ResourceListViewController: NSViewController,
     }
 
     @objc private func openSelectedObjectFromTable() {
+        guard canPerformCommand(.open, requiringTableFocus: false) else {
+            NSSound.beep()
+            return
+        }
         openSelectedObject(initialTab: .automatic)
     }
 
@@ -2143,6 +2308,19 @@ private final class ResourceListViewController: NSViewController,
     ) -> Bool {
         if requiringTableFocus, view.window?.firstResponder !== tableView { return false }
         let selected = model.selectedIdentities
+        let isLocalOnly: Bool
+        switch command {
+        case .copyName, .copyNamespacedName, .copyReference,
+            .focusFilter, .selectAll, .moveDown, .moveUp:
+            isLocalOnly = true
+        default:
+            isLocalOnly = false
+        }
+        if !isLocalOnly,
+            !recoveredResourceTrust.permitsNetworkActions(for: selected)
+        {
+            return false
+        }
         switch command {
         case .open, .openYAML, .openEvents:
             return selected.count == 1

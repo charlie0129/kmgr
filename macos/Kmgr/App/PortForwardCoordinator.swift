@@ -12,6 +12,7 @@ final class PortForwardCoordinator {
         var hasFailure: Bool
         var connectionIssue: ClusterManagerIssue?
         var isWatching: Bool
+        var helperGenerationAvailable: Bool
     }
 
     private let provider: any PortForwardProviding
@@ -40,7 +41,8 @@ final class PortForwardCoordinator {
             activeCount: collection.activeCount,
             hasFailure: collection.hasFailure,
             connectionIssue: connectionIssue,
-            isWatching: isWatching
+            isWatching: isWatching,
+            helperGenerationAvailable: !anchorSessionID.isEmpty
         )
     }
 
@@ -56,9 +58,38 @@ final class PortForwardCoordinator {
     func register(sessionID: String) {
         let value = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
-        guard watchTask == nil else { return }
         anchorSessionID = value
+        guard watchTask == nil else { return }
         startWatching()
+    }
+
+    /// Helper-owned listeners are gone after an unexpected process exit and
+    /// must never be recreated silently. Keep the records visible as failed
+    /// explanations, stop retrying with the dead session, and wait for a fresh
+    /// workspace registration before watching the new empty manager.
+    func engineDidDisconnect(message: String) {
+        watchTask?.cancel()
+        watchTask = nil
+        anchorSessionID = ""
+        isWatching = false
+        let issue = ClusterManagerIssue(
+            category: .unavailable,
+            reason: "EngineRestarted",
+            message: "The Kubernetes engine restarted. This port-forward was not restored automatically. \(message)",
+            retryable: false,
+            operation: "port-forward"
+        )
+        let failed = collection.records.map { record in
+            guard record.state.isActive else { return record }
+            var record = record
+            record.state = .failed
+            record.updatedAt = Date()
+            record.lastIssue = issue
+            return record
+        }
+        collection.replace(with: failed)
+        connectionIssue = issue
+        publish()
     }
 
     @discardableResult
@@ -81,6 +112,16 @@ final class PortForwardCoordinator {
     }
 
     func restart(_ record: PortForwardRecord) async throws {
+        if record.lastIssue?.reason == "EngineRestarted" {
+            throw ClusterManagerIssue(
+                category: .conflict,
+                reason: "EngineRestarted",
+                message: "This port-forward belonged to the previous engine generation and cannot be restarted. Start a new port-forward from the current object view.",
+                retryable: false,
+                contextName: record.contextName,
+                operation: "restart port-forward"
+            )
+        }
         try await provider.restartPortForward(
             id: record.id,
             sessionID: record.clusterSessionID
@@ -122,7 +163,13 @@ final class PortForwardCoordinator {
                         includeStopped: true
                     )
                     guard !Task.isCancelled else { return }
-                    collection.replace(with: listed)
+                    // A fresh helper has no knowledge of listeners owned by
+                    // the crashed generation. Retain those explicit failure
+                    // tombstones so the user can see what was not restored.
+                    let previousGeneration = collection.records.filter {
+                        $0.lastIssue?.reason == "EngineRestarted"
+                    }
+                    collection.replace(with: listed + previousGeneration)
                     connectionIssue = nil
                     publish()
 

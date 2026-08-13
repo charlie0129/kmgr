@@ -187,7 +187,13 @@ public final class EngineSupervisor {
         }
     }
 
-    public private(set) var state: EngineConnectionState = .stopped
+    public private(set) var state: EngineConnectionState = .stopped {
+        didSet {
+            guard oldValue != state else { return }
+            let value = state
+            for observer in Array(stateObservers.values) { observer(value) }
+        }
+    }
     public nonisolated let connection = EngineConnection()
 
     private let configuration: Configuration
@@ -196,6 +202,7 @@ public final class EngineSupervisor {
     private var shutdownRequested = false
     private var currentProcess: Process?
     private var currentClient: EngineConnection.Client?
+    private var stateObservers: [UUID: @MainActor (EngineConnectionState) -> Void] = [:]
 
     public init(configuration: Configuration = .bundled()) {
         self.configuration = configuration
@@ -213,6 +220,23 @@ public final class EngineSupervisor {
         supervisionTask = Task { [weak self] in
             await self?.supervise()
         }
+    }
+
+    /// Observe helper generations without polling. The current state is
+    /// delivered immediately so application composition can subscribe after
+    /// constructing the shared providers without missing startup progress.
+    @discardableResult
+    public func observeState(
+        _ observer: @escaping @MainActor (EngineConnectionState) -> Void
+    ) -> UUID {
+        let token = UUID()
+        stateObservers[token] = observer
+        observer(state)
+        return token
+    }
+
+    public func removeStateObserver(_ token: UUID) {
+        stateObservers.removeValue(forKey: token)
     }
 
     public func waitUntilReady(timeout: Duration = .seconds(10)) async throws -> EngineInformation {
