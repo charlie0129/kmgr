@@ -27,6 +27,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let logProvider: any LogStreamProviding
     private let execProvider: any ExecSessionProviding
     private let portForwards: PortForwardCoordinator
+    private let columnsConfigurationPath: String
     private let workspaceController: ClusterWorkspaceViewController
     private var restoration: ClusterWindowRestorationRecord
     private var portForwardConfigurationController: PortForwardConfigurationWindowController?
@@ -44,6 +45,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         logProvider: any LogStreamProviding,
         execProvider: any ExecSessionProviding,
         portForwards: PortForwardCoordinator,
+        columnsConfigurationPath: String,
         restoration: ClusterWindowRestorationRecord,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
@@ -55,6 +57,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.execProvider = execProvider
         self.restoration = restoration
         self.portForwards = portForwards
+        self.columnsConfigurationPath = columnsConfigurationPath
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
@@ -75,6 +78,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             objectSearchProvider: objectSearchProvider,
             objectDetailProvider: objectDetailProvider,
             portForwards: portForwards,
+            columnsConfigurationPath: columnsConfigurationPath,
             onShowPortForwards: onShowPortForwards
         )
         super.init(window: window)
@@ -259,6 +263,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let objectSearchProvider: any ObjectSearchProviding
     private let objectDetailProvider: any ObjectDetailProviding
     private let portForwards: PortForwardCoordinator
+    private let columnsConfigurationPath: String
     private let onShowPortForwards: @MainActor () -> Void
     private let sidebarController: ResourceSidebarViewController
     private let contentController: ResourceListViewController
@@ -287,6 +292,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
         portForwards: PortForwardCoordinator,
+        columnsConfigurationPath: String,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
         self.session = session
@@ -294,11 +300,13 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.objectSearchProvider = objectSearchProvider
         self.objectDetailProvider = objectDetailProvider
         self.portForwards = portForwards
+        self.columnsConfigurationPath = columnsConfigurationPath
         self.onShowPortForwards = onShowPortForwards
         sidebarController = ResourceSidebarViewController(session: session, provider: provider)
         contentController = ResourceListViewController(
             session: session,
-            provider: provider
+            provider: provider,
+            columnsConfigurationPath: columnsConfigurationPath
         )
         super.init(nibName: nil, bundle: nil)
 
@@ -1079,6 +1087,7 @@ private final class ResourceListViewController: NSViewController,
 {
     private let session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
+    private let columnsConfigurationPath: String
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let freshnessLabel = NSTextField(labelWithString: "Idle")
@@ -1119,9 +1128,14 @@ private final class ResourceListViewController: NSViewController,
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: (() -> Void)?
 
-    init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
+    init(
+        session: OpenedClusterSession,
+        provider: any WorkspaceResourceProviding,
+        columnsConfigurationPath: String
+    ) {
         self.session = session
         self.provider = provider
+        self.columnsConfigurationPath = columnsConfigurationPath
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1478,9 +1492,21 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func configureColumns(for resource: DiscoveredResource) {
-        installColumns(
-            columnDefinitionsByResourceID[resource.id] ?? defaultColumnDefinitions(for: resource)
+        if let existing = columnDefinitionsByResourceID[resource.id] {
+            installColumns(existing)
+            return
+        }
+        let defaults = defaultColumnDefinitions(for: resource)
+        let match = ColumnResourceMatch(
+            group: resource.group,
+            version: resource.version,
+            resource: resource.resource
         )
+        let definitions = (try? ColumnConfigurationFileStore(
+            path: columnsConfigurationPath
+        ).load().views.first(where: { $0.match == match })?.columns) ?? defaults
+        columnDefinitionsByResourceID[resource.id] = definitions
+        installColumns(definitions)
     }
 
     private func applyColumns(_ definitions: [ColumnDefinition], forResourceID resourceID: String) {
