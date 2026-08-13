@@ -1455,6 +1455,7 @@ private final class ResourceListViewController: NSViewController,
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let freshnessLabel = NSTextField(labelWithString: "Idle")
+    private let freshnessProgressIndicator = NSProgressIndicator()
     private let countLabel = NSTextField(labelWithString: "0 objects")
     private let sortLabel = NSTextField(labelWithString: "Unsorted")
     private let filterField = NSSearchField()
@@ -1490,6 +1491,8 @@ private final class ResourceListViewController: NSViewController,
     private var pendingScrollAnchor: ScrollAnchor?
     private var pendingSelectionUIDs: Set<ResourceUID>?
     private var restorationCheckpointTask: Task<Void, Never>?
+    private var freshnessAgeTask: Task<Void, Never>?
+    private var resourceViewStatus: ResourceViewStatus?
     private var suppressPresentationCheckpoint = false
     private var recoveredResourceTrust = RecoveredResourceTrust()
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
@@ -1530,6 +1533,12 @@ private final class ResourceListViewController: NSViewController,
         titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
         scopeLabel.textColor = .secondaryLabelColor
         freshnessLabel.textColor = .secondaryLabelColor
+        freshnessLabel.setAccessibilityLabel("Resource freshness")
+        freshnessProgressIndicator.style = .spinning
+        freshnessProgressIndicator.controlSize = .small
+        freshnessProgressIndicator.isDisplayedWhenStopped = false
+        freshnessProgressIndicator.isHidden = true
+        freshnessProgressIndicator.setAccessibilityLabel("Resource view update in progress")
         countLabel.textColor = .secondaryLabelColor
         sortLabel.textColor = .secondaryLabelColor
         filterField.placeholderString = "Filter resources  /"
@@ -1539,7 +1548,10 @@ private final class ResourceListViewController: NSViewController,
 
         let columnsButton = NSButton(title: "Columns…", target: self, action: #selector(showColumns))
         columnsButton.bezelStyle = .texturedRounded
-        let header = NSStackView(views: [titleLabel, countLabel, scopeLabel, freshnessLabel, sortLabel, NSView(), filterField, columnsButton])
+        let header = NSStackView(views: [
+            titleLabel, countLabel, scopeLabel, freshnessProgressIndicator,
+            freshnessLabel, sortLabel, NSView(), filterField, columnsButton,
+        ])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 9
@@ -1660,6 +1672,7 @@ private final class ResourceListViewController: NSViewController,
     func stop() {
         restorationCheckpointTask?.cancel()
         restorationCheckpointTask = nil
+        stopFreshnessAgeUpdates()
         suspend()
         clearOptionalResourceOverlay()
     }
@@ -1676,7 +1689,7 @@ private final class ResourceListViewController: NSViewController,
         cancelOptionalResourceDiscovery(selecting: nil)
         generationGate.reset()
         recoveredResourceTrust.requireValidation()
-        freshnessLabel.stringValue = "Disconnected"
+        installFreshnessText("Disconnected")
         showInlineIssue(
             "The Kubernetes engine restarted. Rows shown here are from the last connected generation.",
             color: .systemOrange
@@ -1700,6 +1713,9 @@ private final class ResourceListViewController: NSViewController,
 
     func suspend() {
         endProjectionRequest(outcome: "cancelled")
+        stopFreshnessAgeUpdates()
+        freshnessProgressIndicator.stopAnimation(nil)
+        freshnessProgressIndicator.isHidden = true
         filterTask?.cancel()
         filterTask = nil
         streamTask?.cancel()
@@ -1934,7 +1950,7 @@ private final class ResourceListViewController: NSViewController,
         hideInlineIssue()
         titleLabel.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
         scopeLabel.stringValue = scope.presentation
-        freshnessLabel.stringValue = "Loading…"
+        installResourceViewStatus(ResourceViewStatus(freshness: .loading))
         let request = ResourceViewRequest(
             sessionID: session.sessionID,
             viewID: viewID,
@@ -1975,7 +1991,7 @@ private final class ResourceListViewController: NSViewController,
 
         switch message {
         case .status(_, let status):
-            freshnessLabel.stringValue = status.presentation
+            installResourceViewStatus(status)
             countLabel.stringValue = "\(status.rowsVisible.formatted()) objects"
         case .snapshot(_, let chunk):
             let metadata = message.resourceBatchSignpostMetadata!
@@ -2128,7 +2144,58 @@ private final class ResourceListViewController: NSViewController,
 
     private func show(error: Error) {
         showInlineIssue(error.localizedDescription)
-        freshnessLabel.stringValue = "Disconnected"
+        installFreshnessText("Disconnected")
+    }
+
+    private func installResourceViewStatus(
+        _ status: ResourceViewStatus,
+        now: Date = Date()
+    ) {
+        resourceViewStatus = status
+        freshnessLabel.stringValue = status.presentation(now: now)
+        freshnessLabel.setAccessibilityValue(freshnessLabel.stringValue)
+        if status.showsProgress {
+            freshnessProgressIndicator.isHidden = false
+            freshnessProgressIndicator.startAnimation(nil)
+        } else {
+            freshnessProgressIndicator.stopAnimation(nil)
+            freshnessProgressIndicator.isHidden = true
+        }
+        restartFreshnessAgeUpdatesIfNeeded()
+        updateStatusLine()
+    }
+
+    private func installFreshnessText(_ text: String) {
+        resourceViewStatus = nil
+        stopFreshnessAgeUpdates()
+        freshnessProgressIndicator.stopAnimation(nil)
+        freshnessProgressIndicator.isHidden = true
+        freshnessLabel.stringValue = text
+        freshnessLabel.setAccessibilityValue(text)
+        updateStatusLine()
+    }
+
+    private func restartFreshnessAgeUpdatesIfNeeded() {
+        stopFreshnessAgeUpdates()
+        guard resourceViewStatus?.needsAgeRefresh == true else { return }
+        freshnessAgeTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled,
+                    let self,
+                    let status = self.resourceViewStatus,
+                    status.needsAgeRefresh
+                else { return }
+                self.freshnessLabel.stringValue = status.presentation
+                self.freshnessLabel.setAccessibilityValue(self.freshnessLabel.stringValue)
+                self.updateStatusLine()
+            }
+        }
+    }
+
+    private func stopFreshnessAgeUpdates() {
+        freshnessAgeTask?.cancel()
+        freshnessAgeTask = nil
     }
 
     private func showInlineIssue(_ message: String, color: NSColor = .systemRed) {

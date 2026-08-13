@@ -203,17 +203,68 @@ public struct ResourceViewStatus: Hashable, Sendable {
         self.fromWarmCache = fromWarmCache
     }
 
-    public var presentation: String {
+    /// Whether continuity work is happening in the background. The resource
+    /// table stays usable while this is true; callers should pair the text with
+    /// a small indeterminate progress indicator instead of covering the rows.
+    public var showsProgress: Bool {
         switch freshness {
-        case .loading: "Loading…"
-        case .stale: "Cached"
-        case .resuming: "Resuming…"
-        case .relisting: objectsExamined > 0 ? "Relisting… \(objectsExamined.formatted()) loaded" : "Relisting…"
-        case .watching: "Watching"
-        case .reconnecting: "Reconnecting…"
-        case .failed: "Failed"
-        case .complete: "Complete"
+        case .loading, .resuming, .relisting, .reconnecting:
+            true
+        case .stale, .watching, .failed, .complete:
+            false
         }
+    }
+
+    /// Stale rows remain useful, but their age must remain visible and advance
+    /// even when the server emits no further status messages.
+    public var needsAgeRefresh: Bool {
+        guard lastSynchronizedAt != nil else { return false }
+        return switch freshness {
+        case .stale, .resuming, .relisting, .reconnecting, .failed:
+            true
+        case .loading, .watching, .complete:
+            false
+        }
+    }
+
+    public var presentation: String { presentation(now: Date()) }
+
+    public func presentation(now: Date) -> String {
+        let age = lastSynchronizedAt.map {
+            "\(Self.ageText(since: $0, now: now)) old"
+        }
+        switch freshness {
+        case .loading:
+            return "Loading…"
+        case .stale:
+            return age.map { "Cached · \($0)" } ?? "Cached · age unavailable"
+        case .resuming:
+            return age.map { "Resuming… · cached \($0)" } ?? "Resuming…"
+        case .relisting:
+            let progress = objectsExamined > 0
+                ? "Relisting… \(objectsExamined.formatted()) loaded"
+                : "Relisting…"
+            return age.map { "\(progress) · cached \($0)" } ?? progress
+        case .watching:
+            return "Watching"
+        case .reconnecting:
+            return age.map { "Reconnecting… · last synchronized \($0)" }
+                ?? "Reconnecting… · last synchronization unknown"
+        case .failed:
+            return age.map { "Failed · last synchronized \($0)" } ?? "Failed"
+        case .complete:
+            return "Complete"
+        }
+    }
+
+    private static func ageText(since date: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 { return "\(seconds)s" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        return "\(hours / 24)d"
     }
 }
 

@@ -43,10 +43,50 @@ struct ClusterWorkspaceToolbarTests {
         button.sizeToFit()
         #expect(button.frame.width >= button.intrinsicContentSize.width)
     }
+
+    @Test("resource freshness header shows cached age and background progress")
+    func resourceFreshnessHeader() async throws {
+        let synchronizedAt = Date(timeIntervalSinceNow: -18)
+        let provider = HeaderStatusWorkspaceResourceProvider(
+            statuses: [
+                ResourceViewStatus(
+                    freshness: .stale,
+                    rowsVisible: 7,
+                    lastSynchronizedAt: synchronizedAt,
+                    fromWarmCache: true
+                ),
+                ResourceViewStatus(
+                    freshness: .reconnecting,
+                    rowsVisible: 7,
+                    lastSynchronizedAt: synchronizedAt,
+                    fromWarmCache: true
+                ),
+            ]
+        )
+        let controller = makeWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let label = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Resource freshness" })
+        let progress = try #require(descendants(of: root)
+            .compactMap { $0 as? NSProgressIndicator }
+            .first { $0.accessibilityLabel() == "Resource view update in progress" })
+
+        try await waitUntil { label.stringValue.hasPrefix("Reconnecting…") }
+        #expect(label.stringValue.contains("last synchronized"))
+        #expect(label.stringValue.contains("old"))
+        #expect(!progress.isHidden)
+        #expect(!progress.isDisplayedWhenStopped)
+        #expect(label.accessibilityValue() == label.stringValue)
+    }
 }
 
 @MainActor
-private func makeWorkspace() -> ClusterWorkspaceWindowController {
+private func makeWorkspace(
+    provider: any WorkspaceResourceProviding = NoopWorkspaceResourceProvider()
+) -> ClusterWorkspaceWindowController {
     let portForwards = PortForwardCoordinator(provider: NoopPortForwardProvider())
     return ClusterWorkspaceWindowController(
         session: OpenedClusterSession(
@@ -56,7 +96,7 @@ private func makeWorkspace() -> ClusterWorkspaceWindowController {
             serverHostname: "example.invalid",
             defaultNamespace: "default"
         ),
-        provider: NoopWorkspaceResourceProvider(),
+        provider: provider,
         connectionActivityProvider: NoopConnectionActivityProvider(),
         optionalResourceCatalogProvider: NoopOptionalResourceCatalogProvider(),
         objectSearchProvider: NoopObjectSearchProvider(),
@@ -74,6 +114,64 @@ private func makeWorkspace() -> ClusterWorkspaceWindowController {
         ),
         onShowPortForwards: {}
     )
+}
+
+private struct HeaderStatusWorkspaceResourceProvider: WorkspaceResourceProviding {
+    let statuses: [ResourceViewStatus]
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult {
+        .init(resources: [DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list"]
+        )])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { [] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error> {
+        AsyncThrowingStream { continuation in
+            for (index, status) in statuses.enumerated() {
+                continuation.yield(.status(
+                    cursor: StreamCursor(
+                        generation: request.generation,
+                        sequence: UInt64(index + 1)
+                    ),
+                    status: status
+                ))
+            }
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+@MainActor
+private func descendants(of root: NSView) -> [NSView] {
+    [root] + root.subviews.flatMap(descendants(of:))
+}
+
+@MainActor
+private func waitUntil(
+    timeout: Duration = .seconds(2),
+    condition: @escaping @MainActor () -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !condition() {
+        guard clock.now < deadline else {
+            throw ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "AppKitTestTimeout",
+                message: "Timed out waiting for the resource freshness header.",
+                operation: "test resource freshness header"
+            )
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
 }
 
 private struct NoopWorkspaceResourceProvider: WorkspaceResourceProviding {

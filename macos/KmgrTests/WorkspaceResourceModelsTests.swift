@@ -14,10 +14,49 @@ import Testing
 }
 
 @Test func resourceStatusUsesHonestProgressText() {
+    let synchronizedAt = Date(timeIntervalSince1970: 1_000)
+    let now = Date(timeIntervalSince1970: 1_018)
     let relisting = ResourceViewStatus(freshness: .relisting, objectsExamined: 24_000)
     #expect(relisting.presentation.contains("24,000"))
-    #expect(ResourceViewStatus(freshness: .stale).presentation == "Cached")
+    #expect(ResourceViewStatus(
+        freshness: .stale,
+        lastSynchronizedAt: synchronizedAt
+    ).presentation(now: now) == "Cached · 18s old")
+    #expect(ResourceViewStatus(
+        freshness: .reconnecting,
+        lastSynchronizedAt: synchronizedAt
+    ).presentation(now: now) == "Reconnecting… · last synchronized 18s old")
     #expect(ResourceViewStatus(freshness: .watching).presentation == "Watching")
+}
+
+@Test func resourceStatusProgressAndAgeRefreshPolicyMatchesContinuityWork() {
+    let synchronizedAt = Date(timeIntervalSince1970: 1_000)
+    for freshness in [
+        ResourceViewStatus.Freshness.loading, .resuming, .relisting, .reconnecting,
+    ] {
+        #expect(ResourceViewStatus(freshness: freshness).showsProgress)
+    }
+    for freshness in [
+        ResourceViewStatus.Freshness.stale, .watching, .failed, .complete,
+    ] {
+        #expect(!ResourceViewStatus(freshness: freshness).showsProgress)
+    }
+
+    #expect(ResourceViewStatus(
+        freshness: .relisting,
+        lastSynchronizedAt: synchronizedAt
+    ).needsAgeRefresh)
+    #expect(ResourceViewStatus(
+        freshness: .failed,
+        lastSynchronizedAt: synchronizedAt
+    ).needsAgeRefresh)
+    #expect(!ResourceViewStatus(
+        freshness: .watching,
+        lastSynchronizedAt: synchronizedAt
+    ).needsAgeRefresh)
+    #expect(ResourceViewStatus(freshness: .stale).presentation(
+        now: Date(timeIntervalSince1970: 2_000)
+    ) == "Cached · age unavailable")
 }
 
 @Test func everyResourceViewMessageCarriesGenerationCursor() {
