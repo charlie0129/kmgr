@@ -1438,8 +1438,7 @@ private final class ResourceSidebarViewController: NSViewController,
 private final class ResourceListViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate
 {
-    private static let maximumAutoWidthSamples = 4_096
-    private static let maximumAutoSizedColumnWidth: CGFloat = 640
+    private static let autoWidthPolicy = TableColumnAutoWidthPolicy()
 
     private var session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
@@ -1456,6 +1455,7 @@ private final class ResourceListViewController: NSViewController,
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private var tableTopWithoutErrorConstraint: NSLayoutConstraint?
     private var tableTopWithErrorConstraint: NSLayoutConstraint?
+    private var inlineIssueState = ResourceListInlineIssueState()
     private var model = ResourceTableModel()
     private var generationGate = GenerationSequenceGate()
     private var resource: DiscoveredResource?
@@ -1598,12 +1598,12 @@ private final class ResourceListViewController: NSViewController,
             errorLabel.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            tableTopWithoutError,
             scrollView.bottomAnchor.constraint(equalTo: statusLine.topAnchor, constant: -2),
             statusLine.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
             statusLine.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
             statusLine.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
         ])
+        applyInlineIssueState()
         view = root
     }
 
@@ -2120,17 +2120,27 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func showInlineIssue(_ message: String, color: NSColor = .systemRed) {
-        errorLabel.stringValue = message
+        inlineIssueState.show(message)
         errorLabel.textColor = color
-        errorLabel.isHidden = false
-        tableTopWithoutErrorConstraint?.isActive = false
-        tableTopWithErrorConstraint?.isActive = true
+        applyInlineIssueState()
     }
 
     private func hideInlineIssue() {
-        errorLabel.isHidden = true
-        tableTopWithErrorConstraint?.isActive = false
-        tableTopWithoutErrorConstraint?.isActive = true
+        inlineIssueState.hide()
+        applyInlineIssueState()
+    }
+
+    private func applyInlineIssueState() {
+        errorLabel.stringValue = inlineIssueState.message ?? ""
+        errorLabel.isHidden = inlineIssueState.isHidden
+        switch inlineIssueState.tableTopAnchor {
+        case .header:
+            tableTopWithErrorConstraint?.isActive = false
+            tableTopWithoutErrorConstraint?.isActive = true
+        case .issueRow:
+            tableTopWithoutErrorConstraint?.isActive = false
+            tableTopWithErrorConstraint?.isActive = true
+        }
     }
 
     /// Gives each stream generation fresh discovery authority. The installed
@@ -2665,45 +2675,27 @@ private final class ResourceListViewController: NSViewController,
         let rowCount = model.orderedVisibleUIDs.count
         let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
         var fittedWidth = column.headerCell.cellSize.width + 18
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
+        let visibleRange: Range<Int>? = visibleRows.location == NSNotFound
+            ? nil
+            : visibleRows.location..<(visibleRows.location + visibleRows.length)
 
-        for rowIndex in autoWidthSampleRows(rowCount: rowCount, tableView: tableView) {
+        for rowIndex in Self.autoWidthPolicy.sampleIndexes(
+            rowCount: rowCount,
+            visibleRows: visibleRange
+        ) {
             let uid = model.orderedVisibleUIDs[rowIndex]
             let text = model.rowByUID[uid]?[columnID]?.displayText ?? "—"
             let textWidth = (text as NSString).size(withAttributes: [.font: font]).width + 12
             fittedWidth = max(fittedWidth, textWidth)
-            if fittedWidth >= Self.maximumAutoSizedColumnWidth { break }
+            if fittedWidth >= Self.autoWidthPolicy.maximumWidth { break }
         }
 
-        return ceil(min(
-            max(column.minWidth, fittedWidth),
-            min(column.maxWidth, Self.maximumAutoSizedColumnWidth)
+        return CGFloat(Self.autoWidthPolicy.fittedWidth(
+            candidateWidth: Double(fittedWidth),
+            minimumWidth: Double(column.minWidth),
+            columnMaximumWidth: Double(column.maxWidth)
         ))
-    }
-
-    private func autoWidthSampleRows(rowCount: Int, tableView: NSTableView) -> IndexSet {
-        guard rowCount > 0 else { return [] }
-        if rowCount <= Self.maximumAutoWidthSamples {
-            return IndexSet(integersIn: 0..<rowCount)
-        }
-
-        var rows = IndexSet()
-        let visible = tableView.rows(in: tableView.visibleRect)
-        if visible.location != NSNotFound {
-            let upperBound = min(rowCount, visible.location + visible.length)
-            if visible.location < upperBound {
-                rows.insert(integersIn: visible.location..<upperBound)
-            }
-        }
-        let remaining = max(0, Self.maximumAutoWidthSamples - rows.count)
-        guard remaining > 0 else { return rows }
-        if remaining == 1 {
-            rows.insert(rowCount / 2)
-            return rows
-        }
-        for offset in 0..<remaining {
-            rows.insert(offset * (rowCount - 1) / (remaining - 1))
-        }
-        return rows
     }
 
     @objc private func openSelectedObjectFromTable() {
