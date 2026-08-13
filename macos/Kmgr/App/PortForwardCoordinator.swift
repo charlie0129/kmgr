@@ -56,7 +56,7 @@ final class PortForwardCoordinator {
     func register(sessionID: String) {
         let value = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
-        guard value != anchorSessionID || watchTask == nil else { return }
+        guard watchTask == nil else { return }
         anchorSessionID = value
         startWatching()
     }
@@ -163,7 +163,11 @@ final class PortForwardCoordinator {
                     publish()
                     let delay = min(5_000, 250 * (1 << min(retry, 4)))
                     retry += 1
-                    try? await Task.sleep(for: .milliseconds(delay))
+                    do {
+                        try await Task.sleep(for: .milliseconds(delay))
+                    } catch {
+                        return
+                    }
                 }
             }
         }
