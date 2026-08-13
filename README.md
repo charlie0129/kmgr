@@ -1,35 +1,298 @@
 # kmgr
 
-`kmgr` is a keyboard-first, native macOS Kubernetes manager. The user interface is written with programmatic AppKit and delegates all Kubernetes access to a supervised Go helper process.
+`kmgr` is a keyboard-first, native macOS Kubernetes manager. It combines a
+programmatic AppKit interface with an out-of-process Go engine built on
+`client-go`; the UI stays focused on compact rows and window state while the
+engine owns Kubernetes discovery, LIST/WATCH streams, caches, metrics,
+mutations, logs, exec, and port-forwards.
 
-The project is under active construction. The current build establishes the native application bundle and helper boundary; cluster workflows are added as buildable vertical slices.
+The current build is an end-to-end developer release. It opens real kubeconfig
+contexts and does not substitute static demo data.
 
 ## Requirements
 
 - macOS 15 or later
 - Xcode 16.4 or later, including the Swift 6.1 toolchain
-- Go 1.24 or later
+- Go 1.26 or later
+- A kubeconfig using static credentials, certificates, basic authentication,
+  or another authentication form that does not invoke an external plugin
 
-The macOS 15 deployment target is imposed by the maintained gRPC Swift 2 NIO transport used for authenticated Unix-domain-socket IPC. The app is intended for direct distribution and does not use App Sandbox.
+The macOS 15 deployment target is imposed by the maintained gRPC Swift 2 NIO
+transport used for authenticated Unix-domain-socket IPC. The app is intended
+for direct distribution and does not use App Sandbox.
 
-## Developer workflow
+## Build and run
 
 ```sh
-make generate  # regenerate protocol sources
-make test      # run Go and Swift tests
-make app       # assemble build/Kmgr.app, including kmgr-engine
+make test      # run deterministic Go and Swift tests
+make app       # assemble and ad-hoc sign build/Kmgr.app
 make run       # build and launch the local app
+make generate  # regenerate checked-in protobuf sources
 ```
 
-`make app` creates an unsigned local debug bundle. Use `CONFIGURATION=release make app` for an optimized bundle. Release signing, hardened-runtime configuration, and notarization can be applied to the resulting nested-code layout later.
+`make app` builds both processes, embeds `kmgr-engine` under
+`Kmgr.app/Contents/Helpers`, signs the nested helper first, then ad-hoc signs
+the bundle. No signing identity is required. Use `CONFIGURATION=release make
+app` for optimized Swift code; a distribution pipeline can replace the ad-hoc
+signatures with Developer ID signatures and add hardened-runtime/notarization
+steps.
 
-## Architecture
+`make generate` downloads pinned code generators into the ignored `.tools`
+directory on first use. Ordinary builds use the generated Go and Swift files
+already checked into the repository.
 
-The app has two process boundaries:
+## Getting started
 
-- `Kmgr.app` owns windows, responder-chain commands, accessibility, and compact view state.
-- `kmgr-engine`, embedded in `Contents/Helpers`, owns kubeconfig handling, Kubernetes clients, watches, caches, projection, mutations, and long-running streams.
+1. Launch Kmgr. The Cluster Manager reads normal kubeconfig resolution,
+   including `KUBECONFIG` path lists and the default kubeconfig location,
+   without contacting every listed server.
+2. Select a context and choose **Open**. This is the explicit connection
+   boundary: the engine creates authenticated `client-go` clients and makes a
+   short, deadline-bounded `GET /version` probe before accepting the session.
+3. Pick a resource from the sidebar. Lists arrive progressively, then continue
+   through WATCH. Moving away releases the last view consumer after a debounce;
+   returning can display bounded warm rows immediately while the watch resumes
+   or a relist runs in the background.
+4. Use `/` for the current table filter and Command-K for commands, kinds,
+   namespaces, or a two-stage resource-scoped object search. A scoped search
+   checks compatible active/warm engine caches before doing a paginated LIST.
 
-Swift Package Manager is the reproducible macOS project definition. `scripts/build-app.sh` builds both executables and assembles the standard application-bundle structure without requiring code signing.
+Each context workspace is a separate native window. Opening the same context
+twice creates independent UI/navigation state while allowing the engine to
+share compatible cluster authority. Details replace the table in that window;
+logs and terminals use independent windows, and all forwards live in one
+app-wide Port Forwards window.
 
-No credentials, Secret values, logs, or terminal contents may be written to application diagnostics.
+## Main workflows
+
+- Resource tables use UID-stable native multi-selection. Sorting, filtering,
+  and watch updates do not retarget a selection by row index.
+- Details provide Summary, YAML, Events, Relationships, Metrics where
+  meaningful, and a Data editor for ConfigMaps and Secrets.
+- YAML edits are parsed in Go, identity-checked, dry-run with server-side
+  apply, shown as a semantic diff, and committed with resource-version conflict
+  protection.
+- ConfigMap and Secret keys support text and raw binary values. Secret bytes
+  are decoded/encoded by the engine and concealed by default in the UI.
+- Pod logs support one or many UID-pinned Pods, bounded sources and buffers,
+  container selection, follow, previous logs, timestamps, tail, since,
+  filtering, pause, copy, and explicit save.
+- Pod exec uses a SwiftTerm window and direct argv transport. The configuration
+  can probe `/bin/bash` then `/bin/sh`, or run an explicit executable without
+  shell parsing.
+- Pod and Service port-forwards bind loopback by default and retry with
+  exponential backoff capped at 15 seconds until explicitly stopped. A direct
+  Pod forward rechecks its pinned UID before every retry. If the Pod was
+  deleted and a same-name Pod appears with a new UID, the forward stays
+  **Failed** and never attaches to the replacement. Service forwards may
+  resolve another eligible Pod.
+- Delete, scale, rollout restart, label/annotation editing, and copy actions
+  are exposed through native menus. Deletes carry UID preconditions and report
+  per-object partial failures.
+
+### Relationships and scan cost
+
+Opening **Relationships** is intentionally cheap by default. It gets owners
+authoritatively and reads child relationships only from resource caches the
+engine already has; it never wakes stopped watches or lists every resource
+kind. The UI labels these child results **Cached children · potentially
+incomplete**, including when no cached children were found.
+
+Choose **Scan All Resources…** only when fuller coverage is worth the API cost.
+After confirmation, Kmgr performs cancellable, paginated metadata LISTs across
+discovered listable resource types and reports progress. The result can still
+be marked potentially incomplete when discovery is partial or RBAC denies a
+resource. The scan anchors the target's exact UID before doing bulk reads.
+
+## Keyboard reference
+
+Single-letter commands apply only while the resource table is first responder,
+so they do not steal input from filters, YAML/data editors, logs, or terminals.
+
+| Binding | Action |
+| --- | --- |
+| Command-N | Open a new Cluster Manager window |
+| Command-K | Open the current workspace's Command Palette |
+| `/` | Focus the resource filter |
+| Up / Down, `K` / `J` | Move table selection |
+| Shift-click / Shift-Up / Shift-Down | Extend native selection |
+| Command-click | Toggle one selected row |
+| Command-A | Select all visible rows |
+| Return | Open details for exactly one object |
+| Command-[ / Command-] | Back / Forward |
+| Escape | Clear selection or return focus to the table |
+| `Y` | Open YAML for one object |
+| `E` | Open Events for one object |
+| `L` | Configure logs for selected Pods |
+| `S` | Configure exec for one Pod |
+| `P` | Configure a port-forward for one Pod or Service |
+| Command-Backspace | Confirm deletion of selected resources |
+| Command-S | Save the active YAML or key/value edit |
+
+Standard AppKit text editing, copy, undo/redo, find, and window behavior remain
+with the focused native control.
+
+## Programmable columns and filtering
+
+Column definitions live at:
+
+```text
+~/Library/Application Support/kmgr/columns.yaml
+```
+
+The schema is `kmgr.charlie0129.dev/v1alpha1` and the independently versioned
+CEL environment is `kmgr.cel/v1`. The Columns window can enable, reorder, add
+or edit CEL definitions, reset defaults, and persist definitions; draft order
+and visibility apply live to the table. Programmers can edit the same YAML file
+outside the app. The engine loads the configured path when it starts, so after
+external edits relaunch Kmgr to reload the engine configuration.
+
+The full activation, optional-field syntax, types, cost/output limits, Secret
+sanitization boundary, exact huge-page/accelerator resource handling, and
+examples are documented in [docs/columns.md](docs/columns.md). The table filter
+grammar and structured terms are documented in
+[docs/filtering.md](docs/filtering.md).
+
+Metrics are optional enrichment. Pod and Node CPU/memory usage is fetched
+lazily from `metrics.k8s.io`; absence or RBAC denial leaves base objects and
+Pod scheduler request/limit accounting available. The engine has tested
+accounting primitives for ephemeral storage, huge pages, accelerators, and
+Node Pod allocation, but dynamic resource discovery and Node allocation
+watching are not yet wired into the app's standard table runtime.
+
+## Architecture and security
+
+```text
+Kmgr.app (AppKit)
+    compact rows, windows, responders, selection by UID
+            │ authenticated gRPC over a private Unix socket
+            ▼
+kmgr-engine (Go/client-go)
+    kubeconfig, objects, watches, CEL, metrics, mutations, streams
+            │ authenticated Kubernetes HTTP transports
+            ▼
+Kubernetes API server
+```
+
+The app creates a short per-launch directory with mode `0700`, places a Unix
+socket inside it with user-only access, and gives the helper a random launch
+token. Every RPC carries that token. The GUI supervises one helper and removes
+the private endpoint on shutdown; a helper crash cannot corrupt the AppKit
+process. The supervisor can restart the helper process, but reopening prior
+cluster sessions/views automatically after that restart is not implemented.
+
+Kmgr does not copy kubeconfig credentials into app storage. It rejects
+`users[].user.exec` and legacy `auth-provider` entries before connection and
+never invokes cloud CLIs or custom credential programs. It also does not
+provide an ignore-TLS switch.
+
+Diagnostics contain RPC method, duration, status, and safe structural context;
+they must not contain bearer tokens, client keys, Secret contents, exec I/O,
+log records, or full mutation payloads. Secret plaintext, log buffers, and
+terminal buffers are excluded from restoration. Port-forwards default to
+`127.0.0.1`; broader binds require explicit confirmation.
+
+## State and diagnostics
+
+Versioned UI settings and column configuration are kept under
+`~/Library/Application Support/kmgr/`. Lightweight window/navigation state is
+restored, but warm object caches remain process-memory-only and are never
+presented as restored cluster truth after relaunch.
+
+The engine emits structured, redacted JSON diagnostics on stderr. The GUI
+drains that stream without mirroring raw text into application logs; run the
+helper directly with `--log-level debug` when developing its startup and IPC
+boundary. Set `KMGR_ENGINE_PATH` to an absolute local engine executable before
+launching Kmgr to test a separately built helper.
+Performance harness instructions are in
+[docs/performance.md](docs/performance.md).
+
+## Testing
+
+`make test` requires no real Kubernetes cluster. It uses fake clients,
+`httptest` API fixtures, deterministic stream doubles, and AppKit-independent
+Swift reducers. This includes LIST/WATCH continuity, 410 relists, cache
+retention/eviction, UID replacement safety, Secret sanitization, CEL limits,
+resource accounting, bounded streams, port-forward reconnects, and a 100,000
+row synthetic view harness.
+
+For a manual smoke test, provide the exact disposable context name and
+explicitly authorize the test scope first. Merely making a context available
+authorizes read-only checks; it does not authorize creating or deleting test
+objects. With separate approval, mutation tests should be isolated to a
+temporary `kmgr-smoke` namespace in a disposable cluster. Then:
+
+1. Open two windows, list/filter Pods, and verify updates preserve selection.
+2. Open Nodes, switch away long enough for its watch debounce, then return and
+   verify cached rows appear while state changes through Resuming or Relisting.
+3. Exercise Command-K cached, exact-name, and explicitly scoped Pod search.
+4. Open independent log and exec windows.
+5. Start a Service forward, hide its manager and close its workspace, verify it
+   remains active and reconnects, then stop it explicitly.
+6. Start a direct Pod forward, replace that Pod with the same name/new UID, and
+   verify the record remains Failed rather than switching identity.
+7. Edit a ConfigMap key and a decoded Secret key; exercise a YAML
+   resource-version conflict.
+8. If mutation authorization was given, bulk-delete only approved disposable
+   objects in `kmgr-smoke` and verify partial results/UID preconditions.
+9. Compare metrics behavior with Metrics API available and unavailable.
+10. In Relationships, verify cached results are labeled potentially incomplete;
+    run **Scan All Resources…** only against a cluster where that read load is
+    acceptable.
+
+No real-cluster test runs as part of `make test`. A real smoke run requires an
+explicit context name and begins read-only. Creating/deleting the `kmgr-smoke`
+namespace or anything inside it requires separate authorization. Use a
+disposable cluster and least-privilege credentials; the relationship scan can
+issue LIST requests across every discoverable listable type.
+
+## Known limitations
+
+- macOS only; the native UI requires macOS 15 with the current dependency set.
+- External kubeconfig exec plugins and legacy auth-provider integrations are
+  deliberately unsupported in v1.
+- Log configuration currently accepts Pods, not dynamic workload membership;
+  workload membership following is not implemented.
+- The root Command Palette does not yet surface recent/cached object matches;
+  cached lookup is used only after choosing a resource-scoped search.
+- The Columns UI has no selected-object expression preview or built-in/metric
+  column catalog yet; built-in defaults can be enabled/reordered/reset and CEL
+  columns can be edited.
+- Node Pod-allocation watching and automatic huge-page/accelerator column
+  discovery are not connected to live views yet. The typed accounting helpers
+  and projection paths are covered by deterministic tests.
+- Exec reconnect starts a new process; it cannot preserve the original remote
+  process.
+- Relationship cache results are deliberately incomplete by default, and even
+  an explicit full scan is limited by discovery and RBAC visibility.
+- Port-forwards and other live sessions are not restored after app/engine
+  relaunch. Confirmed application quit stops active listeners.
+- An unexpected helper restart does not yet reopen active cluster sessions and
+  resource views automatically; reopen the affected workspace.
+- Metrics Server generally does not provide accelerator, huge-page, or
+  ephemeral-storage utilization. Kmgr labels scheduler allocation separately
+  and does not manufacture usage.
+
+## Troubleshooting
+
+- **A context is disabled:** inspect the authentication label. `exec` and
+  `auth-provider` kubeconfig users are rejected intentionally; use a supported
+  static/test context rather than asking Kmgr to invoke a cloud CLI.
+- **Open fails:** the authenticated `/version` probe has an eight-second
+  deadline. Check the server hostname, VPN/network, credential validity, CA,
+  and kubeconfig TLS server-name settings. The failed provisional session is
+  closed rather than leaving an apparently connected window.
+- **No rows or a reconnecting banner:** keep the cached table visible and read
+  the connection/watch state. A stale resource version can cause a background
+  relist without blanking usable warm rows.
+- **Metrics show Unavailable:** grant read access to `metrics.k8s.io` or install
+  a compatible Metrics Server. Base LIST/WATCH remains independent.
+- **A relationship is missing:** cached results are expected to be potentially
+  incomplete. Use **Scan All Resources…** if the added cluster-wide reads are
+  acceptable; failures listed during that scan usually indicate RBAC or partial
+  discovery.
+- **A forward stays Failed after Pod replacement:** this is the UID safety
+  contract. Start a new forward explicitly for the replacement Pod.
+- **Column configuration fails to load:** verify both version strings and use
+  the Settings window to confirm the active path. Invalid files produce an
+  explicit configuration error rather than changing CEL meaning silently.
