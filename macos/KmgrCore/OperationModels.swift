@@ -16,6 +16,111 @@ public struct ResourceDeleteTarget: Hashable, Sendable {
     }
 }
 
+public enum HighImpactDeleteKind: String, Hashable, Sendable, CaseIterable {
+    case namespace
+    case node
+    case customResourceDefinition
+    case persistentVolumeClaim
+    case clusterRole
+    case clusterRoleBinding
+
+    public var displayName: String {
+        switch self {
+        case .namespace: "Namespace"
+        case .node: "Node"
+        case .customResourceDefinition: "CustomResourceDefinition"
+        case .persistentVolumeClaim: "PersistentVolumeClaim"
+        case .clusterRole: "ClusterRole"
+        case .clusterRoleBinding: "ClusterRoleBinding"
+        }
+    }
+
+    fileprivate var sortOrder: Int {
+        switch self {
+        case .namespace: 0
+        case .node: 1
+        case .customResourceDefinition: 2
+        case .persistentVolumeClaim: 3
+        case .clusterRole: 4
+        case .clusterRoleBinding: 5
+        }
+    }
+}
+
+public struct HighImpactDeleteSelection: Hashable, Sendable {
+    public var kind: HighImpactDeleteKind
+    public var count: Int
+
+    public init(kind: HighImpactDeleteKind, count: Int) {
+        self.kind = kind
+        self.count = count
+    }
+}
+
+/// Presentation facts derived from the immutable targets captured before a
+/// delete confirmation opens. Classification uses exact Kubernetes GVRs so a
+/// custom resource with a lookalike plural cannot trigger or evade a warning.
+public struct ResourceDeleteConfirmationSummary: Hashable, Sendable {
+    public var targetCount: Int
+    public var hiddenTargetCount: Int
+    public var highImpactSelections: [HighImpactDeleteSelection]
+
+    public init(targets: [ResourceDeleteTarget]) {
+        targetCount = targets.count
+        hiddenTargetCount = targets.lazy.filter(\.hiddenByFilter).count
+        var counts: [HighImpactDeleteKind: Int] = [:]
+        for target in targets {
+            guard let kind = Self.highImpactKind(for: target.identity) else { continue }
+            counts[kind, default: 0] += 1
+        }
+        highImpactSelections = counts.map {
+            HighImpactDeleteSelection(kind: $0.key, count: $0.value)
+        }.sorted { $0.kind.sortOrder < $1.kind.sortOrder }
+    }
+
+    public var selectionText: String {
+        let noun = targetCount == 1 ? "resource" : "resources"
+        guard hiddenTargetCount > 0 else {
+            return "\(targetCount) exact UID-pinned \(noun) selected"
+        }
+        return "\(targetCount) exact UID-pinned \(noun) selected · \(hiddenTargetCount) hidden by the current filter"
+    }
+
+    public var highImpactWarningText: String? {
+        guard !highImpactSelections.isEmpty else { return nil }
+        let selections = highImpactSelections.map { selection in
+            "\(selection.kind.displayName) (\(selection.count))"
+        }.joined(separator: ", ")
+        return "High-impact selection: \(selections). Deleting these resources can disrupt the cluster, remove stored data, or change cluster-wide access."
+    }
+
+    public static func displayedGVR(for identity: ResourceIdentity) -> String {
+        let group = identity.group.isEmpty ? "core" : identity.group
+        return "\(group)/\(identity.version)/\(identity.resource)"
+    }
+
+    public static func highImpactKind(
+        for identity: ResourceIdentity
+    ) -> HighImpactDeleteKind? {
+        switch (identity.group, identity.resource) {
+        case ("", "namespaces"):
+            .namespace
+        case ("", "nodes"):
+            .node
+        case ("apiextensions.k8s.io", "customresourcedefinitions"):
+            .customResourceDefinition
+        case ("", "persistentvolumeclaims"):
+            .persistentVolumeClaim
+        case ("rbac.authorization.k8s.io", "clusterroles"):
+            .clusterRole
+        case ("rbac.authorization.k8s.io", "clusterrolebindings"):
+            .clusterRoleBinding
+        default:
+            nil
+        }
+    }
+}
+
 public struct ResourceDeleteOptions: Hashable, Sendable {
     public var propagationPolicy: DeletePropagationPolicy
     public var gracePeriodSeconds: Int64?

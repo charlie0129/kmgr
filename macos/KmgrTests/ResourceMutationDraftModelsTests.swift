@@ -133,6 +133,52 @@ import Testing
     }
 }
 
+@Test func deleteConfirmationClassifiesOnlyExactHighImpactGVRs() {
+    let values: [(String, String, HighImpactDeleteKind)] = [
+        ("", "namespaces", .namespace),
+        ("", "nodes", .node),
+        ("apiextensions.k8s.io", "customresourcedefinitions", .customResourceDefinition),
+        ("", "persistentvolumeclaims", .persistentVolumeClaim),
+        ("rbac.authorization.k8s.io", "clusterroles", .clusterRole),
+        ("rbac.authorization.k8s.io", "clusterrolebindings", .clusterRoleBinding),
+    ]
+    for (group, resource, expected) in values {
+        var value = identity(uid: ResourceUID(expected.rawValue))
+        value.group = group
+        value.resource = resource
+        #expect(ResourceDeleteConfirmationSummary.highImpactKind(for: value) == expected)
+    }
+
+    var lookalike = identity(uid: "custom-node")
+    lookalike.group = "example.com"
+    lookalike.resource = "nodes"
+    #expect(ResourceDeleteConfirmationSummary.highImpactKind(for: lookalike) == nil)
+}
+
+@Test func deleteConfirmationReportsCountHiddenTargetsAndHighImpactKinds() {
+    var node = identity(uid: "node-1")
+    node.group = ""
+    node.resource = "nodes"
+    node.namespace = ""
+    node.name = "worker-a"
+    var binding = identity(uid: "binding-1")
+    binding.group = "rbac.authorization.k8s.io"
+    binding.resource = "clusterrolebindings"
+    binding.namespace = ""
+    let summary = ResourceDeleteConfirmationSummary(targets: [
+        ResourceDeleteTarget(identity: node, hiddenByFilter: true),
+        ResourceDeleteTarget(identity: binding),
+    ])
+
+    #expect(summary.targetCount == 2)
+    #expect(summary.hiddenTargetCount == 1)
+    #expect(summary.selectionText.contains("2 exact UID-pinned resources"))
+    #expect(summary.selectionText.contains("1 hidden"))
+    #expect(summary.highImpactWarningText?.contains("Node (1)") == true)
+    #expect(summary.highImpactWarningText?.contains("ClusterRoleBinding (1)") == true)
+    #expect(ResourceDeleteConfirmationSummary.displayedGVR(for: node) == "core/v1/nodes")
+}
+
 private func identity(uid: ResourceUID) -> ResourceIdentity {
     ResourceIdentity(
         clusterSessionID: "session",

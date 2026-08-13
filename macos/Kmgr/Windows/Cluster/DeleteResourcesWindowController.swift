@@ -11,6 +11,10 @@ final class DeleteResourcesWindowController: NSWindowController,
     private let targets: [ResourceDeleteTarget]
     private let provider: any ResourceOperationProviding
     private let tableView = NSTableView()
+    private let advancedButton = NSButton(
+        title: "Advanced", target: nil, action: nil
+    )
+    private let advancedOptions = NSStackView()
     private let propagationButton = NSPopUpButton()
     private let graceField = NSTextField()
     private let progressIndicator = NSProgressIndicator()
@@ -22,6 +26,7 @@ final class DeleteResourcesWindowController: NSWindowController,
     private var operationID = ""
     private var terminal = false
     private var parentWindow: NSWindow?
+    private var advancedExpanded = false
 
     var onDismiss: (() -> Void)?
 
@@ -56,6 +61,7 @@ final class DeleteResourcesWindowController: NSWindowController,
     func beginSheet(for parent: NSWindow) {
         parentWindow = parent
         parent.beginSheet(window!)
+        window?.makeFirstResponder(cancelButton)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -75,13 +81,22 @@ final class DeleteResourcesWindowController: NSWindowController,
         warning.font = .systemFont(ofSize: 13, weight: .semibold)
         warning.textColor = .systemRed
 
-        let cluster = NSTextField(wrappingLabelWithString:
-            "Context: \(session.contextName)\nCluster: \(session.clusterName) · \(session.serverHostname)"
+        let summary = ResourceDeleteConfirmationSummary(targets: targets)
+        let highImpactWarning = NSTextField(wrappingLabelWithString:
+            summary.highImpactWarningText ?? ""
         )
-        cluster.textColor = .secondaryLabelColor
+        highImpactWarning.font = .systemFont(ofSize: 13, weight: .bold)
+        highImpactWarning.textColor = .systemRed
+        highImpactWarning.isHidden = summary.highImpactWarningText == nil
+
+        let cluster = NSTextField(wrappingLabelWithString:
+            "CONTEXT: \(session.contextName)\nCLUSTER: \(session.clusterName) · \(session.serverHostname)"
+        )
+        cluster.font = .systemFont(ofSize: 14, weight: .bold)
+        cluster.textColor = .labelColor
 
         for (id, title, width) in [
-            ("namespace", "Namespace", 150.0), ("resource", "Resource", 130.0),
+            ("gvr", "GVR", 220.0), ("namespace", "Namespace", 130.0),
             ("name", "Name", 240.0), ("uid", "UID", 190.0),
             ("state", "Result", 130.0),
         ] {
@@ -104,13 +119,23 @@ final class DeleteResourcesWindowController: NSWindowController,
         graceField.placeholderString = "Server default"
         graceField.alignment = .right
         graceField.widthAnchor.constraint(equalToConstant: 110).isActive = true
-        let options = NSStackView(views: [
+        advancedOptions.setViews([
             NSTextField(labelWithString: "Propagation"), propagationButton,
             NSTextField(labelWithString: "Grace seconds"), graceField, NSView(),
-        ])
-        options.orientation = .horizontal
-        options.alignment = .centerY
-        options.spacing = 8
+        ], in: .leading)
+        advancedOptions.orientation = .horizontal
+        advancedOptions.alignment = .centerY
+        advancedOptions.spacing = 8
+        advancedOptions.isHidden = true
+        advancedButton.bezelStyle = .disclosure
+        advancedButton.state = .off
+        advancedButton.target = self
+        advancedButton.action = #selector(toggleAdvanced)
+        advancedButton.setAccessibilityLabel("Show advanced deletion options")
+        let advancedContainer = NSStackView(views: [advancedButton, advancedOptions])
+        advancedContainer.orientation = .vertical
+        advancedContainer.alignment = .leading
+        advancedContainer.spacing = 6
 
         progressIndicator.isIndeterminate = false
         progressIndicator.minValue = 0
@@ -120,7 +145,9 @@ final class DeleteResourcesWindowController: NSWindowController,
         statusLabel.maximumNumberOfLines = 3
         primaryButton.target = self
         primaryButton.action = #selector(beginDelete)
-        primaryButton.keyEquivalent = "\r"
+        // Destructive confirmation deliberately has no Return key equivalent.
+        // Initial focus stays on Cancel so key repeat cannot confirm deletion.
+        primaryButton.keyEquivalent = ""
         primaryButton.contentTintColor = .systemRed
         cancelButton.target = self
         cancelButton.action = #selector(cancelOrClose)
@@ -131,7 +158,10 @@ final class DeleteResourcesWindowController: NSWindowController,
         footer.spacing = 8
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let stack = NSStackView(views: [warning, cluster, scroll, options, progressIndicator, footer])
+        let stack = NSStackView(views: [
+            cluster, warning, highImpactWarning, scroll,
+            advancedContainer, progressIndicator, footer,
+        ])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -147,16 +177,16 @@ final class DeleteResourcesWindowController: NSWindowController,
             scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 230),
             warning.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
+            highImpactWarning.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
             cluster.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            options.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
+            advancedContainer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
+            advancedOptions.widthAnchor.constraint(equalTo: advancedContainer.widthAnchor),
             progressIndicator.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
         ])
         window.contentView = root
-        let hidden = targets.lazy.filter(\.hiddenByFilter).count
-        statusLabel.stringValue = hidden == 0
-            ? "\(targets.count) selected resource\(targets.count == 1 ? "" : "s")"
-            : "\(targets.count) selected · \(hidden) hidden by the current filter"
+        window.defaultButtonCell = nil
+        statusLabel.stringValue = summary.selectionText
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { targets.count }
@@ -171,8 +201,8 @@ final class DeleteResourcesWindowController: NSWindowController,
         let identity = target.identity
         let value: String
         switch tableColumn.identifier.rawValue {
+        case "gvr": value = ResourceDeleteConfirmationSummary.displayedGVR(for: identity)
         case "namespace": value = identity.namespace.isEmpty ? "Cluster" : identity.namespace
-        case "resource": value = identity.resource
         case "name": value = identity.name
         case "uid": value = identity.uid.rawValue
         case "state": value = resultText(resultsByUID[identity.uid])
@@ -203,6 +233,18 @@ final class DeleteResourcesWindowController: NSWindowController,
             cell.textField?.textColor = .labelColor
         }
         return cell
+    }
+
+    @objc private func toggleAdvanced() {
+        guard operationTask == nil, !terminal else { return }
+        advancedExpanded.toggle()
+        advancedButton.state = advancedExpanded ? .on : .off
+        advancedButton.setAccessibilityLabel(
+            advancedExpanded
+                ? "Hide advanced deletion options"
+                : "Show advanced deletion options"
+        )
+        advancedOptions.isHidden = !advancedExpanded
     }
 
     @objc private func beginDelete() {
@@ -325,6 +367,7 @@ final class DeleteResourcesWindowController: NSWindowController,
 
     private func setRunning(_ running: Bool) {
         primaryButton.isEnabled = !running
+        advancedButton.isEnabled = !running
         propagationButton.isEnabled = !running
         graceField.isEnabled = !running
         cancelButton.title = running ? "Cancel Pending" : "Cancel"
