@@ -373,6 +373,13 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 	if request == nil || request.GetContext() == nil || request.GetSpec() == nil {
 		return nil, fmt.Errorf("%w: request, context, and spec are required", ErrInvalidView)
 	}
+	if strings.TrimSpace(request.GetContext().GetRequestId()) == "" {
+		return nil, fmt.Errorf("%w: request ID is required", ErrInvalidView)
+	}
+	if deadlineUnixMs := request.GetContext().GetDeadlineUnixMs(); deadlineUnixMs != 0 &&
+		!time.UnixMilli(deadlineUnixMs).After(time.Now()) {
+		return nil, context.DeadlineExceeded
+	}
 	sessionID := request.GetContext().GetClusterSessionId()
 	viewID := strings.TrimSpace(request.GetViewId())
 	resource := request.GetSpec().GetResource()

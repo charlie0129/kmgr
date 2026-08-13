@@ -60,11 +60,14 @@ type CachedSearchResult struct {
 // SearchCached answers the root Command Palette strictly from process-memory
 // stores. It resolves only the already-open session authority and never calls
 // OpenResource, so it cannot issue Kubernetes GET, LIST, or WATCH requests.
-func (r *Runtime) SearchCached(query CachedSearchQuery) (CachedSearchResult, error) {
+func (r *Runtime) SearchCached(ctx context.Context, query CachedSearchQuery) (CachedSearchResult, error) {
 	query.SessionID = strings.TrimSpace(query.SessionID)
 	query.Query = strings.TrimSpace(query.Query)
 	if query.SessionID == "" || query.Query == "" {
 		return CachedSearchResult{}, fmt.Errorf("%w: cached search session and query are required", ErrInvalidView)
+	}
+	if err := ctx.Err(); err != nil {
+		return CachedSearchResult{}, err
 	}
 	limit := query.ResultLimit
 	if limit == 0 {
@@ -120,6 +123,9 @@ func (r *Runtime) SearchCached(query CachedSearchQuery) (CachedSearchResult, err
 	result := CachedSearchResult{}
 	for _, entry := range entries {
 		for _, indexed := range entry.store.SearchSnapshot() {
+			if err := ctx.Err(); err != nil {
+				return CachedSearchResult{}, err
+			}
 			value := indexed.Object
 			if value == nil || value.GetUID() == "" {
 				continue
@@ -171,6 +177,9 @@ func (r *Runtime) Search(
 ) error {
 	if query.SessionID == "" || query.Resource.Version == "" || query.Resource.Resource == "" {
 		return fmt.Errorf("%w: search session and resource are required", ErrInvalidView)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if emit == nil {
 		return errors.New("search emitter must not be nil")
@@ -239,6 +248,9 @@ func (r *Runtime) Search(
 	var examined uint64
 	for _, entry := range cachedEntries {
 		for _, indexed := range entry.store.SearchSnapshot() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			value := indexed.Object
 			examined++
 			if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {

@@ -160,7 +160,7 @@ func TestRuntimeDropsReleasedResourceRejectedByWarmObjectBudget(t *testing.T) {
 		return client.lastWatch().stopped.Load() && !retained && !warm
 	})
 
-	searchResult, err := runtime.SearchCached(CachedSearchQuery{
+	searchResult, err := runtime.SearchCached(context.Background(), CachedSearchQuery{
 		SessionID: "session-1", NamespaceScope: NamespaceScope{All: true},
 		Query: "api", ResultLimit: 10, ExaminationLimit: 100,
 	})
@@ -1283,7 +1283,7 @@ func (w *controllableWatch) ResultChan() <-chan watch.Event { return w.channel }
 
 func openView(sessionID, viewID string, generation uint64) *kmgrv1.OpenViewRequest {
 	return &kmgrv1.OpenViewRequest{
-		Context:    &kmgrv1.RequestContext{ClusterSessionId: sessionID},
+		Context:    &kmgrv1.RequestContext{RequestId: "runtime-test", ClusterSessionId: sessionID},
 		ViewId:     viewID,
 		Generation: generation,
 		Spec: &kmgrv1.ViewSpec{
@@ -1296,7 +1296,7 @@ func openView(sessionID, viewID string, generation uint64) *kmgrv1.OpenViewReque
 
 func openNodeView(sessionID, viewID string, generation uint64) *kmgrv1.OpenViewRequest {
 	return &kmgrv1.OpenViewRequest{
-		Context:    &kmgrv1.RequestContext{ClusterSessionId: sessionID},
+		Context:    &kmgrv1.RequestContext{RequestId: "runtime-test", ClusterSessionId: sessionID},
 		ViewId:     viewID,
 		Generation: generation,
 		Spec: &kmgrv1.ViewSpec{

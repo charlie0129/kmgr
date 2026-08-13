@@ -67,7 +67,7 @@ func (s *GRPCService) PreviewColumn(
 	ctx context.Context,
 	request *kmgrv1.PreviewColumnRequest,
 ) (*kmgrv1.PreviewColumnResponse, error) {
-	requestID, operationContext, cancel, err := previewRequestContext(ctx, request.GetContext())
+	requestID, operationContext, cancel, err := viewRequestContext(ctx, request.GetContext())
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func (s *GRPCService) DiscoverOptionalResources(
 	if request == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
-	requestID, operationContext, cancel, err := previewRequestContext(ctx, request.GetContext())
+	requestID, operationContext, cancel, err := viewRequestContext(ctx, request.GetContext())
 	if err != nil {
 		return nil, err
 	}
@@ -305,12 +305,16 @@ func previewColumnObjectError(err error, identity *kmgrv1.ResourceIdentity) *kmg
 	}
 }
 
-func previewRequestContext(
+func viewRequestContext(
 	ctx context.Context,
 	request *kmgrv1.RequestContext,
 ) (string, context.Context, context.CancelFunc, error) {
-	if request == nil || request.GetRequestId() == "" || request.GetClusterSessionId() == "" {
+	if request == nil || strings.TrimSpace(request.GetRequestId()) == "" ||
+		strings.TrimSpace(request.GetClusterSessionId()) == "" {
 		return "", nil, nil, status.Error(codes.InvalidArgument, "request ID and cluster session ID are required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", nil, nil, viewStatusError(err)
 	}
 	if request.GetDeadlineUnixMs() == 0 {
 		derived, cancel := context.WithCancel(ctx)
@@ -325,16 +329,25 @@ func previewRequestContext(
 }
 
 func (s *GRPCService) SearchCachedObjects(
-	_ context.Context,
+	ctx context.Context,
 	request *kmgrv1.SearchCachedObjectsRequest,
 ) (*kmgrv1.SearchCachedObjectsResponse, error) {
-	if request == nil || request.GetContext() == nil || request.GetContext().GetRequestId() == "" ||
-		strings.TrimSpace(request.GetContext().GetClusterSessionId()) == "" ||
-		strings.TrimSpace(request.GetQuery()) == "" {
+	if request == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	requestID, operationContext, cancel, err := viewRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	if err := operationContext.Err(); err != nil {
+		return nil, viewStatusError(err)
+	}
+	if strings.TrimSpace(request.GetQuery()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "request, session, and query are required")
 	}
 	scope := request.GetNamespaceScope()
-	result, err := s.runtime.SearchCached(CachedSearchQuery{
+	result, err := s.runtime.SearchCached(operationContext, CachedSearchQuery{
 		SessionID: request.GetContext().GetClusterSessionId(),
 		NamespaceScope: NamespaceScope{
 			All: scope.GetAllNamespaces(), Namespaces: append([]string(nil), scope.GetNamespaces()...),
@@ -342,8 +355,11 @@ func (s *GRPCService) SearchCachedObjects(
 		Query: request.GetQuery(), ResultLimit: int(request.GetResultLimit()),
 		ExaminationLimit: int(request.GetExaminationLimit()),
 	})
-	response := &kmgrv1.SearchCachedObjectsResponse{RequestId: request.GetContext().GetRequestId()}
+	response := &kmgrv1.SearchCachedObjectsResponse{RequestId: requestID}
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, viewStatusError(err)
+		}
 		response.Error = structuredCachedSearchError(err)
 		return response, nil
 	}
@@ -357,11 +373,22 @@ func (s *GRPCService) SearchObjects(
 	request *kmgrv1.SearchObjectsRequest,
 	stream grpc.ServerStreamingServer[kmgrv1.SearchObjectsEvent],
 ) error {
-	if request == nil || request.GetContext() == nil || request.GetContext().GetClusterSessionId() == "" ||
-		request.GetSearchId() == "" || request.GetGeneration() == 0 || request.GetQueryRevision() == 0 || request.GetResource() == nil {
+	if request == nil {
+		return status.Error(codes.InvalidArgument, "request is required")
+	}
+	_, ctx, cancel, err := viewRequestContext(stream.Context(), request.GetContext())
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		cancel()
+		return viewStatusError(err)
+	}
+	if request.GetSearchId() == "" || request.GetGeneration() == 0 ||
+		request.GetQueryRevision() == 0 || request.GetResource() == nil {
+		cancel()
 		return status.Error(codes.InvalidArgument, "session, search ID, generation, revision, and resource are required")
 	}
-	ctx, cancel := context.WithCancel(stream.Context())
 	key := searchStreamKey{
 		sessionID: request.GetContext().GetClusterSessionId(), searchID: request.GetSearchId(),
 		generation: request.GetGeneration(), revision: request.GetQueryRevision(),
@@ -386,7 +413,7 @@ func (s *GRPCService) SearchObjects(
 	resource := request.GetResource()
 	scope := request.GetNamespaceScope()
 	sequence := uint64(0)
-	err := s.runtime.Search(ctx, SearchQuery{
+	err = s.runtime.Search(ctx, SearchQuery{
 		SessionID: key.sessionID,
 		Resource: ResourceType{
 			Group: resource.GetGroup(), Version: resource.GetVersion(), Resource: resource.GetResource(),
@@ -411,11 +438,21 @@ func (s *GRPCService) SearchObjects(
 }
 
 func (s *GRPCService) CancelSearch(
-	_ context.Context,
+	ctx context.Context,
 	request *kmgrv1.CancelSearchRequest,
 ) (*kmgrv1.Acknowledgement, error) {
-	if request == nil || request.GetContext() == nil || request.GetContext().GetRequestId() == "" ||
-		request.GetContext().GetClusterSessionId() == "" || request.GetSearchId() == "" ||
+	if request == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	requestID, operationContext, cancelContext, err := viewRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancelContext()
+	if err := operationContext.Err(); err != nil {
+		return nil, viewStatusError(err)
+	}
+	if request.GetSearchId() == "" ||
 		request.GetGeneration() == 0 || request.GetQueryRevision() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "request, session, search ID, generation, and revision are required")
 	}
@@ -432,20 +469,31 @@ func (s *GRPCService) CancelSearch(
 	if cancel != nil {
 		cancel()
 	}
-	return &kmgrv1.Acknowledgement{RequestId: request.GetContext().GetRequestId(), Accepted: cancel != nil}, nil
+	return &kmgrv1.Acknowledgement{RequestId: requestID, Accepted: cancel != nil}, nil
 }
 
 func (s *GRPCService) StreamView(
 	request *kmgrv1.OpenViewRequest,
 	stream grpc.ServerStreamingServer[kmgrv1.ViewEvent],
 ) error {
+	if request == nil {
+		return status.Error(codes.InvalidArgument, "request is required")
+	}
+	_, operationContext, cancel, err := viewRequestContext(stream.Context(), request.GetContext())
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	if err := operationContext.Err(); err != nil {
+		return viewStatusError(err)
+	}
 	subscription, err := s.runtime.Open(request)
 	if err != nil {
 		return viewStatusError(err)
 	}
 	defer subscription.Close()
 	for {
-		events, err := subscription.Next(stream.Context())
+		events, err := subscription.Next(operationContext)
 		if err != nil {
 			if errors.Is(err, ErrViewClosed) {
 				return nil
@@ -461,12 +509,22 @@ func (s *GRPCService) StreamView(
 }
 
 func (s *GRPCService) CancelView(
-	_ context.Context,
+	ctx context.Context,
 	request *kmgrv1.CancelViewRequest,
 ) (*kmgrv1.Acknowledgement, error) {
 	// A delayed RPC from an old generation cannot cancel its replacement.
-	if request == nil || request.GetContext() == nil || request.GetContext().GetRequestId() == "" ||
-		request.GetContext().GetClusterSessionId() == "" || request.GetViewId() == "" || request.GetGeneration() == 0 {
+	if request == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	requestID, operationContext, cancel, err := viewRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	if err := operationContext.Err(); err != nil {
+		return nil, viewStatusError(err)
+	}
+	if request.GetViewId() == "" || request.GetGeneration() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "request context, session, view ID, and generation are required")
 	}
 	accepted := s.runtime.Cancel(
@@ -474,7 +532,7 @@ func (s *GRPCService) CancelView(
 		request.GetViewId(),
 		request.GetGeneration(),
 	)
-	return &kmgrv1.Acknowledgement{RequestId: request.GetContext().GetRequestId(), Accepted: accepted}, nil
+	return &kmgrv1.Acknowledgement{RequestId: requestID, Accepted: accepted}, nil
 }
 
 func viewStatusError(err error) error {
@@ -482,6 +540,10 @@ func viewStatusError(err error) error {
 		return nil
 	}
 	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, "request deadline exceeded")
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, "request cancelled")
 	case errors.Is(err, ErrSessionNotFound):
 		return status.Error(codes.NotFound, "cluster session was not found")
 	case errors.Is(err, ErrInvalidView):

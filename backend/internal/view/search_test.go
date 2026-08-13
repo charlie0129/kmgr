@@ -64,7 +64,7 @@ func TestCachedRootSearchUsesOnlyCurrentAuthorityWithoutOpeningResources(t *test
 		pod("b", "team", "api-b", "Running", 0, nil, time.Time{}),
 	)
 
-	result, err := runtime.SearchCached(CachedSearchQuery{
+	result, err := runtime.SearchCached(context.Background(), CachedSearchQuery{
 		SessionID: "session-a", NamespaceScope: NamespaceScope{All: true},
 		Query: "api", ResultLimit: 10, ExaminationLimit: 100,
 	})
@@ -93,7 +93,7 @@ func TestCachedRootSearchDeduplicatesFullGVRAndUID(t *testing.T) {
 	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods", fields: "status.phase=Running"}] = cachedSearchRuntime(shared)
 	runtime.resources[resourceKey{authorityID: "authority", group: "example.io", version: "v1", resource: "widgets"}] = cachedSearchRuntime(shared)
 
-	result, err := runtime.SearchCached(CachedSearchQuery{
+	result, err := runtime.SearchCached(context.Background(), CachedSearchQuery{
 		SessionID: "session", NamespaceScope: NamespaceScope{All: true},
 		Query: "api", ResultLimit: 10, ExaminationLimit: 100,
 	})
@@ -130,7 +130,7 @@ func TestCachedRootSearchBoundsExaminationAndRanking(t *testing.T) {
 	}
 	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods"}] = cachedSearchRuntime(objects...)
 
-	result, err := runtime.SearchCached(CachedSearchQuery{
+	result, err := runtime.SearchCached(context.Background(), CachedSearchQuery{
 		SessionID: "session", NamespaceScope: NamespaceScope{All: true},
 		Query: "api", ResultLimit: 5, ExaminationLimit: 40,
 	})
@@ -160,7 +160,7 @@ func TestCachedRootSearchHonorsNamespaceScopeAndRankOrder(t *testing.T) {
 		pod("other", "other", "api", "Running", 0, nil, time.Time{}),
 	)
 
-	result, err := runtime.SearchCached(CachedSearchQuery{
+	result, err := runtime.SearchCached(context.Background(), CachedSearchQuery{
 		SessionID: "session", NamespaceScope: NamespaceScope{Namespaces: []string{"team"}},
 		Query: "api", ResultLimit: 10, ExaminationLimit: 100,
 	})
