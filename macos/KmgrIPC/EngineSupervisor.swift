@@ -103,6 +103,7 @@ public final class EngineSupervisor {
         public var handshakeTimeout: Duration
         public var shutdownTimeout: Duration
         public var clientVersion: String
+        public var columnsConfigurationPath: String?
 
         public init(
             helperURL: URL,
@@ -111,7 +112,8 @@ public final class EngineSupervisor {
             startupTimeout: Duration = .seconds(8),
             handshakeTimeout: Duration = .seconds(2),
             shutdownTimeout: Duration = .seconds(5),
-            clientVersion: String = "dev"
+            clientVersion: String = "dev",
+            columnsConfigurationPath: String? = nil
         ) {
             self.helperURL = helperURL
             self.temporaryDirectoryURL = temporaryDirectoryURL
@@ -120,6 +122,7 @@ public final class EngineSupervisor {
             self.handshakeTimeout = handshakeTimeout
             self.shutdownTimeout = shutdownTimeout
             self.clientVersion = clientVersion
+            self.columnsConfigurationPath = columnsConfigurationPath
         }
 
         public static func bundled(bundle: Bundle = .main) -> Self {
@@ -324,7 +327,13 @@ public final class EngineSupervisor {
         let stderrPipe = Pipe()
         let exitWaiter = ProcessExitWaiter()
         process.executableURL = configuration.helperURL
-        process.arguments = endpoint.helperArguments
+        var helperArguments = endpoint.helperArguments
+        if let columnsConfigurationPath = configuration.columnsConfigurationPath,
+            !columnsConfigurationPath.isEmpty
+        {
+            helperArguments += ["--columns", columnsConfigurationPath]
+        }
+        process.arguments = helperArguments
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = stderrPipe

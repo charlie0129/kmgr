@@ -18,6 +18,7 @@ final class Application: NSObject, NSApplicationDelegate {
     private let logProvider: any LogStreamProviding
     private let execProvider: any ExecSessionProviding
     private let preferencesStore: AppPreferencesStore
+    private let engineColumnsConfigurationPath: String
     private let restorationStore: WorkspaceRestorationStore
     private let settingsWindowController: SettingsWindowController
     private let portForwardCoordinator: PortForwardCoordinator
@@ -33,10 +34,13 @@ final class Application: NSObject, NSApplicationDelegate {
     private var shouldShowChooserAfterRestore = false
 
     override init() {
-        let supervisor = EngineSupervisor()
-        self.engineSupervisor = supervisor
         let preferences = AppPreferencesStore()
         self.preferencesStore = preferences
+        self.engineColumnsConfigurationPath = preferences.current.columnsConfigurationPath
+        var engineConfiguration = EngineSupervisor.Configuration.bundled()
+        engineConfiguration.columnsConfigurationPath = preferences.current.columnsConfigurationPath
+        let supervisor = EngineSupervisor(configuration: engineConfiguration)
+        self.engineSupervisor = supervisor
         self.restorationStore = WorkspaceRestorationStore()
         let settings = SettingsWindowController(preferencesStore: preferences)
         self.settingsWindowController = settings
@@ -165,6 +169,7 @@ final class Application: NSObject, NSApplicationDelegate {
             logProvider: logProvider,
             execProvider: execProvider,
             portForwards: portForwardCoordinator,
+            columnsConfigurationPath: engineColumnsConfigurationPath,
             restoration: restoration,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
@@ -276,7 +281,7 @@ final class Application: NSObject, NSApplicationDelegate {
         }
         guard let parent = workspace.window else { return }
 
-        let configurationPath = preferencesStore.current.columnsConfigurationPath
+        let configurationPath = engineColumnsConfigurationPath
         let controller = ColumnsManagerWindowController(
             resourceTitle: request.resourceTitle,
             match: request.match,

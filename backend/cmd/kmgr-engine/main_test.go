@@ -31,3 +31,11 @@ func TestParseLogLevel(t *testing.T) {
 		t.Fatal("invalid log level was accepted")
 	}
 }
+
+func TestColumnsFlagIsAccepted(t *testing.T) {
+	if code := run([]string{
+		"--version", "--columns", "/definitely/missing/columns.yaml",
+	}); code != 0 {
+		t.Fatalf("run(--version --columns) = %d, want success", code)
+	}
+}

@@ -26,6 +26,7 @@ func run(arguments []string) int {
 	showVersion := flags.Bool("version", false, "print the engine version")
 	socketPath := flags.String("socket", "", "absolute path to the private Unix-domain socket")
 	launchToken := flags.String("token", "", "per-launch bearer token (at least 32 bytes)")
+	columnsPath := flags.String("columns", "", "path to the versioned programmable-columns configuration")
 	logLevel := flags.String("log-level", "info", "stderr log level: debug, info, warn, or error")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -66,8 +67,9 @@ func run(arguments []string) int {
 	}()
 
 	server, err := transport.NewServer(*launchToken, transport.ServerOptions{
-		Version: version,
-		Logger:  logger,
+		Version:     version,
+		Logger:      logger,
+		ColumnsPath: *columnsPath,
 	})
 	if err != nil {
 		logger.Error("failed to initialize engine server", "error_kind", "configuration")
