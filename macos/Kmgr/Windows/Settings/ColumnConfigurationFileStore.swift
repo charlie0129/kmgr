@@ -69,7 +69,9 @@ struct ColumnConfigurationFileStore {
             root["views"] = views
         }
         var accelerators = root["accelerators"] as? [String: Any] ?? [:]
-        if accelerators["autoDetectSuffixes"] == nil { accelerators["autoDetectSuffixes"] = [] }
+        if accelerators["autoDetectSuffixes"] == nil {
+            accelerators["autoDetectSuffixes"] = AcceleratorColumnConfiguration.defaultAutoDetectSuffixes
+        }
         if accelerators["resources"] == nil { accelerators["resources"] = [:] }
         root["accelerators"] = accelerators
 

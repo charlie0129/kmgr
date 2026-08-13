@@ -103,11 +103,13 @@ public struct AcceleratorResourceConfiguration: Codable, Hashable, Sendable {
 }
 
 public struct AcceleratorColumnConfiguration: Codable, Hashable, Sendable {
+    public static let defaultAutoDetectSuffixes = ["/gpu", "/ppu", "/dcu"]
+
     public var autoDetectSuffixes: [String]
     public var resources: [String: AcceleratorResourceConfiguration]
 
     public init(
-        autoDetectSuffixes: [String] = [],
+        autoDetectSuffixes: [String] = Self.defaultAutoDetectSuffixes,
         resources: [String: AcceleratorResourceConfiguration] = [:]
     ) {
         self.autoDetectSuffixes = autoDetectSuffixes

@@ -47,6 +47,11 @@ import Testing
     #expect(try JSONDecoder().decode(ColumnsConfigurationDocument.self, from: data) == document)
 }
 
+@Test func defaultAcceleratorSuffixesMatchBackendAutoDetectionContract() {
+    let document = ColumnsConfigurationDocument()
+    #expect(document.accelerators.autoDetectSuffixes == ["/gpu", "/ppu", "/dcu"])
+}
+
 @Test func columnConfigurationRejectsVersionDriftAndStructuralAmbiguity() {
     let badColumn = ColumnDefinition(
         id: "duplicate",
