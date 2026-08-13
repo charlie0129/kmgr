@@ -662,6 +662,16 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         _ identity: ResourceIdentity,
         initialTab: ObjectDetailInitialTab
     ) {
+        guard let returnState = contentController.captureNavigationState() else { return }
+        contentController.navigateToObject(identity, returnState: returnState)
+        displayObject(identity, initialTab: initialTab)
+        checkpointRestoration()
+    }
+
+    private func displayObject(
+        _ identity: ResourceIdentity,
+        initialTab: ObjectDetailInitialTab
+    ) {
         detailController?.stop()
         contentController.suspend()
         let controller = ObjectDetailViewController(
@@ -669,7 +679,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             provider: objectDetailProvider,
             initialTab: initialTab
         )
-        controller.onBack = { [weak self] in self?.showResourceList() }
+        controller.onBack = { [weak self] in self?.goBack() }
         detailController = controller
         replaceMainContent(with: controller)
         view.window?.makeFirstResponder(controller.view)
@@ -692,23 +702,32 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     @objc private func goBack() {
-        if detailController != nil {
-            showResourceList()
-        } else {
-            contentController.goBack()
-        }
+        guard let destination = contentController.goBack() else { return }
+        restore(destination)
         checkpointRestoration()
     }
 
     func navigateBack() { goBack() }
 
     @objc private func goForward() {
-        guard detailController == nil else { return }
-        contentController.goForward()
+        guard let destination = contentController.goForward() else { return }
+        restore(destination)
         checkpointRestoration()
     }
 
     func navigateForward() { goForward() }
+
+    private func restore(_ destination: WorkspaceDestination) {
+        switch destination {
+        case .resource(let state):
+            showResourceList(resume: false)
+            contentController.restoreResource(state)
+            sidebarController.selectResource(matchingCurrent: contentController.currentResourceID)
+            view.window?.makeFirstResponder(contentController.tableResponder)
+        case .object(let identity, _):
+            displayObject(identity, initialTab: .automatic)
+        }
+    }
 
     private func selectNamespace(_ namespace: String) {
         if let index = namespaceControl.itemTitles.firstIndex(of: namespace) {
@@ -1124,6 +1143,13 @@ private final class ResourceSidebarViewController: NSViewController,
         select(resource: resource, notify: false)
     }
 
+    func selectResource(matchingCurrent resourceID: String?) {
+        guard let resourceID,
+            let resource = allResources.first(where: { $0.id == resourceID })
+        else { return }
+        select(resource: resource, notify: false)
+    }
+
     func selectDefaultResource() {
         guard !didChooseInitialResource else { return }
         didChooseInitialResource = true
@@ -1180,6 +1206,7 @@ private final class ResourceListViewController: NSViewController,
     private var lastStreamResourceID: String?
     private var lastStreamScope: NamespaceSelection?
     private var pendingScrollAnchor: ScrollAnchor?
+    private var pendingSelectionUIDs: Set<ResourceUID>?
     private var restorationCheckpointTask: Task<Void, Never>?
     private var suppressPresentationCheckpoint = false
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
@@ -1288,7 +1315,9 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func open(resource: DiscoveredResource, scope: NamespaceSelection) {
-        if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
+        if case .resource = history.current, let current = navigationState() {
+            history.replaceCurrent(with: .resource(current))
+        }
         self.resource = resource
         self.scope = scope
         pendingScrollAnchor = nil
@@ -1303,7 +1332,9 @@ private final class ResourceListViewController: NSViewController,
 
     func changeNamespaceScope(_ scope: NamespaceSelection) {
         guard self.scope != scope else { return }
-        if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
+        if case .resource = history.current, let current = navigationState() {
+            history.replaceCurrent(with: .resource(current))
+        }
         self.scope = scope
         pendingScrollAnchor = nil
         if var state = navigationState() {
@@ -1419,16 +1450,29 @@ private final class ResourceListViewController: NSViewController,
         view.window?.makeFirstResponder(filterField)
     }
 
-    @objc func goBack() {
-        if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
-        guard let destination = history.goBack() else { return }
-        restore(destination)
+    func captureNavigationState() -> ResourceNavigationState? {
+        navigationState()
     }
 
-    @objc func goForward() {
-        if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
-        guard let destination = history.goForward() else { return }
-        restore(destination)
+    func navigateToObject(_ identity: ResourceIdentity, returnState: ResourceNavigationState) {
+        if case .resource = history.current {
+            history.replaceCurrent(with: .resource(returnState))
+        }
+        history.navigate(to: .object(identity, returnState: returnState))
+    }
+
+    func goBack() -> WorkspaceDestination? {
+        if case .resource = history.current, let current = navigationState() {
+            history.replaceCurrent(with: .resource(current))
+        }
+        return history.goBack()
+    }
+
+    func goForward() -> WorkspaceDestination? {
+        if case .resource = history.current, let current = navigationState() {
+            history.replaceCurrent(with: .resource(current))
+        }
+        return history.goForward()
     }
 
     @objc func showCommandPalette() {
@@ -1564,29 +1608,46 @@ private final class ResourceListViewController: NSViewController,
             let order: VisibleOrderUpdate = chunk.last
                 ? .replace(snapshotUIDs)
                 : .append(chunk.rows.map { $0.identity.uid })
-            let plan = model.apply(
+            var plan = model.apply(
                 ResourceRowBatch(
                     upserts: chunk.rows,
                     visibleOrder: order
                 ),
                 capture: capture
             )
+            plan = restoringPendingSelection(in: plan, chunkIsComplete: chunk.last)
             applyTablePlan(plan)
         case .delta(_, let delta):
             let capture = captureUpdate()
             let order: VisibleOrderUpdate = delta.orderIsComplete
                 ? .replace(delta.orderedUIDs)
                 : .unchanged
-            let plan = model.apply(ResourceRowBatch(
+            var plan = model.apply(ResourceRowBatch(
                 upserts: delta.upserts,
                 removedUIDs: delta.removedUIDs,
                 visibleOrder: order
             ), capture: capture)
+            plan = restoringPendingSelection(in: plan, chunkIsComplete: false)
             applyTablePlan(plan)
         case .failure(_, let issue):
             show(error: issue)
         }
         updateStatusLine()
+    }
+
+    private func restoringPendingSelection(
+        in plan: ResourceTableUpdatePlan,
+        chunkIsComplete: Bool
+    ) -> ResourceTableUpdatePlan {
+        guard let pendingSelectionUIDs else { return plan }
+        model.restoreSelection(uids: pendingSelectionUIDs)
+        if chunkIsComplete { self.pendingSelectionUIDs = nil }
+        return ResourceTableUpdatePlan(
+            selectedRowIndexes: model.orderedVisibleUIDs.enumerated().compactMap {
+                model.selectedUIDs.contains($0.element) ? $0.offset : nil
+            },
+            scrollRestoration: plan.scrollRestoration
+        )
     }
 
     private func captureUpdate() -> ResourceTableUpdateCapture {
@@ -1762,6 +1823,13 @@ private final class ResourceListViewController: NSViewController,
             filter: filterField.stringValue,
             sortColumnID: tableView.sortDescriptors.first?.key,
             sortDescending: !(tableView.sortDescriptors.first?.ascending ?? true),
+            columns: tableView.tableColumns.map { column in
+                ColumnPresentationState(
+                    columnID: column.identifier.rawValue,
+                    width: Double(column.width),
+                    isVisible: !column.isHidden
+                )
+            },
             selectedUIDs: model.selectedUIDs,
             scrollAnchor: captureUpdate().scrollAnchor
         )
@@ -1842,6 +1910,7 @@ private final class ResourceListViewController: NSViewController,
             namespaceSelection: scope, filter: restoration.filter,
             sortColumnID: restoration.sort.first?.columnID,
             sortDescending: !(restoration.sort.first?.ascending ?? true),
+            columns: restoration.columns,
             scrollAnchor: restoration.scrollAnchor
         )
         history = WorkspaceNavigationHistory(initial: .resource(nav))
@@ -1849,8 +1918,7 @@ private final class ResourceListViewController: NSViewController,
         return true
     }
 
-    private func restore(_ destination: WorkspaceDestination) {
-        guard case .resource(let state) = destination else { return }
+    func restoreResource(_ state: ResourceNavigationState) {
         resource = DiscoveredResource(
             group: state.group, version: state.version, resource: state.resource,
             kind: state.kind, namespaced: state.namespaced,
@@ -1858,8 +1926,11 @@ private final class ResourceListViewController: NSViewController,
         )
         scope = state.namespaceSelection
         pendingScrollAnchor = state.scrollAnchor
+        pendingSelectionUIDs = state.selectedUIDs
         filterField.stringValue = state.filter
+        suppressPresentationCheckpoint = true
         configureColumns(for: resource!)
+        applyColumnPresentation(state.columns)
         if let columnID = state.sortColumnID {
             tableView.sortDescriptors = [NSSortDescriptor(
                 key: columnID,
@@ -1868,7 +1939,25 @@ private final class ResourceListViewController: NSViewController,
         } else {
             tableView.sortDescriptors = []
         }
+        suppressPresentationCheckpoint = false
         openStream()
+    }
+
+    private func applyColumnPresentation(_ states: [ColumnPresentationState]) {
+        guard !states.isEmpty else { return }
+        let byID = Dictionary(uniqueKeysWithValues: states.map { ($0.columnID, $0) })
+        for column in tableView.tableColumns {
+            if let state = byID[column.identifier.rawValue] {
+                column.width = CGFloat(state.width)
+                column.isHidden = !state.isVisible
+            }
+        }
+        for (targetIndex, state) in states.enumerated() where targetIndex < tableView.numberOfColumns {
+            guard let currentIndex = tableView.tableColumns.firstIndex(where: {
+                $0.identifier.rawValue == state.columnID
+            }), currentIndex != targetIndex else { continue }
+            tableView.moveColumn(currentIndex, toColumn: targetIndex)
+        }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { model.orderedVisibleUIDs.count }
