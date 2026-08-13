@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestDirectPodLifecycleNeverSwitchesSameNameReplacement(t *testing.T) {
+func TestDirectPodLifecycleRetriesThenRejectsSameNameReplacement(t *testing.T) {
 	t.Parallel()
 	client := fake.NewClientset(readyPod("pod", "old-uid", 8080))
 	forwarder := &fakeForwarder{ports: []uint16{43123}}
@@ -38,31 +38,16 @@ func TestDirectPodLifecycleNeverSwitchesSameNameReplacement(t *testing.T) {
 	afterFailure := forwardStatesUntil(t, updates, func(snapshot Snapshot) bool {
 		return snapshot.State == StateFailed
 	})
-	assertForwardStateAbsent(t, afterFailure, StateReconnecting)
-	if got := coreActionCount(client, "get", "pods"); got != 1 {
-		t.Fatalf("Pod GET calls after connection loss = %d, want 1 initial resolution", got)
-	}
-	if got := backoff.Calls(); got != 0 {
-		t.Fatalf("backoff calls after direct-Pod failure = %d, want 0", got)
-	}
-	assertForwardedPodUIDs(t, forwarder, "old-uid")
-
-	if !manager.Restart("direct-pod", "session") {
-		t.Fatal("explicit restart was rejected")
-	}
-	afterRestart := forwardStatesUntil(t, updates, func(snapshot Snapshot) bool {
-		return snapshot.State == StateFailed
-	})
-	assertForwardStateAbsent(t, afterRestart, StateReconnecting)
+	assertForwardStatePresent(t, afterFailure, StateReconnecting)
 	failed := manager.List("session", true)[0]
 	if !errors.Is(failed.LastError, ErrPodRecreated) {
-		t.Fatalf("restart error = %v, want ErrPodRecreated", failed.LastError)
+		t.Fatalf("reconnect error = %v, want ErrPodRecreated", failed.LastError)
 	}
 	if got := coreActionCount(client, "get", "pods"); got != 2 {
-		t.Fatalf("Pod GET calls after explicit restart = %d, want 2", got)
+		t.Fatalf("Pod GET calls after connection loss = %d, want retry verification", got)
 	}
-	if got := backoff.Calls(); got != 0 {
-		t.Fatalf("backoff calls after explicit direct-Pod restart = %d, want 0", got)
+	if got := backoff.Calls(); got != 1 {
+		t.Fatalf("backoff calls after direct-Pod failure = %d, want 1", got)
 	}
 	assertForwardedPodUIDs(t, forwarder, "old-uid")
 }
@@ -130,8 +115,7 @@ func lifecycleManager(
 			Resolver:    ClientGoTargetResolver{Core: client.CoreV1()},
 			Forwarder:   forwarder,
 		}},
-		MaxReconnectAttempts: 2,
-		Backoff:              backoff,
+		Backoff: backoff,
 	})
 	if err != nil {
 		t.Fatal(err)

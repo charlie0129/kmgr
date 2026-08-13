@@ -10,16 +10,14 @@ import (
 )
 
 const (
-	DefaultMaxReconnectAttempts = 8
-	DefaultInitialBackoff       = 250 * time.Millisecond
-	DefaultMaxBackoff           = 15 * time.Second
+	DefaultInitialBackoff = 250 * time.Millisecond
+	DefaultMaxBackoff     = 15 * time.Second
 )
 
 type Config struct {
-	Sessions             SessionResolver
-	MaxReconnectAttempts int
-	Backoff              Backoff
-	Now                  func() time.Time
+	Sessions SessionResolver
+	Backoff  Backoff
+	Now      func() time.Time
 }
 
 type entry struct {
@@ -60,12 +58,6 @@ type Manager struct {
 func NewManager(config Config) (*Manager, error) {
 	if config.Sessions == nil {
 		return nil, errors.New("port-forward session resolver must not be nil")
-	}
-	if config.MaxReconnectAttempts == 0 {
-		config.MaxReconnectAttempts = DefaultMaxReconnectAttempts
-	}
-	if config.MaxReconnectAttempts < 0 {
-		return nil, errors.New("maximum reconnect attempts must not be negative")
 	}
 	if config.Backoff == nil {
 		config.Backoff = exponentialBackoff{initial: DefaultInitialBackoff, maximum: DefaultMaxBackoff}
@@ -232,9 +224,9 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64) {
 				m.transition(current, revision, StateStopped, nil, nil, 0)
 				return
 			}
-			// Direct Pod forwards are UID-pinned. Any loss/recreation is terminal
-			// until the user explicitly restarts or creates another forward.
-			if request.Target.IsPod() || attempt >= m.config.MaxReconnectAttempts {
+			// A direct Pod forward may outlive transient API and transport
+			// failures, but it must never attach to a same-name replacement.
+			if request.Target.IsPod() && errors.Is(err, ErrPodRecreated) {
 				m.transition(current, revision, StateFailed, err, nil, 0)
 				return
 			}
@@ -263,10 +255,6 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64) {
 		}
 		if ctx.Err() != nil {
 			m.transition(current, revision, StateStopped, nil, &pod, 0)
-			return
-		}
-		if request.Target.IsPod() || attempt >= m.config.MaxReconnectAttempts {
-			m.transition(current, revision, StateFailed, err, &pod, 0)
 			return
 		}
 		m.transition(current, revision, StateReconnecting, err, &pod, 0)

@@ -14,7 +14,7 @@ func TestStartDefaultsLoopbackAndReportsRaceFreeAllocatedPort(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "pod-uid")}}}
 	forwarder := &fakeForwarder{ports: []uint16{43123}}
-	manager := testManager(t, resolver, forwarder, 2)
+	manager := testManager(t, resolver, forwarder)
 	defer manager.Close()
 	started, err := manager.Start(StartRequest{
 		ID: "forward", Target: podIdentity("pod", "pod-uid"), RemotePort: 8080,
@@ -39,7 +39,7 @@ func TestStartDefaultsLoopbackAndReportsRaceFreeAllocatedPort(t *testing.T) {
 
 func TestNonLoopbackRequiresApprovalAndRetainsExposureMetadata(t *testing.T) {
 	t.Parallel()
-	manager := testManager(t, &sequenceResolver{}, &fakeForwarder{}, 1)
+	manager := testManager(t, &sequenceResolver{}, &fakeForwarder{})
 	defer manager.Close()
 	request := StartRequest{
 		ID: "public", Target: podIdentity("pod", "uid"), RemotePort: 80, BindAddress: "0.0.0.0",
@@ -59,32 +59,49 @@ func TestNonLoopbackRequiresApprovalAndRetainsExposureMetadata(t *testing.T) {
 	}
 }
 
-func TestDirectPodFailureIsTerminalAndNeverAutoSwitchesUID(t *testing.T) {
+func TestDirectPodReconnectsAfterTransportFailureButNeverSwitchesUID(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{
 		{target: podIdentity("pod", "old-uid")},
 		{target: podIdentity("pod", "new-uid")},
 	}}
 	forwarder := &fakeForwarder{ports: []uint16{8080}, waitErrors: []error{errors.New("connection lost")}}
-	manager := testManager(t, resolver, forwarder, 8)
+	backoff := &recordingBackoff{}
+	manager, err := NewManager(Config{
+		Sessions: staticSessionResolver{session: Session{
+			ContextName: "context", Resolver: resolver, Forwarder: forwarder,
+		}},
+		Backoff: backoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer manager.Close()
-	_, err := manager.Start(StartRequest{
+	updates, unsubscribe := manager.Subscribe()
+	defer unsubscribe()
+	_, err = manager.Start(StartRequest{
 		ID: "pod-forward", Target: podIdentity("pod", "old-uid"), RemotePort: 8080,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventuallyForward(t, func() bool { return manager.List("", true)[0].State == StateFailed })
+	states := forwardStatesUntil(t, updates, func(snapshot Snapshot) bool {
+		return snapshot.State == StateFailed
+	})
+	assertForwardStatePresent(t, states, StateReconnecting)
 	resolver.mu.Lock()
 	calls := resolver.calls
 	resolver.mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("direct Pod resolution calls = %d, want no automatic re-resolution", calls)
+	if calls != 2 {
+		t.Fatalf("direct Pod resolution calls = %d, want retry to verify UID", calls)
 	}
-	if !manager.Restart("pod-forward", "session") {
-		t.Fatal("explicit restart was rejected")
+	failed := manager.List("", true)[0]
+	if !errors.Is(failed.LastError, ErrPodRecreated) {
+		t.Fatalf("terminal error = %v, want ErrPodRecreated", failed.LastError)
 	}
-	eventuallyForward(t, func() bool { return manager.List("", true)[0].State == StateFailed })
+	if backoff.Calls() != 1 {
+		t.Fatalf("backoff calls = %d, want one before UID verification", backoff.Calls())
+	}
 	forwarder.mu.Lock()
 	startCalls := len(forwarder.requests)
 	forwarder.mu.Unlock()
@@ -93,7 +110,128 @@ func TestDirectPodFailureIsTerminalAndNeverAutoSwitchesUID(t *testing.T) {
 	}
 }
 
-func TestServiceReResolvesNewPodWithBoundedBackoff(t *testing.T) {
+func TestDirectPodTransportFailureReconnectsSameUID(t *testing.T) {
+	t.Parallel()
+	resolver := &sequenceResolver{results: []resolveResult{
+		{target: podIdentity("pod", "pod-uid")},
+		{target: podIdentity("pod", "pod-uid")},
+	}}
+	forwarder := &fakeForwarder{
+		ports: []uint16{43123, 43123}, waitErrors: []error{errors.New("connection lost")},
+	}
+	backoff := &recordingBackoff{}
+	manager, err := NewManager(Config{
+		Sessions: staticSessionResolver{session: Session{
+			ContextName: "context", Resolver: resolver, Forwarder: forwarder,
+		}},
+		Backoff: backoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := manager.Start(StartRequest{
+		ID: "same-pod", Target: podIdentity("pod", "pod-uid"), RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyForward(t, func() bool {
+		forwarder.mu.Lock()
+		defer forwarder.mu.Unlock()
+		return len(forwarder.requests) == 2 && manager.List("", true)[0].State == StateListening
+	})
+	if got := backoff.Calls(); got != 1 {
+		t.Fatalf("backoff calls = %d, want 1", got)
+	}
+	resolver.mu.Lock()
+	calls := resolver.calls
+	resolver.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("resolve calls = %d, want fresh UID verification", calls)
+	}
+	assertForwardedPodUIDs(t, forwarder, "pod-uid", "pod-uid")
+}
+
+func TestDirectPodTransientFailuresRetryPastFormerLimit(t *testing.T) {
+	t.Parallel()
+	const transientFailures = 12
+	results := make([]resolveResult, 0, transientFailures+1)
+	for range transientFailures {
+		results = append(results, resolveResult{err: errors.New("temporary API failure")})
+	}
+	results = append(results, resolveResult{target: podIdentity("pod", "pod-uid")})
+	resolver := &sequenceResolver{results: results}
+	forwarder := &fakeForwarder{ports: []uint16{43123}}
+	backoff := &recordingBackoff{}
+	manager, err := NewManager(Config{
+		Sessions: staticSessionResolver{session: Session{
+			ContextName: "context", Resolver: resolver, Forwarder: forwarder,
+		}},
+		Backoff: backoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := manager.Start(StartRequest{
+		ID: "persistent", Target: podIdentity("pod", "pod-uid"), RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyForward(t, func() bool {
+		values := manager.List("", true)
+		return len(values) == 1 && values[0].State == StateListening
+	})
+	if got := backoff.Calls(); got != transientFailures {
+		t.Fatalf("backoff calls = %d, want %d", got, transientFailures)
+	}
+	resolver.mu.Lock()
+	calls := resolver.calls
+	resolver.mu.Unlock()
+	if calls != transientFailures+1 {
+		t.Fatalf("resolve calls = %d, want %d", calls, transientFailures+1)
+	}
+}
+
+func TestStopCancelsRetryBackoff(t *testing.T) {
+	t.Parallel()
+	resolver := &sequenceResolver{results: []resolveResult{{err: errors.New("temporary API failure")}}}
+	backoff := newBlockingBackoff()
+	manager, err := NewManager(Config{
+		Sessions: staticSessionResolver{session: Session{
+			ContextName: "context", Resolver: resolver, Forwarder: &fakeForwarder{},
+		}},
+		Backoff: backoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := manager.Start(StartRequest{
+		ID: "cancel-retry", Target: podIdentity("pod", "pod-uid"), RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-backoff.entered:
+	case <-time.After(time.Second):
+		t.Fatal("retry did not enter backoff")
+	}
+	if !manager.Stop("cancel-retry", "session") {
+		t.Fatal("stop rejected")
+	}
+	eventuallyForward(t, func() bool {
+		return manager.List("", true)[0].State == StateStopped
+	})
+	resolver.mu.Lock()
+	calls := resolver.calls
+	resolver.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("resolve calls after stop = %d, want no post-cancellation retry", calls)
+	}
+}
+
+func TestServiceReResolvesNewPodWithBackoff(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{
 		{target: podIdentity("pod-a", "uid-a")},
@@ -104,8 +242,8 @@ func TestServiceReResolvesNewPodWithBoundedBackoff(t *testing.T) {
 	}
 	backoff := &recordingBackoff{}
 	manager, err := NewManager(Config{
-		Sessions:             staticSessionResolver{session: Session{ContextName: "context", Resolver: resolver, Forwarder: forwarder}},
-		MaxReconnectAttempts: 2, Backoff: backoff,
+		Sessions: staticSessionResolver{session: Session{ContextName: "context", Resolver: resolver, Forwarder: forwarder}},
+		Backoff:  backoff,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +273,7 @@ func TestStopListWatchAndRestartAreRaceSafe(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}, {target: podIdentity("pod", "uid")}}}
 	forwarder := &fakeForwarder{ports: []uint16{12345, 12345}}
-	manager := testManager(t, resolver, forwarder, 0)
+	manager := testManager(t, resolver, forwarder)
 	updates, unsubscribe := manager.Subscribe()
 	defer unsubscribe()
 	_, err := manager.Start(StartRequest{ID: "forward", Target: podIdentity("pod", "uid"), RemotePort: 8080})
@@ -264,11 +402,25 @@ func (b *recordingBackoff) Calls() int {
 	return b.calls
 }
 
-func testManager(t *testing.T, resolver TargetResolver, forwarder Forwarder, attempts int) *Manager {
+type blockingBackoff struct {
+	entered chan struct{}
+	once    sync.Once
+}
+
+func newBlockingBackoff() *blockingBackoff {
+	return &blockingBackoff{entered: make(chan struct{})}
+}
+
+func (b *blockingBackoff) Wait(ctx context.Context, _ int) error {
+	b.once.Do(func() { close(b.entered) })
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func testManager(t *testing.T, resolver TargetResolver, forwarder Forwarder) *Manager {
 	t.Helper()
 	manager, err := NewManager(Config{
-		Sessions:             staticSessionResolver{session: Session{ContextName: "context", Resolver: resolver, Forwarder: forwarder}},
-		MaxReconnectAttempts: attempts,
+		Sessions: staticSessionResolver{session: Session{ContextName: "context", Resolver: resolver, Forwarder: forwarder}},
 		Backoff: BackoffFunc(func(ctx context.Context, _ int) error {
 			return nil
 		}),

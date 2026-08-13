@@ -13,7 +13,7 @@ import (
 func TestGRPCStartListStopAndNonLoopbackWarning(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}}
-	manager := testManager(t, resolver, &fakeForwarder{ports: []uint16{40404}}, 1)
+	manager := testManager(t, resolver, &fakeForwarder{ports: []uint16{40404}})
 	defer manager.Close()
 	service, err := NewGRPCService(manager)
 	if err != nil {
@@ -54,7 +54,7 @@ func TestGRPCWatchStartsWithSnapshotAndEmitsStoppedRemoval(t *testing.T) {
 	t.Parallel()
 	manager := testManager(t,
 		&sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}},
-		&fakeForwarder{ports: []uint16{12345}}, 1,
+		&fakeForwarder{ports: []uint16{12345}},
 	)
 	defer manager.Close()
 	service, _ := NewGRPCService(manager)
