@@ -263,47 +263,22 @@ func (r *Runtime) Search(
 		return emit(SearchBatch{Complete: true})
 	}
 
-	options := metav1.ListOptions{Limit: DefaultSearchPageSize}
 	seen := newBoundedSearchResults(limit)
-	snapshotStore := store.New()
-	seenContinueTokens := make(map[string]struct{})
-	var snapshotResourceVersion string
+	listExaminedBase := examined
+	transient, attachment, err := r.startTransientSearchList(ctx, snapshotKey, client)
+	if err != nil {
+		return err
+	}
+	defer r.detachTransientSearch(transient, attachment)
 	for {
-		list, err := client.List(ctx, options)
+		page, err := r.waitTransientSearchPage(ctx, transient, attachment)
 		if err != nil {
 			return err
 		}
-		if list == nil {
-			return errors.New("search list returned nil page")
+		if page.err != nil {
+			return page.err
 		}
-		pageResourceVersion := list.GetResourceVersion()
-		if pageResourceVersion == "" {
-			return errors.New("search list page has no resourceVersion")
-		}
-		if snapshotResourceVersion == "" {
-			snapshotResourceVersion = pageResourceVersion
-		} else if pageResourceVersion != snapshotResourceVersion {
-			return fmt.Errorf(
-				"search paginated list resourceVersion changed from %q to %q",
-				snapshotResourceVersion, pageResourceVersion,
-			)
-		}
-		if snapshotStore != nil && len(list.Items) > r.searchSnapshotObjectLimit-snapshotStore.Len() {
-			// Abandon before inserting this page. This keeps retained data at or
-			// below the configured object bound even for a very large first page.
-			snapshotStore = nil
-		}
-		for index := range list.Items {
-			if list.Items[index].GetUID() == "" {
-				return fmt.Errorf("search list page item %d has no UID", index)
-			}
-		}
-		examined += uint64(len(list.Items))
-		for index := range list.Items {
-			value := &list.Items[index]
-			if snapshotStore != nil {
-				snapshotStore.Upsert(value)
-			}
+		for _, value := range page.items {
 			if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
 				continue
 			}
@@ -311,29 +286,20 @@ func (r *Runtime) Search(
 				seen.Add(makeSearchResult(query.SessionID, query.Resource, value, rank, false))
 			}
 		}
+		examined = listExaminedBase + page.examined
 		results := seen.Sorted()
-		continueToken := list.GetContinue()
-		complete := continueToken == ""
-		var installed *completedSearchSnapshot
-		reusable := false
-		if complete && snapshotStore != nil {
-			snapshotStore.SetResourceVersion(snapshotResourceVersion)
-			installed, reusable = r.installSearchSnapshot(snapshotKey, snapshotStore)
+		batch := SearchBatch{
+			Results: results, Examined: examined, Complete: page.complete, Reusable: page.reusable,
 		}
-		if err := emit(SearchBatch{Results: results, Examined: examined, Complete: complete, Reusable: reusable}); err != nil {
-			// The caller did not observe the reusable offer. Avoid retaining a
-			// hidden handoff that could unexpectedly seed a later view.
-			r.revokeSearchSnapshot(snapshotKey, installed)
+		if err := emit(batch); err != nil {
 			return err
 		}
-		if complete {
+		if batch.Reusable {
+			r.observeTransientSearchSnapshot(transient, attachment)
+		}
+		if page.complete {
 			return nil
 		}
-		if _, duplicate := seenContinueTokens[continueToken]; duplicate {
-			return fmt.Errorf("search server repeated continue token %q", continueToken)
-		}
-		seenContinueTokens[continueToken] = struct{}{}
-		options.Continue = continueToken
 	}
 }
 

@@ -13,7 +13,9 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -392,11 +394,202 @@ func TestCompletedPaginatedSearchSeedsViewAndResumesWatch(t *testing.T) {
 		t.Fatalf("initial snapshot UIDs = %v", snapshotUIDs)
 	}
 	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "rv-final" })
 	if client.listCalls.Load() != 2 {
 		t.Fatalf("view repeated LIST; calls = %d", client.listCalls.Load())
 	}
 	if got := client.lastWatchResourceVersion(); got != "rv-final" {
 		t.Fatalf("watch resourceVersion = %q, want rv-final", got)
+	}
+}
+
+func TestViewJoinsSearchBeforeFirstPageWithoutDuplicateList(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv-final", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+		listPage("rv-final", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+	}
+	client.firstPageGate = make(chan struct{})
+	client.secondPageGate = make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	searchDone := make(chan error, 1)
+	go func() {
+		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(SearchBatch) error { return nil })
+	}()
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 1 })
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	close(client.firstPageGate)
+	waitForSnapshotUID(t, subscription, "one")
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 2 })
+	if client.listCalls.Load() != 2 || client.watchCalls.Load() != 0 {
+		t.Fatalf("mid-list calls LIST=%d WATCH=%d", client.listCalls.Load(), client.watchCalls.Load())
+	}
+	close(client.secondPageGate)
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "rv-final" })
+	if client.listCalls.Load() != 2 {
+		t.Fatalf("final LIST=%d watch RV=%q", client.listCalls.Load(), client.lastWatchResourceVersion())
+	}
+}
+
+func TestViewJoinsSearchMidListAndReceivesExistingAndProgressiveRows(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv-final", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+		listPage("rv-final", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+	}
+	client.secondPageGate = make(chan struct{})
+	firstEmitted := make(chan struct{})
+	var firstOnce sync.Once
+	searchDone := make(chan error, 1)
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	go func() {
+		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
+			if batch.Examined >= 1 {
+				firstOnce.Do(func() { close(firstEmitted) })
+			}
+			return nil
+		})
+	}()
+	<-firstEmitted
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	waitForSnapshotUID(t, subscription, "one")
+	close(client.secondPageGate)
+	waitForSnapshotUID(t, subscription, "two")
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "rv-final" })
+	if client.listCalls.Load() != 2 {
+		t.Fatalf("LIST=%d watch RV=%q", client.listCalls.Load(), client.lastWatchResourceVersion())
+	}
+}
+
+func TestSearchCancellationAfterViewJoinsDoesNotCancelSharedList(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv-final", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+		listPage("rv-final", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+	}
+	client.secondPageGate = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	firstEmitted := make(chan struct{})
+	searchDone := make(chan error, 1)
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	go func() {
+		searchDone <- runtime.Search(ctx, inProgressSearchQuery("api"), func(batch SearchBatch) error {
+			if batch.Examined == 1 {
+				close(firstEmitted)
+			}
+			return nil
+		})
+	}()
+	<-firstEmitted
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	cancel()
+	if err := <-searchDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Search error = %v", err)
+	}
+	close(client.secondPageGate)
+	waitForSnapshotUID(t, subscription, "two")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "rv-final" })
+	if client.listCalls.Load() != 2 {
+		t.Fatalf("LIST=%d watch RV=%q", client.listCalls.Load(), client.lastWatchResourceVersion())
+	}
+}
+
+func TestViewCancellationWhileSearchContinuesRetainsCompletedSnapshot(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv-final", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+		listPage("rv-final", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+	}
+	client.secondPageGate = make(chan struct{})
+	firstEmitted := make(chan struct{})
+	var firstOnce sync.Once
+	searchDone := make(chan error, 1)
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	var final SearchBatch
+	go func() {
+		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
+			final = batch
+			if batch.Examined >= 1 {
+				firstOnce.Do(func() { close(firstEmitted) })
+			}
+			return nil
+		})
+	}()
+	<-firstEmitted
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, subscription, "one")
+	subscription.Close()
+	close(client.secondPageGate)
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+	if !final.Complete || !final.Reusable || client.watchCalls.Load() != 0 {
+		t.Fatalf("final=%#v WATCH=%d", final, client.watchCalls.Load())
+	}
+	request := openView("session", "second", 1)
+	second, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	waitForSnapshotUID(t, second, "two")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "rv-final" })
+	if client.listCalls.Load() != 2 {
+		t.Fatalf("LIST=%d watch RV=%q", client.listCalls.Load(), client.lastWatchResourceVersion())
+	}
+}
+
+func inProgressSearchQuery(query string) SearchQuery {
+	return SearchQuery{
+		SessionID:      "session",
+		Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"ns"}},
+		Query:          query, AllowPaginatedList: true,
 	}
 }
 
@@ -463,6 +656,731 @@ func TestCompletedSearchSnapshotRequiresExactLogicalScopeAndSelectors(t *testing
 	}
 }
 
+func TestInProgressSearchMismatchDoesNotJoin(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("search-rv", "next", pod("one", "a", "api", "Running", 0, nil, time.Time{})),
+		listPage("search-rv", ""),
+	}
+	client.secondPageGate = make(chan struct{})
+	firstEmitted := make(chan struct{})
+	var firstOnce sync.Once
+	searchDone := make(chan error, 1)
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	query := inProgressSearchQuery("api")
+	query.NamespaceScope = NamespaceScope{Namespaces: []string{"a", "b"}}
+	go func() {
+		searchDone <- runtime.Search(context.Background(), query, func(batch SearchBatch) error {
+			if batch.Examined >= 1 {
+				firstOnce.Do(func() { close(firstEmitted) })
+			}
+			return nil
+		})
+	}()
+	<-firstEmitted
+	request := openView("session", "view", 1)
+	request.Spec.NamespaceScope = &kmgrv1.NamespaceScope{Namespaces: []string{"a", "c"}}
+	subscription, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	// The mismatched view owns an independent normal LIST while the palette
+	// search remains blocked on its second page.
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() >= 3 })
+	close(client.secondPageGate)
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInProgressSharedListFailureFallsBackToNormalViewList(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		pages []*unstructured.UnstructuredList
+		want  string
+	}{
+		{name: "changed resource version", pages: []*unstructured.UnstructuredList{
+			listPage("one", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+			listPage("two", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+		}, want: "resourceVersion changed"},
+		{name: "repeated token", pages: []*unstructured.UnstructuredList{
+			listPage("one", "same", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+			listPage("one", "same"),
+		}, want: "repeated continue token"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			baseClient := newSearchClient()
+			baseClient.pages = test.pages
+			baseClient.secondPageGate = make(chan struct{})
+			client := &handoffFailureClient{searchClient: baseClient, fallback: listPage(
+				"fallback-rv", "", pod("fallback", "ns", "api-fallback", "Running", 0, nil, time.Time{}),
+			)}
+			firstEmitted := make(chan struct{})
+			searchDone := make(chan error, 1)
+			runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			go func() {
+				searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
+					if batch.Examined == 1 {
+						close(firstEmitted)
+					}
+					return nil
+				})
+			}()
+			<-firstEmitted
+			subscription, err := runtime.Open(openView("session", "view", 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer subscription.Close()
+			close(client.searchClient.secondPageGate)
+			if err := <-searchDone; err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Search error = %v, want %q", err, test.want)
+			}
+			// The partial store is discarded; the normal pipeline owns a new
+			// authoritative LIST/WATCH lifecycle rather than watching from the
+			// invalid transient resourceVersion.
+			eventually(t, time.Second, func() bool { return client.listCalls.Load() >= 3 })
+			eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+			waitForSnapshotUID(t, subscription, "fallback")
+			if client.lastWatchResourceVersion() == "one" || client.lastWatchResourceVersion() == "two" {
+				t.Fatalf("view watched from invalid transient RV %q", client.lastWatchResourceVersion())
+			}
+		})
+	}
+}
+
+func TestInProgressSharedListFailureFallbackEmitsNoViewError(t *testing.T) {
+	t.Parallel()
+	base := newSearchClient()
+	base.pages = []*unstructured.UnstructuredList{
+		listPage("one", "next", pod("partial", "ns", "api-partial", "Running", 0, nil, time.Time{})),
+		listPage("two", ""),
+	}
+	base.secondPageGate = make(chan struct{})
+	client := &handoffFailureClient{searchClient: base, fallback: listPage(
+		"fallback", "", pod("authoritative", "ns", "api-final", "Running", 0, nil, time.Time{}),
+	)}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client}, BatchDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	first := make(chan struct{})
+	searchDone := make(chan error, 1)
+	go func() {
+		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
+			if batch.Examined == 1 {
+				close(first)
+			}
+			return nil
+		})
+	}()
+	<-first
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	close(base.secondPageGate)
+	if err := <-searchDone; err == nil {
+		t.Fatal("Search unexpectedly succeeded")
+	}
+	waitForSnapshotUID(t, subscription, "authoritative")
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		return subscription.rows["partial"] == nil && subscription.rows["authoritative"] != nil
+	})
+	subscription.mu.Lock()
+	defer subscription.mu.Unlock()
+	if subscription.pendingError != nil {
+		t.Fatalf("transparent fallback left view error %#v", subscription.pendingError)
+	}
+}
+
+func TestInProgressSharedListSlowViewConsumerIsBounded(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	pages := make([]*unstructured.UnstructuredList, 0, 20)
+	for index := range 20 {
+		continuation := ""
+		if index != 19 {
+			continuation = fmt.Sprintf("next-%d", index)
+		}
+		pages = append(pages, listPage(
+			"rv", continuation,
+			pod(fmt.Sprintf("uid-%d", index), "ns", fmt.Sprintf("api-%d", index), "Running", 0, nil, time.Time{}),
+		))
+	}
+	client.pages = pages
+	client.firstPageGate = make(chan struct{})
+	searchDone := make(chan error, 1)
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client}, PendingRowLimit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	go func() {
+		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(SearchBatch) error { return nil })
+	}()
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 1 })
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	close(client.firstPageGate)
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+	subscription.mu.Lock()
+	defer subscription.mu.Unlock()
+	if len(subscription.pendingUpserts)+len(subscription.pendingRemoved) > 2 || !subscription.resnapshot {
+		t.Fatalf("slow mailbox upserts=%d removed=%d resnapshot=%v",
+			len(subscription.pendingUpserts), len(subscription.pendingRemoved), subscription.resnapshot)
+	}
+}
+
+func TestViewCancelThenCompatibleViewRejoinsInProgressList(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+		listPage("rv", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+	}
+	client.secondPageGate = make(chan struct{})
+	firstEmitted := make(chan struct{})
+	var once sync.Once
+	searchDone := make(chan error, 1)
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	go func() {
+		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
+			if batch.Examined >= 1 {
+				once.Do(func() { close(firstEmitted) })
+			}
+			return nil
+		})
+	}()
+	<-firstEmitted
+	first, err := runtime.Open(openView("session", "first", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, first, "one")
+	first.Close()
+	second, err := runtime.Open(openView("session", "second", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	waitForSnapshotUID(t, second, "one")
+	close(client.secondPageGate)
+	waitForSnapshotUID(t, second, "two")
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "rv" })
+	if client.listCalls.Load() != 2 {
+		t.Fatalf("LIST calls = %d, want 2", client.listCalls.Load())
+	}
+}
+
+func TestCompatibleSearchJoinsInProgressListWithReplay(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv", "next", pod("alpha", "ns", "alpha", "Running", 0, nil, time.Time{}),
+			pod("beta", "ns", "beta", "Running", 0, nil, time.Time{})),
+		listPage("rv", "", pod("beta-2", "ns", "beta-worker", "Running", 0, nil, time.Time{})),
+	}
+	client.secondPageGate = make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	firstPage := make(chan struct{})
+	firstDone := make(chan error, 1)
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	go func() {
+		firstDone <- runtime.Search(firstCtx, inProgressSearchQuery("alpha"), func(batch SearchBatch) error {
+			if batch.Examined == 2 {
+				close(firstPage)
+			}
+			return nil
+		})
+	}()
+	<-firstPage
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 2 })
+
+	var finalMu sync.Mutex
+	var final SearchBatch
+	secondDone := make(chan error, 1)
+	go func() {
+		query := inProgressSearchQuery("beta")
+		secondDone <- runtime.Search(context.Background(), query, func(batch SearchBatch) error {
+			finalMu.Lock()
+			final = batch
+			finalMu.Unlock()
+			return nil
+		})
+	}()
+	eventually(t, time.Second, func() bool {
+		finalMu.Lock()
+		defer finalMu.Unlock()
+		return len(final.Results) == 1
+	})
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first Search error = %v", err)
+	}
+	close(client.secondPageGate)
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	finalMu.Lock()
+	defer finalMu.Unlock()
+	if !final.Complete || final.Examined != 3 || len(final.Results) != 2 || client.listCalls.Load() != 2 {
+		t.Fatalf("joined final=%#v LIST=%d", final, client.listCalls.Load())
+	}
+}
+
+func TestFailedPeerEmitDoesNotRevokeSharedSearchSnapshot(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+		listPage("rv", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+	}
+	client.secondPageGate = make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	firstPage := make(chan struct{})
+	goodDone := make(chan error, 1)
+	go func() {
+		goodDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
+			if batch.Examined == 1 {
+				select {
+				case <-firstPage:
+				default:
+					close(firstPage)
+				}
+			}
+			return nil
+		})
+	}()
+	<-firstPage
+	wantErr := errors.New("peer stream failed")
+	badAttached := make(chan struct{})
+	var badOnce sync.Once
+	badDone := make(chan error, 1)
+	go func() {
+		badDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
+			if !batch.Complete {
+				badOnce.Do(func() { close(badAttached) })
+			}
+			if batch.Complete {
+				return wantErr
+			}
+			return nil
+		})
+	}()
+	<-badAttached
+	close(client.secondPageGate)
+	if err := <-goodDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-badDone; !errors.Is(err, wantErr) {
+		t.Fatalf("failed peer error = %v", err)
+	}
+	view, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Close()
+	waitForSnapshotUID(t, view, "two")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "rv" })
+	if client.listCalls.Load() != 2 || client.lastWatchResourceVersion() != "rv" {
+		t.Fatalf("shared snapshot lost: LIST=%d watchRV=%q", client.listCalls.Load(), client.lastWatchResourceVersion())
+	}
+}
+
+func TestTransientSearchDetachIsIdempotentForSnapshotAcknowledgement(t *testing.T) {
+	t.Parallel()
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: newSearchClient()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	key := searchSnapshotKey{
+		resource:       resourceKey{authorityID: "cluster", version: "v1", resource: "pods", namespace: "ns"},
+		namespaceScope: "namespaces:ns",
+	}
+	transient := &transientSearchList{
+		key: key, store: store.New(), done: make(chan struct{}), terminal: true,
+		searches: make(map[*transientSearchAttachment]struct{}), progress: make(chan struct{}, 1),
+		reusablePending: 2,
+	}
+	first := &transientSearchAttachment{}
+	second := &transientSearchAttachment{}
+	transient.searches[first] = struct{}{}
+	transient.searches[second] = struct{}{}
+	runtime.mu.Lock()
+	runtime.transientSearchLists[key] = transient
+	runtime.mu.Unlock()
+
+	runtime.detachTransientSearch(transient, first)
+	runtime.detachTransientSearch(transient, first)
+	runtime.mu.Lock()
+	pending := transient.reusablePending
+	_, secondAttached := transient.searches[second]
+	runtime.mu.Unlock()
+	if pending != 1 || !secondAttached {
+		t.Fatalf("double detach pending=%d secondAttached=%v", pending, secondAttached)
+	}
+}
+
+func TestTerminalReplayRaceRemovesProvisionalSearchAttachment(t *testing.T) {
+	t.Parallel()
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: newSearchClient()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	attachment := &transientSearchAttachment{replaying: true}
+	transient := &transientSearchList{
+		terminal: true, searches: map[*transientSearchAttachment]struct{}{attachment: {}},
+		progress: make(chan struct{}, 1), reusablePending: 1,
+	}
+	runtime.mu.Lock()
+	joined := runtime.completeTransientSearchReplayLocked(
+		transient, attachment, nil, 1, "rv",
+	)
+	pending := transient.reusablePending
+	remaining := len(transient.searches)
+	runtime.mu.Unlock()
+	if joined || attachment.replaying || remaining != 0 || pending != 0 {
+		t.Fatalf(
+			"terminal replay joined=%v replaying=%v attachments=%d pending=%d",
+			joined, attachment.replaying, remaining, pending,
+		)
+	}
+}
+
+func TestFinalSharedListDeliveryKeepsDetachAndReopenOnOnePipeline(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage(
+		"rv-final", "", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{}),
+	)}
+	client.firstPageGate = make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	finalBatch := make(chan SearchBatch, 1)
+	searchDone := make(chan error, 1)
+	go func() {
+		searchDone <- runtime.Search(
+			context.Background(), inProgressSearchQuery("api"),
+			func(batch SearchBatch) error {
+				if batch.Complete {
+					finalBatch <- batch
+				}
+				return nil
+			},
+		)
+	}()
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 1 })
+	first, err := runtime.Open(openView("session", "first", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hold final projection after the coordinator commits its store but before
+	// it releases the handoff gate. This makes the detach/reopen window fully
+	// deterministic without adding a production-only hook.
+	first.mu.Lock()
+	close(client.firstPageGate)
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		for _, transient := range runtime.transientSearchLists {
+			if transient.terminal && transient.view == first.resource {
+				return first.resource.store.ResourceVersion() == "rv-final"
+			}
+		}
+		return false
+	})
+
+	closeDone := make(chan struct{})
+	go func() {
+		first.Close()
+		close(closeDone)
+	}()
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		return runtime.views[first.key] == nil
+	})
+	second, err := runtime.Open(openView("session", "second", 1))
+	if err != nil {
+		first.mu.Unlock()
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if got := client.listCalls.Load(); got != 1 {
+		first.mu.Unlock()
+		t.Fatalf("reopen during final delivery issued %d LISTs, want 1", got)
+	}
+	first.mu.Unlock()
+	<-closeDone
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+	batch := <-finalBatch
+	if !batch.Reusable {
+		t.Fatal("completed shared LIST did not advertise its reusable view store")
+	}
+	waitForSnapshotUID(t, second, "one")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "rv-final" })
+	if got := client.lastWatchResourceVersion(); got != "rv-final" {
+		t.Fatalf("replacement WATCH resourceVersion = %q, want rv-final", got)
+	}
+	if got := client.listCalls.Load(); got != 1 {
+		t.Fatalf("final LIST calls = %d, want 1", got)
+	}
+}
+
+func TestRuntimeCloseUnblocksSearchWhenListIgnoresCancellation(t *testing.T) {
+	t.Parallel()
+	client := &cancellationIgnoringSearchClient{
+		started: make(chan struct{}), release: make(chan struct{}),
+		page: listPage("rv", "", pod("one", "ns", "api", "Running", 0, nil, time.Time{})),
+	}
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(SearchBatch) error { return nil })
+	}()
+	<-client.started
+	runtime.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrViewClosed) {
+			t.Fatalf("Search error = %v, want ErrViewClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Runtime.Close stranded Search")
+	}
+	close(client.release)
+}
+
+func TestOverflowedSharedListDropsStoreAfterViewCloses(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{}),
+			pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+		listPage("rv", "", pod("three", "ns", "api-three", "Running", 0, nil, time.Time{})),
+	}
+	client.secondPageGate = make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client}, SearchSnapshotObjectLimit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	client.firstPageGate = make(chan struct{})
+	first := make(chan struct{})
+	searchDone := make(chan error, 1)
+	go func() {
+		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
+			if batch.Examined == 2 {
+				close(first)
+			}
+			return nil
+		})
+	}()
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 1 })
+	view, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(client.firstPageGate)
+	<-first
+	waitForSnapshotUID(t, view, "one")
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		for _, transient := range runtime.transientSearchLists {
+			if transient.view == view.resource && !transient.storeBounded {
+				return true
+			}
+		}
+		return false
+	})
+	view.Close()
+	runtime.mu.Lock()
+	transient := runtime.transientSearchLists[searchSnapshotKey{
+		resource:       resourceKey{authorityID: "cluster", version: "v1", resource: "pods", namespace: "ns"},
+		namespaceScope: "namespaces:ns",
+	}]
+	dropped := transient != nil && transient.store == nil && !transient.joinable
+	runtime.mu.Unlock()
+	if !dropped {
+		t.Fatal("overflowed transient store remained joinable after its view closed")
+	}
+	close(client.secondPageGate)
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSharedNodeListFinalPageRecomputesReadyPodAccounting(t *testing.T) {
+	t.Parallel()
+	nodes := newSearchClient()
+	nodes.pages = []*unstructured.UnstructuredList{
+		listPage("nodes-rv", "next", nodeObject(
+			"node-a", "node-a", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+		)),
+		listPage("nodes-rv", "", nodeObject(
+			"node-b", "node-b", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+		)),
+	}
+	nodes.secondPageGate = make(chan struct{})
+	pods := newScriptedResource()
+	bound := pod("pod", "ns", "api", "Running", 0, nil, time.Time{})
+	bound.Object["spec"].(map[string]any)["nodeName"] = "node-b"
+	bound.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
+		"requests": map[string]any{"cpu": "500m"},
+	}
+	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "", bound)}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &gvrResourceSource{authority: "cluster", clients: map[string]watcher.ListerWatcher{
+			"nodes": nodes, "pods": pods,
+		}}, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	first := make(chan struct{})
+	searchDone := make(chan error, 1)
+	query := SearchQuery{
+		SessionID: "session", Resource: ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
+		NamespaceScope: NamespaceScope{}, Query: "node", AllowPaginatedList: true,
+	}
+	go func() {
+		searchDone <- runtime.Search(context.Background(), query, func(batch SearchBatch) error {
+			if batch.Examined == 1 {
+				close(first)
+			}
+			return nil
+		})
+	}()
+	<-first
+	view, err := runtime.Open(openNodeView("session", "nodes", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Close()
+	eventually(t, time.Second, func() bool { return pods.watchCalls.Load() == 1 })
+	close(nodes.secondPageGate)
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+	waitForNodeAccounting(t, view, "node-b", NodeCPURequestsColumn, 0.5)
+}
+
+func TestSharedPodListFinalPageRecomputesNodeDependent(t *testing.T) {
+	t.Parallel()
+	nodes := newScriptedResource()
+	nodes.listPages = []*unstructured.UnstructuredList{listPage("nodes-rv", "", nodeObject(
+		"node", "node-a", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+		corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+	))}
+	pods := newSearchClient()
+	bound := pod("pod", "ns", "api", "Running", 0, nil, time.Time{})
+	bound.Object["spec"].(map[string]any)["nodeName"] = "node-a"
+	bound.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
+		"requests": map[string]any{"cpu": "500m"},
+	}
+	pods.pages = []*unstructured.UnstructuredList{
+		listPage("pods-rv", "next"), listPage("pods-rv", "", bound),
+	}
+	pods.secondPageGate = make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &gvrResourceSource{authority: "cluster", clients: map[string]watcher.ListerWatcher{
+			"nodes": nodes, "pods": pods,
+		}}, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	searchDone := make(chan error, 1)
+	go func() {
+		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
+			return nil
+		})
+	}()
+	eventually(t, time.Second, func() bool { return pods.listCalls.Load() == 2 })
+	view, err := runtime.Open(openView("session", "pods", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Close()
+	nodeView, err := runtime.Open(openNodeView("session", "nodes", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nodeView.Close()
+	close(pods.secondPageGate)
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+	waitForNodeAccounting(t, nodeView, "node", NodeCPURequestsColumn, 0.5)
+}
+
 func TestCompletedSearchSnapshotCanonicalizesNamespaceOrder(t *testing.T) {
 	t.Parallel()
 	client := newSearchClient()
@@ -492,6 +1410,7 @@ func TestCompletedSearchSnapshotCanonicalizesNamespaceOrder(t *testing.T) {
 	defer subscription.Close()
 	waitForSnapshotUID(t, subscription, "one")
 	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "search-rv" })
 	if client.listCalls.Load() != 1 || client.lastWatchResourceVersion() != "search-rv" {
 		t.Fatalf("LIST=%d watch RV=%q", client.listCalls.Load(), client.lastWatchResourceVersion())
 	}
@@ -593,6 +1512,7 @@ func TestEmptyNamespacedSearchScopeMatchesDefaultViewScope(t *testing.T) {
 	defer subscription.Close()
 	waitForSnapshotUID(t, subscription, "one")
 	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "search-rv" })
 	if got := source.openedNamespaces(); !slices.Equal(got, []string{"default", "default"}) {
 		t.Fatalf("search/view server namespaces = %v", got)
 	}
@@ -1175,12 +2095,55 @@ type searchClient struct {
 	pageIndex             int
 	getObjects            map[string]*unstructured.Unstructured
 	getErr                error
+	firstPageGate         chan struct{}
 	secondPageGate        chan struct{}
 	watches               []*controllableWatch
 	watchResourceVersions []string
 	listCalls             atomic.Int64
 	getCalls              atomic.Int64
 	watchCalls            atomic.Int64
+}
+
+// handoffFailureClient lets a transient paginated LIST fail validation once,
+// then gives the fallback watcher pipeline a valid authoritative snapshot.
+type handoffFailureClient struct {
+	*searchClient
+	fallback *unstructured.UnstructuredList
+}
+
+type cancellationIgnoringSearchClient struct {
+	started chan struct{}
+	release chan struct{}
+	page    *unstructured.UnstructuredList
+	once    sync.Once
+}
+
+func (c *cancellationIgnoringSearchClient) List(context.Context, metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	first := false
+	c.once.Do(func() {
+		first = true
+		close(c.started)
+	})
+	if first {
+		<-c.release
+	}
+	return c.page.DeepCopy(), nil
+}
+
+func (c *cancellationIgnoringSearchClient) Get(context.Context, string, metav1.GetOptions, ...string) (*unstructured.Unstructured, error) {
+	return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "api")
+}
+
+func (*cancellationIgnoringSearchClient) Watch(context.Context, metav1.ListOptions) (watch.Interface, error) {
+	return newControllableWatch(), nil
+}
+
+func (c *handoffFailureClient) List(ctx context.Context, options metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	if c.listCalls.Load() >= int64(len(c.pages)) {
+		c.listCalls.Add(1)
+		return c.fallback.DeepCopy(), nil
+	}
+	return c.searchClient.List(ctx, options)
 }
 
 func (c *searchClient) lastWatchResourceVersion() string {
@@ -1221,8 +2184,11 @@ func (c *searchClient) List(ctx context.Context, options metav1.ListOptions) (*u
 	}
 	c.pageIndex++
 	gate := c.secondPageGate
+	if index == 0 {
+		gate = c.firstPageGate
+	}
 	c.mu.Unlock()
-	if index == 1 && gate != nil {
+	if gate != nil {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

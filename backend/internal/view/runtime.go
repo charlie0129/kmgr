@@ -173,6 +173,7 @@ type Runtime struct {
 	searchSnapshotObjectLimit int
 	searchSnapshotTTL         time.Duration
 	searchSnapshotSequence    uint64
+	transientSearchLists      map[searchSnapshotKey]*transientSearchList
 
 	nodeAccounting         map[nodeAccountingKey]*nodeAccountingWork
 	nodeAccountingRevision uint64
@@ -251,6 +252,11 @@ type resourceRuntime struct {
 	// is not by itself a safe signal for a newly attached dependent.
 	accountingReady bool
 	accountingError error
+	// transientSearchList is set while this entry is sharing a command-palette
+	// LIST. The normal watcher pipeline must not start until that LIST either
+	// commits its final resourceVersion or terminates and releases ownership.
+	transientSearchList      *transientSearchList
+	transientSearchUsesStore bool
 }
 
 type nodeAccountingKey struct {
@@ -354,6 +360,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		searchSnapshotLimit:       searchSnapshotLimit,
 		searchSnapshotObjectLimit: searchSnapshotObjectLimit,
 		searchSnapshotTTL:         searchSnapshotTTL,
+		transientSearchLists:      make(map[searchSnapshotKey]*transientSearchList),
 		nodeAccounting:            make(map[nodeAccountingKey]*nodeAccountingWork),
 		nodeAccountingComputer:    computeNodeAccounting,
 	}, nil
@@ -419,15 +426,25 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 		}
 	}
 	var searchSnapshot *completedSearchSnapshot
+	var transientList *transientSearchList
 	if entry == nil {
-		searchSnapshot = r.consumeSearchSnapshotLocked(searchSnapshotKey{
+		handoffKey := searchSnapshotKey{
 			resource:       key,
 			namespaceScope: canonicalNamespaceScope(projector.spec.Resource, projector.spec.NamespaceScope),
-		})
+		}
+		transientList = r.transientSearchLists[handoffKey]
+		if transientList != nil && (!transientList.joinable || transientList.store == nil) {
+			transientList = nil
+		}
+		if transientList == nil {
+			searchSnapshot = r.consumeSearchSnapshotLocked(handoffKey)
+		}
 	}
 	if entry == nil {
 		entryStore := store.New()
-		if searchSnapshot != nil {
+		if transientList != nil {
+			entryStore = transientList.store
+		} else if searchSnapshot != nil {
 			entryStore = searchSnapshot.store
 		}
 		entry = &resourceRuntime{
@@ -444,6 +461,21 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 				Stale:            true,
 				ResourceVersion:  entryStore.ResourceVersion(),
 				LastSynchronized: searchSnapshot.completedAt,
+			}
+		} else if transientList != nil {
+			entry.transientSearchList = transientList
+			entry.transientSearchUsesStore = true
+			transientList.view = entry
+			// Holding Runtime.mu while the coordinator mutates its store makes
+			// initialization above an atomic replay. Future pages see this view
+			// and are delivered through its bounded subscription mailbox.
+			entry.lastStatus = watcher.Status{
+				Phase: watcher.PhaseListing, ResourceVersion: entryStore.ResourceVersion(),
+			}
+			if transientList.terminal && entryStore.ResourceVersion() != "" {
+				entry.accountingReady = true
+				entry.lastStatus.Phase = watcher.PhaseResuming
+				entry.lastStatus.Stale = true
 			}
 		}
 		r.resources[key] = entry
@@ -502,7 +534,7 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 	r.views[streamKey] = subscription
 	var startSubscribers []*Subscription
 	var startError *kmgrv1.StructuredError
-	if !entry.running {
+	if !entry.running && entry.transientSearchList == nil {
 		startSubscribers, startError = r.startResourceLocked(entry)
 	}
 	r.mu.Unlock()
@@ -629,6 +661,9 @@ func (r *Runtime) applyNodeAccountingError(subscription *Subscription, err error
 }
 
 func (r *Runtime) startResourceLocked(entry *resourceRuntime) ([]*Subscription, *kmgrv1.StructuredError) {
+	if entry.transientSearchList != nil {
+		return nil, nil
+	}
 	entry.runNumber++
 	runNumber := entry.runNumber
 	ctx, cancel := context.WithCancel(context.Background())
@@ -703,11 +738,23 @@ func (r *Runtime) receiveBatch(entry *resourceRuntime, runNumber uint64, batch w
 		r.mu.Unlock()
 		return
 	}
+	subscriptions := r.prepareEntryBatchLocked(entry, batch)
+	r.mu.Unlock()
+
+	for _, subscription := range subscriptions {
+		subscription.applyBatch(batch)
+	}
+}
+
+// prepareEntryBatchLocked mirrors the lifecycle work needed for both ordinary
+// pipeline batches and command-palette LIST pages. Runtime.mu must be held.
+func (r *Runtime) prepareEntryBatchLocked(
+	entry *resourceRuntime,
+	batch watcher.Batch,
+) []*Subscription {
 	// Capture consumers while the lifecycle graph is stable, then project the
 	// batch after releasing the runtime-wide mutex. Subscription.applyBatch has
-	// its own closed/generation gate, so a concurrent detach is safe; more
-	// importantly, CEL and typed row projection for one view can no longer
-	// block unrelated view opens, closes, cache release, or diagnostics.
+	// its own closed/generation gate, so a concurrent detach is safe.
 	subscriptions := make([]*Subscription, 0, len(entry.subscribers))
 	for subscription := range entry.subscribers {
 		subscriptions = append(subscriptions, subscription)
@@ -733,11 +780,7 @@ func (r *Runtime) receiveBatch(entry *resourceRuntime, runNumber uint64, batch w
 			r.scheduleNodeAccountingLocked(entry, pods, true, nil)
 		}
 	}
-	r.mu.Unlock()
-
-	for _, subscription := range subscriptions {
-		subscription.applyBatch(batch)
-	}
+	return subscriptions
 }
 
 func (r *Runtime) resourceStopped(entry *resourceRuntime, runNumber uint64, err error) {
@@ -929,6 +972,40 @@ func (r *Runtime) detachLocked(subscription *Subscription) {
 	delete(r.views, subscription.key)
 	entry := subscription.resource
 	delete(entry.subscribers, subscription)
+	if transient := entry.transientSearchList; transient != nil && transient.view == entry &&
+		len(entry.subscribers)+len(entry.dependents) == 0 {
+		// A valid terminal LIST is still delivering its final projection. Keep
+		// the entry and coordinator association until that delivery gate opens;
+		// a same-key Open can then reuse the complete store instead of starting a
+		// duplicate LIST, and the reusable search offer remains truthful.
+		if transient.terminal && entry.store.ResourceVersion() != "" {
+			r.scheduleReleaseLocked(entry)
+		} else {
+			transient.view = nil
+			entry.transientSearchList = nil
+			entry.transientSearchUsesStore = false
+			// An incomplete shared LIST must never enter the normal warm cache or
+			// be found by a later Open as an ordinary resource entry. The transient
+			// coordinator retains the store and a later compatible view may rejoin it.
+			if r.resources[entry.key] == entry {
+				delete(r.resources, entry.key)
+			}
+			if entry.releaseTimer != nil {
+				entry.releaseTimer.Stop()
+				entry.releaseTimer = nil
+			}
+			if !transient.storeBounded {
+				// The shared store was allowed to exceed the snapshot budget only
+				// because this view needed progressive rows. Once it leaves, stop
+				// retaining further pages and make later views run their own LIST.
+				transient.store = nil
+				transient.joinable = false
+			}
+			if len(transient.searches) == 0 {
+				r.cancelTransientSearchListLocked(transient)
+			}
+		}
+	}
 	if dependency := subscription.nodePods; dependency != nil {
 		delete(dependency.dependents, subscription)
 		subscription.nodePods = nil
@@ -951,7 +1028,8 @@ func (r *Runtime) removeUnusedNodeAccountingLocked(nodes, pods *resourceRuntime)
 }
 
 func (r *Runtime) scheduleReleaseLocked(entry *resourceRuntime) {
-	if entry == nil || len(entry.subscribers)+len(entry.dependents) != 0 || entry.releaseTimer != nil {
+	if entry == nil || entry.transientSearchList != nil ||
+		len(entry.subscribers)+len(entry.dependents) != 0 || entry.releaseTimer != nil {
 		return
 	}
 	key := entry.key
@@ -1024,6 +1102,9 @@ func (r *Runtime) Close() {
 	for key, snapshot := range r.searchSnapshots {
 		r.removeSearchSnapshotLocked(key, snapshot)
 	}
+	for _, transient := range r.transientSearchLists {
+		r.closeTransientSearchListLocked(transient, ErrViewClosed)
+	}
 	clear(r.nodeAccounting)
 	r.mu.Unlock()
 	for _, subscription := range subscriptions {
@@ -1049,35 +1130,11 @@ func (r *Runtime) installSearchSnapshot(
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closed {
-		return nil, false
-	}
-	if previous := r.searchSnapshots[key]; previous != nil {
-		r.removeSearchSnapshotLocked(key, previous)
-	}
 	now := time.Now()
-	r.searchSnapshotSequence++
-	snapshot := &completedSearchSnapshot{
-		store: snapshotStore, objectCount: objectCount, completedAt: now,
-		sequence: r.searchSnapshotSequence, expiresAt: now.Add(r.searchSnapshotTTL),
-	}
-	r.searchSnapshots[key] = snapshot
-	r.searchSnapshotObjects += objectCount
-	snapshot.expirationTimer = time.AfterFunc(r.searchSnapshotTTL, func() {
-		r.expireSearchSnapshot(key, snapshot)
-	})
-
-	for len(r.searchSnapshots) > r.searchSnapshotLimit ||
-		r.searchSnapshotObjects > r.searchSnapshotObjectLimit {
-		evictionKey, eviction := r.oldestSearchSnapshotLocked()
-		if eviction == nil {
-			break
-		}
-		r.removeSearchSnapshotLocked(evictionKey, eviction)
-	}
-	if r.searchSnapshots[key] != snapshot {
+	if !r.installCompletedSearchSnapshotLocked(key, snapshotStore, now) {
 		return nil, false
 	}
+	snapshot := r.searchSnapshots[key]
 	return snapshot, true
 }
 
