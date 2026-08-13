@@ -6,6 +6,17 @@ import KmgrProto
 public protocol ObjectDetailRPC: Sendable {
     func getObject(_ request: Kmgr_V1_GetObjectRequest, timeout: Duration) async throws
         -> Kmgr_V1_GetObjectResponse
+    func watchObject(
+        _ request: Kmgr_V1_WatchObjectRequest,
+        timeout: Duration,
+        receive: @escaping @Sendable (Kmgr_V1_ObjectEvent) throws -> Void
+    ) async throws
+    func getEvents(_ request: Kmgr_V1_GetEventsRequest, timeout: Duration) async throws
+        -> Kmgr_V1_GetEventsResponse
+    func getRelationships(
+        _ request: Kmgr_V1_GetRelationshipsRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_GetRelationshipsResponse
     func getData(_ request: Kmgr_V1_GetDataRequest, timeout: Duration) async throws
         -> Kmgr_V1_GetDataResponse
     func prepareYAML(_ request: Kmgr_V1_PrepareYamlEditRequest, timeout: Duration) async throws
@@ -31,6 +42,33 @@ public struct EngineObjectDetailRPC: ObjectDetailRPC {
         timeout: Duration
     ) async throws -> Kmgr_V1_GetObjectResponse {
         try await connection.objectClient().getObject(request, options: callOptions(timeout))
+    }
+
+    public func watchObject(
+        _ request: Kmgr_V1_WatchObjectRequest,
+        timeout: Duration,
+        receive: @escaping @Sendable (Kmgr_V1_ObjectEvent) throws -> Void
+    ) async throws {
+        try await connection.objectClient().watchObject(
+            request,
+            options: callOptions(timeout)
+        ) { response in
+            for try await event in response.messages { try receive(event) }
+        }
+    }
+
+    public func getEvents(
+        _ request: Kmgr_V1_GetEventsRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_GetEventsResponse {
+        try await connection.objectClient().getEvents(request, options: callOptions(timeout))
+    }
+
+    public func getRelationships(
+        _ request: Kmgr_V1_GetRelationshipsRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_GetRelationshipsResponse {
+        try await connection.objectClient().getRelationships(request, options: callOptions(timeout))
     }
 
     public func getData(
@@ -132,26 +170,109 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
             let response = try await rpc.getObject(request, timeout: unaryTimeout)
             try Self.validate(response.requestID, expected: request.context.requestID)
             if response.hasError { throw EngineClusterContextProvider.issue(from: response.error) }
-            return ObjectDetail(
-                identity: Self.identity(response.identity),
-                resourceVersion: response.resourceVersion,
-                yamlUTF8: response.yamlUtf8,
-                summaryFields: response.summaryFields.map { field in
-                    ObjectSummaryField(
-                        sectionID: field.sectionID,
-                        fieldID: field.fieldID,
-                        label: field.label,
-                        displayText: field.displayText,
-                        tooltip: field.tooltip,
-                        severity: Self.severity(field.severity)
-                    )
-                },
-                labels: Dictionary(uniqueKeysWithValues: response.labels.map { ($0.key, $0.value) }),
-                annotations: Dictionary(uniqueKeysWithValues: response.annotations.map { ($0.key, $0.value) }),
-                metrics: response.metrics.map(Self.usage)
-            )
+            return Self.detail(response)
         } catch {
             throw Self.issue(error, operation: "get object details")
+        }
+    }
+
+    public func watchObject(
+        identity: ResourceIdentity,
+        resourceVersion: String
+    ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
+        let streamID = identifier()
+        var request = Kmgr_V1_WatchObjectRequest()
+        request.context = context(identity.clusterSessionID, timeout: streamTimeout)
+        request.objectStreamID = streamID
+        request.generation = 1
+        request.identity = Self.protoIdentity(identity)
+        request.resourceVersion = resourceVersion
+        let immutableRequest = request
+        let rpc = self.rpc
+        let timeout = streamTimeout
+        let limit = maximumBufferedMessages
+        return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(limit)) { continuation in
+            let task = Task.detached(priority: .userInitiated) {
+                do {
+                    try await rpc.watchObject(immutableRequest, timeout: timeout) { value in
+                        guard value.cursor.streamID == streamID,
+                            value.cursor.generation == immutableRequest.generation
+                        else { throw ObjectDetailBridgeError.objectEnvelopeMismatch }
+                        let event = Self.objectWatchEvent(value)
+                        switch continuation.yield(event) {
+                        case .enqueued: break
+                        case .dropped:
+                            throw ObjectDetailBridgeError.objectBufferExceeded(limit)
+                        case .terminated: throw CancellationError()
+                        @unknown default:
+                            throw ObjectDetailBridgeError.objectBufferExceeded(limit)
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    if Task.isCancelled || error is CancellationError {
+                        continuation.finish()
+                    } else {
+                        continuation.finish(throwing: Self.issue(error, operation: "watch object"))
+                    }
+                }
+            }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
+        }
+    }
+
+    public func getEvents(
+        identity: ResourceIdentity,
+        limit: UInt32 = 200
+    ) async throws -> [KubernetesObjectEvent] {
+        var request = Kmgr_V1_GetEventsRequest()
+        request.context = context(identity.clusterSessionID, timeout: unaryTimeout)
+        request.identity = Self.protoIdentity(identity)
+        request.limit = max(1, min(limit, 500))
+        do {
+            let response = try await rpc.getEvents(request, timeout: unaryTimeout)
+            try Self.validate(response.requestID, expected: request.context.requestID)
+            if response.hasError { throw EngineClusterContextProvider.issue(from: response.error) }
+            return response.events.map { value in
+                KubernetesObjectEvent(
+                    identity: Self.identity(value.identity),
+                    type: value.type,
+                    reason: value.reason,
+                    message: value.message,
+                    firstObservedAt: Self.date(value.firstObservedUnixMs),
+                    lastObservedAt: Self.date(value.lastObservedUnixMs),
+                    count: value.count,
+                    reportingController: value.reportingController
+                )
+            }
+        } catch {
+            throw Self.issue(error, operation: "get object events")
+        }
+    }
+
+    public func getRelationships(
+        identity: ResourceIdentity,
+        includeChildren: Bool = false
+    ) async throws -> [ObjectRelationship] {
+        var request = Kmgr_V1_GetRelationshipsRequest()
+        request.context = context(identity.clusterSessionID, timeout: unaryTimeout)
+        request.identity = Self.protoIdentity(identity)
+        request.includeOwners = true
+        request.includeChildren = includeChildren
+        do {
+            let response = try await rpc.getRelationships(request, timeout: unaryTimeout)
+            try Self.validate(response.requestID, expected: request.context.requestID)
+            if response.hasError { throw EngineClusterContextProvider.issue(from: response.error) }
+            return response.relationships.map { value in
+                ObjectRelationship(
+                    kind: Self.relationshipKind(value.kind),
+                    identity: Self.identity(value.identity),
+                    label: value.label,
+                    stale: value.stale
+                )
+            }
+        } catch {
+            throw Self.issue(error, operation: "get object relationships")
         }
     }
 
@@ -359,6 +480,69 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
         )
     }
 
+    private static func detail(_ response: Kmgr_V1_GetObjectResponse) -> ObjectDetail {
+        ObjectDetail(
+            identity: identity(response.identity),
+            resourceVersion: response.resourceVersion,
+            yamlUTF8: response.yamlUtf8,
+            summaryFields: response.summaryFields.map { field in
+                ObjectSummaryField(
+                    sectionID: field.sectionID,
+                    fieldID: field.fieldID,
+                    label: field.label,
+                    displayText: field.displayText,
+                    tooltip: field.tooltip,
+                    severity: severity(field.severity)
+                )
+            },
+            labels: Dictionary(
+                response.labels.map { ($0.key, $0.value) },
+                uniquingKeysWith: { _, latest in latest }
+            ),
+            annotations: Dictionary(
+                response.annotations.map { ($0.key, $0.value) },
+                uniquingKeysWith: { _, latest in latest }
+            ),
+            metrics: response.metrics.map(usage)
+        )
+    }
+
+    private static func objectWatchEvent(_ value: Kmgr_V1_ObjectEvent) -> ObjectWatchEvent {
+        let cursor = StreamCursor(
+            generation: value.cursor.generation,
+            sequence: value.cursor.sequence
+        )
+        if value.hasError {
+            return .failure(
+                cursor: cursor,
+                issue: EngineClusterContextProvider.issue(from: value.error)
+            )
+        }
+        switch value.type {
+        case .updated:
+            return .updated(cursor: cursor, detail: detail(value.object))
+        case .deleted:
+            return .deleted(cursor: cursor, detail: detail(value.object))
+        case .status, .unspecified, .UNRECOGNIZED:
+            return .status(cursor: cursor, resourceVersion: value.object.resourceVersion)
+        }
+    }
+
+    private static func relationshipKind(
+        _ value: Kmgr_V1_RelationshipKind
+    ) -> ObjectRelationshipKind {
+        switch value {
+        case .owner: .owner
+        case .child: .child
+        case .related, .unspecified, .UNRECOGNIZED: .related
+        }
+    }
+
+    private static func date(_ unixMilliseconds: Int64) -> Date? {
+        guard unixMilliseconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(unixMilliseconds) / 1_000)
+    }
+
     private static func operationState(_ value: Kmgr_V1_OperationState) -> OperationState {
         switch value {
         case .pending, .unspecified, .UNRECOGNIZED: .pending
@@ -370,12 +554,13 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
         }
     }
 
-    private static func itemState(_ value: Kmgr_V1_OperationItemState) -> OperationState {
+    private static func itemState(_ value: Kmgr_V1_OperationItemState) -> OperationItemState {
         switch value {
         case .pending, .unspecified, .UNRECOGNIZED: .pending
         case .running: .running
         case .succeeded: .succeeded
-        case .failed, .skipped: .failed
+        case .failed: .failed
+        case .skipped: .skipped
         case .cancelled: .cancelled
         }
     }
@@ -431,6 +616,15 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
 
     private static func issue(_ error: Error, operation: String) -> ClusterManagerIssue {
         switch error {
+        case ObjectDetailBridgeError.objectBufferExceeded(let limit):
+            return ClusterManagerIssue(
+                category: .resourceExhausted,
+                reason: "ObjectWatchBufferExceeded",
+                message: "Object updates arrived faster than the detail page could apply them. Reopen the object to resume safely.",
+                retryable: true,
+                operation: operation,
+                safeDetails: ["buffered_message_limit": String(limit)]
+            )
         case ObjectDetailBridgeError.operationBufferExceeded(let limit):
             return ClusterManagerIssue(
                 category: .resourceExhausted,
@@ -440,6 +634,7 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                 safeDetails: ["buffered_message_limit": String(limit)]
             )
         case ObjectDetailBridgeError.requestIDMismatch,
+            ObjectDetailBridgeError.objectEnvelopeMismatch,
             ObjectDetailBridgeError.operationEnvelopeMismatch:
             return ClusterManagerIssue(
                 category: .internalFailure,
@@ -468,6 +663,8 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
 
 private enum ObjectDetailBridgeError: Error {
     case requestIDMismatch
+    case objectEnvelopeMismatch
+    case objectBufferExceeded(Int)
     case operationRejected
     case operationEnvelopeMismatch
     case operationBufferExceeded(Int)

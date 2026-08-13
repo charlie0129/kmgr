@@ -53,6 +53,81 @@ public struct ObjectDetail: Hashable, Sendable {
     }
 }
 
+public struct KubernetesObjectEvent: Hashable, Sendable, Identifiable {
+    public var identity: ResourceIdentity
+    public var type: String
+    public var reason: String
+    public var message: String
+    public var firstObservedAt: Date?
+    public var lastObservedAt: Date?
+    public var count: Int32
+    public var reportingController: String
+
+    public init(
+        identity: ResourceIdentity,
+        type: String,
+        reason: String,
+        message: String,
+        firstObservedAt: Date? = nil,
+        lastObservedAt: Date? = nil,
+        count: Int32 = 0,
+        reportingController: String = ""
+    ) {
+        self.identity = identity
+        self.type = type
+        self.reason = reason
+        self.message = message
+        self.firstObservedAt = firstObservedAt
+        self.lastObservedAt = lastObservedAt
+        self.count = count
+        self.reportingController = reportingController
+    }
+
+    public var id: ResourceUID { identity.uid }
+}
+
+public enum ObjectRelationshipKind: String, Hashable, Sendable {
+    case owner
+    case child
+    case related
+}
+
+public struct ObjectRelationship: Hashable, Sendable, Identifiable {
+    public var kind: ObjectRelationshipKind
+    public var identity: ResourceIdentity
+    public var label: String
+    public var stale: Bool
+
+    public init(
+        kind: ObjectRelationshipKind,
+        identity: ResourceIdentity,
+        label: String,
+        stale: Bool = false
+    ) {
+        self.kind = kind
+        self.identity = identity
+        self.label = label
+        self.stale = stale
+    }
+
+    public var id: ResourceUID { identity.uid }
+}
+
+public enum ObjectWatchEvent: Hashable, Sendable {
+    case status(cursor: StreamCursor, resourceVersion: String)
+    case updated(cursor: StreamCursor, detail: ObjectDetail)
+    case deleted(cursor: StreamCursor, detail: ObjectDetail)
+    case failure(cursor: StreamCursor, issue: ClusterManagerIssue)
+
+    public var cursor: StreamCursor {
+        switch self {
+        case .status(let cursor, _), .updated(let cursor, _),
+            .deleted(let cursor, _), .failure(let cursor, _):
+            cursor
+        }
+    }
+}
+
 public enum DataValueKind: String, Hashable, Sendable {
     case text
     case binary
@@ -158,15 +233,24 @@ public enum OperationState: String, Hashable, Sendable {
     }
 }
 
+public enum OperationItemState: String, Hashable, Sendable {
+    case pending
+    case running
+    case succeeded
+    case failed
+    case skipped
+    case cancelled
+}
+
 public struct OperationItemResult: Hashable, Sendable {
     public var identity: ResourceIdentity
-    public var state: OperationState
+    public var state: OperationItemState
     public var newResourceVersion: String
     public var issue: ClusterManagerIssue?
 
     public init(
         identity: ResourceIdentity,
-        state: OperationState,
+        state: OperationItemState,
         newResourceVersion: String = "",
         issue: ClusterManagerIssue? = nil
     ) {
@@ -207,6 +291,16 @@ public struct OperationProgress: Hashable, Sendable {
 
 public protocol ObjectDetailProviding: Sendable {
     func getObject(identity: ResourceIdentity) async throws -> ObjectDetail
+    func watchObject(
+        identity: ResourceIdentity,
+        resourceVersion: String
+    ) -> AsyncThrowingStream<ObjectWatchEvent, Error>
+    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
+        -> [KubernetesObjectEvent]
+    func getRelationships(
+        identity: ResourceIdentity,
+        includeChildren: Bool
+    ) async throws -> [ObjectRelationship]
     func getData(identity: ResourceIdentity) async throws -> ObjectData
     func prepareYAML(
         identity: ResourceIdentity,
