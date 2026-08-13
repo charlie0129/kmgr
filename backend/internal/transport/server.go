@@ -13,6 +13,7 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	"github.com/charlie0129/kmgr/backend/internal/operation"
 	"github.com/charlie0129/kmgr/backend/internal/portforward"
+	execstream "github.com/charlie0129/kmgr/backend/internal/stream/exec"
 	streamlogs "github.com/charlie0129/kmgr/backend/internal/stream/logs"
 	"github.com/charlie0129/kmgr/backend/internal/view"
 	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
@@ -44,6 +45,7 @@ type Server struct {
 	sessions  *cluster.SessionRegistry
 	views     *view.Runtime
 	logs      *streamlogs.Manager
+	exec      *execstream.Manager
 	forwards  *portforward.Manager
 	logger    *slog.Logger
 	closeOnce sync.Once
@@ -120,10 +122,26 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		viewRuntime.Close()
 		return nil, err
 	}
+	execManager, err := execstream.NewManager(execstream.Config{
+		Resolver: execstream.ClusterResolver{Sessions: sessions},
+	})
+	if err != nil {
+		logManager.Close()
+		viewRuntime.Close()
+		return nil, err
+	}
+	execService, err := execstream.NewGRPCService(execManager)
+	if err != nil {
+		execManager.Close()
+		logManager.Close()
+		viewRuntime.Close()
+		return nil, err
+	}
 	forwardManager, err := portforward.NewManager(portforward.Config{
 		Sessions: portforward.ClusterSessions{Sessions: sessions},
 	})
 	if err != nil {
+		execManager.Close()
 		logManager.Close()
 		viewRuntime.Close()
 		return nil, err
@@ -131,6 +149,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	forwardService, err := portforward.NewGRPCService(forwardManager)
 	if err != nil {
 		forwardManager.Close()
+		execManager.Close()
 		logManager.Close()
 		viewRuntime.Close()
 		return nil, err
@@ -153,6 +172,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	kmgrv1.RegisterObjectServiceServer(grpcServer, objectService)
 	kmgrv1.RegisterOperationServiceServer(grpcServer, operationService)
 	kmgrv1.RegisterLogServiceServer(grpcServer, logService)
+	kmgrv1.RegisterExecServiceServer(grpcServer, execService)
 	kmgrv1.RegisterPortForwardServiceServer(grpcServer, forwardService)
 
 	return &Server{
@@ -163,6 +183,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		sessions: sessions,
 		views:    viewRuntime,
 		logs:     logManager,
+		exec:     execManager,
 		forwards: forwardManager,
 		logger:   options.Logger,
 	}, nil
@@ -190,6 +211,7 @@ func (s *Server) Shutdown(timeout time.Duration) {
 		}
 		s.views.Close()
 		s.logs.Close()
+		s.exec.Close()
 		s.forwards.Close()
 		stopped := make(chan struct{})
 		go func() {
