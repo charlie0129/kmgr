@@ -40,6 +40,26 @@ public struct ColumnPresentationState: Hashable, Codable, Sendable {
     }
 }
 
+public struct RestorationValidationIssue: Error, Hashable, Sendable {
+    public var path: String
+    public var message: String
+
+    public init(path: String, message: String) {
+        self.path = path
+        self.message = message
+    }
+}
+
+public struct RestorationValidationError: Error, LocalizedError, Hashable, Sendable {
+    public var issues: [RestorationValidationIssue]
+
+    public init(issues: [RestorationValidationIssue]) { self.issues = issues }
+
+    public var errorDescription: String? {
+        issues.first?.message ?? "Saved workspace state is invalid."
+    }
+}
+
 /// Explicit allow-list of lightweight state safe for UserDefaults/window
 /// restoration. It has no arbitrary payload field, which makes Secret values,
 /// cached rows, terminal contents, logs, credentials, and mutation forms
@@ -47,7 +67,13 @@ public struct ColumnPresentationState: Hashable, Codable, Sendable {
 public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
     public static let schemaVersion = 1
 
-    public var version: Int
+    public static let maximumContextNameBytes = 4 << 10
+    public static let maximumFilterBytes = 64 << 10
+    public static let maximumNamespaceCount = 256
+    public static let maximumSortDescriptors = 16
+    public static let maximumColumns = 256
+
+    public private(set) var version: Int
     public var contextName: String
     public var gvr: GVR?
     public var namespaceScope: NamespaceScope
@@ -76,6 +102,159 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
         self.columns = columns
         self.isSidebarVisible = isSidebarVisible
         self.scrollAnchor = scrollAnchor
+    }
+
+    public func validated() throws -> Self {
+        let issues = validationIssues()
+        guard issues.isEmpty else { throw RestorationValidationError(issues: issues) }
+        return self
+    }
+
+    public func validationIssues() -> [RestorationValidationIssue] {
+        var issues: [RestorationValidationIssue] = []
+        if version != Self.schemaVersion {
+            issues.append(.init(
+                path: "version",
+                message: "Unsupported workspace state version \(version)."
+            ))
+        }
+        validateToken(
+            contextName, path: "contextName", maximumBytes: Self.maximumContextNameBytes,
+            allowEmpty: false, issues: &issues
+        )
+        if let gvr {
+            validateToken(gvr.group, path: "gvr.group", allowEmpty: true, issues: &issues)
+            validateToken(gvr.version, path: "gvr.version", allowEmpty: false, issues: &issues)
+            validateToken(gvr.resource, path: "gvr.resource", allowEmpty: false, issues: &issues)
+        }
+        switch namespaceScope {
+        case .all:
+            break
+        case .namespace(let namespace):
+            validateToken(
+                namespace, path: "namespaceScope.namespace", allowEmpty: false,
+                issues: &issues
+            )
+        case .namespaces(let namespaces):
+            if namespaces.isEmpty || namespaces.count > Self.maximumNamespaceCount {
+                issues.append(.init(
+                    path: "namespaceScope.namespaces",
+                    message: "A saved multi-namespace scope must contain 1 through \(Self.maximumNamespaceCount) namespaces."
+                ))
+            }
+            if Set(namespaces).count != namespaces.count {
+                issues.append(.init(
+                    path: "namespaceScope.namespaces",
+                    message: "A saved namespace scope cannot contain duplicates."
+                ))
+            }
+            for (index, namespace) in namespaces.enumerated() {
+                validateToken(
+                    namespace, path: "namespaceScope.namespaces[\(index)]",
+                    allowEmpty: false, issues: &issues
+                )
+            }
+        }
+        if filter.utf8.count > Self.maximumFilterBytes || filter.contains("\0") {
+            issues.append(.init(
+                path: "filter",
+                message: "A saved filter must contain at most \(Self.maximumFilterBytes) UTF-8 bytes and no NUL bytes."
+            ))
+        }
+        if sort.count > Self.maximumSortDescriptors {
+            issues.append(.init(
+                path: "sort",
+                message: "At most \(Self.maximumSortDescriptors) saved sort descriptors are allowed."
+            ))
+        }
+        if Set(sort.map(\.columnID)).count != sort.count {
+            issues.append(.init(path: "sort", message: "Saved sort column IDs must be unique."))
+        }
+        for (index, descriptor) in sort.enumerated() {
+            validateToken(
+                descriptor.columnID, path: "sort[\(index)].columnID",
+                allowEmpty: false, issues: &issues
+            )
+        }
+        if columns.count > Self.maximumColumns {
+            issues.append(.init(
+                path: "columns",
+                message: "At most \(Self.maximumColumns) saved columns are allowed."
+            ))
+        }
+        if Set(columns.map(\.columnID)).count != columns.count {
+            issues.append(.init(path: "columns", message: "Saved column IDs must be unique."))
+        }
+        for (index, column) in columns.enumerated() {
+            validateToken(
+                column.columnID, path: "columns[\(index)].columnID",
+                allowEmpty: false, issues: &issues
+            )
+            if !column.width.isFinite || !(20...8_192).contains(column.width) {
+                issues.append(.init(
+                    path: "columns[\(index)].width",
+                    message: "Saved column widths must be finite values from 20 through 8192 points."
+                ))
+            }
+        }
+        if let scrollAnchor {
+            validateToken(
+                scrollAnchor.uid.rawValue, path: "scrollAnchor.uid",
+                maximumBytes: 4 << 10, allowEmpty: false, issues: &issues
+            )
+            if !scrollAnchor.pixelOffsetFromTop.isFinite ||
+                !(-8_192...8_192).contains(scrollAnchor.pixelOffsetFromTop)
+            {
+                issues.append(.init(
+                    path: "scrollAnchor.pixelOffsetFromTop",
+                    message: "The saved scroll offset is outside the supported range."
+                ))
+            }
+            if scrollAnchor.priorRowIndex < 0 {
+                issues.append(.init(
+                    path: "scrollAnchor.priorRowIndex",
+                    message: "The saved scroll row index cannot be negative."
+                ))
+            }
+        }
+        return issues
+    }
+
+    private func validateToken(
+        _ value: String,
+        path: String,
+        maximumBytes: Int = 4 << 10,
+        allowEmpty: Bool,
+        issues: inout [RestorationValidationIssue]
+    ) {
+        if (!allowEmpty && value.isEmpty) || value.utf8.count > maximumBytes || value.contains("\0") {
+            issues.append(.init(
+                path: path,
+                message: "Saved \(path) is empty, too large, or contains an invalid NUL byte."
+            ))
+        }
+    }
+}
+
+public extension NamespaceScope {
+    init(_ selection: NamespaceSelection) {
+        if selection.allNamespaces {
+            self = .all
+        } else if selection.namespaces.count == 1, let namespace = selection.namespaces.first {
+            self = .namespace(namespace)
+        } else {
+            self = .namespaces(selection.namespaces)
+        }
+    }
+
+    var namespaceSelection: NamespaceSelection {
+        switch self {
+        case .all: NamespaceSelection()
+        case .namespace(let namespace): .namespace(namespace)
+        case .namespaces(let namespaces): NamespaceSelection(
+            allNamespaces: false, namespaces: namespaces
+        )
+        }
     }
 }
 
