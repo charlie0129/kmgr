@@ -125,10 +125,10 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
         }
     }
 
-    public func openContext(named contextName: String) async throws -> OpenedClusterSession {
+    public func openContext(reference: String) async throws -> OpenedClusterSession {
         var request = Kmgr_V1_OpenSessionRequest()
         request.context = makeRequestContext(timeout: openTimeout)
-        request.contextName = contextName
+        request.contextName = reference
 
         do {
             try await readiness()
@@ -138,7 +138,7 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
                     category: .internalFailure,
                     reason: "RequestIDMismatch",
                     message: "The engine returned a response for a different open request.",
-                    contextName: contextName,
+                    contextName: reference,
                     operation: "open cluster session"
                 )
             }
@@ -148,21 +148,22 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
                     category: .internalFailure,
                     reason: "MissingSessionID",
                     message: "The engine connected but did not return a cluster session identity.",
-                    contextName: contextName,
+                    contextName: reference,
                     operation: "open cluster session"
                 )
             }
             return OpenedClusterSession(
                 sessionID: response.clusterSessionID,
-                contextName: response.contextName.isEmpty ? contextName : response.contextName,
+                contextName: response.contextName.isEmpty ? reference : response.contextName,
                 clusterName: response.clusterName,
                 serverHostname: response.serverHostname,
-                defaultNamespace: response.defaultNamespace
+                defaultNamespace: response.defaultNamespace,
+                contextReference: reference
             )
         } catch {
             throw Self.issue(
                 from: error,
-                contextName: contextName,
+                contextName: reference,
                 operation: "open cluster session"
             )
         }
@@ -199,6 +200,7 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
             authentication = .unsupported(mechanism: mechanism, issue: issue)
         }
         return ClusterContextSummary(
+            id: context.contextID,
             name: context.name,
             clusterName: context.clusterName,
             serverHostname: context.serverHostname,

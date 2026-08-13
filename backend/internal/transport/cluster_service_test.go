@@ -70,10 +70,13 @@ func TestListContextsIsOfflineAndOpenSessionProbes(t *testing.T) {
 	if contexts.GetContexts()[0].GetAuthenticationHint() != "Bearer token" {
 		t.Fatalf("authentication hint = %q", contexts.GetContexts()[0].GetAuthenticationHint())
 	}
+	if contexts.GetContexts()[0].GetContextId() == "" {
+		t.Fatal("offline list omitted the opaque context binding ID")
+	}
 
 	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
 		Context:     requestContext("open"),
-		ContextName: "local",
+		ContextName: contexts.GetContexts()[0].GetContextId(),
 	})
 	if err != nil {
 		t.Fatal(err)

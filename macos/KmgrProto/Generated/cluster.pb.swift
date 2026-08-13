@@ -104,6 +104,8 @@ public struct Kmgr_V1_KubeconfigContext: Sendable {
   /// Clears the value of `unsupportedAuthenticationError`. Subsequent reads from it will return its default value.
   public mutating func clearUnsupportedAuthenticationError() {self._unsupportedAuthenticationError = nil}
 
+  public var contextID: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -435,7 +437,7 @@ extension Kmgr_V1_ConnectionState: SwiftProtobuf._ProtoNameProviding {
 
 extension Kmgr_V1_KubeconfigContext: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".KubeconfigContext"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{3}cluster_name\0\u{3}server_hostname\0\u{3}default_namespace\0\u{3}source_paths\0\u{1}current\0\u{3}authentication_hint\0\u{3}authentication_supported\0\u{3}unsupported_authentication_error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{3}cluster_name\0\u{3}server_hostname\0\u{3}default_namespace\0\u{3}source_paths\0\u{1}current\0\u{3}authentication_hint\0\u{3}authentication_supported\0\u{3}unsupported_authentication_error\0\u{3}context_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -452,6 +454,7 @@ extension Kmgr_V1_KubeconfigContext: SwiftProtobuf.Message, SwiftProtobuf._Messa
       case 7: try { try decoder.decodeSingularStringField(value: &self.authenticationHint) }()
       case 8: try { try decoder.decodeSingularBoolField(value: &self.authenticationSupported) }()
       case 9: try { try decoder.decodeSingularMessageField(value: &self._unsupportedAuthenticationError) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.contextID) }()
       default: break
       }
     }
@@ -489,6 +492,9 @@ extension Kmgr_V1_KubeconfigContext: SwiftProtobuf.Message, SwiftProtobuf._Messa
     try { if let v = self._unsupportedAuthenticationError {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
     } }()
+    if !self.contextID.isEmpty {
+      try visitor.visitSingularStringField(value: self.contextID, fieldNumber: 10)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -502,6 +508,7 @@ extension Kmgr_V1_KubeconfigContext: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if lhs.authenticationHint != rhs.authenticationHint {return false}
     if lhs.authenticationSupported != rhs.authenticationSupported {return false}
     if lhs._unsupportedAuthenticationError != rhs._unsupportedAuthenticationError {return false}
+    if lhs.contextID != rhs.contextID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

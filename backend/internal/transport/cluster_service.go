@@ -103,6 +103,7 @@ func (s *ClusterService) ListContexts(
 	for _, info := range contexts {
 		supported := len(info.UnsupportedAuthentications) == 0
 		entry := &kmgrv1.KubeconfigContext{
+			ContextId:               info.ID,
 			Name:                    info.Name,
 			ClusterName:             info.ClusterName,
 			ServerHostname:          info.ServerHostname,

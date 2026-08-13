@@ -26,6 +26,7 @@ message KubeconfigContext {
   string authentication_hint = 7;
   bool authentication_supported = 8;
   StructuredError unsupported_authentication_error = 9;
+  string context_id = 10;
 }
 
 message ListContextsRequest {

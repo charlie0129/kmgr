@@ -19,9 +19,13 @@ public struct ClusterWindowRestorationRecord: Hashable, Codable, Sendable, Ident
 
     public init(
         id: String = UUID().uuidString.lowercased(),
-        contextName: String
+        contextName: String,
+        contextReference: String = ""
     ) {
-        self.init(id: id, state: ClusterWindowRestorationState(contextName: contextName))
+        self.init(id: id, state: ClusterWindowRestorationState(
+            contextName: contextName,
+            contextReference: contextReference
+        ))
     }
 
     /// Use with `NSWindow.setFrameAutosaveName`. The stable opaque ID avoids

@@ -147,7 +147,10 @@ final class Application: NSObject, NSApplicationDelegate {
         controller.onOpenSession = { [weak self] session in
             self?.openWorkspace(
                 for: session,
-                restoration: ClusterWindowRestorationRecord(contextName: session.contextName)
+                restoration: ClusterWindowRestorationRecord(
+                    contextName: session.contextName,
+                    contextReference: session.contextReference
+                )
             )
         }
         controller.onClose = { [weak self] in
@@ -220,7 +223,7 @@ final class Application: NSObject, NSApplicationDelegate {
                 defer { restorationAttemptFinished() }
                 do {
                     let session = try await clusterContextProvider.openContext(
-                        named: record.state.contextName
+                        reference: record.state.contextReference
                     )
                     guard !Task.isCancelled else { return }
                     openWorkspace(for: session, restoration: record)

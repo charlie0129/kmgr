@@ -405,6 +405,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     func restorationState() -> ClusterWindowRestorationState {
         contentController.restorationState(
             contextName: session.contextName,
+            contextReference: session.contextReference,
             isSidebarVisible: !splitViewItems[0].isCollapsed
         )
     }
@@ -1837,6 +1838,7 @@ private final class ResourceListViewController: NSViewController,
 
     func restorationState(
         contextName: String,
+        contextReference: String,
         isSidebarVisible: Bool
     ) -> ClusterWindowRestorationState {
         let state = navigationState()
@@ -1853,6 +1855,7 @@ private final class ResourceListViewController: NSViewController,
         }
         return ClusterWindowRestorationState(
             contextName: contextName,
+            contextReference: contextReference,
             gvr: state.map { GVR(group: $0.group, version: $0.version, resource: $0.resource) },
             namespaceScope: NamespaceScope(scope),
             filter: filterField.stringValue,

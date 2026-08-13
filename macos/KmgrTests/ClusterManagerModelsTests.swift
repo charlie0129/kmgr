@@ -146,7 +146,26 @@ struct ClusterManagerModelsTests {
         #expect(summary.displayedNamespace == "default")
     }
 
+    @Test("same-name contexts remain distinct and selection follows opaque identity")
+    func duplicateNamesKeepSourceBinding() {
+        var model = ClusterManagerModel(
+            contexts: [
+                context(id: "context-source-a", name: "default", host: "a.example.test"),
+                context(id: "context-source-z", name: "default", host: "z.example.test")
+            ],
+            phase: .loaded
+        )
+
+        #expect(model.allContexts.count == 2)
+        #expect(Set(model.allContexts.map(\.id)) == ["context-source-a", "context-source-z"])
+        model.selectContext(id: "context-source-z")
+        #expect(model.selectedContext?.id == "context-source-z")
+        #expect(model.selectedContext?.name == "default")
+        #expect(model.selectedContext?.serverHostname == "z.example.test")
+    }
+
     private func context(
+        id: String = "",
         name: String,
         cluster: String = "cluster",
         host: String = "api.local",
@@ -156,6 +175,7 @@ struct ClusterManagerModelsTests {
         authentication: ClusterAuthenticationAvailability = .supported(hint: "static")
     ) -> ClusterContextSummary {
         ClusterContextSummary(
+            id: id,
             name: name,
             clusterName: cluster,
             serverHostname: host,

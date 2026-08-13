@@ -60,6 +60,41 @@ import Testing
     #expect(WorkspaceRestorationStore(defaults: storage.defaults).windows.isEmpty)
 }
 
+@Test func legacyV1RestorationDefaultsReferenceToDisplayName() throws {
+    let legacyJSON = Data("""
+    {
+      "version": 1,
+      "contextName": "production",
+      "namespaceScope": {"all": {}},
+      "filter": "",
+      "sort": [],
+      "columns": [],
+      "isSidebarVisible": true
+    }
+    """.utf8)
+    let decoded = try JSONDecoder().decode(
+        ClusterWindowRestorationState.self,
+        from: legacyJSON
+    )
+
+    #expect(decoded.contextName == "production")
+    #expect(decoded.contextReference == "production")
+}
+
+@Test func restorationRoundTripsOpaqueContextReferenceSeparatelyFromName() throws {
+    let state = ClusterWindowRestorationState(
+        contextName: "default",
+        contextReference: "context-source-stable-id"
+    )
+    let decoded = try JSONDecoder().decode(
+        ClusterWindowRestorationState.self,
+        from: JSONEncoder().encode(state)
+    )
+
+    #expect(decoded.contextName == "default")
+    #expect(decoded.contextReference == "context-source-stable-id")
+}
+
 @MainActor
 @Test func corruptUnsupportedAndInvalidRestorationFailClosed() throws {
     let storage = try restorationDefaults()

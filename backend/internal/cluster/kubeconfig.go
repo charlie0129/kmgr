@@ -62,9 +62,19 @@ type ContextInfo struct {
 // Catalog is an immutable snapshot of the kubeconfigs visible when Discover
 // was called. Reloading is done by creating a new Catalog.
 type Catalog struct {
-	config   clientcmdapi.Config
-	contexts []ContextInfo
-	byID     map[string]string
+	contexts   []ContextInfo
+	bindings   map[string]contextBinding
+	uniqueName map[string]string
+}
+
+// contextBinding keeps the exact configuration snapshot that produced a
+// chooser row. Auto-discovered sibling files are deliberately kept separate:
+// standalone kubeconfigs commonly reuse names such as "kubernetes-admin", and
+// flattening them through client-go's map merge would silently attach an
+// earlier file's credentials to a later file's context.
+type contextBinding struct {
+	config      clientcmdapi.Config
+	contextName string
 }
 
 // ContextNotFoundError reports a stale or unknown context ID/name.
@@ -156,12 +166,7 @@ func DiscoverWithRules(rules *clientcmd.ClientConfigLoadingRules) (*Catalog, err
 		return nil, fmt.Errorf("resolve kubeconfig paths: %w", err)
 	}
 
-	catalog := &Catalog{
-		config: *config.DeepCopy(),
-		byID:   make(map[string]string, len(config.Contexts)),
-	}
-	catalog.contexts = buildContextInfo(config, catalog.byID)
-	return catalog, nil
+	return newCatalog(config), nil
 }
 
 // discoverHomeDirectory extends the standards-compliant default file with
@@ -179,11 +184,37 @@ func discoverHomeDirectory(rules *clientcmd.ClientConfigLoadingRules) (*Catalog,
 		// or cannot be inspected; loading the normal default remains authoritative.
 		return DiscoverWithRules(rules)
 	}
-	loadingRules := *rules
-	loadingRules.ExplicitPath = ""
-	loadingRules.Precedence = candidates
-	loadingRules.WarnIfAllMissing = false
-	return DiscoverWithRules(&loadingRules)
+	return discoverIndependentFiles(candidates, defaultPath)
+}
+
+// discoverIndependentFiles catalogs each automatically discovered sibling as
+// its own kubeconfig authority. The normal default file retains precedence for
+// an exact-name lookup, but opaque context IDs bind every chooser row to the
+// cluster and credentials from the file that produced it.
+func discoverIndependentFiles(paths []string, defaultPath string) (*Catalog, error) {
+	catalog := newEmptyCatalog()
+	for _, path := range paths {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			continue
+		}
+		rules := clientcmd.NewDefaultClientConfigLoadingRules()
+		rules.ExplicitPath = path
+		rules.MigrationRules = nil
+		rules.WarnIfAllMissing = false
+
+		fileCatalog, err := DiscoverWithRules(rules)
+		if err != nil {
+			// Candidate validation already rejected malformed sibling files.
+			// Preserve normal client-go behavior for the authoritative default.
+			if filepath.Clean(path) == filepath.Clean(defaultPath) {
+				return nil, err
+			}
+			continue
+		}
+		catalog.append(fileCatalog, filepath.Clean(path) == filepath.Clean(defaultPath))
+	}
+	catalog.finish()
+	return catalog, nil
 }
 
 func homeKubeconfigCandidates(directory, defaultPath string) ([]string, error) {
@@ -232,38 +263,39 @@ func (c *Catalog) Contexts() []ContextInfo {
 
 // Context looks up metadata by deterministic ID or exact kubeconfig name.
 func (c *Catalog) Context(reference string) (ContextInfo, bool) {
-	name, ok := c.contextName(reference)
+	bindingID, ok := c.bindingID(reference)
 	if !ok {
 		return ContextInfo{}, false
 	}
-	index := sort.Search(len(c.contexts), func(index int) bool {
-		return c.contexts[index].Name >= name
-	})
-	if index == len(c.contexts) || c.contexts[index].Name != name {
-		return ContextInfo{}, false
+	for _, info := range c.contexts {
+		if info.ID == bindingID {
+			result := info
+			result.SourcePaths = append([]string(nil), info.SourcePaths...)
+			result.UnsupportedAuthentications = append(
+				[]UnsupportedAuthMechanism(nil),
+				info.UnsupportedAuthentications...,
+			)
+			return result, true
+		}
 	}
-	result := c.contexts[index]
-	result.SourcePaths = append([]string(nil), result.SourcePaths...)
-	result.UnsupportedAuthentications = append(
-		[]UnsupportedAuthMechanism(nil),
-		result.UnsupportedAuthentications...,
-	)
-	return result, true
+	return ContextInfo{}, false
 }
 
 // RESTConfig returns client-go configuration for a context ID or name. It is
 // a local operation; constructing it does not connect to the cluster.
 func (c *Catalog) RESTConfig(reference string) (*rest.Config, error) {
-	name, ok := c.contextName(reference)
+	bindingID, ok := c.bindingID(reference)
 	if !ok {
 		return nil, &ContextNotFoundError{Reference: reference}
 	}
-	contextConfig := c.config.Contexts[name]
+	binding := c.bindings[bindingID]
+	name := binding.contextName
+	contextConfig := binding.config.Contexts[name]
 	if contextConfig == nil {
 		return nil, &ContextNotFoundError{Reference: reference}
 	}
 
-	authInfo, authInfoExists := c.config.AuthInfos[contextConfig.AuthInfo]
+	authInfo, authInfoExists := binding.config.AuthInfos[contextConfig.AuthInfo]
 	mechanisms := unsupportedAuthentication(authInfo)
 	if len(mechanisms) != 0 {
 		return nil, &UnsupportedAuthenticationError{
@@ -280,7 +312,7 @@ func (c *Catalog) RESTConfig(reference string) (*rest.Config, error) {
 		)
 	}
 
-	clusterConfig, clusterExists := c.config.Clusters[contextConfig.Cluster]
+	clusterConfig, clusterExists := binding.config.Clusters[contextConfig.Cluster]
 	if contextConfig.Cluster != "" && (!clusterExists || clusterConfig == nil) {
 		return nil, fmt.Errorf(
 			"build client configuration for context %q: cluster %q was not found",
@@ -290,7 +322,7 @@ func (c *Catalog) RESTConfig(reference string) (*rest.Config, error) {
 	}
 
 	clientConfig := clientcmd.NewNonInteractiveClientConfig(
-		c.config,
+		binding.config,
 		name,
 		&clientcmd.ConfigOverrides{},
 		nil,
@@ -302,18 +334,83 @@ func (c *Catalog) RESTConfig(reference string) (*rest.Config, error) {
 	return restConfig, nil
 }
 
-func (c *Catalog) contextName(reference string) (string, bool) {
+func (c *Catalog) bindingID(reference string) (string, bool) {
 	if c == nil {
 		return "", false
 	}
-	if _, exists := c.config.Contexts[reference]; exists {
+	if _, exists := c.bindings[reference]; exists {
 		return reference, true
 	}
-	name, exists := c.byID[reference]
-	return name, exists
+	id, exists := c.uniqueName[reference]
+	return id, exists
 }
 
-func buildContextInfo(config *clientcmdapi.Config, byID map[string]string) []ContextInfo {
+func newCatalog(config *clientcmdapi.Config) *Catalog {
+	catalog := newEmptyCatalog()
+	catalog.addConfig(config)
+	catalog.finish()
+	return catalog
+}
+
+func newEmptyCatalog() *Catalog {
+	return &Catalog{
+		bindings:   make(map[string]contextBinding),
+		uniqueName: make(map[string]string),
+	}
+}
+
+func (c *Catalog) append(other *Catalog, retainCurrent bool) {
+	if c == nil || other == nil {
+		return
+	}
+	for _, info := range other.contexts {
+		binding, ok := other.bindings[info.ID]
+		if !ok {
+			continue
+		}
+		info.ID = stableID("context-source", info.ID, info.ContextSourcePath)
+		info.Current = retainCurrent && info.Current
+		c.addBinding(info, binding)
+	}
+}
+
+func (c *Catalog) addConfig(config *clientcmdapi.Config) {
+	if c == nil || config == nil {
+		return
+	}
+	for _, info := range buildContextInfo(config) {
+		c.addBinding(info, contextBinding{
+			config:      *config.DeepCopy(),
+			contextName: info.Name,
+		})
+	}
+}
+
+func (c *Catalog) addBinding(info ContextInfo, binding contextBinding) {
+	if _, exists := c.bindings[info.ID]; exists {
+		return
+	}
+	c.contexts = append(c.contexts, info)
+	c.bindings[info.ID] = binding
+	if existing, seen := c.uniqueName[info.Name]; !seen {
+		c.uniqueName[info.Name] = info.ID
+	} else if existing != info.ID {
+		// The first path (default, then filename order) intentionally retains
+		// exact-name precedence for legacy restoration. Chooser rows use IDs.
+		return
+	}
+}
+
+func (c *Catalog) finish() {
+	sort.Slice(c.contexts, func(left, right int) bool {
+		if c.contexts[left].Name != c.contexts[right].Name {
+			return c.contexts[left].Name < c.contexts[right].Name
+		}
+		return c.contexts[left].ID < c.contexts[right].ID
+	})
+}
+
+func buildContextInfo(config *clientcmdapi.Config) []ContextInfo {
 	contexts := make([]ContextInfo, 0, len(config.Contexts))
 	for name, contextConfig := range config.Contexts {
 		if contextConfig == nil {
@@ -358,12 +455,7 @@ func buildContextInfo(config *clientcmdapi.Config, byID map[string]string) []Con
 			UnsupportedAuthentications: unsupportedAuthentication(authInfo),
 		}
 		contexts = append(contexts, info)
-		byID[contextID] = name
 	}
-
-	sort.Slice(contexts, func(left, right int) bool {
-		return contexts[left].Name < contexts[right].Name
-	})
 	return contexts
 }
 

@@ -10,6 +10,7 @@ struct EngineClusterContextProviderTests {
     @Test("maps offline context metadata and unsupported authentication")
     func mapsContextMetadata() async throws {
         var supported = Kmgr_V1_KubeconfigContext()
+        supported.contextID = "context-source-local"
         supported.name = "local"
         supported.clusterName = "kind-local"
         supported.serverHostname = "127.0.0.1"
@@ -38,6 +39,7 @@ struct EngineClusterContextProviderTests {
 
         #expect(contexts.count == 2)
         #expect(contexts[0].name == "local")
+        #expect(contexts[0].id == "context-source-local")
         #expect(contexts[0].sourcePaths == ["/tmp/a", "/tmp/b"])
         #expect(contexts[0].authentication.isSupported)
         #expect(contexts[1].authentication.issue?.category == .unsupported)
@@ -56,7 +58,7 @@ struct EngineClusterContextProviderTests {
             var response = Kmgr_V1_OpenSessionResponse()
             response.requestID = request.context.requestID
             response.clusterSessionID = "session-abc"
-            response.contextName = request.contextName
+            response.contextName = "prod-context"
             response.clusterName = "production"
             response.serverHostname = "api.example.com"
             response.defaultNamespace = "apps"
@@ -64,13 +66,14 @@ struct EngineClusterContextProviderTests {
         }
         let provider = deterministicProvider(rpc: rpc)
 
-        let session = try await provider.openContext(named: "prod-context")
+        let session = try await provider.openContext(reference: "context-source-prod")
 
         #expect(session.sessionID == "session-abc")
         #expect(session.contextName == "prod-context")
+        #expect(session.contextReference == "context-source-prod")
         #expect(session.defaultNamespace == "apps")
         let request = await rpc.capturedOpenRequest()
-        #expect(request?.contextName == "prod-context")
+        #expect(request?.contextName == "context-source-prod")
         #expect(request?.context.deadlineUnixMs == 1_010_000)
     }
 
@@ -92,10 +95,10 @@ struct EngineClusterContextProviderTests {
         let provider = deterministicProvider(rpc: rpc)
 
         await #expect(throws: ClusterManagerIssue.self) {
-            try await provider.openContext(named: "production")
+            try await provider.openContext(reference: "production")
         }
         do {
-            _ = try await provider.openContext(named: "production")
+            _ = try await provider.openContext(reference: "production")
             Issue.record("Expected structured TLS error")
         } catch let issue as ClusterManagerIssue {
             #expect(issue.category == .tls)

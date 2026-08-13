@@ -319,7 +319,7 @@ private final class ClusterManagerViewController: NSViewController,
         guard !isProjectingSelection else { return }
         let row = tableView.selectedRow
         let contexts = model.displayedContexts
-        model.selectContext(named: contexts.indices.contains(row) ? contexts[row].name : nil)
+        model.selectContext(id: contexts.indices.contains(row) ? contexts[row].id : nil)
         operationIssue = nil
         renderControlsAndIssue()
     }
@@ -365,9 +365,10 @@ private final class ClusterManagerViewController: NSViewController,
         operationIssue = nil
         openingContextName = context.name
         renderControlsAndIssue()
-        openTask = Task { [weak self, provider, contextName = context.name] in
+        openTask = Task {
+            [weak self, provider, contextName = context.name, contextReference = context.id] in
             do {
-                let session = try await provider.openContext(named: contextName)
+                let session = try await provider.openContext(reference: contextReference)
                 guard let self, !Task.isCancelled else { return }
                 openTask = nil
                 openingContextName = nil
@@ -672,8 +673,8 @@ private final class ClusterManagerViewController: NSViewController,
 
     private func projectModelSelection() {
         let displayed = model.displayedContexts
-        let selectedRow = model.selectedContextName.flatMap { name in
-            displayed.firstIndex { $0.name == name }
+        let selectedRow = model.selectedContextID.flatMap { id in
+            displayed.firstIndex { $0.id == id }
         }
         isProjectingSelection = true
         defer { isProjectingSelection = false }

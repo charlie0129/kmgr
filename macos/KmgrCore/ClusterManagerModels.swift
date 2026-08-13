@@ -131,7 +131,9 @@ public enum ClusterAuthenticationAvailability: Hashable, Sendable {
 /// Compact kubeconfig provenance returned by the Go engine. Merely listing
 /// these values must not contact the Kubernetes API server.
 public struct ClusterContextSummary: Identifiable, Hashable, Sendable {
-    public var id: String { name }
+    /// Opaque, deterministic reference binding this row to its exact source
+    /// kubeconfig. It can differ between rows with the same display name.
+    public var id: String
 
     public var name: String
     public var clusterName: String
@@ -142,6 +144,7 @@ public struct ClusterContextSummary: Identifiable, Hashable, Sendable {
     public var authentication: ClusterAuthenticationAvailability
 
     public init(
+        id: String = "",
         name: String,
         clusterName: String,
         serverHostname: String,
@@ -150,6 +153,7 @@ public struct ClusterContextSummary: Identifiable, Hashable, Sendable {
         isCurrent: Bool = false,
         authentication: ClusterAuthenticationAvailability = .supported(hint: "")
     ) {
+        self.id = id.isEmpty ? name : id
         self.name = name
         self.clusterName = clusterName
         self.serverHostname = serverHostname
@@ -182,19 +186,22 @@ public struct OpenedClusterSession: Hashable, Sendable {
     public var clusterName: String
     public var serverHostname: String
     public var defaultNamespace: String
+    public var contextReference: String
 
     public init(
         sessionID: String,
         contextName: String,
         clusterName: String,
         serverHostname: String,
-        defaultNamespace: String
+        defaultNamespace: String,
+        contextReference: String = ""
     ) {
         self.sessionID = sessionID
         self.contextName = contextName
         self.clusterName = clusterName
         self.serverHostname = serverHostname
         self.defaultNamespace = defaultNamespace
+        self.contextReference = contextReference.isEmpty ? contextName : contextReference
     }
 }
 
@@ -203,7 +210,7 @@ public struct OpenedClusterSession: Hashable, Sendable {
 /// these display-safe values.
 public protocol ClusterContextProviding: Sendable {
     func listContexts(reload: Bool) async throws -> [ClusterContextSummary]
-    func openContext(named contextName: String) async throws -> OpenedClusterSession
+    func openContext(reference: String) async throws -> OpenedClusterSession
 }
 
 /// A type-erased provider used by application composition. Its closures make
@@ -217,8 +224,8 @@ public struct AnyClusterContextProvider: ClusterContextProviding {
         self.listOperation = { reload in
             try await provider.listContexts(reload: reload)
         }
-        self.openOperation = { contextName in
-            try await provider.openContext(named: contextName)
+        self.openOperation = { reference in
+            try await provider.openContext(reference: reference)
         }
     }
 
@@ -234,8 +241,8 @@ public struct AnyClusterContextProvider: ClusterContextProviding {
         try await listOperation(reload)
     }
 
-    public func openContext(named contextName: String) async throws -> OpenedClusterSession {
-        try await openOperation(contextName)
+    public func openContext(reference: String) async throws -> OpenedClusterSession {
+        try await openOperation(reference)
     }
 }
 
@@ -252,7 +259,8 @@ public enum ClusterContextListPhase: Hashable, Sendable {
 public struct ClusterManagerModel: Hashable, Sendable {
     public private(set) var allContexts: [ClusterContextSummary]
     public private(set) var searchQuery: String
-    public private(set) var selectedContextName: String?
+    public private(set) var selectedContextID: String?
+    public var selectedContextName: String? { selectedContext?.name }
     public private(set) var phase: ClusterContextListPhase
     public private(set) var loadRevision: UInt64
 
@@ -262,9 +270,12 @@ public struct ClusterManagerModel: Hashable, Sendable {
         selectedContextName: String? = nil,
         phase: ClusterContextListPhase = .idle
     ) {
-        self.allContexts = Self.normalized(contexts)
+        let normalizedContexts = Self.normalized(contexts)
+        self.allContexts = normalizedContexts
         self.searchQuery = searchQuery
-        self.selectedContextName = selectedContextName
+        self.selectedContextID = selectedContextName.flatMap { name in
+            normalizedContexts.first(where: { $0.name == name })?.id
+        }
         self.phase = phase
         self.loadRevision = 0
         reconcileSelection()
@@ -284,8 +295,8 @@ public struct ClusterManagerModel: Hashable, Sendable {
     }
 
     public var selectedContext: ClusterContextSummary? {
-        guard let selectedContextName else { return nil }
-        return allContexts.first { $0.name == selectedContextName }
+        guard let selectedContextID else { return nil }
+        return allContexts.first { $0.id == selectedContextID }
     }
 
     public var selectedContextIssue: ClusterManagerIssue? {
@@ -310,7 +321,7 @@ public struct ClusterManagerModel: Hashable, Sendable {
         phase = .loading(reload: reload)
         if !reload {
             allContexts.removeAll(keepingCapacity: true)
-            selectedContextName = nil
+            selectedContextID = nil
         }
         return loadRevision
     }
@@ -347,20 +358,28 @@ public struct ClusterManagerModel: Hashable, Sendable {
         guard let name,
             displayedContexts.contains(where: { $0.name == name })
         else {
-            selectedContextName = nil
+            selectedContextID = nil
             return
         }
-        selectedContextName = name
+        selectedContextID = displayedContexts.first(where: { $0.name == name })?.id
+    }
+
+    public mutating func selectContext(id: String?) {
+        guard let id, displayedContexts.contains(where: { $0.id == id }) else {
+            selectedContextID = nil
+            return
+        }
+        selectedContextID = id
     }
 
     private mutating func reconcileSelection() {
         let displayed = displayedContexts
-        if let selectedContextName,
-            displayed.contains(where: { $0.name == selectedContextName })
+        if let selectedContextID,
+            displayed.contains(where: { $0.id == selectedContextID })
         {
             return
         }
-        selectedContextName = displayed.first(where: \.isCurrent)?.name ?? displayed.first?.name
+        selectedContextID = displayed.first(where: \.isCurrent)?.id ?? displayed.first?.id
     }
 
     private static func normalized(
@@ -368,7 +387,7 @@ public struct ClusterManagerModel: Hashable, Sendable {
     ) -> [ClusterContextSummary] {
         var seen: Set<String> = []
         return contexts
-            .filter { !$0.name.isEmpty && seen.insert($0.name).inserted }
+            .filter { !$0.name.isEmpty && !$0.id.isEmpty && seen.insert($0.id).inserted }
             .sorted { lhs, rhs in
                 if lhs.isCurrent != rhs.isCurrent { return lhs.isCurrent }
                 let comparison = lhs.name.localizedStandardCompare(rhs.name)

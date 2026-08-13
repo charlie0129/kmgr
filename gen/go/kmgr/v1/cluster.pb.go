@@ -93,6 +93,7 @@ type KubeconfigContext struct {
 	AuthenticationHint             string                 `protobuf:"bytes,7,opt,name=authentication_hint,json=authenticationHint,proto3" json:"authentication_hint,omitempty"`
 	AuthenticationSupported        bool                   `protobuf:"varint,8,opt,name=authentication_supported,json=authenticationSupported,proto3" json:"authentication_supported,omitempty"`
 	UnsupportedAuthenticationError *StructuredError       `protobuf:"bytes,9,opt,name=unsupported_authentication_error,json=unsupportedAuthenticationError,proto3" json:"unsupported_authentication_error,omitempty"`
+	ContextId                      string                 `protobuf:"bytes,10,opt,name=context_id,json=contextId,proto3" json:"context_id,omitempty"`
 	unknownFields                  protoimpl.UnknownFields
 	sizeCache                      protoimpl.SizeCache
 }
@@ -188,6 +189,13 @@ func (x *KubeconfigContext) GetUnsupportedAuthenticationError() *StructuredError
 		return x.UnsupportedAuthenticationError
 	}
 	return nil
+}
+
+func (x *KubeconfigContext) GetContextId() string {
+	if x != nil {
+		return x.ContextId
+	}
+	return ""
 }
 
 type ListContextsRequest struct {
@@ -938,7 +946,7 @@ var File_kmgr_v1_cluster_proto protoreflect.FileDescriptor
 
 const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	"\n" +
-	"\x15kmgr/v1/cluster.proto\x12\akmgr.v1\x1a\x14kmgr/v1/common.proto\"\xad\x03\n" +
+	"\x15kmgr/v1/cluster.proto\x12\akmgr.v1\x1a\x14kmgr/v1/common.proto\"\xcc\x03\n" +
 	"\x11KubeconfigContext\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12!\n" +
 	"\fcluster_name\x18\x02 \x01(\tR\vclusterName\x12'\n" +
@@ -948,7 +956,10 @@ const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	"\acurrent\x18\x06 \x01(\bR\acurrent\x12/\n" +
 	"\x13authentication_hint\x18\a \x01(\tR\x12authenticationHint\x129\n" +
 	"\x18authentication_supported\x18\b \x01(\bR\x17authenticationSupported\x12b\n" +
-	" unsupported_authentication_error\x18\t \x01(\v2\x18.kmgr.v1.StructuredErrorR\x1eunsupportedAuthenticationError\"\x8b\x01\n" +
+	" unsupported_authentication_error\x18\t \x01(\v2\x18.kmgr.v1.StructuredErrorR\x1eunsupportedAuthenticationError\x12\x1d\n" +
+	"\n" +
+	"context_id\x18\n" +
+	" \x01(\tR\tcontextId\"\x8b\x01\n" +
 	"\x13ListContextsRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x16\n" +
 	"\x06reload\x18\x02 \x01(\bR\x06reload\x12)\n" +

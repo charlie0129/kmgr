@@ -243,6 +243,114 @@ current-context: from-z
 	}
 }
 
+func TestHomeDiscoveryBindsEachContextToCredentialsFromItsOwnSource(t *testing.T) {
+	home := t.TempDir()
+	kubeDirectory := filepath.Join(home, ".kube")
+	defaultPath := filepath.Join(kubeDirectory, "config")
+	firstPath := filepath.Join(kubeDirectory, "a.kubeconfig")
+	secondPath := filepath.Join(kubeDirectory, "z.kubeconfig")
+	writeFile(t, defaultPath, kubeconfigForContext(
+		"orbstack", "orbstack", "https://orbstack.example.test"))
+	writeFile(t, firstPath, kubeconfigWithSharedNames(
+		"admin@first", "first", "https://first.example.test", "first-certificate", "first-key"))
+	writeFile(t, secondPath, kubeconfigWithSharedNames(
+		"admin@second", "second", "https://second.example.test", "second-certificate", "second-key"))
+
+	t.Setenv("HOME", home)
+	t.Setenv(clientcmd.RecommendedConfigPathEnvVar, "")
+	withRecommendedHomeFile(t, defaultPath)
+	catalog, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, ok := catalog.Context("admin@first")
+	if !ok {
+		t.Fatal("first context was not discovered")
+	}
+	second, ok := catalog.Context("admin@second")
+	if !ok {
+		t.Fatal("second context was not discovered")
+	}
+	firstConfig, err := catalog.RESTConfig(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondConfig, err := catalog.RESTConfig(second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstConfig.Host != "https://first.example.test" ||
+		string(firstConfig.TLSClientConfig.CertData) != "first-certificate" ||
+		string(firstConfig.TLSClientConfig.KeyData) != "first-key" {
+		t.Fatalf("first context was not bound to its source configuration")
+	}
+	if secondConfig.Host != "https://second.example.test" ||
+		string(secondConfig.TLSClientConfig.CertData) != "second-certificate" ||
+		string(secondConfig.TLSClientConfig.KeyData) != "second-key" {
+		t.Fatalf("second context was not bound to its source configuration")
+	}
+
+	// This is the regression: client-go's ordinary flat merge resolves the
+	// shared user name from the earlier file, even for the later context.
+	flat, err := DiscoverPaths([]string{firstPath, secondPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatSecond, err := flat.RESTConfig("admin@second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(flatSecond.TLSClientConfig.CertData) != "first-certificate" {
+		t.Fatal("test fixture no longer reproduces client-go's flat-merge credential collision")
+	}
+}
+
+func TestHomeDiscoveryKeepsSameNameContextsDistinctByOpaqueID(t *testing.T) {
+	home := t.TempDir()
+	kubeDirectory := filepath.Join(home, ".kube")
+	defaultPath := filepath.Join(kubeDirectory, "config")
+	firstPath := filepath.Join(kubeDirectory, "a.kubeconfig")
+	secondPath := filepath.Join(kubeDirectory, "z.kubeconfig")
+	writeFile(t, defaultPath, kubeconfigForContext(
+		"orbstack", "orbstack", "https://orbstack.example.test"))
+	writeFile(t, firstPath, kubeconfigWithSharedNames(
+		"default", "first", "https://first.example.test", "first-certificate", "first-key"))
+	writeFile(t, secondPath, kubeconfigWithSharedNames(
+		"default", "second", "https://second.example.test", "second-certificate", "second-key"))
+
+	t.Setenv("HOME", home)
+	t.Setenv(clientcmd.RecommendedConfigPathEnvVar, "")
+	withRecommendedHomeFile(t, defaultPath)
+	catalog, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var duplicates []ContextInfo
+	for _, info := range catalog.Contexts() {
+		if info.Name == "default" {
+			duplicates = append(duplicates, info)
+		}
+	}
+	if len(duplicates) != 2 || duplicates[0].ID == duplicates[1].ID {
+		t.Fatalf("same-name contexts were not independently addressable: %#v", duplicates)
+	}
+	configs := make(map[string]string)
+	for _, info := range duplicates {
+		config, err := catalog.RESTConfig(info.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		configs[config.Host] = string(config.TLSClientConfig.CertData)
+	}
+	if !reflect.DeepEqual(configs, map[string]string{
+		"https://first.example.test":  "first-certificate",
+		"https://second.example.test": "second-certificate",
+	}) {
+		t.Fatalf("same-name source bindings = %v", configs)
+	}
+}
+
 func TestDiscoverWithKUBECONFIGDoesNotScanHomeDirectory(t *testing.T) {
 	home := t.TempDir()
 	homeConfig := filepath.Join(home, ".kube", "extra.kubeconfig")
@@ -569,6 +677,30 @@ contexts:
   context: {cluster: %s}
 current-context: %s
 `, clusterName, server, contextName, clusterName, contextName)
+}
+
+func kubeconfigWithSharedNames(
+	contextName, clusterName, server, certificate, key string,
+) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Config
+clusters:
+- name: %s
+  cluster: {server: %s}
+users:
+- name: kubernetes-admin
+  user:
+    client-certificate-data: %s
+    client-key-data: %s
+contexts:
+- name: %s
+  context: {cluster: %s, user: kubernetes-admin}
+current-context: %s
+`, clusterName, server,
+		base64.StdEncoding.EncodeToString([]byte(certificate)),
+		base64.StdEncoding.EncodeToString([]byte(key)),
+		contextName, clusterName, contextName)
 }
 
 func withRecommendedHomeFile(t *testing.T, path string) {
