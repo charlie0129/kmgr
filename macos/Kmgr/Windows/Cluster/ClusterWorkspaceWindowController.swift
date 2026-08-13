@@ -1329,6 +1329,9 @@ private final class ResourceSidebarViewController: NSViewController,
 private final class ResourceListViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate
 {
+    private static let maximumAutoWidthSamples = 4_096
+    private static let maximumAutoSizedColumnWidth: CGFloat = 640
+
     private var session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
     private let columnsConfigurationPath: String
@@ -2302,6 +2305,57 @@ private final class ResourceListViewController: NSViewController,
 
     func tableViewColumnDidResize(_ notification: Notification) {
         scheduleRestorationCheckpoint()
+    }
+
+    /// AppKit calls this delegate when the user double-clicks a column divider.
+    /// Compact rows let us measure without constructing off-screen cell views;
+    /// sampling bounds main-thread work for six-figure resource lists.
+    func tableView(_ tableView: NSTableView, sizeToFitWidthOfColumn columnIndex: Int) -> CGFloat {
+        guard tableView.tableColumns.indices.contains(columnIndex) else { return 0 }
+        let column = tableView.tableColumns[columnIndex]
+        let columnID = column.identifier.rawValue
+        let rowCount = model.orderedVisibleUIDs.count
+        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        var fittedWidth = column.headerCell.cellSize.width + 18
+
+        for rowIndex in autoWidthSampleRows(rowCount: rowCount, tableView: tableView) {
+            let uid = model.orderedVisibleUIDs[rowIndex]
+            let text = model.rowByUID[uid]?[columnID]?.displayText ?? "—"
+            let textWidth = (text as NSString).size(withAttributes: [.font: font]).width + 12
+            fittedWidth = max(fittedWidth, textWidth)
+            if fittedWidth >= Self.maximumAutoSizedColumnWidth { break }
+        }
+
+        return ceil(min(
+            max(column.minWidth, fittedWidth),
+            min(column.maxWidth, Self.maximumAutoSizedColumnWidth)
+        ))
+    }
+
+    private func autoWidthSampleRows(rowCount: Int, tableView: NSTableView) -> IndexSet {
+        guard rowCount > 0 else { return [] }
+        if rowCount <= Self.maximumAutoWidthSamples {
+            return IndexSet(integersIn: 0..<rowCount)
+        }
+
+        var rows = IndexSet()
+        let visible = tableView.rows(in: tableView.visibleRect)
+        if visible.location != NSNotFound {
+            let upperBound = min(rowCount, visible.location + visible.length)
+            if visible.location < upperBound {
+                rows.insert(integersIn: visible.location..<upperBound)
+            }
+        }
+        let remaining = max(0, Self.maximumAutoWidthSamples - rows.count)
+        guard remaining > 0 else { return rows }
+        if remaining == 1 {
+            rows.insert(rowCount / 2)
+            return rows
+        }
+        for offset in 0..<remaining {
+            rows.insert(offset * (rowCount - 1) / (remaining - 1))
+        }
+        return rows
     }
 
     @objc private func openSelectedObjectFromTable() {
