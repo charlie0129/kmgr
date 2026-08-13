@@ -12,6 +12,7 @@ import (
 	appconfig "github.com/charlie0129/kmgr/backend/internal/config"
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	"github.com/charlie0129/kmgr/backend/internal/operation"
+	streamlogs "github.com/charlie0129/kmgr/backend/internal/stream/logs"
 	"github.com/charlie0129/kmgr/backend/internal/view"
 	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
@@ -41,6 +42,7 @@ type Server struct {
 	catalogs  *CatalogRegistry
 	sessions  *cluster.SessionRegistry
 	views     *view.Runtime
+	logs      *streamlogs.Manager
 	logger    *slog.Logger
 	closeOnce sync.Once
 }
@@ -103,7 +105,19 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		viewRuntime.Close()
 		return nil, err
 	}
-
+	logManager, err := streamlogs.NewManager(streamlogs.Config{
+		Resolver: streamlogs.ClusterResolver{Sessions: sessions},
+	})
+	if err != nil {
+		viewRuntime.Close()
+		return nil, err
+	}
+	logService, err := streamlogs.NewGRPCService(logManager)
+	if err != nil {
+		logManager.Close()
+		viewRuntime.Close()
+		return nil, err
+	}
 	serverOptions := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(
 			authenticator.UnaryServerInterceptor,
@@ -121,6 +135,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	kmgrv1.RegisterViewServiceServer(grpcServer, viewService)
 	kmgrv1.RegisterObjectServiceServer(grpcServer, objectService)
 	kmgrv1.RegisterOperationServiceServer(grpcServer, operationService)
+	kmgrv1.RegisterLogServiceServer(grpcServer, logService)
 
 	return &Server{
 		grpc:     grpcServer,
@@ -129,6 +144,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		catalogs: catalogs,
 		sessions: sessions,
 		views:    viewRuntime,
+		logs:     logManager,
 		logger:   options.Logger,
 	}, nil
 }
@@ -154,6 +170,7 @@ func (s *Server) Shutdown(timeout time.Duration) {
 			timeout = DefaultGracefulStopTimeout
 		}
 		s.views.Close()
+		s.logs.Close()
 		stopped := make(chan struct{})
 		go func() {
 			s.grpc.GracefulStop()
