@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package kmgr.v1;
+
+import "kmgr/v1/common.proto";
+
+option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
+option swift_prefix = "Kmgr_V1_";
+
+service ExecService {
+  rpc Exec(stream ExecClientMessage) returns (stream ExecServerMessage);
+}
+
+message ExecStart {
+  RequestContext context = 1;
+  string exec_session_id = 2;
+  uint64 generation = 3;
+  ResourceIdentity pod = 4;
+  string container = 5;
+  repeated string command = 6;
+  bool tty = 7;
+  bool stdin = 8;
+  uint32 initial_columns = 9;
+  uint32 initial_rows = 10;
+}
+
+message TerminalResize {
+  uint32 columns = 1;
+  uint32 rows = 2;
+}
+
+message ExecClientMessage {
+  string exec_session_id = 1;
+  uint64 generation = 2;
+  uint64 sequence = 3;
+  oneof payload {
+    ExecStart start = 4;
+    bytes stdin = 5;
+    TerminalResize resize = 6;
+    bool close_stdin = 7;
+    bool cancel = 8;
+  }
+}
+
+enum ExecConnectionState {
+  EXEC_CONNECTION_STATE_UNSPECIFIED = 0;
+  EXEC_CONNECTION_STATE_CONNECTING = 1;
+  EXEC_CONNECTION_STATE_RUNNING = 2;
+  EXEC_CONNECTION_STATE_EXITED = 3;
+  EXEC_CONNECTION_STATE_CANCELLED = 4;
+  EXEC_CONNECTION_STATE_FAILED = 5;
+}
+
+message ExecStatus {
+  ExecConnectionState state = 1;
+  optional int32 exit_code = 2;
+  string status_reason = 3;
+  StructuredError error = 4;
+}
+
+message ExecServerMessage {
+  StreamCursor cursor = 1;
+  oneof payload {
+    bytes stdout = 2;
+    bytes stderr = 3;
+    ExecStatus status = 4;
+    StructuredError error = 5;
+  }
+}

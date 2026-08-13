@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package kmgr.v1;
+
+import "kmgr/v1/common.proto";
+
+option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
+option swift_prefix = "Kmgr_V1_";
+
+service PortForwardService {
+  rpc Start(StartPortForwardRequest) returns (StartPortForwardResponse);
+  rpc Stop(StopPortForwardRequest) returns (Acknowledgement);
+  rpc Restart(RestartPortForwardRequest) returns (Acknowledgement);
+  rpc List(ListPortForwardsRequest) returns (ListPortForwardsResponse);
+  rpc Watch(WatchPortForwardsRequest) returns (stream PortForwardEvent);
+}
+
+message StartPortForwardRequest {
+  RequestContext context = 1;
+  string port_forward_id = 2;
+  ResourceIdentity target = 3;
+  uint32 remote_port = 4;
+  uint32 local_port = 5;
+  string bind_address = 6;
+  string label = 7;
+  bool allow_non_loopback = 8;
+}
+
+message StartPortForwardResponse {
+  string request_id = 1;
+  string port_forward_id = 2;
+  bool accepted = 3;
+  StructuredError error = 4;
+}
+
+message StopPortForwardRequest {
+  RequestContext context = 1;
+  string port_forward_id = 2;
+}
+
+message RestartPortForwardRequest {
+  RequestContext context = 1;
+  string port_forward_id = 2;
+}
+
+message ListPortForwardsRequest {
+  RequestContext context = 1;
+  bool include_stopped = 2;
+}
+
+enum PortForwardState {
+  PORT_FORWARD_STATE_UNSPECIFIED = 0;
+  PORT_FORWARD_STATE_STARTING = 1;
+  PORT_FORWARD_STATE_LISTENING = 2;
+  PORT_FORWARD_STATE_RECONNECTING = 3;
+  PORT_FORWARD_STATE_FAILED = 4;
+  PORT_FORWARD_STATE_STOPPED = 5;
+}
+
+message PortForward {
+  string port_forward_id = 1;
+  string cluster_session_id = 2;
+  string context_name = 3;
+  ResourceIdentity target = 4;
+  ResourceIdentity resolved_pod = 5;
+  uint32 remote_port = 6;
+  uint32 local_port = 7;
+  string bind_address = 8;
+  string label = 9;
+  PortForwardState state = 10;
+  int64 started_at_unix_ms = 11;
+  int64 updated_at_unix_ms = 12;
+  StructuredError last_error = 13;
+}
+
+message ListPortForwardsResponse {
+  string request_id = 1;
+  repeated PortForward port_forwards = 2;
+  StructuredError error = 3;
+}
+
+message WatchPortForwardsRequest {
+  RequestContext context = 1;
+  string stream_id = 2;
+  uint64 generation = 3;
+  bool include_stopped = 4;
+}
+
+message PortForwardDelta {
+  repeated PortForward upserts = 1;
+  repeated string removed_port_forward_ids = 2;
+}
+
+message PortForwardEvent {
+  StreamCursor cursor = 1;
+  PortForwardDelta delta = 2;
+  StructuredError error = 3;
+}

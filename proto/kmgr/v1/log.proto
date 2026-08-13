@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package kmgr.v1;
+
+import "kmgr/v1/common.proto";
+
+option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
+option swift_prefix = "Kmgr_V1_";
+
+service LogService {
+  rpc StreamLogs(StartLogsRequest) returns (stream LogEvent);
+  rpc CancelLogs(CancelLogsRequest) returns (Acknowledgement);
+}
+
+message LogSource {
+  ResourceIdentity identity = 1;
+  string container = 2;
+  string source_id = 3;
+  string source_label = 4;
+}
+
+message LogOptions {
+  bool follow = 1;
+  bool previous = 2;
+  bool timestamps = 3;
+  optional int64 since_unix_ms = 4;
+  optional int64 since_seconds = 5;
+  optional int64 tail_lines = 6;
+  optional int64 byte_limit = 7;
+  bool follow_workload_membership = 8;
+}
+
+message StartLogsRequest {
+  RequestContext context = 1;
+  string log_stream_id = 2;
+  uint64 generation = 3;
+  repeated LogSource sources = 4;
+  LogOptions options = 5;
+}
+
+message CancelLogsRequest {
+  RequestContext context = 1;
+  string log_stream_id = 2;
+  uint64 generation = 3;
+}
+
+message LogRecord {
+  string source_id = 1;
+  bytes data = 2;
+  int64 timestamp_unix_ms = 3;
+  bool ends_with_newline = 4;
+}
+
+enum LogStreamState {
+  LOG_STREAM_STATE_UNSPECIFIED = 0;
+  LOG_STREAM_STATE_CONNECTING = 1;
+  LOG_STREAM_STATE_STREAMING = 2;
+  LOG_STREAM_STATE_RECONNECTING = 3;
+  LOG_STREAM_STATE_COMPLETED = 4;
+  LOG_STREAM_STATE_CANCELLED = 5;
+  LOG_STREAM_STATE_FAILED = 6;
+}
+
+message LogStatus {
+  LogStreamState state = 1;
+  uint64 dropped_records = 2;
+  uint64 dropped_bytes = 3;
+  string source_id = 4;
+  StructuredError error = 5;
+}
+
+// data is bounded and batched by the engine; receivers must not assume a
+// record is a UTF-8 line because a single Kubernetes log line may be huge.
+message LogBatch {
+  repeated LogRecord records = 1;
+  uint64 total_bytes = 2;
+}
+
+message LogEvent {
+  StreamCursor cursor = 1;
+  oneof payload {
+    LogBatch batch = 2;
+    LogStatus status = 3;
+    StructuredError error = 4;
+  }
+}

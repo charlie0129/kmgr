@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package kmgr.v1;
+
+import "kmgr/v1/common.proto";
+import "kmgr/v1/object.proto";
+
+option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
+option swift_prefix = "Kmgr_V1_";
+
+service OperationService {
+  rpc PrepareYamlEdit(PrepareYamlEditRequest) returns (PrepareYamlEditResponse);
+  rpc ApplyYaml(ApplyYamlRequest) returns (StartOperationResponse);
+  rpc UpdateData(UpdateDataRequest) returns (StartOperationResponse);
+  rpc Delete(DeleteRequest) returns (StartOperationResponse);
+  rpc Scale(ScaleRequest) returns (StartOperationResponse);
+  rpc RolloutRestart(RolloutRestartRequest) returns (StartOperationResponse);
+  rpc UpdateMetadata(UpdateMetadataRequest) returns (StartOperationResponse);
+  rpc WatchOperation(WatchOperationRequest) returns (stream OperationEvent);
+  rpc CancelOperation(CancelOperationRequest) returns (Acknowledgement);
+}
+
+message PrepareYamlEditRequest {
+  RequestContext context = 1;
+  ResourceIdentity identity = 2;
+  bytes yaml_utf8 = 3;
+  string expected_resource_version = 4;
+  bool force_field_ownership = 5;
+}
+
+message SemanticDiffEntry {
+  string path = 1;
+  string before_summary = 2;
+  string after_summary = 3;
+  CellSeverity severity = 4;
+}
+
+message PrepareYamlEditResponse {
+  string request_id = 1;
+  ResourceIdentity identity = 2;
+  repeated SemanticDiffEntry diff = 3;
+  repeated StructuredError validation_errors = 4;
+  bytes normalized_yaml_utf8 = 5;
+  string current_resource_version = 6;
+  StructuredError error = 7;
+}
+
+message ApplyYamlRequest {
+  RequestContext context = 1;
+  string operation_id = 2;
+  ResourceIdentity identity = 3;
+  bytes yaml_utf8 = 4;
+  string expected_resource_version = 5;
+  string field_manager = 6;
+  bool force_field_ownership = 7;
+}
+
+enum DataMutationType {
+  DATA_MUTATION_TYPE_UNSPECIFIED = 0;
+  DATA_MUTATION_TYPE_SET = 1;
+  DATA_MUTATION_TYPE_DELETE = 2;
+  DATA_MUTATION_TYPE_RENAME = 3;
+}
+
+message DataMutation {
+  DataMutationType type = 1;
+  string key = 2;
+  string new_key = 3;
+  DataEntryKind entry_kind = 4;
+  bytes value = 5;
+  bytes expected_content_hash = 6;
+}
+
+message UpdateDataRequest {
+  RequestContext context = 1;
+  string operation_id = 2;
+  ResourceIdentity identity = 3;
+  string expected_resource_version = 4;
+  repeated DataMutation mutations = 5;
+}
+
+message DeleteTarget {
+  ResourceIdentity identity = 1;
+  bool hidden_by_filter = 2;
+}
+
+message DeleteRequest {
+  RequestContext context = 1;
+  string operation_id = 2;
+  repeated DeleteTarget targets = 3;
+  PropagationPolicy propagation_policy = 4;
+  optional int64 grace_period_seconds = 5;
+  uint32 max_concurrency = 6;
+}
+
+message ScaleRequest {
+  RequestContext context = 1;
+  string operation_id = 2;
+  ResourceIdentity identity = 3;
+  int32 replicas = 4;
+  string expected_resource_version = 5;
+}
+
+message RolloutRestartRequest {
+  RequestContext context = 1;
+  string operation_id = 2;
+  ResourceIdentity identity = 3;
+  string expected_resource_version = 4;
+}
+
+message UpdateMetadataRequest {
+  RequestContext context = 1;
+  string operation_id = 2;
+  ResourceIdentity identity = 3;
+  string expected_resource_version = 4;
+  repeated StringMapEntry labels = 5;
+  repeated StringMapEntry annotations = 6;
+  repeated string remove_label_keys = 7;
+  repeated string remove_annotation_keys = 8;
+}
+
+message StartOperationResponse {
+  string request_id = 1;
+  string operation_id = 2;
+  bool accepted = 3;
+  StructuredError error = 4;
+}
+
+message WatchOperationRequest {
+  RequestContext context = 1;
+  string stream_id = 2;
+  uint64 generation = 3;
+  string operation_id = 4;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_PENDING = 1;
+  OPERATION_STATE_RUNNING = 2;
+  OPERATION_STATE_SUCCEEDED = 3;
+  OPERATION_STATE_PARTIALLY_SUCCEEDED = 4;
+  OPERATION_STATE_FAILED = 5;
+  OPERATION_STATE_CANCELLED = 6;
+}
+
+enum OperationItemState {
+  OPERATION_ITEM_STATE_UNSPECIFIED = 0;
+  OPERATION_ITEM_STATE_PENDING = 1;
+  OPERATION_ITEM_STATE_RUNNING = 2;
+  OPERATION_ITEM_STATE_SUCCEEDED = 3;
+  OPERATION_ITEM_STATE_FAILED = 4;
+  OPERATION_ITEM_STATE_SKIPPED = 5;
+  OPERATION_ITEM_STATE_CANCELLED = 6;
+}
+
+message OperationItemResult {
+  ResourceIdentity identity = 1;
+  OperationItemState state = 2;
+  StructuredError error = 3;
+  string new_resource_version = 4;
+}
+
+message OperationEvent {
+  StreamCursor cursor = 1;
+  string operation_id = 2;
+  OperationState state = 3;
+  uint32 completed_items = 4;
+  uint32 total_items = 5;
+  repeated OperationItemResult item_results = 6;
+  StructuredError error = 7;
+}
+
+message CancelOperationRequest {
+  RequestContext context = 1;
+  string operation_id = 2;
+  bool cancel_not_started_only = 3;
+}

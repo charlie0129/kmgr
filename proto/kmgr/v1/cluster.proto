@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package kmgr.v1;
+
+import "kmgr/v1/common.proto";
+
+option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
+option swift_prefix = "Kmgr_V1_";
+
+service ClusterService {
+  rpc ListContexts(ListContextsRequest) returns (ListContextsResponse);
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc CloseSession(CloseSessionRequest) returns (Acknowledgement);
+  rpc WatchConnection(WatchConnectionRequest) returns (stream ConnectionEvent);
+  rpc Discover(DiscoverRequest) returns (DiscoverResponse);
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+}
+
+message KubeconfigContext {
+  string name = 1;
+  string cluster_name = 2;
+  string server_hostname = 3;
+  string default_namespace = 4;
+  repeated string source_paths = 5;
+  bool current = 6;
+  string authentication_hint = 7;
+  bool authentication_supported = 8;
+  StructuredError unsupported_authentication_error = 9;
+}
+
+message ListContextsRequest {
+  RequestContext context = 1;
+  bool reload = 2;
+  repeated string kubeconfig_paths = 3;
+}
+
+message ListContextsResponse {
+  string request_id = 1;
+  repeated KubeconfigContext contexts = 2;
+  StructuredError error = 3;
+}
+
+message OpenSessionRequest {
+  RequestContext context = 1;
+  string context_name = 2;
+  repeated string kubeconfig_paths = 3;
+}
+
+message OpenSessionResponse {
+  string request_id = 1;
+  string cluster_session_id = 2;
+  string context_name = 3;
+  string cluster_name = 4;
+  string server_hostname = 5;
+  string default_namespace = 6;
+  StructuredError error = 7;
+}
+
+message CloseSessionRequest {
+  RequestContext context = 1;
+  bool keep_independent_streams = 2;
+}
+
+enum ConnectionState {
+  CONNECTION_STATE_UNSPECIFIED = 0;
+  CONNECTION_STATE_CONNECTING = 1;
+  CONNECTION_STATE_CONNECTED = 2;
+  CONNECTION_STATE_RECONNECTING = 3;
+  CONNECTION_STATE_DISCONNECTED = 4;
+  CONNECTION_STATE_FAILED = 5;
+  CONNECTION_STATE_CLOSED = 6;
+}
+
+message WatchConnectionRequest {
+  RequestContext context = 1;
+  string stream_id = 2;
+}
+
+message ConnectionEvent {
+  StreamCursor cursor = 1;
+  ConnectionState state = 2;
+  int64 observed_at_unix_ms = 3;
+  StructuredError error = 4;
+}
+
+message DiscoverRequest {
+  RequestContext context = 1;
+  bool refresh = 2;
+}
+
+message ApiResource {
+  ResourceType type = 1;
+  repeated string verbs = 2;
+  repeated string short_names = 3;
+  repeated string categories = 4;
+  bool preferred_version = 5;
+}
+
+message DiscoverResponse {
+  string request_id = 1;
+  repeated ApiResource resources = 2;
+  string discovery_revision = 3;
+  StructuredError error = 4;
+}
+
+message ListNamespacesRequest { RequestContext context = 1; }
+
+message ListNamespacesResponse {
+  string request_id = 1;
+  repeated string namespaces = 2;
+  StructuredError error = 3;
+}

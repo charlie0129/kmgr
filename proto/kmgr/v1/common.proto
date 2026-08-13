@@ -1,0 +1,140 @@
+syntax = "proto3";
+
+package kmgr.v1;
+
+option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
+option swift_prefix = "Kmgr_V1_";
+
+// RequestContext is present on every request. deadline_unix_ms is an
+// application-level deadline for queued backend work; callers must also set the
+// native gRPC deadline so transport cancellation is immediate.
+message RequestContext {
+  string request_id = 1;
+  int64 deadline_unix_ms = 2;
+  string cluster_session_id = 3;
+}
+
+// StreamCursor lets the client discard messages from an obsolete stream.
+// generation changes whenever a stream is replaced; sequence is monotonic
+// within one generation and starts at one.
+message StreamCursor {
+  string stream_id = 1;
+  uint64 generation = 2;
+  uint64 sequence = 3;
+}
+
+message Empty {}
+
+message Acknowledgement {
+  string request_id = 1;
+  bool accepted = 2;
+}
+
+enum ErrorCategory {
+  ERROR_CATEGORY_UNSPECIFIED = 0;
+  ERROR_CATEGORY_AUTHENTICATION = 1;
+  ERROR_CATEGORY_AUTHORIZATION = 2;
+  ERROR_CATEGORY_NOT_FOUND = 3;
+  ERROR_CATEGORY_CONFLICT = 4;
+  ERROR_CATEGORY_VALIDATION = 5;
+  ERROR_CATEGORY_UNAVAILABLE = 6;
+  ERROR_CATEGORY_TIMEOUT = 7;
+  ERROR_CATEGORY_CANCELLED = 8;
+  ERROR_CATEGORY_TLS = 9;
+  ERROR_CATEGORY_UNSUPPORTED = 10;
+  ERROR_CATEGORY_INTERNAL = 11;
+  ERROR_CATEGORY_RESOURCE_EXHAUSTED = 12;
+}
+
+// StructuredError is safe to display. It must never contain credentials,
+// Secret values, exec/log bytes, or complete mutation payloads.
+message StructuredError {
+  ErrorCategory category = 1;
+  string reason = 2;
+  string message = 3;
+  int32 http_status_code = 4;
+  bool retryable = 5;
+  int64 retry_after_ms = 6;
+  string field_path = 7;
+  string context_name = 8;
+  string operation = 9;
+  ResourceIdentity resource = 10;
+  map<string, string> safe_details = 11;
+}
+
+message ResourceType {
+  string group = 1;
+  string version = 2;
+  string resource = 3;
+  string kind = 4;
+  bool namespaced = 5;
+}
+
+message ResourceIdentity {
+  string cluster_session_id = 1;
+  string group = 2;
+  string version = 3;
+  string resource = 4;
+  string namespace = 5;
+  string name = 6;
+  string uid = 7;
+}
+
+message NamespaceScope {
+  bool all_namespaces = 1;
+  repeated string namespaces = 2;
+}
+
+message StringMapEntry {
+  string key = 1;
+  string value = 2;
+}
+
+enum CellSeverity {
+  CELL_SEVERITY_UNSPECIFIED = 0;
+  CELL_SEVERITY_NORMAL = 1;
+  CELL_SEVERITY_INFO = 2;
+  CELL_SEVERITY_WARNING = 3;
+  CELL_SEVERITY_ERROR = 4;
+  CELL_SEVERITY_MUTED = 5;
+}
+
+message ResourceUsageValue {
+  double used = 1;
+  double requested = 2;
+  double limit = 3;
+  double capacity = 4;
+  string unit = 5;
+  string resource_name = 6;
+  int64 measured_at_unix_ms = 7;
+  string provider = 8;
+  string measurement_scope = 9;
+  bool usage_available = 10;
+}
+
+message Cell {
+  string column_id = 1;
+  string display_text = 2;
+  oneof typed_value {
+    string string_value = 3;
+    double number_value = 4;
+    int64 timestamp_unix_ms = 5;
+    ResourceUsageValue usage = 6;
+    bool bool_value = 9;
+    bytes opaque_sort_value = 10;
+  }
+  string tooltip = 7;
+  CellSeverity severity = 8;
+}
+
+message ResourceRow {
+  ResourceIdentity identity = 1;
+  repeated Cell cells = 2;
+}
+
+enum PropagationPolicy {
+  PROPAGATION_POLICY_UNSPECIFIED = 0;
+  PROPAGATION_POLICY_BACKGROUND = 1;
+  PROPAGATION_POLICY_FOREGROUND = 2;
+  PROPAGATION_POLICY_ORPHAN = 3;
+}

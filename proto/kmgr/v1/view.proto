@@ -1,0 +1,141 @@
+syntax = "proto3";
+
+package kmgr.v1;
+
+import "kmgr/v1/common.proto";
+
+option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
+option swift_prefix = "Kmgr_V1_";
+
+service ViewService {
+  rpc StreamView(OpenViewRequest) returns (stream ViewEvent);
+  rpc CancelView(CancelViewRequest) returns (Acknowledgement);
+  rpc SearchObjects(SearchObjectsRequest) returns (stream SearchObjectsEvent);
+  rpc CancelSearch(CancelSearchRequest) returns (Acknowledgement);
+}
+
+enum SortDirection {
+  SORT_DIRECTION_UNSPECIFIED = 0;
+  SORT_DIRECTION_ASCENDING = 1;
+  SORT_DIRECTION_DESCENDING = 2;
+}
+
+message SortDescriptor {
+  string column_id = 1;
+  SortDirection direction = 2;
+  bool nulls_first = 3;
+}
+
+message ViewSpec {
+  ResourceType resource = 1;
+  NamespaceScope namespace_scope = 2;
+  string label_selector = 3;
+  string field_selector = 4;
+  string filter_expression = 5;
+  uint64 filter_revision = 6;
+  repeated string column_ids = 7;
+  string column_configuration_version = 8;
+  repeated SortDescriptor sort = 9;
+}
+
+message OpenViewRequest {
+  RequestContext context = 1;
+  string view_id = 2;
+  uint64 generation = 3;
+  ViewSpec spec = 4;
+}
+
+message CancelViewRequest {
+  RequestContext context = 1;
+  string view_id = 2;
+  uint64 generation = 3;
+}
+
+enum ViewFreshness {
+  VIEW_FRESHNESS_UNSPECIFIED = 0;
+  VIEW_FRESHNESS_LOADING = 1;
+  VIEW_FRESHNESS_STALE = 2;
+  VIEW_FRESHNESS_RESUMING = 3;
+  VIEW_FRESHNESS_RELISTING = 4;
+  VIEW_FRESHNESS_WATCHING = 5;
+  VIEW_FRESHNESS_RECONNECTING = 6;
+  VIEW_FRESHNESS_FAILED = 7;
+  VIEW_FRESHNESS_COMPLETE = 8;
+}
+
+message ViewStatus {
+  ViewFreshness freshness = 1;
+  uint64 objects_examined = 2;
+  uint64 rows_visible = 3;
+  int64 last_synchronized_unix_ms = 4;
+  bool from_warm_cache = 5;
+  string resource_version_hint = 6;
+}
+
+message SnapshotChunk {
+  repeated ResourceRow rows = 1;
+  bool first_chunk = 2;
+  bool last_chunk = 3;
+  uint64 chunk_index = 4;
+  uint64 estimated_total_rows = 5;
+}
+
+message RowDelta {
+  repeated ResourceRow upserts = 1;
+  repeated string removed_uids = 2;
+  repeated string ordered_uids = 3;
+  bool order_is_complete = 4;
+}
+
+message ViewEvent {
+  StreamCursor cursor = 1;
+  oneof payload {
+    SnapshotChunk snapshot = 2;
+    RowDelta delta = 3;
+    ViewStatus status = 4;
+    StructuredError error = 5;
+  }
+}
+
+message SearchObjectsRequest {
+  RequestContext context = 1;
+  string search_id = 2;
+  uint64 generation = 3;
+  uint64 query_revision = 4;
+  ResourceType resource = 5;
+  NamespaceScope namespace_scope = 6;
+  string query = 7;
+  uint32 result_limit = 8;
+  bool allow_paginated_list = 9;
+}
+
+message SearchResult {
+  ResourceIdentity identity = 1;
+  string display_text = 2;
+  string detail_text = 3;
+  double rank = 4;
+  bool stale = 5;
+}
+
+message SearchProgress {
+  uint64 query_revision = 1;
+  uint64 objects_examined = 2;
+  bool complete = 3;
+  bool used_direct_get = 4;
+  bool reusable_snapshot_available = 5;
+}
+
+message SearchObjectsEvent {
+  StreamCursor cursor = 1;
+  uint64 query_revision = 2;
+  repeated SearchResult results = 3;
+  SearchProgress progress = 4;
+  StructuredError error = 5;
+}
+
+message CancelSearchRequest {
+  RequestContext context = 1;
+  string search_id = 2;
+  uint64 generation = 3;
+  uint64 query_revision = 4;
+}

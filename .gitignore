@@ -8,7 +8,6 @@ PROMPT.md
 /.build/
 /macos/.build/
 /macos/.swiftpm/
-/macos/Package.resolved
 
 # Xcode
 DerivedData/

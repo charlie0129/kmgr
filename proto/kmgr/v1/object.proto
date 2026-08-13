@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package kmgr.v1;
+
+import "kmgr/v1/common.proto";
+
+option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
+option swift_prefix = "Kmgr_V1_";
+
+service ObjectService {
+  rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+  rpc WatchObject(WatchObjectRequest) returns (stream ObjectEvent);
+  rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
+  rpc GetRelationships(GetRelationshipsRequest) returns (GetRelationshipsResponse);
+  rpc GetData(GetDataRequest) returns (GetDataResponse);
+}
+
+message GetObjectRequest {
+  RequestContext context = 1;
+  ResourceIdentity identity = 2;
+  bool include_yaml = 3;
+  bool include_summary = 4;
+  bool include_metrics = 5;
+}
+
+message ObjectSummaryField {
+  string section_id = 1;
+  string field_id = 2;
+  string label = 3;
+  string display_text = 4;
+  string tooltip = 5;
+  CellSeverity severity = 6;
+}
+
+message GetObjectResponse {
+  string request_id = 1;
+  ResourceIdentity identity = 2;
+  string resource_version = 3;
+  bytes yaml_utf8 = 4;
+  repeated ObjectSummaryField summary_fields = 5;
+  repeated StringMapEntry labels = 6;
+  repeated StringMapEntry annotations = 7;
+  repeated ResourceUsageValue metrics = 8;
+  StructuredError error = 9;
+}
+
+message WatchObjectRequest {
+  RequestContext context = 1;
+  string object_stream_id = 2;
+  uint64 generation = 3;
+  ResourceIdentity identity = 4;
+  string resource_version = 5;
+}
+
+enum ObjectEventType {
+  OBJECT_EVENT_TYPE_UNSPECIFIED = 0;
+  OBJECT_EVENT_TYPE_UPDATED = 1;
+  OBJECT_EVENT_TYPE_DELETED = 2;
+  OBJECT_EVENT_TYPE_STATUS = 3;
+}
+
+message ObjectEvent {
+  StreamCursor cursor = 1;
+  ObjectEventType type = 2;
+  GetObjectResponse object = 3;
+  StructuredError error = 4;
+}
+
+message GetEventsRequest {
+  RequestContext context = 1;
+  ResourceIdentity identity = 2;
+  uint32 limit = 3;
+}
+
+message KubernetesEvent {
+  ResourceIdentity identity = 1;
+  string type = 2;
+  string reason = 3;
+  string message = 4;
+  int64 first_observed_unix_ms = 5;
+  int64 last_observed_unix_ms = 6;
+  int32 count = 7;
+  string reporting_controller = 8;
+}
+
+message GetEventsResponse {
+  string request_id = 1;
+  repeated KubernetesEvent events = 2;
+  StructuredError error = 3;
+}
+
+message GetRelationshipsRequest {
+  RequestContext context = 1;
+  ResourceIdentity identity = 2;
+  bool include_owners = 3;
+  bool include_children = 4;
+}
+
+enum RelationshipKind {
+  RELATIONSHIP_KIND_UNSPECIFIED = 0;
+  RELATIONSHIP_KIND_OWNER = 1;
+  RELATIONSHIP_KIND_CHILD = 2;
+  RELATIONSHIP_KIND_RELATED = 3;
+}
+
+message ResourceRelationship {
+  RelationshipKind kind = 1;
+  ResourceIdentity identity = 2;
+  string label = 3;
+  bool stale = 4;
+}
+
+message GetRelationshipsResponse {
+  string request_id = 1;
+  repeated ResourceRelationship relationships = 2;
+  StructuredError error = 3;
+}
+
+enum DataEntryKind {
+  DATA_ENTRY_KIND_UNSPECIFIED = 0;
+  DATA_ENTRY_KIND_TEXT = 1;
+  DATA_ENTRY_KIND_BINARY = 2;
+}
+
+// value is intentionally bytes. For Secrets, Go decodes Kubernetes base64
+// before sending and re-encodes on mutation. These messages are sensitive and
+// must not be logged or persisted by either process.
+message DataEntry {
+  string key = 1;
+  DataEntryKind kind = 2;
+  bytes value = 3;
+  uint64 byte_size = 4;
+  bytes content_hash = 5;
+}
+
+message GetDataRequest {
+  RequestContext context = 1;
+  ResourceIdentity identity = 2;
+}
+
+message GetDataResponse {
+  string request_id = 1;
+  ResourceIdentity identity = 2;
+  string resource_version = 3;
+  repeated DataEntry entries = 4;
+  bool secret = 5;
+  StructuredError error = 6;
+}

@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package kmgr.v1;
+
+import "kmgr/v1/common.proto";
+
+option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
+option swift_prefix = "Kmgr_V1_";
+
+service EngineService {
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc WatchHealth(WatchHealthRequest) returns (stream HealthEvent);
+  rpc Shutdown(ShutdownRequest) returns (Acknowledgement);
+}
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message Capability {
+  string name = 1;
+  uint32 version = 2;
+}
+
+message HandshakeRequest {
+  RequestContext context = 1;
+  ProtocolVersion client_protocol = 2;
+  string client_version = 3;
+}
+
+message HandshakeResponse {
+  string request_id = 1;
+  ProtocolVersion negotiated_protocol = 2;
+  string engine_version = 3;
+  string engine_instance_id = 4;
+  repeated Capability capabilities = 5;
+  StructuredError error = 6;
+}
+
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0;
+  HEALTH_STATE_STARTING = 1;
+  HEALTH_STATE_READY = 2;
+  HEALTH_STATE_DEGRADED = 3;
+  HEALTH_STATE_STOPPING = 4;
+}
+
+message HealthRequest { RequestContext context = 1; }
+
+message HealthResponse {
+  string request_id = 1;
+  HealthState state = 2;
+  int64 started_at_unix_ms = 3;
+  StructuredError error = 4;
+}
+
+message WatchHealthRequest {
+  RequestContext context = 1;
+  string stream_id = 2;
+}
+
+message HealthEvent {
+  StreamCursor cursor = 1;
+  HealthState state = 2;
+  StructuredError error = 3;
+}
+
+message ShutdownRequest {
+  RequestContext context = 1;
+  bool stop_active_port_forwards = 2;
+}

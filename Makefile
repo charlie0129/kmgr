@@ -4,7 +4,7 @@ SHELL := /bin/zsh
 
 all: test
 
-generate:
+generate: ## Regenerate checked-in Go and Swift protobuf sources.
 	./scripts/generate-proto.sh
 
 test: test-go test-swift
