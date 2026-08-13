@@ -12,6 +12,8 @@ service ObjectService {
   rpc WatchObject(WatchObjectRequest) returns (stream ObjectEvent);
   rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
   rpc GetRelationships(GetRelationshipsRequest) returns (GetRelationshipsResponse);
+  rpc ScanRelationships(ScanRelationshipsRequest) returns (stream RelationshipScanEvent);
+  rpc CancelRelationshipScan(CancelRelationshipScanRequest) returns (Acknowledgement);
   rpc GetData(GetDataRequest) returns (GetDataResponse);
 }
 
@@ -108,12 +110,54 @@ message ResourceRelationship {
   ResourceIdentity identity = 2;
   string label = 3;
   bool stale = 4;
+  // The relationship itself matched the requested owner UID, but the source
+  // did not provide complete coverage of every Kubernetes resource type.
+  bool potentially_incomplete = 5;
 }
 
 message GetRelationshipsResponse {
   string request_id = 1;
   repeated ResourceRelationship relationships = 2;
   StructuredError error = 3;
+  // True even when no cached children were found: an empty cache result must
+  // never be presented as proof that the object has no children.
+  bool children_potentially_incomplete = 4;
+}
+
+message ScanRelationshipsRequest {
+  RequestContext context = 1;
+  string scan_id = 2;
+  uint64 generation = 3;
+  ResourceIdentity identity = 4;
+}
+
+message CancelRelationshipScanRequest {
+  RequestContext context = 1;
+  string scan_id = 2;
+  uint64 generation = 3;
+}
+
+message RelationshipScanProgress {
+  uint32 resources_total = 1;
+  uint32 resources_scanned = 2;
+  uint64 objects_examined = 3;
+  uint32 resources_failed = 4;
+  ResourceType current_resource = 5;
+  bool complete = 6;
+  // A completed scan remains potentially incomplete if discovery or any LIST
+  // was denied or failed. Completion means every discovered resource was
+  // attempted, not that the API server granted complete visibility.
+  bool potentially_incomplete = 7;
+}
+
+message RelationshipScanEvent {
+  StreamCursor cursor = 1;
+  repeated ResourceRelationship relationships = 2;
+  RelationshipScanProgress progress = 3;
+  // A per-resource failure is non-terminal: scanning continues and the final
+  // progress explicitly reports that the result may be incomplete.
+  StructuredError warning = 4;
+  StructuredError error = 5;
 }
 
 enum DataEntryKind {

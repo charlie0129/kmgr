@@ -9,6 +9,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     var watched: [Kmgr_V1_ObjectEvent] = []
     var events = Kmgr_V1_GetEventsResponse()
     var relationships = Kmgr_V1_GetRelationshipsResponse()
+    var relationshipScan: [Kmgr_V1_RelationshipScanEvent] = []
     var watchRequest: Kmgr_V1_WatchObjectRequest?
 
     func getObject(
@@ -47,6 +48,19 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
         return value
     }
 
+    func scanRelationships(
+        _ request: Kmgr_V1_ScanRelationshipsRequest,
+        timeout: Duration,
+        receive: @escaping @Sendable (Kmgr_V1_RelationshipScanEvent) throws -> Void
+    ) async throws {
+        for value in relationshipScan { try receive(value) }
+    }
+
+    func cancelRelationshipScan(
+        _ request: Kmgr_V1_CancelRelationshipScanRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_Acknowledgement { .init() }
+
     func getData(
         _ request: Kmgr_V1_GetDataRequest,
         timeout: Duration
@@ -77,6 +91,9 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     func installEvents(_ value: Kmgr_V1_GetEventsResponse) { events = value }
     func installRelationships(_ value: Kmgr_V1_GetRelationshipsResponse) {
         relationships = value
+    }
+    func installRelationshipScan(_ values: [Kmgr_V1_RelationshipScanEvent]) {
+        relationshipScan = values
     }
     func capturedWatch() -> Kmgr_V1_WatchObjectRequest? { watchRequest }
 }
@@ -135,7 +152,9 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     owner.kind = .owner
     owner.identity = protoIdentity(resource: "deployments", name: "api", uid: "deploy-1")
     owner.label = "Deployment/api"
+    owner.potentiallyIncomplete = false
     relationshipResponse.relationships = [owner]
+    relationshipResponse.childrenPotentiallyIncomplete = true
     await rpc.installRelationships(relationshipResponse)
 
     let provider = EngineObjectDetailProvider(rpc: rpc, identifier: { "request" })
@@ -148,8 +167,41 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
 
     #expect(events.first?.reason == "Scheduled")
     #expect(events.first?.lastObservedAt == Date(timeIntervalSince1970: 1.5))
-    #expect(relationships.first?.kind == .owner)
-    #expect(relationships.first?.identity.uid == "deploy-1")
+    #expect(relationships.values.first?.kind == .owner)
+    #expect(relationships.values.first?.identity.uid == "deploy-1")
+    #expect(relationships.childrenPotentiallyIncomplete)
+}
+
+@Test func objectDetailProviderMapsRelationshipScanProgressAndCoverage() async throws {
+    let rpc = ObjectDetailRPCCapture()
+    var event = Kmgr_V1_RelationshipScanEvent()
+    event.cursor.streamID = "scan-1"
+    event.cursor.generation = 1
+    event.cursor.sequence = 2
+    event.progress.resourcesTotal = 10
+    event.progress.resourcesScanned = 4
+    event.progress.objectsExamined = 1_234
+    event.progress.currentResource.group = "apps"
+    event.progress.currentResource.version = "v1"
+    event.progress.currentResource.resource = "replicasets"
+    event.progress.potentiallyIncomplete = true
+    var child = Kmgr_V1_ResourceRelationship()
+    child.kind = .child
+    child.identity = protoIdentity(resource: "replicasets", name: "api-abc", uid: "rs-1")
+    event.relationships = [child]
+    await rpc.installRelationshipScan([event])
+    let provider = EngineObjectDetailProvider(rpc: rpc, identifier: { "scan-1" })
+
+    var values: [RelationshipScanMessage] = []
+    for try await message in provider.scanRelationships(
+        identity: identity(name: "api", uid: "deploy-1")
+    ) { values.append(message) }
+
+    #expect(values.first?.cursor.sequence == 2)
+    #expect(values.first?.relationships.first?.identity.uid == "rs-1")
+    #expect(values.first?.progress.currentResource == "apps/v1/replicasets")
+    #expect(values.first?.progress.objectsExamined == 1_234)
+    #expect(values.first?.progress.potentiallyIncomplete == true)
 }
 
 private func identity(name: String, uid: ResourceUID) -> ResourceIdentity {

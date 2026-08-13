@@ -97,20 +97,86 @@ public struct ObjectRelationship: Hashable, Sendable, Identifiable {
     public var identity: ResourceIdentity
     public var label: String
     public var stale: Bool
+    public var potentiallyIncomplete: Bool
 
     public init(
         kind: ObjectRelationshipKind,
         identity: ResourceIdentity,
         label: String,
-        stale: Bool = false
+        stale: Bool = false,
+        potentiallyIncomplete: Bool = false
     ) {
         self.kind = kind
         self.identity = identity
         self.label = label
         self.stale = stale
+        self.potentiallyIncomplete = potentiallyIncomplete
     }
 
     public var id: ResourceUID { identity.uid }
+}
+
+public struct ObjectRelationships: Hashable, Sendable {
+    public var values: [ObjectRelationship]
+    public var childrenPotentiallyIncomplete: Bool
+
+    public init(
+        values: [ObjectRelationship],
+        childrenPotentiallyIncomplete: Bool
+    ) {
+        self.values = values
+        self.childrenPotentiallyIncomplete = childrenPotentiallyIncomplete
+    }
+}
+
+public struct RelationshipScanProgress: Hashable, Sendable {
+    public var resourcesTotal: UInt32
+    public var resourcesScanned: UInt32
+    public var objectsExamined: UInt64
+    public var resourcesFailed: UInt32
+    public var currentResource: String
+    public var complete: Bool
+    public var potentiallyIncomplete: Bool
+
+    public init(
+        resourcesTotal: UInt32 = 0,
+        resourcesScanned: UInt32 = 0,
+        objectsExamined: UInt64 = 0,
+        resourcesFailed: UInt32 = 0,
+        currentResource: String = "",
+        complete: Bool = false,
+        potentiallyIncomplete: Bool = false
+    ) {
+        self.resourcesTotal = resourcesTotal
+        self.resourcesScanned = resourcesScanned
+        self.objectsExamined = objectsExamined
+        self.resourcesFailed = resourcesFailed
+        self.currentResource = currentResource
+        self.complete = complete
+        self.potentiallyIncomplete = potentiallyIncomplete
+    }
+}
+
+public struct RelationshipScanMessage: Hashable, Sendable {
+    public var scanID: String
+    public var cursor: StreamCursor
+    public var relationships: [ObjectRelationship]
+    public var progress: RelationshipScanProgress
+    public var warning: ClusterManagerIssue?
+
+    public init(
+        scanID: String,
+        cursor: StreamCursor,
+        relationships: [ObjectRelationship] = [],
+        progress: RelationshipScanProgress,
+        warning: ClusterManagerIssue? = nil
+    ) {
+        self.scanID = scanID
+        self.cursor = cursor
+        self.relationships = relationships
+        self.progress = progress
+        self.warning = warning
+    }
 }
 
 public enum ObjectWatchEvent: Hashable, Sendable {
@@ -300,7 +366,15 @@ public protocol ObjectDetailProviding: Sendable {
     func getRelationships(
         identity: ResourceIdentity,
         includeChildren: Bool
-    ) async throws -> [ObjectRelationship]
+    ) async throws -> ObjectRelationships
+    func scanRelationships(
+        identity: ResourceIdentity
+    ) -> AsyncThrowingStream<RelationshipScanMessage, Error>
+    func cancelRelationshipScan(
+        sessionID: String,
+        scanID: String,
+        generation: UInt64
+    ) async
     func getData(identity: ResourceIdentity) async throws -> ObjectData
     func prepareYAML(
         identity: ResourceIdentity,

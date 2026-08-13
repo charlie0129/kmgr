@@ -34,6 +34,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let eventsScrollView = NSScrollView()
     private let relationshipsTable = NSTableView()
     private let relationshipsScrollView = NSScrollView()
+    private let relationshipsContainerView = NSView()
+    private let relationshipsCoverageLabel = NSTextField(
+        labelWithString: "Cached children are potentially incomplete."
+    )
+    private let scanRelationshipsButton = NSButton(
+        title: "Scan All Resources…", target: nil, action: nil
+    )
+    private let cancelRelationshipScanButton = NSButton(
+        title: "Cancel Scan", target: nil, action: nil
+    )
     private let metricsStack = NSStackView()
     private let metricsScrollView = NSScrollView()
     private let yamlTextView = NSTextView()
@@ -63,6 +73,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var watchTask: Task<Void, Never>?
     private var eventsTask: Task<Void, Never>?
     private var relationshipsTask: Task<Void, Never>?
+    private var relationshipScanTask: Task<Void, Never>?
+    private var activeRelationshipScan: (id: String, generation: UInt64)?
     private var operationTask: Task<Void, Never>?
     private var secretRevealed = false
     private var selectedDataOriginalBytes: Data?
@@ -73,6 +85,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var relationships: [ObjectRelationship] = []
     private var eventsLoaded = false
     private var relationshipsLoaded = false
+    private var childrenPotentiallyIncomplete = true
     private var watchGate = GenerationSequenceGate()
     private var terminalObjectState = false
 
@@ -97,6 +110,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         watchTask?.cancel()
         eventsTask?.cancel()
         relationshipsTask?.cancel()
+        relationshipScanTask?.cancel()
         operationTask?.cancel()
     }
 
@@ -156,6 +170,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         watchTask?.cancel()
         eventsTask?.cancel()
         relationshipsTask?.cancel()
+        relationshipScanTask?.cancel()
         operationTask?.cancel()
         releaseDataDrafts()
     }
@@ -210,6 +225,33 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relationshipsScrollView.documentView = relationshipsTable
         relationshipsScrollView.hasVerticalScroller = true
         relationshipsScrollView.hasHorizontalScroller = true
+        relationshipsCoverageLabel.textColor = .secondaryLabelColor
+        relationshipsCoverageLabel.lineBreakMode = .byTruncatingTail
+        scanRelationshipsButton.target = self
+        scanRelationshipsButton.action = #selector(scanAllRelationships)
+        cancelRelationshipScanButton.target = self
+        cancelRelationshipScanButton.action = #selector(cancelRelationshipScan)
+        cancelRelationshipScanButton.isHidden = true
+        let controls = NSStackView(views: [
+            relationshipsCoverageLabel, NSView(),
+            scanRelationshipsButton, cancelRelationshipScanButton,
+        ])
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.spacing = 8
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        relationshipsScrollView.translatesAutoresizingMaskIntoConstraints = false
+        relationshipsContainerView.addSubview(controls)
+        relationshipsContainerView.addSubview(relationshipsScrollView)
+        NSLayoutConstraint.activate([
+            controls.leadingAnchor.constraint(equalTo: relationshipsContainerView.leadingAnchor, constant: 10),
+            controls.trailingAnchor.constraint(equalTo: relationshipsContainerView.trailingAnchor, constant: -10),
+            controls.topAnchor.constraint(equalTo: relationshipsContainerView.topAnchor, constant: 6),
+            relationshipsScrollView.leadingAnchor.constraint(equalTo: relationshipsContainerView.leadingAnchor),
+            relationshipsScrollView.trailingAnchor.constraint(equalTo: relationshipsContainerView.trailingAnchor),
+            relationshipsScrollView.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 5),
+            relationshipsScrollView.bottomAnchor.constraint(equalTo: relationshipsContainerView.bottomAnchor),
+        ])
     }
 
     private func configureMetrics() {
@@ -450,7 +492,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             show(eventsScrollView)
             loadEventsIfNeeded()
         case 3:
-            show(relationshipsScrollView)
+            show(relationshipsContainerView)
             loadRelationshipsIfNeeded()
         case 4 where supportsMetrics:
             show(metricsScrollView)
@@ -582,23 +624,116 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             guard let self else { return }
             defer { relationshipsTask = nil }
             do {
-                // Owner links are authoritative. Child discovery remains off
-                // until the user selects its cache-vs-scan product behavior.
-                relationships = try await provider.getRelationships(
+                let result = try await provider.getRelationships(
                     identity: identity,
-                    includeChildren: false
+                    includeChildren: true
                 )
                 guard !Task.isCancelled else { return }
+                relationships = result.values
+                childrenPotentiallyIncomplete = result.childrenPotentiallyIncomplete
                 relationshipsLoaded = true
                 relationshipsTable.reloadData()
+                updateRelationshipCoverageLabel()
                 statusLabel.stringValue = relationships.isEmpty
-                    ? "No owner references" : "\(relationships.count) owner relationship\(relationships.count == 1 ? "" : "s")"
+                    ? "No relationships found in current caches"
+                    : "\(relationships.count) relationship\(relationships.count == 1 ? "" : "s")"
                 statusLabel.textColor = .secondaryLabelColor
             } catch {
                 guard !Task.isCancelled else { return }
                 show(error: error)
             }
         }
+    }
+
+    private func updateRelationshipCoverageLabel() {
+        relationshipsCoverageLabel.stringValue = childrenPotentiallyIncomplete
+            ? "Cached children · potentially incomplete"
+            : "All discovered resources scanned"
+        relationshipsCoverageLabel.textColor = childrenPotentiallyIncomplete
+            ? .systemOrange : .secondaryLabelColor
+    }
+
+    @objc private func scanAllRelationships() {
+        guard relationshipScanTask == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = "Scan all listable resources?"
+        alert.informativeText = "This performs metadata LIST requests across the cluster and may be slow or denied for some resource types."
+        alert.addButton(withTitle: "Scan All Resources")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        relationships.removeAll { $0.kind == .child }
+        relationshipsTable.reloadData()
+        scanRelationshipsButton.isHidden = true
+        cancelRelationshipScanButton.isHidden = false
+        statusLabel.stringValue = "Starting relationship scan…"
+        statusLabel.textColor = .secondaryLabelColor
+        relationshipScanTask = Task { [weak self, provider, identity] in
+            guard let self else { return }
+            defer {
+                relationshipScanTask = nil
+                activeRelationshipScan = nil
+                scanRelationshipsButton.isHidden = false
+                cancelRelationshipScanButton.isHidden = true
+            }
+            do {
+                var childUIDs = Set(relationships.filter { $0.kind == .child }.map(\.identity.uid))
+                for try await message in provider.scanRelationships(identity: identity) {
+                    guard !Task.isCancelled else { return }
+                    activeRelationshipScan = (message.scanID, message.cursor.generation)
+                    for relationship in message.relationships where !childUIDs.contains(relationship.identity.uid) {
+                        childUIDs.insert(relationship.identity.uid)
+                        relationships.append(relationship)
+                    }
+                    relationships.sort(by: Self.relationshipOrder)
+                    relationshipsTable.reloadData()
+                    childrenPotentiallyIncomplete = message.progress.potentiallyIncomplete
+                    updateRelationshipCoverageLabel()
+                    if message.progress.complete {
+                        statusLabel.stringValue = message.progress.potentiallyIncomplete
+                            ? "Scan finished with \(message.progress.resourcesFailed) inaccessible resource type(s) · results potentially incomplete"
+                            : "Scan complete · \(message.progress.objectsExamined.formatted()) objects examined"
+                        statusLabel.textColor = message.progress.potentiallyIncomplete
+                            ? .systemOrange : .secondaryLabelColor
+                    } else {
+                        let current = message.progress.currentResource.isEmpty
+                            ? "discovering resources" : message.progress.currentResource
+                        statusLabel.stringValue = "Scanning \(message.progress.resourcesScanned)/\(message.progress.resourcesTotal) · \(message.progress.objectsExamined.formatted()) objects · \(current)"
+                        statusLabel.textColor = message.warning == nil
+                            ? .secondaryLabelColor : .systemOrange
+                    }
+                }
+            } catch {
+                guard !Task.isCancelled else {
+                    statusLabel.stringValue = "Relationship scan cancelled"
+                    statusLabel.textColor = .secondaryLabelColor
+                    return
+                }
+                childrenPotentiallyIncomplete = true
+                updateRelationshipCoverageLabel()
+                show(error: error)
+            }
+        }
+    }
+
+    @objc private func cancelRelationshipScan() {
+        if let activeRelationshipScan {
+            Task { [provider, identity] in
+                await provider.cancelRelationshipScan(
+                    sessionID: identity.clusterSessionID,
+                    scanID: activeRelationshipScan.id,
+                    generation: activeRelationshipScan.generation
+                )
+            }
+        }
+        relationshipScanTask?.cancel()
+    }
+
+    private static func relationshipOrder(_ left: ObjectRelationship, _ right: ObjectRelationship) -> Bool {
+        [left.kind.rawValue, left.identity.resource, left.identity.namespace, left.identity.name, left.identity.uid.rawValue]
+            .joined(separator: "\u{0}")
+            < [right.kind.rawValue, right.identity.resource, right.identity.namespace, right.identity.name, right.identity.uid.rawValue]
+                .joined(separator: "\u{0}")
     }
 
     private func show(_ child: NSView) {
@@ -749,7 +884,14 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             case "resource": value = relationship.identity.resource
             case "namespace": value = relationship.identity.namespace.isEmpty ? "Cluster" : relationship.identity.namespace
             case "name": value = relationship.identity.name
-            case "state": value = relationship.stale ? "Stale UID" : "Current"
+            case "state":
+                if relationship.stale {
+                    value = "Stale UID"
+                } else if relationship.potentiallyIncomplete {
+                    value = "Cached"
+                } else {
+                    value = "Current"
+                }
             default: value = ""
             }
             let cell = textCell(value, table: tableView, column: tableColumn)

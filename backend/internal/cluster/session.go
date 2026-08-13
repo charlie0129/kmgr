@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
 )
@@ -25,6 +26,7 @@ const (
 type BackendClients struct {
 	Dynamic   dynamic.Interface
 	Discovery discovery.DiscoveryInterface
+	Metadata  metadata.Interface
 	Core      coreclient.CoreV1Interface
 	Mapper    meta.ResettableRESTMapper
 	Close     func()
@@ -51,6 +53,11 @@ func (DefaultClientFactory) New(config *rest.Config) (BackendClients, error) {
 		closeHTTPClient(httpClient)
 		return BackendClients{}, fmt.Errorf("construct Kubernetes discovery client: %w", err)
 	}
+	metadataClient, err := metadata.NewForConfigAndClient(config, httpClient)
+	if err != nil {
+		closeHTTPClient(httpClient)
+		return BackendClients{}, fmt.Errorf("construct Kubernetes metadata client: %w", err)
+	}
 	coreClient, err := coreclient.NewForConfigAndClient(config, httpClient)
 	if err != nil {
 		closeHTTPClient(httpClient)
@@ -60,6 +67,7 @@ func (DefaultClientFactory) New(config *rest.Config) (BackendClients, error) {
 	return BackendClients{
 		Dynamic:   dynamicClient,
 		Discovery: discoveryClient,
+		Metadata:  metadataClient,
 		Core:      coreClient,
 		Mapper:    mapper,
 		Close:     func() { closeHTTPClient(httpClient) },
@@ -233,6 +241,7 @@ func (s *Session) ID() string                              { return s.id }
 func (s *Session) Context() ContextInfo                    { return s.context }
 func (s *Session) Dynamic() dynamic.Interface              { return s.backend.clients.Dynamic }
 func (s *Session) Discovery() discovery.DiscoveryInterface { return s.backend.clients.Discovery }
+func (s *Session) Metadata() metadata.Interface            { return s.backend.clients.Metadata }
 func (s *Session) Core() coreclient.CoreV1Interface        { return s.backend.clients.Core }
 func (s *Session) Mapper() meta.RESTMapper                 { return s.backend.clients.Mapper }
 

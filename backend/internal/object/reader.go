@@ -16,7 +16,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/metadata"
 	"sigs.k8s.io/yaml"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
@@ -77,6 +79,14 @@ type ClusterResolver struct {
 	Sessions *cluster.SessionRegistry
 }
 
+// RelationshipScanSession exposes read-only discovery and metadata clients for
+// an explicit exhaustive child scan. The metadata client transfers only object
+// metadata rather than every resource's full spec/status payload.
+type RelationshipScanSession struct {
+	Discovery discovery.DiscoveryInterface
+	Metadata  metadata.Interface
+}
+
 func (r ClusterResolver) Resource(
 	sessionID string,
 	gvr schema.GroupVersionResource,
@@ -134,8 +144,23 @@ func (r ClusterResolver) ResourceForKind(
 	return resource, mapping.Resource, resolvedNamespace, nil
 }
 
+func (r ClusterResolver) RelationshipScanSession(sessionID string) (RelationshipScanSession, error) {
+	if r.Sessions == nil {
+		return RelationshipScanSession{}, ErrSessionNotFound
+	}
+	session, ok := r.Sessions.Get(sessionID)
+	if !ok {
+		return RelationshipScanSession{}, ErrSessionNotFound
+	}
+	if session.Discovery() == nil || session.Metadata() == nil {
+		return RelationshipScanSession{}, ErrRelationshipResolutionUnavailable
+	}
+	return RelationshipScanSession{Discovery: session.Discovery(), Metadata: session.Metadata()}, nil
+}
+
 type Reader struct {
-	resolver Resolver
+	resolver       Resolver
+	cachedChildren CachedChildSource
 }
 
 func NewReader(resolver Resolver) (*Reader, error) {
@@ -143,6 +168,10 @@ func NewReader(resolver Resolver) (*Reader, error) {
 		return nil, errors.New("object resolver must not be nil")
 	}
 	return &Reader{resolver: resolver}, nil
+}
+
+func (r *Reader) SetCachedChildSource(source CachedChildSource) {
+	r.cachedChildren = source
 }
 
 // Resource resolves the exact namespaced or cluster-scoped dynamic resource

@@ -14,6 +14,7 @@ import (
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -151,6 +152,16 @@ type Runtime struct {
 	views     map[viewKey]*Subscription
 	warm      *watcher.WarmCache[resourceKey, *resourceRuntime]
 	closed    bool
+}
+
+// CachedChild identifies an object already retained by a visible or warm
+// resource view. It deliberately exposes no store or watcher lifetime: callers
+// get one bounded point-in-time slice and must treat it as incomplete coverage.
+type CachedChild struct {
+	Group    string
+	Version  string
+	Resource string
+	Object   *unstructured.Unstructured
 }
 
 type resourceKey struct {
@@ -526,6 +537,62 @@ func (r *Runtime) ActiveResourceCount() int {
 		}
 	}
 	return count
+}
+
+// CachedChildren returns only children visible in existing view caches for the
+// selected session authority. It never opens a resource, starts a watcher, or
+// performs network I/O. Different selectors/scopes can retain overlapping
+// objects, so results are de-duplicated by full GVR plus UID.
+func (r *Runtime) CachedChildren(sessionID, ownerUID string) []CachedChild {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(ownerUID) == "" {
+		return nil
+	}
+	authoritySource, ok := r.source.(interface {
+		AuthorityID(string) (string, bool)
+	})
+	if !ok {
+		return nil
+	}
+	authorityID, ok := authoritySource.AuthorityID(sessionID)
+	if !ok {
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := make(map[string]struct{})
+	result := make([]CachedChild, 0)
+	for key, entry := range r.resources {
+		if key.authorityID != authorityID || entry == nil || entry.store == nil {
+			continue
+		}
+		for _, object := range entry.store.Children(types.UID(ownerUID)) {
+			if object == nil || object.GetUID() == "" {
+				continue
+			}
+			unique := strings.Join([]string{
+				key.group, key.version, key.resource, string(object.GetUID()),
+			}, "\x00")
+			if _, exists := seen[unique]; exists {
+				continue
+			}
+			seen[unique] = struct{}{}
+			result = append(result, CachedChild{
+				Group: key.group, Version: key.version, Resource: key.resource, Object: object,
+			})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left, right := result[i], result[j]
+		return strings.Join([]string{
+			left.Group, left.Version, left.Resource, left.Object.GetNamespace(),
+			left.Object.GetName(), string(left.Object.GetUID()),
+		}, "\x00") < strings.Join([]string{
+			right.Group, right.Version, right.Resource, right.Object.GetNamespace(),
+			right.Object.GetName(), string(right.Object.GetUID()),
+		}, "\x00")
+	})
+	return result
 }
 
 // Subscription is a bounded, coalescing mailbox. Slow clients retain at most

@@ -476,6 +476,10 @@ public struct Kmgr_V1_ResourceRelationship: Sendable {
 
   public var stale: Bool = false
 
+  /// The relationship itself matched the requested owner UID, but the source
+  /// did not provide complete coverage of every Kubernetes resource type.
+  public var potentiallyIncomplete: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -501,11 +505,166 @@ public struct Kmgr_V1_GetRelationshipsResponse: Sendable {
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
+  /// True even when no cached children were found: an empty cache result must
+  /// never be presented as proof that the object has no children.
+  public var childrenPotentiallyIncomplete: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
+}
+
+public struct Kmgr_V1_ScanRelationshipsRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var scanID: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var identity: Kmgr_V1_ResourceIdentity {
+    get {return _identity ?? Kmgr_V1_ResourceIdentity()}
+    set {_identity = newValue}
+  }
+  /// Returns true if `identity` has been explicitly set.
+  public var hasIdentity: Bool {return self._identity != nil}
+  /// Clears the value of `identity`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentity() {self._identity = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+  fileprivate var _identity: Kmgr_V1_ResourceIdentity? = nil
+}
+
+public struct Kmgr_V1_CancelRelationshipScanRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var scanID: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+}
+
+public struct Kmgr_V1_RelationshipScanProgress: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var resourcesTotal: UInt32 = 0
+
+  public var resourcesScanned: UInt32 = 0
+
+  public var objectsExamined: UInt64 = 0
+
+  public var resourcesFailed: UInt32 = 0
+
+  public var currentResource: Kmgr_V1_ResourceType {
+    get {return _currentResource ?? Kmgr_V1_ResourceType()}
+    set {_currentResource = newValue}
+  }
+  /// Returns true if `currentResource` has been explicitly set.
+  public var hasCurrentResource: Bool {return self._currentResource != nil}
+  /// Clears the value of `currentResource`. Subsequent reads from it will return its default value.
+  public mutating func clearCurrentResource() {self._currentResource = nil}
+
+  public var complete: Bool = false
+
+  /// A completed scan remains potentially incomplete if discovery or any LIST
+  /// was denied or failed. Completion means every discovered resource was
+  /// attempted, not that the API server granted complete visibility.
+  public var potentiallyIncomplete: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _currentResource: Kmgr_V1_ResourceType? = nil
+}
+
+public struct Kmgr_V1_RelationshipScanEvent: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var cursor: Kmgr_V1_StreamCursor {
+    get {return _storage._cursor ?? Kmgr_V1_StreamCursor()}
+    set {_uniqueStorage()._cursor = newValue}
+  }
+  /// Returns true if `cursor` has been explicitly set.
+  public var hasCursor: Bool {return _storage._cursor != nil}
+  /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
+  public mutating func clearCursor() {_uniqueStorage()._cursor = nil}
+
+  public var relationships: [Kmgr_V1_ResourceRelationship] {
+    get {return _storage._relationships}
+    set {_uniqueStorage()._relationships = newValue}
+  }
+
+  public var progress: Kmgr_V1_RelationshipScanProgress {
+    get {return _storage._progress ?? Kmgr_V1_RelationshipScanProgress()}
+    set {_uniqueStorage()._progress = newValue}
+  }
+  /// Returns true if `progress` has been explicitly set.
+  public var hasProgress: Bool {return _storage._progress != nil}
+  /// Clears the value of `progress`. Subsequent reads from it will return its default value.
+  public mutating func clearProgress() {_uniqueStorage()._progress = nil}
+
+  /// A per-resource failure is non-terminal: scanning continues and the final
+  /// progress explicitly reports that the result may be incomplete.
+  public var warning: Kmgr_V1_StructuredError {
+    get {return _storage._warning ?? Kmgr_V1_StructuredError()}
+    set {_uniqueStorage()._warning = newValue}
+  }
+  /// Returns true if `warning` has been explicitly set.
+  public var hasWarning: Bool {return _storage._warning != nil}
+  /// Clears the value of `warning`. Subsequent reads from it will return its default value.
+  public mutating func clearWarning() {_uniqueStorage()._warning = nil}
+
+  public var error: Kmgr_V1_StructuredError {
+    get {return _storage._error ?? Kmgr_V1_StructuredError()}
+    set {_uniqueStorage()._error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {return _storage._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {_uniqueStorage()._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
 }
 
 /// value is intentionally bytes. For Secrets, Go decodes Kubernetes base64
@@ -1153,7 +1312,7 @@ extension Kmgr_V1_GetRelationshipsRequest: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Kmgr_V1_ResourceRelationship: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResourceRelationship"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}identity\0\u{1}label\0\u{1}stale\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}identity\0\u{1}label\0\u{1}stale\0\u{3}potentially_incomplete\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1165,6 +1324,7 @@ extension Kmgr_V1_ResourceRelationship: SwiftProtobuf.Message, SwiftProtobuf._Me
       case 2: try { try decoder.decodeSingularMessageField(value: &self._identity) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.label) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.stale) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.potentiallyIncomplete) }()
       default: break
       }
     }
@@ -1187,6 +1347,9 @@ extension Kmgr_V1_ResourceRelationship: SwiftProtobuf.Message, SwiftProtobuf._Me
     if self.stale != false {
       try visitor.visitSingularBoolField(value: self.stale, fieldNumber: 4)
     }
+    if self.potentiallyIncomplete != false {
+      try visitor.visitSingularBoolField(value: self.potentiallyIncomplete, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1195,6 +1358,7 @@ extension Kmgr_V1_ResourceRelationship: SwiftProtobuf.Message, SwiftProtobuf._Me
     if lhs._identity != rhs._identity {return false}
     if lhs.label != rhs.label {return false}
     if lhs.stale != rhs.stale {return false}
+    if lhs.potentiallyIncomplete != rhs.potentiallyIncomplete {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1202,7 +1366,7 @@ extension Kmgr_V1_ResourceRelationship: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 extension Kmgr_V1_GetRelationshipsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".GetRelationshipsResponse"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}relationships\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}relationships\0\u{1}error\0\u{3}children_potentially_incomplete\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1213,6 +1377,7 @@ extension Kmgr_V1_GetRelationshipsResponse: SwiftProtobuf.Message, SwiftProtobuf
       case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
       case 2: try { try decoder.decodeRepeatedMessageField(value: &self.relationships) }()
       case 3: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.childrenPotentiallyIncomplete) }()
       default: break
       }
     }
@@ -1232,6 +1397,9 @@ extension Kmgr_V1_GetRelationshipsResponse: SwiftProtobuf.Message, SwiftProtobuf
     try { if let v = self._error {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
     } }()
+    if self.childrenPotentiallyIncomplete != false {
+      try visitor.visitSingularBoolField(value: self.childrenPotentiallyIncomplete, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1239,6 +1407,262 @@ extension Kmgr_V1_GetRelationshipsResponse: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.requestID != rhs.requestID {return false}
     if lhs.relationships != rhs.relationships {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.childrenPotentiallyIncomplete != rhs.childrenPotentiallyIncomplete {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_ScanRelationshipsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScanRelationshipsRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}scan_id\0\u{1}generation\0\u{1}identity\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.scanID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._identity) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.scanID.isEmpty {
+      try visitor.visitSingularStringField(value: self.scanID, fieldNumber: 2)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 3)
+    }
+    try { if let v = self._identity {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ScanRelationshipsRequest, rhs: Kmgr_V1_ScanRelationshipsRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.scanID != rhs.scanID {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs._identity != rhs._identity {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_CancelRelationshipScanRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".CancelRelationshipScanRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}scan_id\0\u{1}generation\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.scanID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.scanID.isEmpty {
+      try visitor.visitSingularStringField(value: self.scanID, fieldNumber: 2)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_CancelRelationshipScanRequest, rhs: Kmgr_V1_CancelRelationshipScanRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.scanID != rhs.scanID {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_RelationshipScanProgress: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".RelationshipScanProgress"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}resources_total\0\u{3}resources_scanned\0\u{3}objects_examined\0\u{3}resources_failed\0\u{3}current_resource\0\u{1}complete\0\u{3}potentially_incomplete\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.resourcesTotal) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.resourcesScanned) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.objectsExamined) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.resourcesFailed) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._currentResource) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.complete) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.potentiallyIncomplete) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.resourcesTotal != 0 {
+      try visitor.visitSingularUInt32Field(value: self.resourcesTotal, fieldNumber: 1)
+    }
+    if self.resourcesScanned != 0 {
+      try visitor.visitSingularUInt32Field(value: self.resourcesScanned, fieldNumber: 2)
+    }
+    if self.objectsExamined != 0 {
+      try visitor.visitSingularUInt64Field(value: self.objectsExamined, fieldNumber: 3)
+    }
+    if self.resourcesFailed != 0 {
+      try visitor.visitSingularUInt32Field(value: self.resourcesFailed, fieldNumber: 4)
+    }
+    try { if let v = self._currentResource {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    if self.complete != false {
+      try visitor.visitSingularBoolField(value: self.complete, fieldNumber: 6)
+    }
+    if self.potentiallyIncomplete != false {
+      try visitor.visitSingularBoolField(value: self.potentiallyIncomplete, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_RelationshipScanProgress, rhs: Kmgr_V1_RelationshipScanProgress) -> Bool {
+    if lhs.resourcesTotal != rhs.resourcesTotal {return false}
+    if lhs.resourcesScanned != rhs.resourcesScanned {return false}
+    if lhs.objectsExamined != rhs.objectsExamined {return false}
+    if lhs.resourcesFailed != rhs.resourcesFailed {return false}
+    if lhs._currentResource != rhs._currentResource {return false}
+    if lhs.complete != rhs.complete {return false}
+    if lhs.potentiallyIncomplete != rhs.potentiallyIncomplete {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_RelationshipScanEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".RelationshipScanEvent"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}relationships\0\u{1}progress\0\u{1}warning\0\u{1}error\0")
+
+  fileprivate class _StorageClass {
+    var _cursor: Kmgr_V1_StreamCursor? = nil
+    var _relationships: [Kmgr_V1_ResourceRelationship] = []
+    var _progress: Kmgr_V1_RelationshipScanProgress? = nil
+    var _warning: Kmgr_V1_StructuredError? = nil
+    var _error: Kmgr_V1_StructuredError? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _cursor = source._cursor
+      _relationships = source._relationships
+      _progress = source._progress
+      _warning = source._warning
+      _error = source._error
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._cursor) }()
+        case 2: try { try decoder.decodeRepeatedMessageField(value: &_storage._relationships) }()
+        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._progress) }()
+        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._warning) }()
+        case 5: try { try decoder.decodeSingularMessageField(value: &_storage._error) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      try { if let v = _storage._cursor {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+      } }()
+      if !_storage._relationships.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._relationships, fieldNumber: 2)
+      }
+      try { if let v = _storage._progress {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+      } }()
+      try { if let v = _storage._warning {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+      } }()
+      try { if let v = _storage._error {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+      } }()
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_RelationshipScanEvent, rhs: Kmgr_V1_RelationshipScanEvent) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._cursor != rhs_storage._cursor {return false}
+        if _storage._relationships != rhs_storage._relationships {return false}
+        if _storage._progress != rhs_storage._progress {return false}
+        if _storage._warning != rhs_storage._warning {return false}
+        if _storage._error != rhs_storage._error {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -101,6 +101,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		viewRuntime.Close()
 		return nil, err
 	}
+	objectReader.SetCachedChildSource(relationshipCacheAdapter{runtime: viewRuntime})
 	objectService, err := object.NewGRPCService(objectReader)
 	if err != nil {
 		viewRuntime.Close()

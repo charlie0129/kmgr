@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
@@ -22,13 +23,21 @@ var _ kmgrv1.ObjectServiceServer = (*GRPCService)(nil)
 type GRPCService struct {
 	kmgrv1.UnimplementedObjectServiceServer
 	reader *Reader
+	scanMu sync.Mutex
+	scans  map[relationshipScanKey]context.CancelFunc
+}
+
+type relationshipScanKey struct {
+	sessionID  string
+	scanID     string
+	generation uint64
 }
 
 func NewGRPCService(reader *Reader) (*GRPCService, error) {
 	if reader == nil {
 		return nil, errors.New("object reader must not be nil")
 	}
-	return &GRPCService{reader: reader}, nil
+	return &GRPCService{reader: reader, scans: make(map[relationshipScanKey]context.CancelFunc)}, nil
 }
 
 func (s *GRPCService) GetObject(
@@ -201,28 +210,129 @@ func (s *GRPCService) GetRelationships(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	values, err := s.reader.Relationships(
+	values, childrenIncomplete, err := s.reader.Relationships(
 		operationContext, identity, request.GetIncludeOwners(), request.GetIncludeChildren(),
 	)
-	response := &kmgrv1.GetRelationshipsResponse{RequestId: requestID}
+	response := &kmgrv1.GetRelationshipsResponse{
+		RequestId: requestID, ChildrenPotentiallyIncomplete: childrenIncomplete,
+	}
 	if err != nil {
 		response.Error = structuredObjectError(err, request.GetIdentity(), "get-relationships")
 		return response, nil
 	}
 	response.Relationships = make([]*kmgrv1.ResourceRelationship, 0, len(values))
 	for _, value := range values {
-		kind := kmgrv1.RelationshipKind_RELATIONSHIP_KIND_RELATED
-		switch value.Kind {
-		case RelationshipOwner:
-			kind = kmgrv1.RelationshipKind_RELATIONSHIP_KIND_OWNER
-		case RelationshipChild:
-			kind = kmgrv1.RelationshipKind_RELATIONSHIP_KIND_CHILD
-		}
-		response.Relationships = append(response.Relationships, &kmgrv1.ResourceRelationship{
-			Kind: kind, Identity: identityToProto(value.Identity), Label: value.Label, Stale: value.Stale,
-		})
+		response.Relationships = append(response.Relationships, relationshipToProto(value))
 	}
 	return response, nil
+}
+
+func (s *GRPCService) ScanRelationships(
+	request *kmgrv1.ScanRelationshipsRequest,
+	stream kmgrv1.ObjectService_ScanRelationshipsServer,
+) error {
+	if request == nil || stream == nil || request.GetContext() == nil ||
+		request.GetScanId() == "" || request.GetGeneration() == 0 {
+		return status.Error(codes.InvalidArgument, "request context, scan ID, and generation are required")
+	}
+	_, operationContext, deadlineCancel, err := objectRequestContext(stream.Context(), request.GetContext())
+	if err != nil {
+		return err
+	}
+	defer deadlineCancel()
+	identity, err := identityFromProto(request.GetIdentity(), request.GetContext().GetClusterSessionId())
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	ctx, cancel := context.WithCancel(operationContext)
+	key := relationshipScanKey{
+		sessionID: request.GetContext().GetClusterSessionId(), scanID: request.GetScanId(),
+		generation: request.GetGeneration(),
+	}
+	s.scanMu.Lock()
+	for existing, existingCancel := range s.scans {
+		if existing.sessionID == key.sessionID && existing.scanID == key.scanID &&
+			existing.generation < key.generation {
+			existingCancel()
+			delete(s.scans, existing)
+		}
+	}
+	if existing := s.scans[key]; existing != nil {
+		s.scanMu.Unlock()
+		cancel()
+		return status.Error(codes.AlreadyExists, "relationship scan generation is already active")
+	}
+	s.scans[key] = cancel
+	s.scanMu.Unlock()
+	defer func() {
+		cancel()
+		s.scanMu.Lock()
+		if current := s.scans[key]; current != nil {
+			delete(s.scans, key)
+		}
+		s.scanMu.Unlock()
+	}()
+
+	sequence := uint64(0)
+	err = s.reader.ScanRelationships(ctx, identity, func(update RelationshipScanUpdate) error {
+		sequence++
+		event := &kmgrv1.RelationshipScanEvent{
+			Cursor: &kmgrv1.StreamCursor{
+				StreamId: request.GetScanId(), Generation: request.GetGeneration(), Sequence: sequence,
+			},
+			Progress: relationshipScanProgressToProto(update.Progress),
+		}
+		for _, relationship := range update.Relationships {
+			event.Relationships = append(event.Relationships, relationshipToProto(relationship))
+		}
+		if update.Warning != nil {
+			event.Warning = structuredObjectError(update.Warning, request.GetIdentity(), "scan-relationships")
+		}
+		return stream.Send(event)
+	})
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return objectStatusError(err)
+	}
+	sequence++
+	if sendErr := stream.Send(&kmgrv1.RelationshipScanEvent{
+		Cursor: &kmgrv1.StreamCursor{
+			StreamId: request.GetScanId(), Generation: request.GetGeneration(), Sequence: sequence,
+		},
+		Error: structuredObjectError(err, request.GetIdentity(), "scan-relationships"),
+	}); sendErr != nil {
+		return sendErr
+	}
+	return nil
+}
+
+func (s *GRPCService) CancelRelationshipScan(
+	_ context.Context,
+	request *kmgrv1.CancelRelationshipScanRequest,
+) (*kmgrv1.Acknowledgement, error) {
+	if request == nil || request.GetContext() == nil || request.GetContext().GetRequestId() == "" ||
+		request.GetContext().GetClusterSessionId() == "" || request.GetScanId() == "" ||
+		request.GetGeneration() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "request, session, scan ID, and generation are required")
+	}
+	key := relationshipScanKey{
+		sessionID: request.GetContext().GetClusterSessionId(), scanID: request.GetScanId(),
+		generation: request.GetGeneration(),
+	}
+	s.scanMu.Lock()
+	cancel := s.scans[key]
+	if cancel != nil {
+		delete(s.scans, key)
+	}
+	s.scanMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return &kmgrv1.Acknowledgement{
+		RequestId: request.GetContext().GetRequestId(), Accepted: cancel != nil,
+	}, nil
 }
 
 func (s *GRPCService) GetData(
@@ -331,6 +441,36 @@ func identityToProto(identity Identity) *kmgrv1.ResourceIdentity {
 	}
 }
 
+func relationshipToProto(value Relationship) *kmgrv1.ResourceRelationship {
+	kind := kmgrv1.RelationshipKind_RELATIONSHIP_KIND_RELATED
+	switch value.Kind {
+	case RelationshipOwner:
+		kind = kmgrv1.RelationshipKind_RELATIONSHIP_KIND_OWNER
+	case RelationshipChild:
+		kind = kmgrv1.RelationshipKind_RELATIONSHIP_KIND_CHILD
+	}
+	return &kmgrv1.ResourceRelationship{
+		Kind: kind, Identity: identityToProto(value.Identity), Label: value.Label,
+		Stale: value.Stale, PotentiallyIncomplete: value.PotentiallyIncomplete,
+	}
+}
+
+func relationshipScanProgressToProto(value RelationshipScanProgress) *kmgrv1.RelationshipScanProgress {
+	result := &kmgrv1.RelationshipScanProgress{
+		ResourcesTotal: uint32(value.ResourcesTotal), ResourcesScanned: uint32(value.ResourcesScanned),
+		ObjectsExamined: value.ObjectsExamined, ResourcesFailed: uint32(value.ResourcesFailed),
+		Complete: value.Complete, PotentiallyIncomplete: value.PotentiallyIncomplete,
+	}
+	if value.Current.Resource != "" {
+		result.CurrentResource = &kmgrv1.ResourceType{
+			Group: value.Current.Group, Version: value.Current.Version,
+			Resource: value.Current.Resource, Kind: value.Current.Kind,
+			Namespaced: value.Current.Namespaced,
+		}
+	}
+	return result
+}
+
 func unixMilliseconds(value time.Time) int64 {
 	if value.IsZero() {
 		return 0
@@ -404,15 +544,15 @@ func structuredObjectError(err error, identity *kmgrv1.ResourceIdentity, operati
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED
 		result.Reason = "DataEditorUnsupported"
 		result.Message = "Key/value data editing is available only for ConfigMaps and Secrets."
-	case errors.Is(err, ErrChildRelationshipsUnavailable):
-		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED
-		result.Reason = "ChildRelationshipsUnavailable"
-		result.Message = "Child relationship lookup is unavailable."
 	case errors.Is(err, ErrRelationshipResolutionUnavailable):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
 		result.Reason = "RelationshipResolutionUnavailable"
 		result.Message = "Kubernetes API relationship mapping is unavailable."
 		result.Retryable = true
+	case errors.Is(err, ErrRelationshipScanLimit):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
+		result.Reason = "RelationshipScanLimitReached"
+		result.Message = err.Error()
 	case errors.Is(err, ErrObjectWatchClosed):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
 		result.Reason = "ObjectWatchClosed"
