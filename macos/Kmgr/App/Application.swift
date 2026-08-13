@@ -6,7 +6,16 @@ import OSLog
 @MainActor
 final class Application: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "application")
-    private var windowController: NSWindowController?
+    private var chooserControllers: [ObjectIdentifier: ClusterManagerWindowController] = [:]
+    private var workspaceControllers: [ObjectIdentifier: ClusterWorkspaceWindowController] = [:]
+    private let clusterContextProvider: any ClusterContextProviding
+
+    override init() {
+        // The engine supervisor replaces this fallback through the same narrow
+        // provider seam when its authenticated RPC channel is ready.
+        self.clusterContextProvider = UnavailableClusterContextProvider()
+        super.init()
+    }
 
     static func main() {
         let application = NSApplication.shared
@@ -28,15 +37,29 @@ final class Application: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showClusterManager() {
-        if let windowController {
-            windowController.showWindow(nil)
-            windowController.window?.makeKeyAndOrderFront(nil)
-            return
+        // Every Command-N starts a fresh chooser so the user can open several
+        // independent workspaces, including the same context more than once.
+        let controller = ClusterManagerWindowController(provider: clusterContextProvider)
+        let identifier = ObjectIdentifier(controller)
+        chooserControllers[identifier] = controller
+        controller.onOpenSession = { [weak self] session in
+            self?.openWorkspace(for: session)
         }
-
-        let controller = ClusterManagerWindowController()
-        windowController = controller
+        controller.onClose = { [weak self] in
+            self?.chooserControllers.removeValue(forKey: identifier)
+        }
         controller.showWindow(nil)
+    }
+
+    private func openWorkspace(for session: OpenedClusterSession) {
+        let controller = ClusterWorkspaceWindowController(session: session)
+        let identifier = ObjectIdentifier(controller)
+        workspaceControllers[identifier] = controller
+        controller.onClose = { [weak self] in
+            self?.workspaceControllers.removeValue(forKey: identifier)
+        }
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
     }
 
     private func installMainMenu() {
