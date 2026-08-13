@@ -38,8 +38,22 @@ type ProjectionSpec struct {
 	FilterExpression string
 	Sort             []SortDescriptor
 	CELPrograms      map[string]*viewcolumns.Program
+	ColumnExtractors map[string]viewcolumns.Extractor
 	Metrics          metrics.Snapshot
+	NodeAccounting   NodeAccountingSnapshot
 	Now              time.Time
+}
+
+// NodeAccountingSnapshot is an immutable scheduler-allocation revision for a
+// Nodes projection. Ready remains false while the shared cluster-wide Pod
+// snapshot is loading. Err records an optional dependency failure without
+// affecting the base Node LIST/WATCH or Metrics API enrichment.
+type NodeAccountingSnapshot struct {
+	Active     bool
+	Ready      bool
+	Err        error
+	Nodes      map[string]metrics.NodeAccounting
+	Discovered metrics.DiscoveredResources
 }
 
 type ResourceType struct {
@@ -80,6 +94,45 @@ func (p *Projector) WithMetrics(snapshot metrics.Snapshot) *Projector {
 	return &copy
 }
 
+// WithNodeAccounting returns an immutable projection revision for scheduler
+// allocation derived from the current Node and Pod stores.
+func (p *Projector) WithNodeAccounting(snapshot NodeAccountingSnapshot) *Projector {
+	if p == nil {
+		return nil
+	}
+	copy := *p
+	copy.spec = p.spec
+	copy.spec.NodeAccounting = cloneNodeAccountingSnapshot(snapshot)
+	return &copy
+}
+
+func cloneNodeAccountingSnapshot(snapshot NodeAccountingSnapshot) NodeAccountingSnapshot {
+	result := NodeAccountingSnapshot{Active: snapshot.Active, Ready: snapshot.Ready, Err: snapshot.Err}
+	result.Discovered.EphemeralStorage = snapshot.Discovered.EphemeralStorage
+	result.Discovered.HugePages = slices.Clone(snapshot.Discovered.HugePages)
+	result.Discovered.Accelerators = slices.Clone(snapshot.Discovered.Accelerators)
+	if snapshot.Nodes == nil {
+		return result
+	}
+	result.Nodes = make(map[string]metrics.NodeAccounting, len(snapshot.Nodes))
+	for name, accounting := range snapshot.Nodes {
+		accounting.Capacity = accounting.Capacity.DeepCopy()
+		accounting.Allocatable = accounting.Allocatable.DeepCopy()
+		accounting.Requested = accounting.Requested.DeepCopy()
+		accounting.Limited = accounting.Limited.DeepCopy()
+		if accounting.Usage != nil {
+			usage := make(metrics.ResourceMeasurements, len(accounting.Usage))
+			for resourceName, measurement := range accounting.Usage {
+				measurement.Quantity = measurement.Quantity.DeepCopy()
+				usage[resourceName] = measurement
+			}
+			accounting.Usage = usage
+		}
+		result.Nodes[name] = accounting
+	}
+	return result
+}
+
 func NewProjector(spec ProjectionSpec) (*Projector, error) {
 	if strings.TrimSpace(spec.ClusterSessionID) == "" {
 		return nil, errors.New("cluster session ID must not be empty")
@@ -102,6 +155,14 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 			return nil, fmt.Errorf("duplicate column ID %q", id)
 		}
 		seenColumns[id] = struct{}{}
+	}
+	for id, extractor := range spec.ColumnExtractors {
+		if strings.TrimSpace(id) == "" || strings.TrimSpace(extractor.Source) == "" || strings.TrimSpace(extractor.Value) == "" {
+			return nil, errors.New("column extractor ID and value must not be blank")
+		}
+		if extractor.Source != "builtin" && extractor.Source != "metric" {
+			return nil, fmt.Errorf("column %q has unsupported extractor source %q", id, extractor.Source)
+		}
 	}
 	compiledFilter, err := viewfilter.Compile(spec.FilterExpression)
 	if err != nil {
@@ -197,11 +258,18 @@ func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID stri
 	if program := p.spec.CELPrograms[columnID]; program != nil {
 		return p.celCell(object, program)
 	}
-	if resourceName, metricColumn := metricColumnResource(p.spec.Resource, columnID); metricColumn {
+	extractorID := p.extractorID(columnID)
+	if extractorID == NodePodCountColumn && isNodeResource(p.spec.Resource) {
+		return p.nodePodCountCell(object, columnID)
+	}
+	if resourceName, field, allocationColumn := nodeAllocationColumn(p.spec.Resource, extractorID); allocationColumn {
+		return p.nodeAllocationCell(object, columnID, resourceName, field)
+	}
+	if resourceName, metricColumn := metricColumnResource(p.spec.Resource, extractorID); metricColumn {
 		return p.resourceUsageCell(object, columnID, resourceName)
 	}
 	cell := &kmgrv1.Cell{ColumnId: columnID, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL}
-	switch columnID {
+	switch extractorID {
 	case "namespace":
 		setStringCell(cell, valueOrMissing(object.GetNamespace()))
 	case "name":
@@ -269,6 +337,22 @@ func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID stri
 	return cell
 }
 
+func (p *Projector) extractorID(columnID string) string {
+	if p != nil {
+		if extractor := p.spec.ColumnExtractors[columnID]; extractor.Value != "" {
+			return extractor.Value
+		}
+	}
+	return columnID
+}
+
+func (p *Projector) extractorSource(columnID string) string {
+	if p != nil {
+		return p.spec.ColumnExtractors[columnID].Source
+	}
+	return ""
+}
+
 func (p *Projector) celCell(object *unstructured.Unstructured, program *viewcolumns.Program) *kmgrv1.Cell {
 	definition := program.Definition()
 	missing := definition.Missing
@@ -325,7 +409,33 @@ func (p *Projector) metricsForObject(object *unstructured.Unstructured) map[stri
 	sample := sampleForObject(
 		p.spec.Metrics, string(object.GetUID()), object.GetNamespace(), object.GetName(), kind,
 	)
-	return metricsActivation(sample, p.spec.Metrics.State)
+	activation := metricsActivation(sample, p.spec.Metrics.State)
+	if kind != metrics.NodeMetrics {
+		return activation
+	}
+	accounting, ready := p.nodeAccountingFor(object)
+	activation["accountingAvailable"] = ready
+	if !ready {
+		activation["requests"] = map[string]any{}
+		activation["limits"] = map[string]any{}
+		activation["allocatable"] = map[string]any{}
+		activation["capacity"] = map[string]any{}
+		return activation
+	}
+	activation["requests"] = resourceListActivation(accounting.Requested)
+	activation["limits"] = resourceListActivation(accounting.Limited)
+	activation["allocatable"] = resourceListActivation(accounting.Allocatable)
+	activation["capacity"] = resourceListActivation(accounting.Capacity)
+	activation["podCount"] = accounting.PodCount
+	return activation
+}
+
+func resourceListActivation(values corev1.ResourceList) map[string]any {
+	result := make(map[string]any, len(values))
+	for name, value := range values {
+		result[string(name)] = quantityNumeric(name, value)
+	}
+	return result
 }
 
 func (p *Projector) resourceUsageCell(
@@ -385,6 +495,14 @@ func (p *Projector) resourceUsageCell(
 		accounting := metrics.AccountPod(&pod, metrics.ResourceMeasurements{resourceName: measurement})
 		request, hasRequest := accounting.Requests[resourceName]
 		limit, hasLimit := accounting.Limits[resourceName]
+		if _, exact := exactResourceColumn(p.extractorID(columnID)); exact &&
+			!hasRequest && !hasLimit && !measurement.HasValue() {
+			cell.DisplayText = DefaultMissingCell
+			cell.TypedValue = nil
+			cell.Tooltip = "Exact resource " + string(resourceName) + " is not present on this Pod"
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+			return cell
+		}
 		setUsageQuantities(usage, measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil)
 		cell.DisplayText = formatUsageDisplay(
 			measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil,
@@ -402,20 +520,155 @@ func (p *Projector) resourceUsageCell(
 		}
 		allocatable, hasAllocatable := node.Status.Allocatable[resourceName]
 		capacity, hasCapacity := node.Status.Capacity[resourceName]
-		setUsageQuantities(usage, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable))
+		var request, limit *resource.Quantity
+		if accounting, ready := p.nodeAccountingFor(object); ready {
+			requested, hasRequest := accounting.Requested[resourceName]
+			limited, hasLimit := accounting.Limited[resourceName]
+			request = optionalQuantity(requested, hasRequest)
+			limit = optionalQuantity(limited, hasLimit)
+		}
+		setUsageQuantities(usage, measurement, request, limit, optionalQuantity(allocatable, hasAllocatable))
 		cell.DisplayText = formatUsageDisplay(
 			measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
 		)
 		cell.Tooltip = formatUsageTooltip(
-			measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
+			measurement, request, limit, optionalQuantity(allocatable, hasAllocatable),
 			optionalQuantity(capacity, hasCapacity),
 		)
+		if p.spec.NodeAccounting.Err != nil {
+			cell.Tooltip += "\nScheduler accounting: unavailable (" + p.spec.NodeAccounting.Err.Error() + ")"
+		}
 	}
 	if measurement.State == metrics.MeasurementStale {
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
 	} else if !measurement.HasValue() {
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
 	}
+	return cell
+}
+
+func (p *Projector) nodeAccountingFor(object *unstructured.Unstructured) (metrics.NodeAccounting, bool) {
+	if p == nil || object == nil || !p.spec.NodeAccounting.Active || !p.spec.NodeAccounting.Ready {
+		return metrics.NodeAccounting{}, false
+	}
+	accounting, found := p.spec.NodeAccounting.Nodes[object.GetName()]
+	return accounting, found
+}
+
+func (p *Projector) nodeAllocationCell(
+	object *unstructured.Unstructured,
+	columnID string,
+	resourceName corev1.ResourceName,
+	field nodeAllocationField,
+) *kmgrv1.Cell {
+	cell := &kmgrv1.Cell{
+		ColumnId: columnID,
+		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+	}
+	usage := &kmgrv1.ResourceUsageValue{
+		ResourceName: string(resourceName),
+		Unit:         resourceUnit(resourceName),
+	}
+	cell.TypedValue = &kmgrv1.Cell_Usage{Usage: usage}
+	if !p.spec.NodeAccounting.Active || (!p.spec.NodeAccounting.Ready && p.spec.NodeAccounting.Err == nil) {
+		cell.DisplayText = "Calculating…"
+		cell.Tooltip = "Summing effective requests and limits from bound, non-terminal Pods"
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		return cell
+	}
+	if p.spec.NodeAccounting.Err != nil && !p.spec.NodeAccounting.Ready {
+		cell.DisplayText = DefaultMissingCell
+		cell.TypedValue = nil
+		cell.Tooltip = "Scheduler accounting is unavailable: " + p.spec.NodeAccounting.Err.Error()
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		return cell
+	}
+	accounting, found := p.nodeAccountingFor(object)
+	if !found {
+		cell.DisplayText = DefaultMissingCell
+		cell.Tooltip = "Node scheduler accounting is unavailable"
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		return cell
+	}
+	allocatable, hasAllocatable := accounting.Allocatable[resourceName]
+	capacity, hasCapacity := accounting.Capacity[resourceName]
+	requested, hasRequest := accounting.Requested[resourceName]
+	limited, hasLimit := accounting.Limited[resourceName]
+	if _, exact := exactResourceColumn(p.extractorID(columnID)); exact &&
+		!hasAllocatable && !hasCapacity && !hasRequest && !hasLimit {
+		cell.DisplayText = DefaultMissingCell
+		cell.TypedValue = nil
+		cell.Tooltip = "Exact resource " + string(resourceName) + " is not present on this Node"
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		return cell
+	}
+	var value *resource.Quantity
+	label := "Summed effective requests"
+	if field == nodeLimited {
+		value = optionalQuantity(limited, hasLimit)
+		usage.Limit = quantityNumeric(resourceName, limited)
+		label = "Summed effective limits"
+	} else {
+		value = optionalQuantity(requested, hasRequest)
+		usage.Requested = quantityNumeric(resourceName, requested)
+	}
+	if hasAllocatable {
+		usage.Capacity = quantityNumeric(resourceName, allocatable)
+	}
+	cell.DisplayText = quantityDisplay(value) + " / " + quantityDisplay(optionalQuantity(allocatable, hasAllocatable))
+	parts := []string{label + ": " + quantityDisplay(value)}
+	if field == nodeRequested && hasLimit {
+		parts = append(parts, "Summed effective limits: "+limited.String())
+	}
+	if hasAllocatable {
+		parts = append(parts, "Allocatable: "+allocatable.String())
+	}
+	if hasCapacity {
+		parts = append(parts, "Physical capacity: "+capacity.String())
+	}
+	cell.Tooltip = strings.Join(parts, "\n")
+	return cell
+}
+
+func (p *Projector) nodePodCountCell(object *unstructured.Unstructured, columnID string) *kmgrv1.Cell {
+	cell := &kmgrv1.Cell{ColumnId: columnID, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL}
+	usage := &kmgrv1.ResourceUsageValue{ResourceName: string(corev1.ResourcePods), Unit: "count"}
+	cell.TypedValue = &kmgrv1.Cell_Usage{Usage: usage}
+	if !p.spec.NodeAccounting.Active || (!p.spec.NodeAccounting.Ready && p.spec.NodeAccounting.Err == nil) {
+		cell.DisplayText = "Calculating…"
+		cell.Tooltip = "Counting bound, non-terminal Pods"
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		return cell
+	}
+	if p.spec.NodeAccounting.Err != nil && !p.spec.NodeAccounting.Ready {
+		cell.DisplayText = DefaultMissingCell
+		cell.TypedValue = nil
+		cell.Tooltip = "Pod counting is unavailable: " + p.spec.NodeAccounting.Err.Error()
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		return cell
+	}
+	accounting, found := p.nodeAccountingFor(object)
+	if !found {
+		cell.DisplayText = DefaultMissingCell
+		cell.Tooltip = "Node Pod accounting is unavailable"
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		return cell
+	}
+	allocatable, hasAllocatable := accounting.Allocatable[corev1.ResourcePods]
+	capacity, hasCapacity := accounting.Capacity[corev1.ResourcePods]
+	usage.Requested = float64(accounting.PodCount)
+	if hasAllocatable {
+		usage.Capacity = quantityNumeric(corev1.ResourcePods, allocatable)
+	}
+	cell.DisplayText = strconv.FormatInt(accounting.PodCount, 10) + " / " + quantityDisplay(optionalQuantity(allocatable, hasAllocatable))
+	parts := []string{"Bound non-terminal Pods: " + strconv.FormatInt(accounting.PodCount, 10)}
+	if hasAllocatable {
+		parts = append(parts, "Allocatable Pod capacity: "+allocatable.String())
+	}
+	if hasCapacity {
+		parts = append(parts, "Physical Pod capacity: "+capacity.String())
+	}
+	cell.Tooltip = strings.Join(parts, "\n")
 	return cell
 }
 
@@ -799,14 +1052,25 @@ func usageSortValue(value *kmgrv1.ResourceUsageValue) (float64, bool) {
 		}
 		return value.GetUsed(), true
 	}
-	if value.GetRequested() != 0 && value.GetCapacity() != 0 {
-		return value.GetRequested() / value.GetCapacity(), true
+	if value.GetCapacity() != 0 {
+		if value.GetRequested() != 0 {
+			return value.GetRequested() / value.GetCapacity(), true
+		}
+		if value.GetLimit() != 0 {
+			return value.GetLimit() / value.GetCapacity(), true
+		}
 	}
 	if value.GetRequested() != 0 {
 		return value.GetRequested(), true
 	}
 	if value.GetLimit() != 0 {
 		return value.GetLimit(), true
+	}
+	// Exact-resource cells are omitted entirely when the resource is absent.
+	// A retained typed value whose quantities are all zero therefore represents
+	// a real Kubernetes zero and must participate in numeric sorting.
+	if value.GetResourceName() != "" {
+		return 0, true
 	}
 	return 0, false
 }

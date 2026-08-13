@@ -13,7 +13,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	"github.com/charlie0129/kmgr/backend/internal/view/columns"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/yaml"
 )
 
@@ -78,12 +80,164 @@ type CompiledColumns struct {
 type compiledView struct {
 	configuration ViewConfiguration
 	programs      map[string]*columns.Program
+	extractors    map[string]columns.Extractor
 }
 
 type resourceKey struct {
 	group    string
 	version  string
 	resource string
+}
+
+var builtinExtractors = map[string]columns.ResultType{
+	"namespace":       columns.ResultString,
+	"name":            columns.ResultString,
+	"kind":            columns.ResultString,
+	"status":          columns.ResultString,
+	"node":            columns.ResultString,
+	"ready":           columns.ResultString,
+	"restarts":        columns.ResultInteger,
+	"age":             columns.ResultDuration,
+	"created":         columns.ResultTimestamp,
+	"resourceVersion": columns.ResultString,
+}
+
+var metricExtractors = map[string]struct{}{
+	"cpu": {}, "memory": {}, "ephemeral-storage": {},
+	"cpu-requests": {}, "cpu-limits": {},
+	"memory-requests": {}, "memory-limits": {},
+	"ephemeral-storage-requests": {},
+	"ephemeral-storage-limits":   {},
+	"pod-count":                  {},
+}
+
+var nodeOnlyMetricExtractors = map[string]struct{}{
+	"cpu-requests": {}, "cpu-limits": {},
+	"memory-requests": {}, "memory-limits": {},
+	"ephemeral-storage-requests": {},
+	"ephemeral-storage-limits":   {},
+	"pod-count":                  {},
+}
+
+func validateExtractor(key resourceKey, definition ColumnConfiguration) (string, error) {
+	value := strings.TrimSpace(definition.Value)
+	if definition.Source == "builtin" {
+		if definition.ListJoiner != "" || definition.Missing != "" {
+			return "", fmt.Errorf("column %q source %q does not allow CEL-only missing/listJoiner options", definition.ID, definition.Source)
+		}
+		canonical, known := builtinValue(value)
+		if !known {
+			return "", fmt.Errorf("column %q has unsupported builtin value %q", definition.ID, definition.Value)
+		}
+		if definition.Type != builtinExtractors[canonical] {
+			return "", fmt.Errorf(
+				"column %q builtin value %q requires type %q, got %q",
+				definition.ID, definition.Value, builtinExtractors[canonical], definition.Type,
+			)
+		}
+		if strings.HasPrefix(value, "pod.") && !isCoreResource(key, "pods") {
+			return "", fmt.Errorf("column %q builtin value %q is only supported for core/v1 Pods", definition.ID, definition.Value)
+		}
+		if !builtinSupportedForResource(key, canonical) {
+			return "", fmt.Errorf("column %q builtin value %q is not supported for %s/%s/%s", definition.ID, definition.Value, key.group, key.version, key.resource)
+		}
+		return canonical, nil
+	}
+
+	if definition.ListJoiner != "" || definition.Missing != "" {
+		return "", fmt.Errorf("column %q source %q does not allow CEL-only missing/listJoiner options", definition.ID, definition.Source)
+	}
+	if strings.HasPrefix(value, "pod.") && !isCoreResource(key, "pods") {
+		return "", fmt.Errorf("column %q metric value %q is only supported for core/v1 Pods", definition.ID, definition.Value)
+	}
+	if strings.HasPrefix(value, "node.") && !isCoreResource(key, "nodes") {
+		return "", fmt.Errorf("column %q metric value %q is only supported for core/v1 Nodes", definition.ID, definition.Value)
+	}
+	canonical, known := metricValue(value)
+	if !known {
+		return "", fmt.Errorf("column %q has unsupported metric value %q", definition.ID, definition.Value)
+	}
+	if definition.Type != columns.ResultResourceUsage {
+		return "", fmt.Errorf(
+			"column %q metric value %q requires type %q, got %q",
+			definition.ID, definition.Value, columns.ResultResourceUsage, definition.Type,
+		)
+	}
+	if err := validateMetricResource(key, canonical); err != nil {
+		return "", fmt.Errorf("column %q: %w", definition.ID, err)
+	}
+	return canonical, nil
+}
+
+func builtinValue(value string) (string, bool) {
+	aliases := map[string]string{
+		"pod.status":   "status",
+		"pod.node":     "node",
+		"pod.ready":    "ready",
+		"pod.restarts": "restarts",
+	}
+	if canonical := aliases[value]; canonical != "" {
+		value = canonical
+	}
+	_, known := builtinExtractors[value]
+	return value, known
+}
+
+func builtinSupportedForResource(key resourceKey, value string) bool {
+	switch value {
+	case "node", "ready", "restarts":
+		return isCoreResource(key, "pods")
+	default:
+		return true
+	}
+}
+
+func metricValue(value string) (string, bool) {
+	aliases := map[string]string{
+		"pod.cpu.usageRequestLimit":               "cpu",
+		"pod.memory.usageRequestLimit":            "memory",
+		"pod.ephemeral-storage.usageRequestLimit": "ephemeral-storage",
+		"node.cpu.usageAllocatable":               "cpu",
+		"node.memory.usageAllocatable":            "memory",
+		"node.ephemeral-storage.usageAllocatable": "ephemeral-storage",
+	}
+	if canonical := aliases[value]; canonical != "" {
+		value = canonical
+	}
+	if _, known := metricExtractors[value]; known {
+		return value, true
+	}
+	if exact, found := strings.CutPrefix(value, "resource:"); found && strings.TrimSpace(exact) != "" {
+		if problems := k8svalidation.IsQualifiedName(exact); len(problems) != 0 {
+			return "", false
+		}
+		return "resource:" + exact, true
+	}
+	return "", false
+}
+
+func validateMetricResource(key resourceKey, value string) error {
+	if !isCoreResource(key, "pods") && !isCoreResource(key, "nodes") {
+		return fmt.Errorf("metric value %q is only supported for core/v1 Pods and Nodes", value)
+	}
+	if key.resource == "pods" {
+		if _, nodeOnly := nodeOnlyMetricExtractors[value]; nodeOnly {
+			return fmt.Errorf("metric value %q is not supported for Pods", value)
+		}
+		switch value {
+		case "cpu", "memory", "ephemeral-storage":
+			return nil
+		}
+		if strings.HasPrefix(value, "resource:") {
+			return nil
+		}
+		return fmt.Errorf("metric value %q is not supported for Pods", value)
+	}
+	return nil
+}
+
+func isCoreResource(key resourceKey, resource string) bool {
+	return key.group == "" && key.version == "v1" && key.resource == resource
 }
 
 func DefaultColumnsPath() (string, error) {
@@ -135,6 +289,7 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 		entry := compiledView{
 			configuration: cloneView(view),
 			programs:      make(map[string]*columns.Program),
+			extractors:    make(map[string]columns.Extractor),
 		}
 		seenIDs := make(map[string]struct{}, len(view.Columns))
 		for columnIndex, definition := range view.Columns {
@@ -155,6 +310,9 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 			}
 			switch definition.Source {
 			case "cel":
+				if strings.TrimSpace(definition.Value) != "" {
+					return nil, fmt.Errorf("column %q source %q does not allow value", definition.ID, definition.Source)
+				}
 				program, err := compiler.Compile(columns.Definition{
 					ID: definition.ID, Title: definition.Title,
 					Expression: definition.Expression, ResultType: definition.Type,
@@ -165,8 +323,18 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 				}
 				entry.programs[definition.ID] = program
 			case "builtin", "metric":
+				if strings.TrimSpace(definition.Expression) != "" {
+					return nil, fmt.Errorf("column %q source %q does not allow expression", definition.ID, definition.Source)
+				}
 				if strings.TrimSpace(definition.Value) == "" {
 					return nil, fmt.Errorf("column %q source %q requires value", definition.ID, definition.Source)
+				}
+				extractor, err := validateExtractor(key, definition)
+				if err != nil {
+					return nil, err
+				}
+				entry.extractors[definition.ID] = columns.Extractor{
+					Source: definition.Source, Value: extractor,
 				}
 			case "":
 				return nil, fmt.Errorf("column %q source must not be empty", definition.ID)
@@ -203,6 +371,15 @@ func (c *CompiledColumns) Document() ColumnsDocument {
 	return cloneDocument(c.document)
 }
 
+// AcceleratorConfig exposes a caller-owned scheduler-discovery configuration
+// without coupling the view runtime to the configuration package.
+func (c *CompiledColumns) AcceleratorConfig() metrics.AcceleratorConfig {
+	if c == nil {
+		return metrics.AcceleratorConfig{}
+	}
+	return acceleratorMetricsConfig(c.document.Accelerators)
+}
+
 func (c *CompiledColumns) View(group, version, resource string) (ViewConfiguration, bool) {
 	if c == nil {
 		return ViewConfiguration{}, false
@@ -215,33 +392,41 @@ func (c *CompiledColumns) Resolve(
 	group, version, resource string,
 	requestedIDs []string,
 	expectedVersion string,
-) (map[string]*columns.Program, string, error) {
+) (columns.Resolution, string, error) {
 	if c == nil {
-		return nil, "", errors.New("columns configuration is unavailable")
+		return columns.Resolution{}, "", errors.New("columns configuration is unavailable")
 	}
 	if expectedVersion != "" && expectedVersion != c.version {
-		return nil, c.version, fmt.Errorf(
+		return columns.Resolution{}, c.version, fmt.Errorf(
 			"column configuration changed from %q to %q", expectedVersion, c.version,
 		)
 	}
 	view, ok := c.views[resourceKey{group: group, version: version, resource: resource}]
 	if !ok {
-		return nil, c.version, nil
+		return columns.Resolution{}, c.version, nil
 	}
 	requested := make(map[string]struct{}, len(requestedIDs))
 	for _, id := range requestedIDs {
 		requested[id] = struct{}{}
 	}
-	result := make(map[string]*columns.Program)
-	for id, program := range view.programs {
-		if len(requested) == 0 {
-			if definition := columnByID(view.configuration.Columns, id); definition != nil && definition.IsEnabled() {
-				result[id] = program
-			}
+	result := columns.Resolution{
+		Programs:   make(map[string]*columns.Program),
+		Extractors: make(map[string]columns.Extractor),
+	}
+	for _, definition := range view.configuration.Columns {
+		if len(requested) == 0 && !definition.IsEnabled() {
 			continue
 		}
-		if _, include := requested[id]; include {
-			result[id] = program
+		if len(requested) != 0 {
+			if _, include := requested[definition.ID]; !include {
+				continue
+			}
+		}
+		if program := view.programs[definition.ID]; program != nil {
+			result.Programs[definition.ID] = program
+		}
+		if extractor := view.extractors[definition.ID]; extractor.Value != "" {
+			result.Extractors[definition.ID] = extractor
 		}
 	}
 	return result, c.version, nil
@@ -336,9 +521,9 @@ func (m *ColumnManager) Resolve(
 	group, version, resource string,
 	requestedIDs []string,
 	expectedVersion string,
-) (map[string]*columns.Program, string, error) {
+) (columns.Resolution, string, error) {
 	if err := m.ReloadIfChanged(); err != nil {
-		return nil, m.Version(), err
+		return columns.Resolution{}, m.Version(), err
 	}
 	m.mu.RLock()
 	current := m.current
@@ -358,16 +543,27 @@ func (m *ColumnManager) Document() ColumnsDocument {
 	return m.current.Document()
 }
 
-func stampFor(info os.FileInfo) fileStamp {
-	return fileStamp{exists: true, modTime: info.ModTime().UnixNano(), size: info.Size()}
+// AcceleratorConfig returns an immutable exact-resource mapping for backend
+// scheduler accounting and discovery.
+func (m *ColumnManager) AcceleratorConfig() metrics.AcceleratorConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.current.AcceleratorConfig()
 }
 
-func columnByID(values []ColumnConfiguration, id string) *ColumnConfiguration {
-	index := slices.IndexFunc(values, func(value ColumnConfiguration) bool { return value.ID == id })
-	if index < 0 {
-		return nil
+func acceleratorMetricsConfig(value AcceleratorConfiguration) metrics.AcceleratorConfig {
+	result := metrics.AcceleratorConfig{AutoDetectSuffixes: slices.Clone(value.AutoDetectSuffixes)}
+	if value.Resources != nil {
+		result.Resources = make(map[string]metrics.AcceleratorResourceConfig, len(value.Resources))
+		for name, settings := range value.Resources {
+			result.Resources[name] = metrics.AcceleratorResourceConfig{DisplayName: settings.DisplayName}
+		}
 	}
-	return &values[index]
+	return result
+}
+
+func stampFor(info os.FileInfo) fileStamp {
+	return fileStamp{exists: true, modTime: info.ModTime().UnixNano(), size: info.Size()}
 }
 
 func cloneDocument(value ColumnsDocument) ColumnsDocument {

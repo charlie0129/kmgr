@@ -13,8 +13,10 @@ import (
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/protobuf/proto"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -130,7 +132,14 @@ type ColumnProgramResolver interface {
 		group, version, resource string,
 		requestedIDs []string,
 		expectedVersion string,
-	) (map[string]*viewcolumns.Program, string, error)
+	) (viewcolumns.Resolution, string, error)
+}
+
+// AcceleratorConfigProvider is optionally implemented by the columns
+// resolver. Runtime uses it only for exact-key scheduler discovery; column
+// definitions still travel through the existing view protocol.
+type AcceleratorConfigProvider interface {
+	AcceleratorConfig() metrics.AcceleratorConfig
 }
 
 // Runtime shares compatible LIST/WATCH pipelines while giving every workspace
@@ -151,7 +160,11 @@ type Runtime struct {
 	resources map[resourceKey]*resourceRuntime
 	views     map[viewKey]*Subscription
 	warm      *watcher.WarmCache[resourceKey, *resourceRuntime]
-	closed    bool
+
+	nodeAccounting         map[nodeAccountingKey]*nodeAccountingWork
+	nodeAccountingRevision uint64
+	nodeAccountingComputer nodeAccountingComputer
+	closed                 bool
 }
 
 // CachedChild identifies an object already retained by a visible or warm
@@ -179,13 +192,48 @@ type resourceRuntime struct {
 	store        *store.UIDStore
 	client       watcher.ListerWatcher
 	subscribers  map[*Subscription]struct{}
+	dependents   map[*Subscription]struct{}
 	ctx          context.Context
 	cancel       context.CancelFunc
 	running      bool
 	runNumber    uint64
 	releaseTimer *time.Timer
 	lastStatus   watcher.Status
+	// accountingReady is set only after a complete LIST has reached runtime.
+	// ResourceVersion can advance in the store just before that callback, so it
+	// is not by itself a safe signal for a newly attached dependent.
+	accountingReady bool
+	accountingError error
 }
+
+type nodeAccountingKey struct {
+	nodes *resourceRuntime
+	pods  *resourceRuntime
+}
+
+type nodeAccountingResult struct {
+	revision uint64
+	snapshot NodeAccountingSnapshot
+}
+
+// nodeAccountingWork coalesces changes for one shared Node/Pod store pair.
+// Every field is protected by Runtime.mu. The expensive store conversion and
+// scheduler aggregation always happen in runNodeAccounting, outside that lock.
+type nodeAccountingWork struct {
+	key       nodeAccountingKey
+	revision  uint64
+	ready     bool
+	err       error
+	running   bool
+	published *nodeAccountingResult
+}
+
+type nodeAccountingComputer func(
+	nodeObjects, podObjects []*unstructured.Unstructured,
+	accelerators metrics.AcceleratorConfig,
+	ready bool,
+	dependencyErr error,
+) NodeAccountingSnapshot
 
 type viewKey struct {
 	sessionID string
@@ -227,18 +275,20 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		return nil, errors.New("view runtime limits must be positive")
 	}
 	return &Runtime{
-		source:            config.Source,
-		metrics:           config.Metrics,
-		columns:           config.Columns,
-		releaseDelay:      releaseDelay,
-		batchDelay:        batchDelay,
-		snapshotChunkSize: chunkSize,
-		pendingRowLimit:   pendingLimit,
-		pageSize:          config.PipelinePageSize,
-		watchTimeout:      config.PipelineTimeout,
-		resources:         make(map[resourceKey]*resourceRuntime),
-		views:             make(map[viewKey]*Subscription),
-		warm:              watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects),
+		source:                 config.Source,
+		metrics:                config.Metrics,
+		columns:                config.Columns,
+		releaseDelay:           releaseDelay,
+		batchDelay:             batchDelay,
+		snapshotChunkSize:      chunkSize,
+		pendingRowLimit:        pendingLimit,
+		pageSize:               config.PipelinePageSize,
+		watchTimeout:           config.PipelineTimeout,
+		resources:              make(map[resourceKey]*resourceRuntime),
+		views:                  make(map[viewKey]*Subscription),
+		warm:                   watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects),
+		nodeAccounting:         make(map[nodeAccountingKey]*nodeAccountingWork),
+		nodeAccountingComputer: computeNodeAccounting,
 	}, nil
 }
 
@@ -305,6 +355,7 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 			store:       store.New(),
 			client:      client,
 			subscribers: make(map[*Subscription]struct{}),
+			dependents:  make(map[*Subscription]struct{}),
 		}
 		r.resources[key] = entry
 	}
@@ -324,6 +375,10 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 	)
 	subscription.runtime = r
 	subscription.resource = entry
+	if needsNodeAccounting(projector) {
+		projector = projector.WithNodeAccounting(NodeAccountingSnapshot{Active: true})
+		subscription.projector = projector
+	}
 	var metricSubscription *metrics.Subscription
 	if r.metrics != nil && needsMetricProvider(projector) {
 		metricKind, _ := metricKindFor(projector.spec.Resource)
@@ -365,7 +420,115 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 	// goroutine after releasing the runtime lock also keeps a very fast metrics
 	// response from contending with the base LIST/WATCH setup.
 	subscription.attachMetrics(metricSubscription)
+	if needsNodeAccounting(projector) {
+		go r.attachNodeAccounting(subscription, sessionID, authorityID)
+	}
 	return subscription, nil
+}
+
+func (r *Runtime) attachNodeAccounting(subscription *Subscription, sessionID, authorityID string) {
+	podGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	resolvedAuthority, client, err := r.source.OpenResource(sessionID, podGVR, "")
+	if err != nil {
+		r.applyNodeAccountingError(subscription, err)
+		return
+	}
+	if resolvedAuthority != authorityID {
+		r.applyNodeAccountingError(subscription, errors.New("Pod accounting resolved a different cluster authority"))
+		return
+	}
+	key := resourceKey{authorityID: authorityID, version: "v1", resource: "pods"}
+	r.mu.Lock()
+	if r.closed || subscription.closed || r.views[subscription.key] != subscription {
+		r.mu.Unlock()
+		return
+	}
+	entry := r.resources[key]
+	if entry == nil {
+		if cached, ok := r.warm.Get(key); ok {
+			entry = cached.Value
+		}
+	}
+	if entry == nil {
+		entry = &resourceRuntime{
+			key: key, store: store.New(), client: client,
+			subscribers: make(map[*Subscription]struct{}),
+			dependents:  make(map[*Subscription]struct{}),
+		}
+		r.resources[key] = entry
+	}
+	if entry.dependents == nil {
+		entry.dependents = make(map[*Subscription]struct{})
+	}
+	if !entry.accountingReady && entry.store.ResourceVersion() != "" {
+		// A warm pipeline resumes directly from its retained resourceVersion and
+		// has no new LIST-complete callback. Its retained Pod snapshot is already
+		// a valid (stale-until-watch-connects) accounting basis.
+		entry.accountingReady = true
+	}
+	r.warm.Remove(key)
+	if entry.releaseTimer != nil {
+		entry.releaseTimer.Stop()
+		entry.releaseTimer = nil
+	}
+	entry.dependents[subscription] = struct{}{}
+	subscription.nodePods = entry
+	if !entry.running {
+		r.startResourceLocked(entry)
+	}
+	var current *nodeAccountingResult
+	if entry.accountingReady || entry.accountingError != nil {
+		current = r.currentOrScheduleNodeAccountingLocked(
+			subscription.resource, entry, entry.accountingError,
+		)
+	}
+	r.mu.Unlock()
+	if current != nil {
+		subscription.applyNodeAccounting(current)
+	}
+}
+
+// currentOrScheduleNodeAccountingLocked lets a late dependent consume the
+// exact revision already shared by its peers. Attaching a view is not itself a
+// store change and therefore must not repeat cluster-wide aggregation.
+func (r *Runtime) currentOrScheduleNodeAccountingLocked(
+	nodes, pods *resourceRuntime,
+	dependencyErr error,
+) *nodeAccountingResult {
+	key := nodeAccountingKey{nodes: nodes, pods: pods}
+	if work := r.nodeAccounting[key]; work != nil {
+		if work.published != nil && work.published.revision == work.revision &&
+			work.published.snapshot.Ready && sameError(work.published.snapshot.Err, dependencyErr) {
+			return work.published
+		}
+		if work.running {
+			return nil
+		}
+	}
+	r.scheduleNodeAccountingLocked(nodes, pods, pods.accountingReady, dependencyErr)
+	return nil
+}
+
+func sameError(left, right error) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Error() == right.Error()
+}
+
+func (r *Runtime) applyNodeAccountingError(subscription *Subscription, err error) {
+	r.mu.Lock()
+	if r.closed || subscription == nil || subscription.closed || r.views[subscription.key] != subscription {
+		r.mu.Unlock()
+		return
+	}
+	r.nodeAccountingRevision++
+	result := &nodeAccountingResult{
+		revision: r.nodeAccountingRevision,
+		snapshot: NodeAccountingSnapshot{Active: true, Err: err},
+	}
+	r.mu.Unlock()
+	subscription.applyNodeAccounting(result)
 }
 
 func (r *Runtime) startResourceLocked(entry *resourceRuntime) {
@@ -389,8 +552,16 @@ func (r *Runtime) startResourceLocked(entry *resourceRuntime) {
 	})
 	if err != nil {
 		entry.running = false
+		entry.cancel()
+		entry.cancel = nil
+		entry.ctx = nil
 		for subscription := range entry.subscribers {
 			subscription.setError(structuredViewError("watch resource", err, true))
+		}
+		if len(entry.dependents) != 0 {
+			entry.accountingReady = false
+			entry.accountingError = fmt.Errorf("watch Pods: %w", err)
+			r.scheduleNodeAccountingLocked(nil, entry, false, entry.accountingError)
 		}
 		return
 	}
@@ -422,6 +593,27 @@ func (r *Runtime) receiveBatch(entry *resourceRuntime, runNumber uint64, batch w
 	for subscription := range entry.subscribers {
 		subscription.applyBatch(batch)
 	}
+	if batch.SnapshotComplete {
+		entry.accountingReady = true
+	}
+	entry.accountingError = nil
+	if len(entry.dependents) != 0 && (batch.SnapshotComplete || (!batch.FromList && !batch.Bookmark)) {
+		r.scheduleNodeAccountingLocked(nil, entry, entry.accountingReady, nil)
+	}
+	if isNodeResourceKey(entry.key) && (batch.SnapshotComplete || (!batch.FromList && !batch.Bookmark)) {
+		seenPods := make(map[*resourceRuntime]struct{})
+		for subscription := range entry.subscribers {
+			pods := subscription.nodePods
+			if pods == nil || !pods.accountingReady {
+				continue
+			}
+			if _, seen := seenPods[pods]; seen {
+				continue
+			}
+			seenPods[pods] = struct{}{}
+			r.scheduleNodeAccountingLocked(entry, pods, true, nil)
+		}
+	}
 }
 
 func (r *Runtime) resourceStopped(entry *resourceRuntime, runNumber uint64, err error) {
@@ -433,11 +625,158 @@ func (r *Runtime) resourceStopped(entry *resourceRuntime, runNumber uint64, err 
 	entry.running = false
 	entry.cancel = nil
 	entry.ctx = nil
-	if len(entry.subscribers) == 0 || errors.Is(err, context.Canceled) {
+	if len(entry.subscribers)+len(entry.dependents) == 0 || errors.Is(err, context.Canceled) {
 		return
 	}
 	for subscription := range entry.subscribers {
 		subscription.setError(structuredViewError("watch resource", err, true))
+	}
+	if len(entry.dependents) != 0 {
+		// Preserve a previously complete cached revision while surfacing that
+		// it is stale. A failure before the first complete Pod snapshot instead
+		// becomes unavailable and leaves Calculating immediately.
+		entry.accountingError = err
+		r.scheduleNodeAccountingLocked(nil, entry, entry.accountingReady, entry.accountingError)
+	}
+}
+
+func isNodeResourceKey(key resourceKey) bool {
+	return key.group == "" && key.version == "v1" && key.resource == "nodes"
+}
+
+// scheduleNodeAccountingLocked marks one shared Node/Pod accounting pair
+// dirty and ensures at most one worker is running for it. Either entry may be
+// nil when the caller only knows the other side; all currently attached pairs
+// are then selected. Repeated changes coalesce behind the newest revision.
+func (r *Runtime) scheduleNodeAccountingLocked(
+	nodes *resourceRuntime,
+	pods *resourceRuntime,
+	ready bool,
+	dependencyErr error,
+) {
+	if r.closed || pods == nil {
+		return
+	}
+	selected := make(map[*resourceRuntime]struct{})
+	for subscription := range pods.dependents {
+		if subscription == nil || subscription.closed || subscription.resource == nil {
+			continue
+		}
+		if nodes == nil || subscription.resource == nodes {
+			selected[subscription.resource] = struct{}{}
+		}
+	}
+	for nodeEntry := range selected {
+		key := nodeAccountingKey{nodes: nodeEntry, pods: pods}
+		work := r.nodeAccounting[key]
+		if work == nil {
+			work = &nodeAccountingWork{key: key}
+			r.nodeAccounting[key] = work
+		}
+		r.nodeAccountingRevision++
+		work.revision = r.nodeAccountingRevision
+		work.ready = ready
+		work.err = dependencyErr
+		if work.running {
+			continue
+		}
+		work.running = true
+		go r.runNodeAccounting(work)
+	}
+}
+
+func (r *Runtime) runNodeAccounting(work *nodeAccountingWork) {
+	for {
+		r.mu.Lock()
+		if r.closed || r.nodeAccounting[work.key] != work {
+			r.mu.Unlock()
+			return
+		}
+		revision, ready, dependencyErr := work.revision, work.ready, work.err
+		nodeStore, podStore := work.key.nodes.store, work.key.pods.store
+		computer := r.nodeAccountingComputer
+		acceleratorProvider, _ := r.columns.(AcceleratorConfigProvider)
+		r.mu.Unlock()
+
+		// Store snapshots, typed conversion, aggregation, and projection are
+		// deliberately outside Runtime.mu. UIDStore supplies its own locking.
+		accelerators := metrics.AcceleratorConfig{}
+		if acceleratorProvider != nil {
+			accelerators = acceleratorProvider.AcceleratorConfig()
+		}
+		snapshot := computer(
+			nodeStore.Snapshot(), podStore.Snapshot(), accelerators, ready, dependencyErr,
+		)
+
+		r.mu.Lock()
+		if r.closed || r.nodeAccounting[work.key] != work {
+			r.mu.Unlock()
+			return
+		}
+		if work.revision != revision {
+			r.mu.Unlock()
+			continue
+		}
+		result := &nodeAccountingResult{revision: revision, snapshot: snapshot}
+		work.published = result
+		subscriptions := r.nodeAccountingSubscribersLocked(work.key)
+		r.mu.Unlock()
+
+		for _, subscription := range subscriptions {
+			subscription.applyNodeAccounting(result)
+		}
+
+		r.mu.Lock()
+		if r.closed || r.nodeAccounting[work.key] != work {
+			r.mu.Unlock()
+			return
+		}
+		if work.revision != revision {
+			r.mu.Unlock()
+			continue
+		}
+		work.running = false
+		r.mu.Unlock()
+		return
+	}
+}
+
+func (r *Runtime) nodeAccountingSubscribersLocked(key nodeAccountingKey) []*Subscription {
+	result := make([]*Subscription, 0, len(key.pods.dependents))
+	for subscription := range key.pods.dependents {
+		if subscription == nil || subscription.closed || subscription.resource != key.nodes ||
+			subscription.nodePods != key.pods || r.views[subscription.key] != subscription {
+			continue
+		}
+		result = append(result, subscription)
+	}
+	return result
+}
+
+func computeNodeAccounting(
+	nodeObjects, podObjects []*unstructured.Unstructured,
+	accelerators metrics.AcceleratorConfig,
+	ready bool,
+	dependencyErr error,
+) NodeAccountingSnapshot {
+	nodes := make([]*corev1.Node, 0, len(nodeObjects))
+	for _, object := range nodeObjects {
+		var node corev1.Node
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &node); err == nil {
+			nodes = append(nodes, &node)
+		}
+	}
+	pods := make([]*corev1.Pod, 0, len(podObjects))
+	for _, object := range podObjects {
+		var pod corev1.Pod
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &pod); err == nil {
+			pods = append(pods, &pod)
+		}
+	}
+	return NodeAccountingSnapshot{
+		Active: true, Ready: ready, Err: dependencyErr,
+		Nodes:      metrics.AggregateNodes(nodes, pods, nil),
+		Discovered: metrics.DiscoverResources(nodes, pods, accelerators),
 	}
 }
 
@@ -460,8 +799,30 @@ func (r *Runtime) detachLocked(subscription *Subscription) {
 	delete(r.views, subscription.key)
 	entry := subscription.resource
 	delete(entry.subscribers, subscription)
+	if dependency := subscription.nodePods; dependency != nil {
+		delete(dependency.dependents, subscription)
+		subscription.nodePods = nil
+		r.removeUnusedNodeAccountingLocked(entry, dependency)
+		r.scheduleReleaseLocked(dependency)
+	}
 	subscription.closeLocked()
-	if len(entry.subscribers) != 0 || entry.releaseTimer != nil {
+	r.scheduleReleaseLocked(entry)
+}
+
+func (r *Runtime) removeUnusedNodeAccountingLocked(nodes, pods *resourceRuntime) {
+	if nodes == nil || pods == nil {
+		return
+	}
+	for subscription := range pods.dependents {
+		if subscription != nil && subscription.resource == nodes && subscription.nodePods == pods {
+			return
+		}
+	}
+	delete(r.nodeAccounting, nodeAccountingKey{nodes: nodes, pods: pods})
+}
+
+func (r *Runtime) scheduleReleaseLocked(entry *resourceRuntime) {
+	if entry == nil || len(entry.subscribers)+len(entry.dependents) != 0 || entry.releaseTimer != nil {
 		return
 	}
 	key := entry.key
@@ -474,7 +835,7 @@ func (r *Runtime) detachLocked(subscription *Subscription) {
 func (r *Runtime) releaseResource(key resourceKey, entry *resourceRuntime, runNumber uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closed || r.resources[key] != entry || len(entry.subscribers) != 0 || entry.runNumber != runNumber {
+	if r.closed || r.resources[key] != entry || len(entry.subscribers)+len(entry.dependents) != 0 || entry.runNumber != runNumber {
 		return
 	}
 	entry.releaseTimer = nil
@@ -490,7 +851,7 @@ func (r *Runtime) releaseResource(key resourceKey, entry *resourceRuntime, runNu
 		Complete:         entry.store.ResourceVersion() != "",
 	})
 	for _, evictedKey := range evicted {
-		if evictedEntry := r.resources[evictedKey]; evictedEntry != nil && len(evictedEntry.subscribers) == 0 && !evictedEntry.running {
+		if evictedEntry := r.resources[evictedKey]; evictedEntry != nil && len(evictedEntry.subscribers)+len(evictedEntry.dependents) == 0 && !evictedEntry.running {
 			delete(r.resources, evictedKey)
 		}
 	}
@@ -524,6 +885,7 @@ func (r *Runtime) Close() {
 		}
 		delete(r.resources, key)
 	}
+	clear(r.nodeAccounting)
 }
 
 // ActiveResourceCount is exposed for lifecycle tests and redacted diagnostics.
@@ -600,29 +962,31 @@ func (r *Runtime) CachedChildren(sessionID, ownerUID string) []CachedChild {
 type Subscription struct {
 	runtime      *Runtime
 	resource     *resourceRuntime
+	nodePods     *resourceRuntime
 	key          viewKey
 	metrics      *metrics.Subscription
 	metricCancel context.CancelFunc
 
-	mu              sync.Mutex
-	generation      uint64
-	sequence        uint64
-	projector       *Projector
-	rows            map[string]*kmgrv1.ResourceRow
-	order           []string
-	pendingUpserts  map[string]*kmgrv1.ResourceRow
-	pendingRemoved  map[string]struct{}
-	pendingStatuses []*kmgrv1.ViewStatus
-	pendingError    *kmgrv1.StructuredError
-	orderDirty      bool
-	resnapshot      bool
-	notify          chan struct{}
-	done            chan struct{}
-	timer           *time.Timer
-	batchDelay      time.Duration
-	chunkSize       int
-	pendingLimit    int
-	closed          bool
+	mu                     sync.Mutex
+	generation             uint64
+	sequence               uint64
+	projector              *Projector
+	nodeAccountingRevision uint64
+	rows                   map[string]*kmgrv1.ResourceRow
+	order                  []string
+	pendingUpserts         map[string]*kmgrv1.ResourceRow
+	pendingRemoved         map[string]struct{}
+	pendingStatuses        []*kmgrv1.ViewStatus
+	pendingError           *kmgrv1.StructuredError
+	orderDirty             bool
+	resnapshot             bool
+	notify                 chan struct{}
+	done                   chan struct{}
+	timer                  *time.Timer
+	batchDelay             time.Duration
+	chunkSize              int
+	pendingLimit           int
+	closed                 bool
 }
 
 func newSubscription(
@@ -707,7 +1071,24 @@ func (s *Subscription) applyMetrics(snapshot metrics.Snapshot) {
 		return
 	}
 	s.projector = s.projector.WithMetrics(snapshot)
-	projected := s.projector.Project(s.resource.store.Snapshot())
+	s.replaceProjectionLocked(s.projector.Project(s.resource.store.Snapshot()))
+}
+
+func (s *Subscription) applyNodeAccounting(result *nodeAccountingResult) {
+	if result == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.resource == nil || result.revision <= s.nodeAccountingRevision {
+		return
+	}
+	s.nodeAccountingRevision = result.revision
+	s.projector = s.projector.WithNodeAccounting(result.snapshot)
+	s.replaceProjectionLocked(s.projector.Project(s.resource.store.Snapshot()))
+}
+
+func (s *Subscription) replaceProjectionLocked(projected []*kmgrv1.ResourceRow) {
 	clear(s.rows)
 	s.order = s.order[:0]
 	clear(s.pendingRemoved)
@@ -1001,10 +1382,10 @@ func projectorFromProto(
 			NullsFirst: descriptor.GetNullsFirst(),
 		})
 	}
-	var programs map[string]*viewcolumns.Program
+	var resolved viewcolumns.Resolution
 	if resolver != nil {
 		var err error
-		programs, _, err = resolver.Resolve(
+		resolved, _, err = resolver.Resolve(
 			resource.GetGroup(), resource.GetVersion(), resource.GetResource(),
 			spec.GetColumnIds(), spec.GetColumnConfigurationVersion(),
 		)
@@ -1022,7 +1403,8 @@ func projectorFromProto(
 		ColumnIDs:        append([]string(nil), spec.GetColumnIds()...),
 		FilterExpression: spec.GetFilterExpression(),
 		Sort:             sortDescriptors,
-		CELPrograms:      programs,
+		CELPrograms:      resolved.Programs,
+		ColumnExtractors: resolved.Extractors,
 	})
 }
 

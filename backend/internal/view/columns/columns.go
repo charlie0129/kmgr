@@ -35,6 +35,10 @@ const (
 	ResultQuantity  ResultType = "quantity"
 	ResultTimestamp ResultType = "timestamp"
 	ResultDuration  ResultType = "duration"
+	// ResultResourceUsage is emitted by validated native metric/accounting
+	// extractors. It is not a valid CEL result because its typed cell contains
+	// several scheduler/measurement components rather than one CEL scalar.
+	ResultResourceUsage ResultType = "resourceUsage"
 )
 
 type Definition struct {
@@ -83,6 +87,25 @@ type Program struct {
 	definition  Definition
 	program     cel.Program
 	usesMetrics bool
+}
+
+// Resolution contains the compiled and typed backend implementations for the
+// display column IDs requested by one resource view. Programs are CEL-backed;
+// Extractors map a display ID to a validated built-in or metric extractor ID.
+// Keeping those identities separate lets a definition such as
+// {id: gpu, value: resource:nvidia.com/gpu} emit cells under "gpu" without
+// losing the exact Kubernetes resource identity used by the backend.
+type Resolution struct {
+	Programs   map[string]*Program
+	Extractors map[string]Extractor
+}
+
+// Extractor identifies one validated native implementation independently from
+// its display column ID. Source is retained so dependency planning can
+// distinguish a scheduler metric from a same-named generic built-in.
+type Extractor struct {
+	Source string
+	Value  string
 }
 
 // Definition returns the immutable, validated definition used to compile the

@@ -24,17 +24,44 @@ Sorting uses the typed result retained alongside display text. It never reparses
 
 ## Built-in resource usage columns
 
+For native columns, `id` is the stable table/UI identity and `value` selects
+the backend extractor. They do not need to match. For example, the following
+keeps the table column ID `gpu` while accounting the exact Kubernetes resource
+`nvidia.com/gpu`:
+
+```yaml
+- id: gpu
+  title: GPU
+  source: metric
+  value: resource:nvidia.com/gpu
+  type: resourceUsage
+```
+
+Built-in values include `name`, `namespace`, `kind`, `status`, `node`,
+`ready`, `restarts`, `age`, `created`, and `resourceVersion`; the documented
+Pod-qualified forms such as `pod.status` resolve to the same optimized
+extractors. Metric values include `cpu`, `memory`, `ephemeral-storage`, Node
+request/limit and Pod-count variants, and `resource:<exact-resource-name>`.
+The documented qualified forms such as `pod.cpu.usageRequestLimit` are also accepted.
+Native result types are part of that contract: `ready` is `string`, `restarts`
+is `integer`, `age` is `duration`, `created` is `timestamp`, and metric values
+are `resourceUsage`; other metadata/status built-ins are `string`.
+Source, value, result type, and resource-kind compatibility are validated when
+the configuration is compiled. CEL columns cannot declare `value`, and native
+columns cannot declare a CEL expression.
+
 Pod and Node views use the built-in IDs `cpu`, `memory`, and
 `ephemeral-storage`. Pods render actual usage / effective request / effective
 limit; Nodes render actual usage / allocatable, with physical capacity in the
 tooltip. These cells remain typed `resourceUsage` values even when actual usage
 is unavailable, so scheduler accounting is not confused with measured usage.
 
-An explicitly configured exact resource uses the ID
+An explicitly configured exact resource uses the value
 `resource:<kubernetes-resource-name>`, for example
 `resource:hugepages-2Mi`, `resource:nvidia.com/gpu`, or
-`resource:aliyun.com/ppu`. In `columns.yaml`, declare it as a `metric` source
-whose `value` is the same ID and whose type is `resourceUsage`. Exact names are never merged. Metrics Server usually
+`resource:aliyun.com/ppu`. Its display ID may be a shorter stable name such as
+`gpu`. Declare it as a `metric` source with type `resourceUsage`. Exact names
+are never merged. Metrics Server usually
 does not report huge-page or accelerator utilization, so these Pod cells show
 effective request / limit with actual usage unavailable; they never label
 allocation as utilization.

@@ -15,12 +15,19 @@ import (
 )
 
 const (
-	PodCPUColumn                    = "cpu"
-	PodMemoryColumn                 = "memory"
-	PodEphemeralStorageColumn       = "ephemeral-storage"
-	NodeCPUUsageColumn              = "cpu"
-	NodeMemoryUsageColumn           = "memory"
-	NodeEphemeralStorageUsageColumn = "ephemeral-storage"
+	PodCPUColumn                       = "cpu"
+	PodMemoryColumn                    = "memory"
+	PodEphemeralStorageColumn          = "ephemeral-storage"
+	NodeCPUUsageColumn                 = "cpu"
+	NodeMemoryUsageColumn              = "memory"
+	NodeEphemeralStorageUsageColumn    = "ephemeral-storage"
+	NodeCPURequestsColumn              = "cpu-requests"
+	NodeCPULimitsColumn                = "cpu-limits"
+	NodeMemoryRequestsColumn           = "memory-requests"
+	NodeMemoryLimitsColumn             = "memory-limits"
+	NodeEphemeralStorageRequestsColumn = "ephemeral-storage-requests"
+	NodeEphemeralStorageLimitsColumn   = "ephemeral-storage-limits"
+	NodePodCountColumn                 = "pod-count"
 
 	metricResourceColumnPrefix = "resource:"
 )
@@ -139,6 +146,69 @@ func metricColumnResource(resource ResourceType, columnID string) (corev1.Resour
 	return "", false
 }
 
+type nodeAllocationField uint8
+
+const (
+	nodeRequested nodeAllocationField = iota
+	nodeLimited
+)
+
+func isNodeResource(resource ResourceType) bool {
+	return resource.Group == "" && resource.Version == "v1" && resource.Resource == "nodes"
+}
+
+func nodeAllocationColumn(
+	resource ResourceType,
+	columnID string,
+) (corev1.ResourceName, nodeAllocationField, bool) {
+	if !isNodeResource(resource) {
+		return "", 0, false
+	}
+	switch columnID {
+	case NodeCPURequestsColumn:
+		return corev1.ResourceCPU, nodeRequested, true
+	case NodeCPULimitsColumn:
+		return corev1.ResourceCPU, nodeLimited, true
+	case NodeMemoryRequestsColumn:
+		return corev1.ResourceMemory, nodeRequested, true
+	case NodeMemoryLimitsColumn:
+		return corev1.ResourceMemory, nodeLimited, true
+	case NodeEphemeralStorageRequestsColumn:
+		return corev1.ResourceEphemeralStorage, nodeRequested, true
+	case NodeEphemeralStorageLimitsColumn:
+		return corev1.ResourceEphemeralStorage, nodeLimited, true
+	}
+	if exact, found := strings.CutPrefix(columnID, metricResourceColumnPrefix); found && exact != "" {
+		return corev1.ResourceName(exact), nodeRequested, true
+	}
+	return "", 0, false
+}
+
+func needsNodeAccounting(projector *Projector) bool {
+	if projector == nil || !isNodeResource(projector.spec.Resource) {
+		return false
+	}
+	for _, displayID := range projector.spec.ColumnIDs {
+		if program := projector.spec.CELPrograms[displayID]; program != nil {
+			if program.UsesMetrics() {
+				return true
+			}
+			continue
+		}
+		columnID := projector.extractorID(displayID)
+		if source := projector.extractorSource(displayID); source != "" && source != "metric" {
+			continue
+		}
+		if columnID == NodePodCountColumn {
+			return true
+		}
+		if _, _, allocation := nodeAllocationColumn(projector.spec.Resource, columnID); allocation {
+			return true
+		}
+	}
+	return false
+}
+
 func metricColumnID(resourceName corev1.ResourceName) string {
 	return metricResourceColumnPrefix + string(resourceName)
 }
@@ -150,15 +220,37 @@ func needsMetricProvider(projector *Projector) bool {
 	if _, supported := metricKindFor(projector.spec.Resource); !supported {
 		return false
 	}
-	for _, columnID := range projector.spec.ColumnIDs {
-		if _, metric := metricColumnResource(projector.spec.Resource, columnID); metric {
-			return true
+	for _, displayID := range projector.spec.ColumnIDs {
+		if program := projector.spec.CELPrograms[displayID]; program != nil {
+			if program.UsesMetrics() {
+				return true
+			}
+			continue
 		}
-		if program := projector.spec.CELPrograms[columnID]; program != nil && program.UsesMetrics() {
+		columnID := projector.extractorID(displayID)
+		if source := projector.extractorSource(displayID); source != "" && source != "metric" {
+			continue
+		}
+		if _, _, allocation := nodeAllocationColumn(projector.spec.Resource, columnID); allocation ||
+			columnID == NodePodCountColumn {
+			continue
+		}
+		// Exact huge-page and extended-resource columns are scheduler
+		// allocations. Metrics Server does not supply their utilization, so an
+		// otherwise allocation-only view must not wake that optional provider.
+		if _, found := exactResourceColumn(columnID); found {
+			continue
+		}
+		if _, metric := metricColumnResource(projector.spec.Resource, columnID); metric {
 			return true
 		}
 	}
 	return false
+}
+
+func exactResourceColumn(columnID string) (corev1.ResourceName, bool) {
+	exact, found := strings.CutPrefix(columnID, metricResourceColumnPrefix)
+	return corev1.ResourceName(exact), found && exact != ""
 }
 
 func metricsNamespace(resource ResourceType, serverNamespace string) string {
