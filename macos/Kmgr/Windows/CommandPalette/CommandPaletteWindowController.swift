@@ -11,6 +11,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         var namespaces: [String]
         var namespaceScope: NamespaceSelection
         var selectedIdentities: [ResourceIdentity]
+        var recentObjects: [RecentObject]
     }
 
     enum Operation: Hashable {
@@ -45,7 +46,14 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             case .result(.namespace):
                 return "Change this workspace's namespace scope"
             case .result(.object(let result)):
-                return result.detailText + (result.stale ? " · Cached — opens with a fresh GET" : "")
+                switch result.origin {
+                case .authoritative:
+                    return result.detailText
+                case .cached:
+                    return result.detailText + " · Cached — opens with a fresh GET"
+                case .recent:
+                    return result.detailText + " · Opens with a fresh GET"
+                }
             }
         }
 
@@ -71,11 +79,12 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     private var items: [Item] = []
     private var searchTask: Task<Void, Never>?
     private var debounceTask: Task<Void, Never>?
+    private var rootSearchTask: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var queryRevision: UInt64 = 0
     private var runningRevision: UInt64?
     private var gate = GenerationSequenceGate()
-    private var resultByUID: [ResourceUID: ObjectSearchResult] = [:]
+    private var resultByIdentity: [String: ObjectSearchResult] = [:]
     private var latestProgress: ObjectSearchProgress?
     private var closing = false
 
@@ -125,6 +134,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
         closing = true
+        rootSearchTask?.cancel()
         cancelPendingSearch()
         onClose?()
     }
@@ -294,22 +304,75 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             namespaces: context.namespaces
         ).map(Item.result))
 
+        let recent = PaletteRanking.recentObjects(
+            query: query,
+            values: context.recentObjects,
+            limit: 20
+        )
+        values.append(contentsOf: recent.map(Item.result))
+
         items = Array(values.prefix(50))
         scopeLabel.stringValue = "\(context.session.contextName) · \(context.namespaceScope.presentation)"
         statusLabel.stringValue = items.isEmpty
             ? "No matching commands or resource kinds"
             : "\(items.count.formatted()) results · ↑↓ navigate · Return open · Esc close"
         reloadSelectingFirst()
+        scheduleRootCacheSearch(query: query, baseItems: values, recent: recent)
+    }
+
+    private func scheduleRootCacheSearch(
+        query: String,
+        baseItems: [Item],
+        recent: [PaletteResult]
+    ) {
+        rootSearchTask?.cancel()
+        guard !query.isEmpty else { return }
+        let sessionID = context.session.sessionID
+        let scope = context.namespaceScope
+        rootSearchTask = Task { [weak self, objectSearchProvider] in
+            do {
+                try await Task.sleep(for: .milliseconds(90))
+                guard !Task.isCancelled else { return }
+                let response = try await objectSearchProvider.searchCachedObjects(request: .init(
+                    sessionID: sessionID,
+                    namespaceScope: scope,
+                    query: query,
+                    resultLimit: 30,
+                    examinationLimit: 50_000
+                ))
+                guard !Task.isCancelled, let self,
+                    case .root = mode,
+                    searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) == query
+                else { return }
+                let objects = PaletteRanking.mergingObjects(
+                    recent: recent,
+                    cached: response.results,
+                    limit: 30
+                ).map(Item.result)
+                items = Array((baseItems.filter {
+                    if case .result(.object) = $0 { return false }
+                    return true
+                } + objects).prefix(50))
+                let qualifier = response.examinationTruncated ? " · cache scan bounded" : ""
+                statusLabel.stringValue = "\(items.count.formatted()) results · \(response.objectsExamined.formatted()) cached examined\(qualifier)"
+                reloadPreservingSelection()
+            } catch {
+                guard !Task.isCancelled else { return }
+                // Recent/kind/namespace results remain useful when the helper's
+                // strictly local cache query is temporarily unavailable.
+            }
+        }
     }
 
     private func enterObjectSearch(_ resource: DiscoveredResource) {
+        rootSearchTask?.cancel()
         cancelPendingSearch()
         mode = .objects(resource)
         generation &+= 1
         if generation == 0 { generation = 1 }
         queryRevision = 0
         gate.reset()
-        resultByUID.removeAll(keepingCapacity: true)
+        resultByIdentity.removeAll(keepingCapacity: true)
         latestProgress = nil
         items = []
         searchField.stringValue = ""
@@ -324,7 +387,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         debounceTask?.cancel()
         searchTask?.cancel()
         cancelRunningSearch()
-        resultByUID.removeAll(keepingCapacity: true)
+        resultByIdentity.removeAll(keepingCapacity: true)
         latestProgress = nil
         items = []
         tableView.reloadData()
@@ -403,11 +466,11 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             statusLabel.textColor = .secondaryLabelColor
         }
         for result in message.results {
-            resultByUID[result.identity.uid] = result
+            resultByIdentity[objectIdentityKey(result.identity)] = result
         }
         latestProgress = message.progress
         items = PaletteRanking.objects(
-            Array(resultByUID.values),
+            Array(resultByIdentity.values),
             limit: 100
         ).map(Item.result)
         statusLabel.stringValue = objectSearchStatus(
@@ -425,12 +488,12 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             kind = "objects"
         }
         if complete {
-            let count = resultByUID.count
+            let count = resultByIdentity.count
             return "\(count.formatted()) matches · \(examined.formatted()) examined · Complete"
         }
         return examined == 0
             ? "Searching \(kind)…"
-            : "Searching \(kind)… \(examined.formatted()) examined · \(resultByUID.count.formatted()) matches"
+            : "Searching \(kind)… \(examined.formatted()) examined · \(resultByIdentity.count.formatted()) matches"
     }
 
     private func cancelPendingSearch() {
@@ -464,7 +527,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             mode = .root
             searchField.stringValue = ""
             searchField.placeholderString = "Type a command or resource kind"
-            resultByUID.removeAll(keepingCapacity: true)
+            resultByIdentity.removeAll(keepingCapacity: true)
             latestProgress = nil
             updateRootItems()
             window?.makeFirstResponder(searchField)
@@ -479,6 +542,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
 
     private func dismissPalette() {
         guard !closing else { return }
+        rootSearchTask?.cancel()
         window?.close()
     }
 
@@ -490,6 +554,11 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             : min(max(current + delta, 0), items.count - 1)
         tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
         tableView.scrollRowToVisible(next)
+    }
+
+    private func objectIdentityKey(_ identity: ResourceIdentity) -> String {
+        [identity.group, identity.version, identity.resource, identity.uid.rawValue]
+            .joined(separator: "\u{0}")
     }
 
     private func reloadSelectingFirst() {

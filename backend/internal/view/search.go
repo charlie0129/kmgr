@@ -13,12 +13,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/charlie0129/kmgr/backend/internal/store"
 )
 
 const (
 	DefaultSearchResultLimit = 100
 	MaximumSearchResultLimit = 500
 	DefaultSearchPageSize    = 500
+	DefaultCacheExamination  = 50_000
+	MaximumCacheExamination  = 250_000
 )
 
 type SearchQuery struct {
@@ -36,6 +40,120 @@ type SearchBatch struct {
 	Complete      bool
 	UsedDirectGet bool
 	Reusable      bool
+}
+
+type CachedSearchQuery struct {
+	SessionID        string
+	NamespaceScope   NamespaceScope
+	Query            string
+	ResultLimit      int
+	ExaminationLimit int
+}
+
+type CachedSearchResult struct {
+	Results   []*kmgrv1.SearchResult
+	Examined  uint64
+	Truncated bool
+}
+
+// SearchCached answers the root Command Palette strictly from process-memory
+// stores. It resolves only the already-open session authority and never calls
+// OpenResource, so it cannot issue Kubernetes GET, LIST, or WATCH requests.
+func (r *Runtime) SearchCached(query CachedSearchQuery) (CachedSearchResult, error) {
+	query.SessionID = strings.TrimSpace(query.SessionID)
+	query.Query = strings.TrimSpace(query.Query)
+	if query.SessionID == "" || query.Query == "" {
+		return CachedSearchResult{}, fmt.Errorf("%w: cached search session and query are required", ErrInvalidView)
+	}
+	limit := query.ResultLimit
+	if limit == 0 {
+		limit = DefaultSearchResultLimit
+	}
+	if limit < 1 || limit > MaximumSearchResultLimit {
+		return CachedSearchResult{}, fmt.Errorf("%w: cached search result limit must be 1..%d", ErrInvalidView, MaximumSearchResultLimit)
+	}
+	examinationLimit := query.ExaminationLimit
+	if examinationLimit == 0 {
+		examinationLimit = DefaultCacheExamination
+	}
+	if examinationLimit < 1 || examinationLimit > MaximumCacheExamination {
+		return CachedSearchResult{}, fmt.Errorf("%w: cache examination limit must be 1..%d", ErrInvalidView, MaximumCacheExamination)
+	}
+	authoritySource, ok := r.source.(interface {
+		AuthorityID(string) (string, bool)
+	})
+	if !ok {
+		return CachedSearchResult{}, ErrSessionNotFound
+	}
+	authorityID, ok := authoritySource.AuthorityID(query.SessionID)
+	if !ok {
+		return CachedSearchResult{}, ErrSessionNotFound
+	}
+
+	// Capture entry pointers under Runtime.mu, then snapshot stores, normalize,
+	// rank, and sort after releasing it. Stores own their synchronization and
+	// resource runtimes remain alive until Runtime.Close.
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return CachedSearchResult{}, ErrViewClosed
+	}
+	type cachedSearchEntry struct {
+		key   resourceKey
+		store *store.UIDStore
+	}
+	entries := make([]cachedSearchEntry, 0, len(r.resources))
+	for key, entry := range r.resources {
+		if key.authorityID == authorityID && entry != nil && entry.store != nil {
+			entries = append(entries, cachedSearchEntry{key: key, store: entry.store})
+		}
+	}
+	r.mu.Unlock()
+	slices.SortFunc(entries, func(left, right cachedSearchEntry) int {
+		return cmp.Compare(searchResourceKey(left.key), searchResourceKey(right.key))
+	})
+
+	retained := newBoundedSearchResults(limit)
+	seen := make(map[string]struct{}, min(examinationLimit, 4096))
+	result := CachedSearchResult{}
+	for _, entry := range entries {
+		for _, value := range entry.store.Snapshot() {
+			if value == nil || value.GetUID() == "" {
+				continue
+			}
+			unique := searchObjectKey(entry.key, string(value.GetUID()))
+			if _, duplicate := seen[unique]; duplicate {
+				continue
+			}
+			if len(seen) >= examinationLimit {
+				result.Truncated = true
+				result.Results = retained.Sorted()
+				return result, nil
+			}
+			seen[unique] = struct{}{}
+			result.Examined++
+			resource := ResourceType{
+				Group: entry.key.group, Version: entry.key.version,
+				Resource: entry.key.resource, Namespaced: value.GetNamespace() != "",
+			}
+			if !includesSearchNamespace(value.GetNamespace(), resource, query.NamespaceScope) {
+				continue
+			}
+			if rank, match := searchRank(query.Query, value.GetNamespace(), value.GetName()); match {
+				retained.Add(makeSearchResult(query.SessionID, resource, value, rank, true))
+			}
+		}
+	}
+	result.Results = retained.Sorted()
+	return result, nil
+}
+
+func searchResourceKey(key resourceKey) string {
+	return strings.Join([]string{key.group, key.version, key.resource, key.namespace, key.labels, key.fields}, "\x00")
+}
+
+func searchObjectKey(key resourceKey, uid string) string {
+	return strings.Join([]string{key.group, key.version, key.resource, uid}, "\x00")
 }
 
 // Search uses compatible active/warm stores without waking a stopped watcher.
@@ -264,7 +382,11 @@ func makeSearchResult(
 	if detail != "" {
 		detail += " · "
 	}
-	detail += resource.Kind
+	kind := resource.Kind
+	if kind == "" {
+		kind = resource.Resource
+	}
+	detail += kind
 	return &kmgrv1.SearchResult{
 		Identity: &kmgrv1.ResourceIdentity{
 			ClusterSessionId: sessionID, Group: resource.Group, Version: resource.Version,
@@ -296,8 +418,8 @@ func newBoundedSearchResults(limit int) *boundedSearchResults {
 }
 
 func (r *boundedSearchResults) Add(value *kmgrv1.SearchResult) {
-	uid := value.GetIdentity().GetUid()
-	r.values[uid] = value
+	key := searchResultKey(value)
+	r.values[key] = value
 	if len(r.values) <= r.limit {
 		return
 	}
@@ -312,6 +434,13 @@ func (r *boundedSearchResults) Add(value *kmgrv1.SearchResult) {
 	delete(r.values, worstUID)
 }
 
+func searchResultKey(value *kmgrv1.SearchResult) string {
+	identity := value.GetIdentity()
+	return strings.Join([]string{
+		identity.GetGroup(), identity.GetVersion(), identity.GetResource(), identity.GetUid(),
+	}, "\x00")
+}
+
 func (r *boundedSearchResults) Sorted() []*kmgrv1.SearchResult {
 	return sortedSearchResults(r.values, r.limit)
 }
@@ -324,6 +453,15 @@ func compareSearchResults(left, right *kmgrv1.SearchResult) int {
 		return result
 	}
 	if result := cmp.Compare(left.GetIdentity().GetName(), right.GetIdentity().GetName()); result != 0 {
+		return result
+	}
+	if result := cmp.Compare(left.GetIdentity().GetGroup(), right.GetIdentity().GetGroup()); result != 0 {
+		return result
+	}
+	if result := cmp.Compare(left.GetIdentity().GetVersion(), right.GetIdentity().GetVersion()); result != 0 {
+		return result
+	}
+	if result := cmp.Compare(left.GetIdentity().GetResource(), right.GetIdentity().GetResource()); result != 0 {
 		return result
 	}
 	return cmp.Compare(left.GetIdentity().GetUid(), right.GetIdentity().GetUid())

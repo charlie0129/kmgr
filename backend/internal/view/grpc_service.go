@@ -3,6 +3,7 @@ package view
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
@@ -34,6 +35,35 @@ func NewGRPCService(runtime *Runtime) (*GRPCService, error) {
 		return nil, errors.New("view runtime must not be nil")
 	}
 	return &GRPCService{runtime: runtime, searches: make(map[searchStreamKey]context.CancelFunc)}, nil
+}
+
+func (s *GRPCService) SearchCachedObjects(
+	_ context.Context,
+	request *kmgrv1.SearchCachedObjectsRequest,
+) (*kmgrv1.SearchCachedObjectsResponse, error) {
+	if request == nil || request.GetContext() == nil || request.GetContext().GetRequestId() == "" ||
+		strings.TrimSpace(request.GetContext().GetClusterSessionId()) == "" ||
+		strings.TrimSpace(request.GetQuery()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "request, session, and query are required")
+	}
+	scope := request.GetNamespaceScope()
+	result, err := s.runtime.SearchCached(CachedSearchQuery{
+		SessionID: request.GetContext().GetClusterSessionId(),
+		NamespaceScope: NamespaceScope{
+			All: scope.GetAllNamespaces(), Namespaces: append([]string(nil), scope.GetNamespaces()...),
+		},
+		Query: request.GetQuery(), ResultLimit: int(request.GetResultLimit()),
+		ExaminationLimit: int(request.GetExaminationLimit()),
+	})
+	response := &kmgrv1.SearchCachedObjectsResponse{RequestId: request.GetContext().GetRequestId()}
+	if err != nil {
+		response.Error = structuredCachedSearchError(err)
+		return response, nil
+	}
+	response.Results = result.Results
+	response.ObjectsExamined = result.Examined
+	response.ExaminationTruncated = result.Truncated
+	return response, nil
 }
 
 func (s *GRPCService) SearchObjects(
@@ -176,4 +206,28 @@ func viewStatusError(err error) error {
 	default:
 		return status.Error(codes.Internal, "resource view failed")
 	}
+}
+
+func structuredCachedSearchError(err error) *kmgrv1.StructuredError {
+	result := &kmgrv1.StructuredError{
+		Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL,
+		Reason:   "CachedSearchFailed", Message: "The in-memory object search failed.",
+		Operation: "search cached objects",
+	}
+	switch {
+	case errors.Is(err, ErrSessionNotFound):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
+		result.Reason = "ClusterSessionNotFound"
+		result.Message = "The cluster session was not found."
+	case errors.Is(err, ErrInvalidView):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION
+		result.Reason = "InvalidCachedSearch"
+		result.Message = err.Error()
+	case errors.Is(err, ErrViewClosed):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
+		result.Reason = "ViewRuntimeClosed"
+		result.Message = "The in-memory object cache is unavailable."
+		result.Retryable = true
+	}
+	return result
 }

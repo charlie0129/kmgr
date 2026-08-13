@@ -422,6 +422,75 @@ public struct Kmgr_V1_SearchObjectsRequest: Sendable {
   fileprivate var _namespaceScope: Kmgr_V1_NamespaceScope? = nil
 }
 
+/// SearchCachedObjects is the root Command Palette's strictly local lookup.
+/// The engine must answer it only from active/warm process-memory stores: it
+/// never opens a resource client and never performs GET, LIST, or WATCH.
+public struct Kmgr_V1_SearchCachedObjectsRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var namespaceScope: Kmgr_V1_NamespaceScope {
+    get {return _namespaceScope ?? Kmgr_V1_NamespaceScope()}
+    set {_namespaceScope = newValue}
+  }
+  /// Returns true if `namespaceScope` has been explicitly set.
+  public var hasNamespaceScope: Bool {return self._namespaceScope != nil}
+  /// Clears the value of `namespaceScope`. Subsequent reads from it will return its default value.
+  public mutating func clearNamespaceScope() {self._namespaceScope = nil}
+
+  public var query: String = String()
+
+  public var resultLimit: UInt32 = 0
+
+  public var examinationLimit: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+  fileprivate var _namespaceScope: Kmgr_V1_NamespaceScope? = nil
+}
+
+public struct Kmgr_V1_SearchCachedObjectsResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var results: [Kmgr_V1_SearchResult] = []
+
+  public var objectsExamined: UInt64 = 0
+
+  public var examinationTruncated: Bool = false
+
+  public var error: Kmgr_V1_StructuredError {
+    get {return _error ?? Kmgr_V1_StructuredError()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {return self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: Kmgr_V1_StructuredError? = nil
+}
+
 public struct Kmgr_V1_SearchResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1129,6 +1198,114 @@ extension Kmgr_V1_SearchObjectsRequest: SwiftProtobuf.Message, SwiftProtobuf._Me
     if lhs.query != rhs.query {return false}
     if lhs.resultLimit != rhs.resultLimit {return false}
     if lhs.allowPaginatedList != rhs.allowPaginatedList {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_SearchCachedObjectsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SearchCachedObjectsRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}namespace_scope\0\u{1}query\0\u{3}result_limit\0\u{3}examination_limit\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._namespaceScope) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.query) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.resultLimit) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.examinationLimit) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._namespaceScope {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    if !self.query.isEmpty {
+      try visitor.visitSingularStringField(value: self.query, fieldNumber: 3)
+    }
+    if self.resultLimit != 0 {
+      try visitor.visitSingularUInt32Field(value: self.resultLimit, fieldNumber: 4)
+    }
+    if self.examinationLimit != 0 {
+      try visitor.visitSingularUInt32Field(value: self.examinationLimit, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_SearchCachedObjectsRequest, rhs: Kmgr_V1_SearchCachedObjectsRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs._namespaceScope != rhs._namespaceScope {return false}
+    if lhs.query != rhs.query {return false}
+    if lhs.resultLimit != rhs.resultLimit {return false}
+    if lhs.examinationLimit != rhs.examinationLimit {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_SearchCachedObjectsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SearchCachedObjectsResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}results\0\u{3}objects_examined\0\u{3}examination_truncated\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.results) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.objectsExamined) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.examinationTruncated) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.results.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.results, fieldNumber: 2)
+    }
+    if self.objectsExamined != 0 {
+      try visitor.visitSingularUInt64Field(value: self.objectsExamined, fieldNumber: 3)
+    }
+    if self.examinationTruncated != false {
+      try visitor.visitSingularBoolField(value: self.examinationTruncated, fieldNumber: 4)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_SearchCachedObjectsResponse, rhs: Kmgr_V1_SearchCachedObjectsResponse) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.results != rhs.results {return false}
+    if lhs.objectsExamined != rhs.objectsExamined {return false}
+    if lhs.examinationTruncated != rhs.examinationTruncated {return false}
+    if lhs._error != rhs._error {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -10,6 +10,7 @@ option swift_prefix = "Kmgr_V1_";
 service ViewService {
   rpc StreamView(OpenViewRequest) returns (stream ViewEvent);
   rpc CancelView(CancelViewRequest) returns (Acknowledgement);
+  rpc SearchCachedObjects(SearchCachedObjectsRequest) returns (SearchCachedObjectsResponse);
   rpc SearchObjects(SearchObjectsRequest) returns (stream SearchObjectsEvent);
   rpc CancelSearch(CancelSearchRequest) returns (Acknowledgement);
 }
@@ -107,6 +108,25 @@ message SearchObjectsRequest {
   string query = 7;
   uint32 result_limit = 8;
   bool allow_paginated_list = 9;
+}
+
+// SearchCachedObjects is the root Command Palette's strictly local lookup.
+// The engine must answer it only from active/warm process-memory stores: it
+// never opens a resource client and never performs GET, LIST, or WATCH.
+message SearchCachedObjectsRequest {
+  RequestContext context = 1;
+  NamespaceScope namespace_scope = 2;
+  string query = 3;
+  uint32 result_limit = 4;
+  uint32 examination_limit = 5;
+}
+
+message SearchCachedObjectsResponse {
+  string request_id = 1;
+  repeated SearchResult results = 2;
+  uint64 objects_examined = 3;
+  bool examination_truncated = 4;
+  StructuredError error = 5;
 }
 
 message SearchResult {

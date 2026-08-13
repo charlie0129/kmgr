@@ -24,6 +24,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     private let provider: any WorkspaceResourceProviding
     private let objectDetailProvider: any ObjectDetailProviding
+    private let recentObjectStore: RecentObjectStore
     private let operationProvider: any ResourceOperationProviding
     private let logProvider: any LogStreamProviding
     private let execProvider: any ExecSessionProviding
@@ -43,6 +44,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         provider: any WorkspaceResourceProviding,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
+        recentObjectStore: RecentObjectStore = .shared,
         operationProvider: any ResourceOperationProviding,
         logProvider: any LogStreamProviding,
         execProvider: any ExecSessionProviding,
@@ -55,6 +57,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.session = session
         self.provider = provider
         self.objectDetailProvider = objectDetailProvider
+        self.recentObjectStore = recentObjectStore
         self.operationProvider = operationProvider
         self.logProvider = logProvider
         self.execProvider = execProvider
@@ -81,6 +84,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             provider: provider,
             objectSearchProvider: objectSearchProvider,
             objectDetailProvider: objectDetailProvider,
+            recentObjectStore: recentObjectStore,
             portForwards: portForwards,
             columnsConfigurationPath: columnsConfigurationPath,
             onShowPortForwards: onShowPortForwards
@@ -320,6 +324,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let provider: any WorkspaceResourceProviding
     private let objectSearchProvider: any ObjectSearchProviding
     private let objectDetailProvider: any ObjectDetailProviding
+    private let recentObjectStore: RecentObjectStore
     private let portForwards: PortForwardCoordinator
     private let columnsConfigurationPath: String
     private let onShowPortForwards: @MainActor () -> Void
@@ -350,6 +355,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         provider: any WorkspaceResourceProviding,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
+        recentObjectStore: RecentObjectStore,
         portForwards: PortForwardCoordinator,
         columnsConfigurationPath: String,
         onShowPortForwards: @escaping @MainActor () -> Void
@@ -358,6 +364,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.provider = provider
         self.objectSearchProvider = objectSearchProvider
         self.objectDetailProvider = objectDetailProvider
+        self.recentObjectStore = recentObjectStore
         self.portForwards = portForwards
         self.columnsConfigurationPath = columnsConfigurationPath
         self.onShowPortForwards = onShowPortForwards
@@ -472,7 +479,14 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     func recover(with recoveredSession: OpenedClusterSession) {
+        let previousSessionID = session.sessionID
         session = recoveredSession
+        Task { [recentObjectStore] in
+            await recentObjectStore.rebind(
+                from: previousSessionID,
+                to: recoveredSession.sessionID
+            )
+        }
         sidebarController.recover(session: recoveredSession) { [weak self] _ in
             guard let self else { return }
             sidebarController.reconcileSelection(
@@ -694,13 +708,23 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             paletteController.showWindow(nil)
             return
         }
+        Task { [weak self, recentObjectStore] in
+            guard let self else { return }
+            let recentObjects = await recentObjectStore.recent(sessionID: session.sessionID)
+            guard !Task.isCancelled, paletteController == nil else { return }
+            installCommandPalette(recentObjects: recentObjects)
+        }
+    }
+
+    private func installCommandPalette(recentObjects: [RecentObject]) {
         let controller = CommandPaletteWindowController(
             context: .init(
                 session: session,
                 resources: resources,
                 namespaces: namespaces,
                 namespaceScope: selectedNamespaceScope(),
-                selectedIdentities: contentController.selectedIdentitiesForNetworkActions
+                selectedIdentities: contentController.selectedIdentitiesForNetworkActions,
+                recentObjects: recentObjects
             ),
             objectSearchProvider: objectSearchProvider
         )
@@ -755,6 +779,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         initialTab: ObjectDetailInitialTab
     ) {
         guard let returnState = contentController.captureNavigationState() else { return }
+        Task { [recentObjectStore] in await recentObjectStore.record(identity) }
         contentController.navigateToObject(identity, returnState: returnState)
         displayObject(identity, initialTab: initialTab)
         checkpointRestoration()

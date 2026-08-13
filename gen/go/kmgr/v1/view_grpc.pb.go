@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ViewService_StreamView_FullMethodName    = "/kmgr.v1.ViewService/StreamView"
-	ViewService_CancelView_FullMethodName    = "/kmgr.v1.ViewService/CancelView"
-	ViewService_SearchObjects_FullMethodName = "/kmgr.v1.ViewService/SearchObjects"
-	ViewService_CancelSearch_FullMethodName  = "/kmgr.v1.ViewService/CancelSearch"
+	ViewService_StreamView_FullMethodName          = "/kmgr.v1.ViewService/StreamView"
+	ViewService_CancelView_FullMethodName          = "/kmgr.v1.ViewService/CancelView"
+	ViewService_SearchCachedObjects_FullMethodName = "/kmgr.v1.ViewService/SearchCachedObjects"
+	ViewService_SearchObjects_FullMethodName       = "/kmgr.v1.ViewService/SearchObjects"
+	ViewService_CancelSearch_FullMethodName        = "/kmgr.v1.ViewService/CancelSearch"
 )
 
 // ViewServiceClient is the client API for ViewService service.
@@ -31,6 +32,7 @@ const (
 type ViewServiceClient interface {
 	StreamView(ctx context.Context, in *OpenViewRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ViewEvent], error)
 	CancelView(ctx context.Context, in *CancelViewRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
+	SearchCachedObjects(ctx context.Context, in *SearchCachedObjectsRequest, opts ...grpc.CallOption) (*SearchCachedObjectsResponse, error)
 	SearchObjects(ctx context.Context, in *SearchObjectsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SearchObjectsEvent], error)
 	CancelSearch(ctx context.Context, in *CancelSearchRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
 }
@@ -72,6 +74,16 @@ func (c *viewServiceClient) CancelView(ctx context.Context, in *CancelViewReques
 	return out, nil
 }
 
+func (c *viewServiceClient) SearchCachedObjects(ctx context.Context, in *SearchCachedObjectsRequest, opts ...grpc.CallOption) (*SearchCachedObjectsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SearchCachedObjectsResponse)
+	err := c.cc.Invoke(ctx, ViewService_SearchCachedObjects_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *viewServiceClient) SearchObjects(ctx context.Context, in *SearchObjectsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SearchObjectsEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &ViewService_ServiceDesc.Streams[1], ViewService_SearchObjects_FullMethodName, cOpts...)
@@ -107,6 +119,7 @@ func (c *viewServiceClient) CancelSearch(ctx context.Context, in *CancelSearchRe
 type ViewServiceServer interface {
 	StreamView(*OpenViewRequest, grpc.ServerStreamingServer[ViewEvent]) error
 	CancelView(context.Context, *CancelViewRequest) (*Acknowledgement, error)
+	SearchCachedObjects(context.Context, *SearchCachedObjectsRequest) (*SearchCachedObjectsResponse, error)
 	SearchObjects(*SearchObjectsRequest, grpc.ServerStreamingServer[SearchObjectsEvent]) error
 	CancelSearch(context.Context, *CancelSearchRequest) (*Acknowledgement, error)
 	mustEmbedUnimplementedViewServiceServer()
@@ -124,6 +137,9 @@ func (UnimplementedViewServiceServer) StreamView(*OpenViewRequest, grpc.ServerSt
 }
 func (UnimplementedViewServiceServer) CancelView(context.Context, *CancelViewRequest) (*Acknowledgement, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelView not implemented")
+}
+func (UnimplementedViewServiceServer) SearchCachedObjects(context.Context, *SearchCachedObjectsRequest) (*SearchCachedObjectsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SearchCachedObjects not implemented")
 }
 func (UnimplementedViewServiceServer) SearchObjects(*SearchObjectsRequest, grpc.ServerStreamingServer[SearchObjectsEvent]) error {
 	return status.Error(codes.Unimplemented, "method SearchObjects not implemented")
@@ -181,6 +197,24 @@ func _ViewService_CancelView_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ViewService_SearchCachedObjects_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SearchCachedObjectsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ViewServiceServer).SearchCachedObjects(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ViewService_SearchCachedObjects_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ViewServiceServer).SearchCachedObjects(ctx, req.(*SearchCachedObjectsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ViewService_SearchObjects_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(SearchObjectsRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -220,6 +254,10 @@ var ViewService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelView",
 			Handler:    _ViewService_CancelView_Handler,
+		},
+		{
+			MethodName: "SearchCachedObjects",
+			Handler:    _ViewService_SearchCachedObjects_Handler,
 		},
 		{
 			MethodName: "CancelSearch",

@@ -10,13 +10,17 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 
+	"github.com/charlie0129/kmgr/backend/internal/store"
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
+	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 )
 
 func TestSearchRankingOrder(t *testing.T) {
@@ -37,6 +41,228 @@ func TestSearchRankingOrder(t *testing.T) {
 	if !slices.Equal(got, []string{"exact", "prefix", "substring"}) {
 		t.Fatalf("ranking = %v", got)
 	}
+}
+
+func TestCachedRootSearchUsesOnlyCurrentAuthorityWithoutOpeningResources(t *testing.T) {
+	t.Parallel()
+	source := &fakeResourceSource{
+		authority: "unused", client: newSearchClient(),
+		sessions: map[string]string{"session-a": "authority-a", "session-b": "authority-b"},
+	}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	runtime.resources[resourceKey{authorityID: "authority-a", version: "v1", resource: "pods"}] = cachedSearchRuntime(
+		pod("a", "team", "api-a", "Running", 0, nil, time.Time{}),
+	)
+	runtime.resources[resourceKey{authorityID: "authority-b", version: "v1", resource: "pods"}] = cachedSearchRuntime(
+		pod("b", "team", "api-b", "Running", 0, nil, time.Time{}),
+	)
+
+	result, err := runtime.SearchCached(CachedSearchQuery{
+		SessionID: "session-a", NamespaceScope: NamespaceScope{All: true},
+		Query: "api", ResultLimit: 10, ExaminationLimit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.opens.Load() != 0 {
+		t.Fatalf("cache-only search opened %d resources", source.opens.Load())
+	}
+	if len(result.Results) != 1 || result.Results[0].GetIdentity().GetUid() != "a" ||
+		result.Results[0].GetIdentity().GetClusterSessionId() != "session-a" {
+		t.Fatalf("authority-isolated results = %#v", result.Results)
+	}
+}
+
+func TestCachedRootSearchDeduplicatesFullGVRAndUID(t *testing.T) {
+	t.Parallel()
+	source := &fakeResourceSource{authority: "authority", client: newSearchClient()}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	shared := pod("shared", "team", "api", "Running", 0, nil, time.Time{})
+	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods", labels: "app=api"}] = cachedSearchRuntime(shared)
+	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods", fields: "status.phase=Running"}] = cachedSearchRuntime(shared)
+	runtime.resources[resourceKey{authorityID: "authority", group: "example.io", version: "v1", resource: "widgets"}] = cachedSearchRuntime(shared)
+
+	result, err := runtime.SearchCached(CachedSearchQuery{
+		SessionID: "session", NamespaceScope: NamespaceScope{All: true},
+		Query: "api", ResultLimit: 10, ExaminationLimit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Examined != 2 || len(result.Results) != 2 {
+		t.Fatalf("full-GVR dedup result = %#v", result)
+	}
+	got := []string{
+		result.Results[0].GetIdentity().GetGroup() + "/" + result.Results[0].GetIdentity().GetResource(),
+		result.Results[1].GetIdentity().GetGroup() + "/" + result.Results[1].GetIdentity().GetResource(),
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"/pods", "example.io/widgets"}) {
+		t.Fatalf("GVR identities = %v", got)
+	}
+}
+
+func TestCachedRootSearchBoundsExaminationAndRanking(t *testing.T) {
+	t.Parallel()
+	source := &fakeResourceSource{authority: "authority", client: newSearchClient()}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	objects := make([]*unstructured.Unstructured, 0, 200)
+	for index := range 200 {
+		objects = append(objects, pod(
+			fmt.Sprintf("uid-%03d", index), "team", fmt.Sprintf("api-%03d", index),
+			"Running", 0, nil, time.Time{},
+		))
+	}
+	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods"}] = cachedSearchRuntime(objects...)
+
+	result, err := runtime.SearchCached(CachedSearchQuery{
+		SessionID: "session", NamespaceScope: NamespaceScope{All: true},
+		Query: "api", ResultLimit: 5, ExaminationLimit: 40,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Truncated || result.Examined != 40 || len(result.Results) != 5 {
+		t.Fatalf("bounded cached search = %#v", result)
+	}
+	if source.opens.Load() != 0 {
+		t.Fatalf("bounded cached search opened %d resources", source.opens.Load())
+	}
+}
+
+func TestCachedRootSearchHonorsNamespaceScopeAndRankOrder(t *testing.T) {
+	t.Parallel()
+	source := &fakeResourceSource{authority: "authority", client: newSearchClient()}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods"}] = cachedSearchRuntime(
+		pod("substring", "team", "my-api-copy", "Running", 0, nil, time.Time{}),
+		pod("prefix", "team", "api-worker", "Running", 0, nil, time.Time{}),
+		pod("exact", "team", "api", "Running", 0, nil, time.Time{}),
+		pod("other", "other", "api", "Running", 0, nil, time.Time{}),
+	)
+
+	result, err := runtime.SearchCached(CachedSearchQuery{
+		SessionID: "session", NamespaceScope: NamespaceScope{Namespaces: []string{"team"}},
+		Query: "api", ResultLimit: 10, ExaminationLimit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(result.Results))
+	for _, value := range result.Results {
+		got = append(got, value.GetIdentity().GetUid())
+	}
+	if !slices.Equal(got, []string{"exact", "prefix", "substring"}) {
+		t.Fatalf("scoped rank order = %v", got)
+	}
+}
+
+func TestSearchCachedObjectsGRPCMapsEnvelopeResultsAndBounds(t *testing.T) {
+	t.Parallel()
+	source := &fakeResourceSource{authority: "authority", client: newSearchClient()}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods"}] = cachedSearchRuntime(
+		pod("exact", "team", "api", "Running", 0, nil, time.Time{}),
+		pod("prefix", "team", "api-worker", "Running", 0, nil, time.Time{}),
+	)
+	service, err := NewGRPCService(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := service.SearchCachedObjects(context.Background(), &kmgrv1.SearchCachedObjectsRequest{
+		Context:          &kmgrv1.RequestContext{RequestId: "cached-request", ClusterSessionId: "session"},
+		NamespaceScope:   &kmgrv1.NamespaceScope{Namespaces: []string{"team"}},
+		Query:            "api",
+		ResultLimit:      1,
+		ExaminationLimit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetRequestId() != "cached-request" || response.GetObjectsExamined() != 1 ||
+		!response.GetExaminationTruncated() || len(response.GetResults()) != 1 || response.GetError() != nil {
+		t.Fatalf("cache search response = %#v", response)
+	}
+	if source.opens.Load() != 0 {
+		t.Fatalf("gRPC cached search opened %d resources", source.opens.Load())
+	}
+}
+
+func TestSearchCachedObjectsGRPCReturnsStructuredSessionError(t *testing.T) {
+	t.Parallel()
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{
+		sessions: map[string]string{"known": "authority"}, client: newSearchClient(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	service, err := NewGRPCService(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := service.SearchCachedObjects(context.Background(), &kmgrv1.SearchCachedObjectsRequest{
+		Context: &kmgrv1.RequestContext{RequestId: "unknown-request", ClusterSessionId: "unknown"},
+		Query:   "api",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetRequestId() != "unknown-request" ||
+		response.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND ||
+		response.GetError().GetReason() != "ClusterSessionNotFound" {
+		t.Fatalf("structured session error = %#v", response)
+	}
+}
+
+func TestSearchCachedObjectsGRPCRejectsInvalidEnvelope(t *testing.T) {
+	t.Parallel()
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "authority", client: newSearchClient()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	service, err := NewGRPCService(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.SearchCachedObjects(context.Background(), &kmgrv1.SearchCachedObjectsRequest{
+		Context: &kmgrv1.RequestContext{RequestId: "request", ClusterSessionId: "session"},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("invalid envelope error = %v", err)
+	}
+}
+
+func cachedSearchRuntime(objects ...*unstructured.Unstructured) *resourceRuntime {
+	entry := &resourceRuntime{store: store.New()}
+	for _, object := range objects {
+		entry.store.Upsert(object)
+	}
+	return entry
 }
 
 func TestCachedSearchDoesNotWakeStoppedWatcher(t *testing.T) {

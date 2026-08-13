@@ -4,6 +4,10 @@ import KmgrCore
 import KmgrProto
 
 public protocol ObjectSearchRPC: Sendable {
+    func searchCached(
+        _ request: Kmgr_V1_SearchCachedObjectsRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_SearchCachedObjectsResponse
     func search(
         _ request: Kmgr_V1_SearchObjectsRequest,
         timeout: Duration,
@@ -19,6 +23,16 @@ public struct EngineObjectSearchRPC: ObjectSearchRPC {
     private let connection: EngineConnection
 
     public init(connection: EngineConnection) { self.connection = connection }
+
+    public func searchCached(
+        _ request: Kmgr_V1_SearchCachedObjectsRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_SearchCachedObjectsResponse {
+        var options = CallOptions.defaults
+        options.timeout = timeout
+        options.waitForReady = false
+        return try await connection.viewClient().searchCachedObjects(request, options: options)
+    }
 
     public func search(
         _ request: Kmgr_V1_SearchObjectsRequest,
@@ -117,6 +131,32 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
         }
     }
 
+    public func searchCachedObjects(
+        request: CachedObjectSearchRequest
+    ) async throws -> CachedObjectSearchResponse {
+        var value = Kmgr_V1_SearchCachedObjectsRequest()
+        value.context = context(request.sessionID, timeout: controlTimeout)
+        value.namespaceScope.allNamespaces = request.namespaceScope.allNamespaces
+        value.namespaceScope.namespaces = request.namespaceScope.namespaces
+        value.query = request.query
+        value.resultLimit = request.resultLimit
+        value.examinationLimit = request.examinationLimit
+        do {
+            let response = try await rpc.searchCached(value, timeout: controlTimeout)
+            guard response.requestID == value.context.requestID else {
+                throw ObjectSearchBridgeError.envelopeMismatch
+            }
+            if response.hasError { throw EngineClusterContextProvider.issue(from: response.error) }
+            return CachedObjectSearchResponse(
+                results: response.results.map(Self.result),
+                objectsExamined: response.objectsExamined,
+                examinationTruncated: response.examinationTruncated
+            )
+        } catch {
+            throw Self.issue(error)
+        }
+    }
+
     public func cancelSearch(
         sessionID: String,
         searchID: String,
@@ -163,23 +203,7 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
         return ObjectSearchMessage(
             cursor: StreamCursor(generation: value.cursor.generation, sequence: value.cursor.sequence),
             queryRevision: value.queryRevision,
-            results: value.results.map { item in
-                ObjectSearchResult(
-                    identity: ResourceIdentity(
-                        clusterSessionID: item.identity.clusterSessionID,
-                        group: item.identity.group,
-                        version: item.identity.version,
-                        resource: item.identity.resource,
-                        namespace: item.identity.namespace,
-                        name: item.identity.name,
-                        uid: ResourceUID(item.identity.uid)
-                    ),
-                    displayText: item.displayText,
-                    detailText: item.detailText,
-                    rank: item.rank,
-                    stale: item.stale
-                )
-            },
+            results: value.results.map(Self.result),
             progress: ObjectSearchProgress(
                 queryRevision: progress.queryRevision,
                 objectsExamined: progress.objectsExamined,
@@ -189,6 +213,24 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
             ),
             issue: value.hasError
                 ? EngineClusterContextProvider.issue(from: value.error) : nil
+        )
+    }
+
+    private static func result(_ item: Kmgr_V1_SearchResult) -> ObjectSearchResult {
+        ObjectSearchResult(
+            identity: ResourceIdentity(
+                clusterSessionID: item.identity.clusterSessionID,
+                group: item.identity.group,
+                version: item.identity.version,
+                resource: item.identity.resource,
+                namespace: item.identity.namespace,
+                name: item.identity.name,
+                uid: ResourceUID(item.identity.uid)
+            ),
+            displayText: item.displayText,
+            detailText: item.detailText,
+            rank: item.rank,
+            stale: item.stale
         )
     }
 

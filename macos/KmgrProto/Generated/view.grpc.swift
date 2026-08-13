@@ -46,6 +46,19 @@ public enum Kmgr_V1_ViewService: Sendable {
                 type: .unary
             )
         }
+        /// Namespace for "SearchCachedObjects" metadata.
+        public enum SearchCachedObjects: Sendable {
+            /// Request type for "SearchCachedObjects".
+            public typealias Input = Kmgr_V1_SearchCachedObjectsRequest
+            /// Response type for "SearchCachedObjects".
+            public typealias Output = Kmgr_V1_SearchCachedObjectsResponse
+            /// Descriptor for "SearchCachedObjects".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ViewService"),
+                method: "SearchCachedObjects",
+                type: .unary
+            )
+        }
         /// Namespace for "SearchObjects" metadata.
         public enum SearchObjects: Sendable {
             /// Request type for "SearchObjects".
@@ -76,6 +89,7 @@ public enum Kmgr_V1_ViewService: Sendable {
         public static let descriptors: [GRPCCore.MethodDescriptor] = [
             StreamView.descriptor,
             CancelView.descriptor,
+            SearchCachedObjects.descriptor,
             SearchObjects.descriptor,
             CancelSearch.descriptor
         ]
@@ -133,6 +147,25 @@ extension Kmgr_V1_ViewService {
             deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_Acknowledgement>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "SearchCachedObjects" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_SearchCachedObjectsRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_SearchCachedObjectsRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_SearchCachedObjectsResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func searchCachedObjects<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_SearchCachedObjectsRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_SearchCachedObjectsRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_SearchCachedObjectsResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_SearchCachedObjectsResponse>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "SearchObjects" method.
@@ -241,6 +274,36 @@ extension Kmgr_V1_ViewService {
             try await self.client.unary(
                 request: request,
                 descriptor: Kmgr_V1_ViewService.Method.CancelView.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "SearchCachedObjects" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_SearchCachedObjectsRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_SearchCachedObjectsRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_SearchCachedObjectsResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func searchCachedObjects<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_SearchCachedObjectsRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_SearchCachedObjectsRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_SearchCachedObjectsResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_SearchCachedObjectsResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Kmgr_V1_ViewService.Method.SearchCachedObjects.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -359,6 +422,31 @@ extension Kmgr_V1_ViewService.ClientProtocol {
         )
     }
 
+    /// Call the "SearchCachedObjects" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_SearchCachedObjectsRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func searchCachedObjects<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_SearchCachedObjectsRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_SearchCachedObjectsResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.searchCachedObjects(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_SearchCachedObjectsRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_SearchCachedObjectsResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "SearchObjects" method.
     ///
     /// - Parameters:
@@ -461,6 +549,35 @@ extension Kmgr_V1_ViewService.ClientProtocol {
             metadata: metadata
         )
         return try await self.cancelView(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "SearchCachedObjects" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func searchCachedObjects<Result>(
+        _ message: Kmgr_V1_SearchCachedObjectsRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_SearchCachedObjectsResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_SearchCachedObjectsRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.searchCachedObjects(
             request: request,
             options: options,
             onResponse: handleResponse
