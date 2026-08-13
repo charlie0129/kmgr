@@ -5,12 +5,36 @@ import KmgrCore
 final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate,
     NSTableViewDataSource, NSTableViewDelegate
 {
+    @MainActor
+    struct WindowDismissal {
+        let sheetParent: (NSWindow) -> NSWindow?
+        let endSheet: (NSWindow, NSWindow) -> Void
+        let close: (NSWindow) -> Void
+
+        static let appKit = Self(
+            sheetParent: { $0.sheetParent },
+            endSheet: { parent, sheet in
+                parent.endSheet(sheet, returnCode: .cancel)
+            },
+            close: { $0.close() }
+        )
+
+        func dismiss(_ window: NSWindow) {
+            if let parent = sheetParent(window) {
+                endSheet(parent, window)
+            } else {
+                close(window)
+            }
+        }
+    }
+
     private let resourceTitle: String
     private let match: ColumnResourceMatch
     private let defaultColumns: [ColumnDefinition]
     private let previewProvider: any ColumnPreviewProviding
     private let previewContext: ColumnPreviewContext
     private let fileStore: ColumnConfigurationFileStore
+    private let windowDismissal: WindowDismissal
     private var configurationDocument: ColumnsConfigurationDocument
     private var draft: ResourceColumnDraft
     private var lastAppliedColumns: [ColumnDefinition]
@@ -39,13 +63,15 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         defaultColumns: [ColumnDefinition],
         previewProvider: any ColumnPreviewProviding,
         previewContext: ColumnPreviewContext,
-        configurationPath: String = AppPreferences.defaultColumnsConfigurationPath
+        configurationPath: String = AppPreferences.defaultColumnsConfigurationPath,
+        windowDismissal: WindowDismissal = .appKit
     ) {
         self.resourceTitle = resourceTitle
         self.match = match
         self.defaultColumns = defaultColumns
         self.previewProvider = previewProvider
         self.previewContext = previewContext
+        self.windowDismissal = windowDismissal
         fileStore = ColumnConfigurationFileStore(path: configurationPath)
 
         var loadedDocument = ColumnsConfigurationDocument()
@@ -511,11 +537,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
 
     @objc private func closeWindow() {
         guard let window, approveDismissal() else { return }
-        if let parent = window.sheetParent {
-            parent.endSheet(window, returnCode: .cancel)
-        } else {
-            window.close()
-        }
+        windowDismissal.dismiss(window)
     }
 
     fileprivate static func resultTypeTitle(_ type: ColumnResultType) -> String {
@@ -527,7 +549,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
 }
 
 @MainActor
-private final class NativeColumnPickerWindowController: NSWindowController,
+final class NativeColumnPickerWindowController: NSWindowController,
     NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate
 {
     private let match: ColumnResourceMatch
@@ -741,6 +763,7 @@ private final class NativeColumnPickerWindowController: NSWindowController,
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
         contentStack.spacing = 10
+        contentStack.setCustomSpacing(14, after: exactSection ?? catalogHelp)
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         scrollView.setContentHuggingPriority(.init(1), for: .vertical)
         scrollView.setContentCompressionResistancePriority(.init(1), for: .vertical)
