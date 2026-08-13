@@ -11,13 +11,27 @@ struct LargeViewHarnessTests {
         let updateBatchCount = 8
         let diagnosticsEnabled =
             ProcessInfo.processInfo.environment["KMGR_PERF_DIAGNOSTICS"] == "1"
+        let budgetsEnabled =
+            ProcessInfo.processInfo.environment["KMGR_PERF_BUDGETS"] == "1"
+
+        // Opt-in Release diagnostics, intentionally disabled in the normal
+        // deterministic suite. These are generous enough for a busy modern
+        // Apple Silicon developer machine and catch order-of-magnitude model
+        // regressions without pretending to be UI frame-latency evidence.
+        let phaseBudgets: [String: TimeInterval] = [
+            "progressive 100,000-row snapshot": 15,
+            "4,000 row updates across 8 reorder batches": 5,
+            "identity and bounded-state verification": 2,
+        ]
 
         var phaseStartedAt = Date()
         var phaseTimings: [(String, TimeInterval)] = []
         func recordTiming(_ name: String) {
-            guard diagnosticsEnabled else { return }
             let now = Date()
-            phaseTimings.append((name, now.timeIntervalSince(phaseStartedAt)))
+            let elapsed = now.timeIntervalSince(phaseStartedAt)
+            if diagnosticsEnabled || budgetsEnabled {
+                phaseTimings.append((name, elapsed))
+            }
             phaseStartedAt = now
         }
 
@@ -121,9 +135,17 @@ struct LargeViewHarnessTests {
         #expect(model.rowByUID.values.allSatisfy { $0.cells.count == 2 })
         recordTiming("identity and bounded-state verification")
 
-        if diagnosticsEnabled {
+        if diagnosticsEnabled || budgetsEnabled {
             for (phase, elapsed) in phaseTimings {
-                print(String(format: "kmgr large-view diagnostic: %.3fs — %@", elapsed, phase))
+                let budget = phaseBudgets[phase]
+                let suffix = budget.map { String(format: " (budget %.3fs)", $0) } ?? ""
+                print(String(format: "kmgr large-view diagnostic: %.3fs — %@%@", elapsed, phase, suffix))
+                if budgetsEnabled, let budget {
+                    #expect(
+                        elapsed <= budget,
+                        "Release diagnostic phase '\(phase)' exceeded its opt-in \(budget)s budget."
+                    )
+                }
             }
         }
     }

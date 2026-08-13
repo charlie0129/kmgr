@@ -1,5 +1,6 @@
 import AppKit
 import KmgrCore
+import OSLog
 
 @MainActor
 final class LogWindowController: NSWindowController, NSWindowDelegate,
@@ -27,6 +28,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var latestStreamDrops: UInt64 = 0
     private var latestRenderOmissions = 0
     private var latestStreamState: LogStreamState = .connecting
+    private let logSignposter = OSSignposter(
+        subsystem: PerformanceSignpostCatalog.subsystem,
+        category: PerformanceSignpostCatalog.logsCategory
+    )
 
     private let textView = NSTextView()
     private let scrollView = NSScrollView()
@@ -243,7 +248,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         guard disposition == .acceptedNewGeneration || disposition == .acceptedNextSequence else { return }
         switch message {
         case .records(_, let records, _):
+            let interval = logSignposter.beginInterval(
+                PerformanceSignpostCatalog.logStoreAppend,
+                "incoming_records=\(records.count)"
+            )
             let statistics = await recordStore.append(contentsOf: records)
+            logSignposter.endInterval(
+                PerformanceSignpostCatalog.logStoreAppend,
+                interval,
+                "stored_records=\(statistics.recordCount) stored_bytes=\(statistics.byteCount) dropped_records=\(statistics.droppedRecords) cancelled=\(Task.isCancelled)"
+            )
             guard !Task.isCancelled else { return }
             latestStoreDrops = statistics.droppedRecords
             updateStatusLabel()
@@ -315,14 +329,33 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let labels = sourceLabels
         let byteLimit = maximumRenderedUTF8Bytes
         let rendered: RenderedLogText
-        let renderer = Task.detached(priority: .userInitiated) {
-            try LogTextRenderer.render(
-                records: records,
-                sourceLabels: labels,
-                showSourceLabels: showLabels,
-                filter: filter,
-                maximumOutputUTF8Bytes: byteLimit
+        let renderer = Task.detached(priority: .userInitiated) { [logSignposter] in
+            let interval = logSignposter.beginInterval(
+                PerformanceSignpostCatalog.logTextFormat,
+                "input_records=\(records.count) output_byte_limit=\(byteLimit) shows_labels=\(showLabels) has_filter=\(!filter.isEmpty)"
             )
+            do {
+                let result = try LogTextRenderer.render(
+                    records: records,
+                    sourceLabels: labels,
+                    showSourceLabels: showLabels,
+                    filter: filter,
+                    maximumOutputUTF8Bytes: byteLimit
+                )
+                logSignposter.endInterval(
+                    PerformanceSignpostCatalog.logTextFormat,
+                    interval,
+                    "rendered_records=\(result.renderedRecords) omitted_records=\(result.omittedRecords) output_bytes=\(result.outputUTF8Bytes)"
+                )
+                return result
+            } catch {
+                logSignposter.endInterval(
+                    PerformanceSignpostCatalog.logTextFormat,
+                    interval,
+                    "outcome=cancelled"
+                )
+                throw error
+            }
         }
         do {
             rendered = try await withTaskCancellationHandler {
@@ -337,6 +370,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             needsRenderWhenVisible = true
             return
         }
+        let installInterval = logSignposter.beginInterval(
+            PerformanceSignpostCatalog.logTextInstall,
+            "output_bytes=\(rendered.outputUTF8Bytes) rendered_records=\(rendered.renderedRecords)"
+        )
         textView.string = rendered.text
         latestRenderOmissions = rendered.omittedRecords
         updateStatusLabel()
@@ -349,6 +386,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
         if wasAtTail { textView.scrollToEndOfDocument(nil) }
         needsRenderWhenVisible = false
+        logSignposter.endInterval(
+            PerformanceSignpostCatalog.logTextInstall,
+            installInterval
+        )
     }
 
     private var isAtTail: Bool {

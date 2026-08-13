@@ -1,7 +1,9 @@
 import Foundation
 import GRPCCore
+import GRPCProtobuf
 import KmgrCore
 import KmgrProto
+import OSLog
 
 /// Narrow RPC seam used to test protobuf mapping without launching the helper.
 public protocol WorkspaceRPC: Sendable {
@@ -34,6 +36,10 @@ public protocol WorkspaceRPC: Sendable {
 
 public struct EngineWorkspaceRPC: WorkspaceRPC {
     private let connection: EngineConnection
+    private let streamSignposter = OSSignposter(
+        subsystem: PerformanceSignpostCatalog.subsystem,
+        category: PerformanceSignpostCatalog.workspaceStreamCategory
+    )
 
     public init(connection: EngineConnection) {
         self.connection = connection
@@ -64,8 +70,12 @@ public struct EngineWorkspaceRPC: WorkspaceRPC {
         timeout: Duration,
         receive: @escaping @Sendable (Kmgr_V1_ViewEvent) throws -> Void
     ) async throws {
-        try await connection.viewClient().streamView(
-            request,
+        let client = try connection.viewClient()
+        let clientRequest = ClientRequest(message: request)
+        try await client.streamView(
+            request: clientRequest,
+            serializer: ProtobufSerializer<Kmgr_V1_OpenViewRequest>(),
+            deserializer: SignpostedViewEventDeserializer(signposter: streamSignposter),
             options: callOptions(timeout: timeout)
         ) { response in
             for try await event in response.messages {
@@ -99,6 +109,36 @@ public struct EngineWorkspaceRPC: WorkspaceRPC {
         options.timeout = timeout
         options.waitForReady = false
         return options
+    }
+}
+
+private struct SignpostedViewEventDeserializer: MessageDeserializer {
+    let signposter: OSSignposter
+
+    func deserialize<Bytes: GRPCContiguousBytes>(
+        _ serializedMessageBytes: Bytes
+    ) throws -> Kmgr_V1_ViewEvent {
+        let interval = signposter.beginInterval(
+            PerformanceSignpostCatalog.viewEventDecode,
+            "protobuf_bytes=\(serializedMessageBytes.count)"
+        )
+        do {
+            let event = try ProtobufDeserializer<Kmgr_V1_ViewEvent>()
+                .deserialize(serializedMessageBytes)
+            signposter.endInterval(
+                PerformanceSignpostCatalog.viewEventDecode,
+                interval,
+                "generation=\(event.cursor.generation) sequence=\(event.cursor.sequence)"
+            )
+            return event
+        } catch {
+            signposter.endInterval(
+                PerformanceSignpostCatalog.viewEventDecode,
+                interval,
+                "outcome=failed"
+            )
+            throw error
+        }
     }
 }
 

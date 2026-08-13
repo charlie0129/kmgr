@@ -196,6 +196,53 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(close?.keepIndependentStreams == true)
     }
 
+    @Test("workspace stream fails safely instead of growing past its buffer")
+    func boundsWorkspaceStreamBuffer() async throws {
+        let eventCount = 20
+        let bufferLimit = 4
+        let rpc = FakeWorkspaceRPC(
+            streamEvents: (1...eventCount).map { sequence in
+                var event = Kmgr_V1_ViewEvent()
+                event.cursor = Self.cursor(sequence: UInt64(sequence))
+                event.status.freshness = .watching
+                return event
+            }
+        )
+        let provider = EngineWorkspaceResourceProvider(
+            rpc: rpc,
+            maximumBufferedMessages: bufferLimit
+        )
+        let request = ResourceViewRequest(
+            sessionID: "session-one",
+            viewID: "view-pods",
+            generation: 7,
+            resource: DiscoveredResource(
+                group: "", version: "v1", resource: "pods",
+                kind: "Pod", namespaced: true
+            ),
+            allNamespaces: true,
+            namespaces: []
+        )
+
+        let stream = provider.streamView(request: request)
+        // The fake producer completes synchronously on its detached bridge
+        // before this consumer starts draining, deterministically exercising
+        // the bufferingOldest overflow path.
+        try await Task.sleep(for: .milliseconds(50))
+
+        var delivered = 0
+        do {
+            for try await _ in stream { delivered += 1 }
+            Issue.record("Expected the bounded workspace stream to fail on overflow")
+        } catch let issue as ClusterManagerIssue {
+            #expect(issue.category == .resourceExhausted)
+            #expect(issue.reason == "WorkspaceStreamBufferExceeded")
+            #expect(issue.retryable)
+            #expect(issue.safeDetails["buffered_message_limit"] == String(bufferLimit))
+        }
+        #expect(delivered <= bufferLimit)
+    }
+
     @Test("workspace response mismatches and structured discovery errors stay useful")
     func mapsDiscoveryFailures() async {
         var structured = Kmgr_V1_StructuredError()

@@ -1357,6 +1357,12 @@ private final class ResourceListViewController: NSViewController,
     private var suppressPresentationCheckpoint = false
     private var recoveredResourceTrust = RecoveredResourceTrust()
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
+    private let tableSignposter = OSSignposter(
+        subsystem: PerformanceSignpostCatalog.subsystem,
+        category: PerformanceSignpostCatalog.resourceTableCategory
+    )
+    private var projectionRequestInterval: OSSignpostIntervalState?
+    private var projectionRequestGeneration: UInt64?
     var onShowCommandPalette: (() -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
@@ -1501,6 +1507,7 @@ private final class ResourceListViewController: NSViewController,
     /// A new helper generation receives a fresh session and opens a new view;
     /// the stale session is never reused for mutations.
     func engineDidDisconnect() {
+        endProjectionRequest(outcome: "engine-disconnected")
         filterTask?.cancel()
         filterTask = nil
         streamTask?.cancel()
@@ -1523,6 +1530,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func suspend() {
+        endProjectionRequest(outcome: "cancelled")
         filterTask?.cancel()
         filterTask = nil
         streamTask?.cancel()
@@ -1702,6 +1710,7 @@ private final class ResourceListViewController: NSViewController,
 
     private func openStream() {
         guard let resource else { return }
+        endProjectionRequest(outcome: "superseded")
         let previousGeneration = generation
         streamTask?.cancel()
         if previousGeneration > 0 {
@@ -1710,6 +1719,7 @@ private final class ResourceListViewController: NSViewController,
             }
         }
         generation &+= 1
+        beginProjectionRequest()
         generationGate.reset()
         let canKeepWarmRows = lastStreamResourceID == resource.id
             && lastStreamScope == scope
@@ -1751,6 +1761,7 @@ private final class ResourceListViewController: NSViewController,
                 }
             } catch {
                 guard !Task.isCancelled else { return }
+                self?.endProjectionRequest(outcome: "failed")
                 self?.show(error: error)
             }
         }
@@ -1767,6 +1778,11 @@ private final class ResourceListViewController: NSViewController,
             freshnessLabel.stringValue = status.presentation
             countLabel.stringValue = "\(status.rowsVisible.formatted()) objects"
         case .snapshot(_, let chunk):
+            let metadata = message.resourceBatchSignpostMetadata!
+            let interval = tableSignposter.beginInterval(
+                PerformanceSignpostCatalog.resourceModelApply,
+                "kind=\(metadata.kind.rawValue, privacy: .public) generation=\(metadata.generation) sequence=\(metadata.sequence) upserts=\(metadata.upsertCount) removals=\(metadata.removalCount) order_count=\(metadata.orderCount) replaces_order=\(metadata.replacesOrder)"
+            )
             var capture = captureUpdate()
             if chunk.first {
                 snapshotUIDs.removeAll(keepingCapacity: true)
@@ -1799,8 +1815,19 @@ private final class ResourceListViewController: NSViewController,
                 capture: capture
             )
             plan = restoringPendingSelection(in: plan, chunkIsComplete: chunk.last)
+            tableSignposter.endInterval(
+                PerformanceSignpostCatalog.resourceModelApply,
+                interval,
+                "visible_rows=\(self.model.orderedVisibleUIDs.count) stored_rows=\(self.model.rowByUID.count) selected_rows=\(plan.selectedRowIndexes.count)"
+            )
             applyTablePlan(plan)
+            if chunk.last { endProjectionRequest(outcome: "snapshot-complete") }
         case .delta(_, let delta):
+            let metadata = message.resourceBatchSignpostMetadata!
+            let interval = tableSignposter.beginInterval(
+                PerformanceSignpostCatalog.resourceModelApply,
+                "kind=\(metadata.kind.rawValue, privacy: .public) generation=\(metadata.generation) sequence=\(metadata.sequence) upserts=\(metadata.upsertCount) removals=\(metadata.removalCount) order_count=\(metadata.orderCount) replaces_order=\(metadata.replacesOrder)"
+            )
             let capture = captureUpdate()
             let order: VisibleOrderUpdate = delta.orderIsComplete
                 ? .replace(delta.orderedUIDs)
@@ -1811,12 +1838,18 @@ private final class ResourceListViewController: NSViewController,
                 visibleOrder: order
             ), capture: capture)
             plan = restoringPendingSelection(in: plan, chunkIsComplete: false)
+            tableSignposter.endInterval(
+                PerformanceSignpostCatalog.resourceModelApply,
+                interval,
+                "visible_rows=\(self.model.orderedVisibleUIDs.count) stored_rows=\(self.model.rowByUID.count) selected_rows=\(plan.selectedRowIndexes.count)"
+            )
             applyTablePlan(plan)
             recoveredResourceTrust.receiveDelta(
                 upsertedUIDs: delta.upserts.map { $0.identity.uid },
                 removedUIDs: delta.removedUIDs
             )
         case .failure(_, let issue):
+            endProjectionRequest(outcome: "failed")
             show(error: issue)
         }
         updateStatusLine()
@@ -1848,6 +1881,10 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func applyTablePlan(_ plan: ResourceTableUpdatePlan) {
+        let interval = tableSignposter.beginInterval(
+            PerformanceSignpostCatalog.resourceTableReload,
+            "visible_rows=\(self.model.orderedVisibleUIDs.count) selected_rows=\(plan.selectedRowIndexes.count) restores_scroll=\(plan.scrollRestoration != nil)"
+        )
         suppressSelectionCallbacks = true
         tableView.reloadData()
         tableView.selectRowIndexes(IndexSet(plan.selectedRowIndexes), byExtendingSelection: false)
@@ -1860,6 +1897,30 @@ private final class ResourceListViewController: NSViewController,
             tableView.scroll(NSPoint(x: tableView.visibleRect.minX, y: targetY))
             scrollView.reflectScrolledClipView(scrollView.contentView)
         }
+        tableSignposter.endInterval(
+            PerformanceSignpostCatalog.resourceTableReload,
+            interval
+        )
+    }
+
+    private func beginProjectionRequest() {
+        guard tableSignposter.isEnabled else { return }
+        projectionRequestGeneration = generation
+        projectionRequestInterval = tableSignposter.beginInterval(
+            PerformanceSignpostCatalog.resourceProjectionRequest,
+            "generation=\(self.generation) filter_revision=\(self.filterRevision) sort_count=\(self.tableView.sortDescriptors.count) column_count=\(self.columnIDs.count)"
+        )
+    }
+
+    private func endProjectionRequest(outcome: String) {
+        guard let interval = projectionRequestInterval else { return }
+        tableSignposter.endInterval(
+            PerformanceSignpostCatalog.resourceProjectionRequest,
+            interval,
+            "generation=\(self.projectionRequestGeneration ?? 0) outcome=\(outcome, privacy: .public) visible_rows=\(self.model.orderedVisibleUIDs.count)"
+        )
+        projectionRequestInterval = nil
+        projectionRequestGeneration = nil
     }
 
     private func show(error: Error) {
