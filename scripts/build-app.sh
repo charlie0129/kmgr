@@ -47,4 +47,10 @@ cp "$swift_bin_dir/Kmgr" "$macos_dir/Kmgr"
 cp "$repo_root/macos/Kmgr/Resources/Info.plist" "$contents_dir/Info.plist"
 chmod 0755 "$macos_dir/Kmgr" "$helpers_dir/kmgr-engine"
 
+# Copying SwiftPM's linker-signed executable into a bundle invalidates its
+# original ad-hoc seal. Sign nested code first, then seal the finished bundle.
+# A distribution pipeline can replace both signatures with Developer ID.
+codesign --force --sign - "$helpers_dir/kmgr-engine"
+codesign --force --sign - "$app_dir"
+
 print "$app_dir"
