@@ -91,6 +91,7 @@ type backendKey struct {
 
 type sharedBackend struct {
 	clients BackendClients
+	config  *rest.Config
 	refs    int
 }
 
@@ -158,7 +159,7 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 		if err != nil {
 			return nil, fmt.Errorf("open context %q: %w", contextInfo.Name, err)
 		}
-		backend = &sharedBackend{clients: clients}
+		backend = &sharedBackend{clients: clients, config: rest.CopyConfig(config)}
 		r.backends[key] = backend
 	}
 
@@ -234,6 +235,16 @@ func (s *Session) Dynamic() dynamic.Interface              { return s.backend.cl
 func (s *Session) Discovery() discovery.DiscoveryInterface { return s.backend.clients.Discovery }
 func (s *Session) Core() coreclient.CoreV1Interface        { return s.backend.clients.Core }
 func (s *Session) Mapper() meta.RESTMapper                 { return s.backend.clients.Mapper }
+
+// RESTConfig returns an independent copy for subresource transports such as
+// exec and port-forward. Callers must never log it because it may contain
+// authentication material.
+func (s *Session) RESTConfig() *rest.Config {
+	if s == nil || s.backend == nil || s.backend.config == nil {
+		return nil
+	}
+	return rest.CopyConfig(s.backend.config)
+}
 
 func newSessionID() (string, error) {
 	var random [16]byte
