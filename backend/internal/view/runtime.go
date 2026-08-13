@@ -81,6 +81,20 @@ func (s ClusterResourceSource) OpenResource(
 	return authorityID, resourceClient, nil
 }
 
+// AuthorityID exposes the shared backend identity without leaking clients or
+// credentials. It is stable for the lifetime of an open shared backend and is
+// identical across independent workspace sessions using it.
+func (s ClusterResourceSource) AuthorityID(sessionID string) (string, bool) {
+	if s.Sessions == nil {
+		return "", false
+	}
+	session, ok := s.Sessions.Get(sessionID)
+	if !ok {
+		return "", false
+	}
+	return session.Context().ID + "/" + pointerIdentity(session.Dynamic()), true
+}
+
 func pointerIdentity(value any) string {
 	ref := reflect.ValueOf(value)
 	switch ref.Kind() {
