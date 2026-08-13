@@ -124,6 +124,10 @@ type SourceOpener interface {
 type ResolvedSession struct {
 	ContextName string
 	Opener      SourceOpener
+	// Release relinquishes the cluster-session lease acquired by Resolve.
+	// Managers call it exactly once after the operation terminates or if Start
+	// rejects the resolved operation before it becomes active.
+	Release func()
 }
 
 type Resolver interface {

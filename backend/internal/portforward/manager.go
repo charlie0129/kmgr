@@ -21,13 +21,13 @@ type Config struct {
 }
 
 type entry struct {
-	mu       sync.RWMutex
-	request  StartRequest
-	session  Session
-	snapshot Snapshot
-	cancel   context.CancelFunc
-	runDone  chan struct{}
-	revision uint64
+	mu         sync.RWMutex
+	request    StartRequest
+	snapshot   Snapshot
+	cancel     context.CancelFunc
+	runDone    chan struct{}
+	revision   uint64
+	restarting bool
 }
 
 func (e *entry) Snapshot() Snapshot {
@@ -78,13 +78,19 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	releaseSession := true
+	defer func() {
+		if releaseSession && session.Release != nil {
+			session.Release()
+		}
+	}()
 	if session.Resolver == nil || session.Forwarder == nil {
 		return Snapshot{}, errors.New("port-forward session is incomplete")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	now := m.config.Now()
 	current := &entry{
-		request: request, session: session, cancel: cancel, runDone: make(chan struct{}), revision: 1,
+		request: request, cancel: cancel, runDone: make(chan struct{}), revision: 1,
 		snapshot: Snapshot{
 			ID: request.ID, ContextName: session.ContextName, Target: request.Target,
 			RemotePort: request.RemotePort, LocalPort: request.LocalPort, BindAddress: request.BindAddress,
@@ -106,7 +112,8 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 	m.entries[request.ID] = current
 	m.mu.Unlock()
 	m.publish(current.Snapshot())
-	go m.run(ctx, current, current.revision)
+	go m.run(ctx, current, current.revision, session)
+	releaseSession = false
 	return current.Snapshot(), nil
 }
 
@@ -115,7 +122,10 @@ func (m *Manager) Stop(id, sessionID string) bool {
 	if current == nil {
 		return false
 	}
-	current.cancel()
+	current.mu.RLock()
+	cancel := current.cancel
+	current.mu.RUnlock()
+	cancel()
 	return true
 }
 
@@ -125,21 +135,53 @@ func (m *Manager) Restart(id, sessionID string) bool {
 		return false
 	}
 	current.mu.Lock()
-	if current.snapshot.State != StateFailed && current.snapshot.State != StateStopped {
+	if current.restarting || (current.snapshot.State != StateFailed && current.snapshot.State != StateStopped) {
 		current.mu.Unlock()
 		return false
 	}
+	current.restarting = true
+	revision := current.revision
+	current.mu.Unlock()
+
+	session, err := m.config.Sessions.ResolveSession(current.request.Target.SessionID)
+	if err != nil || session.Resolver == nil || session.Forwarder == nil {
+		if err == nil && session.Release != nil {
+			session.Release()
+		}
+		current.mu.Lock()
+		if current.revision == revision {
+			current.restarting = false
+		}
+		current.mu.Unlock()
+		return false
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
+	m.mu.Lock()
+	current.mu.Lock()
+	if m.closed || m.entries[id] != current || current.revision != revision || !current.restarting ||
+		(current.snapshot.State != StateFailed && current.snapshot.State != StateStopped) {
+		current.restarting = false
+		current.mu.Unlock()
+		m.mu.Unlock()
+		cancel()
+		if session.Release != nil {
+			session.Release()
+		}
+		return false
+	}
 	current.cancel = cancel
 	current.runDone = make(chan struct{})
 	current.revision++
-	revision := current.revision
+	revision = current.revision
+	current.restarting = false
 	current.snapshot.State = StateStarting
 	current.snapshot.LastError = nil
 	current.snapshot.UpdatedAt = m.config.Now()
 	current.mu.Unlock()
+	m.mu.Unlock()
 	m.publish(current.Snapshot())
-	go m.run(ctx, current, revision)
+	go m.run(ctx, current, revision, session)
 	return true
 }
 
@@ -200,21 +242,32 @@ func (m *Manager) Close() {
 	clear(m.watchers)
 	m.mu.Unlock()
 	for _, value := range entries {
-		value.cancel()
+		value.mu.RLock()
+		cancel := value.cancel
+		value.mu.RUnlock()
+		cancel()
 	}
 	for _, value := range entries {
-		<-value.runDone
+		value.mu.RLock()
+		done := value.runDone
+		value.mu.RUnlock()
+		<-done
 	}
 }
 
-func (m *Manager) run(ctx context.Context, current *entry, revision uint64) {
+func (m *Manager) run(ctx context.Context, current *entry, revision uint64, session Session) {
 	current.mu.RLock()
 	done := current.runDone
 	current.mu.RUnlock()
-	defer close(done)
+	defer func() {
+		if session.Release != nil {
+			session.Release()
+		}
+		close(done)
+	}()
 	request := current.request
 	for attempt := 0; ; attempt++ {
-		resolved, err := current.session.Resolver.Resolve(ctx, request.Target, request.RemotePort)
+		resolved, err := session.Resolver.Resolve(ctx, request.Target, request.RemotePort)
 		pod := resolved.Pod
 		if err == nil && request.Target.IsPod() && pod.UID != request.Target.UID {
 			err = ErrPodRecreated
@@ -237,7 +290,7 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64) {
 			}
 			continue
 		}
-		running, err := current.session.Forwarder.Start(ctx, ForwardRequest{
+		running, err := session.Forwarder.Start(ctx, ForwardRequest{
 			Pod: pod, RemotePort: resolved.RemotePort, LocalPort: current.Snapshot().LocalPort,
 			BindAddress: request.BindAddress,
 		})

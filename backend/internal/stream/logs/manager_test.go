@@ -291,6 +291,76 @@ func TestStaleGenerationCannotStartOrCancelReplacement(t *testing.T) {
 	}
 }
 
+func TestManagerReleasesResolvedSessionOnFailureAndTermination(t *testing.T) {
+	t.Parallel()
+	reader := newBlockingReadCloser()
+	var mu sync.Mutex
+	acquired := 0
+	released := 0
+	resolver := ResolverFunc(func(string) (ResolvedSession, error) {
+		mu.Lock()
+		acquired++
+		mu.Unlock()
+		return ResolvedSession{
+			ContextName: "local",
+			Opener: openerFunc(func(context.Context, Source, corev1.PodLogOptions) (io.ReadCloser, error) {
+				return reader, nil
+			}),
+			Release: func() {
+				mu.Lock()
+				released++
+				mu.Unlock()
+			},
+		}, nil
+	})
+	manager, err := NewManager(Config{Resolver: resolver, MaxStreams: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "active", Generation: 1, Sources: []Source{testSource("a")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return acquired == 1
+	}, "first session acquisition")
+	if _, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "full", Generation: 1, Sources: []Source{testSource("b")},
+	}); !errors.Is(err, ErrTooManyStreams) {
+		t.Fatalf("capacity Start error = %v", err)
+	}
+	if _, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "active", Generation: 1, Sources: []Source{testSource("c")},
+	}); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("stale Start error = %v", err)
+	}
+	mu.Lock()
+	if acquired != 3 || released != 2 {
+		t.Fatalf("before termination acquired/released = %d/%d, want 3/2", acquired, released)
+	}
+	mu.Unlock()
+	manager.Close()
+	if status := waitForTerminal(t, first); status.State != StateCancelled {
+		t.Fatalf("terminal status = %#v", status)
+	}
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return released == 3
+	}, "active session lease release")
+	first.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if released != 3 {
+		t.Fatalf("subscription close released lease again: %d", released)
+	}
+}
+
 type blockingReadCloser struct {
 	once   sync.Once
 	closed chan struct{}

@@ -27,12 +27,13 @@ func (r ClusterResolver) Resolve(sessionID string) (ResolvedSession, error) {
 	if r.Sessions == nil {
 		return ResolvedSession{}, ErrSessionNotFound
 	}
-	session, ok := r.Sessions.Get(sessionID)
+	session, lease, ok := r.Sessions.Acquire(sessionID)
 	if !ok {
 		return ResolvedSession{}, ErrSessionNotFound
 	}
 	config := session.RESTConfig()
 	if session.Core() == nil || config == nil {
+		lease.Release()
 		return ResolvedSession{}, ErrExecutorUnavailable
 	}
 	return ResolvedSession{
@@ -40,6 +41,7 @@ func (r ClusterResolver) Resolve(sessionID string) (ResolvedSession, error) {
 		Runner: ClientGoRunner{
 			Core: session.Core(), Config: config, ExecutorFactory: r.ExecutorFactory,
 		},
+		Release: lease.Release,
 	}, nil
 }
 

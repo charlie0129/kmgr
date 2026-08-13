@@ -102,6 +102,7 @@ type Runner interface {
 type ResolvedSession struct {
 	ContextName string
 	Runner      Runner
+	Release     func()
 }
 
 type Resolver interface {

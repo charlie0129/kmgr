@@ -24,16 +24,18 @@ func (r ClusterResolver) Resolve(sessionID string) (ResolvedSession, error) {
 	if r.Sessions == nil {
 		return ResolvedSession{}, ErrSessionNotFound
 	}
-	session, ok := r.Sessions.Get(sessionID)
+	session, lease, ok := r.Sessions.Acquire(sessionID)
 	if !ok {
 		return ResolvedSession{}, ErrSessionNotFound
 	}
 	if session.Core() == nil {
+		lease.Release()
 		return ResolvedSession{}, ErrLogClientUnavailable
 	}
 	return ResolvedSession{
 		ContextName: session.Context().Name,
 		Opener:      ClientGoSource{Core: session.Core()},
+		Release:     lease.Release,
 	}, nil
 }
 

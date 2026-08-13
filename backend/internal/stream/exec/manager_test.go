@@ -270,6 +270,67 @@ func TestCancellationAndStaleGenerationIsolation(t *testing.T) {
 	}
 }
 
+func TestManagerReleasesResolvedSessionOnFailureAndTermination(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	acquired := 0
+	released := 0
+	runner := runnerFunc(func(ctx context.Context, _ StartRequest, options RunOptions) error {
+		if options.Started != nil {
+			options.Started()
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	resolver := ResolverFunc(func(string) (ResolvedSession, error) {
+		mu.Lock()
+		acquired++
+		mu.Unlock()
+		return ResolvedSession{ContextName: "local", Runner: runner, Release: func() {
+			mu.Lock()
+			released++
+			mu.Unlock()
+		}}, nil
+	})
+	manager, err := NewManager(Config{Resolver: resolver, MaxSessions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Start(context.Background(), testStart(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := manager.Start(context.Background(), testStart(1)); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("stale Start error = %v", err)
+	}
+	full := testStart(1)
+	full.ExecSessionID = "another"
+	if _, err := manager.Start(context.Background(), full); !errors.Is(err, ErrTooManySessions) {
+		t.Fatalf("capacity Start error = %v", err)
+	}
+	mu.Lock()
+	if acquired != 3 || released != 2 {
+		t.Fatalf("before termination acquired/released = %d/%d, want 3/2", acquired, released)
+	}
+	mu.Unlock()
+	manager.Close()
+	if terminal := lastTerminal(t, first); terminal.State != StateCancelled {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return released == 3
+	}, "active session lease release")
+	first.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if released != 3 {
+		t.Fatalf("session close released lease again: %d", released)
+	}
+}
+
 func TestExitCodeIsPreserved(t *testing.T) {
 	t.Parallel()
 	runner := runnerFunc(func(_ context.Context, _ StartRequest, options RunOptions) error {

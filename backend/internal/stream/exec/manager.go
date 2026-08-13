@@ -54,6 +54,8 @@ type operation struct {
 	input              *inputPipe
 	resizes            *resizeQueue
 	output             *outputQueue
+	releaseSession     func()
+	releaseSessionOnce sync.Once
 	producerDone       bool
 	subscriptionClosed bool
 }
@@ -123,6 +125,12 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Session, er
 	if err != nil {
 		return nil, err
 	}
+	releaseResolved := true
+	defer func() {
+		if releaseResolved && resolved.Release != nil {
+			resolved.Release()
+		}
+	}()
 	if resolved.Runner == nil {
 		return nil, ErrExecutorUnavailable
 	}
@@ -136,8 +144,9 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Session, er
 	op := &operation{
 		key: key, generation: request.Generation, contextName: resolved.ContextName,
 		pod: request.Pod, tty: request.TTY, cancel: cancel, input: input,
-		resizes: newResizeQueue(request.InitialSize),
-		output:  newOutputQueue(m.config.OutputItems, m.config.OutputBytes, m.config.OutputChunkBytes),
+		releaseSession: resolved.Release,
+		resizes:        newResizeQueue(request.InitialSize),
+		output:         newOutputQueue(m.config.OutputItems, m.config.OutputBytes, m.config.OutputChunkBytes),
 	}
 
 	m.mu.Lock()
@@ -169,10 +178,12 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Session, er
 
 	op.output.setStatus(Status{State: StateConnecting})
 	go m.run(execContext, op, resolved.Runner, request)
+	releaseResolved = false
 	return &Session{manager: m, operation: op}, nil
 }
 
 func (m *Manager) run(ctx context.Context, op *operation, runner Runner, request StartRequest) {
+	defer op.releaseLease()
 	stopInput := op.input.CloseOnContext(ctx)
 	defer func() {
 		stopInput()
@@ -196,6 +207,16 @@ func (m *Manager) run(ctx context.Context, op *operation, runner Runner, request
 	status := terminalStatus(ctx, err)
 	op.output.finish(status)
 	m.detach(op)
+}
+
+func (op *operation) releaseLease() {
+	if op != nil {
+		op.releaseSessionOnce.Do(func() {
+			if op.releaseSession != nil {
+				op.releaseSession()
+			}
+		})
+	}
 }
 
 func terminalStatus(ctx context.Context, err error) Status {

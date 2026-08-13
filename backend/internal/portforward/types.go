@@ -112,6 +112,7 @@ type Session struct {
 	ContextName string
 	Resolver    TargetResolver
 	Forwarder   Forwarder
+	Release     func()
 }
 
 type SessionResolver interface {

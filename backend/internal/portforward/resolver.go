@@ -23,11 +23,12 @@ func (r ClusterSessions) ResolveSession(sessionID string) (Session, error) {
 	if r.Sessions == nil {
 		return Session{}, ErrSessionNotFound
 	}
-	session, found := r.Sessions.Get(sessionID)
+	session, lease, found := r.Sessions.Acquire(sessionID)
 	if !found {
 		return Session{}, ErrSessionNotFound
 	}
 	if session.Core() == nil || session.Core().RESTClient() == nil || session.RESTConfig() == nil {
+		lease.Release()
 		return Session{}, errors.New("Kubernetes port-forward client is unavailable")
 	}
 	resolver := ClientGoTargetResolver{Core: session.Core()}
@@ -37,6 +38,7 @@ func (r ClusterSessions) ResolveSession(sessionID string) (Session, error) {
 		Forwarder: ClientGoForwarder{
 			Config: session.RESTConfig(), RESTClient: session.Core().RESTClient(),
 		},
+		Release: lease.Release,
 	}, nil
 }
 

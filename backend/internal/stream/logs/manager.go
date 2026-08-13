@@ -47,6 +47,8 @@ type operation struct {
 	contextName        string
 	cancel             context.CancelFunc
 	queue              *recordQueue
+	releaseSession     func()
+	releaseSessionOnce sync.Once
 	producerDone       bool
 	subscriptionClosed bool
 }
@@ -113,6 +115,12 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Subscriptio
 	if err != nil {
 		return nil, err
 	}
+	releaseResolved := true
+	defer func() {
+		if releaseResolved && resolved.Release != nil {
+			resolved.Release()
+		}
+	}()
 	if resolved.Opener == nil {
 		return nil, ErrLogClientUnavailable
 	}
@@ -121,6 +129,7 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Subscriptio
 	streamContext, cancel := context.WithCancel(ctx)
 	op := &operation{
 		key: key, generation: request.Generation, contextName: resolved.ContextName, cancel: cancel,
+		releaseSession: resolved.Release,
 		queue: newRecordQueue(queueConfig{
 			maxRecords: m.config.QueueRecords, maxBytes: m.config.QueueBytes,
 			maxRecordBytes: m.config.MaxRecordBytes,
@@ -157,10 +166,12 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Subscriptio
 
 	op.queue.setStatus(Status{State: StateConnecting})
 	go m.run(streamContext, op, resolved.Opener, request)
+	releaseResolved = false
 	return &Subscription{manager: m, operation: op}, nil
 }
 
 func (m *Manager) run(ctx context.Context, op *operation, opener SourceOpener, request StartRequest) {
+	defer op.releaseLease()
 	var wait sync.WaitGroup
 	var failures atomic.Int32
 	wait.Add(len(request.Sources))
@@ -185,6 +196,16 @@ func (m *Manager) run(ctx context.Context, op *operation, opener SourceOpener, r
 	}
 	op.queue.finish(status, discard)
 	m.detach(op)
+}
+
+func (op *operation) releaseLease() {
+	if op != nil {
+		op.releaseSessionOnce.Do(func() {
+			if op.releaseSession != nil {
+				op.releaseSession()
+			}
+		})
+	}
 }
 
 // runSource returns true only for a source failure, not normal cancellation.

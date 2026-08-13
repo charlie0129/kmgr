@@ -144,6 +144,106 @@ func TestSessionRegistryRateLimitCanOnlyChangeWhileIdle(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCloseKeepsSessionUntilIndependentLeasesRelease(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog(t, "https://cluster.example.test")
+	factory := &recordingFactory{}
+	registry := NewSessionRegistry(factory)
+	t.Cleanup(registry.CloseAll)
+	session, err := registry.Open(catalog, "local")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_, first, ok := registry.Acquire(session.ID())
+	if !ok {
+		t.Fatal("Acquire first lease failed")
+	}
+	_, second, ok := registry.Acquire(session.ID())
+	if !ok {
+		t.Fatal("Acquire second lease failed")
+	}
+	if !registry.CloseWorkspace(session.ID()) {
+		t.Fatal("CloseWorkspace rejected open workspace")
+	}
+	if _, ok := registry.Get(session.ID()); ok {
+		t.Fatal("closed workspace remained available through Get")
+	}
+	if _, lease, ok := registry.Acquire(session.ID()); ok || lease != nil {
+		t.Fatal("closed workspace accepted a new independent lease")
+	}
+	if factory.closes != 0 {
+		t.Fatalf("backend close count = %d before final release", factory.closes)
+	}
+	if registry.CloseWorkspace(session.ID()) {
+		t.Fatal("workspace lease was released twice")
+	}
+	first.Release()
+	first.Release()
+	if _, ok := registry.Get(session.ID()); ok || factory.closes != 0 {
+		t.Fatal("first idempotent release closed a multiply leased session")
+	}
+	second.Release()
+	if _, ok := registry.Get(session.ID()); ok {
+		t.Fatal("session survived its final lease")
+	}
+	if factory.closes != 1 {
+		t.Fatalf("backend close count = %d, want 1", factory.closes)
+	}
+	if _, lease, ok := registry.Acquire(session.ID()); ok || lease != nil {
+		t.Fatal("acquired a removed session")
+	}
+}
+
+func TestForceCloseInvalidatesSessionWithIndependentLease(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog(t, "https://cluster.example.test")
+	factory := &recordingFactory{}
+	registry := NewSessionRegistry(factory)
+	t.Cleanup(registry.CloseAll)
+	session, err := registry.Open(catalog, "local")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_, lease, ok := registry.Acquire(session.ID())
+	if !ok {
+		t.Fatal("Acquire: session missing")
+	}
+	if !registry.Close(session.ID()) {
+		t.Fatal("force close rejected")
+	}
+	if _, ok := registry.Get(session.ID()); ok {
+		t.Fatal("force-closed session remained registered")
+	}
+	if factory.closes != 1 {
+		t.Fatalf("backend close count = %d, want 1", factory.closes)
+	}
+	lease.Release()
+	lease.Release()
+	if factory.closes != 1 {
+		t.Fatalf("late lease release closed backend again: %d", factory.closes)
+	}
+}
+
+func TestWorkspaceCloseWithoutIndependentLeaseDoesNotRetainSession(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog(t, "https://cluster.example.test")
+	factory := &recordingFactory{}
+	registry := NewSessionRegistry(factory)
+	session, err := registry.Open(catalog, "local")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !registry.CloseWorkspace(session.ID()) {
+		t.Fatal("CloseWorkspace rejected")
+	}
+	if _, ok := registry.Get(session.ID()); ok {
+		t.Fatal("closed idle workspace was retained")
+	}
+	if factory.closes != 1 {
+		t.Fatalf("backend close count = %d, want 1", factory.closes)
+	}
+}
+
 func testCatalog(t *testing.T, server string) *Catalog {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config")

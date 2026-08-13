@@ -305,12 +305,134 @@ func TestStopListWatchAndRestartAreRaceSafe(t *testing.T) {
 	}
 }
 
+func TestPortForwardLeaseSpansRunAndRestartReacquires(t *testing.T) {
+	t.Parallel()
+	resolver := &sequenceResolver{results: []resolveResult{
+		{target: podIdentity("pod", "uid")}, {target: podIdentity("pod", "uid")},
+	}}
+	forwarder := &fakeForwarder{ports: []uint16{12345, 12345}}
+	sessions := &leaseSessionResolver{session: Session{
+		ContextName: "context", Resolver: resolver, Forwarder: forwarder,
+	}}
+	manager, err := NewManager(Config{
+		Sessions: sessions,
+		Backoff:  BackoffFunc(func(context.Context, int) error { return nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(StartRequest{
+		ID: "leased", Target: podIdentity("pod", "uid"), RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyForward(t, func() bool { return manager.List("", true)[0].State == StateListening })
+	if got := sessions.Counts(); got != [2]int{1, 0} {
+		t.Fatalf("listening acquire/release counts = %v", got)
+	}
+	if !manager.Stop("leased", "session") {
+		t.Fatal("Stop rejected")
+	}
+	eventuallyForward(t, func() bool {
+		return manager.List("", true)[0].State == StateStopped && sessions.Counts()[1] == 1
+	})
+	if !manager.Restart("leased", "session") {
+		t.Fatal("Restart rejected")
+	}
+	eventuallyForward(t, func() bool {
+		return manager.List("", true)[0].State == StateListening && sessions.Counts()[0] == 2
+	})
+	manager.Close()
+	if got := sessions.Counts(); got != [2]int{2, 2} {
+		t.Fatalf("final acquire/release counts = %v, want [2 2]", got)
+	}
+}
+
+func TestPortForwardStartFailuresAndFailedRestartDoNotLeakLease(t *testing.T) {
+	t.Parallel()
+	resolver := &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}}
+	forwarder := &fakeForwarder{ports: []uint16{12345}}
+	sessions := &leaseSessionResolver{session: Session{
+		ContextName: "context", Resolver: resolver, Forwarder: forwarder,
+	}}
+	manager, err := NewManager(Config{
+		Sessions: sessions,
+		Backoff:  BackoffFunc(func(context.Context, int) error { return nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(StartRequest{
+		ID: "same", Target: podIdentity("pod", "uid"), RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(StartRequest{
+		ID: "same", Target: podIdentity("pod", "uid"), RemotePort: 8080,
+	}); !errors.Is(err, ErrDuplicatePortForward) {
+		t.Fatalf("duplicate Start error = %v", err)
+	}
+	eventuallyForward(t, func() bool { return sessions.Counts()[0] == 2 && sessions.Counts()[1] == 1 })
+	if !manager.Stop("same", "session") {
+		t.Fatal("Stop rejected")
+	}
+	eventuallyForward(t, func() bool {
+		return manager.List("", true)[0].State == StateStopped && sessions.Counts()[1] == 2
+	})
+	sessions.mu.Lock()
+	sessions.err = ErrSessionNotFound
+	sessions.mu.Unlock()
+	if manager.Restart("same", "session") {
+		t.Fatal("Restart succeeded after session disappeared")
+	}
+	if got := sessions.Counts(); got != [2]int{2, 2} {
+		t.Fatalf("failed restart changed lease counts = %v", got)
+	}
+	manager.Close()
+	if got := sessions.Counts(); got != [2]int{2, 2} {
+		t.Fatalf("manager close released terminal lease again: %v", got)
+	}
+}
+
 type staticSessionResolver struct {
 	session Session
 	err     error
 }
 
 func (r staticSessionResolver) ResolveSession(string) (Session, error) { return r.session, r.err }
+
+type leaseSessionResolver struct {
+	mu       sync.Mutex
+	session  Session
+	err      error
+	acquires int
+	releases int
+}
+
+func (r *leaseSessionResolver) ResolveSession(string) (Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return Session{}, r.err
+	}
+	r.acquires++
+	session := r.session
+	var once sync.Once
+	session.Release = func() {
+		once.Do(func() {
+			r.mu.Lock()
+			r.releases++
+			r.mu.Unlock()
+		})
+	}
+	return session, nil
+}
+
+func (r *leaseSessionResolver) Counts() [2]int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return [2]int{r.acquires, r.releases}
+}
 
 type resolveResult struct {
 	target Identity

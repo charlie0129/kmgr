@@ -199,7 +199,14 @@ func (s *ClusterService) CloseSession(
 	if err := requestContext.Err(); err != nil {
 		return nil, contextStatus(err)
 	}
-	if !s.sessions.Close(request.GetContext().GetClusterSessionId()) {
+	sessionID := request.GetContext().GetClusterSessionId()
+	closed := false
+	if request.GetKeepIndependentStreams() {
+		closed = s.sessions.CloseWorkspace(sessionID)
+	} else {
+		closed = s.sessions.Close(sessionID)
+	}
+	if !closed {
 		return nil, status.Error(codes.NotFound, "cluster session was not found")
 	}
 	return &kmgrv1.Acknowledgement{

@@ -116,6 +116,82 @@ func TestOpenSessionProbeFailureReturnsStructuredErrorAndRollsBack(t *testing.T)
 	}
 }
 
+func TestCloseSessionPreservesOnlyPreexistingIndependentLeasesWhenRequested(t *testing.T) {
+	t.Parallel()
+	catalog := serviceCatalog(t)
+	factory := &serviceFactory{}
+	sessions := cluster.NewSessionRegistry(factory)
+	service := NewClusterService(ClusterServiceOptions{
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) { return catalog, nil }),
+		Sessions: sessions,
+		Prober:   SessionProbeFunc(func(context.Context, *cluster.Session) error { return nil }),
+	})
+	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
+		Context: requestContext("open-preserved"), ContextName: "local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := opened.GetClusterSessionId()
+	_, lease, ok := sessions.Acquire(sessionID)
+	if !ok {
+		t.Fatal("Acquire: session missing")
+	}
+	ack, err := service.CloseSession(context.Background(), &kmgrv1.CloseSessionRequest{
+		Context:                &kmgrv1.RequestContext{RequestId: "close-preserved", ClusterSessionId: sessionID},
+		KeepIndependentStreams: true,
+	})
+	if err != nil || !ack.GetAccepted() {
+		t.Fatalf("CloseSession = %#v, %v", ack, err)
+	}
+	if _, ok := sessions.Get(sessionID); ok || factory.closeCount() != 0 {
+		t.Fatal("preserving close did not tombstone the workspace while retaining its leased backend")
+	}
+	if _, newLease, ok := sessions.Acquire(sessionID); ok || newLease != nil {
+		t.Fatal("preserving close accepted a new independent operation")
+	}
+	lease.Release()
+	if _, ok := sessions.Get(sessionID); ok || factory.closeCount() != 1 {
+		t.Fatal("final lease did not retire the closed workspace session")
+	}
+}
+
+func TestCloseSessionWithoutPreservationForceCloses(t *testing.T) {
+	t.Parallel()
+	catalog := serviceCatalog(t)
+	factory := &serviceFactory{}
+	sessions := cluster.NewSessionRegistry(factory)
+	service := NewClusterService(ClusterServiceOptions{
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) { return catalog, nil }),
+		Sessions: sessions,
+		Prober:   SessionProbeFunc(func(context.Context, *cluster.Session) error { return nil }),
+	})
+	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
+		Context: requestContext("open-force"), ContextName: "local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := opened.GetClusterSessionId()
+	_, lease, ok := sessions.Acquire(sessionID)
+	if !ok {
+		t.Fatal("Acquire: session missing")
+	}
+	_, err = service.CloseSession(context.Background(), &kmgrv1.CloseSessionRequest{
+		Context: &kmgrv1.RequestContext{RequestId: "close-force", ClusterSessionId: sessionID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sessions.Get(sessionID); ok || factory.closeCount() != 1 {
+		t.Fatal("non-preserving close did not invalidate the leased session")
+	}
+	lease.Release()
+	if factory.closeCount() != 1 {
+		t.Fatal("late release closed force-closed backend twice")
+	}
+}
+
 func TestConnectionErrorDoesNotExposeUnderlyingMessage(t *testing.T) {
 	t.Parallel()
 	errorValue := connectionError(errors.New("server rejected token super-secret"), "local", "cluster.test")

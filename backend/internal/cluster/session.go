@@ -88,8 +88,14 @@ type SessionRegistry struct {
 	factory  ClientFactory
 	qps      float32
 	burst    int
-	sessions map[string]*Session
+	sessions map[string]*sessionEntry
 	backends map[backendKey]*sharedBackend
+}
+
+type sessionEntry struct {
+	session           *Session
+	workspaceLease    bool
+	independentLeases int
 }
 
 type backendKey struct {
@@ -100,7 +106,19 @@ type backendKey struct {
 type sharedBackend struct {
 	clients BackendClients
 	config  *rest.Config
-	refs    int
+	// refs counts live session entries, not individual workspace or stream
+	// leases. A session entry remains live after its workspace closes only
+	// while an independent operation still owns it.
+	refs int
+}
+
+// SessionLease keeps one session and its shared Kubernetes backend alive for
+// an independent operation. Release is idempotent so cleanup paths may safely
+// converge without closing a backend more than once.
+type SessionLease struct {
+	registry *SessionRegistry
+	entry    *sessionEntry
+	once     sync.Once
 }
 
 // Session is the immutable cluster identity exposed to one workspace window.
@@ -121,7 +139,7 @@ func NewSessionRegistry(factory ClientFactory) *SessionRegistry {
 		factory:  factory,
 		qps:      DefaultClientQPS,
 		burst:    DefaultClientBurst,
-		sessions: make(map[string]*Session),
+		sessions: make(map[string]*sessionEntry),
 		backends: make(map[backendKey]*sharedBackend),
 	}
 }
@@ -184,57 +202,122 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 	for r.sessions[sessionID] != nil {
 		sessionID, err = newSessionID()
 		if err != nil {
+			if backend.refs == 0 {
+				r.closeBackendLocked(key, backend)
+			}
 			return nil, err
 		}
 	}
 	backend.refs++
 	session := &Session{id: sessionID, context: contextInfo, key: key, backend: backend}
-	r.sessions[sessionID] = session
+	r.sessions[sessionID] = &sessionEntry{session: session, workspaceLease: true}
 	return session, nil
 }
 
 func (r *SessionRegistry) Get(sessionID string) (*Session, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	session, ok := r.sessions[sessionID]
-	return session, ok
+	entry, ok := r.sessions[sessionID]
+	if !ok || !entry.workspaceLease {
+		return nil, false
+	}
+	return entry.session, true
 }
 
+// Acquire obtains a lease for an independent operation. It is atomic with
+// workspace close: either the lease is retained and the session remains
+// usable, or the session has already disappeared and Acquire returns false.
+func (r *SessionRegistry) Acquire(sessionID string) (*Session, *SessionLease, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry := r.sessions[sessionID]
+	if entry == nil || !entry.workspaceLease {
+		return nil, nil, false
+	}
+	entry.independentLeases++
+	return entry.session, &SessionLease{registry: r, entry: entry}, true
+}
+
+// CloseWorkspace releases the lease created by Open while preserving the
+// session for any independent operations that already acquired their own
+// leases. Once the final independent lease ends, the session and (when no
+// other session shares it) its Kubernetes backend are closed automatically.
+func (r *SessionRegistry) CloseWorkspace(sessionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry := r.sessions[sessionID]
+	if entry == nil || !entry.workspaceLease {
+		return false
+	}
+	entry.workspaceLease = false
+	if entry.independentLeases == 0 {
+		r.removeSessionLocked(sessionID, entry)
+	}
+	return true
+}
+
+// Close force-closes a session regardless of outstanding independent leases.
+// It is used for explicit non-preserving close, failed Open rollback, and
+// other callers that require immediate invalidation.
 func (r *SessionRegistry) Close(sessionID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	session := r.sessions[sessionID]
-	if session == nil {
+	entry := r.sessions[sessionID]
+	if entry == nil {
 		return false
 	}
+	r.removeSessionLocked(sessionID, entry)
+	return true
+}
+
+func (r *SessionRegistry) removeSessionLocked(sessionID string, entry *sessionEntry) {
+	if entry == nil || r.sessions[sessionID] != entry {
+		return
+	}
 	delete(r.sessions, sessionID)
-	backend := session.backend
+	backend := entry.session.backend
 	backend.refs--
 	if backend.refs == 0 {
-		if backend.clients.Mapper != nil {
-			backend.clients.Mapper.Reset()
-		}
-		if backend.clients.Close != nil {
-			backend.clients.Close()
-		}
-		delete(r.backends, session.key)
+		r.closeBackendLocked(entry.session.key, backend)
 	}
-	return true
+}
+
+func (r *SessionRegistry) closeBackendLocked(key backendKey, backend *sharedBackend) {
+	if backend.clients.Mapper != nil {
+		backend.clients.Mapper.Reset()
+	}
+	if backend.clients.Close != nil {
+		backend.clients.Close()
+	}
+	delete(r.backends, key)
 }
 
 func (r *SessionRegistry) CloseAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for key, backend := range r.backends {
-		if backend.clients.Mapper != nil {
-			backend.clients.Mapper.Reset()
-		}
-		if backend.clients.Close != nil {
-			backend.clients.Close()
-		}
-		delete(r.backends, key)
-	}
 	clear(r.sessions)
+	for key, backend := range r.backends {
+		r.closeBackendLocked(key, backend)
+	}
+}
+
+func (l *SessionLease) Release() {
+	if l == nil || l.registry == nil || l.entry == nil {
+		return
+	}
+	l.once.Do(func() {
+		r := l.registry
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		entry := l.entry
+		if r.sessions[entry.session.id] != entry || entry.independentLeases == 0 {
+			return
+		}
+		entry.independentLeases--
+		if !entry.workspaceLease && entry.independentLeases == 0 {
+			r.removeSessionLocked(entry.session.id, entry)
+		}
+	})
 }
 
 func (s *Session) ID() string                              { return s.id }
