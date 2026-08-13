@@ -120,6 +120,142 @@ public enum Kmgr_V1_ViewFreshness: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
+/// PreviewColumn compiles one draft CEL definition in the authoritative Go
+/// environment and evaluates it against either the selected object (after a
+/// fresh UID-pinned GET) or a deterministic, non-sensitive sample object.
+public struct Kmgr_V1_PreviewColumnRequest: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _storage._context ?? Kmgr_V1_RequestContext()}
+    set {_uniqueStorage()._context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return _storage._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {_uniqueStorage()._context = nil}
+
+  public var resource: Kmgr_V1_ResourceType {
+    get {return _storage._resource ?? Kmgr_V1_ResourceType()}
+    set {_uniqueStorage()._resource = newValue}
+  }
+  /// Returns true if `resource` has been explicitly set.
+  public var hasResource: Bool {return _storage._resource != nil}
+  /// Clears the value of `resource`. Subsequent reads from it will return its default value.
+  public mutating func clearResource() {_uniqueStorage()._resource = nil}
+
+  public var namespaceScope: Kmgr_V1_NamespaceScope {
+    get {return _storage._namespaceScope ?? Kmgr_V1_NamespaceScope()}
+    set {_uniqueStorage()._namespaceScope = newValue}
+  }
+  /// Returns true if `namespaceScope` has been explicitly set.
+  public var hasNamespaceScope: Bool {return _storage._namespaceScope != nil}
+  /// Clears the value of `namespaceScope`. Subsequent reads from it will return its default value.
+  public mutating func clearNamespaceScope() {_uniqueStorage()._namespaceScope = nil}
+
+  public var column: Kmgr_V1_CELColumnDefinition {
+    get {return _storage._column ?? Kmgr_V1_CELColumnDefinition()}
+    set {_uniqueStorage()._column = newValue}
+  }
+  /// Returns true if `column` has been explicitly set.
+  public var hasColumn: Bool {return _storage._column != nil}
+  /// Clears the value of `column`. Subsequent reads from it will return its default value.
+  public mutating func clearColumn() {_uniqueStorage()._column = nil}
+
+  public var selectedObject: Kmgr_V1_ResourceIdentity {
+    get {return _storage._selectedObject ?? Kmgr_V1_ResourceIdentity()}
+    set {_uniqueStorage()._selectedObject = newValue}
+  }
+  /// Returns true if `selectedObject` has been explicitly set.
+  public var hasSelectedObject: Bool {return _storage._selectedObject != nil}
+  /// Clears the value of `selectedObject`. Subsequent reads from it will return its default value.
+  public mutating func clearSelectedObject() {_uniqueStorage()._selectedObject = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public struct Kmgr_V1_CELColumnDefinition: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var id: String = String()
+
+  public var title: String = String()
+
+  public var expression: String = String()
+
+  public var resultType: String = String()
+
+  public var missing: String = String()
+
+  public var listJoiner: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Kmgr_V1_PreviewColumnResponse: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String {
+    get {return _storage._requestID}
+    set {_uniqueStorage()._requestID = newValue}
+  }
+
+  public var celEnvironment: String {
+    get {return _storage._celEnvironment}
+    set {_uniqueStorage()._celEnvironment = newValue}
+  }
+
+  public var preview: Kmgr_V1_Cell {
+    get {return _storage._preview ?? Kmgr_V1_Cell()}
+    set {_uniqueStorage()._preview = newValue}
+  }
+  /// Returns true if `preview` has been explicitly set.
+  public var hasPreview: Bool {return _storage._preview != nil}
+  /// Clears the value of `preview`. Subsequent reads from it will return its default value.
+  public mutating func clearPreview() {_uniqueStorage()._preview = nil}
+
+  public var usedSampleObject: Bool {
+    get {return _storage._usedSampleObject}
+    set {_uniqueStorage()._usedSampleObject = newValue}
+  }
+
+  public var evaluatedObject: Kmgr_V1_ResourceIdentity {
+    get {return _storage._evaluatedObject ?? Kmgr_V1_ResourceIdentity()}
+    set {_uniqueStorage()._evaluatedObject = newValue}
+  }
+  /// Returns true if `evaluatedObject` has been explicitly set.
+  public var hasEvaluatedObject: Bool {return _storage._evaluatedObject != nil}
+  /// Clears the value of `evaluatedObject`. Subsequent reads from it will return its default value.
+  public mutating func clearEvaluatedObject() {_uniqueStorage()._evaluatedObject = nil}
+
+  public var error: Kmgr_V1_StructuredError {
+    get {return _storage._error ?? Kmgr_V1_StructuredError()}
+    set {_uniqueStorage()._error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {return _storage._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {_uniqueStorage()._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
 public struct Kmgr_V1_SortDescriptor: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -622,6 +758,264 @@ extension Kmgr_V1_SortDirection: SwiftProtobuf._ProtoNameProviding {
 
 extension Kmgr_V1_ViewFreshness: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0VIEW_FRESHNESS_UNSPECIFIED\0\u{1}VIEW_FRESHNESS_LOADING\0\u{1}VIEW_FRESHNESS_STALE\0\u{1}VIEW_FRESHNESS_RESUMING\0\u{1}VIEW_FRESHNESS_RELISTING\0\u{1}VIEW_FRESHNESS_WATCHING\0\u{1}VIEW_FRESHNESS_RECONNECTING\0\u{1}VIEW_FRESHNESS_FAILED\0\u{1}VIEW_FRESHNESS_COMPLETE\0")
+}
+
+extension Kmgr_V1_PreviewColumnRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PreviewColumnRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{1}resource\0\u{3}namespace_scope\0\u{1}column\0\u{3}selected_object\0")
+
+  fileprivate class _StorageClass {
+    var _context: Kmgr_V1_RequestContext? = nil
+    var _resource: Kmgr_V1_ResourceType? = nil
+    var _namespaceScope: Kmgr_V1_NamespaceScope? = nil
+    var _column: Kmgr_V1_CELColumnDefinition? = nil
+    var _selectedObject: Kmgr_V1_ResourceIdentity? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _context = source._context
+      _resource = source._resource
+      _namespaceScope = source._namespaceScope
+      _column = source._column
+      _selectedObject = source._selectedObject
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._context) }()
+        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._resource) }()
+        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._namespaceScope) }()
+        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._column) }()
+        case 5: try { try decoder.decodeSingularMessageField(value: &_storage._selectedObject) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      try { if let v = _storage._context {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+      } }()
+      try { if let v = _storage._resource {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+      } }()
+      try { if let v = _storage._namespaceScope {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+      } }()
+      try { if let v = _storage._column {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+      } }()
+      try { if let v = _storage._selectedObject {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+      } }()
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_PreviewColumnRequest, rhs: Kmgr_V1_PreviewColumnRequest) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._context != rhs_storage._context {return false}
+        if _storage._resource != rhs_storage._resource {return false}
+        if _storage._namespaceScope != rhs_storage._namespaceScope {return false}
+        if _storage._column != rhs_storage._column {return false}
+        if _storage._selectedObject != rhs_storage._selectedObject {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_CELColumnDefinition: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".CELColumnDefinition"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}title\0\u{1}expression\0\u{3}result_type\0\u{1}missing\0\u{3}list_joiner\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.expression) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.resultType) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.missing) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.listJoiner) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 2)
+    }
+    if !self.expression.isEmpty {
+      try visitor.visitSingularStringField(value: self.expression, fieldNumber: 3)
+    }
+    if !self.resultType.isEmpty {
+      try visitor.visitSingularStringField(value: self.resultType, fieldNumber: 4)
+    }
+    if !self.missing.isEmpty {
+      try visitor.visitSingularStringField(value: self.missing, fieldNumber: 5)
+    }
+    if !self.listJoiner.isEmpty {
+      try visitor.visitSingularStringField(value: self.listJoiner, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_CELColumnDefinition, rhs: Kmgr_V1_CELColumnDefinition) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.expression != rhs.expression {return false}
+    if lhs.resultType != rhs.resultType {return false}
+    if lhs.missing != rhs.missing {return false}
+    if lhs.listJoiner != rhs.listJoiner {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_PreviewColumnResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PreviewColumnResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}cel_environment\0\u{1}preview\0\u{3}used_sample_object\0\u{3}evaluated_object\0\u{1}error\0")
+
+  fileprivate class _StorageClass {
+    var _requestID: String = String()
+    var _celEnvironment: String = String()
+    var _preview: Kmgr_V1_Cell? = nil
+    var _usedSampleObject: Bool = false
+    var _evaluatedObject: Kmgr_V1_ResourceIdentity? = nil
+    var _error: Kmgr_V1_StructuredError? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _requestID = source._requestID
+      _celEnvironment = source._celEnvironment
+      _preview = source._preview
+      _usedSampleObject = source._usedSampleObject
+      _evaluatedObject = source._evaluatedObject
+      _error = source._error
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._requestID) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._celEnvironment) }()
+        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._preview) }()
+        case 4: try { try decoder.decodeSingularBoolField(value: &_storage._usedSampleObject) }()
+        case 5: try { try decoder.decodeSingularMessageField(value: &_storage._evaluatedObject) }()
+        case 6: try { try decoder.decodeSingularMessageField(value: &_storage._error) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if !_storage._requestID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._requestID, fieldNumber: 1)
+      }
+      if !_storage._celEnvironment.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._celEnvironment, fieldNumber: 2)
+      }
+      try { if let v = _storage._preview {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+      } }()
+      if _storage._usedSampleObject != false {
+        try visitor.visitSingularBoolField(value: _storage._usedSampleObject, fieldNumber: 4)
+      }
+      try { if let v = _storage._evaluatedObject {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+      } }()
+      try { if let v = _storage._error {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+      } }()
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_PreviewColumnResponse, rhs: Kmgr_V1_PreviewColumnResponse) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._requestID != rhs_storage._requestID {return false}
+        if _storage._celEnvironment != rhs_storage._celEnvironment {return false}
+        if _storage._preview != rhs_storage._preview {return false}
+        if _storage._usedSampleObject != rhs_storage._usedSampleObject {return false}
+        if _storage._evaluatedObject != rhs_storage._evaluatedObject {return false}
+        if _storage._error != rhs_storage._error {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
 }
 
 extension Kmgr_V1_SortDescriptor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {

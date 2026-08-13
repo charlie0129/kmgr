@@ -10,9 +10,39 @@ option swift_prefix = "Kmgr_V1_";
 service ViewService {
   rpc StreamView(OpenViewRequest) returns (stream ViewEvent);
   rpc CancelView(CancelViewRequest) returns (Acknowledgement);
+  rpc PreviewColumn(PreviewColumnRequest) returns (PreviewColumnResponse);
   rpc SearchCachedObjects(SearchCachedObjectsRequest) returns (SearchCachedObjectsResponse);
   rpc SearchObjects(SearchObjectsRequest) returns (stream SearchObjectsEvent);
   rpc CancelSearch(CancelSearchRequest) returns (Acknowledgement);
+}
+
+// PreviewColumn compiles one draft CEL definition in the authoritative Go
+// environment and evaluates it against either the selected object (after a
+// fresh UID-pinned GET) or a deterministic, non-sensitive sample object.
+message PreviewColumnRequest {
+  RequestContext context = 1;
+  ResourceType resource = 2;
+  NamespaceScope namespace_scope = 3;
+  CELColumnDefinition column = 4;
+  ResourceIdentity selected_object = 5;
+}
+
+message CELColumnDefinition {
+  string id = 1;
+  string title = 2;
+  string expression = 3;
+  string result_type = 4;
+  string missing = 5;
+  string list_joiner = 6;
+}
+
+message PreviewColumnResponse {
+  string request_id = 1;
+  string cel_environment = 2;
+  Cell preview = 3;
+  bool used_sample_object = 4;
+  ResourceIdentity evaluated_object = 5;
+  StructuredError error = 6;
 }
 
 enum SortDirection {

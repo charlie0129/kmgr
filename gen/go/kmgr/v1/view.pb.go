@@ -137,6 +137,253 @@ func (ViewFreshness) EnumDescriptor() ([]byte, []int) {
 	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{1}
 }
 
+// PreviewColumn compiles one draft CEL definition in the authoritative Go
+// environment and evaluates it against either the selected object (after a
+// fresh UID-pinned GET) or a deterministic, non-sensitive sample object.
+type PreviewColumnRequest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Context        *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	Resource       *ResourceType          `protobuf:"bytes,2,opt,name=resource,proto3" json:"resource,omitempty"`
+	NamespaceScope *NamespaceScope        `protobuf:"bytes,3,opt,name=namespace_scope,json=namespaceScope,proto3" json:"namespace_scope,omitempty"`
+	Column         *CELColumnDefinition   `protobuf:"bytes,4,opt,name=column,proto3" json:"column,omitempty"`
+	SelectedObject *ResourceIdentity      `protobuf:"bytes,5,opt,name=selected_object,json=selectedObject,proto3" json:"selected_object,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *PreviewColumnRequest) Reset() {
+	*x = PreviewColumnRequest{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PreviewColumnRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PreviewColumnRequest) ProtoMessage() {}
+
+func (x *PreviewColumnRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PreviewColumnRequest.ProtoReflect.Descriptor instead.
+func (*PreviewColumnRequest) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *PreviewColumnRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *PreviewColumnRequest) GetResource() *ResourceType {
+	if x != nil {
+		return x.Resource
+	}
+	return nil
+}
+
+func (x *PreviewColumnRequest) GetNamespaceScope() *NamespaceScope {
+	if x != nil {
+		return x.NamespaceScope
+	}
+	return nil
+}
+
+func (x *PreviewColumnRequest) GetColumn() *CELColumnDefinition {
+	if x != nil {
+		return x.Column
+	}
+	return nil
+}
+
+func (x *PreviewColumnRequest) GetSelectedObject() *ResourceIdentity {
+	if x != nil {
+		return x.SelectedObject
+	}
+	return nil
+}
+
+type CELColumnDefinition struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Expression    string                 `protobuf:"bytes,3,opt,name=expression,proto3" json:"expression,omitempty"`
+	ResultType    string                 `protobuf:"bytes,4,opt,name=result_type,json=resultType,proto3" json:"result_type,omitempty"`
+	Missing       string                 `protobuf:"bytes,5,opt,name=missing,proto3" json:"missing,omitempty"`
+	ListJoiner    string                 `protobuf:"bytes,6,opt,name=list_joiner,json=listJoiner,proto3" json:"list_joiner,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CELColumnDefinition) Reset() {
+	*x = CELColumnDefinition{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CELColumnDefinition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CELColumnDefinition) ProtoMessage() {}
+
+func (x *CELColumnDefinition) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CELColumnDefinition.ProtoReflect.Descriptor instead.
+func (*CELColumnDefinition) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *CELColumnDefinition) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *CELColumnDefinition) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *CELColumnDefinition) GetExpression() string {
+	if x != nil {
+		return x.Expression
+	}
+	return ""
+}
+
+func (x *CELColumnDefinition) GetResultType() string {
+	if x != nil {
+		return x.ResultType
+	}
+	return ""
+}
+
+func (x *CELColumnDefinition) GetMissing() string {
+	if x != nil {
+		return x.Missing
+	}
+	return ""
+}
+
+func (x *CELColumnDefinition) GetListJoiner() string {
+	if x != nil {
+		return x.ListJoiner
+	}
+	return ""
+}
+
+type PreviewColumnResponse struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	RequestId        string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	CelEnvironment   string                 `protobuf:"bytes,2,opt,name=cel_environment,json=celEnvironment,proto3" json:"cel_environment,omitempty"`
+	Preview          *Cell                  `protobuf:"bytes,3,opt,name=preview,proto3" json:"preview,omitempty"`
+	UsedSampleObject bool                   `protobuf:"varint,4,opt,name=used_sample_object,json=usedSampleObject,proto3" json:"used_sample_object,omitempty"`
+	EvaluatedObject  *ResourceIdentity      `protobuf:"bytes,5,opt,name=evaluated_object,json=evaluatedObject,proto3" json:"evaluated_object,omitempty"`
+	Error            *StructuredError       `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *PreviewColumnResponse) Reset() {
+	*x = PreviewColumnResponse{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PreviewColumnResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PreviewColumnResponse) ProtoMessage() {}
+
+func (x *PreviewColumnResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PreviewColumnResponse.ProtoReflect.Descriptor instead.
+func (*PreviewColumnResponse) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *PreviewColumnResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *PreviewColumnResponse) GetCelEnvironment() string {
+	if x != nil {
+		return x.CelEnvironment
+	}
+	return ""
+}
+
+func (x *PreviewColumnResponse) GetPreview() *Cell {
+	if x != nil {
+		return x.Preview
+	}
+	return nil
+}
+
+func (x *PreviewColumnResponse) GetUsedSampleObject() bool {
+	if x != nil {
+		return x.UsedSampleObject
+	}
+	return false
+}
+
+func (x *PreviewColumnResponse) GetEvaluatedObject() *ResourceIdentity {
+	if x != nil {
+		return x.EvaluatedObject
+	}
+	return nil
+}
+
+func (x *PreviewColumnResponse) GetError() *StructuredError {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
 type SortDescriptor struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ColumnId      string                 `protobuf:"bytes,1,opt,name=column_id,json=columnId,proto3" json:"column_id,omitempty"`
@@ -148,7 +395,7 @@ type SortDescriptor struct {
 
 func (x *SortDescriptor) Reset() {
 	*x = SortDescriptor{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[0]
+	mi := &file_kmgr_v1_view_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -160,7 +407,7 @@ func (x *SortDescriptor) String() string {
 func (*SortDescriptor) ProtoMessage() {}
 
 func (x *SortDescriptor) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[0]
+	mi := &file_kmgr_v1_view_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -173,7 +420,7 @@ func (x *SortDescriptor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SortDescriptor.ProtoReflect.Descriptor instead.
 func (*SortDescriptor) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{0}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SortDescriptor) GetColumnId() string {
@@ -214,7 +461,7 @@ type ViewSpec struct {
 
 func (x *ViewSpec) Reset() {
 	*x = ViewSpec{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[1]
+	mi := &file_kmgr_v1_view_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -226,7 +473,7 @@ func (x *ViewSpec) String() string {
 func (*ViewSpec) ProtoMessage() {}
 
 func (x *ViewSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[1]
+	mi := &file_kmgr_v1_view_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -239,7 +486,7 @@ func (x *ViewSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ViewSpec.ProtoReflect.Descriptor instead.
 func (*ViewSpec) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{1}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ViewSpec) GetResource() *ResourceType {
@@ -317,7 +564,7 @@ type OpenViewRequest struct {
 
 func (x *OpenViewRequest) Reset() {
 	*x = OpenViewRequest{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[2]
+	mi := &file_kmgr_v1_view_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -329,7 +576,7 @@ func (x *OpenViewRequest) String() string {
 func (*OpenViewRequest) ProtoMessage() {}
 
 func (x *OpenViewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[2]
+	mi := &file_kmgr_v1_view_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -342,7 +589,7 @@ func (x *OpenViewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenViewRequest.ProtoReflect.Descriptor instead.
 func (*OpenViewRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{2}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *OpenViewRequest) GetContext() *RequestContext {
@@ -384,7 +631,7 @@ type CancelViewRequest struct {
 
 func (x *CancelViewRequest) Reset() {
 	*x = CancelViewRequest{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[3]
+	mi := &file_kmgr_v1_view_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -396,7 +643,7 @@ func (x *CancelViewRequest) String() string {
 func (*CancelViewRequest) ProtoMessage() {}
 
 func (x *CancelViewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[3]
+	mi := &file_kmgr_v1_view_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -409,7 +656,7 @@ func (x *CancelViewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelViewRequest.ProtoReflect.Descriptor instead.
 func (*CancelViewRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{3}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CancelViewRequest) GetContext() *RequestContext {
@@ -447,7 +694,7 @@ type ViewStatus struct {
 
 func (x *ViewStatus) Reset() {
 	*x = ViewStatus{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[4]
+	mi := &file_kmgr_v1_view_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -459,7 +706,7 @@ func (x *ViewStatus) String() string {
 func (*ViewStatus) ProtoMessage() {}
 
 func (x *ViewStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[4]
+	mi := &file_kmgr_v1_view_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -472,7 +719,7 @@ func (x *ViewStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ViewStatus.ProtoReflect.Descriptor instead.
 func (*ViewStatus) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{4}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ViewStatus) GetFreshness() ViewFreshness {
@@ -530,7 +777,7 @@ type SnapshotChunk struct {
 
 func (x *SnapshotChunk) Reset() {
 	*x = SnapshotChunk{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[5]
+	mi := &file_kmgr_v1_view_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -542,7 +789,7 @@ func (x *SnapshotChunk) String() string {
 func (*SnapshotChunk) ProtoMessage() {}
 
 func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[5]
+	mi := &file_kmgr_v1_view_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -555,7 +802,7 @@ func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotChunk.ProtoReflect.Descriptor instead.
 func (*SnapshotChunk) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{5}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SnapshotChunk) GetRows() []*ResourceRow {
@@ -605,7 +852,7 @@ type RowDelta struct {
 
 func (x *RowDelta) Reset() {
 	*x = RowDelta{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[6]
+	mi := &file_kmgr_v1_view_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -617,7 +864,7 @@ func (x *RowDelta) String() string {
 func (*RowDelta) ProtoMessage() {}
 
 func (x *RowDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[6]
+	mi := &file_kmgr_v1_view_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -630,7 +877,7 @@ func (x *RowDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RowDelta.ProtoReflect.Descriptor instead.
 func (*RowDelta) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{6}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RowDelta) GetUpserts() []*ResourceRow {
@@ -677,7 +924,7 @@ type ViewEvent struct {
 
 func (x *ViewEvent) Reset() {
 	*x = ViewEvent{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[7]
+	mi := &file_kmgr_v1_view_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -689,7 +936,7 @@ func (x *ViewEvent) String() string {
 func (*ViewEvent) ProtoMessage() {}
 
 func (x *ViewEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[7]
+	mi := &file_kmgr_v1_view_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -702,7 +949,7 @@ func (x *ViewEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ViewEvent.ProtoReflect.Descriptor instead.
 func (*ViewEvent) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{7}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ViewEvent) GetCursor() *StreamCursor {
@@ -800,7 +1047,7 @@ type SearchObjectsRequest struct {
 
 func (x *SearchObjectsRequest) Reset() {
 	*x = SearchObjectsRequest{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[8]
+	mi := &file_kmgr_v1_view_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -812,7 +1059,7 @@ func (x *SearchObjectsRequest) String() string {
 func (*SearchObjectsRequest) ProtoMessage() {}
 
 func (x *SearchObjectsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[8]
+	mi := &file_kmgr_v1_view_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -825,7 +1072,7 @@ func (x *SearchObjectsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchObjectsRequest.ProtoReflect.Descriptor instead.
 func (*SearchObjectsRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{8}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SearchObjectsRequest) GetContext() *RequestContext {
@@ -907,7 +1154,7 @@ type SearchCachedObjectsRequest struct {
 
 func (x *SearchCachedObjectsRequest) Reset() {
 	*x = SearchCachedObjectsRequest{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[9]
+	mi := &file_kmgr_v1_view_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -919,7 +1166,7 @@ func (x *SearchCachedObjectsRequest) String() string {
 func (*SearchCachedObjectsRequest) ProtoMessage() {}
 
 func (x *SearchCachedObjectsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[9]
+	mi := &file_kmgr_v1_view_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -932,7 +1179,7 @@ func (x *SearchCachedObjectsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchCachedObjectsRequest.ProtoReflect.Descriptor instead.
 func (*SearchCachedObjectsRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{9}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SearchCachedObjectsRequest) GetContext() *RequestContext {
@@ -983,7 +1230,7 @@ type SearchCachedObjectsResponse struct {
 
 func (x *SearchCachedObjectsResponse) Reset() {
 	*x = SearchCachedObjectsResponse{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[10]
+	mi := &file_kmgr_v1_view_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -995,7 +1242,7 @@ func (x *SearchCachedObjectsResponse) String() string {
 func (*SearchCachedObjectsResponse) ProtoMessage() {}
 
 func (x *SearchCachedObjectsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[10]
+	mi := &file_kmgr_v1_view_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1008,7 +1255,7 @@ func (x *SearchCachedObjectsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchCachedObjectsResponse.ProtoReflect.Descriptor instead.
 func (*SearchCachedObjectsResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{10}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SearchCachedObjectsResponse) GetRequestId() string {
@@ -1059,7 +1306,7 @@ type SearchResult struct {
 
 func (x *SearchResult) Reset() {
 	*x = SearchResult{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[11]
+	mi := &file_kmgr_v1_view_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1071,7 +1318,7 @@ func (x *SearchResult) String() string {
 func (*SearchResult) ProtoMessage() {}
 
 func (x *SearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[11]
+	mi := &file_kmgr_v1_view_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1084,7 +1331,7 @@ func (x *SearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResult.ProtoReflect.Descriptor instead.
 func (*SearchResult) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{11}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SearchResult) GetIdentity() *ResourceIdentity {
@@ -1135,7 +1382,7 @@ type SearchProgress struct {
 
 func (x *SearchProgress) Reset() {
 	*x = SearchProgress{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[12]
+	mi := &file_kmgr_v1_view_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1147,7 +1394,7 @@ func (x *SearchProgress) String() string {
 func (*SearchProgress) ProtoMessage() {}
 
 func (x *SearchProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[12]
+	mi := &file_kmgr_v1_view_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1160,7 +1407,7 @@ func (x *SearchProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchProgress.ProtoReflect.Descriptor instead.
 func (*SearchProgress) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{12}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SearchProgress) GetQueryRevision() uint64 {
@@ -1211,7 +1458,7 @@ type SearchObjectsEvent struct {
 
 func (x *SearchObjectsEvent) Reset() {
 	*x = SearchObjectsEvent{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[13]
+	mi := &file_kmgr_v1_view_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1223,7 +1470,7 @@ func (x *SearchObjectsEvent) String() string {
 func (*SearchObjectsEvent) ProtoMessage() {}
 
 func (x *SearchObjectsEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[13]
+	mi := &file_kmgr_v1_view_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1236,7 +1483,7 @@ func (x *SearchObjectsEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchObjectsEvent.ProtoReflect.Descriptor instead.
 func (*SearchObjectsEvent) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{13}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SearchObjectsEvent) GetCursor() *StreamCursor {
@@ -1286,7 +1533,7 @@ type CancelSearchRequest struct {
 
 func (x *CancelSearchRequest) Reset() {
 	*x = CancelSearchRequest{}
-	mi := &file_kmgr_v1_view_proto_msgTypes[14]
+	mi := &file_kmgr_v1_view_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1298,7 +1545,7 @@ func (x *CancelSearchRequest) String() string {
 func (*CancelSearchRequest) ProtoMessage() {}
 
 func (x *CancelSearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_view_proto_msgTypes[14]
+	mi := &file_kmgr_v1_view_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1311,7 +1558,7 @@ func (x *CancelSearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelSearchRequest.ProtoReflect.Descriptor instead.
 func (*CancelSearchRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{14}
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CancelSearchRequest) GetContext() *RequestContext {
@@ -1346,7 +1593,32 @@ var File_kmgr_v1_view_proto protoreflect.FileDescriptor
 
 const file_kmgr_v1_view_proto_rawDesc = "" +
 	"\n" +
-	"\x12kmgr/v1/view.proto\x12\akmgr.v1\x1a\x14kmgr/v1/common.proto\"\x84\x01\n" +
+	"\x12kmgr/v1/view.proto\x12\akmgr.v1\x1a\x14kmgr/v1/common.proto\"\xb8\x02\n" +
+	"\x14PreviewColumnRequest\x121\n" +
+	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x121\n" +
+	"\bresource\x18\x02 \x01(\v2\x15.kmgr.v1.ResourceTypeR\bresource\x12@\n" +
+	"\x0fnamespace_scope\x18\x03 \x01(\v2\x17.kmgr.v1.NamespaceScopeR\x0enamespaceScope\x124\n" +
+	"\x06column\x18\x04 \x01(\v2\x1c.kmgr.v1.CELColumnDefinitionR\x06column\x12B\n" +
+	"\x0fselected_object\x18\x05 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\x0eselectedObject\"\xb7\x01\n" +
+	"\x13CELColumnDefinition\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\x12\x1e\n" +
+	"\n" +
+	"expression\x18\x03 \x01(\tR\n" +
+	"expression\x12\x1f\n" +
+	"\vresult_type\x18\x04 \x01(\tR\n" +
+	"resultType\x12\x18\n" +
+	"\amissing\x18\x05 \x01(\tR\amissing\x12\x1f\n" +
+	"\vlist_joiner\x18\x06 \x01(\tR\n" +
+	"listJoiner\"\xac\x02\n" +
+	"\x15PreviewColumnResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12'\n" +
+	"\x0fcel_environment\x18\x02 \x01(\tR\x0ecelEnvironment\x12'\n" +
+	"\apreview\x18\x03 \x01(\v2\r.kmgr.v1.CellR\apreview\x12,\n" +
+	"\x12used_sample_object\x18\x04 \x01(\bR\x10usedSampleObject\x12D\n" +
+	"\x10evaluated_object\x18\x05 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\x0fevaluatedObject\x12.\n" +
+	"\x05error\x18\x06 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\x84\x01\n" +
 	"\x0eSortDescriptor\x12\x1b\n" +
 	"\tcolumn_id\x18\x01 \x01(\tR\bcolumnId\x124\n" +
 	"\tdirection\x18\x02 \x01(\x0e2\x16.kmgr.v1.SortDirectionR\tdirection\x12\x1f\n" +
@@ -1469,12 +1741,13 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"\x17VIEW_FRESHNESS_WATCHING\x10\x05\x12\x1f\n" +
 	"\x1bVIEW_FRESHNESS_RECONNECTING\x10\x06\x12\x19\n" +
 	"\x15VIEW_FRESHNESS_FAILED\x10\a\x12\x1b\n" +
-	"\x17VIEW_FRESHNESS_COMPLETE\x10\b2\x88\x03\n" +
+	"\x17VIEW_FRESHNESS_COMPLETE\x10\b2\xd8\x03\n" +
 	"\vViewService\x12<\n" +
 	"\n" +
 	"StreamView\x12\x18.kmgr.v1.OpenViewRequest\x1a\x12.kmgr.v1.ViewEvent0\x01\x12B\n" +
 	"\n" +
-	"CancelView\x12\x1a.kmgr.v1.CancelViewRequest\x1a\x18.kmgr.v1.Acknowledgement\x12`\n" +
+	"CancelView\x12\x1a.kmgr.v1.CancelViewRequest\x1a\x18.kmgr.v1.Acknowledgement\x12N\n" +
+	"\rPreviewColumn\x12\x1d.kmgr.v1.PreviewColumnRequest\x1a\x1e.kmgr.v1.PreviewColumnResponse\x12`\n" +
 	"\x13SearchCachedObjects\x12#.kmgr.v1.SearchCachedObjectsRequest\x1a$.kmgr.v1.SearchCachedObjectsResponse\x12M\n" +
 	"\rSearchObjects\x12\x1d.kmgr.v1.SearchObjectsRequest\x1a\x1b.kmgr.v1.SearchObjectsEvent0\x01\x12F\n" +
 	"\fCancelSearch\x12\x1c.kmgr.v1.CancelSearchRequest\x1a\x18.kmgr.v1.AcknowledgementB>Z1github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1\xba\x02\bKmgr_V1_b\x06proto3"
@@ -1492,78 +1765,92 @@ func file_kmgr_v1_view_proto_rawDescGZIP() []byte {
 }
 
 var file_kmgr_v1_view_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_kmgr_v1_view_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_kmgr_v1_view_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_kmgr_v1_view_proto_goTypes = []any{
 	(SortDirection)(0),                  // 0: kmgr.v1.SortDirection
 	(ViewFreshness)(0),                  // 1: kmgr.v1.ViewFreshness
-	(*SortDescriptor)(nil),              // 2: kmgr.v1.SortDescriptor
-	(*ViewSpec)(nil),                    // 3: kmgr.v1.ViewSpec
-	(*OpenViewRequest)(nil),             // 4: kmgr.v1.OpenViewRequest
-	(*CancelViewRequest)(nil),           // 5: kmgr.v1.CancelViewRequest
-	(*ViewStatus)(nil),                  // 6: kmgr.v1.ViewStatus
-	(*SnapshotChunk)(nil),               // 7: kmgr.v1.SnapshotChunk
-	(*RowDelta)(nil),                    // 8: kmgr.v1.RowDelta
-	(*ViewEvent)(nil),                   // 9: kmgr.v1.ViewEvent
-	(*SearchObjectsRequest)(nil),        // 10: kmgr.v1.SearchObjectsRequest
-	(*SearchCachedObjectsRequest)(nil),  // 11: kmgr.v1.SearchCachedObjectsRequest
-	(*SearchCachedObjectsResponse)(nil), // 12: kmgr.v1.SearchCachedObjectsResponse
-	(*SearchResult)(nil),                // 13: kmgr.v1.SearchResult
-	(*SearchProgress)(nil),              // 14: kmgr.v1.SearchProgress
-	(*SearchObjectsEvent)(nil),          // 15: kmgr.v1.SearchObjectsEvent
-	(*CancelSearchRequest)(nil),         // 16: kmgr.v1.CancelSearchRequest
-	(*ResourceType)(nil),                // 17: kmgr.v1.ResourceType
-	(*NamespaceScope)(nil),              // 18: kmgr.v1.NamespaceScope
-	(*RequestContext)(nil),              // 19: kmgr.v1.RequestContext
-	(*ResourceRow)(nil),                 // 20: kmgr.v1.ResourceRow
-	(*StreamCursor)(nil),                // 21: kmgr.v1.StreamCursor
-	(*StructuredError)(nil),             // 22: kmgr.v1.StructuredError
+	(*PreviewColumnRequest)(nil),        // 2: kmgr.v1.PreviewColumnRequest
+	(*CELColumnDefinition)(nil),         // 3: kmgr.v1.CELColumnDefinition
+	(*PreviewColumnResponse)(nil),       // 4: kmgr.v1.PreviewColumnResponse
+	(*SortDescriptor)(nil),              // 5: kmgr.v1.SortDescriptor
+	(*ViewSpec)(nil),                    // 6: kmgr.v1.ViewSpec
+	(*OpenViewRequest)(nil),             // 7: kmgr.v1.OpenViewRequest
+	(*CancelViewRequest)(nil),           // 8: kmgr.v1.CancelViewRequest
+	(*ViewStatus)(nil),                  // 9: kmgr.v1.ViewStatus
+	(*SnapshotChunk)(nil),               // 10: kmgr.v1.SnapshotChunk
+	(*RowDelta)(nil),                    // 11: kmgr.v1.RowDelta
+	(*ViewEvent)(nil),                   // 12: kmgr.v1.ViewEvent
+	(*SearchObjectsRequest)(nil),        // 13: kmgr.v1.SearchObjectsRequest
+	(*SearchCachedObjectsRequest)(nil),  // 14: kmgr.v1.SearchCachedObjectsRequest
+	(*SearchCachedObjectsResponse)(nil), // 15: kmgr.v1.SearchCachedObjectsResponse
+	(*SearchResult)(nil),                // 16: kmgr.v1.SearchResult
+	(*SearchProgress)(nil),              // 17: kmgr.v1.SearchProgress
+	(*SearchObjectsEvent)(nil),          // 18: kmgr.v1.SearchObjectsEvent
+	(*CancelSearchRequest)(nil),         // 19: kmgr.v1.CancelSearchRequest
+	(*RequestContext)(nil),              // 20: kmgr.v1.RequestContext
+	(*ResourceType)(nil),                // 21: kmgr.v1.ResourceType
+	(*NamespaceScope)(nil),              // 22: kmgr.v1.NamespaceScope
 	(*ResourceIdentity)(nil),            // 23: kmgr.v1.ResourceIdentity
-	(*Acknowledgement)(nil),             // 24: kmgr.v1.Acknowledgement
+	(*Cell)(nil),                        // 24: kmgr.v1.Cell
+	(*StructuredError)(nil),             // 25: kmgr.v1.StructuredError
+	(*ResourceRow)(nil),                 // 26: kmgr.v1.ResourceRow
+	(*StreamCursor)(nil),                // 27: kmgr.v1.StreamCursor
+	(*Acknowledgement)(nil),             // 28: kmgr.v1.Acknowledgement
 }
 var file_kmgr_v1_view_proto_depIdxs = []int32{
-	0,  // 0: kmgr.v1.SortDescriptor.direction:type_name -> kmgr.v1.SortDirection
-	17, // 1: kmgr.v1.ViewSpec.resource:type_name -> kmgr.v1.ResourceType
-	18, // 2: kmgr.v1.ViewSpec.namespace_scope:type_name -> kmgr.v1.NamespaceScope
-	2,  // 3: kmgr.v1.ViewSpec.sort:type_name -> kmgr.v1.SortDescriptor
-	19, // 4: kmgr.v1.OpenViewRequest.context:type_name -> kmgr.v1.RequestContext
-	3,  // 5: kmgr.v1.OpenViewRequest.spec:type_name -> kmgr.v1.ViewSpec
-	19, // 6: kmgr.v1.CancelViewRequest.context:type_name -> kmgr.v1.RequestContext
-	1,  // 7: kmgr.v1.ViewStatus.freshness:type_name -> kmgr.v1.ViewFreshness
-	20, // 8: kmgr.v1.SnapshotChunk.rows:type_name -> kmgr.v1.ResourceRow
-	20, // 9: kmgr.v1.RowDelta.upserts:type_name -> kmgr.v1.ResourceRow
-	21, // 10: kmgr.v1.ViewEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	7,  // 11: kmgr.v1.ViewEvent.snapshot:type_name -> kmgr.v1.SnapshotChunk
-	8,  // 12: kmgr.v1.ViewEvent.delta:type_name -> kmgr.v1.RowDelta
-	6,  // 13: kmgr.v1.ViewEvent.status:type_name -> kmgr.v1.ViewStatus
-	22, // 14: kmgr.v1.ViewEvent.error:type_name -> kmgr.v1.StructuredError
-	19, // 15: kmgr.v1.SearchObjectsRequest.context:type_name -> kmgr.v1.RequestContext
-	17, // 16: kmgr.v1.SearchObjectsRequest.resource:type_name -> kmgr.v1.ResourceType
-	18, // 17: kmgr.v1.SearchObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
-	19, // 18: kmgr.v1.SearchCachedObjectsRequest.context:type_name -> kmgr.v1.RequestContext
-	18, // 19: kmgr.v1.SearchCachedObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
-	13, // 20: kmgr.v1.SearchCachedObjectsResponse.results:type_name -> kmgr.v1.SearchResult
-	22, // 21: kmgr.v1.SearchCachedObjectsResponse.error:type_name -> kmgr.v1.StructuredError
-	23, // 22: kmgr.v1.SearchResult.identity:type_name -> kmgr.v1.ResourceIdentity
-	21, // 23: kmgr.v1.SearchObjectsEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	13, // 24: kmgr.v1.SearchObjectsEvent.results:type_name -> kmgr.v1.SearchResult
-	14, // 25: kmgr.v1.SearchObjectsEvent.progress:type_name -> kmgr.v1.SearchProgress
-	22, // 26: kmgr.v1.SearchObjectsEvent.error:type_name -> kmgr.v1.StructuredError
-	19, // 27: kmgr.v1.CancelSearchRequest.context:type_name -> kmgr.v1.RequestContext
-	4,  // 28: kmgr.v1.ViewService.StreamView:input_type -> kmgr.v1.OpenViewRequest
-	5,  // 29: kmgr.v1.ViewService.CancelView:input_type -> kmgr.v1.CancelViewRequest
-	11, // 30: kmgr.v1.ViewService.SearchCachedObjects:input_type -> kmgr.v1.SearchCachedObjectsRequest
-	10, // 31: kmgr.v1.ViewService.SearchObjects:input_type -> kmgr.v1.SearchObjectsRequest
-	16, // 32: kmgr.v1.ViewService.CancelSearch:input_type -> kmgr.v1.CancelSearchRequest
-	9,  // 33: kmgr.v1.ViewService.StreamView:output_type -> kmgr.v1.ViewEvent
-	24, // 34: kmgr.v1.ViewService.CancelView:output_type -> kmgr.v1.Acknowledgement
-	12, // 35: kmgr.v1.ViewService.SearchCachedObjects:output_type -> kmgr.v1.SearchCachedObjectsResponse
-	15, // 36: kmgr.v1.ViewService.SearchObjects:output_type -> kmgr.v1.SearchObjectsEvent
-	24, // 37: kmgr.v1.ViewService.CancelSearch:output_type -> kmgr.v1.Acknowledgement
-	33, // [33:38] is the sub-list for method output_type
-	28, // [28:33] is the sub-list for method input_type
-	28, // [28:28] is the sub-list for extension type_name
-	28, // [28:28] is the sub-list for extension extendee
-	0,  // [0:28] is the sub-list for field type_name
+	20, // 0: kmgr.v1.PreviewColumnRequest.context:type_name -> kmgr.v1.RequestContext
+	21, // 1: kmgr.v1.PreviewColumnRequest.resource:type_name -> kmgr.v1.ResourceType
+	22, // 2: kmgr.v1.PreviewColumnRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
+	3,  // 3: kmgr.v1.PreviewColumnRequest.column:type_name -> kmgr.v1.CELColumnDefinition
+	23, // 4: kmgr.v1.PreviewColumnRequest.selected_object:type_name -> kmgr.v1.ResourceIdentity
+	24, // 5: kmgr.v1.PreviewColumnResponse.preview:type_name -> kmgr.v1.Cell
+	23, // 6: kmgr.v1.PreviewColumnResponse.evaluated_object:type_name -> kmgr.v1.ResourceIdentity
+	25, // 7: kmgr.v1.PreviewColumnResponse.error:type_name -> kmgr.v1.StructuredError
+	0,  // 8: kmgr.v1.SortDescriptor.direction:type_name -> kmgr.v1.SortDirection
+	21, // 9: kmgr.v1.ViewSpec.resource:type_name -> kmgr.v1.ResourceType
+	22, // 10: kmgr.v1.ViewSpec.namespace_scope:type_name -> kmgr.v1.NamespaceScope
+	5,  // 11: kmgr.v1.ViewSpec.sort:type_name -> kmgr.v1.SortDescriptor
+	20, // 12: kmgr.v1.OpenViewRequest.context:type_name -> kmgr.v1.RequestContext
+	6,  // 13: kmgr.v1.OpenViewRequest.spec:type_name -> kmgr.v1.ViewSpec
+	20, // 14: kmgr.v1.CancelViewRequest.context:type_name -> kmgr.v1.RequestContext
+	1,  // 15: kmgr.v1.ViewStatus.freshness:type_name -> kmgr.v1.ViewFreshness
+	26, // 16: kmgr.v1.SnapshotChunk.rows:type_name -> kmgr.v1.ResourceRow
+	26, // 17: kmgr.v1.RowDelta.upserts:type_name -> kmgr.v1.ResourceRow
+	27, // 18: kmgr.v1.ViewEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	10, // 19: kmgr.v1.ViewEvent.snapshot:type_name -> kmgr.v1.SnapshotChunk
+	11, // 20: kmgr.v1.ViewEvent.delta:type_name -> kmgr.v1.RowDelta
+	9,  // 21: kmgr.v1.ViewEvent.status:type_name -> kmgr.v1.ViewStatus
+	25, // 22: kmgr.v1.ViewEvent.error:type_name -> kmgr.v1.StructuredError
+	20, // 23: kmgr.v1.SearchObjectsRequest.context:type_name -> kmgr.v1.RequestContext
+	21, // 24: kmgr.v1.SearchObjectsRequest.resource:type_name -> kmgr.v1.ResourceType
+	22, // 25: kmgr.v1.SearchObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
+	20, // 26: kmgr.v1.SearchCachedObjectsRequest.context:type_name -> kmgr.v1.RequestContext
+	22, // 27: kmgr.v1.SearchCachedObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
+	16, // 28: kmgr.v1.SearchCachedObjectsResponse.results:type_name -> kmgr.v1.SearchResult
+	25, // 29: kmgr.v1.SearchCachedObjectsResponse.error:type_name -> kmgr.v1.StructuredError
+	23, // 30: kmgr.v1.SearchResult.identity:type_name -> kmgr.v1.ResourceIdentity
+	27, // 31: kmgr.v1.SearchObjectsEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	16, // 32: kmgr.v1.SearchObjectsEvent.results:type_name -> kmgr.v1.SearchResult
+	17, // 33: kmgr.v1.SearchObjectsEvent.progress:type_name -> kmgr.v1.SearchProgress
+	25, // 34: kmgr.v1.SearchObjectsEvent.error:type_name -> kmgr.v1.StructuredError
+	20, // 35: kmgr.v1.CancelSearchRequest.context:type_name -> kmgr.v1.RequestContext
+	7,  // 36: kmgr.v1.ViewService.StreamView:input_type -> kmgr.v1.OpenViewRequest
+	8,  // 37: kmgr.v1.ViewService.CancelView:input_type -> kmgr.v1.CancelViewRequest
+	2,  // 38: kmgr.v1.ViewService.PreviewColumn:input_type -> kmgr.v1.PreviewColumnRequest
+	14, // 39: kmgr.v1.ViewService.SearchCachedObjects:input_type -> kmgr.v1.SearchCachedObjectsRequest
+	13, // 40: kmgr.v1.ViewService.SearchObjects:input_type -> kmgr.v1.SearchObjectsRequest
+	19, // 41: kmgr.v1.ViewService.CancelSearch:input_type -> kmgr.v1.CancelSearchRequest
+	12, // 42: kmgr.v1.ViewService.StreamView:output_type -> kmgr.v1.ViewEvent
+	28, // 43: kmgr.v1.ViewService.CancelView:output_type -> kmgr.v1.Acknowledgement
+	4,  // 44: kmgr.v1.ViewService.PreviewColumn:output_type -> kmgr.v1.PreviewColumnResponse
+	15, // 45: kmgr.v1.ViewService.SearchCachedObjects:output_type -> kmgr.v1.SearchCachedObjectsResponse
+	18, // 46: kmgr.v1.ViewService.SearchObjects:output_type -> kmgr.v1.SearchObjectsEvent
+	28, // 47: kmgr.v1.ViewService.CancelSearch:output_type -> kmgr.v1.Acknowledgement
+	42, // [42:48] is the sub-list for method output_type
+	36, // [36:42] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_view_proto_init() }
@@ -1572,7 +1859,7 @@ func file_kmgr_v1_view_proto_init() {
 		return
 	}
 	file_kmgr_v1_common_proto_init()
-	file_kmgr_v1_view_proto_msgTypes[7].OneofWrappers = []any{
+	file_kmgr_v1_view_proto_msgTypes[10].OneofWrappers = []any{
 		(*ViewEvent_Snapshot)(nil),
 		(*ViewEvent_Delta)(nil),
 		(*ViewEvent_Status)(nil),
@@ -1584,7 +1871,7 @@ func file_kmgr_v1_view_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_view_proto_rawDesc), len(file_kmgr_v1_view_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   15,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

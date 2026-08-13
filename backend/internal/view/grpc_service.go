@@ -3,13 +3,20 @@ package view
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 )
 
 var _ kmgrv1.ViewServiceServer = (*GRPCService)(nil)
@@ -19,6 +26,7 @@ var _ kmgrv1.ViewServiceServer = (*GRPCService)(nil)
 type GRPCService struct {
 	kmgrv1.UnimplementedViewServiceServer
 	runtime  *Runtime
+	compiler *viewcolumns.Compiler
 	searchMu sync.Mutex
 	searches map[searchStreamKey]context.CancelFunc
 }
@@ -30,11 +38,212 @@ type searchStreamKey struct {
 	revision   uint64
 }
 
-func NewGRPCService(runtime *Runtime) (*GRPCService, error) {
+func NewGRPCService(runtime *Runtime, compilers ...*viewcolumns.Compiler) (*GRPCService, error) {
 	if runtime == nil {
 		return nil, errors.New("view runtime must not be nil")
 	}
-	return &GRPCService{runtime: runtime, searches: make(map[searchStreamKey]context.CancelFunc)}, nil
+	var compiler *viewcolumns.Compiler
+	if len(compilers) != 0 {
+		compiler = compilers[0]
+	}
+	if compiler == nil {
+		var err error
+		compiler, err = viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &GRPCService{
+		runtime: runtime, compiler: compiler,
+		searches: make(map[searchStreamKey]context.CancelFunc),
+	}, nil
+}
+
+// PreviewColumn is deliberately independent from the active columns file. A
+// draft is compiled and evaluated without replacing the manager's last valid
+// compiled configuration or starting a LIST/WATCH consumer.
+func (s *GRPCService) PreviewColumn(
+	ctx context.Context,
+	request *kmgrv1.PreviewColumnRequest,
+) (*kmgrv1.PreviewColumnResponse, error) {
+	requestID, operationContext, cancel, err := previewRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	if request.GetResource() == nil || request.GetColumn() == nil {
+		return nil, status.Error(codes.InvalidArgument, "resource and CEL column definition are required")
+	}
+	resource := request.GetResource()
+	if strings.TrimSpace(resource.GetVersion()) == "" || strings.TrimSpace(resource.GetResource()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "resource version and name are required")
+	}
+	definition := request.GetColumn()
+	program, err := s.compiler.Compile(viewcolumns.Definition{
+		ID: definition.GetId(), Title: definition.GetTitle(),
+		Expression: definition.GetExpression(), ResultType: viewcolumns.ResultType(definition.GetResultType()),
+		Missing: definition.GetMissing(), ListJoiner: definition.GetListJoiner(),
+	})
+	response := &kmgrv1.PreviewColumnResponse{
+		RequestId: requestID, CelEnvironment: viewcolumns.EnvironmentVersion,
+	}
+	if err != nil {
+		response.Error = previewColumnError("CELCompileFailed", err, "compile CEL column")
+		return response, nil
+	}
+
+	object, identity, sample, err := s.previewObject(operationContext, request)
+	if err != nil {
+		response.Error = previewColumnObjectError(err, request.GetSelectedObject())
+		return response, nil
+	}
+	response.UsedSampleObject = sample
+	response.EvaluatedObject = identity
+	isSecret := resource.GetGroup() == "" && resource.GetVersion() == "v1" && resource.GetResource() == "secrets"
+	value, err := program.Evaluate(viewcolumns.Activation{
+		Object:  viewcolumns.SanitizeObjectActivation(object.Object, isSecret),
+		Metrics: map[string]any{},
+		Context: previewContext(request),
+		Now:     time.Now(),
+	})
+	if err != nil {
+		response.Error = previewColumnError("CELEvaluationFailed", err, "evaluate CEL column")
+		return response, nil
+	}
+	response.Preview = cellForCELValue(definition.GetId(), value)
+	return response, nil
+}
+
+func (s *GRPCService) previewObject(
+	ctx context.Context,
+	request *kmgrv1.PreviewColumnRequest,
+) (*unstructured.Unstructured, *kmgrv1.ResourceIdentity, bool, error) {
+	selected := request.GetSelectedObject()
+	if selected == nil || selected.GetName() == "" || selected.GetUid() == "" {
+		return samplePreviewObject(request.GetResource()), nil, true, nil
+	}
+	if selected.GetClusterSessionId() != "" && selected.GetClusterSessionId() != request.GetContext().GetClusterSessionId() {
+		return nil, nil, false, errors.New("selected object belongs to another cluster session")
+	}
+	resource := request.GetResource()
+	if selected.GetGroup() != resource.GetGroup() || selected.GetVersion() != resource.GetVersion() ||
+		selected.GetResource() != resource.GetResource() {
+		return nil, nil, false, errors.New("selected object belongs to another resource type")
+	}
+	_, client, err := s.runtime.source.OpenResource(
+		request.GetContext().GetClusterSessionId(),
+		schema.GroupVersionResource{Group: resource.GetGroup(), Version: resource.GetVersion(), Resource: resource.GetResource()},
+		selected.GetNamespace(),
+	)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	getter, ok := client.(interface {
+		Get(context.Context, string, metav1.GetOptions, ...string) (*unstructured.Unstructured, error)
+	})
+	if !ok {
+		return nil, nil, false, errors.New("resource client does not support authoritative GET")
+	}
+	object, err := getter.Get(ctx, selected.GetName(), metav1.GetOptions{})
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if object == nil {
+		return nil, nil, false, errors.New("Kubernetes API returned no object")
+	}
+	if string(object.GetUID()) != selected.GetUid() {
+		return nil, nil, false, fmt.Errorf(
+			"selected object was recreated (expected UID %q, found %q)",
+			selected.GetUid(), object.GetUID(),
+		)
+	}
+	return object, selected, false, nil
+}
+
+func samplePreviewObject(resource *kmgrv1.ResourceType) *unstructured.Unstructured {
+	apiVersion := resource.GetVersion()
+	if resource.GetGroup() != "" {
+		apiVersion = resource.GetGroup() + "/" + resource.GetVersion()
+	}
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": apiVersion,
+		"kind":       resource.GetKind(),
+		"metadata": map[string]any{
+			"name": "sample", "namespace": "default",
+			"labels": map[string]any{}, "annotations": map[string]any{},
+		},
+	}}
+	if !resource.GetNamespaced() {
+		object.SetNamespace("")
+	}
+	return object
+}
+
+func previewContext(request *kmgrv1.PreviewColumnRequest) map[string]any {
+	resource, scope := request.GetResource(), request.GetNamespaceScope()
+	return map[string]any{
+		"clusterSessionID": request.GetContext().GetClusterSessionId(),
+		"group":            resource.GetGroup(), "version": resource.GetVersion(),
+		"resource": resource.GetResource(), "kind": resource.GetKind(),
+		"namespaced": resource.GetNamespaced(), "allNamespaces": scope.GetAllNamespaces(),
+		"namespaces": append([]string(nil), scope.GetNamespaces()...),
+	}
+}
+
+func cellForCELValue(columnID string, value viewcolumns.Value) *kmgrv1.Cell {
+	cell := &kmgrv1.Cell{
+		ColumnId: columnID, DisplayText: value.Display,
+		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+	}
+	switch {
+	case value.String != nil:
+		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: *value.String}
+	case value.Integer != nil:
+		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: float64(*value.Integer)}
+	case value.Number != nil:
+		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: *value.Number}
+	case value.Boolean != nil:
+		cell.TypedValue = &kmgrv1.Cell_BoolValue{BoolValue: *value.Boolean}
+	case value.Time != nil:
+		cell.TypedValue = &kmgrv1.Cell_TimestampUnixMs{TimestampUnixMs: value.Time.UnixMilli()}
+	case value.Duration != nil:
+		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: value.Duration.Seconds()}
+	}
+	return cell
+}
+
+func previewColumnError(reason string, err error, operation string) *kmgrv1.StructuredError {
+	return &kmgrv1.StructuredError{
+		Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION,
+		Reason:   reason, Message: err.Error(), Operation: operation,
+	}
+}
+
+func previewColumnObjectError(err error, identity *kmgrv1.ResourceIdentity) *kmgrv1.StructuredError {
+	return &kmgrv1.StructuredError{
+		Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE,
+		Reason:   "ColumnPreviewObjectUnavailable", Message: err.Error(),
+		Operation: "load CEL preview object", Resource: identity,
+	}
+}
+
+func previewRequestContext(
+	ctx context.Context,
+	request *kmgrv1.RequestContext,
+) (string, context.Context, context.CancelFunc, error) {
+	if request == nil || request.GetRequestId() == "" || request.GetClusterSessionId() == "" {
+		return "", nil, nil, status.Error(codes.InvalidArgument, "request ID and cluster session ID are required")
+	}
+	if request.GetDeadlineUnixMs() == 0 {
+		derived, cancel := context.WithCancel(ctx)
+		return request.GetRequestId(), derived, cancel, nil
+	}
+	deadline := time.UnixMilli(request.GetDeadlineUnixMs())
+	if !deadline.After(time.Now()) {
+		return "", nil, nil, status.Error(codes.DeadlineExceeded, "request deadline exceeded")
+	}
+	derived, cancel := context.WithDeadline(ctx, deadline)
+	return request.GetRequestId(), derived, cancel, nil
 }
 
 func (s *GRPCService) SearchCachedObjects(

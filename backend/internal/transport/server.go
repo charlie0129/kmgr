@@ -94,7 +94,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	viewService, err := view.NewGRPCService(viewRuntime)
+	viewService, err := view.NewGRPCService(viewRuntime, columnsCompiler)
 	if err != nil {
 		viewRuntime.Close()
 		return nil, err
