@@ -10,10 +10,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let provider: any WorkspaceResourceProviding
     private let workspaceController: ClusterWorkspaceViewController
 
-    convenience init(session: OpenedClusterSession) {
-        self.init(session: session, provider: UnavailableWorkspaceResourceProvider())
-    }
-
     init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
         self.provider = provider
@@ -467,6 +463,9 @@ private final class ResourceListViewController: NSViewController,
     private var suppressSelectionCallbacks = false
     private var history = WorkspaceNavigationHistory()
     private var columnIDs: [String] = []
+    private var snapshotUIDs: [ResourceUID] = []
+    private var lastStreamResourceID: String?
+    private var lastStreamScope: NamespaceSelection?
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
 
     init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
@@ -555,7 +554,7 @@ private final class ResourceListViewController: NSViewController,
         self.scope = scope
         let state = ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
-            kind: resource.kind, namespaceSelection: scope
+            kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope
         )
         history.navigate(to: .resource(state))
         configureColumns(for: resource)
@@ -632,8 +631,16 @@ private final class ResourceListViewController: NSViewController,
         }
         generation &+= 1
         generationGate.reset()
-        model = ResourceTableModel()
-        tableView.reloadData()
+        let canKeepWarmRows = lastStreamResourceID == resource.id
+            && lastStreamScope == scope
+            && !model.orderedVisibleUIDs.isEmpty
+        if !canKeepWarmRows {
+            model = ResourceTableModel()
+            tableView.reloadData()
+        }
+        lastStreamResourceID = resource.id
+        lastStreamScope = scope
+        snapshotUIDs.removeAll(keepingCapacity: true)
         errorLabel.isHidden = true
         titleLabel.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
         scopeLabel.stringValue = scope.presentation
@@ -647,7 +654,14 @@ private final class ResourceListViewController: NSViewController,
             namespaces: scope.namespaces,
             filterExpression: filterField.stringValue,
             filterRevision: filterRevision,
-            columnIDs: columnIDs
+            columnIDs: columnIDs,
+            sort: tableView.sortDescriptors.compactMap { descriptor in
+                guard let columnID = descriptor.key else { return nil }
+                return ResourceSortDescriptor(
+                    columnID: columnID,
+                    direction: descriptor.ascending ? .ascending : .descending
+                )
+            }
         )
         streamTask = Task { [weak self, provider] in
             do {
@@ -675,12 +689,16 @@ private final class ResourceListViewController: NSViewController,
         case .snapshot(_, let chunk):
             let capture = captureUpdate()
             if chunk.first {
-                model = ResourceTableModel()
+                snapshotUIDs.removeAll(keepingCapacity: true)
             }
+            snapshotUIDs.append(contentsOf: chunk.rows.map { $0.identity.uid })
+            let order: VisibleOrderUpdate = chunk.last
+                ? .replace(snapshotUIDs)
+                : .append(chunk.rows.map { $0.identity.uid })
             let plan = model.apply(
                 ResourceRowBatch(
                     upserts: chunk.rows,
-                    visibleOrder: .append(chunk.rows.map { $0.identity.uid })
+                    visibleOrder: order
                 ),
                 capture: capture
             )
@@ -764,8 +782,10 @@ private final class ResourceListViewController: NSViewController,
         guard let resource else { return nil }
         return ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
-            kind: resource.kind, namespaceSelection: scope,
+            kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope,
             filter: filterField.stringValue,
+            sortColumnID: tableView.sortDescriptors.first?.key,
+            sortDescending: !(tableView.sortDescriptors.first?.ascending ?? true),
             selectedUIDs: model.selectedUIDs,
             scrollAnchor: captureUpdate().scrollAnchor
         )
@@ -775,12 +795,20 @@ private final class ResourceListViewController: NSViewController,
         guard case .resource(let state) = destination else { return }
         resource = DiscoveredResource(
             group: state.group, version: state.version, resource: state.resource,
-            kind: state.kind, namespaced: !state.namespaceSelection.namespaces.isEmpty || state.namespaceSelection.allNamespaces,
+            kind: state.kind, namespaced: state.namespaced,
             verbs: ["list", "watch"]
         )
         scope = state.namespaceSelection
         filterField.stringValue = state.filter
         configureColumns(for: resource!)
+        if let columnID = state.sortColumnID {
+            tableView.sortDescriptors = [NSSortDescriptor(
+                key: columnID,
+                ascending: !state.sortDescending
+            )]
+        } else {
+            tableView.sortDescriptors = []
+        }
         openStream()
     }
 
@@ -816,6 +844,7 @@ private final class ResourceListViewController: NSViewController,
         case .warning: cell.textField?.textColor = .systemOrange
         case .critical: cell.textField?.textColor = .systemRed
         case .informational: cell.textField?.textColor = .systemBlue
+        case .muted: cell.textField?.textColor = .secondaryLabelColor
         default: cell.textField?.textColor = .labelColor
         }
         return cell
@@ -837,9 +866,6 @@ private final class ResourceListViewController: NSViewController,
         guard let descriptor = tableView.sortDescriptors.first,
             let key = descriptor.key
         else { return }
-        // Sorting is backend-authoritative. Until the IPC provider exposes a
-        // dedicated navigation mutation, reopening applies the same column set
-        // and stable UID tie-breaker; this keeps AppKit off raw object work.
         logger.debug("Requested backend table sort for \(key, privacy: .public)")
         openStream()
     }

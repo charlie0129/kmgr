@@ -59,6 +59,7 @@ public enum CellSeverity: String, Codable, Sendable, CaseIterable {
     case informational
     case warning
     case critical
+    case muted
 }
 
 /// Compact, already-computed resource usage sent to the GUI. Quantities used
@@ -68,21 +69,36 @@ public struct ResourceUsageValue: Hashable, Codable, Sendable {
     public var usage: Double?
     public var request: Double?
     public var limit: Double?
+    public var capacity: Double?
     public var sortValue: Double?
     public var unit: String
+    public var resourceName: String
+    public var measuredAtUnixMilliseconds: Int64?
+    public var provider: String
+    public var measurementScope: String
 
     public init(
         usage: Double? = nil,
         request: Double? = nil,
         limit: Double? = nil,
+        capacity: Double? = nil,
         sortValue: Double? = nil,
-        unit: String
+        unit: String,
+        resourceName: String = "",
+        measuredAtUnixMilliseconds: Int64? = nil,
+        provider: String = "",
+        measurementScope: String = ""
     ) {
         self.usage = usage
         self.request = request
         self.limit = limit
+        self.capacity = capacity
         self.sortValue = sortValue
         self.unit = unit
+        self.resourceName = resourceName
+        self.measuredAtUnixMilliseconds = measuredAtUnixMilliseconds
+        self.provider = provider
+        self.measurementScope = measurementScope
     }
 }
 
@@ -92,6 +108,8 @@ public enum CellTypedValue: Hashable, Codable, Sendable {
     case integer(Int64)
     case timestampUnixMilliseconds(Int64)
     case usage(ResourceUsageValue)
+    case boolean(Bool)
+    case opaqueSortValue(Data)
 }
 
 public struct Cell: Hashable, Codable, Sendable {

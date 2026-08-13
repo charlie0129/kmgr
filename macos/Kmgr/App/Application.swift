@@ -10,6 +10,7 @@ final class Application: NSObject, NSApplicationDelegate {
     private var chooserControllers: [ObjectIdentifier: ClusterManagerWindowController] = [:]
     private var workspaceControllers: [ObjectIdentifier: ClusterWorkspaceWindowController] = [:]
     private let clusterContextProvider: any ClusterContextProviding
+    private let workspaceResourceProvider: any WorkspaceResourceProviding
     private let engineSupervisor: EngineSupervisor
     private var isTerminating = false
 
@@ -18,6 +19,9 @@ final class Application: NSObject, NSApplicationDelegate {
         self.engineSupervisor = supervisor
         self.clusterContextProvider = EngineClusterContextProvider(
             supervisor: supervisor
+        )
+        self.workspaceResourceProvider = EngineWorkspaceResourceProvider(
+            connection: supervisor.connection
         )
         super.init()
     }
@@ -68,7 +72,10 @@ final class Application: NSObject, NSApplicationDelegate {
     }
 
     private func openWorkspace(for session: OpenedClusterSession) {
-        let controller = ClusterWorkspaceWindowController(session: session)
+        let controller = ClusterWorkspaceWindowController(
+            session: session,
+            provider: workspaceResourceProvider
+        )
         let identifier = ObjectIdentifier(controller)
         workspaceControllers[identifier] = controller
         controller.onClose = { [weak self] in

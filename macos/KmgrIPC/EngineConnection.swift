@@ -86,6 +86,10 @@ public final class EngineConnection: @unchecked Sendable {
     public func clusterClient() throws -> Kmgr_V1_ClusterService.Client<Transport> {
         Kmgr_V1_ClusterService.Client(wrapping: try currentClient())
     }
+
+    public func viewClient() throws -> Kmgr_V1_ViewService.Client<Transport> {
+        Kmgr_V1_ViewService.Client(wrapping: try currentClient())
+    }
 }
 
 private extension NSLock {
