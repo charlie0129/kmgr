@@ -9,6 +9,25 @@ enum ObjectDetailInitialTab {
     case relationships
     case metrics
     case data
+
+    func segment(supportsDataEditor: Bool, supportsMetrics: Bool) -> Int {
+        switch self {
+        case .automatic:
+            supportsDataEditor ? 5 : 0
+        case .summary:
+            0
+        case .yaml:
+            1
+        case .events:
+            2
+        case .relationships:
+            3
+        case .metrics:
+            supportsMetrics ? 4 : 0
+        case .data:
+            supportsDataEditor ? 5 : 0
+        }
+    }
 }
 
 /// A fresh, UID-authoritative detail surface. It replaces the table area in a
@@ -50,6 +69,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let yamlScrollView = NSScrollView()
     private let yamlContainerView = NSView()
     private let editButton = NSButton(title: "Edit", target: nil, action: nil)
+    private let managedFieldsButton = NSButton(
+        checkboxWithTitle: "Show Managed Fields", target: nil, action: nil
+    )
     private let saveButton = NSButton(title: "Save", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let dataSplitView = NSSplitView()
@@ -69,6 +91,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var objectData: ObjectData?
     private var selectedDataEntry: ObjectDataEntry?
     private var originalYAML = Data()
+    private var yamlPresentation = YAMLManagedFieldsPresentation(yamlUTF8: Data())
+    private var yamlLineNumberRuler: LineNumberRulerView?
     private var loadTask: Task<Void, Never>?
     private var watchTask: Task<Void, Never>?
     private var eventsTask: Task<Void, Never>?
@@ -365,20 +389,36 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         yamlTextView.isAutomaticDashSubstitutionEnabled = false
         yamlTextView.allowsUndo = true
         yamlTextView.delegate = self
+        yamlTextView.setAccessibilityLabel("Kubernetes object YAML")
         yamlTextView.textContainerInset = NSSize(width: 10, height: 10)
         yamlScrollView.documentView = yamlTextView
         yamlScrollView.hasVerticalScroller = true
         yamlScrollView.hasHorizontalScroller = true
+        yamlScrollView.identifier = .init("object-detail-yaml-scroll")
+        let lineNumberRuler = LineNumberRulerView(
+            textView: yamlTextView,
+            scrollView: yamlScrollView
+        )
+        yamlLineNumberRuler = lineNumberRuler
+        yamlScrollView.verticalRulerView = lineNumberRuler
+        yamlScrollView.hasVerticalRuler = true
+        yamlScrollView.rulersVisible = true
 
         editButton.target = self
         editButton.action = #selector(beginYAMLEdit)
+        managedFieldsButton.target = self
+        managedFieldsButton.action = #selector(toggleManagedFields)
+        managedFieldsButton.state = .off
+        managedFieldsButton.isHidden = true
         saveButton.target = self
         saveButton.action = #selector(saveYAML)
         cancelButton.target = self
         cancelButton.action = #selector(cancelYAMLEdit)
         saveButton.isHidden = true
         cancelButton.isHidden = true
-        let controls = NSStackView(views: [editButton, saveButton, cancelButton, NSView()])
+        let controls = NSStackView(views: [
+            editButton, managedFieldsButton, saveButton, cancelButton, NSView(),
+        ])
         controls.orientation = .horizontal
         controls.translatesAutoresizingMaskIntoConstraints = false
         yamlScrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -490,8 +530,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         identity = detail.identity
         self.detail = detail
         objectData = data
-        originalYAML = detail.yamlUTF8
-        yamlTextView.string = String(decoding: detail.yamlUTF8, as: UTF8.self)
+        installYAML(detail.yamlUTF8)
         renderSummary(detail.summaryFields)
         keysTable.reloadData()
         updateDataEditorControls()
@@ -536,12 +575,14 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         editButton.isEnabled = true
         saveButton.isEnabled = isEditingYAML
         originalYAML = updatedDetail.yamlUTF8
+        yamlPresentation = YAMLManagedFieldsPresentation(yamlUTF8: updatedDetail.yamlUTF8)
+        managedFieldsButton.isHidden = !yamlPresentation.hasManagedFields
         if preserveYAML, var editingBasis = detail {
             editingBasis.identity = updatedDetail.identity
             detail = editingBasis
         } else {
             detail = updatedDetail
-            yamlTextView.string = String(decoding: updatedDetail.yamlUTF8, as: UTF8.self)
+            showYAMLPresentation()
         }
         renderSummary(updatedDetail.summaryFields)
         renderMetrics(updatedDetail.metrics)
@@ -662,22 +703,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private var initialSegment: Int {
-        switch initialTab {
-        case .automatic:
-            return supportsDataEditor ? 2 : 0
-        case .summary:
-            return 0
-        case .yaml:
-            return 1
-        case .events:
-            return 2
-        case .relationships:
-            return 3
-        case .metrics:
-            return supportsMetrics ? 4 : 0
-        case .data:
-            return supportsDataEditor ? 5 : 0
-        }
+        initialTab.segment(
+            supportsDataEditor: supportsDataEditor,
+            supportsMetrics: supportsMetrics
+        )
     }
 
     private func startObjectWatch(resourceVersion: String) {
@@ -736,8 +765,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             return
         }
         detail = updated
-        originalYAML = updated.yamlUTF8
-        yamlTextView.string = String(decoding: updated.yamlUTF8, as: UTF8.self)
+        installYAML(updated.yamlUTF8)
         renderSummary(updated.summaryFields)
         renderMetrics(updated.metrics)
         statusLabel.stringValue = "Watching · resource version \(updated.resourceVersion)"
@@ -895,16 +923,20 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func beginYAMLEdit() {
+        // Editing always starts from the complete authoritative YAML even when
+        // managedFields were hidden in the read-only presentation. The backend
+        // protects them from apply along with the other server-owned fields.
+        yamlTextView.string = yamlPresentation.completeYAML
         isEditingYAML = true
         yamlTextView.isEditable = true
         editButton.isHidden = true
+        managedFieldsButton.isHidden = true
         saveButton.isHidden = false
         cancelButton.isHidden = false
         view.window?.makeFirstResponder(yamlTextView)
     }
 
     @objc private func cancelYAMLEdit() {
-        yamlTextView.string = String(decoding: originalYAML, as: UTF8.self)
         finishYAMLEdit()
     }
 
@@ -974,8 +1006,30 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         isEditingYAML = false
         yamlTextView.isEditable = false
         editButton.isHidden = false
+        managedFieldsButton.isHidden = !yamlPresentation.hasManagedFields
         saveButton.isHidden = true
         cancelButton.isHidden = true
+        showYAMLPresentation()
+    }
+
+    @objc private func toggleManagedFields() {
+        guard !isEditingYAML else { return }
+        showYAMLPresentation()
+    }
+
+    private func installYAML(_ yamlUTF8: Data) {
+        originalYAML = yamlUTF8
+        yamlPresentation = YAMLManagedFieldsPresentation(yamlUTF8: yamlUTF8)
+        if !yamlPresentation.hasManagedFields { managedFieldsButton.state = .off }
+        managedFieldsButton.isHidden = !yamlPresentation.hasManagedFields || isEditingYAML
+        if !isEditingYAML { showYAMLPresentation() }
+    }
+
+    private func showYAMLPresentation() {
+        yamlTextView.string = yamlPresentation.text(
+            showingManagedFields: managedFieldsButton.state == .on
+        )
+        yamlLineNumberRuler?.textDidChange()
     }
 
     override func cancelOperation(_ sender: Any?) {
