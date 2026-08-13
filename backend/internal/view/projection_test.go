@@ -94,6 +94,65 @@ func TestProjectorEvaluatesCompiledCELAndSortsByTypedResult(t *testing.T) {
 	}
 }
 
+func TestProjectorCapturesNowOncePerProjectionBatch(t *testing.T) {
+	t.Parallel()
+	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program, err := compiler.Compile(viewcolumns.Definition{
+		ID: "projected-at", Title: "Projected At", Expression: "now",
+		ResultType: viewcolumns.ResultTimestamp,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs:        []string{"projected-at"},
+		CELPrograms:      map[string]*viewcolumns.Program{"projected-at": program},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instants := []time.Time{
+		time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC),
+		time.Date(2026, 8, 13, 10, 1, 0, 0, time.UTC),
+	}
+	clockCalls := 0
+	projector.now = func() time.Time {
+		instant := instants[min(clockCalls, len(instants)-1)]
+		clockCalls++
+		return instant
+	}
+	objects := []*unstructured.Unstructured{
+		pod("uid-a", "team-a", "api", "Running", 0, nil, time.Time{}),
+		pod("uid-b", "team-a", "worker", "Running", 0, nil, time.Time{}),
+	}
+
+	first := projector.Project(objects)
+	if clockCalls != 1 {
+		t.Fatalf("clock calls after first batch = %d, want 1", clockCalls)
+	}
+	for _, row := range first {
+		if got := row.GetCells()[0].GetTimestampUnixMs(); got != instants[0].UnixMilli() {
+			t.Fatalf("first batch timestamp = %d, want %d", got, instants[0].UnixMilli())
+		}
+	}
+
+	second := projector.Project(objects)
+	if clockCalls != 2 {
+		t.Fatalf("clock calls after second batch = %d, want 2", clockCalls)
+	}
+	for _, row := range second {
+		if got := row.GetCells()[0].GetTimestampUnixMs(); got != instants[1].UnixMilli() {
+			t.Fatalf("second batch timestamp = %d, want %d", got, instants[1].UnixMilli())
+		}
+	}
+}
+
 func TestProjectorConfiguredExtractorAliasesPreserveDisplayColumnIDs(t *testing.T) {
 	t.Parallel()
 	projector, err := NewProjector(ProjectionSpec{

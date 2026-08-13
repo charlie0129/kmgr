@@ -282,6 +282,41 @@ func TestSlowSubscriptionFallsBackToBoundedSnapshot(t *testing.T) {
 	}
 }
 
+func TestSubscriptionCapturesNowOnceForWatchBatch(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs:        []string{"age"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	clockCalls := 0
+	projector.now = func() time.Time {
+		clockCalls++
+		return now
+	}
+	subscription := newSubscription(
+		viewKey{sessionID: "session-a", viewID: "view-a"},
+		1,
+		projector,
+		time.Hour,
+		100,
+		100,
+	)
+
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "api", "Running", 0, nil, now.Add(-time.Minute)),
+		pod("uid-b", "ns", "worker", "Running", 0, nil, now.Add(-2*time.Minute)),
+	}})
+	if clockCalls != 1 {
+		t.Fatalf("watch batch clock calls = %d, want 1", clockCalls)
+	}
+}
+
 func TestStaleCancelCannotCloseReplacementGeneration(t *testing.T) {
 	t.Parallel()
 	source := &fakeResourceSource{authority: "cluster-a", client: newScriptedResource()}

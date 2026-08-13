@@ -79,6 +79,7 @@ type Projector struct {
 	spec       ProjectionSpec
 	filter     *viewfilter.Filter
 	namespaces map[string]struct{}
+	now        func() time.Time
 }
 
 // WithMetrics returns an immutable projection revision for one optional
@@ -168,35 +169,63 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 	if err != nil {
 		return nil, err
 	}
-	if spec.Now.IsZero() {
-		spec.Now = time.Now()
+	// Now is a deterministic clock override used by tests and callers that
+	// need a fixed projection instant. Production projectors leave it unset so
+	// each projection batch captures a fresh timestamp below.
+	now := time.Now
+	if !spec.Now.IsZero() {
+		fixed := spec.Now
+		now = func() time.Time { return fixed }
 	}
+	spec.Now = time.Time{}
 	namespaces := make(map[string]struct{}, len(spec.NamespaceScope.Namespaces))
 	for _, namespace := range spec.NamespaceScope.Namespaces {
 		if namespace != "" {
 			namespaces[namespace] = struct{}{}
 		}
 	}
-	return &Projector{spec: spec, filter: compiledFilter, namespaces: namespaces}, nil
+	return &Projector{spec: spec, filter: compiledFilter, namespaces: namespaces, now: now}, nil
 }
 
 // Project returns all visible rows in deterministic typed sort order. The
 // supplied objects are treated as immutable and may safely be a UIDStore
 // snapshot.
 func (p *Projector) Project(objects []*unstructured.Unstructured) []*kmgrv1.ResourceRow {
+	batch := p.beginBatch()
 	rows := make([]*kmgrv1.ResourceRow, 0, len(objects))
 	for _, object := range objects {
-		if row, visible := p.ProjectOne(object); visible {
+		if row, visible := batch.projectOne(object); visible {
 			rows = append(rows, row)
 		}
 	}
-	slices.SortStableFunc(rows, p.compareRows)
+	slices.SortStableFunc(rows, batch.compareRows)
 	return rows
 }
 
 // ProjectOne computes a single compact row and whether it belongs to the
 // current namespace/filter projection.
 func (p *Projector) ProjectOne(object *unstructured.Unstructured) (*kmgrv1.ResourceRow, bool) {
+	return p.beginBatch().projectOne(object)
+}
+
+// beginBatch captures the CEL `now` activation exactly once. Callers that
+// project several objects from one LIST/WATCH/metrics revision must reuse the
+// returned projector for every object in that batch.
+func (p *Projector) beginBatch() *Projector {
+	if p == nil {
+		return nil
+	}
+	batch := *p
+	batch.spec = p.spec
+	if p.now != nil {
+		batch.spec.Now = p.now()
+	} else {
+		batch.spec.Now = time.Now()
+	}
+	return &batch
+}
+
+func (p *Projector) projectOne(object *unstructured.Unstructured) (*kmgrv1.ResourceRow, bool) {
 	if object == nil || object.GetUID() == "" || !p.includesNamespace(object.GetNamespace()) {
 		return nil, false
 	}

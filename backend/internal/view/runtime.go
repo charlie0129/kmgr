@@ -1136,6 +1136,7 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 	if s.closed {
 		return
 	}
+	batchProjector := s.projector.beginBatch()
 	for _, uid := range batch.RemovedUIDs {
 		key := string(uid)
 		delete(s.rows, key)
@@ -1146,7 +1147,7 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 	for _, object := range batch.Upserts {
 		uid := string(object.GetUID())
 		previous := s.rows[uid]
-		row, visible := s.projector.ProjectOne(object)
+		row, visible := batchProjector.projectOne(object)
 		if !visible {
 			if previous != nil {
 				delete(s.rows, uid)
