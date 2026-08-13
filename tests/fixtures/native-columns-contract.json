@@ -1,0 +1,43 @@
+{
+  "accelerators": {
+    "autoDetectSuffixes": [],
+    "resources": {}
+  },
+  "apiVersion": "kmgr.charlie0129.dev/v1alpha1",
+  "celEnvironment": "kmgr.cel/v1",
+  "views": [
+    {
+      "columns": [
+        {"id": "namespace", "title": "Namespace", "source": "builtin", "value": "namespace", "type": "string"},
+        {"id": "name", "title": "Name", "source": "builtin", "value": "name", "type": "string"},
+        {"id": "kind", "title": "Kind", "source": "builtin", "value": "kind", "type": "string"},
+        {"id": "status", "title": "Status", "source": "builtin", "value": "status", "type": "string"},
+        {"id": "node", "title": "Node", "source": "builtin", "value": "node", "type": "string"},
+        {"id": "ready", "title": "Ready", "source": "builtin", "value": "ready", "type": "string"},
+        {"id": "restarts", "title": "Restarts", "source": "builtin", "value": "restarts", "type": "integer"},
+        {"id": "age", "title": "Age", "source": "builtin", "value": "age", "type": "duration"},
+        {"id": "created", "title": "Created", "source": "builtin", "value": "created", "type": "timestamp"},
+        {"id": "resource-version", "title": "Resource Version", "source": "builtin", "value": "resourceVersion", "type": "string"},
+        {"id": "cpu", "title": "CPU", "source": "metric", "value": "cpu", "type": "resourceUsage"},
+        {"id": "memory", "title": "Memory", "source": "metric", "value": "memory", "type": "resourceUsage"},
+        {"id": "ephemeral-storage", "title": "Ephemeral Storage", "source": "metric", "value": "ephemeral-storage", "type": "resourceUsage"}
+      ],
+      "match": {"group": "", "version": "v1", "resource": "pods"}
+    },
+    {
+      "columns": [
+        {"id": "cpu", "title": "CPU", "source": "metric", "value": "cpu", "type": "resourceUsage"},
+        {"id": "memory", "title": "Memory", "source": "metric", "value": "memory", "type": "resourceUsage"},
+        {"id": "ephemeral-storage", "title": "Ephemeral Storage", "source": "metric", "value": "ephemeral-storage", "type": "resourceUsage"},
+        {"id": "cpu-requests", "title": "CPU Requests", "source": "metric", "value": "cpu-requests", "type": "resourceUsage"},
+        {"id": "cpu-limits", "title": "CPU Limits", "source": "metric", "value": "cpu-limits", "type": "resourceUsage"},
+        {"id": "memory-requests", "title": "Memory Requests", "source": "metric", "value": "memory-requests", "type": "resourceUsage"},
+        {"id": "memory-limits", "title": "Memory Limits", "source": "metric", "value": "memory-limits", "type": "resourceUsage"},
+        {"id": "ephemeral-storage-requests", "title": "Ephemeral Storage Requests", "source": "metric", "value": "ephemeral-storage-requests", "type": "resourceUsage"},
+        {"id": "ephemeral-storage-limits", "title": "Ephemeral Storage Limits", "source": "metric", "value": "ephemeral-storage-limits", "type": "resourceUsage"},
+        {"id": "pod-count", "title": "Pods", "source": "metric", "value": "pod-count", "type": "resourceUsage"}
+      ],
+      "match": {"group": "", "version": "v1", "resource": "nodes"}
+    }
+  ]
+}

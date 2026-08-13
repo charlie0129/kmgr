@@ -1,13 +1,114 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/charlie0129/kmgr/backend/internal/view/columns"
 )
+
+func TestSharedNativeColumnContractCoversEveryExtractorAndParses(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "native-columns-contract.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseColumns(data, compiler); err != nil {
+		t.Fatalf("shared native-column contract is not accepted by Go: %v", err)
+	}
+
+	var document ColumnsDocument
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	seenBuiltins := make(map[string]columns.ResultType)
+	seenMetrics := make(map[string]struct{})
+	for _, view := range document.Views {
+		for _, definition := range view.Columns {
+			switch definition.Source {
+			case "builtin":
+				if existing, found := seenBuiltins[definition.Value]; found && existing != definition.Type {
+					t.Fatalf("builtin %q has conflicting fixture types %q and %q", definition.Value, existing, definition.Type)
+				}
+				seenBuiltins[definition.Value] = definition.Type
+			case "metric":
+				seenMetrics[definition.Value] = struct{}{}
+			}
+		}
+	}
+	if len(seenBuiltins) != len(builtinExtractors) {
+		t.Fatalf("fixture builtins = %v; registry = %v", sortedKeys(seenBuiltins), sortedKeys(builtinExtractors))
+	}
+	for value, resultType := range builtinExtractors {
+		if seenBuiltins[value] != resultType {
+			t.Fatalf("fixture builtin %q type = %q; want %q", value, seenBuiltins[value], resultType)
+		}
+	}
+	if len(seenMetrics) != len(metricExtractors) {
+		t.Fatalf("fixture metrics = %v; registry = %v", sortedKeys(seenMetrics), sortedKeys(metricExtractors))
+	}
+	for value := range metricExtractors {
+		if _, found := seenMetrics[value]; !found {
+			t.Fatalf("fixture omits metric extractor %q", value)
+		}
+	}
+}
+
+func sortedKeys[M ~map[string]V, V any](values M) []string {
+	result := make([]string, 0, len(values))
+	for key := range values {
+		result = append(result, key)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func TestParseColumnsMigratesOnlyLegacyGUIBuiltinTypes(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := ParseColumns([]byte(`
+apiVersion: kmgr.charlie0129.dev/v1alpha1
+celEnvironment: kmgr.cel/v1
+views:
+- match: {version: v1, resource: pods}
+  columns:
+  - {id: ready, title: Ready, source: builtin, value: ready, type: number}
+  - {id: age, title: Age, source: builtin, value: age, type: timestamp}
+`), compiler)
+	if err != nil {
+		t.Fatalf("legacy GUI defaults were not migrated: %v", err)
+	}
+	view, found := compiled.View("", "v1", "pods")
+	if !found || len(view.Columns) != 2 || view.Columns[0].Type != columns.ResultString ||
+		view.Columns[1].Type != columns.ResultDuration {
+		t.Fatalf("migrated definitions = %#v", view.Columns)
+	}
+
+	for name, definition := range map[string]string{
+		"renamed ready": `{id: pod-readiness, title: Ready, source: builtin, value: ready, type: number}`,
+		"renamed age":   `{id: pod-age, title: Age, source: builtin, value: age, type: timestamp}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := "apiVersion: kmgr.charlie0129.dev/v1alpha1\n" +
+				"celEnvironment: kmgr.cel/v1\nviews:\n" +
+				"- match: {version: v1, resource: pods}\n  columns:\n  - " + definition + "\n"
+			if _, err := ParseColumns([]byte(input), compiler); err == nil {
+				t.Fatal("non-legacy invalid definition was silently migrated")
+			}
+		})
+	}
+}
 
 func TestParseColumnsCompilesVersionedCELAndResolvesRequestedPrograms(t *testing.T) {
 	t.Parallel()

@@ -1902,7 +1902,12 @@ private final class ResourceListViewController: NSViewController,
         for definition in enabled {
             let column = NSTableColumn(identifier: .init(definition.id))
             column.title = definition.title
-            column.width = definition.width.map { CGFloat($0) } ?? columnWidth(definition.id)
+            column.width = definition.width.map { CGFloat($0) }
+                ?? NativeColumnCatalog.descriptor(
+                    source: definition.source,
+                    value: definition.value ?? definition.id
+                ).map { CGFloat($0.width) }
+                ?? 120
             column.minWidth = 55
             column.sortDescriptorPrototype = NSSortDescriptor(key: definition.id, ascending: true)
             tableView.addTableColumn(column)
@@ -1915,66 +1920,12 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func defaultColumnDefinitions(for resource: DiscoveredResource) -> [ColumnDefinition] {
-        var ids = resource.namespaced ? ["namespace", "name"] : ["name"]
-        if resource.resource == "pods" {
-            ids += [
-                "ready", "status", "restarts", "node",
-                "cpu", "memory", "ephemeral-storage", "age",
-            ]
-        } else if resource.group.isEmpty && resource.version == "v1"
-            && resource.resource == "nodes"
-        {
-            ids += ["status", "cpu", "memory", "ephemeral-storage", "age"]
-        } else {
-            ids += ["status", "age"]
-        }
-        return ids.map { id in
-            ColumnDefinition(
-                id: id,
-                title: columnTitle(id),
-                source: ["cpu", "memory", "ephemeral-storage"].contains(id) ? .metric : .builtin,
-                value: id,
-                type: columnType(id),
-                alignment: columnAlignment(id),
-                width: Double(columnWidth(id)),
-                enabled: true
-            )
-        }
-    }
-
-    private func columnType(_ id: String) -> ColumnResultType {
-        switch id {
-        case "ready": .number
-        case "restarts": .integer
-        case "cpu", "memory", "ephemeral-storage": .resourceUsage
-        case "age": .timestamp
-        default: .string
-        }
-    }
-
-    private func columnAlignment(_ id: String) -> ColumnAlignment {
-        switch id {
-        case "ready": .center
-        case "restarts", "cpu", "memory", "ephemeral-storage", "age": .trailing
-        default: .leading
-        }
-    }
-
-    private func columnTitle(_ id: String) -> String {
-        [
-            "namespace": "Namespace", "name": "Name", "ready": "Ready",
-            "status": "Status", "restarts": "Restarts", "node": "Node",
-            "cpu": "CPU", "memory": "Memory",
-            "ephemeral-storage": "Ephemeral Storage", "age": "Age",
-        ][id] ?? id
-    }
-
-    private func columnWidth(_ id: String) -> CGFloat {
-        [
-            "namespace": 150, "name": 280, "ready": 70, "status": 130,
-            "restarts": 75, "node": 180, "cpu": 190, "memory": 210,
-            "ephemeral-storage": 230, "age": 75,
-        ][id] ?? 120
+        NativeColumnCatalog.defaultDefinitions(
+            group: resource.group,
+            version: resource.version,
+            resource: resource.resource,
+            namespaced: resource.namespaced
+        )
     }
 
     private func navigationState() -> ResourceNavigationState? {

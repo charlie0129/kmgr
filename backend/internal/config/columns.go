@@ -270,6 +270,7 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 			document.CELEnvironment, columns.EnvironmentVersion,
 		)
 	}
+	normalizeLegacyNativeColumnTypes(&document)
 
 	compiled := &CompiledColumns{
 		document: cloneDocument(document),
@@ -345,6 +346,30 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 		compiled.views[key] = entry
 	}
 	return compiled, nil
+}
+
+// normalizeLegacyNativeColumnTypes accepts the two incorrect declared types
+// emitted by older native macOS default layouts. The migration is deliberately
+// restricted to the exact built-in IDs and values that Kmgr wrote; unrelated
+// invalid custom definitions must continue to fail validation.
+func normalizeLegacyNativeColumnTypes(document *ColumnsDocument) {
+	if document == nil {
+		return
+	}
+	for viewIndex := range document.Views {
+		for columnIndex := range document.Views[viewIndex].Columns {
+			definition := &document.Views[viewIndex].Columns[columnIndex]
+			if definition.Source != "builtin" || definition.ID != definition.Value {
+				continue
+			}
+			switch {
+			case definition.Value == "ready" && definition.Type == columns.ResultNumber:
+				definition.Type = columns.ResultString
+			case definition.Value == "age" && definition.Type == columns.ResultTimestamp:
+				definition.Type = columns.ResultDuration
+			}
+		}
+	}
 }
 
 func EmptyColumns() *CompiledColumns {
