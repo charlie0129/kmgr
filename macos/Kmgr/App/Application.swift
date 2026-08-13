@@ -12,6 +12,7 @@ final class Application: NSObject, NSApplicationDelegate {
     private var columnsManagerControllers: [ObjectIdentifier: ColumnsManagerWindowController] = [:]
     private let clusterContextProvider: any ClusterContextProviding
     private let workspaceResourceProvider: any WorkspaceResourceProviding
+    private let optionalResourceCatalogProvider: any OptionalResourceCatalogProviding
     private let columnPreviewProvider: any ColumnPreviewProviding
     private let objectSearchProvider: any ObjectSearchProviding
     private let objectDetailProvider: any ObjectDetailProviding
@@ -54,6 +55,9 @@ final class Application: NSObject, NSApplicationDelegate {
             supervisor: supervisor
         )
         self.workspaceResourceProvider = EngineWorkspaceResourceProvider(
+            connection: supervisor.connection
+        )
+        self.optionalResourceCatalogProvider = EngineOptionalResourceCatalogProvider(
             connection: supervisor.connection
         )
         self.columnPreviewProvider = EngineColumnPreviewProvider(
@@ -270,6 +274,7 @@ final class Application: NSObject, NSApplicationDelegate {
         let controller = ClusterWorkspaceWindowController(
             session: session,
             provider: workspaceResourceProvider,
+            optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             objectSearchProvider: objectSearchProvider,
             objectDetailProvider: objectDetailProvider,
             operationProvider: operationProvider,

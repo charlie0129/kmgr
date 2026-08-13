@@ -44,6 +44,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     init(
         session: OpenedClusterSession,
         provider: any WorkspaceResourceProviding,
+        optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
         recentObjectStore: RecentObjectStore = .shared,
@@ -87,6 +88,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController = ClusterWorkspaceViewController(
             session: session,
             provider: provider,
+            optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             objectSearchProvider: objectSearchProvider,
             objectDetailProvider: objectDetailProvider,
             recentObjectStore: recentObjectStore,
@@ -360,6 +362,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     init(
         session: OpenedClusterSession,
         provider: any WorkspaceResourceProviding,
+        optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
         recentObjectStore: RecentObjectStore,
@@ -379,6 +382,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController = ResourceListViewController(
             session: session,
             provider: provider,
+            optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             columnsConfigurationPath: columnsConfigurationPath
         )
         super.init(nibName: nil, bundle: nil)
@@ -1398,6 +1402,7 @@ private final class ResourceListViewController: NSViewController,
 
     private var session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
+    private let optionalResourceCatalogProvider: any OptionalResourceCatalogProviding
     private let columnsConfigurationPath: String
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
@@ -1418,6 +1423,10 @@ private final class ResourceListViewController: NSViewController,
     private var generation: UInt64 = 0
     private var filterRevision: UInt64 = 0
     private var streamTask: Task<Void, Never>?
+    private var optionalResourceCatalogTask: Task<Void, Never>?
+    private var optionalResourceCatalogTaskTicket: OptionalResourceCatalogDiscoveryTicket?
+    private var optionalResourceDiscoveryGate = OptionalResourceCatalogDiscoveryGate()
+    private var optionalResourceOverlayState = OptionalResourceOverlayLifetimeState()
     private var filterTask: Task<Void, Never>?
     private var filterMemory = ResourceFilterMemory()
     private var suppressSelectionCallbacks = false
@@ -1454,10 +1463,12 @@ private final class ResourceListViewController: NSViewController,
     init(
         session: OpenedClusterSession,
         provider: any WorkspaceResourceProviding,
+        optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         columnsConfigurationPath: String
     ) {
         self.session = session
         self.provider = provider
+        self.optionalResourceCatalogProvider = optionalResourceCatalogProvider
         self.columnsConfigurationPath = columnsConfigurationPath
         super.init(nibName: nil, bundle: nil)
     }
@@ -1597,6 +1608,7 @@ private final class ResourceListViewController: NSViewController,
         restorationCheckpointTask?.cancel()
         restorationCheckpointTask = nil
         suspend()
+        clearOptionalResourceOverlay()
     }
 
     /// Preserve the last compact rows as an explicitly disconnected snapshot.
@@ -1608,6 +1620,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask = nil
         streamTask?.cancel()
         streamTask = nil
+        cancelOptionalResourceDiscovery(selecting: nil)
         generationGate.reset()
         recoveredResourceTrust.requireValidation()
         freshnessLabel.stringValue = "Disconnected"
@@ -1619,10 +1632,16 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func recover(session: OpenedClusterSession) {
+        let sessionChanged = self.session.sessionID != session.sessionID
         self.session = session
         history.rebindClusterSessionID(session.sessionID)
         model.rebindClusterSessionID(session.sessionID)
         recoveredResourceTrust.requireValidation()
+        if sessionChanged {
+            cancelOptionalResourceDiscovery(selecting: nil)
+            clearOptionalResourceOverlay()
+            if let resource { installEffectiveColumns(for: resource) }
+        }
         if resource != nil { openStream() }
     }
 
@@ -1632,6 +1651,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask = nil
         streamTask?.cancel()
         streamTask = nil
+        cancelOptionalResourceDiscovery(selecting: nil)
         let generation = generation
         guard generation > 0 else { return }
         Task { [provider, session, viewID] in
@@ -1845,6 +1865,7 @@ private final class ResourceListViewController: NSViewController,
             }
         }
         generation &+= 1
+        prepareOptionalResourceDiscovery(for: resource)
         beginProjectionRequest()
         generationGate.reset()
         let canKeepWarmRows = lastStreamResourceID == resource.id
@@ -1947,6 +1968,9 @@ private final class ResourceListViewController: NSViewController,
                 "visible_rows=\(self.model.orderedVisibleUIDs.count) stored_rows=\(self.model.rowByUID.count) selected_rows=\(plan.selectedRowIndexes.count)"
             )
             applyTablePlan(plan)
+            if !chunk.rows.isEmpty || chunk.last {
+                markBaseViewUsableForOptionalResourceDiscovery()
+            }
             if chunk.last { endProjectionRequest(outcome: "snapshot-complete") }
         case .delta(_, let delta):
             let metadata = message.resourceBatchSignpostMetadata!
@@ -2068,6 +2092,129 @@ private final class ResourceListViewController: NSViewController,
         tableTopWithoutErrorConstraint?.isActive = true
     }
 
+    /// Gives each stream generation fresh discovery authority. The installed
+    /// overlay survives same-session/same-GVR reopens to avoid flicker and an
+    /// add/remove reopen loop; changing either part of its scope removes it.
+    private func prepareOptionalResourceDiscovery(for resource: DiscoveredResource) {
+        if optionalResourceOverlayState.clearIfScopeChanged(
+            sessionID: session.sessionID,
+            gvr: resourceGVR(for: resource)
+        ) {
+            installEffectiveColumns(for: resource)
+        }
+        cancelOptionalResourceDiscovery(selecting:
+            OptionalResourceCatalogDiscoveryTarget(
+                sessionID: session.sessionID,
+                applicableResource: resource,
+                viewGeneration: generation
+            )
+        )
+    }
+
+    private func cancelOptionalResourceDiscovery(
+        selecting target: OptionalResourceCatalogDiscoveryTarget?
+    ) {
+        optionalResourceCatalogTask?.cancel()
+        optionalResourceCatalogTask = nil
+        optionalResourceCatalogTaskTicket = nil
+        optionalResourceDiscoveryGate.select(target)
+    }
+
+    private func clearOptionalResourceOverlay() {
+        optionalResourceOverlayState.clear()
+    }
+
+    private func markBaseViewUsableForOptionalResourceDiscovery() {
+        optionalResourceDiscoveryGate.markBaseViewUsable()
+        beginOptionalResourceDiscoveryIfAuthorized()
+    }
+
+    private func beginOptionalResourceDiscoveryIfAuthorized() {
+        guard optionalResourceCatalogTask == nil,
+            let ticket = optionalResourceDiscoveryGate.beginDiscovery()
+        else { return }
+        let provider = optionalResourceCatalogProvider
+        optionalResourceCatalogTaskTicket = ticket
+        optionalResourceCatalogTask = Task { [weak self, provider] in
+            do {
+                let catalog = try await provider.discoverOptionalResources(ticket.request)
+                guard !Task.isCancelled else {
+                    self?.finishOptionalResourceDiscoveryWithoutResult(ticket)
+                    return
+                }
+                self?.finishOptionalResourceDiscovery(ticket, catalog: catalog)
+            } catch {
+                self?.finishOptionalResourceDiscoveryWithoutResult(ticket)
+            }
+        }
+    }
+
+    private func finishOptionalResourceDiscoveryWithoutResult(
+        _ ticket: OptionalResourceCatalogDiscoveryTicket
+    ) {
+        _ = optionalResourceDiscoveryGate.finishWithoutResult(ticket)
+        releaseOptionalResourceCatalogTask(ticket)
+        // Catalog failures are deliberately silent and never alter the base
+        // resource stream's freshness or inline error presentation.
+    }
+
+    private func releaseOptionalResourceCatalogTask(
+        _ ticket: OptionalResourceCatalogDiscoveryTicket
+    ) {
+        guard optionalResourceCatalogTaskTicket == ticket else { return }
+        optionalResourceCatalogTask = nil
+        optionalResourceCatalogTaskTicket = nil
+    }
+
+    private func finishOptionalResourceDiscovery(
+        _ ticket: OptionalResourceCatalogDiscoveryTicket,
+        catalog: OptionalResourceCatalog
+    ) {
+        let resultIsCurrent = optionalResourceDiscoveryGate.finishSuccess(ticket)
+        releaseOptionalResourceCatalogTask(ticket)
+        guard resultIsCurrent,
+            let resource,
+            ticket.targetKey == OptionalResourceCatalogDiscoveryTarget(
+                sessionID: session.sessionID,
+                applicableResource: resource,
+                viewGeneration: generation
+            ).key
+        else {
+            return
+        }
+
+        let persisted = persistedColumnDefinitions(for: resource)
+        let previousEnabled = enabledColumnDefinitions(in: effectiveColumnDefinitions(
+            persistedDefinitions: persisted,
+            resource: resource
+        ))
+        do {
+            var reconciled = OptionalResourceColumnOverlay()
+            try reconciled.reconcile(
+                catalog,
+                applicableResource: resource,
+                persistedDefinitions: persisted
+            )
+            optionalResourceOverlayState.install(
+                reconciled,
+                sessionID: session.sessionID,
+                gvr: resourceGVR(for: resource)
+            )
+        } catch {
+            return
+        }
+        let effective = effectiveColumnDefinitions(
+            persistedDefinitions: persisted,
+            resource: resource
+        )
+        let enabled = enabledColumnDefinitions(in: effective)
+        installColumns(effective)
+        guard enabled != previousEnabled else { return }
+        openStream()
+        updateStatusLine()
+        onRestorationChanged?()
+    }
+
     private func updateStatusLine() {
         countLabel.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects"
         if let descriptor = tableView.sortDescriptors.first, let key = descriptor.key {
@@ -2088,7 +2235,10 @@ private final class ResourceListViewController: NSViewController,
 
     private func configureColumns(for resource: DiscoveredResource) {
         if let existing = columnDefinitionsByResourceID[resource.id] {
-            installColumns(existing)
+            installColumns(effectiveColumnDefinitions(
+                persistedDefinitions: existing,
+                resource: resource
+            ))
             return
         }
         let defaults = defaultColumnDefinitions(for: resource)
@@ -2101,14 +2251,22 @@ private final class ResourceListViewController: NSViewController,
             path: columnsConfigurationPath
         ).load().views.first(where: { $0.match == match })?.columns) ?? defaults
         columnDefinitionsByResourceID[resource.id] = definitions
-        installColumns(definitions)
+        installColumns(effectiveColumnDefinitions(
+            persistedDefinitions: definitions,
+            resource: resource
+        ))
     }
 
     private func applyColumns(_ definitions: [ColumnDefinition], forResourceID resourceID: String) {
         guard resource?.id == resourceID else { return }
         columnDefinitionsByResourceID[resourceID] = definitions
-        installColumns(definitions)
-        openStream()
+        let previousEffective = installedColumnDefinitions
+        if let resource {
+            installEffectiveColumns(for: resource)
+        }
+        if installedColumnDefinitions != previousEffective {
+            openStream()
+        }
         updateStatusLine()
         onRestorationChanged?()
     }
@@ -2142,6 +2300,38 @@ private final class ResourceListViewController: NSViewController,
             descriptor.key.map(enabledIDs.contains) ?? false
         }
         tableView.reloadData()
+    }
+
+    private var installedColumnDefinitions: [ColumnDefinition] {
+        columnIDs.compactMap { columnDefinitionsByID[$0] }
+    }
+
+    private func persistedColumnDefinitions(for resource: DiscoveredResource) -> [ColumnDefinition] {
+        columnDefinitionsByResourceID[resource.id] ?? defaultColumnDefinitions(for: resource)
+    }
+
+    private func effectiveColumnDefinitions(
+        persistedDefinitions: [ColumnDefinition],
+        resource: DiscoveredResource
+    ) -> [ColumnDefinition] {
+        optionalResourceOverlayState.applying(
+            to: persistedDefinitions,
+            sessionID: session.sessionID,
+            gvr: resourceGVR(for: resource)
+        )
+    }
+
+    private func enabledColumnDefinitions(
+        in definitions: [ColumnDefinition]
+    ) -> [ColumnDefinition] {
+        definitions.filter(\.isEnabled)
+    }
+
+    private func installEffectiveColumns(for resource: DiscoveredResource) {
+        installColumns(effectiveColumnDefinitions(
+            persistedDefinitions: persistedColumnDefinitions(for: resource),
+            resource: resource
+        ))
     }
 
     private func defaultColumnDefinitions(for resource: DiscoveredResource) -> [ColumnDefinition] {
