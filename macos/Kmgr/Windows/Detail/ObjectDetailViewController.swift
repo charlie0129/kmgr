@@ -1,6 +1,13 @@
 import AppKit
 import KmgrCore
 
+enum ObjectDetailInitialTab {
+    case automatic
+    case summary
+    case yaml
+    case data
+}
+
 /// A fresh, UID-authoritative detail surface. It replaces the table area in a
 /// workspace; no inspector or bottom drawer is introduced.
 @MainActor
@@ -9,6 +16,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 {
     let identity: ResourceIdentity
     private let provider: any ObjectDetailProviding
+    private let initialTab: ObjectDetailInitialTab
     private let segmented = NSSegmentedControl(
         labels: ["Summary", "YAML", "Data"],
         trackingMode: .selectOne,
@@ -42,9 +50,14 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     var onBack: (() -> Void)?
 
-    init(identity: ResourceIdentity, provider: any ObjectDetailProviding) {
+    init(
+        identity: ResourceIdentity,
+        provider: any ObjectDetailProviding,
+        initialTab: ObjectDetailInitialTab = .automatic
+    ) {
         self.identity = identity
         self.provider = provider
+        self.initialTab = initialTab
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -67,7 +80,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         let breadcrumb = NSTextField(labelWithString: breadcrumbText)
         breadcrumb.font = .systemFont(ofSize: 15, weight: .semibold)
         breadcrumb.lineBreakMode = .byTruncatingMiddle
-        segmented.selectedSegment = 0
+        segmented.selectedSegment = initialSegment
         segmented.target = self
         segmented.action = #selector(tabChanged)
         if !supportsDataEditor { segmented.setEnabled(false, forSegment: 2) }
@@ -95,7 +108,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         configureYAML()
         configureDataEditor()
         view = root
-        show(summaryStack)
+        tabChanged()
     }
 
     override func viewDidAppear() {
@@ -261,7 +274,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         keysTable.reloadData()
         statusLabel.stringValue = "Resource version \(detail.resourceVersion)"
         statusLabel.textColor = .secondaryLabelColor
-        if supportsDataEditor {
+        if initialTab == .automatic, supportsDataEditor {
             segmented.selectedSegment = 2
             tabChanged()
         }
@@ -275,6 +288,19 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             show(dataSplitView)
         default:
             show(summaryStack)
+        }
+    }
+
+    private var initialSegment: Int {
+        switch initialTab {
+        case .automatic:
+            return supportsDataEditor ? 2 : 0
+        case .summary:
+            return 0
+        case .yaml:
+            return 1
+        case .data:
+            return supportsDataEditor ? 2 : 0
         }
     }
 

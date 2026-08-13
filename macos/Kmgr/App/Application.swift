@@ -140,9 +140,6 @@ final class Application: NSObject, NSApplicationDelegate {
         controller.onClose = { [weak self] in
             self?.workspaceControllers.removeValue(forKey: identifier)
         }
-        controller.onOpenObject = { [weak controller] identity in
-            controller?.showObjectFallback(identity)
-        }
         controller.onStartPortForward = { [weak controller] identity in
             controller?.showPortForwardConfigurationPlaceholder(identity)
         }

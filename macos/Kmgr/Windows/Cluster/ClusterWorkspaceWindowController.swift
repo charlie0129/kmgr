@@ -6,7 +6,6 @@ import OSLog
 final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate {
     let session: OpenedClusterSession
     var onClose: (() -> Void)?
-    var onOpenObject: ((ResourceIdentity) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
 
     private let provider: any WorkspaceResourceProviding
@@ -45,9 +44,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             onShowPortForwards: onShowPortForwards
         )
         super.init(window: window)
-        workspaceController.onOpenObject = { [weak self] identity in
-            self?.onOpenObject?(identity)
-        }
         workspaceController.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
         }
@@ -72,10 +68,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             await provider.closeSession(sessionID: session.sessionID)
         }
         onClose?()
-    }
-
-    func showObjectFallback(_ identity: ResourceIdentity) {
-        workspaceController.openObjectFallback(identity)
     }
 
     func showPortForwardConfigurationPlaceholder(_ identity: ResourceIdentity) {
@@ -112,7 +104,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var namespaces: [String] = []
     private var paletteController: CommandPaletteWindowController?
     private var objectOpenTask: Task<Void, Never>?
-    var onOpenObject: ((ResourceIdentity) -> Void)?
+    private var detailController: ObjectDetailViewController?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
 
     init(
@@ -138,13 +130,24 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
         sidebarController.onSelectResource = { [weak self] resource in
             guard let self else { return }
+            let wasShowingDetail = detailController != nil
+            showResourceList(resume: false)
             contentController.open(resource: resource, scope: selectedNamespaceScope())
+            if wasShowingDetail {
+                view.window?.makeFirstResponder(contentController.tableResponder)
+            }
         }
         sidebarController.onResourcesChanged = { [weak self] resources in
             self?.resources = resources
         }
         contentController.onShowCommandPalette = { [weak self] in
             self?.showCommandPalette()
+        }
+        contentController.onOpenObject = { [weak self] identity, tab in
+            self?.showObject(identity, initialTab: tab)
+        }
+        contentController.onStartPortForward = { [weak self] identity in
+            self?.onStartPortForward?(identity)
         }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
         addSplitViewItem(NSSplitViewItem(viewController: contentController))
@@ -173,6 +176,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         paletteController?.close()
         paletteController = nil
         objectOpenTask?.cancel()
+        detailController?.stop()
+        detailController = nil
         if let portForwardObserver {
             portForwards.removeObserver(portForwardObserver)
             self.portForwardObserver = nil
@@ -217,10 +222,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 systemSymbolName: itemIdentifier == .back ? "chevron.left" : "chevron.right",
                 accessibilityDescription: item.label
             )
-            item.target = contentController
-            item.action = itemIdentifier == .back
-                ? #selector(ResourceListViewController.goBack)
-                : #selector(ResourceListViewController.goForward)
+            item.target = self
+            item.action = itemIdentifier == .back ? #selector(goBack) : #selector(goForward)
             return item
         case .cluster:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -274,7 +277,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     @objc private func namespaceChanged() {
+        let wasShowingDetail = detailController != nil
+        showResourceList(resume: false)
         contentController.changeNamespaceScope(selectedNamespaceScope())
+        if wasShowingDetail {
+            view.window?.makeFirstResponder(contentController.tableResponder)
+        }
     }
 
     @objc private func showPortForwards() {
@@ -302,7 +310,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         )
         controller.onOpenResource = { [weak self] resource in
             guard let self else { return }
+            let wasShowingDetail = detailController != nil
+            showResourceList(resume: false)
             contentController.open(resource: resource, scope: selectedNamespaceScope())
+            if wasShowingDetail {
+                view.window?.makeFirstResponder(contentController.tableResponder)
+            }
         }
         controller.onChangeNamespace = { [weak self] namespace in
             self?.selectNamespace(namespace)
@@ -334,11 +347,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 guard !Task.isCancelled else { return }
                 connectionLabel.stringValue = "Connected"
                 connectionLabel.textColor = .secondaryLabelColor
-                if let onOpenObject {
-                    onOpenObject(detail.identity)
-                } else {
-                    openObjectFallback(detail.identity)
-                }
+                showObject(detail.identity, initialTab: .automatic)
             } catch {
                 guard !Task.isCancelled else { return }
                 connectionLabel.stringValue = error.localizedDescription
@@ -347,16 +356,50 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
     }
 
-    fileprivate func openObjectFallback(_ identity: ResourceIdentity) {
-        guard let resource = resources.first(where: {
-            $0.group == identity.group && $0.version == identity.version
-                && $0.resource == identity.resource
-        }) else { return }
-        let scope = identity.namespace.isEmpty
-            ? NamespaceSelection()
-            : .namespace(identity.namespace)
-        contentController.open(resource: resource, scope: scope)
-        contentController.setFilter(identity.name)
+    private func showObject(
+        _ identity: ResourceIdentity,
+        initialTab: ObjectDetailInitialTab
+    ) {
+        detailController?.stop()
+        contentController.suspend()
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: objectDetailProvider,
+            initialTab: initialTab
+        )
+        controller.onBack = { [weak self] in self?.showResourceList() }
+        detailController = controller
+        replaceMainContent(with: controller)
+        view.window?.makeFirstResponder(controller.view)
+    }
+
+    private func showResourceList(resume: Bool = true) {
+        guard detailController != nil else { return }
+        detailController?.stop()
+        replaceMainContent(with: contentController)
+        detailController = nil
+        if resume { contentController.resume() }
+        view.window?.makeFirstResponder(contentController.tableResponder)
+    }
+
+    private func replaceMainContent(with controller: NSViewController) {
+        if splitViewItems.count > 1 {
+            removeSplitViewItem(splitViewItems[1])
+        }
+        insertSplitViewItem(NSSplitViewItem(viewController: controller), at: 1)
+    }
+
+    @objc private func goBack() {
+        if detailController != nil {
+            showResourceList()
+        } else {
+            contentController.goBack()
+        }
+    }
+
+    @objc private func goForward() {
+        guard detailController == nil else { return }
+        contentController.goForward()
     }
 
     private func selectNamespace(_ namespace: String) {
@@ -665,6 +708,8 @@ private final class ResourceListViewController: NSViewController,
     private var lastStreamScope: NamespaceSelection?
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
     var onShowCommandPalette: (() -> Void)?
+    var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
+    var onStartPortForward: ((ResourceIdentity) -> Void)?
 
     init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
@@ -700,7 +745,7 @@ private final class ResourceListViewController: NSViewController,
         tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        tableView.doubleAction = #selector(openSelectedObject)
+        tableView.doubleAction = #selector(openSelectedObjectFromTable)
         tableView.target = self
         tableView.rowSizeStyle = .medium
         tableView.setAccessibilityLabel("Kubernetes resources")
@@ -771,13 +816,26 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func stop() {
+        suspend()
+    }
+
+    func suspend() {
         filterTask?.cancel()
+        filterTask = nil
         streamTask?.cancel()
+        streamTask = nil
         let generation = generation
+        guard generation > 0 else { return }
         Task { [provider, session, viewID] in
             await provider.cancelView(sessionID: session.sessionID, viewID: viewID, generation: generation)
         }
     }
+
+    func resume() {
+        openStream()
+    }
+
+    var tableResponder: NSResponder { tableView }
 
     var selectedIdentities: [ResourceIdentity] { model.selectedIdentities }
 
@@ -1074,9 +1132,13 @@ private final class ResourceListViewController: NSViewController,
         openStream()
     }
 
-    @objc private func openSelectedObject() {
-        guard model.selectionCounts.selected == 1 else { return }
-        NSSound.beep()
+    @objc private func openSelectedObjectFromTable() {
+        openSelectedObject(initialTab: .automatic)
+    }
+
+    private func openSelectedObject(initialTab: ObjectDetailInitialTab) {
+        guard let identity = model.selectedIdentities.only else { return }
+        onOpenObject?(identity, initialTab)
     }
 
     private func handle(_ command: ResourceTableCommand) {
@@ -1084,7 +1146,16 @@ private final class ResourceListViewController: NSViewController,
         case .focusFilter:
             view.window?.makeFirstResponder(filterField)
         case .open:
-            openSelectedObject()
+            openSelectedObjectFromTable()
+        case .openYAML:
+            openSelectedObject(initialTab: .yaml)
+        case .startPortForward:
+            guard let identity = model.selectedIdentities.only,
+                identity.group.isEmpty,
+                identity.version == "v1",
+                identity.resource == "pods" || identity.resource == "services"
+            else { return }
+            onStartPortForward?(identity)
         case .selectAll:
             model.selectAllVisible()
             suppressSelectionCallbacks = true
@@ -1103,7 +1174,7 @@ private final class ResourceListViewController: NSViewController,
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, open, selectAll, delete, moveUp, moveDown
+    case focusFilter, open, openYAML, startPortForward, selectAll, delete, moveUp, moveDown
 }
 
 @MainActor
@@ -1118,9 +1189,15 @@ private final class ResourceTableView: NSTableView {
         case ("j", _, false): onCommand?(.moveDown)
         case ("k", _, false): onCommand?(.moveUp)
         case (_, 36, false): onCommand?(.open)
+        case ("y", _, false), ("Y", _, false): onCommand?(.openYAML)
+        case ("p", _, false), ("P", _, false): onCommand?(.startPortForward)
         case ("a", _, true): onCommand?(.selectAll)
         case (_, 51, true): onCommand?(.delete)
         default: super.keyDown(with: event)
         }
     }
+}
+
+private extension Collection {
+    var only: Element? { count == 1 ? first : nil }
 }
