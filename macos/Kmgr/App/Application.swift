@@ -11,8 +11,11 @@ final class Application: NSObject, NSApplicationDelegate {
     private var workspaceControllers: [ObjectIdentifier: ClusterWorkspaceWindowController] = [:]
     private let clusterContextProvider: any ClusterContextProviding
     private let workspaceResourceProvider: any WorkspaceResourceProviding
+    private let portForwardCoordinator: PortForwardCoordinator
+    private let portForwardsWindowController: PortForwardsWindowController
     private let engineSupervisor: EngineSupervisor
     private var isTerminating = false
+    private var terminationTask: Task<Void, Never>?
 
     override init() {
         let supervisor = EngineSupervisor()
@@ -22,6 +25,13 @@ final class Application: NSObject, NSApplicationDelegate {
         )
         self.workspaceResourceProvider = EngineWorkspaceResourceProvider(
             connection: supervisor.connection
+        )
+        let portForwards = PortForwardCoordinator(
+            provider: EnginePortForwardProvider(connection: supervisor.connection)
+        )
+        self.portForwardCoordinator = portForwards
+        self.portForwardsWindowController = PortForwardsWindowController(
+            coordinator: portForwards
         )
         super.init()
     }
@@ -43,17 +53,52 @@ final class Application: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        !portForwardCoordinator.hasActiveForwards
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isTerminating else { return .terminateLater }
+        if portForwardCoordinator.hasActiveForwards {
+            let forwards = portForwardCoordinator.activeRecords
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Stop active port-forwards and quit?"
+            let descriptions = forwards.prefix(8).map { record in
+                let context = record.contextName.isEmpty ? "unknown context" : record.contextName
+                let namespace = record.target.namespace.isEmpty ? "cluster" : record.target.namespace
+                return "• \(context) · \(namespace)/\(record.target.name) · \(record.address ?? "allocating") → \(record.remotePort)"
+            }
+            let remainder = max(0, forwards.count - descriptions.count)
+            alert.informativeText = descriptions.joined(separator: "\n")
+                + (remainder > 0 ? "\n…and \(remainder) more" : "")
+                + "\n\nQuitting stops these listeners. They will not be restored automatically."
+            alert.addButton(withTitle: "Stop and Quit")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                return .terminateCancel
+            }
+        }
         isTerminating = true
-        Task { [engineSupervisor] in
+        terminationTask = Task { [engineSupervisor, portForwardCoordinator] in
+            await portForwardCoordinator.stopAllActive()
+            portForwardCoordinator.stopWatching()
             await engineSupervisor.shutdown()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        guard !flag else { return true }
+        if portForwardCoordinator.hasActiveForwards {
+            showPortForwards(nil)
+        } else {
+            showClusterManager()
+        }
+        return true
     }
 
     @objc private func showClusterManager() {
@@ -74,7 +119,11 @@ final class Application: NSObject, NSApplicationDelegate {
     private func openWorkspace(for session: OpenedClusterSession) {
         let controller = ClusterWorkspaceWindowController(
             session: session,
-            provider: workspaceResourceProvider
+            provider: workspaceResourceProvider,
+            portForwards: portForwardCoordinator,
+            onShowPortForwards: { [weak self] in
+                self?.showPortForwards(nil)
+            }
         )
         let identifier = ObjectIdentifier(controller)
         workspaceControllers[identifier] = controller
@@ -83,6 +132,11 @@ final class Application: NSObject, NSApplicationDelegate {
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func showPortForwards(_ sender: Any?) {
+        portForwardsWindowController.showWindow(sender)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func installMainMenu() {
@@ -116,6 +170,13 @@ final class Application: NSObject, NSApplicationDelegate {
             action: #selector(NSWindow.performMiniaturize(_:)),
             keyEquivalent: "m"
         )
+        windowMenu.addItem(.separator())
+        let portForwardsItem = windowMenu.addItem(
+            withTitle: "Port Forwards",
+            action: #selector(showPortForwards(_:)),
+            keyEquivalent: ""
+        )
+        portForwardsItem.target = self
         windowItem.submenu = windowMenu
         mainMenu.addItem(windowItem)
         NSApp.windowsMenu = windowMenu

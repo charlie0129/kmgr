@@ -10,7 +10,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let provider: any WorkspaceResourceProviding
     private let workspaceController: ClusterWorkspaceViewController
 
-    init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
+    init(
+        session: OpenedClusterSession,
+        provider: any WorkspaceResourceProviding,
+        portForwards: PortForwardCoordinator,
+        onShowPortForwards: @escaping @MainActor () -> Void
+    ) {
         self.session = session
         self.provider = provider
 
@@ -27,7 +32,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         window.setFrameAutosaveName("ClusterWorkspace-\(session.contextName)")
         window.center()
 
-        workspaceController = ClusterWorkspaceViewController(session: session, provider: provider)
+        workspaceController = ClusterWorkspaceViewController(
+            session: session,
+            provider: provider,
+            portForwards: portForwards,
+            onShowPortForwards: onShowPortForwards
+        )
         super.init(window: window)
         window.delegate = self
         window.contentViewController = workspaceController
@@ -59,16 +69,26 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 {
     private let session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
+    private let portForwards: PortForwardCoordinator
+    private let onShowPortForwards: @MainActor () -> Void
     private let sidebarController: ResourceSidebarViewController
     private let contentController: ResourceListViewController
     private let namespaceControl = NSPopUpButton(frame: .zero, pullsDown: false)
     private let connectionLabel = NSTextField(labelWithString: "Connected")
     private let forwardsButton = NSButton(title: "Forwards 0", target: nil, action: nil)
     private var namespaceTask: Task<Void, Never>?
+    private var portForwardObserver: UUID?
 
-    init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
+    init(
+        session: OpenedClusterSession,
+        provider: any WorkspaceResourceProviding,
+        portForwards: PortForwardCoordinator,
+        onShowPortForwards: @escaping @MainActor () -> Void
+    ) {
         self.session = session
         self.provider = provider
+        self.portForwards = portForwards
+        self.onShowPortForwards = onShowPortForwards
         sidebarController = ResourceSidebarViewController(session: session, provider: provider)
         contentController = ResourceListViewController(session: session, provider: provider)
         super.init(nibName: nil, bundle: nil)
@@ -91,10 +111,20 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     func start() {
         sidebarController.start()
         loadNamespaces()
+        portForwards.register(sessionID: session.sessionID)
+        if portForwardObserver == nil {
+            portForwardObserver = portForwards.observe { [weak self] snapshot in
+                self?.updatePortForwardButton(snapshot)
+            }
+        }
     }
 
     func stop() {
         namespaceTask?.cancel()
+        if let portForwardObserver {
+            portForwards.removeObserver(portForwardObserver)
+            self.portForwardObserver = nil
+        }
         sidebarController.stop()
         contentController.stop()
     }
@@ -175,6 +205,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         case .forwards:
             forwardsButton.bezelStyle = .texturedRounded
             forwardsButton.image = NSImage(systemSymbolName: "arrow.left.arrow.right", accessibilityDescription: nil)
+            forwardsButton.target = self
+            forwardsButton.action = #selector(showPortForwards)
+            forwardsButton.setAccessibilityLabel("Open app-wide Port Forwards")
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Port Forwards"
             item.view = forwardsButton
@@ -190,6 +223,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     @objc private func namespaceChanged() {
         contentController.changeNamespaceScope(selectedNamespaceScope())
+    }
+
+    @objc private func showPortForwards() {
+        onShowPortForwards()
     }
 
     private func selectedNamespaceScope() -> NamespaceSelection {
@@ -221,6 +258,23 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 connectionLabel.stringValue = "Namespace list unavailable"
                 connectionLabel.textColor = .systemOrange
             }
+        }
+    }
+
+    private func updatePortForwardButton(_ snapshot: PortForwardCoordinator.Snapshot) {
+        forwardsButton.title = "Forwards \(snapshot.activeCount.formatted())"
+        if snapshot.hasFailure {
+            forwardsButton.contentTintColor = .systemRed
+            forwardsButton.toolTip = "One or more port-forwards failed. Open Port Forwards."
+            forwardsButton.setAccessibilityValue("\(snapshot.activeCount) active, failures present")
+        } else if snapshot.connectionIssue != nil {
+            forwardsButton.contentTintColor = .systemOrange
+            forwardsButton.toolTip = "Port-forward status is reconnecting."
+            forwardsButton.setAccessibilityValue("\(snapshot.activeCount) active, status unavailable")
+        } else {
+            forwardsButton.contentTintColor = nil
+            forwardsButton.toolTip = "\(snapshot.activeCount.formatted()) app-wide active port-forward(s)"
+            forwardsButton.setAccessibilityValue("\(snapshot.activeCount) active")
         }
     }
 }
