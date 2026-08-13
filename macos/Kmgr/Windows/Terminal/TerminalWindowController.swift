@@ -10,8 +10,16 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     private let terminalController: RemoteTerminalViewController
     var onClose: (() -> Void)?
 
-    init(request: ExecSessionRequest, provider: any ExecSessionProviding) {
-        terminalController = RemoteTerminalViewController(request: request, provider: provider)
+    init(
+        request: ExecSessionRequest,
+        provider: any ExecSessionProviding,
+        fallbackShellCommand: [String]? = nil
+    ) {
+        terminalController = RemoteTerminalViewController(
+            request: request,
+            provider: provider,
+            fallbackShellCommand: fallbackShellCommand
+        )
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 590),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -72,6 +80,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
 
     private let baseRequest: ExecSessionRequest
     private let provider: any ExecSessionProviding
+    private let fallbackShellCommand: [String]?
     private let statusLabel = NSTextField(labelWithString: "Not connected")
     private let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
     private var generation: UInt64
@@ -80,6 +89,11 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     private var commandTask: Task<Void, Never>?
     private var commandContinuation: AsyncStream<TerminalCommand>.Continuation?
     private var state: ExecConnectionState?
+    private var activeCommand: [String]
+    private var currentAttemptProducedOutput = false
+    private var usedFallbackShell = false
+    private var lastIssue: ClusterManagerIssue?
+    private var lastExitCode: Int32?
     private var lastSentSize: TerminalSize?
     private var stopped = false
 
@@ -87,10 +101,16 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         state == .connecting || state == .running
     }
 
-    init(request: ExecSessionRequest, provider: any ExecSessionProviding) {
+    init(
+        request: ExecSessionRequest,
+        provider: any ExecSessionProviding,
+        fallbackShellCommand: [String]? = nil
+    ) {
         baseRequest = request
         self.provider = provider
+        self.fallbackShellCommand = fallbackShellCommand
         generation = request.generation
+        activeCommand = request.command
         podDisplayName = request.pod.namespace.isEmpty
             ? request.pod.name : "\(request.pod.namespace)/\(request.pod.name)"
         var options = TerminalOptions.default
@@ -152,16 +172,24 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         session = nil
     }
 
-    private func connect() {
+    private func connect(statusOverride: String? = nil) {
         var request = baseRequest
         request.generation = generation
+        request.command = activeCommand
         let currentSize = TerminalSize(
             columns: UInt32(clamping: max(1, terminalView.getTerminal().cols)),
             rows: UInt32(clamping: max(1, terminalView.getTerminal().rows))
         )
         request.initialSize = request.tty ? currentSize : nil
+        currentAttemptProducedOutput = false
+        lastIssue = nil
+        lastExitCode = nil
         state = .connecting
         updateStatus(ExecStatus(state: .connecting, statusReason: "Connecting"))
+        if let statusOverride {
+            statusLabel.stringValue = statusOverride
+            statusLabel.toolTip = statusOverride
+        }
         reconnectButton.isEnabled = false
         streamTask = Task { [weak self, provider] in
             guard let self else { return }
@@ -186,6 +214,13 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             stopCommandPump()
             session = nil
             streamTask = nil
+            if shouldTryFallbackShell() {
+                usedFallbackShell = true
+                activeCommand = fallbackShellCommand ?? activeCommand
+                generation &+= 1
+                connect(statusOverride: "\(baseRequest.command[0]) unavailable; trying \(activeCommand[0])")
+                return
+            }
             if state == .connecting || state == .running {
                 state = .failed
                 statusLabel.stringValue = "Disconnected"
@@ -205,18 +240,38 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         connect()
     }
 
+    private func shouldTryFallbackShell() -> Bool {
+        guard !usedFallbackShell,
+            let fallbackShellCommand,
+            !fallbackShellCommand.isEmpty,
+            fallbackShellCommand != activeCommand,
+            !currentAttemptProducedOutput
+        else { return false }
+        if state == .exited, lastExitCode == 126 || lastExitCode == 127 {
+            return true
+        }
+        guard state == .failed, let lastIssue else { return false }
+        // Authentication, replacement, transport, timeout, and capacity
+        // failures cannot be repaired by selecting another executable.
+        return lastIssue.category == .notFound || lastIssue.category == .internalFailure
+    }
+
     private func apply(_ event: ExecServerEvent) {
         switch event {
         case .stdout(_, let data), .stderr(_, let data):
+            if !data.isEmpty { currentAttemptProducedOutput = true }
             // Feed raw bytes; decoding them as String would corrupt split UTF-8
             // and escape/control sequences.
             terminalView.feed(byteArray: Array(data)[...])
         case .status(_, let status):
             state = status.state
+            lastExitCode = status.exitCode
+            lastIssue = status.issue
             updateStatus(status)
             reconnectButton.isEnabled = status.state.isTerminal
         case .failure(_, let issue):
             state = .failed
+            lastIssue = issue
             showIssue(issue)
             reconnectButton.isEnabled = true
         }
@@ -232,6 +287,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             operation: "exec Pod"
         )
         state = .failed
+        lastIssue = issue
         showIssue(issue)
     }
 
