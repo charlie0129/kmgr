@@ -86,3 +86,26 @@ import Testing
     #expect(ConfirmationPreferences.alwaysShowClusterAndNamespaceIdentity)
     #expect(KeyboardShortcutReference.defaults.contains { $0.keys == "S" })
 }
+
+@Test func defaultNamespacePreferenceSeedsOnlyNewWorkspaceScope() {
+    #expect(
+        DefaultNamespacePreference.contextDefault.initialSelection(
+            contextDefaultNamespace: "team-a"
+        ) == .namespace("team-a")
+    )
+    #expect(
+        DefaultNamespacePreference.contextDefault.initialSelection(
+            contextDefaultNamespace: ""
+        ) == .namespace("default")
+    )
+    #expect(
+        DefaultNamespacePreference.contextDefault.initialSelection(
+            contextDefaultNamespace: "  "
+        ) == .namespace("default")
+    )
+    #expect(
+        DefaultNamespacePreference.allNamespaces.initialSelection(
+            contextDefaultNamespace: "team-a"
+        ) == NamespaceSelection()
+    )
+}

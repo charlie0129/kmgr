@@ -230,11 +230,17 @@ final class Application: NSObject, NSApplicationDelegate {
         let identifier = ObjectIdentifier(controller)
         chooserControllers[identifier] = controller
         controller.onOpenSession = { [weak self] session in
-            self?.openWorkspace(
+            guard let self else { return }
+            let initialNamespace = preferencesStore.current.defaultNamespace
+                .initialSelection(contextDefaultNamespace: session.defaultNamespace)
+            openWorkspace(
                 for: session,
                 restoration: ClusterWindowRestorationRecord(
-                    contextName: session.contextName,
-                    contextReference: session.contextReference
+                    state: ClusterWindowRestorationState(
+                        contextName: session.contextName,
+                        contextReference: session.contextReference,
+                        namespaceScope: NamespaceScope(initialNamespace)
+                    )
                 )
             )
         }

@@ -24,6 +24,21 @@ public enum DefaultNamespacePreference: String, Codable, CaseIterable, Hashable,
         case .allNamespaces: "All namespaces"
         }
     }
+
+    /// Namespace scope for a newly created workspace. Restored workspaces use
+    /// their persisted scope instead, so changing this preference never
+    /// silently retargets an existing window.
+    public func initialSelection(contextDefaultNamespace: String) -> NamespaceSelection {
+        switch self {
+        case .contextDefault:
+            let namespace = contextDefaultNamespace.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            return .namespace(namespace.isEmpty ? "default" : namespace)
+        case .allNamespaces:
+            return NamespaceSelection()
+        }
+    }
 }
 
 public struct LogDisplayPreferences: Codable, Hashable, Sendable {
