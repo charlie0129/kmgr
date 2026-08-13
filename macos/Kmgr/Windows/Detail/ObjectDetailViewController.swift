@@ -662,8 +662,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        relationships.removeAll { $0.kind == .child }
-        relationshipsTable.reloadData()
         scanRelationshipsButton.isHidden = true
         cancelRelationshipScanButton.isHidden = false
         statusLabel.stringValue = "Starting relationship scan…"
@@ -677,15 +675,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 cancelRelationshipScanButton.isHidden = true
             }
             do {
-                var childUIDs = Set(relationships.filter { $0.kind == .child }.map(\.identity.uid))
+                var collection = RelationshipScanCollection(baseline: relationships)
                 for try await message in provider.scanRelationships(identity: identity) {
                     guard !Task.isCancelled else { return }
                     activeRelationshipScan = (message.scanID, message.cursor.generation)
-                    for relationship in message.relationships where !childUIDs.contains(relationship.identity.uid) {
-                        childUIDs.insert(relationship.identity.uid)
-                        relationships.append(relationship)
-                    }
-                    relationships.sort(by: Self.relationshipOrder)
+                    collection.apply(message)
+                    relationships = collection.values
                     relationshipsTable.reloadData()
                     childrenPotentiallyIncomplete = message.progress.potentiallyIncomplete
                     updateRelationshipCoverageLabel()
@@ -727,13 +722,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             }
         }
         relationshipScanTask?.cancel()
-    }
-
-    private static func relationshipOrder(_ left: ObjectRelationship, _ right: ObjectRelationship) -> Bool {
-        [left.kind.rawValue, left.identity.resource, left.identity.namespace, left.identity.name, left.identity.uid.rawValue]
-            .joined(separator: "\u{0}")
-            < [right.kind.rawValue, right.identity.resource, right.identity.namespace, right.identity.name, right.identity.uid.rawValue]
-                .joined(separator: "\u{0}")
     }
 
     private func show(_ child: NSView) {

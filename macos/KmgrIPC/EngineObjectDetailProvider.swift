@@ -315,14 +315,17 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
         let immutableRequest = request
         let rpc = self.rpc
         let timeout = streamTimeout
+        let cancelTimeout = unaryTimeout
         let limit = maximumBufferedMessages
         return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(limit)) { continuation in
+            let cursor = RelationshipScanCursorValidator(
+                streamID: scanID,
+                generation: immutableRequest.generation
+            )
             let task = Task.detached(priority: .userInitiated) {
                 do {
                     try await rpc.scanRelationships(immutableRequest, timeout: timeout) { value in
-                        guard value.cursor.streamID == scanID,
-                            value.cursor.generation == immutableRequest.generation
-                        else { throw ObjectDetailBridgeError.relationshipScanEnvelopeMismatch }
+                        try cursor.validate(value.cursor)
                         if value.hasError {
                             throw EngineClusterContextProvider.issue(from: value.error)
                         }
@@ -344,7 +347,21 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                     }
                 }
             }
-            continuation.onTermination = { @Sendable _ in task.cancel() }
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
+                Task.detached(priority: .utility) {
+                    var cancelRequest = Kmgr_V1_CancelRelationshipScanRequest()
+                    cancelRequest.context = immutableRequest.context
+                    cancelRequest.context.requestID = identifier()
+                    cancelRequest.context.deadlineUnixMs = 0
+                    cancelRequest.scanID = immutableRequest.scanID
+                    cancelRequest.generation = immutableRequest.generation
+                    _ = try? await rpc.cancelRelationshipScan(
+                        cancelRequest,
+                        timeout: cancelTimeout
+                    )
+                }
+            }
         }
     }
 
@@ -804,4 +821,28 @@ private enum ObjectDetailBridgeError: Error {
     case operationBufferExceeded(Int)
     case relationshipScanEnvelopeMismatch
     case relationshipScanBufferExceeded(Int)
+}
+
+private final class RelationshipScanCursorValidator: @unchecked Sendable {
+    private let streamID: String
+    private let generation: UInt64
+    private let lock = NSLock()
+    private var lastSequence: UInt64 = 0
+
+    init(streamID: String, generation: UInt64) {
+        self.streamID = streamID
+        self.generation = generation
+    }
+
+    func validate(_ cursor: Kmgr_V1_StreamCursor) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard cursor.streamID == streamID,
+            cursor.generation == generation,
+            cursor.sequence > lastSequence
+        else {
+            throw ObjectDetailBridgeError.relationshipScanEnvelopeMismatch
+        }
+        lastSequence = cursor.sequence
+    }
 }

@@ -179,6 +179,54 @@ public struct RelationshipScanMessage: Hashable, Sendable {
     }
 }
 
+/// Maintains the cache-first relationship baseline while an exhaustive scan
+/// streams child matches. A failed or cancelled scan therefore never erases
+/// useful cached results. Once a scan completes, its authoritative child set
+/// replaces the cached child subset while owner relationships remain intact.
+public struct RelationshipScanCollection: Hashable, Sendable {
+    public private(set) var values: [ObjectRelationship]
+    private let baseline: [ObjectRelationship]
+    private var scannedChildren: [ResourceIdentity: ObjectRelationship] = [:]
+
+    public init(baseline: [ObjectRelationship]) {
+        self.baseline = baseline
+        values = Self.sorted(baseline)
+    }
+
+    public mutating func apply(_ message: RelationshipScanMessage) {
+        for relationship in message.relationships where relationship.kind == .child {
+            scannedChildren[relationship.identity] = relationship
+        }
+        let ownersAndRelated = baseline.filter { $0.kind != .child }
+        if message.progress.complete {
+            values = Self.sorted(ownersAndRelated + Array(scannedChildren.values))
+        } else {
+            var merged = Dictionary(
+                uniqueKeysWithValues: baseline
+                    .filter { $0.kind == .child }
+                    .map { ($0.identity, $0) }
+            )
+            merged.merge(scannedChildren) { _, scanned in scanned }
+            values = Self.sorted(ownersAndRelated + Array(merged.values))
+        }
+    }
+
+    private static func sorted(_ values: [ObjectRelationship]) -> [ObjectRelationship] {
+        values.sorted { left, right in
+            [
+                left.kind.rawValue, left.identity.group, left.identity.version,
+                left.identity.resource, left.identity.namespace,
+                left.identity.name, left.identity.uid.rawValue,
+            ].joined(separator: "\u{0}")
+                < [
+                    right.kind.rawValue, right.identity.group, right.identity.version,
+                    right.identity.resource, right.identity.namespace,
+                    right.identity.name, right.identity.uid.rawValue,
+                ].joined(separator: "\u{0}")
+        }
+    }
+}
+
 public enum ObjectWatchEvent: Hashable, Sendable {
     case status(cursor: StreamCursor, resourceVersion: String)
     case updated(cursor: StreamCursor, detail: ObjectDetail)

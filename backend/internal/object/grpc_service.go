@@ -251,8 +251,15 @@ func (s *GRPCService) ScanRelationships(
 	}
 	s.scanMu.Lock()
 	for existing, existingCancel := range s.scans {
-		if existing.sessionID == key.sessionID && existing.scanID == key.scanID &&
-			existing.generation < key.generation {
+		if existing.sessionID != key.sessionID || existing.scanID != key.scanID {
+			continue
+		}
+		switch {
+		case existing.generation > key.generation:
+			s.scanMu.Unlock()
+			cancel()
+			return status.Error(codes.FailedPrecondition, "relationship scan generation is stale")
+		case existing.generation < key.generation:
 			existingCancel()
 			delete(s.scans, existing)
 		}

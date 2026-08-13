@@ -3,10 +3,22 @@ package object
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/discovery/fake"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	metadatafake "k8s.io/client-go/metadata/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func TestGRPCGetDataCarriesDecodedSecretBytes(t *testing.T) {
@@ -62,4 +74,117 @@ func TestGRPCGetObjectReturnsStructuredRecreationConflict(t *testing.T) {
 		response.GetError().GetReason() != "ObjectRecreated" {
 		t.Fatalf("structured error = %#v", response.GetError())
 	}
+}
+
+func TestGRPCRelationshipScanCursorAndExplicitCancellation(t *testing.T) {
+	target := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "owner-uid")
+	metadataScheme := metadatafake.NewTestScheme()
+	metav1.AddMetaToScheme(metadataScheme)
+	metadataClient := metadatafake.NewSimpleMetadataClient(metadataScheme)
+	block := make(chan struct{})
+	metadataClient.PrependReactor("list", "replicasets", func(clienttesting.Action) (bool, runtime.Object, error) {
+		<-block
+		return true, nil, context.Canceled
+	})
+	discovery := &fake.FakeDiscovery{Fake: &clienttesting.Fake{}}
+	discovery.Resources = []*metav1.APIResourceList{{
+		GroupVersion: "apps/v1",
+		APIResources: []metav1.APIResource{{
+			Name: "replicasets", Kind: "ReplicaSet", Namespaced: true, Verbs: metav1.Verbs{"list"},
+		}},
+	}}
+	reader, err := NewReader(scanTestResolver{
+		dynamic:   dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), target),
+		discovery: discovery, metadata: metadataClient,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, _ := NewGRPCService(reader)
+	stream := &relationshipScanTestStream{ctx: context.Background()}
+	done := make(chan error, 1)
+	go func() { done <- service.ScanRelationships(relationshipScanRequest(2), stream) }()
+	waitForRelationshipScan(t, service, relationshipScanKey{sessionID: "session", scanID: "scan", generation: 2})
+
+	ack, err := service.CancelRelationshipScan(context.Background(), &kmgrv1.CancelRelationshipScanRequest{
+		Context: relationshipRequestContext(), ScanId: "scan", Generation: 2,
+	})
+	if err != nil || !ack.GetAccepted() {
+		t.Fatalf("cancel acknowledgement = %#v, error = %v", ack, err)
+	}
+	close(block)
+	if err := <-done; status.Code(err) != codes.Canceled {
+		t.Fatalf("scan cancellation error = %v", err)
+	}
+	events := stream.snapshot()
+	for index, event := range events {
+		if event.GetCursor().GetStreamId() != "scan" || event.GetCursor().GetGeneration() != 2 ||
+			event.GetCursor().GetSequence() != uint64(index+1) {
+			t.Fatalf("event %d cursor = %#v", index, event.GetCursor())
+		}
+	}
+}
+
+func TestGRPCRelationshipScanRejectsStaleGeneration(t *testing.T) {
+	reader := testReader(t, kubernetesObject("v1", "Pod", "pods", "ns", "api", "owner-uid"))
+	service, _ := NewGRPCService(reader)
+	service.scans[relationshipScanKey{sessionID: "session", scanID: "scan", generation: 3}] = func() {}
+	err := service.ScanRelationships(relationshipScanRequest(2), &relationshipScanTestStream{ctx: context.Background()})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("stale generation error = %v", err)
+	}
+}
+
+func relationshipScanRequest(generation uint64) *kmgrv1.ScanRelationshipsRequest {
+	return &kmgrv1.ScanRelationshipsRequest{
+		Context: relationshipRequestContext(), ScanId: "scan", Generation: generation,
+		Identity: &kmgrv1.ResourceIdentity{
+			ClusterSessionId: "session", Group: "apps", Version: "v1", Resource: "deployments",
+			Namespace: "ns", Name: "api", Uid: "owner-uid",
+		},
+	}
+}
+
+func relationshipRequestContext() *kmgrv1.RequestContext {
+	return &kmgrv1.RequestContext{RequestId: "request", ClusterSessionId: "session"}
+}
+
+func waitForRelationshipScan(t *testing.T, service *GRPCService, key relationshipScanKey) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		service.scanMu.Lock()
+		_, active := service.scans[key]
+		service.scanMu.Unlock()
+		if active {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("relationship scan did not become active")
+}
+
+type relationshipScanTestStream struct {
+	grpc.ServerStream
+	ctx    context.Context
+	mu     sync.Mutex
+	events []*kmgrv1.RelationshipScanEvent
+}
+
+func (s *relationshipScanTestStream) Context() context.Context { return s.ctx }
+func (s *relationshipScanTestStream) Send(value *kmgrv1.RelationshipScanEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, value)
+	return nil
+}
+func (s *relationshipScanTestStream) SetHeader(metadata.MD) error  { return nil }
+func (s *relationshipScanTestStream) SendHeader(metadata.MD) error { return nil }
+func (s *relationshipScanTestStream) SetTrailer(metadata.MD)       {}
+func (s *relationshipScanTestStream) SendMsg(any) error            { return errors.New("unexpected SendMsg") }
+func (s *relationshipScanTestStream) RecvMsg(any) error            { return errors.New("unexpected RecvMsg") }
+func (s *relationshipScanTestStream) snapshot() []*kmgrv1.RelationshipScanEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*kmgrv1.RelationshipScanEvent(nil), s.events...)
 }

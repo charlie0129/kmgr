@@ -11,6 +11,8 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     var relationships = Kmgr_V1_GetRelationshipsResponse()
     var relationshipScan: [Kmgr_V1_RelationshipScanEvent] = []
     var watchRequest: Kmgr_V1_WatchObjectRequest?
+    var relationshipScanRequest: Kmgr_V1_ScanRelationshipsRequest?
+    var relationshipCancelRequest: Kmgr_V1_CancelRelationshipScanRequest?
 
     func getObject(
         _ request: Kmgr_V1_GetObjectRequest,
@@ -53,13 +55,17 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
         timeout: Duration,
         receive: @escaping @Sendable (Kmgr_V1_RelationshipScanEvent) throws -> Void
     ) async throws {
+        relationshipScanRequest = request
         for value in relationshipScan { try receive(value) }
     }
 
     func cancelRelationshipScan(
         _ request: Kmgr_V1_CancelRelationshipScanRequest,
         timeout: Duration
-    ) async throws -> Kmgr_V1_Acknowledgement { .init() }
+    ) async throws -> Kmgr_V1_Acknowledgement {
+        relationshipCancelRequest = request
+        return .init()
+    }
 
     func getData(
         _ request: Kmgr_V1_GetDataRequest,
@@ -96,6 +102,12 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
         relationshipScan = values
     }
     func capturedWatch() -> Kmgr_V1_WatchObjectRequest? { watchRequest }
+    func capturedRelationshipScan() -> Kmgr_V1_ScanRelationshipsRequest? {
+        relationshipScanRequest
+    }
+    func capturedRelationshipCancel() -> Kmgr_V1_CancelRelationshipScanRequest? {
+        relationshipCancelRequest
+    }
 }
 
 @Test func objectDetailProviderMapsUIDPinnedWatchEnvelope() async throws {
@@ -202,6 +214,59 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(values.first?.progress.currentResource == "apps/v1/replicasets")
     #expect(values.first?.progress.objectsExamined == 1_234)
     #expect(values.first?.progress.potentiallyIncomplete == true)
+}
+
+@Test func relationshipScanRejectsZeroDuplicateAndOutOfOrderSequences() async {
+    for sequences in [[0], [1, 1], [2, 1]] {
+        let rpc = ObjectDetailRPCCapture()
+        var events: [Kmgr_V1_RelationshipScanEvent] = []
+        for sequence in sequences {
+            var event = Kmgr_V1_RelationshipScanEvent()
+            event.cursor.streamID = "scan-ordered"
+            event.cursor.generation = 1
+            event.cursor.sequence = UInt64(sequence)
+            events.append(event)
+        }
+        await rpc.installRelationshipScan(events)
+        let provider = EngineObjectDetailProvider(
+            rpc: rpc,
+            identifier: { "scan-ordered" }
+        )
+        do {
+            for try await _ in provider.scanRelationships(
+                identity: identity(name: "api", uid: "deploy-1")
+            ) {}
+            Issue.record("Expected invalid relationship scan cursor for \(sequences)")
+        } catch let issue as ClusterManagerIssue {
+            #expect(issue.category == .internalFailure)
+            #expect(issue.reason == "OperationEnvelopeMismatch")
+        } catch {
+            Issue.record("Unexpected relationship scan error: \(error)")
+        }
+    }
+}
+
+@Test func relationshipScanTerminationSendsExplicitKnownIdentityCancel() async throws {
+    let rpc = ObjectDetailRPCCapture()
+    let provider = EngineObjectDetailProvider(
+        rpc: rpc,
+        now: { Date(timeIntervalSince1970: 1_000) },
+        identifier: { "scan-cancel" }
+    )
+    let stream = provider.scanRelationships(
+        identity: identity(name: "api", uid: "deploy-1")
+    )
+    for try await _ in stream { break }
+
+    for _ in 0..<100 where await rpc.capturedRelationshipCancel() == nil {
+        try await Task.sleep(for: .milliseconds(2))
+    }
+    let started = await rpc.capturedRelationshipScan()
+    let cancelled = await rpc.capturedRelationshipCancel()
+    #expect(started?.scanID == "scan-cancel")
+    #expect(cancelled?.scanID == "scan-cancel")
+    #expect(cancelled?.generation == 1)
+    #expect(cancelled?.context.clusterSessionID == "session")
 }
 
 private func identity(name: String, uid: ResourceUID) -> ResourceIdentity {
