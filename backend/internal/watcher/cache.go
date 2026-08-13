@@ -42,31 +42,32 @@ func NewWarmCache[K comparable, V any](maxEntries, maxObjects int) *WarmCache[K,
 	}
 }
 
-// Put returns the keys evicted from least to most recently used. An entry
-// larger than the entire object budget is rejected rather than evicting every
-// useful cache entry for a value that still cannot fit.
-func (c *WarmCache[K, V]) Put(key K, entry WarmEntry[V]) []K {
+// Put returns the keys evicted from least to most recently used and whether
+// the new entry was admitted. An entry larger than the entire object budget is
+// rejected rather than evicting every useful cache entry for a value that
+// still cannot fit. Rejection leaves the cache unchanged, including any prior
+// entry under the same key.
+func (c *WarmCache[K, V]) Put(key K, entry WarmEntry[V]) (evicted []K, admitted bool) {
 	if entry.ObjectCount < 0 {
 		panic("watcher: negative object count")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if entry.ObjectCount > c.maxObjects {
+		return nil, false
+	}
 	if element := c.byKey[key]; element != nil {
 		item := element.Value.(*cacheItem[K, V])
 		c.objects -= item.entry.ObjectCount
 		c.lru.Remove(element)
 		delete(c.byKey, key)
 	}
-	if entry.ObjectCount > c.maxObjects {
-		return nil
-	}
 
 	item := &cacheItem[K, V]{key: key, entry: entry}
 	c.byKey[key] = c.lru.PushFront(item)
 	c.objects += entry.ObjectCount
 
-	var evicted []K
 	for len(c.byKey) > c.maxEntries || c.objects > c.maxObjects {
 		element := c.lru.Back()
 		item := element.Value.(*cacheItem[K, V])
@@ -75,7 +76,7 @@ func (c *WarmCache[K, V]) Put(key K, entry WarmEntry[V]) []K {
 		c.objects -= item.entry.ObjectCount
 		evicted = append(evicted, item.key)
 	}
-	return evicted
+	return evicted, true
 }
 
 func (c *WarmCache[K, V]) Get(key K) (WarmEntry[V], bool) {

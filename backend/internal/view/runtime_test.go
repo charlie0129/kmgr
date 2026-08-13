@@ -126,6 +126,97 @@ func TestRuntimeReturnsWarmSnapshotBeforeResumeAndAvoidsRelist(t *testing.T) {
 	}
 }
 
+func TestRuntimeDropsReleasedResourceRejectedByWarmObjectBudget(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	client.listPages = []*unstructured.UnstructuredList{listPage(
+		"rv-1", "",
+		pod("uid-a", "ns", "api-a", "Running", 0, nil, time.Time{}),
+		pod("uid-b", "ns", "api-b", "Running", 0, nil, time.Time{}),
+	)}
+	source := &fakeResourceSource{authority: "cluster-a", client: client}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: source, ReleaseDelay: 5 * time.Millisecond, BatchDelay: time.Millisecond,
+		WarmObjectLimit: 1, PipelineTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	first, err := runtime.Open(openView("session-1", "view-1", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, first, "uid-b")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	key := first.resource.key
+	first.Close()
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		_, retained := runtime.resources[key]
+		_, warm := runtime.warm.Get(key)
+		return client.lastWatch().stopped.Load() && !retained && !warm
+	})
+
+	searchResult, err := runtime.SearchCached(CachedSearchQuery{
+		SessionID: "session-1", NamespaceScope: NamespaceScope{All: true},
+		Query: "api", ResultLimit: 10, ExaminationLimit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searchResult.Examined != 0 || len(searchResult.Results) != 0 {
+		t.Fatalf("search retained rejected warm objects: %#v", searchResult)
+	}
+
+	secondListGate := make(chan struct{})
+	client.mu.Lock()
+	client.beforeListPage = map[int]chan struct{}{0: secondListGate}
+	client.mu.Unlock()
+	second, err := runtime.Open(openView("session-1", "view-2", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 2 })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	events, err := second.Next(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var freshness []kmgrv1.ViewFreshness
+	var snapshotRows int
+	var sawEmptySnapshot bool
+	for _, event := range events {
+		if status := event.GetStatus(); status != nil {
+			freshness = append(freshness, status.GetFreshness())
+			if status.GetFromWarmCache() {
+				t.Fatalf("cold reopen reported warm-cache status: %#v", status)
+			}
+		}
+		if snapshot := event.GetSnapshot(); snapshot != nil {
+			sawEmptySnapshot = snapshot.GetFirstChunk() && snapshot.GetLastChunk() && len(snapshot.GetRows()) == 0
+			snapshotRows += len(snapshot.GetRows())
+		}
+	}
+	if !slices.Contains(freshness, kmgrv1.ViewFreshness_VIEW_FRESHNESS_LOADING) ||
+		slices.Contains(freshness, kmgrv1.ViewFreshness_VIEW_FRESHNESS_STALE) ||
+		!sawEmptySnapshot || snapshotRows != 0 {
+		t.Fatalf("cold initial delivery: freshness=%v, saw empty snapshot=%t, rows=%d", freshness, sawEmptySnapshot, snapshotRows)
+	}
+
+	close(secondListGate)
+	waitForSnapshotUID(t, second, "uid-a")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 2 })
+	if client.listCalls.Load() != 2 {
+		t.Fatalf("cold reopen LIST calls = %d, want 2 total", client.listCalls.Load())
+	}
+}
+
 func TestCachedChildrenUsesOnlyMatchingAuthorityAndDeduplicatesViewStores(t *testing.T) {
 	t.Parallel()
 	ownerUID := types.UID("owner-uid")

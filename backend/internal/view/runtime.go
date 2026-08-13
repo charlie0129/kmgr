@@ -1050,13 +1050,17 @@ func (r *Runtime) releaseResource(key resourceKey, entry *resourceRuntime, runNu
 		entry.cancel()
 	}
 	entry.running = false
-	evicted := r.warm.Put(key, watcher.WarmEntry[*resourceRuntime]{
+	evicted, admitted := r.warm.Put(key, watcher.WarmEntry[*resourceRuntime]{
 		Value:            entry,
 		ObjectCount:      entry.store.Len(),
 		ResourceVersion:  entry.store.ResourceVersion(),
 		LastSynchronized: entry.lastStatus.LastSynchronized,
 		Complete:         entry.store.ResourceVersion() != "",
 	})
+	if !admitted && r.resources[key] == entry &&
+		len(entry.subscribers)+len(entry.dependents) == 0 && !entry.running {
+		delete(r.resources, key)
+	}
 	for _, evictedKey := range evicted {
 		if evictedEntry := r.resources[evictedKey]; evictedEntry != nil && len(evictedEntry.subscribers)+len(evictedEntry.dependents) == 0 && !evictedEntry.running {
 			delete(r.resources, evictedKey)

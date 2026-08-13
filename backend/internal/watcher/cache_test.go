@@ -14,7 +14,10 @@ func TestWarmCacheEvictsLeastRecentlyUsedWithinBothBudgets(t *testing.T) {
 	if _, ok := cache.Get("pods"); !ok {
 		t.Fatal("pods unexpectedly absent")
 	}
-	evicted := cache.Put("deployments", entry("deployments", 2))
+	evicted, admitted := cache.Put("deployments", entry("deployments", 2))
+	if !admitted {
+		t.Fatal("entry within object budget was rejected")
+	}
 	if !reflect.DeepEqual(evicted, []string{"nodes"}) {
 		t.Fatalf("evicted = %v, want [nodes]", evicted)
 	}
@@ -30,12 +33,26 @@ func TestWarmCacheRejectsOversizedEntryWithoutEvictingUsefulData(t *testing.T) {
 	t.Parallel()
 	cache := NewWarmCache[string, string](2, 3)
 	cache.Put("pods", entry("pods", 2))
-	cache.Put("huge", entry("huge", 10))
+	_, admitted := cache.Put("huge", entry("huge", 10))
+	if admitted {
+		t.Fatal("oversized entry reported successful admission")
+	}
 	if _, ok := cache.Get("pods"); !ok {
 		t.Fatal("oversized insertion evicted useful data")
 	}
 	if _, ok := cache.Get("huge"); ok {
 		t.Fatal("oversized entry was cached")
+	}
+	if cache.Len() != 1 || cache.ObjectCount() != 2 {
+		t.Fatalf("cache size after rejection = %d entries, %d objects", cache.Len(), cache.ObjectCount())
+	}
+	_, admitted = cache.Put("pods", entry("oversized replacement", 10))
+	if admitted {
+		t.Fatal("oversized replacement reported successful admission")
+	}
+	retained, ok := cache.Get("pods")
+	if !ok || retained.Value != "pods" {
+		t.Fatalf("entry after rejected replacement = %#v, present = %t", retained, ok)
 	}
 }
 
