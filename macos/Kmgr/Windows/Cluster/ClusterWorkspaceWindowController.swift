@@ -228,6 +228,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.presentCommandPalette()
     }
 
+    @objc func navigateBack(_ sender: Any?) { workspaceController.navigateBack() }
+    @objc func navigateForward(_ sender: Any?) { workspaceController.navigateForward() }
+
     @objc func openResourceDetails(_ sender: Any?) { workspaceController.openResourceDetails(sender) }
     @objc func openResourceYAML(_ sender: Any?) { workspaceController.openResourceYAML(sender) }
     @objc func openResourceEvents(_ sender: Any?) { workspaceController.openResourceEvents(sender) }
@@ -238,6 +241,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func scaleResourceSelection(_ sender: Any?) { workspaceController.scaleResourceSelection(sender) }
     @objc func restartResourceSelection(_ sender: Any?) { workspaceController.restartResourceSelection(sender) }
     @objc func editResourceMetadata(_ sender: Any?) { workspaceController.editResourceMetadata(sender) }
+    @objc func copyResourceName(_ sender: Any?) { workspaceController.copyResourceName(sender) }
+    @objc func copyResourceNamespacedName(_ sender: Any?) {
+        workspaceController.copyResourceNamespacedName(sender)
+    }
+    @objc func copyResourceReference(_ sender: Any?) { workspaceController.copyResourceReference(sender) }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let command: ResourceTableCommand?
@@ -252,6 +260,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(scaleResourceSelection(_:)): command = .scale
         case #selector(restartResourceSelection(_:)): command = .restart
         case #selector(editResourceMetadata(_:)): command = .editMetadata
+        case #selector(copyResourceName(_:)): command = .copyName
+        case #selector(copyResourceNamespacedName(_:)): command = .copyNamespacedName
+        case #selector(copyResourceReference(_:)): command = .copyReference
         default: command = nil
         }
         return command.map(workspaceController.canPerformCommand) ?? true
@@ -274,6 +285,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let namespaceControl = NSPopUpButton(frame: .zero, pullsDown: false)
     private let connectionLabel = NSTextField(labelWithString: "Connected")
     private let forwardsButton = NSButton(title: "Forwards 0", target: nil, action: nil)
+    private let actionsButton = NSMenuToolbarItem(itemIdentifier: .actions)
     private var namespaceTask: Task<Void, Never>?
     private var portForwardObserver: UUID?
     private var resources: [DiscoveredResource] = []
@@ -317,13 +329,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         sidebarController.onSelectResource = { [weak self] resource in
             guard let self else { return }
             guard pendingRestorationState == nil else { return }
-            let wasShowingDetail = detailController != nil
             showResourceList(resume: false)
             contentController.open(resource: resource, scope: selectedNamespaceScope())
             checkpointRestoration()
-            if wasShowingDetail {
-                view.window?.makeFirstResponder(contentController.tableResponder)
-            }
+            view.window?.makeFirstResponder(contentController.tableResponder)
         }
         sidebarController.onResourcesChanged = { [weak self] resources in
             self?.resources = resources
@@ -428,11 +437,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards]
+        [.toggleSidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards]
+        [.toggleSidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
     }
 
     func toolbar(
@@ -461,7 +470,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         case .cluster:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = session.contextName
-            let button = NSButton(title: session.contextName, target: nil, action: nil)
+            let button = NSButton(title: session.contextName, target: self, action: #selector(showClusterDetails))
             button.bezelStyle = .texturedRounded
             button.toolTip = "\(session.clusterName) · \(session.serverHostname)"
             item.view = button
@@ -500,6 +509,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             item.label = "Port Forwards"
             item.view = forwardsButton
             return item
+        case .actions:
+            actionsButton.label = "Actions"
+            actionsButton.image = NSImage(
+                systemSymbolName: "ellipsis.circle",
+                accessibilityDescription: "Actions for selected resources"
+            )
+            actionsButton.showsIndicator = true
+            actionsButton.menu = contentController.makeResourceMenu()
+            return actionsButton
         default:
             return nil
         }
@@ -524,8 +542,39 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         onShowPortForwards()
     }
 
+    @objc private func showClusterDetails() {
+        let alert = NSAlert()
+        alert.messageText = session.contextName
+        alert.informativeText = [
+            "Cluster: \(session.clusterName)",
+            "Server: \(session.serverHostname)",
+            "Default namespace: \(session.defaultNamespace.isEmpty ? "default" : session.defaultNamespace)",
+        ].joined(separator: "\n")
+        alert.addButton(withTitle: "OK")
+        if let window = view.window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
     @objc private func showCommandPalette() {
         presentCommandPalette()
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if let paletteController {
+            paletteController.close()
+            self.paletteController = nil
+            return
+        }
+        if detailController != nil {
+            showResourceList()
+            checkpointRestoration()
+            return
+        }
+        if contentController.handleEscape() { return }
+        view.window?.makeFirstResponder(contentController.tableResponder)
     }
 
     @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
@@ -538,6 +587,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func scaleResourceSelection(_ sender: Any?) { contentController.performCommand(.scale) }
     @objc func restartResourceSelection(_ sender: Any?) { contentController.performCommand(.restart) }
     @objc func editResourceMetadata(_ sender: Any?) { contentController.performCommand(.editMetadata) }
+    @objc func copyResourceName(_ sender: Any?) { contentController.performCommand(.copyName) }
+    @objc func copyResourceNamespacedName(_ sender: Any?) {
+        contentController.performCommand(.copyNamespacedName)
+    }
+    @objc func copyResourceReference(_ sender: Any?) { contentController.performCommand(.copyReference) }
 
     func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
         contentController.canPerformCommand(command)
@@ -560,13 +614,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         )
         controller.onOpenResource = { [weak self] resource in
             guard let self else { return }
-            let wasShowingDetail = detailController != nil
             showResourceList(resume: false)
             contentController.open(resource: resource, scope: selectedNamespaceScope())
             checkpointRestoration()
-            if wasShowingDetail {
-                view.window?.makeFirstResponder(contentController.tableResponder)
-            }
+            view.window?.makeFirstResponder(contentController.tableResponder)
         }
         controller.onChangeNamespace = { [weak self] namespace in
             self?.selectNamespace(namespace)
@@ -649,11 +700,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         checkpointRestoration()
     }
 
+    func navigateBack() { goBack() }
+
     @objc private func goForward() {
         guard detailController == nil else { return }
         contentController.goForward()
         checkpointRestoration()
     }
+
+    func navigateForward() { goForward() }
 
     private func selectNamespace(_ namespace: String) {
         if let index = namespaceControl.itemTitles.firstIndex(of: namespace) {
@@ -737,6 +792,7 @@ private extension NSToolbarItem.Identifier {
     static let palette = Self("workspace.palette")
     static let connection = Self("workspace.connection")
     static let forwards = Self("workspace.forwards")
+    static let actions = Self("workspace.actions")
 }
 
 @MainActor
@@ -897,7 +953,11 @@ private final class ResourceSidebarViewController: NSViewController,
             }
         }
         outlineView.reloadData()
-        for index in sections.indices { outlineView.expandItem(sections[index]) }
+        for index in sections.indices
+            where sections[index].title != "Custom Resources" || !query.isEmpty
+        {
+            outlineView.expandItem(sections[index])
+        }
         if let selectedID, let resource = allResources.first(where: { $0.id == selectedID }) {
             select(resource: resource, notify: false)
         }
@@ -1087,7 +1147,7 @@ private final class ResourceSidebarViewController: NSViewController,
 
 @MainActor
 private final class ResourceListViewController: NSViewController,
-    NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate
+    NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate
 {
     private let session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
@@ -1096,6 +1156,7 @@ private final class ResourceListViewController: NSViewController,
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let freshnessLabel = NSTextField(labelWithString: "Idle")
     private let countLabel = NSTextField(labelWithString: "0 objects")
+    private let sortLabel = NSTextField(labelWithString: "Unsorted")
     private let filterField = NSSearchField()
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
@@ -1152,13 +1213,14 @@ private final class ResourceListViewController: NSViewController,
         scopeLabel.textColor = .secondaryLabelColor
         freshnessLabel.textColor = .secondaryLabelColor
         countLabel.textColor = .secondaryLabelColor
+        sortLabel.textColor = .secondaryLabelColor
         filterField.placeholderString = "Filter resources  /"
         filterField.delegate = self
         filterField.sendsSearchStringImmediately = true
 
         let columnsButton = NSButton(title: "Columns…", target: self, action: #selector(showColumns))
         columnsButton.bezelStyle = .texturedRounded
-        let header = NSStackView(views: [titleLabel, countLabel, scopeLabel, freshnessLabel, NSView(), filterField, columnsButton])
+        let header = NSStackView(views: [titleLabel, countLabel, scopeLabel, freshnessLabel, sortLabel, NSView(), filterField, columnsButton])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 9
@@ -1176,6 +1238,7 @@ private final class ResourceListViewController: NSViewController,
         tableView.rowSizeStyle = .medium
         tableView.setAccessibilityLabel("Kubernetes resources")
         tableView.onCommand = { [weak self] command in self?.handle(command) }
+        tableView.menu = makeResourceMenu()
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -1277,6 +1340,75 @@ private final class ResourceListViewController: NSViewController,
     var currentResourceID: String? { resource?.id }
 
     var selectedIdentities: [ResourceIdentity] { model.selectedIdentities }
+
+    @discardableResult
+    func handleEscape() -> Bool {
+        if view.window?.firstResponder === filterField {
+            if !filterField.stringValue.isEmpty {
+                setFilter("")
+            }
+            view.window?.makeFirstResponder(tableView)
+            return true
+        }
+        if !filterField.stringValue.isEmpty {
+            setFilter("")
+            view.window?.makeFirstResponder(tableView)
+            return true
+        }
+        if !model.selectedUIDs.isEmpty {
+            model.clearSelection()
+            suppressSelectionCallbacks = true
+            tableView.deselectAll(nil)
+            suppressSelectionCallbacks = false
+            updateStatusLine()
+            return true
+        }
+        return false
+    }
+
+    func makeResourceMenu() -> NSMenu {
+        let menu = NSMenu(title: "Resource Actions")
+        menu.delegate = self
+        return menu
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        addResourceMenuItems(to: menu)
+    }
+
+    private func addResourceMenuItems(to menu: NSMenu) {
+        func add(_ title: String, _ command: ResourceTableCommand) {
+            let item = NSMenuItem(title: title, action: #selector(performContextMenuCommand(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = ResourceTableCommandBox(command)
+            item.isEnabled = canPerformCommand(command, requiringTableFocus: false)
+            menu.addItem(item)
+        }
+        add("Open Details", .open)
+        add("Open YAML", .openYAML)
+        add("Open Events", .openEvents)
+        menu.addItem(.separator())
+        add("Open Logs…", .openLogs)
+        add("Open Terminal…", .openExec)
+        add("Start Port Forward…", .startPortForward)
+        menu.addItem(.separator())
+        add("Scale…", .scale)
+        add("Rollout Restart…", .restart)
+        add("Edit Labels / Annotations…", .editMetadata)
+        menu.addItem(.separator())
+        add("Copy Name", .copyName)
+        add("Copy Namespace/Name", .copyNamespacedName)
+        add("Copy kubectl Reference", .copyReference)
+        menu.addItem(.separator())
+        add("Delete…", .delete)
+    }
+
+    @objc private func performContextMenuCommand(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? ResourceTableCommandBox else { return }
+        guard canPerformCommand(box.command, requiringTableFocus: false) else { NSSound.beep(); return }
+        handle(box.command)
+    }
 
     func setFilter(_ value: String) {
         filterRevision &+= 1
@@ -1490,8 +1622,19 @@ private final class ResourceListViewController: NSViewController,
 
     private func updateStatusLine() {
         countLabel.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects"
+        if let descriptor = tableView.sortDescriptors.first, let key = descriptor.key {
+            let title = tableView.tableColumns.first(where: { $0.identifier.rawValue == key })?.title
+                ?? key
+            sortLabel.stringValue = "Sorted by \(title) \(descriptor.ascending ? "↑" : "↓")"
+        } else {
+            sortLabel.stringValue = "Unsorted"
+        }
         if let status = view.viewWithTag(0)?.subviews.compactMap({ $0 as? NSTextField }).first(where: { $0.identifier?.rawValue == "resource-status-line" }) {
-            status.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects · \(model.selectionCounts.selected) selected · \(freshnessLabel.stringValue)"
+            let counts = model.selectionCounts
+            let selection = counts.hidden > 0
+                ? "\(counts.selected) selected (\(counts.hidden) hidden by filter)"
+                : "\(counts.selected) selected"
+            status.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects · \(selection) · \(freshnessLabel.stringValue)"
         }
     }
 
@@ -1518,6 +1661,7 @@ private final class ResourceListViewController: NSViewController,
         columnDefinitionsByResourceID[resourceID] = definitions
         installColumns(definitions)
         openStream()
+        updateStatusLine()
         onRestorationChanged?()
     }
 
@@ -1865,6 +2009,18 @@ private final class ResourceListViewController: NSViewController,
         case .editMetadata:
             guard let identity = model.selectedIdentities.only else { return }
             onMutate?(identity, .metadata)
+        case .copyName:
+            copySelectedIdentities { $0.name }
+        case .copyNamespacedName:
+            copySelectedIdentities { identity in
+                identity.namespace.isEmpty ? identity.name : "\(identity.namespace)/\(identity.name)"
+            }
+        case .copyReference:
+            copySelectedIdentities { identity in
+                var reference = "\(identity.resource)/\(identity.name)"
+                if !identity.namespace.isEmpty { reference += " -n \(identity.namespace)" }
+                return reference
+            }
         case .moveDown, .moveUp:
             let delta = command == .moveDown ? 1 : -1
             let next = min(max(tableView.selectedRow + delta, 0), max(0, tableView.numberOfRows - 1))
@@ -1873,13 +2029,27 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
+    private func copySelectedIdentities(_ transform: (ResourceIdentity) -> String) {
+        let values = model.selectedIdentities.map(transform)
+        guard !values.isEmpty else { NSSound.beep(); return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(values.joined(separator: "\n"), forType: .string)
+    }
+
     func performCommand(_ command: ResourceTableCommand) {
         guard canPerformCommand(command) else { NSSound.beep(); return }
         handle(command)
     }
 
     func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
-        guard view.window?.firstResponder === tableView else { return false }
+        canPerformCommand(command, requiringTableFocus: true)
+    }
+
+    private func canPerformCommand(
+        _ command: ResourceTableCommand,
+        requiringTableFocus: Bool
+    ) -> Bool {
+        if requiringTableFocus, view.window?.firstResponder !== tableView { return false }
         let selected = model.selectedIdentities
         switch command {
         case .open, .openYAML, .openEvents:
@@ -1906,6 +2076,8 @@ private final class ResourceListViewController: NSViewController,
                 && ["deployments", "statefulsets", "daemonsets"].contains(selected[0].resource)
         case .editMetadata:
             return selected.count == 1
+        case .copyName, .copyNamespacedName, .copyReference:
+            return !selected.isEmpty
         case .focusFilter, .selectAll, .moveDown, .moveUp:
             return true
         }
@@ -1914,7 +2086,13 @@ private final class ResourceListViewController: NSViewController,
 
 private enum ResourceTableCommand: Equatable {
     case focusFilter, open, openYAML, openEvents, openLogs, openExec
-    case startPortForward, selectAll, delete, scale, restart, editMetadata, moveUp, moveDown
+    case startPortForward, selectAll, delete, scale, restart, editMetadata
+    case copyName, copyNamespacedName, copyReference, moveUp, moveDown
+}
+
+private final class ResourceTableCommandBox {
+    let command: ResourceTableCommand
+    init(_ command: ResourceTableCommand) { self.command = command }
 }
 
 @MainActor
@@ -1936,6 +2114,18 @@ private final class ResourceTableView: NSTableView {
         case ("p", _, false), ("P", _, false): onCommand?(.startPortForward)
         case ("a", _, true): onCommand?(.selectAll)
         case (_, 51, true): onCommand?(.delete)
+        case ("[", _, true):
+            _ = window?.windowController?.tryToPerform(
+                #selector(ClusterWorkspaceWindowController.navigateBack(_:)),
+                with: nil
+            )
+        case ("]", _, true):
+            _ = window?.windowController?.tryToPerform(
+                #selector(ClusterWorkspaceWindowController.navigateForward(_:)),
+                with: nil
+            )
+        case (_, 53, false):
+            _ = tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: nil)
         default: super.keyDown(with: event)
         }
     }

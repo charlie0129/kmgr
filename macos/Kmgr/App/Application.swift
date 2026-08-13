@@ -412,6 +412,22 @@ final class Application: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         resourceMenu.addItem(.separator())
+        resourceMenu.addItem(
+            withTitle: "Copy Name",
+            action: #selector(ClusterWorkspaceWindowController.copyResourceName(_:)),
+            keyEquivalent: ""
+        )
+        resourceMenu.addItem(
+            withTitle: "Copy Namespace/Name",
+            action: #selector(ClusterWorkspaceWindowController.copyResourceNamespacedName(_:)),
+            keyEquivalent: ""
+        )
+        resourceMenu.addItem(
+            withTitle: "Copy kubectl Reference",
+            action: #selector(ClusterWorkspaceWindowController.copyResourceReference(_:)),
+            keyEquivalent: ""
+        )
+        resourceMenu.addItem(.separator())
         let deleteItem = resourceMenu.addItem(
             withTitle: "Delete…",
             action: #selector(ClusterWorkspaceWindowController.deleteResourceSelection(_:)),
@@ -428,6 +444,19 @@ final class Application: NSObject, NSApplicationDelegate {
             action: #selector(NSWindow.performMiniaturize(_:)),
             keyEquivalent: "m"
         )
+        windowMenu.addItem(.separator())
+        let backItem = windowMenu.addItem(
+            withTitle: "Back",
+            action: #selector(ClusterWorkspaceWindowController.navigateBack(_:)),
+            keyEquivalent: "["
+        )
+        backItem.keyEquivalentModifierMask = .command
+        let forwardItem = windowMenu.addItem(
+            withTitle: "Forward",
+            action: #selector(ClusterWorkspaceWindowController.navigateForward(_:)),
+            keyEquivalent: "]"
+        )
+        forwardItem.keyEquivalentModifierMask = .command
         windowMenu.addItem(.separator())
         let paletteItem = windowMenu.addItem(
             withTitle: "Command Palette…",
