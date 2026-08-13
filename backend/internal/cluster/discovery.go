@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 )
@@ -165,7 +166,7 @@ func discoverTargets(
 	switch {
 	case err == nil:
 		for _, version := range legacy.Versions {
-			if !safeDiscoveryPathSegment(version) {
+			if !validDiscoveryVersion(version) {
 				failures = append(failures, DiscoveryFailure{
 					Target: "core/invalid-version",
 					Err:    errors.New("the core discovery document contained an invalid API version"),
@@ -193,7 +194,7 @@ func discoverTargets(
 	case err == nil:
 		for index := range groups.Groups {
 			group := &groups.Groups[index]
-			if !safeDiscoveryPathSegment(group.Name) {
+			if len(utilvalidation.IsDNS1123Subdomain(group.Name)) != 0 {
 				failures = append(failures, DiscoveryFailure{
 					Target: "apis/invalid-group",
 					Err:    errors.New("the API discovery document contained an invalid group name"),
@@ -206,7 +207,7 @@ func discoverTargets(
 			for _, version := range group.Versions {
 				parsed, parseErr := schema.ParseGroupVersion(version.GroupVersion)
 				if parseErr != nil || parsed.Group != group.Name || parsed.Version != version.Version ||
-					!safeDiscoveryPathSegment(version.Version) {
+					!validDiscoveryVersion(version.Version) {
 					failures = append(failures, DiscoveryFailure{
 						Target: group.Name + "/invalid-version",
 						Err:    errors.New("the API discovery document contained an invalid group version"),
@@ -285,9 +286,8 @@ func fetchResourceLists(
 	return lists, failures, successful, nil
 }
 
-func safeDiscoveryPathSegment(value string) bool {
-	return value != "" && value != "." && value != ".." &&
-		len(value) <= 253 && !strings.ContainsAny(value, "/?#")
+func validDiscoveryVersion(value string) bool {
+	return len(utilvalidation.IsDNS1035Label(value)) == 0
 }
 
 func ListNamespaces(ctx context.Context, session *Session) ([]string, error) {

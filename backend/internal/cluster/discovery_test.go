@@ -163,9 +163,18 @@ func TestDiscoverResourcesCancelsHangingResourceEndpoint(t *testing.T) {
 
 func discoveryTestSession(t *testing.T, handler http.Handler) *Session {
 	t.Helper()
-	server := httptest.NewServer(handler)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if authorization := request.Header.Get("Authorization"); authorization != "Bearer discovery-test-token" {
+			t.Errorf("Authorization header = %q, want discovery client bearer token", authorization)
+			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(writer, request)
+	}))
 	t.Cleanup(server.Close)
-	client, err := discovery.NewDiscoveryClientForConfig(&rest.Config{Host: server.URL})
+	client, err := discovery.NewDiscoveryClientForConfig(&rest.Config{
+		Host: server.URL, BearerToken: "discovery-test-token",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
