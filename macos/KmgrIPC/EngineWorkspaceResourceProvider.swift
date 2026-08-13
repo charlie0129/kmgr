@@ -191,7 +191,7 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
     public func discoverResources(
         sessionID: String,
         refresh: Bool
-    ) async throws -> [DiscoveredResource] {
+    ) async throws -> ResourceDiscoveryResult {
         var request = Kmgr_V1_DiscoverRequest()
         request.context = makeRequestContext(
             sessionID: sessionID,
@@ -212,7 +212,26 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
             if response.hasError {
                 throw EngineClusterContextProvider.issue(from: response.error)
             }
-            return response.resources.compactMap(Self.resource(from:))
+            let warning: ClusterManagerIssue?
+            if response.hasWarning {
+                warning = EngineClusterContextProvider.issue(from: response.warning)
+            } else if response.potentiallyIncomplete {
+                warning = ClusterManagerIssue(
+                    category: .unavailable,
+                    reason: "DiscoveryPartiallyFailed",
+                    message: "Some Kubernetes API groups could not be discovered. The available resource list may be incomplete.",
+                    retryable: true,
+                    operation: "discover-resources"
+                )
+            } else {
+                warning = nil
+            }
+            return ResourceDiscoveryResult(
+                resources: response.resources.compactMap(Self.resource(from:)),
+                revision: response.discoveryRevision,
+                potentiallyIncomplete: response.potentiallyIncomplete || warning != nil,
+                warning: warning
+            )
         } catch {
             throw EngineClusterContextProvider.issue(
                 from: error,

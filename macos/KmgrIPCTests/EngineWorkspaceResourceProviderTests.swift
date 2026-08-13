@@ -26,13 +26,13 @@ struct EngineWorkspaceResourceProviderTests {
         )
         let provider = deterministicProvider(rpc: rpc)
 
-        let resources = try await provider.discoverResources(
+        let discovery = try await provider.discoverResources(
             sessionID: "session-one",
             refresh: true
         )
         let namespaces = try await provider.listNamespaces(sessionID: "session-one")
 
-        #expect(resources == [DiscoveredResource(
+        #expect(discovery.resources == [DiscoveredResource(
             group: "apps",
             version: "v1",
             resource: "deployments",
@@ -43,6 +43,9 @@ struct EngineWorkspaceResourceProviderTests {
             categories: ["all"],
             preferredVersion: true
         )])
+        #expect(discovery.revision == "discovery-test")
+        #expect(discovery.potentiallyIncomplete == false)
+        #expect(discovery.warning == nil)
         #expect(namespaces == ["apps", "default", "kube-system"])
 
         let discoverRequest = await rpc.capturedDiscoverRequest()
@@ -53,6 +56,44 @@ struct EngineWorkspaceResourceProviderTests {
         let namespaceRequest = await rpc.capturedNamespaceRequest()
         #expect(namespaceRequest?.context.clusterSessionID == "session-one")
         #expect(namespaceRequest?.context.deadlineUnixMs == 1_030_000)
+    }
+
+    @Test("keeps partial discovery resources and maps the structured warning")
+    func mapsPartialDiscoveryWarning() async throws {
+        var pods = Kmgr_V1_ApiResource()
+        pods.type.version = "v1"
+        pods.type.resource = "pods"
+        pods.type.kind = "Pod"
+        pods.type.namespaced = true
+        pods.verbs = ["list", "watch"]
+
+        var warning = Kmgr_V1_StructuredError()
+        warning.category = .unavailable
+        warning.reason = "DiscoveryPartiallyFailed"
+        warning.message = "Some Kubernetes API groups could not be discovered. The available resource list may be incomplete."
+        warning.retryable = true
+        warning.operation = "discover-resources"
+        warning.safeDetails = [
+            "failed_group_versions": "metrics.k8s.io/v1beta1",
+            "failed_group_version_count": "1",
+        ]
+
+        let provider = deterministicProvider(rpc: FakeWorkspaceRPC(
+            resources: [pods],
+            discoveryWarning: warning,
+            discoveryPotentiallyIncomplete: true
+        ))
+
+        let discovery = try await provider.discoverResources(
+            sessionID: "session-one",
+            refresh: false
+        )
+
+        #expect(discovery.resources.map(\.resource) == ["pods"])
+        #expect(discovery.potentiallyIncomplete)
+        #expect(discovery.warning?.reason == "DiscoveryPartiallyFailed")
+        #expect(discovery.warning?.safeDetails["failed_group_versions"] == "metrics.k8s.io/v1beta1")
+        #expect(discovery.warning?.retryable == true)
     }
 
     @Test("maps streamed request, compact rows, status, deltas, and structured failures")
@@ -407,6 +448,8 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
     private let namespaces: [String]
     private let streamEvents: [Kmgr_V1_ViewEvent]
     private let discoveryError: Kmgr_V1_StructuredError?
+    private let discoveryWarning: Kmgr_V1_StructuredError?
+    private let discoveryPotentiallyIncomplete: Bool
 
     private var discoverRequest: Kmgr_V1_DiscoverRequest?
     private var namespaceRequest: Kmgr_V1_ListNamespacesRequest?
@@ -418,12 +461,16 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
         resources: [Kmgr_V1_ApiResource] = [],
         namespaces: [String] = [],
         streamEvents: [Kmgr_V1_ViewEvent] = [],
-        discoveryError: Kmgr_V1_StructuredError? = nil
+        discoveryError: Kmgr_V1_StructuredError? = nil,
+        discoveryWarning: Kmgr_V1_StructuredError? = nil,
+        discoveryPotentiallyIncomplete: Bool = false
     ) {
         self.resources = resources
         self.namespaces = namespaces
         self.streamEvents = streamEvents
         self.discoveryError = discoveryError
+        self.discoveryWarning = discoveryWarning
+        self.discoveryPotentiallyIncomplete = discoveryPotentiallyIncomplete
     }
 
     func capturedDiscoverRequest() -> Kmgr_V1_DiscoverRequest? { discoverRequest }
@@ -440,7 +487,10 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
         var response = Kmgr_V1_DiscoverResponse()
         response.requestID = request.context.requestID
         response.resources = resources
+        response.discoveryRevision = "discovery-test"
         if let discoveryError { response.error = discoveryError }
+        if let discoveryWarning { response.warning = discoveryWarning }
+        response.potentiallyIncomplete = discoveryPotentiallyIncomplete
         return response
     }
 

@@ -107,6 +107,11 @@ message DiscoverResponse {
   repeated ApiResource resources = 2;
   string discovery_revision = 3;
   StructuredError error = 4;
+  // Partial discovery remains useful, but consumers must not assume this is a
+  // complete catalog when potentially_incomplete is true. warning is safe to
+  // display and contains no arbitrary Kubernetes response text.
+  bool potentially_incomplete = 5;
+  StructuredError warning = 6;
 }
 
 message ListNamespacesRequest { RequestContext context = 1; }

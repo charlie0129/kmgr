@@ -795,8 +795,13 @@ type DiscoverResponse struct {
 	Resources         []*ApiResource         `protobuf:"bytes,2,rep,name=resources,proto3" json:"resources,omitempty"`
 	DiscoveryRevision string                 `protobuf:"bytes,3,opt,name=discovery_revision,json=discoveryRevision,proto3" json:"discovery_revision,omitempty"`
 	Error             *StructuredError       `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Partial discovery remains useful, but consumers must not assume this is a
+	// complete catalog when potentially_incomplete is true. warning is safe to
+	// display and contains no arbitrary Kubernetes response text.
+	PotentiallyIncomplete bool             `protobuf:"varint,5,opt,name=potentially_incomplete,json=potentiallyIncomplete,proto3" json:"potentially_incomplete,omitempty"`
+	Warning               *StructuredError `protobuf:"bytes,6,opt,name=warning,proto3" json:"warning,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *DiscoverResponse) Reset() {
@@ -853,6 +858,20 @@ func (x *DiscoverResponse) GetDiscoveryRevision() string {
 func (x *DiscoverResponse) GetError() *StructuredError {
 	if x != nil {
 		return x.Error
+	}
+	return nil
+}
+
+func (x *DiscoverResponse) GetPotentiallyIncomplete() bool {
+	if x != nil {
+		return x.PotentiallyIncomplete
+	}
+	return false
+}
+
+func (x *DiscoverResponse) GetWarning() *StructuredError {
+	if x != nil {
+		return x.Warning
 	}
 	return nil
 }
@@ -1025,13 +1044,15 @@ const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	"\n" +
 	"categories\x18\x04 \x03(\tR\n" +
 	"categories\x12+\n" +
-	"\x11preferred_version\x18\x05 \x01(\bR\x10preferredVersion\"\xc4\x01\n" +
+	"\x11preferred_version\x18\x05 \x01(\bR\x10preferredVersion\"\xaf\x02\n" +
 	"\x10DiscoverResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x122\n" +
 	"\tresources\x18\x02 \x03(\v2\x14.kmgr.v1.ApiResourceR\tresources\x12-\n" +
 	"\x12discovery_revision\x18\x03 \x01(\tR\x11discoveryRevision\x12.\n" +
-	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"J\n" +
+	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\x125\n" +
+	"\x16potentially_incomplete\x18\x05 \x01(\bR\x15potentiallyIncomplete\x122\n" +
+	"\awarning\x18\x06 \x01(\v2\x18.kmgr.v1.StructuredErrorR\awarning\"J\n" +
 	"\x15ListNamespacesRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\"\x87\x01\n" +
 	"\x16ListNamespacesResponse\x12\x1d\n" +
@@ -1108,25 +1129,26 @@ var file_kmgr_v1_cluster_proto_depIdxs = []int32{
 	17, // 12: kmgr.v1.ApiResource.type:type_name -> kmgr.v1.ResourceType
 	10, // 13: kmgr.v1.DiscoverResponse.resources:type_name -> kmgr.v1.ApiResource
 	14, // 14: kmgr.v1.DiscoverResponse.error:type_name -> kmgr.v1.StructuredError
-	15, // 15: kmgr.v1.ListNamespacesRequest.context:type_name -> kmgr.v1.RequestContext
-	14, // 16: kmgr.v1.ListNamespacesResponse.error:type_name -> kmgr.v1.StructuredError
-	2,  // 17: kmgr.v1.ClusterService.ListContexts:input_type -> kmgr.v1.ListContextsRequest
-	4,  // 18: kmgr.v1.ClusterService.OpenSession:input_type -> kmgr.v1.OpenSessionRequest
-	6,  // 19: kmgr.v1.ClusterService.CloseSession:input_type -> kmgr.v1.CloseSessionRequest
-	7,  // 20: kmgr.v1.ClusterService.WatchConnection:input_type -> kmgr.v1.WatchConnectionRequest
-	9,  // 21: kmgr.v1.ClusterService.Discover:input_type -> kmgr.v1.DiscoverRequest
-	12, // 22: kmgr.v1.ClusterService.ListNamespaces:input_type -> kmgr.v1.ListNamespacesRequest
-	3,  // 23: kmgr.v1.ClusterService.ListContexts:output_type -> kmgr.v1.ListContextsResponse
-	5,  // 24: kmgr.v1.ClusterService.OpenSession:output_type -> kmgr.v1.OpenSessionResponse
-	18, // 25: kmgr.v1.ClusterService.CloseSession:output_type -> kmgr.v1.Acknowledgement
-	8,  // 26: kmgr.v1.ClusterService.WatchConnection:output_type -> kmgr.v1.ConnectionEvent
-	11, // 27: kmgr.v1.ClusterService.Discover:output_type -> kmgr.v1.DiscoverResponse
-	13, // 28: kmgr.v1.ClusterService.ListNamespaces:output_type -> kmgr.v1.ListNamespacesResponse
-	23, // [23:29] is the sub-list for method output_type
-	17, // [17:23] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	14, // 15: kmgr.v1.DiscoverResponse.warning:type_name -> kmgr.v1.StructuredError
+	15, // 16: kmgr.v1.ListNamespacesRequest.context:type_name -> kmgr.v1.RequestContext
+	14, // 17: kmgr.v1.ListNamespacesResponse.error:type_name -> kmgr.v1.StructuredError
+	2,  // 18: kmgr.v1.ClusterService.ListContexts:input_type -> kmgr.v1.ListContextsRequest
+	4,  // 19: kmgr.v1.ClusterService.OpenSession:input_type -> kmgr.v1.OpenSessionRequest
+	6,  // 20: kmgr.v1.ClusterService.CloseSession:input_type -> kmgr.v1.CloseSessionRequest
+	7,  // 21: kmgr.v1.ClusterService.WatchConnection:input_type -> kmgr.v1.WatchConnectionRequest
+	9,  // 22: kmgr.v1.ClusterService.Discover:input_type -> kmgr.v1.DiscoverRequest
+	12, // 23: kmgr.v1.ClusterService.ListNamespaces:input_type -> kmgr.v1.ListNamespacesRequest
+	3,  // 24: kmgr.v1.ClusterService.ListContexts:output_type -> kmgr.v1.ListContextsResponse
+	5,  // 25: kmgr.v1.ClusterService.OpenSession:output_type -> kmgr.v1.OpenSessionResponse
+	18, // 26: kmgr.v1.ClusterService.CloseSession:output_type -> kmgr.v1.Acknowledgement
+	8,  // 27: kmgr.v1.ClusterService.WatchConnection:output_type -> kmgr.v1.ConnectionEvent
+	11, // 28: kmgr.v1.ClusterService.Discover:output_type -> kmgr.v1.DiscoverResponse
+	13, // 29: kmgr.v1.ClusterService.ListNamespaces:output_type -> kmgr.v1.ListNamespacesResponse
+	24, // [24:30] is the sub-list for method output_type
+	18, // [18:24] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_cluster_proto_init() }

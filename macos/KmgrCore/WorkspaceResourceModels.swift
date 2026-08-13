@@ -36,8 +36,30 @@ public struct DiscoveredResource: Hashable, Sendable {
     public var id: String { "\(group)/\(version)/\(resource)" }
 }
 
+/// One usable discovery snapshot. `resources` intentionally remains available
+/// when `potentiallyIncomplete` is true; callers should render it while also
+/// surfacing `warning` instead of replacing the sidebar with an error state.
+public struct ResourceDiscoveryResult: Hashable, Sendable {
+    public var resources: [DiscoveredResource]
+    public var revision: String
+    public var potentiallyIncomplete: Bool
+    public var warning: ClusterManagerIssue?
+
+    public init(
+        resources: [DiscoveredResource],
+        revision: String = "",
+        potentiallyIncomplete: Bool = false,
+        warning: ClusterManagerIssue? = nil
+    ) {
+        self.resources = resources
+        self.revision = revision
+        self.potentiallyIncomplete = potentiallyIncomplete
+        self.warning = warning
+    }
+}
+
 public protocol WorkspaceResourceProviding: Sendable {
-    func discoverResources(sessionID: String, refresh: Bool) async throws -> [DiscoveredResource]
+    func discoverResources(sessionID: String, refresh: Bool) async throws -> ResourceDiscoveryResult
     func listNamespaces(sessionID: String) async throws -> [String]
 
     func streamView(
@@ -49,7 +71,7 @@ public protocol WorkspaceResourceProviding: Sendable {
 }
 
 public struct AnyWorkspaceResourceProvider: WorkspaceResourceProviding {
-    private let discoverOperation: @Sendable (String, Bool) async throws -> [DiscoveredResource]
+    private let discoverOperation: @Sendable (String, Bool) async throws -> ResourceDiscoveryResult
     private let namespacesOperation: @Sendable (String) async throws -> [String]
     private let streamOperation: @Sendable (ResourceViewRequest) -> AsyncThrowingStream<ResourceViewMessage, Error>
     private let cancelOperation: @Sendable (String, String, UInt64) async -> Void
@@ -63,7 +85,7 @@ public struct AnyWorkspaceResourceProvider: WorkspaceResourceProviding {
         closeOperation = provider.closeSession
     }
 
-    public func discoverResources(sessionID: String, refresh: Bool) async throws -> [DiscoveredResource] {
+    public func discoverResources(sessionID: String, refresh: Bool) async throws -> ResourceDiscoveryResult {
         try await discoverOperation(sessionID, refresh)
     }
 

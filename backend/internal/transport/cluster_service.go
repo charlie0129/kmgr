@@ -3,10 +3,14 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -316,15 +320,19 @@ func (s *ClusterService) Discover(
 			mapper.Reset()
 		}
 	}
-	resources, revision, err := cluster.DiscoverResources(requestContext, session)
+	discoveryResult, err := cluster.DiscoverResources(requestContext, session)
 	if err != nil {
 		response.Error = connectionError(err, session.Context().Name, session.Context().ServerHostname)
 		response.Error.Operation = "discover-resources"
 		return response, nil
 	}
-	response.DiscoveryRevision = revision
-	response.Resources = make([]*kmgrv1.ApiResource, 0, len(resources))
-	for _, resource := range resources {
+	response.DiscoveryRevision = discoveryResult.Revision
+	response.PotentiallyIncomplete = discoveryResult.PotentiallyIncomplete
+	if discoveryResult.PotentiallyIncomplete {
+		response.Warning = discoveryWarning(discoveryResult.Failures, session.Context().Name)
+	}
+	response.Resources = make([]*kmgrv1.ApiResource, 0, len(discoveryResult.Resources))
+	for _, resource := range discoveryResult.Resources {
 		response.Resources = append(response.Resources, &kmgrv1.ApiResource{
 			Type: &kmgrv1.ResourceType{
 				Group:      resource.Group,
@@ -340,6 +348,51 @@ func (s *ClusterService) Discover(
 		})
 	}
 	return response, nil
+}
+
+func discoveryWarning(failures []cluster.DiscoveryFailure, contextName string) *kmgrv1.StructuredError {
+	result := &kmgrv1.StructuredError{
+		Category:    kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE,
+		Reason:      "DiscoveryPartiallyFailed",
+		Message:     "Some Kubernetes API groups could not be discovered. The available resource list may be incomplete.",
+		Retryable:   true,
+		ContextName: contextName,
+		Operation:   "discover-resources",
+	}
+	targets := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		if failure.Target != "" {
+			targets = append(targets, failure.Target)
+		}
+		// Preserve only Kubernetes status structure. kubeerrors.Enrich never
+		// copies Status.Message, cause messages, raw bodies, or headers.
+		kubeerrors.Enrich(result, failure.Err)
+	}
+	// The status reason describes one failed endpoint; the warning itself has
+	// stable semantics even when several endpoints failed differently.
+	result.Reason = "DiscoveryPartiallyFailed"
+	sort.Strings(targets)
+	targets = slicesCompact(targets)
+	result.SafeDetails = map[string]string{
+		"failed_group_version_count": fmt.Sprintf("%d", len(failures)),
+	}
+	if len(targets) != 0 {
+		result.SafeDetails["failed_group_versions"] = strings.Join(targets, ",")
+	}
+	return result
+}
+
+func slicesCompact(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	result := values[:1]
+	for _, value := range values[1:] {
+		if value != result[len(result)-1] {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func (s *ClusterService) ListNamespaces(

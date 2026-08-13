@@ -1149,12 +1149,20 @@ private final class ResourceSidebarViewController: NSViewController,
         task = Task { [weak self, provider, session] in
             guard let self else { return }
             do {
-                let resources = try await provider.discoverResources(sessionID: session.sessionID, refresh: false)
+                let discovery = try await provider.discoverResources(
+                    sessionID: session.sessionID,
+                    refresh: false
+                )
                 guard !Task.isCancelled else { return }
-                allResources = resources.filter { $0.verbs.contains("list") }
+                allResources = discovery.resources.filter { $0.verbs.contains("list") }
                 onResourcesChanged?(allResources)
                 rebuildSections()
-                if let issue = pinStore.loadIssue {
+                if discovery.potentiallyIncomplete {
+                    statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds • discovery incomplete"
+                    statusLabel.toolTip = discovery.warning?.localizedDescription
+                        ?? "Some Kubernetes API groups could not be discovered."
+                    statusLabel.textColor = .systemOrange
+                } else if let issue = pinStore.loadIssue {
                     statusLabel.stringValue = "\(allResources.count.formatted()) kinds • built-in pins in use"
                     statusLabel.toolTip = issue.localizedDescription
                     statusLabel.textColor = .systemOrange

@@ -9,10 +9,16 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/rest"
 )
+
+const discoveryParallelism = 8
 
 type APIResource struct {
 	Group            string
@@ -26,26 +32,77 @@ type APIResource struct {
 	PreferredVersion bool
 }
 
+// DiscoveryFailure identifies one discovery endpoint that did not return a
+// resource list. Err is kept inside the Go helper so the transport can classify
+// the failure without ever forwarding an arbitrary server response body.
+type DiscoveryFailure struct {
+	Target string
+	Err    error
+}
+
+// ResourceDiscovery is useful even when PotentiallyIncomplete is true. The UI
+// must keep Resources available and surface the corresponding warning.
+type ResourceDiscovery struct {
+	Resources             []APIResource
+	Revision              string
+	PotentiallyIncomplete bool
+	Failures              []DiscoveryFailure
+}
+
+type discoveryTarget struct {
+	group   string
+	version string
+	path    string
+}
+
+func (t discoveryTarget) name() string {
+	return schema.GroupVersion{Group: t.group, Version: t.version}.String()
+}
+
+type resourceListResult struct {
+	index int
+	list  *metav1.APIResourceList
+	err   error
+}
+
 // DiscoverResources returns listable, non-subresource API resources in stable
 // GVR order. Discovery is an explicit connection action and is never triggered
 // merely by rendering the sidebar.
-func DiscoverResources(ctx context.Context, session *Session) ([]APIResource, string, error) {
+//
+// DiscoveryInterface's convenience methods are contextless. Use its existing
+// REST client directly so the exact client-go authentication, TLS, proxy, rate
+// limiting, and transport wrappers remain in force while cancellation and
+// deadlines propagate to every HTTP request.
+func DiscoverResources(ctx context.Context, session *Session) (ResourceDiscovery, error) {
 	if session == nil || session.Discovery() == nil {
-		return nil, "", errors.New("cluster session discovery client is unavailable")
+		return ResourceDiscovery{}, errors.New("cluster session discovery client is unavailable")
 	}
-	groups, resourceLists, err := session.Discovery().ServerGroupsAndResources()
-	if err != nil && len(resourceLists) == 0 {
-		return nil, "", fmt.Errorf("discover Kubernetes API resources: %w", err)
+	restClient := session.Discovery().RESTClient()
+	if restClient == nil {
+		return ResourceDiscovery{}, errors.New("cluster session discovery REST client is unavailable")
 	}
-	preferred := make(map[string]string, len(groups))
-	for _, group := range groups {
-		if group == nil {
-			continue
+	if err := ctx.Err(); err != nil {
+		return ResourceDiscovery{}, err
+	}
+
+	targets, preferred, failures, err := discoverTargets(ctx, restClient)
+	if err != nil {
+		return ResourceDiscovery{}, err
+	}
+	resourceLists, resourceFailures, successfulLists, err := fetchResourceLists(ctx, restClient, targets)
+	if err != nil {
+		return ResourceDiscovery{}, err
+	}
+	failures = append(failures, resourceFailures...)
+	sort.Slice(failures, func(i, j int) bool { return failures[i].Target < failures[j].Target })
+
+	if len(failures) != 0 && successfulLists == 0 {
+		causes := make([]error, 0, len(failures))
+		for _, failure := range failures {
+			causes = append(causes, failure.Err)
 		}
-		preferred[group.Name] = group.PreferredVersion.Version
+		return ResourceDiscovery{}, fmt.Errorf("discover Kubernetes API resources: %w", errors.Join(causes...))
 	}
-	// Core/v1 is not represented as an APIGroup in every discovery response.
-	preferred[""] = "v1"
 
 	resources := make([]APIResource, 0)
 	for _, list := range resourceLists {
@@ -78,14 +135,159 @@ func DiscoverResources(ctx context.Context, session *Session) ([]APIResource, st
 		return strings.Join([]string{left.Group, left.Version, left.Resource}, "\x00") <
 			strings.Join([]string{right.Group, right.Version, right.Resource}, "\x00")
 	})
-	revision := discoveryRevision(resources)
-	if err != nil {
-		// client-go returns partial discovery results alongside a typed error.
-		// Keep useful resources available; the caller can surface a warning on a
-		// subsequent refresh if desired without blanking the sidebar.
-		return resources, revision, nil
+	return ResourceDiscovery{
+		Resources:             resources,
+		Revision:              discoveryRevision(resources),
+		PotentiallyIncomplete: len(failures) != 0,
+		Failures:              failures,
+	}, nil
+}
+
+func discoverTargets(
+	ctx context.Context,
+	restClient rest.Interface,
+) ([]discoveryTarget, map[string]string, []DiscoveryFailure, error) {
+	preferred := map[string]string{}
+	failures := make([]DiscoveryFailure, 0, 2)
+	targets := make([]discoveryTarget, 0)
+	seen := make(map[string]struct{})
+	appendTarget := func(target discoveryTarget) {
+		name := target.name()
+		if _, exists := seen[name]; exists {
+			return
+		}
+		seen[name] = struct{}{}
+		targets = append(targets, target)
 	}
-	return resources, revision, nil
+
+	legacy := &metav1.APIVersions{}
+	err := restClient.Get().AbsPath("/api").SetHeader("Accept", discovery.AcceptV1).Do(ctx).Into(legacy)
+	switch {
+	case err == nil:
+		for _, version := range legacy.Versions {
+			if !safeDiscoveryPathSegment(version) {
+				failures = append(failures, DiscoveryFailure{
+					Target: "core/invalid-version",
+					Err:    errors.New("the core discovery document contained an invalid API version"),
+				})
+				continue
+			}
+			appendTarget(discoveryTarget{version: version, path: "/api/" + version})
+		}
+		if slices.Contains(legacy.Versions, "v1") {
+			preferred[""] = "v1"
+		} else if len(legacy.Versions) != 0 {
+			preferred[""] = legacy.Versions[0]
+		}
+	case ctx.Err() != nil:
+		return nil, nil, nil, ctx.Err()
+	case apierrors.IsNotFound(err):
+		// Match client-go's tolerance for aggregated API servers without /api.
+	default:
+		failures = append(failures, DiscoveryFailure{Target: "/api", Err: err})
+	}
+
+	groups := &metav1.APIGroupList{}
+	err = restClient.Get().AbsPath("/apis").SetHeader("Accept", discovery.AcceptV1).Do(ctx).Into(groups)
+	switch {
+	case err == nil:
+		for index := range groups.Groups {
+			group := &groups.Groups[index]
+			if !safeDiscoveryPathSegment(group.Name) {
+				failures = append(failures, DiscoveryFailure{
+					Target: "apis/invalid-group",
+					Err:    errors.New("the API discovery document contained an invalid group name"),
+				})
+				continue
+			}
+			if group.PreferredVersion.Version != "" {
+				preferred[group.Name] = group.PreferredVersion.Version
+			}
+			for _, version := range group.Versions {
+				parsed, parseErr := schema.ParseGroupVersion(version.GroupVersion)
+				if parseErr != nil || parsed.Group != group.Name || parsed.Version != version.Version ||
+					!safeDiscoveryPathSegment(version.Version) {
+					failures = append(failures, DiscoveryFailure{
+						Target: group.Name + "/invalid-version",
+						Err:    errors.New("the API discovery document contained an invalid group version"),
+					})
+					continue
+				}
+				appendTarget(discoveryTarget{
+					group: group.Name, version: version.Version,
+					path: "/apis/" + group.Name + "/" + version.Version,
+				})
+			}
+		}
+	case ctx.Err() != nil:
+		return nil, nil, nil, ctx.Err()
+	default:
+		failures = append(failures, DiscoveryFailure{Target: "/apis", Err: err})
+	}
+	return targets, preferred, failures, nil
+}
+
+func fetchResourceLists(
+	ctx context.Context,
+	restClient rest.Interface,
+	targets []discoveryTarget,
+) ([]*metav1.APIResourceList, []DiscoveryFailure, int, error) {
+	if len(targets) == 0 {
+		return nil, nil, 0, nil
+	}
+	jobs := make(chan int, len(targets))
+	results := make(chan resourceListResult, len(targets))
+	for index := range targets {
+		jobs <- index
+	}
+	close(jobs)
+
+	workers := min(discoveryParallelism, len(targets))
+	var workerGroup sync.WaitGroup
+	workerGroup.Add(workers)
+	for range workers {
+		go func() {
+			defer workerGroup.Done()
+			for index := range jobs {
+				target := targets[index]
+				list := &metav1.APIResourceList{GroupVersion: target.name()}
+				err := restClient.Get().AbsPath(target.path).SetHeader("Accept", discovery.AcceptV1).Do(ctx).Into(list)
+				if err != nil && target.group == "" && target.version == "v1" && apierrors.IsNotFound(err) {
+					err = nil
+				}
+				results <- resourceListResult{index: index, list: list, err: err}
+			}
+		}()
+	}
+
+	lists := make([]*metav1.APIResourceList, len(targets))
+	failures := make([]DiscoveryFailure, 0)
+	successful := 0
+	for range targets {
+		select {
+		case <-ctx.Done():
+			return nil, nil, 0, ctx.Err()
+		case result := <-results:
+			if result.err != nil {
+				failures = append(failures, DiscoveryFailure{
+					Target: targets[result.index].name(), Err: result.err,
+				})
+				continue
+			}
+			successful++
+			lists[result.index] = result.list
+		}
+	}
+	workerGroup.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+	return lists, failures, successful, nil
+}
+
+func safeDiscoveryPathSegment(value string) bool {
+	return value != "" && value != "." && value != ".." &&
+		len(value) <= 253 && !strings.ContainsAny(value, "/?#")
 }
 
 func ListNamespaces(ctx context.Context, session *Session) ([]string, error) {

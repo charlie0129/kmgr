@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 )
 
@@ -395,6 +397,38 @@ func TestConnectionErrorClassifiesSafeConnectionFailures(t *testing.T) {
 				t.Fatalf("connectionError() = %#v", structured)
 			}
 		})
+	}
+}
+
+func TestDiscoveryWarningIsStructuredAndRedactsServerMessages(t *testing.T) {
+	t.Parallel()
+	secret := "credential=never-forward-this"
+	warning := discoveryWarning([]cluster.DiscoveryFailure{{
+		Target: "metrics.k8s.io/v1beta1",
+		Err: &apierrors.StatusError{ErrStatus: metav1.Status{
+			Status:  metav1.StatusFailure,
+			Reason:  metav1.StatusReasonServiceUnavailable,
+			Message: secret,
+			Code:    503,
+			Details: &metav1.StatusDetails{Causes: []metav1.StatusCause{{
+				Type: metav1.CauseTypeUnexpectedServerResponse, Message: secret,
+			}}},
+		}},
+	}}, "local")
+
+	if warning.GetReason() != "DiscoveryPartiallyFailed" ||
+		warning.GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE ||
+		warning.GetHttpStatusCode() != 503 || !warning.GetRetryable() {
+		t.Fatalf("warning envelope = %#v", warning)
+	}
+	if warning.GetSafeDetails()["failed_group_versions"] != "metrics.k8s.io/v1beta1" ||
+		warning.GetSafeDetails()["failed_group_version_count"] != "1" {
+		t.Fatalf("warning details = %#v", warning.GetSafeDetails())
+	}
+	if strings.Contains(warning.String(), secret) ||
+		warning.GetKubernetesStatus().GetMessage() != "" ||
+		warning.GetKubernetesStatus().GetCauses()[0].GetMessage() != "" {
+		t.Fatalf("warning exposed an arbitrary Kubernetes response message: %#v", warning)
 	}
 }
 

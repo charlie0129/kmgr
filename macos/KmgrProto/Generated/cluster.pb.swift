@@ -381,11 +381,26 @@ public struct Kmgr_V1_DiscoverResponse: Sendable {
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
+  /// Partial discovery remains useful, but consumers must not assume this is a
+  /// complete catalog when potentially_incomplete is true. warning is safe to
+  /// display and contains no arbitrary Kubernetes response text.
+  public var potentiallyIncomplete: Bool = false
+
+  public var warning: Kmgr_V1_StructuredError {
+    get {return _warning ?? Kmgr_V1_StructuredError()}
+    set {_warning = newValue}
+  }
+  /// Returns true if `warning` has been explicitly set.
+  public var hasWarning: Bool {return self._warning != nil}
+  /// Clears the value of `warning`. Subsequent reads from it will return its default value.
+  public mutating func clearWarning() {self._warning = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
+  fileprivate var _warning: Kmgr_V1_StructuredError? = nil
 }
 
 public struct Kmgr_V1_ListNamespacesRequest: Sendable {
@@ -949,7 +964,7 @@ extension Kmgr_V1_ApiResource: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Kmgr_V1_DiscoverResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DiscoverResponse"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}resources\0\u{3}discovery_revision\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}resources\0\u{3}discovery_revision\0\u{1}error\0\u{3}potentially_incomplete\0\u{1}warning\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -961,6 +976,8 @@ extension Kmgr_V1_DiscoverResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
       case 2: try { try decoder.decodeRepeatedMessageField(value: &self.resources) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.discoveryRevision) }()
       case 4: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.potentiallyIncomplete) }()
+      case 6: try { try decoder.decodeSingularMessageField(value: &self._warning) }()
       default: break
       }
     }
@@ -983,6 +1000,12 @@ extension Kmgr_V1_DiscoverResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
     try { if let v = self._error {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
     } }()
+    if self.potentiallyIncomplete != false {
+      try visitor.visitSingularBoolField(value: self.potentiallyIncomplete, fieldNumber: 5)
+    }
+    try { if let v = self._warning {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -991,6 +1014,8 @@ extension Kmgr_V1_DiscoverResponse: SwiftProtobuf.Message, SwiftProtobuf._Messag
     if lhs.resources != rhs.resources {return false}
     if lhs.discoveryRevision != rhs.discoveryRevision {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.potentiallyIncomplete != rhs.potentiallyIncomplete {return false}
+    if lhs._warning != rhs._warning {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
