@@ -77,7 +77,8 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     private var generation: UInt64
     private var session: (any ExecSession)?
     private var streamTask: Task<Void, Never>?
-    private var inputTasks: [Task<Void, Never>] = []
+    private var commandTask: Task<Void, Never>?
+    private var commandContinuation: AsyncStream<TerminalCommand>.Continuation?
     private var state: ExecConnectionState?
     private var lastSentSize: TerminalSize?
     private var stopped = false
@@ -144,8 +145,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         stopped = true
         streamTask?.cancel()
         streamTask = nil
-        inputTasks.forEach { $0.cancel() }
-        inputTasks.removeAll()
+        stopCommandPump()
         if let session {
             Task { await session.cancel() }
         }
@@ -172,6 +172,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
                     return
                 }
                 session = opened
+                startCommandPump(session: opened)
                 lastSentSize = currentSize
                 for try await event in opened.events {
                     guard !Task.isCancelled else { break }
@@ -182,6 +183,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             } catch {
                 applyFailure(error)
             }
+            stopCommandPump()
             session = nil
             streamTask = nil
             if state == .connecting || state == .running {
@@ -197,8 +199,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         guard !remoteProcessIsActive else { return }
         streamTask?.cancel()
         streamTask = nil
-        inputTasks.forEach { $0.cancel() }
-        inputTasks.removeAll()
+        stopCommandPump()
         generation &+= 1
         state = nil
         connect()
@@ -264,19 +265,61 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         statusLabel.toolTip = issue.message
     }
 
-    private func enqueue(_ operation: @escaping @Sendable (any ExecSession) async throws -> Void) {
-        guard let session else { return }
-        let task = Task { [weak self] in
-            do { try await operation(session) }
-            catch is CancellationError {}
-            catch { self?.applyFailure(error) }
+    private func startCommandPump(session: any ExecSession) {
+        stopCommandPump()
+        let pair = AsyncStream<TerminalCommand>.makeStream(
+            bufferingPolicy: .bufferingOldest(256)
+        )
+        commandContinuation = pair.continuation
+        commandTask = Task { [weak self] in
+            do {
+                for await command in pair.stream {
+                    try Task.checkCancellation()
+                    switch command {
+                    case .stdin(let data): try await session.sendStdin(data)
+                    case .resize(let size): try await session.resize(size)
+                    }
+                }
+            } catch is CancellationError {
+            } catch {
+                self?.applyFailure(error)
+                await session.cancel()
+            }
         }
-        inputTasks.append(task)
-        inputTasks.removeAll { $0.isCancelled }
+    }
+
+    private func stopCommandPump() {
+        commandContinuation?.finish()
+        commandContinuation = nil
+        commandTask?.cancel()
+        commandTask = nil
+    }
+
+    private func enqueue(_ command: TerminalCommand) {
+        guard let commandContinuation else { return }
+        switch commandContinuation.yield(command) {
+        case .enqueued:
+            break
+        case .dropped:
+            applyFailure(ClusterManagerIssue(
+                category: .resourceExhausted,
+                reason: "TerminalInputBufferExceeded",
+                message: "Terminal input arrived faster than it could be sent. Reconnect to start a new process.",
+                retryable: true,
+                contextName: baseRequest.contextName,
+                operation: "send terminal input"
+            ))
+            if let session { Task { await session.cancel() } }
+            stopCommandPump()
+        case .terminated:
+            break
+        @unknown default:
+            break
+        }
     }
 
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
-        enqueue { try await $0.sendStdin(Data(data)) }
+        enqueue(.stdin(Data(data)))
     }
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
@@ -287,7 +330,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         )
         guard size != lastSentSize else { return }
         lastSentSize = size
-        enqueue { try await $0.resize(size) }
+        enqueue(.resize(size))
     }
 
     func setTerminalTitle(source: TerminalView, title: String) {
@@ -353,6 +396,11 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     @objc private func reconnectPressed() {
         reconnect()
     }
+}
+
+private enum TerminalCommand: Sendable {
+    case stdin(Data)
+    case resize(TerminalSize)
 }
 
 private extension NSToolbarItem.Identifier {
