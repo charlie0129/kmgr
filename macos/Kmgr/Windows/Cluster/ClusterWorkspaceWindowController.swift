@@ -729,8 +729,11 @@ private extension NSToolbarItem.Identifier {
 
 @MainActor
 private final class ResourceSidebarViewController: NSViewController,
-    NSOutlineViewDataSource, NSOutlineViewDelegate
+    NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate
 {
+    private static let pinnedSectionTitle = "Pinned"
+    private static let pinPasteboardType = NSPasteboard.PasteboardType("com.kmgr.sidebar-pin-gvr")
+
     private struct Section: Hashable {
         var title: String
         var resources: [DiscoveredResource]
@@ -738,20 +741,27 @@ private final class ResourceSidebarViewController: NSViewController,
 
     private let session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
+    private let pinStore: SidebarPinStore
     private let outlineView = NSOutlineView()
     private let searchField = NSSearchField()
     private let statusLabel = NSTextField(labelWithString: "Loading discovery…")
     private var sections: [Section] = []
     private var allResources: [DiscoveredResource] = []
     private var task: Task<Void, Never>?
+    private var pinObserver: UUID?
     private var didChooseInitialResource = false
     private var suppressSelectionCallbacks = false
     var onSelectResource: ((DiscoveredResource) -> Void)?
     var onResourcesChanged: (([DiscoveredResource]) -> Void)?
 
-    init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
+    init(
+        session: OpenedClusterSession,
+        provider: any WorkspaceResourceProviding,
+        pinStore: SidebarPinStore = .shared
+    ) {
         self.session = session
         self.provider = provider
+        self.pinStore = pinStore
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -775,6 +785,12 @@ private final class ResourceSidebarViewController: NSViewController,
         outlineView.dataSource = self
         outlineView.autoresizesOutlineColumn = true
         outlineView.setAccessibilityLabel("Kubernetes resource kinds")
+        outlineView.registerForDraggedTypes([Self.pinPasteboardType])
+        outlineView.setDraggingSourceOperationMask(.move, forLocal: true)
+        outlineView.setDraggingSourceOperationMask([], forLocal: false)
+        let resourceMenu = NSMenu(title: "Resource Kind")
+        resourceMenu.delegate = self
+        outlineView.menu = resourceMenu
 
         let scroll = NSScrollView()
         scroll.documentView = outlineView
@@ -803,6 +819,11 @@ private final class ResourceSidebarViewController: NSViewController,
     }
 
     func start(onLoaded: (([DiscoveredResource]) -> Void)? = nil) {
+        if pinObserver == nil {
+            pinObserver = pinStore.observe { [weak self] _ in
+                self?.rebuildSections()
+            }
+        }
         guard task == nil else { return }
         task = Task { [weak self, provider, session] in
             guard let self else { return }
@@ -812,7 +833,15 @@ private final class ResourceSidebarViewController: NSViewController,
                 allResources = resources.filter { $0.verbs.contains("list") }
                 onResourcesChanged?(allResources)
                 rebuildSections()
-                statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds"
+                if let issue = pinStore.loadIssue {
+                    statusLabel.stringValue = "\(allResources.count.formatted()) kinds • built-in pins in use"
+                    statusLabel.toolTip = issue.localizedDescription
+                    statusLabel.textColor = .systemOrange
+                } else {
+                    statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds"
+                    statusLabel.toolTip = nil
+                    statusLabel.textColor = .secondaryLabelColor
+                }
                 onLoaded?(allResources)
             } catch {
                 statusLabel.stringValue = error.localizedDescription
@@ -824,24 +853,32 @@ private final class ResourceSidebarViewController: NSViewController,
     func stop() {
         task?.cancel()
         task = nil
+        if let pinObserver {
+            pinStore.removeObserver(pinObserver)
+            self.pinObserver = nil
+        }
     }
 
     @objc private func searchChanged() { rebuildSections() }
 
     private func rebuildSections() {
+        let selectedID = selectedResource()?.id
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let visible = query.isEmpty ? allResources : allResources.filter {
             ([$0.kind, $0.resource] + $0.shortNames)
                 .contains { $0.lowercased().contains(query) }
         }
-        let pinnedIDs = Set(DefaultSidebarPins.values.map(\.id))
-        let pinned = visible.filter { pinnedIDs.contains($0.id) }.sorted { pinIndex($0.id) < pinIndex($1.id) }
+        let pinIndexes = Dictionary(uniqueKeysWithValues: pinStore.pins.enumerated().map { ($1.id, $0) })
+        let pinnedIDs = Set(pinIndexes.keys)
+        let pinned = visible.filter { pinnedIDs.contains($0.id) }.sorted {
+            pinIndexes[$0.id, default: .max] < pinIndexes[$1.id, default: .max]
+        }
         var grouped: [String: [DiscoveredResource]] = [:]
         for resource in visible where !pinnedIDs.contains(resource.id) {
             grouped[sectionName(for: resource), default: []].append(resource)
         }
         sections = []
-        if !pinned.isEmpty { sections.append(Section(title: "Pinned", resources: pinned)) }
+        if !pinned.isEmpty { sections.append(Section(title: Self.pinnedSectionTitle, resources: pinned)) }
         for title in ["Workloads", "Network", "Config", "Storage", "RBAC", "Cluster", "Custom Resources"] {
             if let resources = grouped[title], !resources.isEmpty {
                 sections.append(Section(title: title, resources: resources.sorted { $0.kind < $1.kind }))
@@ -849,10 +886,9 @@ private final class ResourceSidebarViewController: NSViewController,
         }
         outlineView.reloadData()
         for index in sections.indices { outlineView.expandItem(sections[index]) }
-    }
-
-    private func pinIndex(_ id: String) -> Int {
-        DefaultSidebarPins.values.firstIndex { $0.id == id } ?? .max
+        if let selectedID, let resource = allResources.first(where: { $0.id == selectedID }) {
+            select(resource: resource, notify: false)
+        }
     }
 
     private func sectionName(for resource: DiscoveredResource) -> String {
@@ -882,6 +918,49 @@ private final class ResourceSidebarViewController: NSViewController,
     }
 
     func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool { item is Section }
+
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        pasteboardWriterForItem item: Any
+    ) -> (any NSPasteboardWriting)? {
+        guard let resource = item as? DiscoveredResource, pinStore.contains(id: resource.id) else {
+            return nil
+        }
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setString(resource.id, forType: Self.pinPasteboardType)
+        return pasteboardItem
+    }
+
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        validateDrop info: any NSDraggingInfo,
+        proposedItem item: Any?,
+        proposedChildIndex index: Int
+    ) -> NSDragOperation {
+        guard info.draggingSource as? NSOutlineView === outlineView,
+            let pinID = info.draggingPasteboard.string(forType: Self.pinPasteboardType),
+            pinStore.contains(id: pinID),
+            let section = item as? Section,
+            section.title == Self.pinnedSectionTitle,
+            index != NSOutlineViewDropOnItemIndex
+        else { return [] }
+        return .move
+    }
+
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        acceptDrop info: any NSDraggingInfo,
+        item: Any?,
+        childIndex index: Int
+    ) -> Bool {
+        guard let section = item as? Section,
+            section.title == Self.pinnedSectionTitle,
+            section.resources.indices.contains(index) || index == section.resources.endIndex,
+            let pinID = info.draggingPasteboard.string(forType: Self.pinPasteboardType)
+        else { return false }
+        let targetID = index < section.resources.count ? section.resources[index].id : nil
+        return pinStore.move(pinID: pinID, beforePinID: targetID)
+    }
 
     func outlineView(
         _ outlineView: NSOutlineView,
@@ -919,6 +998,50 @@ private final class ResourceSidebarViewController: NSViewController,
             let resource = outlineView.item(atRow: outlineView.selectedRow) as? DiscoveredResource
         else { return }
         onSelectResource?(resource)
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard let resource = contextMenuResource() else { return }
+        let isPinned = pinStore.contains(id: resource.id)
+        let verb = isPinned ? "Unpin" : "Pin"
+        let title = resource.kind.isEmpty ? resource.resource : resource.kind
+        let item = NSMenuItem(
+            title: "\(verb) \(title)",
+            action: #selector(togglePin(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.representedObject = resource.id
+        menu.addItem(item)
+    }
+
+    @objc private func togglePin(_ sender: NSMenuItem) {
+        guard let resourceID = sender.representedObject as? String,
+            let resource = allResources.first(where: { $0.id == resourceID })
+        else { return }
+        let changed: Bool
+        if pinStore.contains(id: resource.id) {
+            changed = pinStore.unpin(id: resource.id)
+        } else {
+            changed = pinStore.pin(SidebarPin(
+                group: resource.group,
+                version: resource.version,
+                resource: resource.resource
+            ))
+        }
+        if !changed { NSSound.beep() }
+    }
+
+    private func contextMenuResource() -> DiscoveredResource? {
+        let row = outlineView.clickedRow >= 0 ? outlineView.clickedRow : outlineView.selectedRow
+        guard row >= 0 else { return nil }
+        return outlineView.item(atRow: row) as? DiscoveredResource
+    }
+
+    private func selectedResource() -> DiscoveredResource? {
+        guard outlineView.selectedRow >= 0 else { return nil }
+        return outlineView.item(atRow: outlineView.selectedRow) as? DiscoveredResource
     }
 
     func selectResource(matching resourceID: String?) {
