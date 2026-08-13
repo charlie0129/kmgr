@@ -3,6 +3,7 @@ package view
 import (
 	"context"
 	"errors"
+	"sync"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
@@ -16,14 +17,105 @@ var _ kmgrv1.ViewServiceServer = (*GRPCService)(nil)
 // consumer lifetimes, generation gating, warm caches, and bounded batching.
 type GRPCService struct {
 	kmgrv1.UnimplementedViewServiceServer
-	runtime *Runtime
+	runtime  *Runtime
+	searchMu sync.Mutex
+	searches map[searchStreamKey]context.CancelFunc
+}
+
+type searchStreamKey struct {
+	sessionID  string
+	searchID   string
+	generation uint64
+	revision   uint64
 }
 
 func NewGRPCService(runtime *Runtime) (*GRPCService, error) {
 	if runtime == nil {
 		return nil, errors.New("view runtime must not be nil")
 	}
-	return &GRPCService{runtime: runtime}, nil
+	return &GRPCService{runtime: runtime, searches: make(map[searchStreamKey]context.CancelFunc)}, nil
+}
+
+func (s *GRPCService) SearchObjects(
+	request *kmgrv1.SearchObjectsRequest,
+	stream grpc.ServerStreamingServer[kmgrv1.SearchObjectsEvent],
+) error {
+	if request == nil || request.GetContext() == nil || request.GetContext().GetClusterSessionId() == "" ||
+		request.GetSearchId() == "" || request.GetGeneration() == 0 || request.GetQueryRevision() == 0 || request.GetResource() == nil {
+		return status.Error(codes.InvalidArgument, "session, search ID, generation, revision, and resource are required")
+	}
+	ctx, cancel := context.WithCancel(stream.Context())
+	key := searchStreamKey{
+		sessionID: request.GetContext().GetClusterSessionId(), searchID: request.GetSearchId(),
+		generation: request.GetGeneration(), revision: request.GetQueryRevision(),
+	}
+	s.searchMu.Lock()
+	for existing, existingCancel := range s.searches {
+		if existing.sessionID == key.sessionID && existing.searchID == key.searchID &&
+			(existing.generation < key.generation || existing.revision < key.revision) {
+			existingCancel()
+			delete(s.searches, existing)
+		}
+	}
+	s.searches[key] = cancel
+	s.searchMu.Unlock()
+	defer func() {
+		cancel()
+		s.searchMu.Lock()
+		delete(s.searches, key)
+		s.searchMu.Unlock()
+	}()
+
+	resource := request.GetResource()
+	scope := request.GetNamespaceScope()
+	sequence := uint64(0)
+	err := s.runtime.Search(ctx, SearchQuery{
+		SessionID: key.sessionID,
+		Resource: ResourceType{
+			Group: resource.GetGroup(), Version: resource.GetVersion(), Resource: resource.GetResource(),
+			Kind: resource.GetKind(), Namespaced: resource.GetNamespaced(),
+		},
+		NamespaceScope: NamespaceScope{All: scope.GetAllNamespaces(), Namespaces: append([]string(nil), scope.GetNamespaces()...)},
+		Query:          request.GetQuery(), ResultLimit: int(request.GetResultLimit()),
+		AllowPaginatedList: request.GetAllowPaginatedList(),
+	}, func(batch SearchBatch) error {
+		sequence++
+		return stream.Send(&kmgrv1.SearchObjectsEvent{
+			Cursor:        &kmgrv1.StreamCursor{StreamId: key.searchID, Generation: key.generation, Sequence: sequence},
+			QueryRevision: key.revision,
+			Results:       batch.Results,
+			Progress: &kmgrv1.SearchProgress{
+				QueryRevision: key.revision, ObjectsExamined: batch.Examined, Complete: batch.Complete,
+				UsedDirectGet: batch.UsedDirectGet, ReusableSnapshotAvailable: batch.Reusable,
+			},
+		})
+	})
+	return viewStatusError(err)
+}
+
+func (s *GRPCService) CancelSearch(
+	_ context.Context,
+	request *kmgrv1.CancelSearchRequest,
+) (*kmgrv1.Acknowledgement, error) {
+	if request == nil || request.GetContext() == nil || request.GetContext().GetRequestId() == "" ||
+		request.GetContext().GetClusterSessionId() == "" || request.GetSearchId() == "" ||
+		request.GetGeneration() == 0 || request.GetQueryRevision() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "request, session, search ID, generation, and revision are required")
+	}
+	key := searchStreamKey{
+		sessionID: request.GetContext().GetClusterSessionId(), searchID: request.GetSearchId(),
+		generation: request.GetGeneration(), revision: request.GetQueryRevision(),
+	}
+	s.searchMu.Lock()
+	cancel := s.searches[key]
+	if cancel != nil {
+		delete(s.searches, key)
+	}
+	s.searchMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return &kmgrv1.Acknowledgement{RequestId: request.GetContext().GetRequestId(), Accepted: cancel != nil}, nil
 }
 
 func (s *GRPCService) StreamView(
@@ -69,6 +161,9 @@ func (s *GRPCService) CancelView(
 }
 
 func viewStatusError(err error) error {
+	if err == nil {
+		return nil
+	}
 	switch {
 	case errors.Is(err, ErrSessionNotFound):
 		return status.Error(codes.NotFound, "cluster session was not found")
