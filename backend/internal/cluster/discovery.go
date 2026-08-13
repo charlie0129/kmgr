@@ -78,9 +78,24 @@ func DiscoverResources(ctx context.Context, session *Session) (ResourceDiscovery
 	if session == nil || session.Discovery() == nil {
 		return ResourceDiscovery{}, errors.New("cluster session discovery client is unavailable")
 	}
-	restClient := session.Discovery().RESTClient()
+	return DiscoverResourcesWithClient(ctx, session.Discovery())
+}
+
+// DiscoverResourcesWithClient is the context-aware discovery path for callers
+// that already hold a client-go discovery client. It uses that client's REST
+// transport so authentication, TLS, proxy, rate limiting, and transport
+// wrappers remain identical while the caller's cancellation reaches every
+// request.
+func DiscoverResourcesWithClient(
+	ctx context.Context,
+	client discovery.DiscoveryInterface,
+) (ResourceDiscovery, error) {
+	if client == nil {
+		return ResourceDiscovery{}, errors.New("Kubernetes discovery client is unavailable")
+	}
+	restClient := client.RESTClient()
 	if restClient == nil {
-		return ResourceDiscovery{}, errors.New("cluster session discovery REST client is unavailable")
+		return ResourceDiscovery{}, errors.New("Kubernetes discovery REST client is unavailable")
 	}
 	if err := ctx.Err(); err != nil {
 		return ResourceDiscovery{}, err

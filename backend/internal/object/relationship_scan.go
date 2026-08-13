@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/metadata"
@@ -208,44 +209,29 @@ func discoverRelationshipResources(
 	if session.Discovery == nil || session.Metadata == nil {
 		return nil, false, ErrRelationshipResolutionUnavailable
 	}
-	groups, lists, discoveryErr := session.Discovery.ServerGroupsAndResources()
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
+	discovered, err := cluster.DiscoverResourcesWithClient(ctx, session.Discovery)
+	if err != nil {
+		return nil, false, fmt.Errorf("discover listable resources: %w", err)
 	}
-	if discoveryErr != nil && len(lists) == 0 {
-		return nil, false, fmt.Errorf("discover listable resources: %w", discoveryErr)
-	}
-	preferred := map[string]string{"": "v1"}
-	for _, group := range groups {
-		if group != nil {
-			preferred[group.Name] = group.PreferredVersion.Version
+	preferred := make(map[string]string)
+	for _, value := range discovered.Resources {
+		if value.PreferredVersion {
+			preferred[value.Group] = value.Version
 		}
 	}
 	chosen := make(map[string]RelationshipScanResource)
-	for _, list := range lists {
-		if list == nil {
-			continue
+	for _, value := range discovered.Resources {
+		candidate := RelationshipScanResource{
+			Group: value.Group, Version: value.Version, Resource: value.Resource,
+			Kind: value.Kind, Namespaced: value.Namespaced,
 		}
-		groupVersion, err := schema.ParseGroupVersion(list.GroupVersion)
-		if err != nil {
-			continue
-		}
-		for _, value := range list.APIResources {
-			if strings.Contains(value.Name, "/") || !slices.Contains(value.Verbs, "list") {
-				continue
-			}
-			candidate := RelationshipScanResource{
-				Group: groupVersion.Group, Version: groupVersion.Version,
-				Resource: value.Name, Kind: value.Kind, Namespaced: value.Namespaced,
-			}
-			key := groupVersion.Group + "\x00" + value.Name
-			current, exists := chosen[key]
-			candidatePreferred := preferred[groupVersion.Group] == groupVersion.Version
-			currentPreferred := preferred[current.Group] == current.Version
-			if !exists || (candidatePreferred && !currentPreferred) ||
-				(candidatePreferred == currentPreferred && candidate.Version < current.Version) {
-				chosen[key] = candidate
-			}
+		key := value.Group + "\x00" + value.Resource
+		current, exists := chosen[key]
+		candidatePreferred := preferred[value.Group] == value.Version
+		currentPreferred := preferred[current.Group] == current.Version
+		if !exists || (candidatePreferred && !currentPreferred) ||
+			(candidatePreferred == currentPreferred && candidate.Version < current.Version) {
+			chosen[key] = candidate
 		}
 	}
 	result := make([]RelationshipScanResource, 0, len(chosen))
@@ -256,7 +242,7 @@ func discoverRelationshipResources(
 		return strings.Join([]string{result[i].Group, result[i].Resource, result[i].Version}, "\x00") <
 			strings.Join([]string{result[j].Group, result[j].Resource, result[j].Version}, "\x00")
 	})
-	return result, discoveryErr != nil, nil
+	return result, discovered.PotentiallyIncomplete, nil
 }
 
 func applicableRelationshipResources(

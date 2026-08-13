@@ -2,24 +2,30 @@ package object
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/discovery/fake"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	metadatafake "k8s.io/client-go/metadata/fake"
-	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/rest"
 )
 
 type scanTestResolver struct {
 	dynamic   dynamic.Interface
-	discovery *fake.FakeDiscovery
+	discovery discovery.DiscoveryInterface
 	metadata  *metadatafake.FakeMetadataClient
 }
 
@@ -47,19 +53,38 @@ func TestScanRelationshipsUsesExactOwnerUIDPreferredVersionsAndNamespace(t *test
 	wrongUID := partialMetadata("v1", "Pod", "ns", "same-name-owner", "wrong-child", "replacement-owner-uid")
 	otherNamespace := partialMetadata("v1", "Pod", "other", "other", "other-child", "owner-uid")
 	metadataClient := metadatafake.NewSimpleMetadataClient(metadataScheme, child, wrongUID, otherNamespace)
-	discovery := &fake.FakeDiscovery{Fake: &clienttesting.Fake{}}
-	discovery.Resources = []*metav1.APIResourceList{
-		{GroupVersion: "apps/v1", APIResources: []metav1.APIResource{
-			{Name: "replicasets", Kind: "ReplicaSet", Namespaced: true, Verbs: metav1.Verbs{"list"}},
-		}},
-		{GroupVersion: "apps/v1beta1", APIResources: []metav1.APIResource{
-			{Name: "replicasets", Kind: "ReplicaSet", Namespaced: true, Verbs: metav1.Verbs{"list"}},
-		}},
-		{GroupVersion: "v1", APIResources: []metav1.APIResource{
-			{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: metav1.Verbs{"list"}},
-			{Name: "nodes", Kind: "Node", Namespaced: false, Verbs: metav1.Verbs{"list"}},
-		}},
-	}
+	discovery := newRelationshipDiscoveryClient(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIVersions{Versions: []string{"v1"}})
+		case "/apis":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIGroupList{Groups: []metav1.APIGroup{{
+				Name: "apps",
+				Versions: []metav1.GroupVersionForDiscovery{
+					{GroupVersion: "apps/v1", Version: "v1"},
+					{GroupVersion: "apps/v1beta1", Version: "v1beta1"},
+				},
+				PreferredVersion: metav1.GroupVersionForDiscovery{GroupVersion: "apps/v1", Version: "v1"},
+			}}})
+		case "/api/v1":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIResourceList{
+				GroupVersion: "v1", APIResources: []metav1.APIResource{
+					{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: metav1.Verbs{"list"}},
+					{Name: "nodes", Kind: "Node", Namespaced: false, Verbs: metav1.Verbs{"list"}},
+				},
+			})
+		case "/apis/apps/v1", "/apis/apps/v1beta1":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIResourceList{
+				GroupVersion: request.URL.Path[len("/apis/"):],
+				APIResources: []metav1.APIResource{{
+					Name: "replicasets", Kind: "ReplicaSet", Namespaced: true,
+					Verbs: metav1.Verbs{"list"},
+				}},
+			})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
 	reader, err := NewReader(scanTestResolver{dynamic: dynamicClient, discovery: discovery, metadata: metadataClient})
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +128,11 @@ func TestScanRelationshipsRejectsRecreatedTargetBeforeBulkLists(t *testing.T) {
 	metadataScheme := metadatafake.NewTestScheme()
 	metav1.AddMetaToScheme(metadataScheme)
 	metadataClient := metadatafake.NewSimpleMetadataClient(metadataScheme)
-	discovery := &fake.FakeDiscovery{Fake: &clienttesting.Fake{}}
+	var discoveryRequests atomic.Int64
+	discovery := newRelationshipDiscoveryClient(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		discoveryRequests.Add(1)
+		http.NotFound(writer, request)
+	}))
 	reader, _ := NewReader(scanTestResolver{
 		dynamic:   dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), target),
 		discovery: discovery, metadata: metadataClient,
@@ -116,33 +145,250 @@ func TestScanRelationshipsRejectsRecreatedTargetBeforeBulkLists(t *testing.T) {
 	if !errors.As(err, &changed) || changed.ActualUID != "new-uid" {
 		t.Fatalf("scan error = %#v", err)
 	}
-	if len(metadataClient.Actions()) != 0 || len(discovery.Actions()) != 0 {
-		t.Fatalf("bulk access occurred before UID guard: metadata=%v discovery=%v",
-			metadataClient.Actions(), discovery.Actions())
+	if len(metadataClient.Actions()) != 0 {
+		t.Fatalf("bulk metadata access occurred before UID guard: %v", metadataClient.Actions())
+	}
+	if discoveryRequests.Load() != 0 {
+		t.Fatalf("discovery requests before UID guard = %d", discoveryRequests.Load())
 	}
 }
 
 func TestDiscoverRelationshipResourcesSelectsStablePreferredVersion(t *testing.T) {
 	t.Parallel()
-	discovery := &fake.FakeDiscovery{Fake: &clienttesting.Fake{}}
-	discovery.Resources = []*metav1.APIResourceList{
-		{GroupVersion: "apps/v1beta1", APIResources: []metav1.APIResource{{Name: "deployments", Kind: "Deployment", Verbs: metav1.Verbs{"list"}}}},
-		{GroupVersion: "apps/v1", APIResources: []metav1.APIResource{{Name: "deployments", Kind: "Deployment", Verbs: metav1.Verbs{"list"}}}},
-	}
+	discovery := newRelationshipDiscoveryClient(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIVersions{})
+		case "/apis":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIGroupList{Groups: []metav1.APIGroup{{
+				Name: "apps",
+				Versions: []metav1.GroupVersionForDiscovery{
+					{GroupVersion: "apps/v1beta1", Version: "v1beta1"},
+					{GroupVersion: "apps/v1", Version: "v1"},
+				},
+				PreferredVersion: metav1.GroupVersionForDiscovery{
+					GroupVersion: "apps/v1beta1", Version: "v1beta1",
+				},
+			}}})
+		case "/apis/apps/v1beta1", "/apis/apps/v1":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIResourceList{
+				GroupVersion: request.URL.Path[len("/apis/"):],
+				APIResources: []metav1.APIResource{{
+					Name: "deployments", Kind: "Deployment", Verbs: metav1.Verbs{"list"},
+				}},
+			})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
 	metadataScheme := metadatafake.NewTestScheme()
 	metav1.AddMetaToScheme(metadataScheme)
 	resources, incomplete, err := discoverRelationshipResources(context.Background(), RelationshipScanSession{
 		Discovery: discovery, Metadata: metadatafake.NewSimpleMetadataClient(metadataScheme),
 	})
 	if err != nil || incomplete || len(resources) != 1 || resources[0].Version != "v1beta1" {
-		// FakeDiscovery declares the first observed version preferred. This test
-		// ensures exactly that declared preferred version is honored rather than
-		// guessing version order.
+		// Honor the server-declared preferred version rather than guessing from
+		// lexical or discovery response order.
 		t.Fatalf("resources=%#v incomplete=%t err=%v", resources, incomplete, err)
 	}
 	if !slices.Equal([]string{resources[0].Group, resources[0].Resource}, []string{"apps", "deployments"}) {
 		t.Fatalf("resource = %#v", resources[0])
 	}
+}
+
+func TestDiscoverRelationshipResourcesKeepsPartialResults(t *testing.T) {
+	t.Parallel()
+	discovery := newRelationshipDiscoveryClient(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIVersions{Versions: []string{"v1"}})
+		case "/apis":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIGroupList{Groups: []metav1.APIGroup{{
+				Name: "broken.example.io",
+				Versions: []metav1.GroupVersionForDiscovery{{
+					GroupVersion: "broken.example.io/v1", Version: "v1",
+				}},
+				PreferredVersion: metav1.GroupVersionForDiscovery{
+					GroupVersion: "broken.example.io/v1", Version: "v1",
+				},
+			}}})
+		case "/api/v1":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIResourceList{
+				GroupVersion: "v1", APIResources: []metav1.APIResource{{
+					Name: "pods", Kind: "Pod", Namespaced: true, Verbs: metav1.Verbs{"list"},
+				}},
+			})
+		case "/apis/broken.example.io/v1":
+			http.Error(writer, "unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	metadataScheme := metadatafake.NewTestScheme()
+	metav1.AddMetaToScheme(metadataScheme)
+	resources, incomplete, err := discoverRelationshipResources(context.Background(), RelationshipScanSession{
+		Discovery: discovery, Metadata: metadatafake.NewSimpleMetadataClient(metadataScheme),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !incomplete || len(resources) != 1 || resources[0].Resource != "pods" {
+		t.Fatalf("resources=%#v incomplete=%t", resources, incomplete)
+	}
+}
+
+func TestScanRelationshipsCancelsStalledDiscoveryRequest(t *testing.T) {
+	t.Parallel()
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	defer close(releaseHandler)
+	var startOnce sync.Once
+	var cancelOnce sync.Once
+	discovery := newRelationshipDiscoveryClient(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIVersions{Versions: []string{"v1"}})
+		case "/apis":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIGroupList{})
+		case "/api/v1":
+			startOnce.Do(func() { close(requestStarted) })
+			select {
+			case <-request.Context().Done():
+				cancelOnce.Do(func() { close(requestCanceled) })
+			case <-releaseHandler:
+			}
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	target := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "owner-uid")
+	metadataScheme := metadatafake.NewTestScheme()
+	metav1.AddMetaToScheme(metadataScheme)
+	metadataClient := metadatafake.NewSimpleMetadataClient(metadataScheme)
+	reader, err := NewReader(scanTestResolver{
+		dynamic:   dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), target),
+		discovery: discovery, metadata: metadataClient,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- reader.ScanRelationships(ctx, Identity{
+			SessionID: "session", Group: "apps", Version: "v1", Resource: "deployments",
+			Namespace: "ns", Name: "api", UID: "owner-uid",
+		}, func(RelationshipScanUpdate) error { return nil })
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relationship discovery request did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ScanRelationships error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("relationship scan did not return after cancellation")
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("discovery HTTP handler did not observe request cancellation")
+	}
+	if len(metadataClient.Actions()) != 0 {
+		t.Fatalf("metadata LIST began before discovery completed: %v", metadataClient.Actions())
+	}
+}
+
+func newRelationshipDiscoveryClient(t *testing.T, handler http.Handler) discovery.DiscoveryInterface {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if authorization := request.Header.Get("Authorization"); authorization != "Bearer relationship-test-token" {
+			t.Errorf("Authorization header = %q, want discovery client bearer token", authorization)
+			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(writer, request)
+	}))
+	t.Cleanup(server.Close)
+	client, err := discovery.NewDiscoveryClientForConfig(&rest.Config{
+		Host: server.URL, BearerToken: "relationship-test-token",
+	})
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	return client
+}
+
+func writeRelationshipDiscoveryJSON(t *testing.T, writer http.ResponseWriter, value any) {
+	t.Helper()
+	writer.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(writer).Encode(value); err != nil {
+		t.Errorf("encode relationship discovery response: %v", err)
+	}
+}
+
+func relationshipDiscoveryHandler(
+	t *testing.T,
+	lists []*metav1.APIResourceList,
+) http.Handler {
+	t.Helper()
+	coreVersions := make([]string, 0)
+	groupsByName := make(map[string]*metav1.APIGroup)
+	listsByPath := make(map[string]*metav1.APIResourceList, len(lists))
+	for _, list := range lists {
+		if list == nil {
+			continue
+		}
+		groupVersion, err := schema.ParseGroupVersion(list.GroupVersion)
+		if err != nil {
+			t.Fatalf("invalid test discovery group version %q: %v", list.GroupVersion, err)
+		}
+		path := "/api/" + groupVersion.Version
+		if groupVersion.Group == "" {
+			coreVersions = append(coreVersions, groupVersion.Version)
+		} else {
+			path = "/apis/" + list.GroupVersion
+			group := groupsByName[groupVersion.Group]
+			if group == nil {
+				group = &metav1.APIGroup{Name: groupVersion.Group}
+				groupsByName[groupVersion.Group] = group
+			}
+			version := metav1.GroupVersionForDiscovery{
+				GroupVersion: list.GroupVersion, Version: groupVersion.Version,
+			}
+			group.Versions = append(group.Versions, version)
+			if group.PreferredVersion.Version == "" {
+				group.PreferredVersion = version
+			}
+		}
+		listsByPath[path] = list
+	}
+	groups := make([]metav1.APIGroup, 0, len(groupsByName))
+	for _, group := range groupsByName {
+		groups = append(groups, *group)
+	}
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIVersions{Versions: coreVersions})
+		case "/apis":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIGroupList{Groups: groups})
+		default:
+			if list := listsByPath[request.URL.Path]; list != nil {
+				writeRelationshipDiscoveryJSON(t, writer, list)
+				return
+			}
+			http.NotFound(writer, request)
+		}
+	})
 }
 
 func partialMetadata(

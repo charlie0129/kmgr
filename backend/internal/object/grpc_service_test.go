@@ -15,7 +15,6 @@ import (
 	"google.golang.org/grpc/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/discovery/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	metadatafake "k8s.io/client-go/metadata/fake"
 	clienttesting "k8s.io/client-go/testing"
@@ -86,13 +85,12 @@ func TestGRPCRelationshipScanCursorAndExplicitCancellation(t *testing.T) {
 		<-block
 		return true, nil, context.Canceled
 	})
-	discovery := &fake.FakeDiscovery{Fake: &clienttesting.Fake{}}
-	discovery.Resources = []*metav1.APIResourceList{{
-		GroupVersion: "apps/v1",
-		APIResources: []metav1.APIResource{{
-			Name: "replicasets", Kind: "ReplicaSet", Namespaced: true, Verbs: metav1.Verbs{"list"},
+	discovery := newRelationshipDiscoveryClient(t, relationshipDiscoveryHandler(t, []*metav1.APIResourceList{{
+		GroupVersion: "apps/v1", APIResources: []metav1.APIResource{{
+			Name: "replicasets", Kind: "ReplicaSet", Namespaced: true,
+			Verbs: metav1.Verbs{"list"},
 		}},
-	}}
+	}}))
 	reader, err := NewReader(scanTestResolver{
 		dynamic:   dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), target),
 		discovery: discovery, metadata: metadataClient,
