@@ -753,6 +753,11 @@ func TestProjectorEmitsNodeSchedulerAccountingAndExactResources(t *testing.T) {
 		if usage.GetResourceName() != strings.TrimPrefix(id, metricResourceColumnPrefix) || usage.GetRequested() != want {
 			t.Fatalf("exact resource %q = %#v", id, usage)
 		}
+		if tooltip := cellByID(row, id).GetTooltip(); !strings.Contains(
+			tooltip, "Resource: "+strings.TrimPrefix(id, metricResourceColumnPrefix),
+		) {
+			t.Fatalf("exact resource %q tooltip = %q", id, tooltip)
+		}
 	}
 }
 

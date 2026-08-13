@@ -548,7 +548,7 @@ func (p *Projector) resourceUsageCell(
 			resourceName, measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil,
 		)
 		cell.Tooltip = formatUsageTooltip(
-			measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil, nil,
+			resourceName, measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil, nil,
 			p.spec.Now,
 		)
 	case metrics.NodeMetrics:
@@ -573,7 +573,7 @@ func (p *Projector) resourceUsageCell(
 			resourceName, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
 		)
 		cell.Tooltip = formatUsageTooltip(
-			measurement, request, limit, optionalQuantity(allocatable, hasAllocatable),
+			resourceName, measurement, request, limit, optionalQuantity(allocatable, hasAllocatable),
 			optionalQuantity(capacity, hasCapacity), p.spec.Now,
 		)
 		if p.spec.NodeAccounting.Err != nil {
@@ -658,7 +658,7 @@ func (p *Projector) nodeAllocationCell(
 	}
 	cell.DisplayText = formatResourceQuantity(resourceName, value) + " / " +
 		formatResourceQuantity(resourceName, optionalQuantity(allocatable, hasAllocatable))
-	parts := []string{label + ": " + exactQuantityDisplay(value)}
+	parts := []string{"Resource: " + string(resourceName), label + ": " + exactQuantityDisplay(value)}
 	if field == nodeRequested && hasLimit {
 		parts = append(parts, "Summed effective limits: "+limited.String())
 	}
@@ -800,11 +800,15 @@ func exactQuantityDisplay(quantity *resource.Quantity) string {
 }
 
 func formatUsageTooltip(
+	resourceName corev1.ResourceName,
 	measurement metrics.Measurement,
 	request, limit, allocatable, capacity *resource.Quantity,
 	now time.Time,
 ) string {
-	parts := make([]string, 0, 6)
+	parts := make([]string, 0, 7)
+	if resourceName != "" {
+		parts = append(parts, "Resource: "+string(resourceName))
+	}
 	if measurement.HasValue() {
 		parts = append(parts, "Actual usage: "+measurement.Quantity.String())
 		if measurement.Provider != "" {
