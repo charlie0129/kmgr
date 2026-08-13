@@ -19,6 +19,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogWindow: ((LogWindowController) -> Void)?
     var onOpenTerminalWindow: ((TerminalWindowController) -> Void)?
+    var onRestorationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
 
     private let provider: any WorkspaceResourceProviding
     private let objectDetailProvider: any ObjectDetailProviding
@@ -27,6 +28,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let execProvider: any ExecSessionProviding
     private let portForwards: PortForwardCoordinator
     private let workspaceController: ClusterWorkspaceViewController
+    private var restoration: ClusterWindowRestorationRecord
     private var portForwardConfigurationController: PortForwardConfigurationWindowController?
     private var logConfigurationController: LogConfigurationWindowController?
     private var execConfigurationController: ExecConfigurationWindowController?
@@ -42,6 +44,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         logProvider: any LogStreamProviding,
         execProvider: any ExecSessionProviding,
         portForwards: PortForwardCoordinator,
+        restoration: ClusterWindowRestorationRecord,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
         self.session = session
@@ -50,6 +53,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.operationProvider = operationProvider
         self.logProvider = logProvider
         self.execProvider = execProvider
+        self.restoration = restoration
         self.portForwards = portForwards
 
         let window = NSWindow(
@@ -62,8 +66,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         window.subtitle = session.serverHostname
         window.minSize = NSSize(width: 820, height: 520)
         window.tabbingMode = .disallowed
-        window.setFrameAutosaveName("ClusterWorkspace-\(session.contextName)")
         window.center()
+        window.setFrameAutosaveName(restoration.frameAutosaveName)
 
         workspaceController = ClusterWorkspaceViewController(
             session: session,
@@ -92,6 +96,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onMutate = { [weak self] identity, mutation in
             self?.showResourceMutation(identity, mutation: mutation)
         }
+        workspaceController.onRestorationChanged = { [weak self] state in
+            guard let self else { return }
+            self.restoration.state = state
+            self.onRestorationCheckpoint?(self.restoration)
+        }
         window.delegate = self
         window.contentViewController = workspaceController
         window.toolbar = workspaceController.makeToolbar()
@@ -104,11 +113,13 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
-        workspaceController.start()
+        workspaceController.start(restoring: restoration.state)
     }
 
     func windowWillClose(_ notification: Notification) {
         workspaceController.stop()
+        restoration.state = workspaceController.restorationState()
+        onRestorationCheckpoint?(restoration)
         Task { [provider, session] in
             await provider.closeSession(sessionID: session.sessionID)
         }
@@ -261,12 +272,14 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var paletteController: CommandPaletteWindowController?
     private var objectOpenTask: Task<Void, Never>?
     private var detailController: ObjectDetailViewController?
+    private var pendingRestorationState: ClusterWindowRestorationState?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogs: (([ResourceIdentity]) -> Void)?
     var onOpenExec: ((ResourceIdentity) -> Void)?
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
+    var onRestorationChanged: ((ClusterWindowRestorationState) -> Void)?
 
     init(
         session: OpenedClusterSession,
@@ -291,9 +304,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
         sidebarController.onSelectResource = { [weak self] resource in
             guard let self else { return }
+            guard pendingRestorationState == nil else { return }
             let wasShowingDetail = detailController != nil
             showResourceList(resume: false)
             contentController.open(resource: resource, scope: selectedNamespaceScope())
+            checkpointRestoration()
             if wasShowingDetail {
                 view.window?.makeFirstResponder(contentController.tableResponder)
             }
@@ -325,6 +340,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onMutate = { [weak self] identity, mutation in
             self?.onMutate?(identity, mutation)
         }
+        contentController.onRestorationChanged = { [weak self] in
+            self?.checkpointRestoration()
+        }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
         addSplitViewItem(NSSplitViewItem(viewController: contentController))
         splitViewItems[0].minimumThickness = 180
@@ -336,8 +354,24 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         fatalError("ClusterWorkspaceViewController is programmatic")
     }
 
-    func start() {
-        sidebarController.start()
+    func start(restoring state: ClusterWindowRestorationState? = nil) {
+        pendingRestorationState = state
+        sidebarController.start { [weak self] resources in
+            guard let self else { return }
+            let restored = pendingRestorationState.flatMap {
+                contentController.applyRestoration($0, discoveredResources: resources)
+            } ?? false
+            if let state = pendingRestorationState {
+                applyNamespaceScopeSelection(state.namespaceScope.namespaceSelection)
+                splitViewItems[0].isCollapsed = !state.isSidebarVisible
+            }
+            pendingRestorationState = nil
+            if restored {
+                sidebarController.selectResource(matching: contentController.currentResourceID)
+            } else {
+                sidebarController.selectDefaultResource()
+            }
+        }
         loadNamespaces()
         portForwards.register(sessionID: session.sessionID)
         if portForwardObserver == nil {
@@ -345,6 +379,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 self?.updatePortForwardButton(snapshot)
             }
         }
+    }
+
+    func restorationState() -> ClusterWindowRestorationState {
+        contentController.restorationState(
+            contextName: session.contextName,
+            isSidebarVisible: !splitViewItems[0].isCollapsed
+        )
+    }
+
+    private func checkpointRestoration() {
+        onRestorationChanged?(restorationState())
     }
 
     func stop() {
@@ -450,6 +495,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     @objc private func toggleWorkspaceSidebar() {
         splitViewItems[0].animator().isCollapsed.toggle()
+        checkpointRestoration()
     }
 
     @objc private func namespaceChanged() {
@@ -459,6 +505,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         if wasShowingDetail {
             view.window?.makeFirstResponder(contentController.tableResponder)
         }
+        checkpointRestoration()
     }
 
     @objc private func showPortForwards() {
@@ -504,6 +551,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             let wasShowingDetail = detailController != nil
             showResourceList(resume: false)
             contentController.open(resource: resource, scope: selectedNamespaceScope())
+            checkpointRestoration()
             if wasShowingDetail {
                 view.window?.makeFirstResponder(contentController.tableResponder)
             }
@@ -586,11 +634,13 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         } else {
             contentController.goBack()
         }
+        checkpointRestoration()
     }
 
     @objc private func goForward() {
         guard detailController == nil else { return }
         contentController.goForward()
+        checkpointRestoration()
     }
 
     private func selectNamespace(_ namespace: String) {
@@ -601,6 +651,19 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             namespaceControl.selectItem(withTitle: namespace)
         }
         namespaceChanged()
+    }
+
+    private func applyNamespaceScopeSelection(_ scope: NamespaceSelection) {
+        guard !scope.allNamespaces, let namespace = scope.namespaces.first else {
+            namespaceControl.selectItem(at: 0)
+            return
+        }
+        if let index = namespaceControl.itemTitles.firstIndex(of: namespace) {
+            namespaceControl.selectItem(at: index)
+        } else {
+            namespaceControl.addItem(withTitle: namespace)
+            namespaceControl.selectItem(withTitle: namespace)
+        }
     }
 
     private func selectedNamespaceScope() -> NamespaceSelection {
@@ -620,12 +683,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 namespaceControl.removeAllItems()
                 namespaceControl.addItem(withTitle: "All namespaces")
                 namespaceControl.addItems(withTitles: namespaces)
-                if !session.defaultNamespace.isEmpty,
-                    let index = namespaceControl.itemTitles.firstIndex(of: session.defaultNamespace)
+                if let previous,
+                    let index = namespaceControl.itemTitles.firstIndex(of: previous)
                 {
                     namespaceControl.selectItem(at: index)
-                } else if let previous,
-                    let index = namespaceControl.itemTitles.firstIndex(of: previous)
+                } else if !session.defaultNamespace.isEmpty,
+                    let index = namespaceControl.itemTitles.firstIndex(of: session.defaultNamespace)
                 {
                     namespaceControl.selectItem(at: index)
                 }
@@ -681,6 +744,8 @@ private final class ResourceSidebarViewController: NSViewController,
     private var sections: [Section] = []
     private var allResources: [DiscoveredResource] = []
     private var task: Task<Void, Never>?
+    private var didChooseInitialResource = false
+    private var suppressSelectionCallbacks = false
     var onSelectResource: ((DiscoveredResource) -> Void)?
     var onResourcesChanged: (([DiscoveredResource]) -> Void)?
 
@@ -737,7 +802,7 @@ private final class ResourceSidebarViewController: NSViewController,
         view = root
     }
 
-    func start() {
+    func start(onLoaded: (([DiscoveredResource]) -> Void)? = nil) {
         guard task == nil else { return }
         task = Task { [weak self, provider, session] in
             guard let self else { return }
@@ -748,11 +813,7 @@ private final class ResourceSidebarViewController: NSViewController,
                 onResourcesChanged?(allResources)
                 rebuildSections()
                 statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds"
-                if let pods = allResources.first(where: { $0.group.isEmpty && $0.resource == "pods" }) {
-                    select(resource: pods)
-                } else if let first = allResources.first {
-                    select(resource: first)
-                }
+                onLoaded?(allResources)
             } catch {
                 statusLabel.stringValue = error.localizedDescription
                 statusLabel.textColor = .systemRed
@@ -853,16 +914,37 @@ private final class ResourceSidebarViewController: NSViewController,
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard !suppressSelectionCallbacks else { return }
         guard outlineView.selectedRow >= 0,
             let resource = outlineView.item(atRow: outlineView.selectedRow) as? DiscoveredResource
         else { return }
         onSelectResource?(resource)
     }
 
-    private func select(resource: DiscoveredResource) {
+    func selectResource(matching resourceID: String?) {
+        guard !didChooseInitialResource, let resourceID,
+            let resource = allResources.first(where: { $0.id == resourceID })
+        else { return }
+        didChooseInitialResource = true
+        select(resource: resource, notify: false)
+    }
+
+    func selectDefaultResource() {
+        guard !didChooseInitialResource else { return }
+        didChooseInitialResource = true
+        if let pods = allResources.first(where: { $0.group.isEmpty && $0.resource == "pods" }) {
+            select(resource: pods, notify: true)
+        } else if let first = allResources.first {
+            select(resource: first, notify: true)
+        }
+    }
+
+    private func select(resource: DiscoveredResource, notify: Bool) {
         for row in 0..<outlineView.numberOfRows where (outlineView.item(atRow: row) as? DiscoveredResource)?.id == resource.id {
+            suppressSelectionCallbacks = true
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            onSelectResource?(resource)
+            suppressSelectionCallbacks = false
+            if notify { onSelectResource?(resource) }
             break
         }
     }
@@ -900,6 +982,9 @@ private final class ResourceListViewController: NSViewController,
     private var snapshotUIDs: [ResourceUID] = []
     private var lastStreamResourceID: String?
     private var lastStreamScope: NamespaceSelection?
+    private var pendingScrollAnchor: ScrollAnchor?
+    private var restorationCheckpointTask: Task<Void, Never>?
+    private var suppressPresentationCheckpoint = false
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
     var onShowCommandPalette: (() -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
@@ -909,6 +994,7 @@ private final class ResourceListViewController: NSViewController,
     var onOpenExec: ((ResourceIdentity) -> Void)?
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
+    var onRestorationChanged: (() -> Void)?
 
     init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
@@ -955,6 +1041,13 @@ private final class ResourceListViewController: NSViewController,
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(scrollBoundsChanged(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
 
         errorLabel.isHidden = true
         errorLabel.textColor = .systemRed
@@ -994,6 +1087,7 @@ private final class ResourceListViewController: NSViewController,
         if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
         self.resource = resource
         self.scope = scope
+        pendingScrollAnchor = nil
         let state = ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
             kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope
@@ -1007,6 +1101,7 @@ private final class ResourceListViewController: NSViewController,
         guard self.scope != scope else { return }
         if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
         self.scope = scope
+        pendingScrollAnchor = nil
         if var state = navigationState() {
             state.namespaceSelection = scope
             history.navigate(to: .resource(state))
@@ -1015,6 +1110,8 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func stop() {
+        restorationCheckpointTask?.cancel()
+        restorationCheckpointTask = nil
         suspend()
     }
 
@@ -1036,6 +1133,8 @@ private final class ResourceListViewController: NSViewController,
 
     var tableResponder: NSResponder { tableView }
 
+    var currentResourceID: String? { resource?.id }
+
     var selectedIdentities: [ResourceIdentity] { model.selectedIdentities }
 
     func setFilter(_ value: String) {
@@ -1043,6 +1142,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask?.cancel()
         filterField.stringValue = value
         openStream()
+        onRestorationChanged?()
         view.window?.makeFirstResponder(filterField)
     }
 
@@ -1087,6 +1187,21 @@ private final class ResourceListViewController: NSViewController,
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled, self?.filterRevision == revision else { return }
             self?.openStream()
+            self?.onRestorationChanged?()
+        }
+    }
+
+    @objc private func scrollBoundsChanged(_ notification: Notification) {
+        scheduleRestorationCheckpoint()
+    }
+
+    private func scheduleRestorationCheckpoint() {
+        guard !suppressPresentationCheckpoint else { return }
+        restorationCheckpointTask?.cancel()
+        restorationCheckpointTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            self?.onRestorationChanged?()
         }
     }
 
@@ -1157,11 +1272,22 @@ private final class ResourceListViewController: NSViewController,
             freshnessLabel.stringValue = status.presentation
             countLabel.stringValue = "\(status.rowsVisible.formatted()) objects"
         case .snapshot(_, let chunk):
-            let capture = captureUpdate()
+            var capture = captureUpdate()
             if chunk.first {
                 snapshotUIDs.removeAll(keepingCapacity: true)
             }
             snapshotUIDs.append(contentsOf: chunk.rows.map { $0.identity.uid })
+            if let pendingScrollAnchor,
+                chunk.last || chunk.rows.contains(where: { $0.identity.uid == pendingScrollAnchor.uid })
+            {
+                capture = ResourceTableUpdateCapture(
+                    selectedUIDs: capture.selectedUIDs,
+                    selectionAnchorUID: capture.selectionAnchorUID,
+                    previousOrder: capture.previousOrder,
+                    scrollAnchor: pendingScrollAnchor
+                )
+                self.pendingScrollAnchor = nil
+            }
             let order: VisibleOrderUpdate = chunk.last
                 ? .replace(snapshotUIDs)
                 : .append(chunk.rows.map { $0.identity.uid })
@@ -1194,7 +1320,10 @@ private final class ResourceListViewController: NSViewController,
         let firstRow = tableView.rows(in: tableView.visibleRect).location
         let uid = model.orderedVisibleUIDs.indices.contains(firstRow)
             ? model.orderedVisibleUIDs[firstRow] : nil
-        return model.captureUpdate(topVisibleUID: uid)
+        let pixelOffset = uid.map { _ in
+            Double(tableView.rect(ofRow: firstRow).minY - tableView.visibleRect.minY)
+        } ?? 0
+        return model.captureUpdate(topVisibleUID: uid, pixelOffsetFromTop: pixelOffset)
     }
 
     private func applyTablePlan(_ plan: ResourceTableUpdatePlan) {
@@ -1205,7 +1334,10 @@ private final class ResourceListViewController: NSViewController,
         if let restoration = plan.scrollRestoration,
             model.orderedVisibleUIDs.indices.contains(restoration.rowIndex)
         {
-            tableView.scrollRowToVisible(restoration.rowIndex)
+            let rowRect = tableView.rect(ofRow: restoration.rowIndex)
+            let targetY = max(0, rowRect.minY - CGFloat(restoration.pixelOffsetFromTop))
+            tableView.scroll(NSPoint(x: tableView.visibleRect.minX, y: targetY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
     }
 
@@ -1233,6 +1365,7 @@ private final class ResourceListViewController: NSViewController,
         columnDefinitionsByResourceID[resourceID] = definitions
         installColumns(definitions)
         openStream()
+        onRestorationChanged?()
     }
 
     private func installColumns(_ definitions: [ColumnDefinition]) {
@@ -1337,6 +1470,88 @@ private final class ResourceListViewController: NSViewController,
         )
     }
 
+    func restorationState(
+        contextName: String,
+        isSidebarVisible: Bool
+    ) -> ClusterWindowRestorationState {
+        let state = navigationState()
+        let columns = tableView.tableColumns.map { column in
+            ColumnPresentationState(
+                columnID: column.identifier.rawValue,
+                width: Double(column.width),
+                isVisible: !column.isHidden
+            )
+        }
+        let sorts = tableView.sortDescriptors.compactMap { descriptor -> SortDescriptorState? in
+            guard let key = descriptor.key else { return nil }
+            return SortDescriptorState(columnID: key, ascending: descriptor.ascending)
+        }
+        return ClusterWindowRestorationState(
+            contextName: contextName,
+            gvr: state.map { GVR(group: $0.group, version: $0.version, resource: $0.resource) },
+            namespaceScope: NamespaceScope(scope),
+            filter: filterField.stringValue,
+            sort: sorts,
+            columns: columns,
+            isSidebarVisible: isSidebarVisible,
+            scrollAnchor: captureUpdate().scrollAnchor
+        )
+    }
+
+    @discardableResult
+    func applyRestoration(
+        _ restoration: ClusterWindowRestorationState,
+        discoveredResources: [DiscoveredResource]
+    ) -> Bool {
+        guard let gvr = restoration.gvr,
+            let restored = discoveredResources.first(where: {
+                $0.group == gvr.group && $0.version == gvr.version && $0.resource == gvr.resource
+            })
+        else { return false }
+        resource = restored
+        scope = restoration.namespaceScope.namespaceSelection
+        pendingScrollAnchor = restoration.scrollAnchor
+        filterField.stringValue = restoration.filter
+        suppressPresentationCheckpoint = true
+        defer { suppressPresentationCheckpoint = false }
+        configureColumns(for: restored)
+        if !restoration.columns.isEmpty {
+            let byID = Dictionary(uniqueKeysWithValues: restoration.columns.map { ($0.columnID, $0) })
+            for column in tableView.tableColumns {
+                if let state = byID[column.identifier.rawValue] {
+                    column.width = CGFloat(state.width)
+                    column.isHidden = !state.isVisible
+                }
+            }
+            for (targetIndex, state) in restoration.columns.enumerated()
+                where targetIndex < tableView.numberOfColumns
+            {
+                guard let currentIndex = tableView.tableColumns.firstIndex(where: {
+                    $0.identifier.rawValue == state.columnID
+                }) else { continue }
+                if currentIndex != targetIndex {
+                    tableView.moveColumn(currentIndex, toColumn: targetIndex)
+                }
+            }
+        }
+        let availableColumnIDs = Set(tableView.tableColumns.map { $0.identifier.rawValue })
+        tableView.sortDescriptors = restoration.sort.compactMap {
+            guard availableColumnIDs.contains($0.columnID) else { return nil }
+            return NSSortDescriptor(key: $0.columnID, ascending: $0.ascending)
+        }
+        let nav = ResourceNavigationState(
+            group: restored.group, version: restored.version, resource: restored.resource,
+            kind: restored.kind, namespaced: restored.namespaced,
+            namespaceSelection: scope, filter: restoration.filter,
+            sortColumnID: restoration.sort.first?.columnID,
+            sortDescending: !(restoration.sort.first?.ascending ?? true),
+            scrollAnchor: restoration.scrollAnchor
+        )
+        history = WorkspaceNavigationHistory(initial: .resource(nav))
+        openStream()
+        return true
+    }
+
     private func restore(_ destination: WorkspaceDestination) {
         guard case .resource(let state) = destination else { return }
         resource = DiscoveredResource(
@@ -1345,6 +1560,7 @@ private final class ResourceListViewController: NSViewController,
             verbs: ["list", "watch"]
         )
         scope = state.namespaceSelection
+        pendingScrollAnchor = state.scrollAnchor
         filterField.stringValue = state.filter
         configureColumns(for: resource!)
         if let columnID = state.sortColumnID {
@@ -1415,11 +1631,21 @@ private final class ResourceListViewController: NSViewController,
         sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
     ) {
         guard !suppressSortChanges else { return }
-        guard let descriptor = tableView.sortDescriptors.first,
-            let key = descriptor.key
-        else { return }
-        logger.debug("Requested backend table sort for \(key, privacy: .public)")
+        if let key = tableView.sortDescriptors.first?.key {
+            logger.debug("Requested backend table sort for \(key, privacy: .public)")
+        } else {
+            logger.debug("Cleared backend table sort")
+        }
         openStream()
+        onRestorationChanged?()
+    }
+
+    func tableViewColumnDidMove(_ notification: Notification) {
+        scheduleRestorationCheckpoint()
+    }
+
+    func tableViewColumnDidResize(_ notification: Notification) {
+        scheduleRestorationCheckpoint()
     }
 
     @objc private func openSelectedObjectFromTable() {

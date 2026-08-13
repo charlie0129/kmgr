@@ -18,6 +18,7 @@ final class Application: NSObject, NSApplicationDelegate {
     private let logProvider: any LogStreamProviding
     private let execProvider: any ExecSessionProviding
     private let preferencesStore: AppPreferencesStore
+    private let restorationStore: WorkspaceRestorationStore
     private let settingsWindowController: SettingsWindowController
     private let portForwardCoordinator: PortForwardCoordinator
     private let portForwardsWindowController: PortForwardsWindowController
@@ -26,12 +27,17 @@ final class Application: NSObject, NSApplicationDelegate {
     private var terminalWindowControllers: [ObjectIdentifier: TerminalWindowController] = [:]
     private var isTerminating = false
     private var terminationTask: Task<Void, Never>?
+    private var restorationTasks: [Task<Void, Never>] = []
+    private var restorationAttemptsRemaining = 0
+    private var didRestoreWorkspace = false
+    private var shouldShowChooserAfterRestore = false
 
     override init() {
         let supervisor = EngineSupervisor()
         self.engineSupervisor = supervisor
         let preferences = AppPreferencesStore()
         self.preferencesStore = preferences
+        self.restorationStore = WorkspaceRestorationStore()
         let settings = SettingsWindowController(preferencesStore: preferences)
         self.settingsWindowController = settings
         self.clusterContextProvider = EngineClusterContextProvider(
@@ -74,7 +80,7 @@ final class Application: NSObject, NSApplicationDelegate {
         installMainMenu()
         applyAppearance(preferencesStore.current.appearance)
         engineSupervisor.start()
-        showClusterManager()
+        restoreWorkspacesOrShowChooser()
         NSApp.activate(ignoringOtherApps: true)
         logger.info("Kmgr application launched")
     }
@@ -135,7 +141,10 @@ final class Application: NSObject, NSApplicationDelegate {
         let identifier = ObjectIdentifier(controller)
         chooserControllers[identifier] = controller
         controller.onOpenSession = { [weak self] session in
-            self?.openWorkspace(for: session)
+            self?.openWorkspace(
+                for: session,
+                restoration: ClusterWindowRestorationRecord(contextName: session.contextName)
+            )
         }
         controller.onClose = { [weak self] in
             self?.chooserControllers.removeValue(forKey: identifier)
@@ -143,7 +152,10 @@ final class Application: NSObject, NSApplicationDelegate {
         controller.showWindow(nil)
     }
 
-    private func openWorkspace(for session: OpenedClusterSession) {
+    private func openWorkspace(
+        for session: OpenedClusterSession,
+        restoration: ClusterWindowRestorationRecord
+    ) {
         let controller = ClusterWorkspaceWindowController(
             session: session,
             provider: workspaceResourceProvider,
@@ -153,6 +165,7 @@ final class Application: NSObject, NSApplicationDelegate {
             logProvider: logProvider,
             execProvider: execProvider,
             portForwards: portForwardCoordinator,
+            restoration: restoration,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
             }
@@ -160,6 +173,9 @@ final class Application: NSObject, NSApplicationDelegate {
         let identifier = ObjectIdentifier(controller)
         workspaceControllers[identifier] = controller
         controller.onClose = { [weak self] in
+            if self?.isTerminating == false {
+                try? self?.restorationStore.remove(id: restoration.id)
+            }
             self?.columnsManagerControllers.removeValue(forKey: identifier)?.close()
             self?.workspaceControllers.removeValue(forKey: identifier)
         }
@@ -176,8 +192,49 @@ final class Application: NSObject, NSApplicationDelegate {
             guard let self, let controller else { return }
             self.showColumns(request, for: controller)
         }
+        controller.onRestorationCheckpoint = { [weak self] record in
+            try? self?.restorationStore.upsert(record)
+        }
+        try? restorationStore.upsert(restoration)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func restoreWorkspacesOrShowChooser() {
+        let records = restorationStore.windows
+        guard !records.isEmpty else { showClusterManager(); return }
+        restorationAttemptsRemaining = records.count
+        didRestoreWorkspace = false
+        shouldShowChooserAfterRestore = false
+        for record in records {
+            let task = Task { [weak self, clusterContextProvider] in
+                guard let self else { return }
+                defer { restorationAttemptFinished() }
+                do {
+                    let session = try await clusterContextProvider.openContext(
+                        named: record.state.contextName
+                    )
+                    guard !Task.isCancelled else { return }
+                    openWorkspace(for: session, restoration: record)
+                    didRestoreWorkspace = true
+                } catch {
+                    logger.error(
+                        "Workspace restore failed for context \(record.state.contextName, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    )
+                    shouldShowChooserAfterRestore = true
+                }
+            }
+            restorationTasks.append(task)
+        }
+    }
+
+    private func restorationAttemptFinished() {
+        restorationAttemptsRemaining -= 1
+        guard restorationAttemptsRemaining == 0 else { return }
+        restorationTasks.removeAll()
+        if shouldShowChooserAfterRestore || !didRestoreWorkspace {
+            showClusterManager()
+        }
     }
 
     private func retainAndShow(_ controller: LogWindowController) {
