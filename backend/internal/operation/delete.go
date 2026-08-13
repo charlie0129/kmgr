@@ -72,6 +72,14 @@ func DeleteMany(
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
+				// The dispatcher and a newly available worker may become ready at
+				// the same instant as cancellation. Go select intentionally chooses
+				// among ready cases nondeterministically, so recheck after handoff:
+				// receiving a job is not yet dispatching its destructive API call.
+				if err := context.Cause(ctx); err != nil {
+					results[index].Err = err
+					continue
+				}
 				target := targets[index]
 				if err := validateTarget(target); err != nil {
 					results[index].Err = err
