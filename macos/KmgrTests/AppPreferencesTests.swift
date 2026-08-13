@@ -109,3 +109,38 @@ import Testing
         ) == NamespaceSelection()
     )
 }
+
+@Test func preferenceDeltaClassifiesLiveWorkspaceAndRelaunchChanges() {
+    let previous = AppPreferences()
+    var updated = previous
+    updated.appearance = .dark
+    updated.logs.recordLimit += 1_000
+    updated.confirmations.confirmScaling.toggle()
+    updated.defaultNamespace = .allNamespaces
+    updated.metricsRefreshSeconds += 5
+    updated.columnsConfigurationPath = "/tmp/kmgr-columns.yaml"
+
+    let delta = AppPreferencesDelta(previous: previous, updated: updated)
+
+    #expect(delta.changes(activated: .immediate) == [
+        .appearance, .logDisplay, .confirmations,
+    ])
+    #expect(delta.changes(activated: .newWorkspace) == [.defaultNamespace])
+    #expect(delta.changes(activated: .applicationRelaunch) == [
+        .metricsRefresh, .columnsConfigurationPath,
+    ])
+    #expect(delta.requiresApplicationRelaunch)
+    #expect(!delta.isEmpty)
+    #expect(AppPreferencesDelta(previous: updated, updated: updated).isEmpty)
+}
+
+@Test func confirmationPreferencesControlOnlyRestartAndScalingPrompts() {
+    var preferences = ConfirmationPreferences()
+    #expect(preferences.requiresConfirmation(for: .workloadRestart))
+    #expect(!preferences.requiresConfirmation(for: .scaling))
+
+    preferences.confirmWorkloadRestart = false
+    preferences.confirmScaling = true
+    #expect(!preferences.requiresConfirmation(for: .workloadRestart))
+    #expect(preferences.requiresConfirmation(for: .scaling))
+}

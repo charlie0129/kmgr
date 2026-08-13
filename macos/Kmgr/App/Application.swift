@@ -76,8 +76,17 @@ final class Application: NSObject, NSApplicationDelegate {
             coordinator: portForwards
         )
         super.init()
-        settings.onPreferencesChanged = { [weak self] preferences in
-            self?.applyAppearance(preferences.appearance)
+        settings.onPreferencesChanged = { [weak self] preferences, delta in
+            guard let self else { return }
+            if delta.contains(.appearance) {
+                applyAppearance(preferences.appearance)
+            }
+            if delta.contains(.logDisplay) {
+                let configuration = LogDisplayConfiguration(preferences: preferences.logs)
+                for controller in logWindowControllers.values {
+                    controller.applyDisplayConfiguration(configuration)
+                }
+            }
         }
     }
 
@@ -271,6 +280,9 @@ final class Application: NSObject, NSApplicationDelegate {
             logDisplayConfiguration: LogDisplayConfiguration(
                 preferences: preferencesStore.current.logs
             ),
+            confirmationPreferences: { [weak self] in
+                self?.preferencesStore.current.confirmations ?? ConfirmationPreferences()
+            },
             restoration: restoration,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
@@ -345,6 +357,12 @@ final class Application: NSObject, NSApplicationDelegate {
     }
 
     private func retainAndShow(_ controller: LogWindowController) {
+        // A workspace may predate the latest preferences. Correct the newly
+        // created controller before its stream begins, then retain it for live
+        // updates from subsequent Settings saves.
+        controller.applyDisplayConfiguration(LogDisplayConfiguration(
+            preferences: preferencesStore.current.logs
+        ))
         let identifier = ObjectIdentifier(controller)
         logWindowControllers[identifier] = controller
         controller.onClose = { [weak self, weak controller] in

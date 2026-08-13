@@ -23,6 +23,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     private let session: OpenedClusterSession
     private let identity: ResourceIdentity
     private let mutation: Mutation
+    private let confirmationPreferences: ConfirmationPreferences
     private let detailProvider: any ObjectDetailProviding
     private let operationProvider: any ResourceOperationProviding
     private let replicasField = NSTextField()
@@ -43,12 +44,14 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         session: OpenedClusterSession,
         identity: ResourceIdentity,
         mutation: Mutation,
+        confirmationPreferences: ConfirmationPreferences,
         detailProvider: any ObjectDetailProviding,
         operationProvider: any ResourceOperationProviding
     ) {
         self.session = session
         self.identity = identity
         self.mutation = mutation
+        self.confirmationPreferences = confirmationPreferences
         self.detailProvider = detailProvider
         self.operationProvider = operationProvider
         let panel = NSPanel(
@@ -163,6 +166,42 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         let draft: MutationDraft
         do { draft = try mutationDraft() }
         catch { show(error); return }
+
+        if let controlledMutation = mutation.preferenceControlledMutation,
+            confirmationPreferences.requiresConfirmation(for: controlledMutation)
+        {
+            confirm(draft)
+        } else {
+            perform(draft)
+        }
+    }
+
+    private func confirm(_ draft: MutationDraft) {
+        guard let panel = window else { return }
+        let namespace = identity.namespace.isEmpty ? "cluster scoped" : identity.namespace
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        switch draft {
+        case .scale(let replicas):
+            alert.messageText = "Scale \(identity.name) to \(replicas) replicas?"
+            alert.informativeText = "Context: \(session.contextName)\nTarget: \(identity.resource) · \(namespace)/\(identity.name)\n\nThe object identity and resource version will be refreshed before scaling."
+            alert.addButton(withTitle: "Scale")
+        case .restart:
+            alert.messageText = "Restart \(identity.name)?"
+            alert.informativeText = "Context: \(session.contextName)\nTarget: \(identity.resource) · \(namespace)/\(identity.name)\n\nThe Pod template will be updated after a fresh object identity and resource-version check."
+            alert.addButton(withTitle: "Restart")
+        case .metadata:
+            return
+        }
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: panel) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.perform(draft)
+        }
+    }
+
+    private func perform(_ draft: MutationDraft) {
+        guard task == nil, !terminal else { return }
         primaryButton.isEnabled = false
         progress.startAnimation(nil)
         statusLabel.stringValue = "Refreshing exact object identity…"
@@ -256,5 +295,15 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         if let parentWindow { parentWindow.endSheet(window) }
         window.orderOut(nil)
         onDismiss?()
+    }
+}
+
+private extension ResourceMutationWindowController.Mutation {
+    var preferenceControlledMutation: PreferenceControlledMutation? {
+        switch self {
+        case .scale: .scaling
+        case .rolloutRestart: .workloadRestart
+        case .metadata: nil
+        }
     }
 }

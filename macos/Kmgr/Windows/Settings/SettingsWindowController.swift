@@ -20,7 +20,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let applyButton = NSButton(title: "Apply", target: nil, action: nil)
 
-    var onPreferencesChanged: ((AppPreferences) -> Void)?
+    var onPreferencesChanged: ((AppPreferences, AppPreferencesDelta) -> Void)?
 
     init(preferencesStore: AppPreferencesStore) {
         self.preferencesStore = preferencesStore
@@ -184,8 +184,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
 
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        statusLabel.maximumNumberOfLines = 2
-        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.maximumNumberOfLines = 4
+        statusLabel.lineBreakMode = .byWordWrapping
 
         let defaultsButton = NSButton(title: "Use Defaults", target: self, action: #selector(useDefaults))
         let revertButton = NSButton(title: "Revert", target: self, action: #selector(revert))
@@ -342,14 +342,37 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     @objc private func apply() {
         do {
             let preferences = try preferencesFromControls().validated()
+            let delta = AppPreferencesDelta(
+                previous: preferencesStore.current,
+                updated: preferences
+            )
             try preferencesStore.save(preferences)
             loadedPreferences = preferencesStore.current
             install(loadedPreferences)
-            showStatus("Settings saved.", error: false)
-            onPreferencesChanged?(loadedPreferences)
+            showStatus(statusMessage(for: delta), error: false)
+            onPreferencesChanged?(loadedPreferences, delta)
         } catch {
             showStatus(error.localizedDescription, error: true)
         }
+    }
+
+    private func statusMessage(for delta: AppPreferencesDelta) -> String {
+        guard !delta.isEmpty else { return "Settings are already up to date." }
+
+        var messages = ["Settings saved."]
+        if delta.contains(.logDisplay) {
+            messages.append("Open log windows were updated.")
+        }
+        if delta.contains(.defaultNamespace) {
+            messages.append("The default namespace applies to new cluster windows.")
+        }
+        let relaunchChanges = delta.changes(activated: .applicationRelaunch)
+        if !relaunchChanges.isEmpty {
+            let names = relaunchChanges.map(\.title).joined(separator: " and ")
+            let verb = relaunchChanges.count == 1 ? "applies" : "apply"
+            messages.append("\(names) \(verb) after relaunching the app. The running helper was not restarted, and Kubernetes mutations were not replayed.")
+        }
+        return messages.joined(separator: " ")
     }
 
     @objc private func revert() {

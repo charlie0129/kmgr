@@ -76,6 +76,20 @@ public struct ConfirmationPreferences: Codable, Hashable, Sendable {
     public static let alwaysConfirmActiveTerminalClose = true
     public static let alwaysConfirmNonLoopbackPortForward = true
     public static let alwaysShowClusterAndNamespaceIdentity = true
+
+    public func requiresConfirmation(for mutation: PreferenceControlledMutation) -> Bool {
+        switch mutation {
+        case .workloadRestart:
+            confirmWorkloadRestart
+        case .scaling:
+            confirmScaling
+        }
+    }
+}
+
+public enum PreferenceControlledMutation: Hashable, Sendable {
+    case workloadRestart
+    case scaling
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
@@ -157,6 +171,83 @@ public struct AppPreferences: Codable, Hashable, Sendable {
             string: columnsConfigurationPath.trimmingCharacters(in: .whitespacesAndNewlines)
         ).expandingTildeInPath
         return copy
+    }
+}
+
+public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
+    case appearance
+    case logDisplay
+    case confirmations
+    case defaultNamespace
+    case metricsRefresh
+    case columnsConfigurationPath
+
+    public enum Activation: Hashable, Sendable {
+        case immediate
+        case newWorkspace
+        case applicationRelaunch
+    }
+
+    public var activation: Activation {
+        switch self {
+        case .appearance, .logDisplay, .confirmations:
+            .immediate
+        case .defaultNamespace:
+            .newWorkspace
+        case .metricsRefresh, .columnsConfigurationPath:
+            .applicationRelaunch
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .appearance: "Appearance"
+        case .logDisplay: "Log display"
+        case .confirmations: "Confirmation prompts"
+        case .defaultNamespace: "Default namespace"
+        case .metricsRefresh: "Metrics refresh"
+        case .columnsConfigurationPath: "Programmable columns path"
+        }
+    }
+}
+
+/// Describes when saved settings can safely take effect. Helper-owned
+/// settings require a full application relaunch: restarting the helper in
+/// place could otherwise make an in-flight Kubernetes mutation ambiguous.
+public struct AppPreferencesDelta: Hashable, Sendable {
+    public let changes: Set<AppPreferenceChange>
+
+    public init(previous: AppPreferences, updated: AppPreferences) {
+        var changes: Set<AppPreferenceChange> = []
+        if previous.appearance != updated.appearance { changes.insert(.appearance) }
+        if previous.logs != updated.logs { changes.insert(.logDisplay) }
+        if previous.confirmations != updated.confirmations { changes.insert(.confirmations) }
+        if previous.defaultNamespace != updated.defaultNamespace {
+            changes.insert(.defaultNamespace)
+        }
+        if previous.metricsRefreshSeconds != updated.metricsRefreshSeconds {
+            changes.insert(.metricsRefresh)
+        }
+        if previous.columnsConfigurationPath != updated.columnsConfigurationPath {
+            changes.insert(.columnsConfigurationPath)
+        }
+        self.changes = changes
+    }
+
+    public var isEmpty: Bool { changes.isEmpty }
+
+    public func contains(_ change: AppPreferenceChange) -> Bool {
+        changes.contains(change)
+    }
+
+    public func changes(activated activation: AppPreferenceChange.Activation) -> [AppPreferenceChange] {
+        AppPreferenceChange.allCases.filter {
+            changes.contains($0) && $0.activation == activation
+        }
+    }
+
+    public var requiresApplicationRelaunch: Bool {
+        !changes(activated: .applicationRelaunch).isEmpty
     }
 }
 

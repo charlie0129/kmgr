@@ -190,6 +190,25 @@ public struct LogRecordRing: Sendable {
         byteCount = 0
     }
 
+    /// Rebuilds the ring under new bounds so an already-open log view can
+    /// adopt saved preferences. Appending oldest-to-newest retains the newest
+    /// possible records (and newest fragments of an oversized record), while
+    /// seeding the counters preserves all drops observed before the resize.
+    public mutating func resize(recordLimit: Int, byteLimit: Int) {
+        precondition(recordLimit > 0 && byteLimit > 0)
+        guard recordLimit != self.recordLimit || byteLimit != self.byteLimit else { return }
+
+        var replacement = LogRecordRing(
+            recordLimit: recordLimit,
+            byteLimit: byteLimit,
+            fragmentByteLimit: fragmentByteLimit
+        )
+        replacement.droppedRecords = droppedRecords
+        replacement.droppedBytes = droppedBytes
+        replacement.append(contentsOf: records)
+        self = replacement
+    }
+
     private mutating func appendOne(_ record: LogRecord) {
         let size = record.data.count
         while recordCount > 0 && (recordCount >= recordLimit || byteCount + size > byteLimit) {
@@ -274,6 +293,7 @@ public struct LogRecordRingSnapshot: Sendable {
 /// decodes log bytes and exposes only bounded snapshots for batched rendering.
 public actor LogRecordStore {
     private var ring: LogRecordRing
+    private var latestConfigurationRevision: UInt64 = 0
 
     public init(
         recordLimit: Int = 20_000,
@@ -301,6 +321,27 @@ public actor LogRecordStore {
 
     public func statistics() -> LogRecordRingStatistics {
         statistics(for: ring)
+    }
+
+    @discardableResult
+    public func resize(recordLimit: Int, byteLimit: Int) -> LogRecordRingStatistics {
+        ring.resize(recordLimit: recordLimit, byteLimit: byteLimit)
+        return statistics(for: ring)
+    }
+
+    /// Revisioned variant used by live Settings propagation. Once a newer
+    /// configuration has reached the actor, a delayed older request cannot
+    /// overwrite it.
+    @discardableResult
+    public func resize(
+        recordLimit: Int,
+        byteLimit: Int,
+        revision: UInt64
+    ) -> LogRecordRingStatistics {
+        guard revision > latestConfigurationRevision else { return statistics(for: ring) }
+        latestConfigurationRevision = revision
+        ring.resize(recordLimit: recordLimit, byteLimit: byteLimit)
+        return statistics(for: ring)
     }
 
     public func snapshot() -> LogRecordRingSnapshot {

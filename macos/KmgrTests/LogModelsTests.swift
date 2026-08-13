@@ -42,6 +42,67 @@ import Testing
     #expect(ring.droppedRecords > 0)
 }
 
+@Test func resizingLogRingKeepsNewestDataAndCumulativeDropCounts() {
+    var ring = LogRecordRing(recordLimit: 3, byteLimit: 100)
+    ring.append(contentsOf: [
+        LogRecord(sourceID: "a", data: Data("z".utf8), endsWithNewline: true),
+        LogRecord(sourceID: "a", data: Data("aa".utf8), endsWithNewline: true),
+        LogRecord(sourceID: "a", data: Data("bbb".utf8), endsWithNewline: true),
+        LogRecord(sourceID: "a", data: Data("cccc".utf8), endsWithNewline: true),
+    ])
+    #expect(ring.droppedRecords == 1)
+    #expect(ring.droppedBytes == 1)
+
+    ring.resize(recordLimit: 2, byteLimit: 6)
+    #expect(ring.records.map { String(decoding: $0.data, as: UTF8.self) } == ["cccc"])
+    #expect(ring.recordCount == 1)
+    #expect(ring.byteCount == 4)
+    #expect(ring.droppedRecords == 3)
+    #expect(ring.droppedBytes == 6)
+
+    ring.resize(recordLimit: 10, byteLimit: 100)
+    #expect(ring.records.map { String(decoding: $0.data, as: UTF8.self) } == ["cccc"])
+    #expect(ring.droppedRecords == 3)
+    #expect(ring.droppedBytes == 6)
+}
+
+@Test func logRecordStoreCanResizeAnOpenBuffer() async {
+    let store = LogRecordStore(recordLimit: 4, byteLimit: 100)
+    _ = await store.append(contentsOf: [
+        LogRecord(sourceID: "a", data: Data("old".utf8), endsWithNewline: true),
+        LogRecord(sourceID: "a", data: Data("middle".utf8), endsWithNewline: true),
+        LogRecord(sourceID: "a", data: Data("new".utf8), endsWithNewline: true),
+    ])
+
+    let statistics = await store.resize(recordLimit: 2, byteLimit: 10)
+    let snapshot = await store.snapshot()
+    #expect(snapshot.records.map { String(decoding: $0.data, as: UTF8.self) } == ["middle", "new"])
+    #expect(statistics == snapshot.statistics)
+    #expect(statistics.recordCount == 2)
+    #expect(statistics.byteCount == 9)
+    #expect(statistics.droppedRecords == 1)
+}
+
+@Test func logRecordStoreIgnoresDelayedStaleConfigurationRevision() async {
+    let store = LogRecordStore(recordLimit: 10, byteLimit: 100)
+    _ = await store.append(contentsOf: [
+        LogRecord(sourceID: "a", data: Data("one".utf8), endsWithNewline: true),
+        LogRecord(sourceID: "a", data: Data("two".utf8), endsWithNewline: true),
+        LogRecord(sourceID: "a", data: Data("three".utf8), endsWithNewline: true),
+    ])
+
+    _ = await store.resize(recordLimit: 2, byteLimit: 100, revision: 2)
+    _ = await store.resize(recordLimit: 10, byteLimit: 100, revision: 1)
+    _ = await store.append(contentsOf: [
+        LogRecord(sourceID: "a", data: Data("four".utf8), endsWithNewline: true),
+    ])
+
+    let snapshot = await store.snapshot()
+    #expect(snapshot.records.map { String(decoding: $0.data, as: UTF8.self) } == ["three", "four"])
+    #expect(snapshot.statistics.recordCount == 2)
+    #expect(snapshot.statistics.droppedRecords == 2)
+}
+
 @Test func logRendererBoundsInvalidUTF8ExpansionAndKeepsNewestRecords() throws {
     let records = [
         LogRecord(sourceID: "old", data: Data("old line".utf8), endsWithNewline: true),

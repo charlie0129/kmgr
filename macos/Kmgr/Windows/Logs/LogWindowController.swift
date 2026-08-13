@@ -16,8 +16,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var gate = GenerationSequenceGate()
     private let recordStore: LogRecordStore
     private var options: LogOptions
-    private let renderBatchMilliseconds: Int
-    private let maximumRenderedUTF8Bytes: Int
+    private var displayConfiguration: LogDisplayConfiguration
+    private var renderBatchMilliseconds: Int
+    private var maximumRenderedUTF8Bytes: Int
+    private var configurationRevision: UInt64 = 0
+    private var renderScheduleRevision: UInt64 = 0
     private let sourceLabels: [String: String]
     private var isPaused = false
     private var pendingRender = false
@@ -61,6 +64,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             recordLimit: displayConfiguration.recordLimit,
             byteLimit: displayConfiguration.byteLimit
         )
+        self.displayConfiguration = displayConfiguration
         self.renderBatchMilliseconds = displayConfiguration.renderBatchMilliseconds
         // Preferences may retain far more history than AppKit can safely lay
         // out in one main-thread NSTextView.string replacement.
@@ -112,6 +116,32 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func controlTextDidChange(_ obj: Notification) { scheduleRender() }
+
+    /// Applies saved limits to an existing log window without interrupting its
+    /// stream. Resizes are serialized so rapid preference saves cannot leave
+    /// the actor-backed ring using an older configuration.
+    func applyDisplayConfiguration(_ configuration: LogDisplayConfiguration) {
+        guard configuration != displayConfiguration else { return }
+        displayConfiguration = configuration
+        renderBatchMilliseconds = configuration.renderBatchMilliseconds
+        maximumRenderedUTF8Bytes = min(configuration.byteLimit, 32 << 20)
+        configurationRevision &+= 1
+        let revision = configurationRevision
+        cancelScheduledRender()
+        needsRenderWhenVisible = true
+        Task { [weak self, recordStore] in
+            guard let self, !isClosing else { return }
+            let statistics = await recordStore.resize(
+                recordLimit: configuration.recordLimit,
+                byteLimit: configuration.byteLimit,
+                revision: revision
+            )
+            guard !Task.isCancelled, revision == configurationRevision else { return }
+            latestStoreDrops = statistics.droppedRecords
+            updateStatusLabel()
+            if !isPaused { scheduleRender() }
+        }
+    }
 
     private func configureContent(in window: NSWindow) {
         let root = NSView()
@@ -230,8 +260,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func stopStream() {
-        renderTask?.cancel()
-        renderTask = nil
+        cancelScheduledRender()
         streamTask?.cancel()
         let generation = generation
         Task { [provider, session, streamID] in
@@ -298,10 +327,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
         pendingRender = true
         renderDirty = false
+        let revision = renderScheduleRevision
         renderTask = Task { [weak self] in
             guard let delay = self?.renderBatchMilliseconds else { return }
             try? await Task.sleep(for: .milliseconds(delay))
-            guard let self else { return }
+            guard let self, revision == renderScheduleRevision else { return }
             if !Task.isCancelled {
                 if canRenderNow, !isPaused {
                     await render()
@@ -310,6 +340,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 }
             }
 
+            guard revision == renderScheduleRevision else { return }
             let needsFollowUp = renderDirty
             pendingRender = false
             renderTask = nil
@@ -414,7 +445,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         // Prevent an in-flight formatting pass from restoring the snapshot the
         // user just cleared. New records mark the cancelled pass dirty and are
         // picked up by its single serialized follow-up.
-        renderTask?.cancel()
+        cancelScheduledRender()
         Task { [weak self, recordStore] in
             _ = await recordStore.clear()
             guard let self else { return }
@@ -435,7 +466,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         if pendingRender || !textView.string.isEmpty {
             needsRenderWhenVisible = true
         }
+        cancelScheduledRender()
+    }
+
+    private func cancelScheduledRender() {
+        renderScheduleRevision &+= 1
         renderTask?.cancel()
+        renderTask = nil
+        pendingRender = false
+        renderDirty = false
     }
 
     private func resumeRenderingIfVisible() {

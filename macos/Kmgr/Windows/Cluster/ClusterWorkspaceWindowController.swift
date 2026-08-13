@@ -32,6 +32,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let portForwards: PortForwardCoordinator
     private let columnsConfigurationPath: String
     private let logDisplayConfiguration: LogDisplayConfiguration
+    private let confirmationPreferences: @MainActor () -> ConfirmationPreferences
     private let workspaceController: ClusterWorkspaceViewController
     private var restoration: ClusterWindowRestorationRecord
     private var portForwardConfigurationController: PortForwardConfigurationWindowController?
@@ -52,6 +53,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         portForwards: PortForwardCoordinator,
         columnsConfigurationPath: String,
         logDisplayConfiguration: LogDisplayConfiguration,
+        confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
         restoration: ClusterWindowRestorationRecord,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
@@ -66,6 +68,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.portForwards = portForwards
         self.columnsConfigurationPath = columnsConfigurationPath
         self.logDisplayConfiguration = logDisplayConfiguration
+        self.confirmationPreferences = confirmationPreferences
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
@@ -262,6 +265,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             session: session,
             identity: identity,
             mutation: mutation,
+            confirmationPreferences: confirmationPreferences(),
             detailProvider: objectDetailProvider,
             operationProvider: operationProvider
         )
