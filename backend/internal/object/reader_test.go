@@ -109,6 +109,82 @@ func TestConfigMapRejectsDuplicateTextAndBinaryKey(t *testing.T) {
 	}
 }
 
+func TestUpdateSecretUsesRawBytesAndOptimisticConcurrency(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "Secret", "secrets", "ns", "credentials", "uid")
+	value.Object["data"] = map[string]any{"token": base64.StdEncoding.EncodeToString([]byte("old"))}
+	reader := testReader(t, value)
+	loaded, err := reader.GetData(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "secrets", Namespace: "ns", Name: "credentials", UID: "uid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := reader.UpdateData(context.Background(), loaded.Identity, loaded.ResourceVersion, []DataMutation{{
+		Type: MutationSet, Key: "token", Kind: DataText, Value: []byte("new-value"),
+		ExpectedContentHash: loaded.Entries[0].ContentHash[:],
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.Secret || len(updated.Entries) != 1 || string(updated.Entries[0].Value) != "new-value" {
+		t.Fatalf("updated data metadata mismatch: %#v", updated)
+	}
+	fresh, err := reader.GetData(context.Background(), loaded.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(fresh.Entries[0].Value) != "new-value" {
+		t.Fatalf("fresh value = %q", fresh.Entries[0].Value)
+	}
+}
+
+func TestUpdateDataRejectsResourceVersionAndPerKeyConflicts(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "ConfigMap", "configmaps", "ns", "settings", "uid")
+	value.Object["data"] = map[string]any{"one": "server"}
+	reader := testReader(t, value)
+	identity := Identity{SessionID: "session", Version: "v1", Resource: "configmaps", Namespace: "ns", Name: "settings", UID: "uid"}
+
+	_, err := reader.UpdateData(context.Background(), identity, "stale-rv", []DataMutation{{
+		Type: MutationSet, Key: "one", Kind: DataText, Value: []byte("local"),
+	}})
+	var versionConflict *ResourceVersionConflictError
+	if !errors.As(err, &versionConflict) {
+		t.Fatalf("resource version error = %#v", err)
+	}
+
+	wrongHash := make([]byte, 32)
+	_, err = reader.UpdateData(context.Background(), identity, "rv-1", []DataMutation{{
+		Type: MutationSet, Key: "one", Kind: DataText, Value: []byte("local"), ExpectedContentHash: wrongHash,
+	}})
+	var dataConflict *DataConflictError
+	if !errors.As(err, &dataConflict) || len(dataConflict.CurrentHash) != 32 {
+		t.Fatalf("key conflict error = %#v", err)
+	}
+}
+
+func TestUpdateConfigMapRenamePreservesBinaryKind(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "ConfigMap", "configmaps", "ns", "settings", "uid")
+	value.Object["binaryData"] = map[string]any{"old.bin": base64.StdEncoding.EncodeToString([]byte{0, 1})}
+	reader := testReader(t, value)
+	identity := Identity{SessionID: "session", Version: "v1", Resource: "configmaps", Namespace: "ns", Name: "settings", UID: "uid"}
+	loaded, err := reader.GetData(context.Background(), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := reader.UpdateData(context.Background(), identity, "rv-1", []DataMutation{{
+		Type: MutationRename, Key: "old.bin", NewKey: "new.bin", ExpectedContentHash: loaded.Entries[0].ContentHash[:],
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Entries) != 1 || updated.Entries[0].Key != "new.bin" || updated.Entries[0].Kind != DataBinary {
+		t.Fatalf("renamed entry = %#v", updated.Entries)
+	}
+}
+
 type fakeResolver struct{ client dynamic.Interface }
 
 func (r fakeResolver) Resource(_ string, gvr schema.GroupVersionResource, namespace string) (dynamic.ResourceInterface, error) {
