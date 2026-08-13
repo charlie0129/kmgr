@@ -1,10 +1,11 @@
 import Foundation
 import KmgrCore
+import Yams
 
 /// Small, deliberately strict persistence boundary for the GUI column editor.
 /// JSON is emitted because it is a YAML 1.2 subset and is accepted by the Go
-/// engine's strict YAML loader without adding a second YAML implementation to
-/// the GUI process.
+/// engine's strict YAML loader. Loading accepts ordinary YAML, but rejects
+/// constructs whose meaning could change when the GUI rewrites the document.
 struct ColumnConfigurationFileStore {
     static let maximumByteCount = 4 << 20
 
@@ -37,12 +38,28 @@ struct ColumnConfigurationFileStore {
         }
 
         let data = try Data(contentsOf: url)
+        guard data.count <= Self.maximumByteCount else {
+            throw ColumnConfigurationFileIssue(
+                "The column configuration is \(data.count.formatted()) bytes; the GUI editor limit is \(Self.maximumByteCount.formatted()) bytes. Open it in an external editor instead."
+            )
+        }
         let object: Any
         do {
-            object = try JSONSerialization.jsonObject(with: data)
+            let resolver = Resolver.default.removing(.timestamp).removing(.value)
+            let parser = try Parser(yaml: data, resolver: resolver, encoding: .utf8)
+            guard let rootNode = try parser.singleRoot() else {
+                throw ColumnConfigurationFileIssue(
+                    "The column configuration must be a mapping document."
+                )
+            }
+            object = try withExtendedLifetime(parser) {
+                try Self.jsonValue(from: rootNode)
+            }
+        } catch let issue as ColumnConfigurationFileIssue {
+            throw issue
         } catch {
             throw ColumnConfigurationFileIssue(
-                "This file uses YAML syntax that the native column editor cannot safely preserve. Open it in an external editor, or save it as JSON-compatible YAML."
+                "The column configuration is not valid single-document YAML: \(error)"
             )
         }
         guard var root = object as? [String: Any] else {
@@ -68,12 +85,14 @@ struct ColumnConfigurationFileStore {
             }
             root["views"] = views
         }
-        var accelerators = root["accelerators"] as? [String: Any] ?? [:]
-        if accelerators["autoDetectSuffixes"] == nil {
-            accelerators["autoDetectSuffixes"] = AcceleratorColumnConfiguration.defaultAutoDetectSuffixes
+        if root["accelerators"] == nil { root["accelerators"] = [:] }
+        if var accelerators = root["accelerators"] as? [String: Any] {
+            if accelerators["autoDetectSuffixes"] == nil {
+                accelerators["autoDetectSuffixes"] = AcceleratorColumnConfiguration.defaultAutoDetectSuffixes
+            }
+            if accelerators["resources"] == nil { accelerators["resources"] = [:] }
+            root["accelerators"] = accelerators
         }
-        if accelerators["resources"] == nil { accelerators["resources"] = [:] }
-        root["accelerators"] = accelerators
 
         let normalized = try JSONSerialization.data(withJSONObject: root)
         var document: ColumnsConfigurationDocument
@@ -213,6 +232,78 @@ struct ColumnConfigurationFileStore {
         for key in object.keys where !allowed.contains(key) {
             result.append(path.isEmpty ? key : "\(path).\(key)")
         }
+    }
+
+    private static func jsonValue(from node: Node) throws -> Any {
+        guard node.anchor == nil else {
+            throw unsupportedYAMLIssue("anchors and aliases")
+        }
+
+        switch node {
+        case let .mapping(mapping):
+            guard node.tag.rawValue == Tag.Name.map.rawValue else {
+                throw unsupportedYAMLIssue("custom mapping tags")
+            }
+            var result: [String: Any] = [:]
+            result.reserveCapacity(mapping.count)
+            for (keyNode, valueNode) in mapping {
+                guard keyNode.anchor == nil else {
+                    throw unsupportedYAMLIssue("anchors and aliases")
+                }
+                guard case let .scalar(key) = keyNode,
+                    keyNode.tag.rawValue == Tag.Name.str.rawValue
+                else {
+                    if keyNode.tag.rawValue == Tag.Name.merge.rawValue {
+                        throw unsupportedYAMLIssue("merge keys, anchors, and aliases")
+                    }
+                    throw unsupportedYAMLIssue("non-string mapping keys")
+                }
+                result[key.string] = try jsonValue(from: valueNode)
+            }
+            return result
+
+        case let .sequence(sequence):
+            guard node.tag.rawValue == Tag.Name.seq.rawValue else {
+                throw unsupportedYAMLIssue("custom sequence tags")
+            }
+            return try sequence.map(jsonValue(from:))
+
+        case let .scalar(scalar):
+            switch node.tag.rawValue {
+            case Tag.Name.str.rawValue:
+                return scalar.string
+            case Tag.Name.bool.rawValue:
+                guard let value = node.bool else {
+                    throw unsupportedYAMLIssue("invalid boolean scalars")
+                }
+                return value
+            case Tag.Name.int.rawValue:
+                guard let value = node.int else {
+                    throw unsupportedYAMLIssue("integers outside the supported range")
+                }
+                return value
+            case Tag.Name.float.rawValue:
+                guard let value = node.float, value.isFinite else {
+                    throw unsupportedYAMLIssue("non-finite numbers")
+                }
+                return value
+            case Tag.Name.null.rawValue:
+                return NSNull()
+            default:
+                throw unsupportedYAMLIssue("custom or non-JSON scalar tags")
+            }
+
+        case .alias:
+            // Parser resolves aliases to their anchored node, so this branch is
+            // defensive; the anchor check above catches normal alias input.
+            throw unsupportedYAMLIssue("anchors and aliases")
+        }
+    }
+
+    private static func unsupportedYAMLIssue(_ construct: String) -> ColumnConfigurationFileIssue {
+        ColumnConfigurationFileIssue(
+            "The native column editor cannot safely rewrite YAML containing \(construct). Open it in an external editor instead."
+        )
     }
 }
 

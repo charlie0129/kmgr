@@ -37,6 +37,10 @@ let package = Package(
         .package(
             url: "https://github.com/migueldeicaza/SwiftTerm.git",
             exact: "1.18.0"
+        ),
+        .package(
+            url: "https://github.com/jpsim/Yams.git",
+            exact: "6.2.2"
         )
     ],
     targets: [
@@ -81,7 +85,8 @@ let package = Package(
                 "KmgrCore",
                 "KmgrProto",
                 "KmgrIPC",
-                .product(name: "SwiftTerm", package: "SwiftTerm")
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+                .product(name: "Yams", package: "Yams")
             ],
             path: "Kmgr",
             exclude: ["Resources"],
@@ -102,6 +107,11 @@ let package = Package(
                 .product(name: "GRPCCore", package: "grpc-swift-2")
             ],
             path: "KmgrIPCTests"
+        ),
+        .testTarget(
+            name: "KmgrAppTests",
+            dependencies: ["Kmgr"],
+            path: "KmgrAppTests"
         )
     ]
 )
