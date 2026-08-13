@@ -13,6 +13,7 @@ import Testing
     )
     let nodes = ResourceNavigationState(
         group: "", version: "v1", resource: "nodes", kind: "Node",
+        namespaced: false,
         namespaceSelection: NamespaceSelection()
     )
     var history = WorkspaceNavigationHistory(initial: .resource(pods))
@@ -21,6 +22,22 @@ import Testing
     #expect(history.goBack() == .resource(pods))
     #expect(history.canGoForward)
     #expect(history.goForward() == .resource(nodes))
+}
+
+@Test func navigationRetainsAuthoritativeResourceScope() {
+    let nodes = ResourceNavigationState(
+        group: "", version: "v1", resource: "nodes", kind: "Node",
+        namespaced: false,
+        namespaceSelection: NamespaceSelection()
+    )
+    let pods = ResourceNavigationState(
+        group: "", version: "v1", resource: "pods", kind: "Pod",
+        namespaced: true,
+        namespaceSelection: .namespace("team-a")
+    )
+
+    #expect(nodes.namespaced == false)
+    #expect(pods.namespaced)
 }
 
 @Test func navigatingAfterBackDropsOnlyForwardBranch() {

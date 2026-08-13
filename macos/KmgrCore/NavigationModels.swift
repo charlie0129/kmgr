@@ -26,6 +26,7 @@ public struct ResourceNavigationState: Hashable, Codable, Sendable {
     public var version: String
     public var resource: String
     public var kind: String
+    public var namespaced: Bool
     public var namespaceSelection: NamespaceSelection
     public var filter: String
     public var sortColumnID: String?
@@ -38,6 +39,7 @@ public struct ResourceNavigationState: Hashable, Codable, Sendable {
         version: String,
         resource: String,
         kind: String,
+        namespaced: Bool = true,
         namespaceSelection: NamespaceSelection,
         filter: String = "",
         sortColumnID: String? = nil,
@@ -49,6 +51,7 @@ public struct ResourceNavigationState: Hashable, Codable, Sendable {
         self.version = version
         self.resource = resource
         self.kind = kind
+        self.namespaced = namespaced
         self.namespaceSelection = namespaceSelection
         self.filter = filter
         self.sortColumnID = sortColumnID
