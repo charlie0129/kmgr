@@ -105,6 +105,98 @@ import Testing
     #expect(model.selectionCounts == SelectionCounts(selected: 3, visible: 2, hidden: 1))
 }
 
+@Test func commandGesturePreservesHiddenSelectionAndTogglesVisibleProjection() {
+    let hidden: ResourceUID = "hidden"
+    let visibleA: ResourceUID = "visible-a"
+    let visibleB: ResourceUID = "visible-b"
+    var model = ResourceTableModel(rows: [row(hidden), row(visibleA), row(visibleB)])
+    model.selectExclusively(hidden)
+    model.toggleSelection(of: visibleA)
+    model.apply(ResourceRowBatch(visibleOrder: .replace([visibleA, visibleB])))
+
+    let removed = model.applySelectionGesture(
+        clickedIndex: 0,
+        modifiers: [.command]
+    )
+    #expect(removed)
+    #expect(model.selectedUIDs == [hidden])
+
+    let added = model.applySelectionGesture(
+        clickedIndex: 1,
+        modifiers: [.command]
+    )
+    #expect(added)
+
+    #expect(model.selectedUIDs == [hidden, visibleB])
+    #expect(model.selectionAnchorUID == visibleB)
+    #expect(model.selectionCounts == SelectionCounts(selected: 2, visible: 1, hidden: 1))
+}
+
+@Test func shiftGestureKeepsUIDAnchorAfterReorderAndPreservesHiddenSelection() {
+    let hidden: ResourceUID = "hidden"
+    let anchor: ResourceUID = "anchor"
+    let middle: ResourceUID = "middle"
+    let target: ResourceUID = "target"
+    var model = ResourceTableModel(rows: [row(hidden), row(anchor), row(middle), row(target)])
+    model.selectExclusively(anchor)
+    model.toggleSelection(of: hidden)
+    model.apply(ResourceRowBatch(visibleOrder: .replace([target, middle, anchor])))
+    #expect(model.selectionAnchorUID == hidden)
+
+    // Establish the visible anchor explicitly, then reorder and reconcile the
+    // AppKit range projection. Shift must not replace it with the target row.
+    let establishedAnchor = model.applySelectionGesture(
+        clickedIndex: 2,
+        modifiers: [.command]
+    )
+    #expect(establishedAnchor)
+    #expect(model.selectionAnchorUID == anchor)
+    model.apply(ResourceRowBatch(visibleOrder: .replace([anchor, middle, target])))
+    let extended = model.applySelectionGesture(
+        clickedIndex: 2,
+        modifiers: [.shift]
+    )
+    #expect(extended)
+
+    #expect(model.selectedUIDs == [hidden, anchor, middle, target])
+    #expect(model.selectionAnchorUID == anchor)
+}
+
+@Test func keyboardShiftExtensionGrowsAndContractsFromUIDAnchor() {
+    let a: ResourceUID = "a"
+    let b: ResourceUID = "b"
+    let anchor: ResourceUID = "anchor"
+    let d: ResourceUID = "d"
+    let e: ResourceUID = "e"
+    var model = ResourceTableModel(rows: [row(a), row(b), row(anchor), row(d), row(e)])
+    model.selectExclusively(anchor)
+
+    #expect(model.selectionExtensionDestinationIndex(movingDown: true) == 3)
+    let grewDown = model.applySelectionGesture(clickedIndex: 3, modifiers: [.shift])
+    #expect(grewDown)
+    #expect(model.selectedUIDs == [anchor, d])
+
+    #expect(model.selectionExtensionDestinationIndex(movingDown: true) == 4)
+    let grewDownAgain = model.applySelectionGesture(clickedIndex: 4, modifiers: [.shift])
+    #expect(grewDownAgain)
+    #expect(model.selectedUIDs == [anchor, d, e])
+
+    #expect(model.selectionExtensionDestinationIndex(movingDown: false) == 3)
+    let contractedUp = model.applySelectionGesture(clickedIndex: 3, modifiers: [.shift])
+    #expect(contractedUp)
+    #expect(model.selectedUIDs == [anchor, d])
+
+    #expect(model.selectionExtensionDestinationIndex(movingDown: false) == 2)
+    let collapsed = model.applySelectionGesture(clickedIndex: 2, modifiers: [.shift])
+    #expect(collapsed)
+    #expect(model.selectedUIDs == [anchor])
+
+    #expect(model.selectionExtensionDestinationIndex(movingDown: false) == 1)
+    let grewUp = model.applySelectionGesture(clickedIndex: 1, modifiers: [.shift])
+    #expect(grewUp)
+    #expect(model.selectedUIDs == [b, anchor])
+}
+
 @Test func replacingVisibleRowsDoesNotTreatOmissionAsDeletion() {
     let a: ResourceUID = "a"
     let b: ResourceUID = "b"

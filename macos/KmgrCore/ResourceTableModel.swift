@@ -352,6 +352,61 @@ public struct ResourceTableModel: Hashable, Sendable {
         }
     }
 
+    /// Applies a modifier selection gesture against UID truth. AppKit delegates
+    /// plain selection, but Command/Shift gestures come through this seam so a
+    /// numeric row anchor can never replace the UID anchor after a reorder.
+    public mutating func applySelectionGesture(
+        clickedIndex: Int?,
+        modifiers: ResourceTableSelectionModifiers
+    ) -> Bool {
+        guard let clickedIndex, orderedVisibleUIDs.indices.contains(clickedIndex) else {
+            return false
+        }
+        let uid = orderedVisibleUIDs[clickedIndex]
+        if modifiers.contains(.shift) {
+            let hiddenSelection = selectedUIDs.subtracting(orderedVisibleUIDs)
+            extendSelection(to: uid, additive: modifiers.contains(.command))
+            selectedUIDs.formUnion(hiddenSelection)
+        } else if modifiers.contains(.command) {
+            toggleSelection(of: uid)
+        } else {
+            selectExclusively(uid)
+        }
+        return true
+    }
+
+    /// Returns the next row for a Shift-Up/Down gesture. The active end of a
+    /// native range is opposite its UID anchor, so reversing direction first
+    /// contracts the range instead of repeatedly targeting AppKit's selected
+    /// row (which is commonly the greatest selected index).
+    public func selectionExtensionDestinationIndex(movingDown: Bool) -> Int? {
+        guard !orderedVisibleUIDs.isEmpty else { return nil }
+
+        let step = movingDown ? 1 : -1
+        guard
+            let anchor = selectionAnchorUID,
+            let anchorIndex = orderedVisibleUIDs.firstIndex(of: anchor)
+        else {
+            return movingDown ? 0 : orderedVisibleUIDs.count - 1
+        }
+
+        let selectedIndexes = orderedVisibleUIDs.indices.filter {
+            selectedUIDs.contains(orderedVisibleUIDs[$0])
+        }
+        let lowerBound = selectedIndexes.first ?? anchorIndex
+        let upperBound = selectedIndexes.last ?? anchorIndex
+        let activeIndex: Int
+        if selectedUIDs.contains(anchor), lowerBound == anchorIndex, upperBound > anchorIndex {
+            activeIndex = upperBound
+        } else if selectedUIDs.contains(anchor), lowerBound < anchorIndex, upperBound == anchorIndex {
+            activeIndex = lowerBound
+        } else {
+            activeIndex = anchorIndex
+        }
+
+        return min(max(activeIndex + step, 0), orderedVisibleUIDs.count - 1)
+    }
+
     /// Restores a captured UID selection when reopening a navigation entry.
     /// Missing UIDs are ignored; a same-name object with a new UID cannot
     /// inherit selection.
@@ -415,6 +470,15 @@ public struct ResourceTableModel: Hashable, Sendable {
             rowByUID[uid] != nil && seen.insert(uid).inserted
         }
     }
+}
+
+public struct ResourceTableSelectionModifiers: OptionSet, Hashable, Sendable {
+    public let rawValue: UInt8
+
+    public init(rawValue: UInt8) { self.rawValue = rawValue }
+
+    public static let command = Self(rawValue: 1 << 0)
+    public static let shift = Self(rawValue: 1 << 1)
 }
 
 /// Tracks which cached row UIDs have been observed from the freshly opened

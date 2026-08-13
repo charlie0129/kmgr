@@ -1525,6 +1525,7 @@ private final class ResourceListViewController: NSViewController,
         countLabel.textColor = .secondaryLabelColor
         sortLabel.textColor = .secondaryLabelColor
         filterField.placeholderString = "Filter resources  /"
+        filterField.setAccessibilityLabel("Filter Kubernetes resources")
         filterField.delegate = self
         filterField.sendsSearchStringImmediately = true
 
@@ -1548,6 +1549,9 @@ private final class ResourceListViewController: NSViewController,
         tableView.rowSizeStyle = .medium
         tableView.setAccessibilityLabel("Kubernetes resources")
         tableView.onCommand = { [weak self] command in self?.handle(command) }
+        tableView.onSelectionGesture = { [weak self] gesture in
+            self?.performSelectionGesture(gesture) ?? false
+        }
         tableView.menu = makeResourceMenu()
 
         scrollView.documentView = tableView
@@ -2643,6 +2647,25 @@ private final class ResourceListViewController: NSViewController,
         updateStatusLine()
     }
 
+    private func performSelectionGesture(_ gesture: ResourceTableSelectionGesture) -> Bool {
+        let row = gesture.keyboardDirection.map {
+            model.selectionExtensionDestinationIndex(movingDown: $0 == .down)
+        } ?? gesture.row
+        guard model.applySelectionGesture(
+            clickedIndex: row,
+            modifiers: gesture.modifiers
+        ) else { return false }
+        let selectedIndexes = model.orderedVisibleUIDs.enumerated().compactMap {
+            model.selectedUIDs.contains($0.element) ? $0.offset : nil
+        }
+        suppressSelectionCallbacks = true
+        tableView.selectRowIndexes(IndexSet(selectedIndexes), byExtendingSelection: false)
+        suppressSelectionCallbacks = false
+        if let row { tableView.scrollRowToVisible(row) }
+        updateStatusLine()
+        return true
+    }
+
     func tableView(
         _ tableView: NSTableView,
         sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
@@ -2923,6 +2946,23 @@ private final class ResourceTableCommandBox {
 @MainActor
 private final class ResourceTableView: NSTableView {
     var onCommand: ((ResourceTableCommand) -> Void)?
+    var onSelectionGesture: ((ResourceTableSelectionGesture) -> Bool)?
+
+    override func mouseDown(with event: NSEvent) {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        let gesture = ResourceTableSelectionGesture(
+            row: row >= 0 ? row : nil,
+            modifiers: Self.selectionModifiers(from: event.modifierFlags),
+            keyboardDirection: nil
+        )
+        if !gesture.modifiers.isEmpty,
+            onSelectionGesture?(gesture) == true
+        {
+            window?.makeFirstResponder(self)
+            return
+        }
+        super.mouseDown(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
         guard currentEditor() == nil else { super.keyDown(with: event); return }
@@ -2951,9 +2991,42 @@ private final class ResourceTableView: NSTableView {
             )
         case (_, 53, false):
             _ = tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: nil)
-        default: super.keyDown(with: event)
+        default:
+            if event.keyCode == 125 || event.keyCode == 126 {
+                let gesture = ResourceTableSelectionGesture(
+                    row: nil,
+                    modifiers: Self.selectionModifiers(from: event.modifierFlags),
+                    keyboardDirection: event.keyCode == 125 ? .down : .up
+                )
+                if gesture.modifiers.contains(.shift),
+                    onSelectionGesture?(gesture) == true
+                {
+                    return
+                }
+            }
+            super.keyDown(with: event)
         }
     }
+
+    private static func selectionModifiers(
+        from flags: NSEvent.ModifierFlags
+    ) -> ResourceTableSelectionModifiers {
+        var result: ResourceTableSelectionModifiers = []
+        if flags.contains(.command) { result.insert(.command) }
+        if flags.contains(.shift) { result.insert(.shift) }
+        return result
+    }
+}
+
+private struct ResourceTableSelectionGesture {
+    let row: Int?
+    let modifiers: ResourceTableSelectionModifiers
+    let keyboardDirection: KeyboardSelectionDirection?
+}
+
+private enum KeyboardSelectionDirection {
+    case up
+    case down
 }
 
 private extension Collection {
