@@ -11,7 +11,8 @@ let package = Package(
     products: [
         .executable(name: "Kmgr", targets: ["Kmgr"]),
         .library(name: "KmgrCore", targets: ["KmgrCore"]),
-        .library(name: "KmgrProto", targets: ["KmgrProto"])
+        .library(name: "KmgrProto", targets: ["KmgrProto"]),
+        .library(name: "KmgrIPC", targets: ["KmgrIPC"])
     ],
     dependencies: [
         .package(
@@ -53,9 +54,26 @@ let package = Package(
             path: "KmgrProto",
             exclude: ["README.md"]
         ),
+        .target(
+            name: "KmgrIPC",
+            dependencies: [
+                "KmgrCore",
+                "KmgrProto",
+                .product(name: "GRPCCore", package: "grpc-swift-2"),
+                .product(
+                    name: "GRPCNIOTransportHTTP2Posix",
+                    package: "grpc-swift-nio-transport"
+                )
+            ],
+            path: "KmgrIPC",
+            linkerSettings: [
+                .linkedFramework("OSLog"),
+                .linkedFramework("Security")
+            ]
+        ),
         .executableTarget(
             name: "Kmgr",
-            dependencies: ["KmgrCore", "KmgrProto"],
+            dependencies: ["KmgrCore", "KmgrProto", "KmgrIPC"],
             path: "Kmgr",
             exclude: ["Resources"],
             linkerSettings: [
@@ -67,6 +85,14 @@ let package = Package(
             name: "KmgrCoreTests",
             dependencies: ["KmgrCore"],
             path: "KmgrTests"
+        ),
+        .testTarget(
+            name: "KmgrIPCTests",
+            dependencies: [
+                "KmgrIPC",
+                .product(name: "GRPCCore", package: "grpc-swift-2")
+            ],
+            path: "KmgrIPCTests"
         )
     ]
 )

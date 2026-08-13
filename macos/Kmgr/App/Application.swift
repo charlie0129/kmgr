@@ -1,5 +1,6 @@
 import AppKit
 import KmgrCore
+import KmgrIPC
 import OSLog
 
 @main
@@ -9,11 +10,15 @@ final class Application: NSObject, NSApplicationDelegate {
     private var chooserControllers: [ObjectIdentifier: ClusterManagerWindowController] = [:]
     private var workspaceControllers: [ObjectIdentifier: ClusterWorkspaceWindowController] = [:]
     private let clusterContextProvider: any ClusterContextProviding
+    private let engineSupervisor: EngineSupervisor
+    private var isTerminating = false
 
     override init() {
-        // The engine supervisor replaces this fallback through the same narrow
-        // provider seam when its authenticated RPC channel is ready.
-        self.clusterContextProvider = UnavailableClusterContextProvider()
+        let supervisor = EngineSupervisor()
+        self.engineSupervisor = supervisor
+        self.clusterContextProvider = EngineClusterContextProvider(
+            supervisor: supervisor
+        )
         super.init()
     }
 
@@ -27,6 +32,7 @@ final class Application: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
+        engineSupervisor.start()
         showClusterManager()
         NSApp.activate(ignoringOtherApps: true)
         logger.info("Kmgr application launched")
@@ -34,6 +40,16 @@ final class Application: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isTerminating else { return .terminateLater }
+        isTerminating = true
+        Task { [engineSupervisor] in
+            await engineSupervisor.shutdown()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     @objc private func showClusterManager() {

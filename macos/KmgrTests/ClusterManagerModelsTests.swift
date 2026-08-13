@@ -8,16 +8,15 @@ struct ClusterManagerModelsTests {
         var model = ClusterManagerModel()
         let revision = model.beginLoading(reload: false)
 
-        #expect(
-            model.finishLoading(
-                [
-                    context(name: "zeta"),
-                    context(name: "beta", current: true),
-                    context(name: "alpha")
-                ],
-                revision: revision
-            )
+        let accepted = model.finishLoading(
+            [
+                context(name: "zeta"),
+                context(name: "beta", current: true),
+                context(name: "alpha")
+            ],
+            revision: revision
         )
+        #expect(accepted)
 
         #expect(model.allContexts.map(\.name) == ["beta", "alpha", "zeta"])
         #expect(model.selectedContextName == "beta")
@@ -101,9 +100,17 @@ struct ClusterManagerModelsTests {
         let firstRevision = model.beginLoading(reload: false)
         let secondRevision = model.beginLoading(reload: true)
 
-        #expect(!model.finishLoading([context(name: "stale")], revision: firstRevision))
+        let acceptedStale = model.finishLoading(
+            [context(name: "stale")],
+            revision: firstRevision
+        )
+        #expect(!acceptedStale)
         #expect(model.allContexts.isEmpty)
-        #expect(model.finishLoading([context(name: "fresh")], revision: secondRevision))
+        let acceptedFresh = model.finishLoading(
+            [context(name: "fresh")],
+            revision: secondRevision
+        )
+        #expect(acceptedFresh)
         #expect(model.allContexts.map(\.name) == ["fresh"])
     }
 
@@ -119,7 +126,8 @@ struct ClusterManagerModelsTests {
             message: "One kubeconfig file is malformed."
         )
 
-        #expect(model.failLoading(with: issue, revision: revision))
+        let accepted = model.failLoading(with: issue, revision: revision)
+        #expect(accepted)
         #expect(model.allContexts.map(\.name) == ["local"])
         #expect(model.selectedContextName == "local")
         #expect(model.canOpenSelectedContext)
