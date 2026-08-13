@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -434,6 +435,25 @@ func (s *GRPCService) SearchObjects(
 			},
 		})
 	})
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		structured := &kmgrv1.StructuredError{
+			Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE,
+			Reason:   "ObjectSearchFailed", Message: "The Kubernetes object search failed.",
+			Operation: "search objects", Retryable: true,
+		}
+		kubeerrors.Enrich(structured, err)
+		sequence++
+		if sendErr := stream.Send(&kmgrv1.SearchObjectsEvent{
+			Cursor: &kmgrv1.StreamCursor{
+				StreamId: key.searchID, Generation: key.generation, Sequence: sequence,
+			},
+			QueryRevision: key.revision,
+			Error:         structured,
+		}); sendErr != nil {
+			return sendErr
+		}
+		return nil
+	}
 	return viewStatusError(err)
 }
 

@@ -90,6 +90,16 @@ struct EngineClusterContextProviderTests {
             response.error.operation = "probe cluster"
             response.error.retryable = false
             response.error.safeDetails = ["server": "api.example.com"]
+            response.error.kubernetesStatus.name = "deploy-api"
+            response.error.kubernetesStatus.group = "apps"
+            response.error.kubernetesStatus.kind = "Deployment"
+            response.error.kubernetesStatus.uid = "uid-1"
+            response.error.kubernetesStatus.reason = "Invalid"
+            response.error.kubernetesStatus.retryAfterSeconds = 3
+            var cause = Kmgr_V1_KubernetesStatusCause()
+            cause.reason = "FieldValueInvalid"
+            cause.field = "spec.template.spec.containers[0].image"
+            response.error.kubernetesStatus.causes = [cause]
             return response
         }
         let provider = deterministicProvider(rpc: rpc)
@@ -106,6 +116,18 @@ struct EngineClusterContextProviderTests {
             #expect(issue.contextName == "production")
             #expect(issue.operation == "probe cluster")
             #expect(issue.safeDetails["server"] == "api.example.com")
+            #expect(issue.kubernetesStatus?.name == "deploy-api")
+            #expect(issue.kubernetesStatus?.group == "apps")
+            #expect(issue.kubernetesStatus?.kind == "Deployment")
+            #expect(issue.kubernetesStatus?.uid == "uid-1")
+            #expect(issue.kubernetesStatus?.reason == "Invalid")
+            #expect(issue.kubernetesStatus?.retryAfterSeconds == 3)
+            #expect(issue.kubernetesStatus?.causes == [
+                .init(
+                    reason: "FieldValueInvalid",
+                    field: "spec.template.spec.containers[0].image"
+                ),
+            ])
         }
     }
 

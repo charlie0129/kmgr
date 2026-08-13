@@ -60,6 +60,27 @@ message StructuredError {
   string operation = 9;
   ResourceIdentity resource = 10;
   map<string, string> safe_details = 11;
+  KubernetesStatusDetails kubernetes_status = 12;
+}
+
+// KubernetesStatusDetails preserves the structured, display-relevant portion
+// of metav1.StatusDetails. Servers may omit human messages when echoing them
+// could expose a sensitive object value; reason and field remain available.
+message KubernetesStatusDetails {
+  string name = 1;
+  string group = 2;
+  string kind = 3;
+  string uid = 4;
+  string reason = 5;
+  string message = 6;
+  int32 retry_after_seconds = 7;
+  repeated KubernetesStatusCause causes = 8;
+}
+
+message KubernetesStatusCause {
+  string reason = 1;
+  string message = 2;
+  string field = 3;
 }
 
 message ResourceType {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -360,6 +361,7 @@ func structuredExecError(err error, contextName string, pod Identity) *kmgrv1.St
 			Resource: pod.Resource, Namespace: pod.Namespace, Name: pod.Name, Uid: pod.UID,
 		},
 	}
+	kubeerrors.Enrich(result, err)
 	var mismatch *UIDMismatchError
 	var apiStatus apierrors.APIStatus
 	switch {

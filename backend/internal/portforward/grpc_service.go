@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -285,6 +286,7 @@ func structuredPortForwardError(
 		Message: "The Kubernetes port-forward failed.", Operation: operation, ContextName: contextName,
 		Resource: identity,
 	}
+	kubeerrors.Enrich(result, err)
 	var apiStatus apierrors.APIStatus
 	switch {
 	case errors.Is(err, ErrInvalidRequest):

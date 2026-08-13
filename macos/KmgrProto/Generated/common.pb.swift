@@ -319,11 +319,65 @@ public struct Kmgr_V1_StructuredError: @unchecked Sendable {
     set {_uniqueStorage()._safeDetails = newValue}
   }
 
+  public var kubernetesStatus: Kmgr_V1_KubernetesStatusDetails {
+    get {return _storage._kubernetesStatus ?? Kmgr_V1_KubernetesStatusDetails()}
+    set {_uniqueStorage()._kubernetesStatus = newValue}
+  }
+  /// Returns true if `kubernetesStatus` has been explicitly set.
+  public var hasKubernetesStatus: Bool {return _storage._kubernetesStatus != nil}
+  /// Clears the value of `kubernetesStatus`. Subsequent reads from it will return its default value.
+  public mutating func clearKubernetesStatus() {_uniqueStorage()._kubernetesStatus = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// KubernetesStatusDetails preserves the structured, display-relevant portion
+/// of metav1.StatusDetails. Servers may omit human messages when echoing them
+/// could expose a sensitive object value; reason and field remain available.
+public struct Kmgr_V1_KubernetesStatusDetails: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var name: String = String()
+
+  public var group: String = String()
+
+  public var kind: String = String()
+
+  public var uid: String = String()
+
+  public var reason: String = String()
+
+  public var message: String = String()
+
+  public var retryAfterSeconds: Int32 = 0
+
+  public var causes: [Kmgr_V1_KubernetesStatusCause] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Kmgr_V1_KubernetesStatusCause: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var reason: String = String()
+
+  public var message: String = String()
+
+  public var field: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 public struct Kmgr_V1_ResourceType: Sendable {
@@ -744,7 +798,7 @@ extension Kmgr_V1_Acknowledgement: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Kmgr_V1_StructuredError: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StructuredError"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}category\0\u{1}reason\0\u{1}message\0\u{3}http_status_code\0\u{1}retryable\0\u{3}retry_after_ms\0\u{3}field_path\0\u{3}context_name\0\u{1}operation\0\u{1}resource\0\u{3}safe_details\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}category\0\u{1}reason\0\u{1}message\0\u{3}http_status_code\0\u{1}retryable\0\u{3}retry_after_ms\0\u{3}field_path\0\u{3}context_name\0\u{1}operation\0\u{1}resource\0\u{3}safe_details\0\u{3}kubernetes_status\0")
 
   fileprivate class _StorageClass {
     var _category: Kmgr_V1_ErrorCategory = .unspecified
@@ -758,6 +812,7 @@ extension Kmgr_V1_StructuredError: SwiftProtobuf.Message, SwiftProtobuf._Message
     var _operation: String = String()
     var _resource: Kmgr_V1_ResourceIdentity? = nil
     var _safeDetails: Dictionary<String,String> = [:]
+    var _kubernetesStatus: Kmgr_V1_KubernetesStatusDetails? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -779,6 +834,7 @@ extension Kmgr_V1_StructuredError: SwiftProtobuf.Message, SwiftProtobuf._Message
       _operation = source._operation
       _resource = source._resource
       _safeDetails = source._safeDetails
+      _kubernetesStatus = source._kubernetesStatus
     }
   }
 
@@ -808,6 +864,7 @@ extension Kmgr_V1_StructuredError: SwiftProtobuf.Message, SwiftProtobuf._Message
         case 9: try { try decoder.decodeSingularStringField(value: &_storage._operation) }()
         case 10: try { try decoder.decodeSingularMessageField(value: &_storage._resource) }()
         case 11: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: &_storage._safeDetails) }()
+        case 12: try { try decoder.decodeSingularMessageField(value: &_storage._kubernetesStatus) }()
         default: break
         }
       }
@@ -853,6 +910,9 @@ extension Kmgr_V1_StructuredError: SwiftProtobuf.Message, SwiftProtobuf._Message
       if !_storage._safeDetails.isEmpty {
         try visitor.visitMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: _storage._safeDetails, fieldNumber: 11)
       }
+      try { if let v = _storage._kubernetesStatus {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -873,10 +933,116 @@ extension Kmgr_V1_StructuredError: SwiftProtobuf.Message, SwiftProtobuf._Message
         if _storage._operation != rhs_storage._operation {return false}
         if _storage._resource != rhs_storage._resource {return false}
         if _storage._safeDetails != rhs_storage._safeDetails {return false}
+        if _storage._kubernetesStatus != rhs_storage._kubernetesStatus {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_KubernetesStatusDetails: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".KubernetesStatusDetails"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}group\0\u{1}kind\0\u{1}uid\0\u{1}reason\0\u{1}message\0\u{3}retry_after_seconds\0\u{1}causes\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.group) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.kind) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.uid) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.message) }()
+      case 7: try { try decoder.decodeSingularInt32Field(value: &self.retryAfterSeconds) }()
+      case 8: try { try decoder.decodeRepeatedMessageField(value: &self.causes) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
+    }
+    if !self.group.isEmpty {
+      try visitor.visitSingularStringField(value: self.group, fieldNumber: 2)
+    }
+    if !self.kind.isEmpty {
+      try visitor.visitSingularStringField(value: self.kind, fieldNumber: 3)
+    }
+    if !self.uid.isEmpty {
+      try visitor.visitSingularStringField(value: self.uid, fieldNumber: 4)
+    }
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 5)
+    }
+    if !self.message.isEmpty {
+      try visitor.visitSingularStringField(value: self.message, fieldNumber: 6)
+    }
+    if self.retryAfterSeconds != 0 {
+      try visitor.visitSingularInt32Field(value: self.retryAfterSeconds, fieldNumber: 7)
+    }
+    if !self.causes.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.causes, fieldNumber: 8)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_KubernetesStatusDetails, rhs: Kmgr_V1_KubernetesStatusDetails) -> Bool {
+    if lhs.name != rhs.name {return false}
+    if lhs.group != rhs.group {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.uid != rhs.uid {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.message != rhs.message {return false}
+    if lhs.retryAfterSeconds != rhs.retryAfterSeconds {return false}
+    if lhs.causes != rhs.causes {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_KubernetesStatusCause: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".KubernetesStatusCause"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reason\0\u{1}message\0\u{1}field\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.message) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.field) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 1)
+    }
+    if !self.message.isEmpty {
+      try visitor.visitSingularStringField(value: self.message, fieldNumber: 2)
+    }
+    if !self.field.isEmpty {
+      try visitor.visitSingularStringField(value: self.field, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_KubernetesStatusCause, rhs: Kmgr_V1_KubernetesStatusCause) -> Bool {
+    if lhs.reason != rhs.reason {return false}
+    if lhs.message != rhs.message {return false}
+    if lhs.field != rhs.field {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

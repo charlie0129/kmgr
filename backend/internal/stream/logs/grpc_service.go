@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -265,6 +266,7 @@ func structuredLogError(err error, source *Source, contextName string) *kmgrv1.S
 		Reason:   "PodLogFailed", Message: "The Kubernetes Pod log request failed.",
 		ContextName: contextName, Operation: "stream-pod-logs",
 	}
+	kubeerrors.Enrich(result, err)
 	if source != nil {
 		identity := source.Identity
 		result.Resource = &kmgrv1.ResourceIdentity{

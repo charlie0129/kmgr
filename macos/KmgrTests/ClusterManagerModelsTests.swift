@@ -1,6 +1,25 @@
 import KmgrCore
 import Testing
 
+@Test func kubernetesStatusDetailsRemainTypedAndDisplaySafe() {
+    let status = ClusterManagerIssue.KubernetesStatus(
+        name: "api", group: "apps", kind: "Deployment", uid: "uid-1",
+        reason: "Invalid", retryAfterSeconds: 5,
+        causes: [.init(reason: "FieldValueInvalid", field: "spec.replicas")]
+    )
+    let issue = ClusterManagerIssue(
+        category: .validation,
+        reason: "ServerValidationFailed",
+        message: "The API server rejected one or more fields.",
+        httpStatusCode: 422,
+        kubernetesStatus: status
+    )
+
+    #expect(issue.kubernetesStatus == status)
+    #expect(issue.kubernetesStatus?.causes.first?.field == "spec.replicas")
+    #expect(issue.presentationMetadata == "ServerValidationFailed · HTTP 422")
+}
+
 @Suite("Cluster manager model")
 struct ClusterManagerModelsTests {
     @Test("current context is first and selected after discovery")

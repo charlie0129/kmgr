@@ -4,6 +4,44 @@ import Foundation
 /// kubeconfig context. Providers must not put credentials or kubeconfig
 /// contents in these fields.
 public struct ClusterManagerIssue: Error, Hashable, Sendable {
+    public struct KubernetesStatus: Hashable, Sendable {
+        public struct Cause: Hashable, Sendable {
+            public var reason: String
+            public var message: String
+            public var field: String
+
+            public init(reason: String = "", message: String = "", field: String = "") {
+                self.reason = reason
+                self.message = message
+                self.field = field
+            }
+        }
+
+        public var name: String
+        public var group: String
+        public var kind: String
+        public var uid: String
+        public var reason: String
+        public var message: String
+        public var retryAfterSeconds: Int32
+        public var causes: [Cause]
+
+        public init(
+            name: String = "", group: String = "", kind: String = "", uid: String = "",
+            reason: String = "", message: String = "", retryAfterSeconds: Int32 = 0,
+            causes: [Cause] = []
+        ) {
+            self.name = name
+            self.group = group
+            self.kind = kind
+            self.uid = uid
+            self.reason = reason
+            self.message = message
+            self.retryAfterSeconds = retryAfterSeconds
+            self.causes = causes
+        }
+    }
+
     public enum Category: String, Hashable, Sendable, CaseIterable {
         case authentication
         case authorization
@@ -29,6 +67,7 @@ public struct ClusterManagerIssue: Error, Hashable, Sendable {
     public var contextName: String
     public var operation: String
     public var safeDetails: [String: String]
+    public var kubernetesStatus: KubernetesStatus?
 
     public init(
         category: Category,
@@ -40,7 +79,8 @@ public struct ClusterManagerIssue: Error, Hashable, Sendable {
         fieldPath: String = "",
         contextName: String = "",
         operation: String = "",
-        safeDetails: [String: String] = [:]
+        safeDetails: [String: String] = [:],
+        kubernetesStatus: KubernetesStatus? = nil
     ) {
         self.category = category
         self.reason = reason
@@ -52,6 +92,7 @@ public struct ClusterManagerIssue: Error, Hashable, Sendable {
         self.contextName = contextName
         self.operation = operation
         self.safeDetails = safeDetails
+        self.kubernetesStatus = kubernetesStatus
     }
 
     public var presentationTitle: String {

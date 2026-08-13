@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc/codes"
@@ -592,6 +593,7 @@ func structuredOperationError(err error, identity *kmgrv1.ResourceIdentity, oper
 		Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL, Reason: "OperationFailed",
 		Message: "The Kubernetes operation failed.", Operation: operation, Resource: identity,
 	}
+	kubeerrors.Enrich(result, err)
 	var identityMismatch *object.YAMLIdentityMismatchError
 	var uidMismatch *object.IdentityChangedError
 	var versionConflict *object.ResourceVersionConflictError
@@ -644,7 +646,7 @@ func structuredOperationError(err error, identity *kmgrv1.ResourceIdentity, oper
 		result.Reason, result.Message = "ApplyConflict", "The object changed or another field manager owns an edited field."
 	case apierrors.IsInvalid(err) || apierrors.IsBadRequest(err):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION
-		result.Reason, result.Message = "ServerValidationFailed", err.Error()
+		result.Reason, result.Message = "ServerValidationFailed", "The Kubernetes API server rejected one or more object fields."
 	case apierrors.IsNotFound(err):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
 		result.Reason, result.Message = "NotFound", "The Kubernetes object no longer exists."

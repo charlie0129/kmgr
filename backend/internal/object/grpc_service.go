@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -535,6 +536,7 @@ func structuredObjectError(err error, identity *kmgrv1.ResourceIdentity, operati
 		Reason:   "ObjectRequestFailed", Message: "The Kubernetes object request failed.",
 		Operation: operation, Resource: identity,
 	}
+	kubeerrors.Enrich(result, err)
 	var changed *IdentityChangedError
 	var apiStatus apierrors.APIStatus
 	switch {

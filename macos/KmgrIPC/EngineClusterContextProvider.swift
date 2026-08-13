@@ -212,7 +212,8 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
     }
 
     public static func issue(from error: Kmgr_V1_StructuredError) -> ClusterManagerIssue {
-        ClusterManagerIssue(
+        let status = error.hasKubernetesStatus ? error.kubernetesStatus : nil
+        return ClusterManagerIssue(
             category: category(from: error.category),
             reason: error.reason,
             message: error.message.isEmpty ? "The engine reported an unspecified error." : error.message,
@@ -222,7 +223,21 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
             fieldPath: error.fieldPath,
             contextName: error.contextName,
             operation: error.operation,
-            safeDetails: error.safeDetails
+            safeDetails: error.safeDetails,
+            kubernetesStatus: status.map {
+                ClusterManagerIssue.KubernetesStatus(
+                    name: $0.name,
+                    group: $0.group,
+                    kind: $0.kind,
+                    uid: $0.uid,
+                    reason: $0.reason,
+                    message: $0.message,
+                    retryAfterSeconds: $0.retryAfterSeconds,
+                    causes: $0.causes.map {
+                        .init(reason: $0.reason, message: $0.message, field: $0.field)
+                    }
+                )
+            }
         )
     }
 

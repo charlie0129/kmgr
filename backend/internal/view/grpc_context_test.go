@@ -12,6 +12,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestViewServiceMethodsValidateRequestContext(t *testing.T) {
@@ -219,6 +221,48 @@ func TestSearchObjectsApplicationDeadlineCancelsRuntimeWork(t *testing.T) {
 	service.searchMu.Unlock()
 	if active != 0 {
 		t.Fatalf("deadline-expired search retained %d registrations", active)
+	}
+}
+
+func TestSearchObjectsStreamsStructuredKubernetesStatusFailure(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.getErr = &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status: metav1.StatusFailure, Reason: metav1.StatusReasonInvalid, Code: 422,
+		Message: "must-not-cross-the-protocol-boundary",
+		Details: &metav1.StatusDetails{
+			Group: "apps", Kind: "Deployment", Name: "api",
+			Causes: []metav1.StatusCause{{
+				Type: metav1.CauseTypeFieldValueInvalid, Field: "spec.replicas",
+				Message: "must-not-cross-the-protocol-boundary",
+			}},
+		},
+	}}
+	service := newViewContextService(t, client)
+	request := searchRequest(viewTestRequestContext("status-search"))
+	request.Query = "team/api"
+	stream := newViewTestStream[kmgrv1.SearchObjectsEvent](context.Background())
+
+	if err := service.SearchObjects(request, stream); err != nil {
+		t.Fatal(err)
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if len(stream.values) != 1 {
+		t.Fatalf("streamed %d events, want one failure", len(stream.values))
+	}
+	failure := stream.values[0].GetError()
+	if failure.GetHttpStatusCode() != 422 || failure.GetReason() != "Invalid" ||
+		failure.GetKubernetesStatus().GetGroup() != "apps" ||
+		failure.GetKubernetesStatus().GetKind() != "Deployment" ||
+		failure.GetKubernetesStatus().GetName() != "api" ||
+		len(failure.GetKubernetesStatus().GetCauses()) != 1 ||
+		failure.GetKubernetesStatus().GetCauses()[0].GetField() != "spec.replicas" {
+		t.Fatalf("structured search failure = %#v", failure)
+	}
+	if failure.GetKubernetesStatus().GetMessage() != "" ||
+		failure.GetKubernetesStatus().GetCauses()[0].GetMessage() != "" {
+		t.Fatalf("raw Kubernetes messages crossed the protocol: %#v", failure)
 	}
 }
 

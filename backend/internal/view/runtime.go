@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
@@ -1903,13 +1904,15 @@ func structuredViewError(operation string, err error, retryable bool) *kmgrv1.St
 	if err == nil {
 		err = errors.New("unknown error")
 	}
-	return &kmgrv1.StructuredError{
+	result := &kmgrv1.StructuredError{
 		Category:  kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE,
 		Reason:    "ViewStreamFailed",
-		Message:   err.Error(),
+		Message:   "The Kubernetes resource stream failed.",
 		Retryable: retryable,
 		Operation: operation,
 	}
+	kubeerrors.Enrich(result, err)
+	return result
 }
 
 // Compile-time check that dynamic clients remain compatible with the narrow

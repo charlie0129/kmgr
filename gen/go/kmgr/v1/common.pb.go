@@ -427,20 +427,21 @@ func (x *Acknowledgement) GetAccepted() bool {
 // StructuredError is safe to display. It must never contain credentials,
 // Secret values, exec/log bytes, or complete mutation payloads.
 type StructuredError struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Category       ErrorCategory          `protobuf:"varint,1,opt,name=category,proto3,enum=kmgr.v1.ErrorCategory" json:"category,omitempty"`
-	Reason         string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
-	Message        string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
-	HttpStatusCode int32                  `protobuf:"varint,4,opt,name=http_status_code,json=httpStatusCode,proto3" json:"http_status_code,omitempty"`
-	Retryable      bool                   `protobuf:"varint,5,opt,name=retryable,proto3" json:"retryable,omitempty"`
-	RetryAfterMs   int64                  `protobuf:"varint,6,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
-	FieldPath      string                 `protobuf:"bytes,7,opt,name=field_path,json=fieldPath,proto3" json:"field_path,omitempty"`
-	ContextName    string                 `protobuf:"bytes,8,opt,name=context_name,json=contextName,proto3" json:"context_name,omitempty"`
-	Operation      string                 `protobuf:"bytes,9,opt,name=operation,proto3" json:"operation,omitempty"`
-	Resource       *ResourceIdentity      `protobuf:"bytes,10,opt,name=resource,proto3" json:"resource,omitempty"`
-	SafeDetails    map[string]string      `protobuf:"bytes,11,rep,name=safe_details,json=safeDetails,proto3" json:"safe_details,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state            protoimpl.MessageState   `protogen:"open.v1"`
+	Category         ErrorCategory            `protobuf:"varint,1,opt,name=category,proto3,enum=kmgr.v1.ErrorCategory" json:"category,omitempty"`
+	Reason           string                   `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	Message          string                   `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	HttpStatusCode   int32                    `protobuf:"varint,4,opt,name=http_status_code,json=httpStatusCode,proto3" json:"http_status_code,omitempty"`
+	Retryable        bool                     `protobuf:"varint,5,opt,name=retryable,proto3" json:"retryable,omitempty"`
+	RetryAfterMs     int64                    `protobuf:"varint,6,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
+	FieldPath        string                   `protobuf:"bytes,7,opt,name=field_path,json=fieldPath,proto3" json:"field_path,omitempty"`
+	ContextName      string                   `protobuf:"bytes,8,opt,name=context_name,json=contextName,proto3" json:"context_name,omitempty"`
+	Operation        string                   `protobuf:"bytes,9,opt,name=operation,proto3" json:"operation,omitempty"`
+	Resource         *ResourceIdentity        `protobuf:"bytes,10,opt,name=resource,proto3" json:"resource,omitempty"`
+	SafeDetails      map[string]string        `protobuf:"bytes,11,rep,name=safe_details,json=safeDetails,proto3" json:"safe_details,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	KubernetesStatus *KubernetesStatusDetails `protobuf:"bytes,12,opt,name=kubernetes_status,json=kubernetesStatus,proto3" json:"kubernetes_status,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StructuredError) Reset() {
@@ -550,6 +551,176 @@ func (x *StructuredError) GetSafeDetails() map[string]string {
 	return nil
 }
 
+func (x *StructuredError) GetKubernetesStatus() *KubernetesStatusDetails {
+	if x != nil {
+		return x.KubernetesStatus
+	}
+	return nil
+}
+
+// KubernetesStatusDetails preserves the structured, display-relevant portion
+// of metav1.StatusDetails. Servers may omit human messages when echoing them
+// could expose a sensitive object value; reason and field remain available.
+type KubernetesStatusDetails struct {
+	state             protoimpl.MessageState   `protogen:"open.v1"`
+	Name              string                   `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Group             string                   `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
+	Kind              string                   `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Uid               string                   `protobuf:"bytes,4,opt,name=uid,proto3" json:"uid,omitempty"`
+	Reason            string                   `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`
+	Message           string                   `protobuf:"bytes,6,opt,name=message,proto3" json:"message,omitempty"`
+	RetryAfterSeconds int32                    `protobuf:"varint,7,opt,name=retry_after_seconds,json=retryAfterSeconds,proto3" json:"retry_after_seconds,omitempty"`
+	Causes            []*KubernetesStatusCause `protobuf:"bytes,8,rep,name=causes,proto3" json:"causes,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *KubernetesStatusDetails) Reset() {
+	*x = KubernetesStatusDetails{}
+	mi := &file_kmgr_v1_common_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KubernetesStatusDetails) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KubernetesStatusDetails) ProtoMessage() {}
+
+func (x *KubernetesStatusDetails) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_common_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KubernetesStatusDetails.ProtoReflect.Descriptor instead.
+func (*KubernetesStatusDetails) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *KubernetesStatusDetails) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *KubernetesStatusDetails) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *KubernetesStatusDetails) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *KubernetesStatusDetails) GetUid() string {
+	if x != nil {
+		return x.Uid
+	}
+	return ""
+}
+
+func (x *KubernetesStatusDetails) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *KubernetesStatusDetails) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *KubernetesStatusDetails) GetRetryAfterSeconds() int32 {
+	if x != nil {
+		return x.RetryAfterSeconds
+	}
+	return 0
+}
+
+func (x *KubernetesStatusDetails) GetCauses() []*KubernetesStatusCause {
+	if x != nil {
+		return x.Causes
+	}
+	return nil
+}
+
+type KubernetesStatusCause struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	Field         string                 `protobuf:"bytes,3,opt,name=field,proto3" json:"field,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KubernetesStatusCause) Reset() {
+	*x = KubernetesStatusCause{}
+	mi := &file_kmgr_v1_common_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KubernetesStatusCause) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KubernetesStatusCause) ProtoMessage() {}
+
+func (x *KubernetesStatusCause) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_common_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KubernetesStatusCause.ProtoReflect.Descriptor instead.
+func (*KubernetesStatusCause) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *KubernetesStatusCause) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *KubernetesStatusCause) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *KubernetesStatusCause) GetField() string {
+	if x != nil {
+		return x.Field
+	}
+	return ""
+}
+
 type ResourceType struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
@@ -563,7 +734,7 @@ type ResourceType struct {
 
 func (x *ResourceType) Reset() {
 	*x = ResourceType{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[5]
+	mi := &file_kmgr_v1_common_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -575,7 +746,7 @@ func (x *ResourceType) String() string {
 func (*ResourceType) ProtoMessage() {}
 
 func (x *ResourceType) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[5]
+	mi := &file_kmgr_v1_common_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -588,7 +759,7 @@ func (x *ResourceType) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceType.ProtoReflect.Descriptor instead.
 func (*ResourceType) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{5}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ResourceType) GetGroup() string {
@@ -641,7 +812,7 @@ type ResourceIdentity struct {
 
 func (x *ResourceIdentity) Reset() {
 	*x = ResourceIdentity{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[6]
+	mi := &file_kmgr_v1_common_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -653,7 +824,7 @@ func (x *ResourceIdentity) String() string {
 func (*ResourceIdentity) ProtoMessage() {}
 
 func (x *ResourceIdentity) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[6]
+	mi := &file_kmgr_v1_common_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -666,7 +837,7 @@ func (x *ResourceIdentity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceIdentity.ProtoReflect.Descriptor instead.
 func (*ResourceIdentity) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{6}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ResourceIdentity) GetClusterSessionId() string {
@@ -728,7 +899,7 @@ type NamespaceScope struct {
 
 func (x *NamespaceScope) Reset() {
 	*x = NamespaceScope{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[7]
+	mi := &file_kmgr_v1_common_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -740,7 +911,7 @@ func (x *NamespaceScope) String() string {
 func (*NamespaceScope) ProtoMessage() {}
 
 func (x *NamespaceScope) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[7]
+	mi := &file_kmgr_v1_common_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -753,7 +924,7 @@ func (x *NamespaceScope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NamespaceScope.ProtoReflect.Descriptor instead.
 func (*NamespaceScope) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{7}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *NamespaceScope) GetAllNamespaces() bool {
@@ -780,7 +951,7 @@ type StringMapEntry struct {
 
 func (x *StringMapEntry) Reset() {
 	*x = StringMapEntry{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[8]
+	mi := &file_kmgr_v1_common_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -792,7 +963,7 @@ func (x *StringMapEntry) String() string {
 func (*StringMapEntry) ProtoMessage() {}
 
 func (x *StringMapEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[8]
+	mi := &file_kmgr_v1_common_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -805,7 +976,7 @@ func (x *StringMapEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StringMapEntry.ProtoReflect.Descriptor instead.
 func (*StringMapEntry) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{8}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *StringMapEntry) GetKey() string {
@@ -840,7 +1011,7 @@ type ResourceUsageValue struct {
 
 func (x *ResourceUsageValue) Reset() {
 	*x = ResourceUsageValue{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[9]
+	mi := &file_kmgr_v1_common_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -852,7 +1023,7 @@ func (x *ResourceUsageValue) String() string {
 func (*ResourceUsageValue) ProtoMessage() {}
 
 func (x *ResourceUsageValue) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[9]
+	mi := &file_kmgr_v1_common_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -865,7 +1036,7 @@ func (x *ResourceUsageValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceUsageValue.ProtoReflect.Descriptor instead.
 func (*ResourceUsageValue) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{9}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ResourceUsageValue) GetUsed() float64 {
@@ -953,7 +1124,7 @@ type KubernetesQuantityValue struct {
 
 func (x *KubernetesQuantityValue) Reset() {
 	*x = KubernetesQuantityValue{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[10]
+	mi := &file_kmgr_v1_common_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -965,7 +1136,7 @@ func (x *KubernetesQuantityValue) String() string {
 func (*KubernetesQuantityValue) ProtoMessage() {}
 
 func (x *KubernetesQuantityValue) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[10]
+	mi := &file_kmgr_v1_common_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -978,7 +1149,7 @@ func (x *KubernetesQuantityValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KubernetesQuantityValue.ProtoReflect.Descriptor instead.
 func (*KubernetesQuantityValue) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{10}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *KubernetesQuantityValue) GetExact() string {
@@ -1025,7 +1196,7 @@ type Cell struct {
 
 func (x *Cell) Reset() {
 	*x = Cell{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[11]
+	mi := &file_kmgr_v1_common_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1037,7 +1208,7 @@ func (x *Cell) String() string {
 func (*Cell) ProtoMessage() {}
 
 func (x *Cell) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[11]
+	mi := &file_kmgr_v1_common_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1050,7 +1221,7 @@ func (x *Cell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Cell.ProtoReflect.Descriptor instead.
 func (*Cell) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{11}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Cell) GetColumnId() string {
@@ -1222,7 +1393,7 @@ type ResourceRow struct {
 
 func (x *ResourceRow) Reset() {
 	*x = ResourceRow{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[12]
+	mi := &file_kmgr_v1_common_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1234,7 +1405,7 @@ func (x *ResourceRow) String() string {
 func (*ResourceRow) ProtoMessage() {}
 
 func (x *ResourceRow) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[12]
+	mi := &file_kmgr_v1_common_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1247,7 +1418,7 @@ func (x *ResourceRow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceRow.ProtoReflect.Descriptor instead.
 func (*ResourceRow) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{12}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ResourceRow) GetIdentity() *ResourceIdentity {
@@ -1284,7 +1455,7 @@ const file_kmgr_v1_common_proto_rawDesc = "" +
 	"\x0fAcknowledgement\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1a\n" +
-	"\baccepted\x18\x02 \x01(\bR\baccepted\"\x8a\x04\n" +
+	"\baccepted\x18\x02 \x01(\bR\baccepted\"\xd9\x04\n" +
 	"\x0fStructuredError\x122\n" +
 	"\bcategory\x18\x01 \x01(\x0e2\x16.kmgr.v1.ErrorCategoryR\bcategory\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\x18\n" +
@@ -1298,10 +1469,24 @@ const file_kmgr_v1_common_proto_rawDesc = "" +
 	"\toperation\x18\t \x01(\tR\toperation\x125\n" +
 	"\bresource\x18\n" +
 	" \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bresource\x12L\n" +
-	"\fsafe_details\x18\v \x03(\v2).kmgr.v1.StructuredError.SafeDetailsEntryR\vsafeDetails\x1a>\n" +
+	"\fsafe_details\x18\v \x03(\v2).kmgr.v1.StructuredError.SafeDetailsEntryR\vsafeDetails\x12M\n" +
+	"\x11kubernetes_status\x18\f \x01(\v2 .kmgr.v1.KubernetesStatusDetailsR\x10kubernetesStatus\x1a>\n" +
 	"\x10SafeDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8e\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x02\n" +
+	"\x17KubernetesStatusDetails\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05group\x18\x02 \x01(\tR\x05group\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\x12\x10\n" +
+	"\x03uid\x18\x04 \x01(\tR\x03uid\x12\x16\n" +
+	"\x06reason\x18\x05 \x01(\tR\x06reason\x12\x18\n" +
+	"\amessage\x18\x06 \x01(\tR\amessage\x12.\n" +
+	"\x13retry_after_seconds\x18\a \x01(\x05R\x11retryAfterSeconds\x126\n" +
+	"\x06causes\x18\b \x03(\v2\x1e.kmgr.v1.KubernetesStatusCauseR\x06causes\"_\n" +
+	"\x15KubernetesStatusCause\x12\x16\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12\x14\n" +
+	"\x05field\x18\x03 \x01(\tR\x05field\"\x8e\x01\n" +
 	"\fResourceType\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1a\n" +
@@ -1407,7 +1592,7 @@ func file_kmgr_v1_common_proto_rawDescGZIP() []byte {
 }
 
 var file_kmgr_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_kmgr_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_kmgr_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_kmgr_v1_common_proto_goTypes = []any{
 	(ErrorCategory)(0),              // 0: kmgr.v1.ErrorCategory
 	(CellSeverity)(0),               // 1: kmgr.v1.CellSeverity
@@ -1417,30 +1602,34 @@ var file_kmgr_v1_common_proto_goTypes = []any{
 	(*Empty)(nil),                   // 5: kmgr.v1.Empty
 	(*Acknowledgement)(nil),         // 6: kmgr.v1.Acknowledgement
 	(*StructuredError)(nil),         // 7: kmgr.v1.StructuredError
-	(*ResourceType)(nil),            // 8: kmgr.v1.ResourceType
-	(*ResourceIdentity)(nil),        // 9: kmgr.v1.ResourceIdentity
-	(*NamespaceScope)(nil),          // 10: kmgr.v1.NamespaceScope
-	(*StringMapEntry)(nil),          // 11: kmgr.v1.StringMapEntry
-	(*ResourceUsageValue)(nil),      // 12: kmgr.v1.ResourceUsageValue
-	(*KubernetesQuantityValue)(nil), // 13: kmgr.v1.KubernetesQuantityValue
-	(*Cell)(nil),                    // 14: kmgr.v1.Cell
-	(*ResourceRow)(nil),             // 15: kmgr.v1.ResourceRow
-	nil,                             // 16: kmgr.v1.StructuredError.SafeDetailsEntry
+	(*KubernetesStatusDetails)(nil), // 8: kmgr.v1.KubernetesStatusDetails
+	(*KubernetesStatusCause)(nil),   // 9: kmgr.v1.KubernetesStatusCause
+	(*ResourceType)(nil),            // 10: kmgr.v1.ResourceType
+	(*ResourceIdentity)(nil),        // 11: kmgr.v1.ResourceIdentity
+	(*NamespaceScope)(nil),          // 12: kmgr.v1.NamespaceScope
+	(*StringMapEntry)(nil),          // 13: kmgr.v1.StringMapEntry
+	(*ResourceUsageValue)(nil),      // 14: kmgr.v1.ResourceUsageValue
+	(*KubernetesQuantityValue)(nil), // 15: kmgr.v1.KubernetesQuantityValue
+	(*Cell)(nil),                    // 16: kmgr.v1.Cell
+	(*ResourceRow)(nil),             // 17: kmgr.v1.ResourceRow
+	nil,                             // 18: kmgr.v1.StructuredError.SafeDetailsEntry
 }
 var file_kmgr_v1_common_proto_depIdxs = []int32{
 	0,  // 0: kmgr.v1.StructuredError.category:type_name -> kmgr.v1.ErrorCategory
-	9,  // 1: kmgr.v1.StructuredError.resource:type_name -> kmgr.v1.ResourceIdentity
-	16, // 2: kmgr.v1.StructuredError.safe_details:type_name -> kmgr.v1.StructuredError.SafeDetailsEntry
-	12, // 3: kmgr.v1.Cell.usage:type_name -> kmgr.v1.ResourceUsageValue
-	13, // 4: kmgr.v1.Cell.quantity_value:type_name -> kmgr.v1.KubernetesQuantityValue
-	1,  // 5: kmgr.v1.Cell.severity:type_name -> kmgr.v1.CellSeverity
-	9,  // 6: kmgr.v1.ResourceRow.identity:type_name -> kmgr.v1.ResourceIdentity
-	14, // 7: kmgr.v1.ResourceRow.cells:type_name -> kmgr.v1.Cell
-	8,  // [8:8] is the sub-list for method output_type
-	8,  // [8:8] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	11, // 1: kmgr.v1.StructuredError.resource:type_name -> kmgr.v1.ResourceIdentity
+	18, // 2: kmgr.v1.StructuredError.safe_details:type_name -> kmgr.v1.StructuredError.SafeDetailsEntry
+	8,  // 3: kmgr.v1.StructuredError.kubernetes_status:type_name -> kmgr.v1.KubernetesStatusDetails
+	9,  // 4: kmgr.v1.KubernetesStatusDetails.causes:type_name -> kmgr.v1.KubernetesStatusCause
+	14, // 5: kmgr.v1.Cell.usage:type_name -> kmgr.v1.ResourceUsageValue
+	15, // 6: kmgr.v1.Cell.quantity_value:type_name -> kmgr.v1.KubernetesQuantityValue
+	1,  // 7: kmgr.v1.Cell.severity:type_name -> kmgr.v1.CellSeverity
+	11, // 8: kmgr.v1.ResourceRow.identity:type_name -> kmgr.v1.ResourceIdentity
+	16, // 9: kmgr.v1.ResourceRow.cells:type_name -> kmgr.v1.Cell
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_common_proto_init() }
@@ -1448,8 +1637,8 @@ func file_kmgr_v1_common_proto_init() {
 	if File_kmgr_v1_common_proto != nil {
 		return
 	}
-	file_kmgr_v1_common_proto_msgTypes[9].OneofWrappers = []any{}
-	file_kmgr_v1_common_proto_msgTypes[11].OneofWrappers = []any{
+	file_kmgr_v1_common_proto_msgTypes[11].OneofWrappers = []any{}
+	file_kmgr_v1_common_proto_msgTypes[13].OneofWrappers = []any{
 		(*Cell_StringValue)(nil),
 		(*Cell_NumberValue)(nil),
 		(*Cell_TimestampUnixMs)(nil),
@@ -1465,7 +1654,7 @@ func file_kmgr_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_common_proto_rawDesc), len(file_kmgr_v1_common_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   14,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

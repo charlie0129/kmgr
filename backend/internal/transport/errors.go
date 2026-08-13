@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -63,11 +64,7 @@ func connectionError(err error, contextName, serverHostname string) *kmgrv1.Stru
 	}
 
 	var apiStatus apierrors.APIStatus
-	if errors.As(err, &apiStatus) {
-		status := apiStatus.Status()
-		structured.HttpStatusCode = status.Code
-		structured.Retryable = status.Code == 0 || status.Code == 408 || status.Code == 429 || status.Code >= 500
-	}
+	kubeerrors.Enrich(structured, err)
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TIMEOUT
@@ -106,9 +103,6 @@ func connectionError(err error, contextName, serverHostname string) *kmgrv1.Stru
 		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TIMEOUT
 		structured.Reason = "NetworkTimeout"
 		structured.Message = "The network timed out while connecting to the Kubernetes API server."
-	}
-	if retryAfterSeconds, ok := apierrors.SuggestsClientDelay(err); ok {
-		structured.RetryAfterMs = int64(retryAfterSeconds) * 1000
 	}
 	return structured
 }
