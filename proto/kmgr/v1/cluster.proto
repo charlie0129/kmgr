@@ -82,6 +82,11 @@ message ConnectionEvent {
   ConnectionState state = 2;
   int64 observed_at_unix_ms = 3;
   StructuredError error = 4;
+  // Monotonic, process-local Kubernetes API payload totals for this shared
+  // cluster authority. They intentionally exclude kubeconfig contents and
+  // expose counts only; the GUI derives short-window rates from deltas.
+  uint64 api_bytes_received = 5;
+  uint64 api_bytes_sent = 6;
 }
 
 message DiscoverRequest {

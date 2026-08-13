@@ -24,6 +24,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onRestorationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
 
     private let provider: any WorkspaceResourceProviding
+    private let connectionActivityProvider: any ClusterConnectionActivityProviding
     private let objectDetailProvider: any ObjectDetailProviding
     private let recentObjectStore: RecentObjectStore
     private let operationProvider: any ResourceOperationProviding
@@ -44,6 +45,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     init(
         session: OpenedClusterSession,
         provider: any WorkspaceResourceProviding,
+        connectionActivityProvider: any ClusterConnectionActivityProviding,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
@@ -60,6 +62,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     ) {
         self.session = session
         self.provider = provider
+        self.connectionActivityProvider = connectionActivityProvider
         self.objectDetailProvider = objectDetailProvider
         self.recentObjectStore = recentObjectStore
         self.operationProvider = operationProvider
@@ -88,6 +91,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController = ClusterWorkspaceViewController(
             session: session,
             provider: provider,
+            connectionActivityProvider: connectionActivityProvider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             objectSearchProvider: objectSearchProvider,
             objectDetailProvider: objectDetailProvider,
@@ -330,6 +334,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 {
     private var session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
+    private let connectionActivityProvider: any ClusterConnectionActivityProviding
     private let objectSearchProvider: any ObjectSearchProviding
     private let objectDetailProvider: any ObjectDetailProviding
     private let recentObjectStore: RecentObjectStore
@@ -339,7 +344,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let sidebarController: ResourceSidebarViewController
     private let contentController: ResourceListViewController
     private let namespaceControl = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let connectionLabel = NSTextField(labelWithString: "Connected")
+    private let connectionActivityView = ClusterConnectionActivityView()
+    private let connectionActivityStreamID = UUID().uuidString.lowercased()
+    private var connectionActivityTask: Task<Void, Never>?
+    private var connectionActivityGate = GenerationSequenceGate()
+    private var connectionRateTracker = ClusterConnectionRateTracker()
     private let forwardsButton = NSButton(title: "Forwards 0", target: nil, action: nil)
     private let actionsButton = NSMenuToolbarItem(itemIdentifier: .actions)
     private var namespaceTask: Task<Void, Never>?
@@ -362,6 +371,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     init(
         session: OpenedClusterSession,
         provider: any WorkspaceResourceProviding,
+        connectionActivityProvider: any ClusterConnectionActivityProviding,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
@@ -372,6 +382,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     ) {
         self.session = session
         self.provider = provider
+        self.connectionActivityProvider = connectionActivityProvider
         self.objectSearchProvider = objectSearchProvider
         self.objectDetailProvider = objectDetailProvider
         self.recentObjectStore = recentObjectStore
@@ -438,8 +449,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     func start(restoring state: ClusterWindowRestorationState? = nil) {
         pendingRestorationState = state
-        connectionLabel.stringValue = "Connected"
-        connectionLabel.textColor = .secondaryLabelColor
+        connectionActivityView.setState(.connected)
+        startConnectionActivityWatch()
         sidebarController.start { [weak self] resources in
             guard let self else { return }
             let restored = pendingRestorationState.flatMap {
@@ -482,20 +493,19 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         paletteController = nil
         detailController?.engineDidDisconnect()
         contentController.engineDidDisconnect()
-        connectionLabel.stringValue = "Engine disconnected · reconnecting…"
-        connectionLabel.toolTip = message
-        connectionLabel.textColor = .systemOrange
+        connectionActivityTask?.cancel()
+        connectionActivityTask = nil
+        connectionActivityView.setState(.reconnecting, detail: message)
     }
 
     func engineRecoveryFailed(_ error: Error) {
-        connectionLabel.stringValue = "Reconnect failed"
-        connectionLabel.toolTip = error.localizedDescription
-        connectionLabel.textColor = .systemRed
+        connectionActivityView.setState(.failed, detail: error.localizedDescription)
     }
 
     func recover(with recoveredSession: OpenedClusterSession) {
         let previousSessionID = session.sessionID
         session = recoveredSession
+        startConnectionActivityWatch()
         Task { [recentObjectStore] in
             await recentObjectStore.rebind(
                 from: previousSessionID,
@@ -512,21 +522,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         loadNamespaces()
         portForwards.register(sessionID: recoveredSession.sessionID)
         if let detailController {
-            connectionLabel.stringValue = "Reopening view…"
+            connectionActivityView.setState(.connecting, detail: "Reopening view…")
             detailController.recover(sessionID: recoveredSession.sessionID) { [weak self] result in
                 switch result {
                 case .success:
-                    self?.connectionLabel.stringValue = "Connected"
-                    self?.connectionLabel.toolTip = nil
-                    self?.connectionLabel.textColor = .secondaryLabelColor
+                    self?.connectionActivityView.setState(.connected)
                 case .failure(let error):
                     self?.engineRecoveryFailed(error)
                 }
             }
         } else {
-            connectionLabel.stringValue = "Connected"
-            connectionLabel.toolTip = nil
-            connectionLabel.textColor = .secondaryLabelColor
+            connectionActivityView.setState(.connected)
         }
     }
 
@@ -534,7 +540,48 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         onRestorationChanged?(restorationState())
     }
 
+    private func startConnectionActivityWatch() {
+        connectionActivityTask?.cancel()
+        connectionActivityGate.reset()
+        connectionRateTracker = ClusterConnectionRateTracker()
+        connectionActivityView.update(rate: ClusterConnectionRate())
+        let provider = connectionActivityProvider
+        let sessionID = session.sessionID
+        let streamID = connectionActivityStreamID
+        connectionActivityTask = Task { [weak self, provider] in
+            do {
+                for try await sample in provider.watchConnectionActivity(
+                    sessionID: sessionID,
+                    streamID: streamID
+                ) {
+                    guard !Task.isCancelled, let self,
+                        self.session.sessionID == sessionID
+                    else { return }
+                    let disposition = connectionActivityGate.accept(sample.cursor)
+                    guard disposition == .acceptedNewGeneration
+                        || disposition == .acceptedNextSequence
+                    else { continue }
+                    connectionActivityView.setState(
+                        sample.state,
+                        detail: sample.issue?.localizedDescription
+                    )
+                    connectionActivityView.update(
+                        rate: connectionRateTracker.receive(sample)
+                    )
+                }
+            } catch {
+                guard !Task.isCancelled, self?.session.sessionID == sessionID else { return }
+                self?.connectionActivityView.setState(
+                    .reconnecting,
+                    detail: error.localizedDescription
+                )
+            }
+        }
+    }
+
     func stop() {
+        connectionActivityTask?.cancel()
+        connectionActivityTask = nil
         namespaceTask?.cancel()
         palettePresentationTask?.cancel()
         palettePresentationTask = nil
@@ -620,11 +667,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             item.action = #selector(showCommandPalette)
             return item
         case .connection:
-            connectionLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            connectionLabel.textColor = .secondaryLabelColor
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Connection"
-            item.view = connectionLabel
+            item.view = connectionActivityView
             return item
         case .forwards:
             forwardsButton.bezelStyle = .texturedRounded
@@ -831,20 +876,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     private func freshOpen(_ identity: ResourceIdentity) {
         objectOpenTask?.cancel()
-        connectionLabel.stringValue = "Refreshing \(identity.name)…"
-        connectionLabel.textColor = .secondaryLabelColor
+        connectionActivityView.setState(.connecting, detail: "Refreshing \(identity.name)…")
         objectOpenTask = Task { [weak self, objectDetailProvider] in
             guard let self else { return }
             do {
                 let detail = try await objectDetailProvider.getObject(identity: identity)
                 guard !Task.isCancelled else { return }
-                connectionLabel.stringValue = "Connected"
-                connectionLabel.textColor = .secondaryLabelColor
+                connectionActivityView.setState(.connected)
                 showObject(detail.identity, initialTab: .automatic)
             } catch {
                 guard !Task.isCancelled else { return }
-                connectionLabel.stringValue = error.localizedDescription
-                connectionLabel.textColor = .systemRed
+                connectionActivityView.setState(.failed, detail: error.localizedDescription)
             }
         }
     }
@@ -971,8 +1013,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     namespaceControl.selectItem(at: index)
                 }
             } catch {
-                connectionLabel.stringValue = "Namespace list unavailable"
-                connectionLabel.textColor = .systemOrange
+                connectionActivityView.setState(.reconnecting, detail: "Namespace list unavailable")
             }
         }
     }

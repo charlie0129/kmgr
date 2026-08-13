@@ -47,6 +47,9 @@ func TestSessionRegistryOpensIndependentSessionsWithSharedClients(t *testing.T) 
 	if first.backend != second.backend {
 		t.Fatal("same catalog/context did not share Kubernetes authority")
 	}
+	if first.APIActivity() == nil || first.APIActivity() != second.APIActivity() {
+		t.Fatal("same Kubernetes authority did not share one activity counter")
+	}
 	if len(factory.configs) != 1 {
 		t.Fatalf("client factory calls = %d, want 1", len(factory.configs))
 	}
@@ -69,6 +72,26 @@ func TestSessionRegistryOpensIndependentSessionsWithSharedClients(t *testing.T) 
 	}
 	if registry.Close(second.ID()) {
 		t.Fatal("closing an absent session succeeded")
+	}
+}
+
+func TestDifferentAuthoritiesDoNotShareActivityCounters(t *testing.T) {
+	t.Parallel()
+	firstCatalog := testCatalog(t, "https://first.example.test")
+	secondCatalog := testCatalog(t, "https://second.example.test")
+	registry := NewSessionRegistry(&recordingFactory{})
+	t.Cleanup(registry.CloseAll)
+	first, err := registry.Open(firstCatalog, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := registry.Open(secondCatalog, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.APIActivity().AddReceived(9)
+	if first.APIActivity() == second.APIActivity() || second.APIActivity().Snapshot().BytesReceived != 0 {
+		t.Fatal("independent Kubernetes authorities shared activity totals")
 	}
 }
 

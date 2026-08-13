@@ -13,6 +13,10 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/rest"
 )
@@ -194,6 +198,175 @@ func TestCloseSessionWithoutPreservationForceCloses(t *testing.T) {
 		t.Fatal("late release closed force-closed backend twice")
 	}
 }
+
+func TestWatchConnectionEmitsInitialAndCoalescedMonotonicTotals(t *testing.T) {
+	t.Parallel()
+	catalog := serviceCatalog(t)
+	sessions := cluster.NewSessionRegistry(&serviceFactory{})
+	t.Cleanup(sessions.CloseAll)
+	session, err := sessions.Open(catalog, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	activity := session.APIActivity()
+	activity.AddReceived(10)
+	activity.AddSent(4)
+	service := NewClusterService(ClusterServiceOptions{Sessions: sessions})
+	streamContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := newConnectionTestStream(streamContext)
+	result := make(chan error, 1)
+	go func() {
+		result <- service.WatchConnection(&kmgrv1.WatchConnectionRequest{
+			Context: &kmgrv1.RequestContext{
+				RequestId: "activity", ClusterSessionId: session.ID(),
+			},
+			StreamId: "connection-1",
+		}, stream)
+	}()
+	stream.waitForCount(t, 1)
+	initial := stream.snapshot()[0]
+	if initial.GetCursor().GetStreamId() != "connection-1" ||
+		initial.GetCursor().GetGeneration() != 1 || initial.GetCursor().GetSequence() != 1 ||
+		initial.GetApiBytesReceived() != 10 || initial.GetApiBytesSent() != 4 ||
+		initial.GetState() != kmgrv1.ConnectionState_CONNECTION_STATE_CONNECTED {
+		t.Fatalf("initial event = %#v", initial)
+	}
+	activity.AddReceived(2)
+	activity.AddReceived(3)
+	activity.AddSent(7)
+	stream.waitForCount(t, 2)
+	updated := stream.snapshot()[1]
+	if updated.GetCursor().GetSequence() != 2 || updated.GetApiBytesReceived() != 15 ||
+		updated.GetApiBytesSent() != 11 {
+		t.Fatalf("updated event = %#v", updated)
+	}
+	if count := len(stream.snapshot()); count != 2 {
+		t.Fatalf("burst emitted %d events, want coalesced initial + update", count)
+	}
+	cancel()
+	if err := <-result; status.Code(err) != codes.Canceled {
+		t.Fatalf("WatchConnection cancellation = %v", err)
+	}
+
+	secondContext, secondCancel := context.WithCancel(context.Background())
+	secondStream := newConnectionTestStream(secondContext)
+	secondResult := make(chan error, 1)
+	go func() {
+		secondResult <- service.WatchConnection(&kmgrv1.WatchConnectionRequest{
+			Context: &kmgrv1.RequestContext{
+				RequestId: "activity-2", ClusterSessionId: session.ID(),
+			},
+			StreamId: "connection-1",
+		}, secondStream)
+	}()
+	secondStream.waitForCount(t, 1)
+	if cursor := secondStream.snapshot()[0].GetCursor(); cursor.GetGeneration() <= initial.GetCursor().GetGeneration() || cursor.GetSequence() != 1 {
+		t.Fatalf("second cursor = %#v", cursor)
+	}
+	secondCancel()
+	<-secondResult
+}
+
+func TestWatchConnectionLeaseSurvivesPreservingWorkspaceClose(t *testing.T) {
+	t.Parallel()
+	catalog := serviceCatalog(t)
+	factory := &serviceFactory{}
+	sessions := cluster.NewSessionRegistry(factory)
+	session, err := sessions.Open(catalog, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewClusterService(ClusterServiceOptions{Sessions: sessions})
+	streamContext, cancel := context.WithCancel(context.Background())
+	stream := newConnectionTestStream(streamContext)
+	result := make(chan error, 1)
+	go func() {
+		result <- service.WatchConnection(&kmgrv1.WatchConnectionRequest{
+			Context: &kmgrv1.RequestContext{
+				RequestId: "activity", ClusterSessionId: session.ID(),
+			},
+			StreamId: "connection",
+		}, stream)
+	}()
+	stream.waitForCount(t, 1)
+	if !sessions.CloseWorkspace(session.ID()) || factory.closeCount() != 0 {
+		t.Fatal("workspace close did not preserve the activity stream lease")
+	}
+	cancel()
+	<-result
+	deadline := time.Now().Add(time.Second)
+	for factory.closeCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if factory.closeCount() != 1 {
+		t.Fatal("activity stream release did not retire its closed session")
+	}
+}
+
+func TestWatchConnectionValidatesRequest(t *testing.T) {
+	t.Parallel()
+	service := NewClusterService(ClusterServiceOptions{Sessions: cluster.NewSessionRegistry(nil)})
+	stream := newConnectionTestStream(context.Background())
+	if err := service.WatchConnection(nil, stream); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("nil request = %v", err)
+	}
+	if err := service.WatchConnection(&kmgrv1.WatchConnectionRequest{
+		Context: &kmgrv1.RequestContext{RequestId: "request", ClusterSessionId: "missing"},
+	}, stream); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("empty stream ID = %v", err)
+	}
+	if err := service.WatchConnection(&kmgrv1.WatchConnectionRequest{
+		Context:  &kmgrv1.RequestContext{RequestId: "request", ClusterSessionId: "missing"},
+		StreamId: "connection",
+	}, stream); status.Code(err) != codes.NotFound {
+		t.Fatalf("missing session = %v", err)
+	}
+}
+
+type connectionTestStream struct {
+	ctx    context.Context
+	mu     sync.Mutex
+	events []*kmgrv1.ConnectionEvent
+}
+
+func newConnectionTestStream(ctx context.Context) *connectionTestStream {
+	return &connectionTestStream{ctx: ctx}
+}
+
+func (s *connectionTestStream) Send(event *kmgrv1.ConnectionEvent) error {
+	s.mu.Lock()
+	s.events = append(s.events, event)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *connectionTestStream) SetHeader(metadata.MD) error  { return nil }
+func (s *connectionTestStream) SendHeader(metadata.MD) error { return nil }
+func (s *connectionTestStream) SetTrailer(metadata.MD)       {}
+func (s *connectionTestStream) Context() context.Context     { return s.ctx }
+func (s *connectionTestStream) SendMsg(any) error            { return errors.New("unexpected SendMsg") }
+func (s *connectionTestStream) RecvMsg(any) error            { return errors.New("unexpected RecvMsg") }
+
+func (s *connectionTestStream) snapshot() []*kmgrv1.ConnectionEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*kmgrv1.ConnectionEvent(nil), s.events...)
+}
+
+func (s *connectionTestStream) waitForCount(t *testing.T, count int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(s.snapshot()) >= count {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("stream received %d events, want at least %d", len(s.snapshot()), count)
+}
+
+var _ grpc.ServerStreamingServer[kmgrv1.ConnectionEvent] = (*connectionTestStream)(nil)
 
 func TestConnectionErrorDoesNotExposeUnderlyingMessage(t *testing.T) {
 	t.Parallel()

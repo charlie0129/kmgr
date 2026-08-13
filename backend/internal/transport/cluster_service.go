@@ -3,15 +3,19 @@ package transport
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 const DefaultConnectionProbeTimeout = 8 * time.Second
+
+const connectionActivityCoalesceDelay = 100 * time.Millisecond
 
 // SessionProber makes the explicit connection action independently testable.
 // Implementations must honor the supplied context.
@@ -41,10 +45,11 @@ func (versionProber) Probe(ctx context.Context, session *cluster.Session) error 
 type ClusterService struct {
 	kmgrv1.UnimplementedClusterServiceServer
 
-	catalogs     *CatalogRegistry
-	sessions     *cluster.SessionRegistry
-	prober       SessionProber
-	probeTimeout time.Duration
+	catalogs         *CatalogRegistry
+	sessions         *cluster.SessionRegistry
+	prober           SessionProber
+	probeTimeout     time.Duration
+	streamGeneration atomic.Uint64
 }
 
 type ClusterServiceOptions struct {
@@ -72,6 +77,79 @@ func NewClusterService(options ClusterServiceOptions) *ClusterService {
 		sessions:     options.Sessions,
 		prober:       options.Prober,
 		probeTimeout: options.ProbeTimeout,
+	}
+}
+
+func (s *ClusterService) WatchConnection(
+	request *kmgrv1.WatchConnectionRequest,
+	stream grpc.ServerStreamingServer[kmgrv1.ConnectionEvent],
+) error {
+	if request == nil {
+		return status.Error(codes.InvalidArgument, "request is required")
+	}
+	requestContext, cancel, err := validateRequestContext(stream.Context(), request.GetContext(), true)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	if request.GetStreamId() == "" {
+		return status.Error(codes.InvalidArgument, "stream ID is required")
+	}
+	session, lease, ok := s.sessions.Acquire(request.GetContext().GetClusterSessionId())
+	if !ok {
+		return status.Error(codes.NotFound, "cluster session was not found")
+	}
+	defer lease.Release()
+	activity := session.APIActivity()
+	updates, unsubscribe := activity.Subscribe()
+	defer unsubscribe()
+	generation := s.streamGeneration.Add(1)
+	sequence := uint64(0)
+	lastSent := cluster.APIActivitySnapshot{}
+	send := func(force bool) error {
+		totals := activity.Snapshot()
+		if !force && totals == lastSent {
+			return nil
+		}
+		sequence++
+		if err := stream.Send(&kmgrv1.ConnectionEvent{
+			Cursor: &kmgrv1.StreamCursor{
+				StreamId: request.GetStreamId(), Generation: generation, Sequence: sequence,
+			},
+			State:            kmgrv1.ConnectionState_CONNECTION_STATE_CONNECTED,
+			ObservedAtUnixMs: time.Now().UnixMilli(),
+			ApiBytesReceived: totals.BytesReceived,
+			ApiBytesSent:     totals.BytesSent,
+		}); err != nil {
+			return err
+		}
+		lastSent = totals
+		return nil
+	}
+	if err := send(true); err != nil {
+		return err
+	}
+	var timer *time.Timer
+	var timerChannel <-chan time.Time
+	for {
+		select {
+		case <-requestContext.Done():
+			if timer != nil {
+				timer.Stop()
+			}
+			return contextStatus(requestContext.Err())
+		case <-updates:
+			if timerChannel == nil {
+				timer = time.NewTimer(connectionActivityCoalesceDelay)
+				timerChannel = timer.C
+			}
+		case <-timerChannel:
+			timerChannel = nil
+			timer = nil
+			if err := send(false); err != nil {
+				return err
+			}
+		}
 	}
 }
 

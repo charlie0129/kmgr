@@ -294,6 +294,13 @@ public struct Kmgr_V1_ConnectionEvent: Sendable {
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
+  /// Monotonic, process-local Kubernetes API payload totals for this shared
+  /// cluster authority. They intentionally exclude kubeconfig contents and
+  /// expose counts only; the GUI derives short-window rates from deltas.
+  public var apiBytesReceived: UInt64 = 0
+
+  public var apiBytesSent: UInt64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -790,7 +797,7 @@ extension Kmgr_V1_WatchConnectionRequest: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ConnectionEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}state\0\u{3}observed_at_unix_ms\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}state\0\u{3}observed_at_unix_ms\0\u{1}error\0\u{3}api_bytes_received\0\u{3}api_bytes_sent\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -802,6 +809,8 @@ extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
       case 2: try { try decoder.decodeSingularEnumField(value: &self.state) }()
       case 3: try { try decoder.decodeSingularInt64Field(value: &self.observedAtUnixMs) }()
       case 4: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.apiBytesReceived) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.apiBytesSent) }()
       default: break
       }
     }
@@ -824,6 +833,12 @@ extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
     try { if let v = self._error {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
     } }()
+    if self.apiBytesReceived != 0 {
+      try visitor.visitSingularUInt64Field(value: self.apiBytesReceived, fieldNumber: 5)
+    }
+    if self.apiBytesSent != 0 {
+      try visitor.visitSingularUInt64Field(value: self.apiBytesSent, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -832,6 +847,8 @@ extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
     if lhs.state != rhs.state {return false}
     if lhs.observedAtUnixMs != rhs.observedAtUnixMs {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.apiBytesReceived != rhs.apiBytesReceived {return false}
+    if lhs.apiBytesSent != rhs.apiBytesSent {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

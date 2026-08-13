@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 
@@ -74,6 +75,63 @@ func (DefaultClientFactory) New(config *rest.Config) (BackendClients, error) {
 	}, nil
 }
 
+func configWithAPIActivity(config *rest.Config, activity *APIActivity) *rest.Config {
+	config = rest.CopyConfig(config)
+	previous := config.WrapTransport
+	config.WrapTransport = func(base http.RoundTripper) http.RoundTripper {
+		if previous != nil {
+			base = previous(base)
+		}
+		return &activityRoundTripper{base: base, activity: activity}
+	}
+	return config
+}
+
+type activityRoundTripper struct {
+	base     http.RoundTripper
+	activity *APIActivity
+}
+
+func (t *activityRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request != nil && request.Body != nil {
+		request = request.Clone(request.Context())
+		request.Body = &activityReadCloser{ReadCloser: request.Body, activity: t.activity, sent: true}
+		if request.GetBody != nil {
+			getBody := request.GetBody
+			request.GetBody = func() (io.ReadCloser, error) {
+				body, err := getBody()
+				if err != nil {
+					return nil, err
+				}
+				return &activityReadCloser{ReadCloser: body, activity: t.activity, sent: true}, nil
+			}
+		}
+	}
+	response, err := t.base.RoundTrip(request)
+	if response != nil && response.Body != nil {
+		response.Body = &activityReadCloser{ReadCloser: response.Body, activity: t.activity}
+	}
+	return response, err
+}
+
+type activityReadCloser struct {
+	io.ReadCloser
+	activity *APIActivity
+	sent     bool
+}
+
+func (r *activityReadCloser) Read(buffer []byte) (int, error) {
+	count, err := r.ReadCloser.Read(buffer)
+	if count > 0 {
+		if r.sent {
+			r.activity.AddSent(uint64(count))
+		} else {
+			r.activity.AddReceived(uint64(count))
+		}
+	}
+	return count, err
+}
+
 func closeHTTPClient(client *http.Client) {
 	if client == nil {
 		return
@@ -109,7 +167,8 @@ type sharedBackend struct {
 	// refs counts live session entries, not individual workspace or stream
 	// leases. A session entry remains live after its workspace closes only
 	// while an independent operation still owns it.
-	refs int
+	refs     int
+	activity *APIActivity
 }
 
 // SessionLease keeps one session and its shared Kubernetes backend alive for
@@ -181,11 +240,13 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 	key := backendKey{catalog: catalog, contextID: contextInfo.ID}
 	backend := r.backends[key]
 	if backend == nil {
+		activity := &APIActivity{}
+		config = configWithAPIActivity(config, activity)
 		clients, err := r.factory.New(config)
 		if err != nil {
 			return nil, fmt.Errorf("open context %q: %w", contextInfo.Name, err)
 		}
-		backend = &sharedBackend{clients: clients, config: rest.CopyConfig(config)}
+		backend = &sharedBackend{clients: clients, config: rest.CopyConfig(config), activity: activity}
 		r.backends[key] = backend
 	}
 
@@ -327,6 +388,12 @@ func (s *Session) Discovery() discovery.DiscoveryInterface { return s.backend.cl
 func (s *Session) Metadata() metadata.Interface            { return s.backend.clients.Metadata }
 func (s *Session) Core() coreclient.CoreV1Interface        { return s.backend.clients.Core }
 func (s *Session) Mapper() meta.RESTMapper                 { return s.backend.clients.Mapper }
+func (s *Session) APIActivity() *APIActivity {
+	if s == nil || s.backend == nil {
+		return nil
+	}
+	return s.backend.activity
+}
 
 // RESTConfig returns an independent copy for subresource transports such as
 // exec and port-forward. Callers must never log it because it may contain

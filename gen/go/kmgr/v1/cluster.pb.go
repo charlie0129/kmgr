@@ -580,6 +580,11 @@ type ConnectionEvent struct {
 	State            ConnectionState        `protobuf:"varint,2,opt,name=state,proto3,enum=kmgr.v1.ConnectionState" json:"state,omitempty"`
 	ObservedAtUnixMs int64                  `protobuf:"varint,3,opt,name=observed_at_unix_ms,json=observedAtUnixMs,proto3" json:"observed_at_unix_ms,omitempty"`
 	Error            *StructuredError       `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	// Monotonic, process-local Kubernetes API payload totals for this shared
+	// cluster authority. They intentionally exclude kubeconfig contents and
+	// expose counts only; the GUI derives short-window rates from deltas.
+	ApiBytesReceived uint64 `protobuf:"varint,5,opt,name=api_bytes_received,json=apiBytesReceived,proto3" json:"api_bytes_received,omitempty"`
+	ApiBytesSent     uint64 `protobuf:"varint,6,opt,name=api_bytes_sent,json=apiBytesSent,proto3" json:"api_bytes_sent,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -640,6 +645,20 @@ func (x *ConnectionEvent) GetError() *StructuredError {
 		return x.Error
 	}
 	return nil
+}
+
+func (x *ConnectionEvent) GetApiBytesReceived() uint64 {
+	if x != nil {
+		return x.ApiBytesReceived
+	}
+	return 0
+}
+
+func (x *ConnectionEvent) GetApiBytesSent() uint64 {
+	if x != nil {
+		return x.ApiBytesSent
+	}
+	return 0
 }
 
 type DiscoverRequest struct {
@@ -987,12 +1006,14 @@ const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	"\x18keep_independent_streams\x18\x02 \x01(\bR\x16keepIndependentStreams\"h\n" +
 	"\x16WatchConnectionRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x1b\n" +
-	"\tstream_id\x18\x02 \x01(\tR\bstreamId\"\xcf\x01\n" +
+	"\tstream_id\x18\x02 \x01(\tR\bstreamId\"\xa3\x02\n" +
 	"\x0fConnectionEvent\x12-\n" +
 	"\x06cursor\x18\x01 \x01(\v2\x15.kmgr.v1.StreamCursorR\x06cursor\x12.\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x18.kmgr.v1.ConnectionStateR\x05state\x12-\n" +
 	"\x13observed_at_unix_ms\x18\x03 \x01(\x03R\x10observedAtUnixMs\x12.\n" +
-	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"^\n" +
+	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\x12,\n" +
+	"\x12api_bytes_received\x18\x05 \x01(\x04R\x10apiBytesReceived\x12$\n" +
+	"\x0eapi_bytes_sent\x18\x06 \x01(\x04R\fapiBytesSent\"^\n" +
 	"\x0fDiscoverRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x18\n" +
 	"\arefresh\x18\x02 \x01(\bR\arefresh\"\xbc\x01\n" +
