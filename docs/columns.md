@@ -46,6 +46,16 @@ Evaluation is deterministic and side-effect free. Each evaluation has a runtime 
 
 Sorting uses the typed result retained alongside display text. It never reparses formatted display text.
 
+## Columns window
+
+The native built-in/metric picker is filtered to the current resource GVR and
+marks extractors already represented by the draft. It can add a catalog entry
+disabled for deliberate review, or validate and add an exact Kubernetes
+resource name such as `nvidia.com/gpu`. The CEL editor compiles each current
+revision through the engine and previews it against the selected table object
+when exactly one is selected, otherwise against a bounded sample object. Only
+the latest successful validation can be committed.
+
 ## Built-in resource usage columns
 
 For native columns, `id` is the stable table/UI identity and `value` selects
@@ -96,6 +106,23 @@ are never merged. Metrics Server usually
 does not report huge-page or accelerator utilization, so these Pod cells show
 effective request / limit with actual usage unavailable; they never label
 allocation as utilization.
+
+### Automatic optional-resource columns
+
+Once the base Pod or Node snapshot has produced rows, or has completed empty,
+Kmgr performs a cache-only catalog query for optional scheduler resources. It
+uses exact resource names: equal friendly labels never merge vendor resources.
+Present huge-page and accelerator entries become enabled transient columns;
+configured-but-absent entries remain disabled. Ephemeral storage remains in
+the existing built-in column instead of creating a duplicate exact-resource
+column.
+
+The catalog is optional enrichment. Failure is silent and does not change the
+base view's rows, freshness, or error state. A transient overlay lasts only for
+the current helper session and exact GVR, survives a same-GVR stream reopen,
+and is never saved to `columns.yaml`. Persisted definitions always win by both
+display ID and exact extractor identity, including when the persisted column is
+disabled.
 
 CPU and memory columns subscribe lazily to `metrics.k8s.io/v1beta1`. A view
 without a metric column (and without a CEL expression that reads `metrics`)

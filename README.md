@@ -30,12 +30,18 @@ make run       # build and launch the local app
 make generate  # regenerate checked-in protobuf sources
 ```
 
-`make app` builds both processes, embeds `kmgr-engine` under
-`Kmgr.app/Contents/Helpers`, signs the nested helper first, then ad-hoc signs
-the bundle. No signing identity is required. Use `CONFIGURATION=release make
-app` for optimized Swift code; a distribution pipeline can replace the ad-hoc
-signatures with Developer ID signatures and add hardened-runtime/notarization
-steps.
+`make app` defaults to a developer-friendly bundle with a SwiftPM Debug
+executable and a Go helper that retains its symbol and DWARF data. It embeds
+`kmgr-engine` under `Kmgr.app/Contents/Helpers`, signs the nested helper first,
+then ad-hoc signs the bundle. No signing identity is required.
+
+Use `CONFIGURATION=release make app` for a smaller distribution candidate. It
+builds optimized Swift code, removes the copied Swift executable's symbol table
+while leaving SwiftPM's separate dSYM under `macos/.build` for archival, and
+builds the Go helper with `-s -w` while retaining `-trimpath` and the injected
+version. All stripping happens before signing. A distribution pipeline can
+archive the dSYM, replace both ad-hoc signatures with Developer ID signatures,
+then add hardened-runtime and notarization steps.
 
 `make generate` downloads pinned code generators into the ignored `.tools`
 directory on first use. Ordinary builds use the generated Go and Swift files
@@ -53,9 +59,12 @@ already checked into the repository.
    through WATCH. Moving away releases the last view consumer after a debounce;
    returning can display bounded warm rows immediately while the watch resumes
    or a relist runs in the background.
-4. Use `/` for the current table filter and Command-K for commands, kinds,
-   namespaces, or a two-stage resource-scoped object search. A scoped search
-   checks compatible active/warm engine caches before doing a paginated LIST.
+4. Use `/` for the current table filter and Command-K for commands, recent or
+   cached objects, kinds, namespaces, or a two-stage resource-scoped object
+   search. A scoped search checks compatible active/warm engine caches before
+   doing a paginated LIST. When that LIST completes, its exact-scope snapshot
+   can be handed once to the resource view, which displays those rows and
+   resumes WATCH from the same resource version without repeating the LIST.
 
 Each context workspace is a separate native window. Opening the same context
 twice creates independent UI/navigation state while allowing the engine to
@@ -141,11 +150,14 @@ Column definitions live at:
 ```
 
 The schema is `kmgr.charlie0129.dev/v1alpha1` and the independently versioned
-CEL environment is `kmgr.cel/v1`. The Columns window can enable, reorder, add
-or edit CEL definitions, reset defaults, and persist definitions; draft order
-and visibility apply live to the table. Programmers can edit the same YAML file
-outside the app. The engine loads the configured path when it starts, so after
-external edits relaunch Kmgr to reload the engine configuration.
+CEL environment is `kmgr.cel/v1`. The Columns window can enable and reorder
+definitions, choose GVR-compatible built-in or metric extractors from a native
+catalog, enter exact scheduler resources, add or edit CEL definitions, preview
+CEL against the selected object or a bounded sample, reset defaults, and
+persist definitions. Draft order and visibility apply live to the table.
+Programmers can edit the same YAML file outside the app. The engine loads the
+configured path when it starts, so after external edits relaunch Kmgr to reload
+the engine configuration.
 
 The full activation, optional-field syntax, types, cost/output limits, Secret
 sanitization boundary, exact huge-page/accelerator resource handling, and
@@ -160,8 +172,15 @@ columns for CPU, memory, ephemeral storage, Pod count, huge pages, and exact
 accelerator resources start a shared cluster-wide Pod dependency
 asynchronously, initially render **Calculating…**, and update as bound Pods
 change without delaying the base Node list. Exact configured huge-page and
-accelerator keys remain distinct. Automatic live discovery and insertion of
-those optional columns is not implemented yet.
+accelerator keys remain distinct.
+
+After a Pod or Node base snapshot is usable, Kmgr queries a cache-only catalog
+for exact huge-page and accelerator resources and automatically installs
+present resources as transient columns. Ephemeral storage remains represented
+by its richer built-in column rather than a duplicate exact-resource column.
+Discovery never delays or changes base-list freshness, persisted definitions
+win over transient matches, and the transient overlay is scoped to the current
+helper session and exact GVR rather than written to `columns.yaml`.
 
 ## Architecture and security
 
@@ -236,11 +255,13 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
 3. Create a multi-selection with a Shift anchor, cause updates that reorder the
    sorted rows, and verify the selected UIDs and anchor still identify the same
    objects rather than the same row indexes.
-4. Exercise Command-K commands and kinds, then choose the Pod search entry and
-   exercise a cached object match, exact object GET, and scoped partial search.
-   Verify the cached search does not restart a stopped watch and that object
-   search stays within the selected kind/scope: it must not perform an
-   all-resource search or start a search-only WATCH.
+4. Exercise Command-K commands, recent/cached root object matches, and kinds,
+   then choose the Pod search entry and exercise an exact object GET and scoped
+   partial search. Complete a paginated search, open its resource view, and
+   verify the completed snapshot supplies the initial rows before WATCH without
+   a duplicate LIST. Verify cached search does not restart a stopped watch and
+   that object search stays within the selected kind/scope: it must not perform
+   an all-resource search or start a search-only WATCH.
 5. Open independent log windows for one and multiple Pods, then an exec window.
 6. Start a Service forward, hide its manager and close its workspace, verify it
    remains active and reconnects, then stop it explicitly.
@@ -251,8 +272,9 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
 9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
 10. Compare metrics behavior with Metrics API available and unavailable. Enable
-    configured Node request/limit and exact-resource columns and verify the
-    asynchronous Pod accounting does not block the base Node snapshot.
+    configured Node request/limit and exact-resource columns, verify discovered
+    huge-page/accelerator columns appear after the base snapshot, and confirm
+    asynchronous Pod accounting does not block that snapshot.
 11. In Relationships, verify cached results are labeled potentially incomplete;
     run **Scan All Resources…** only against a cluster where that read load is
     acceptable.
@@ -261,11 +283,11 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
     authenticated session, and does not replay mutations, exec commands, or
     port-forwards.
 
-No real-cluster test runs as part of `make test`. A real smoke run requires an
-explicit context name and begins read-only. Creating/deleting the `kmgr-smoke`
-namespace or anything inside it requires separate authorization. Use a
-disposable cluster and least-privilege credentials; the relationship scan can
-issue LIST requests across every discoverable listable type.
+A real smoke run requires an explicit context name and begins read-only.
+Creating/deleting the `kmgr-smoke` namespace or anything inside it requires
+separate authorization. Use a disposable cluster and least-privilege
+credentials; the relationship scan can issue LIST requests across every
+discoverable listable type.
 
 ## Known limitations
 
@@ -274,14 +296,6 @@ issue LIST requests across every discoverable listable type.
   deliberately unsupported in v1.
 - Log configuration currently accepts Pods, not dynamic workload membership;
   workload membership following is not implemented.
-- The root Command Palette does not yet surface recent/cached object matches;
-  cached lookup is used only after choosing a resource-scoped search.
-- The Columns UI has no selected-object expression preview or built-in/metric
-  column catalog yet; built-in defaults can be enabled/reordered/reset and CEL
-  columns can be edited.
-- Automatic live discovery and insertion of huge-page/accelerator columns is
-  not implemented yet. Exact configured resource columns and configured Node
-  Pod-allocation columns are connected to live views.
 - Exec reconnect starts a new process; it cannot preserve the original remote
   process.
 - Relationship cache results are deliberately incomplete by default, and even

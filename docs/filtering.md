@@ -25,3 +25,10 @@ api status:running
 namespace:"team platform" label:app=controller
 field:spec.nodeName=worker-3
 ```
+
+## Per-resource filter memory
+
+Each workspace remembers the current filter by exact group, version, and
+resource. Switching to a GVR not visited in that window starts with an empty
+filter, so a Pod query cannot silently filter Nodes. Returning to a previously
+visited GVR restores that resource's last filter.
