@@ -14,6 +14,17 @@ case "$configuration" in
   *) print -u2 "CONFIGURATION must be 'debug' or 'release'"; exit 2 ;;
 esac
 
+# Assemble from an empty target every time. Reusing an old bundle can retain
+# removed helpers/resources or invalid nested signatures from a prior build.
+if [[ -d "$app_dir" ]]; then
+  app_parent=${app_dir:h}
+  app_name=${app_dir:t}
+  if [[ "$app_parent" != "$repo_root/build" || "$app_name" != "Kmgr.app" ]]; then
+    print -u2 "refusing to replace unexpected app target: $app_dir"
+    exit 1
+  fi
+  rm -rf -- "$app_dir"
+fi
 mkdir -p "$macos_dir" "$helpers_dir" "$resources_dir"
 
 go build \
