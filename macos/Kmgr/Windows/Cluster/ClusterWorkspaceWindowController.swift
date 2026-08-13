@@ -31,6 +31,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var logConfigurationController: LogConfigurationWindowController?
     private var execConfigurationController: ExecConfigurationWindowController?
     private var deleteResourcesController: DeleteResourcesWindowController?
+    private var resourceMutationController: ResourceMutationWindowController?
 
     init(
         session: OpenedClusterSession,
@@ -87,6 +88,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
         workspaceController.onDelete = { [weak self] targets in
             self?.showDeleteResources(targets)
+        }
+        workspaceController.onMutate = { [weak self] identity, mutation in
+            self?.showResourceMutation(identity, mutation: mutation)
         }
         window.delegate = self
         window.contentViewController = workspaceController
@@ -181,6 +185,26 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         controller.beginSheet(for: window)
     }
 
+    private func showResourceMutation(
+        _ identity: ResourceIdentity,
+        mutation: ResourceMutationWindowController.Mutation
+    ) {
+        guard let window, resourceMutationController == nil else { NSSound.beep(); return }
+        let controller = ResourceMutationWindowController(
+            session: session,
+            identity: identity,
+            mutation: mutation,
+            detailProvider: objectDetailProvider,
+            operationProvider: operationProvider
+        )
+        controller.onDismiss = { [weak self, weak controller] in
+            guard self?.resourceMutationController === controller else { return }
+            self?.resourceMutationController = nil
+        }
+        resourceMutationController = controller
+        controller.beginSheet(for: window)
+    }
+
     @objc func showCommandPalette(_ sender: Any?) {
         workspaceController.presentCommandPalette()
     }
@@ -192,6 +216,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func openResourceExec(_ sender: Any?) { workspaceController.openResourceExec(sender) }
     @objc func startResourcePortForward(_ sender: Any?) { workspaceController.startResourcePortForward(sender) }
     @objc func deleteResourceSelection(_ sender: Any?) { workspaceController.deleteResourceSelection(sender) }
+    @objc func scaleResourceSelection(_ sender: Any?) { workspaceController.scaleResourceSelection(sender) }
+    @objc func restartResourceSelection(_ sender: Any?) { workspaceController.restartResourceSelection(sender) }
+    @objc func editResourceMetadata(_ sender: Any?) { workspaceController.editResourceMetadata(sender) }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let command: ResourceTableCommand?
@@ -203,6 +230,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(openResourceExec(_:)): command = .openExec
         case #selector(startResourcePortForward(_:)): command = .startPortForward
         case #selector(deleteResourceSelection(_:)): command = .delete
+        case #selector(scaleResourceSelection(_:)): command = .scale
+        case #selector(restartResourceSelection(_:)): command = .restart
+        case #selector(editResourceMetadata(_:)): command = .editMetadata
         default: command = nil
         }
         return command.map(workspaceController.canPerformCommand) ?? true
@@ -236,6 +266,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     var onOpenLogs: (([ResourceIdentity]) -> Void)?
     var onOpenExec: ((ResourceIdentity) -> Void)?
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
+    var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
 
     init(
         session: OpenedClusterSession,
@@ -290,6 +321,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onDelete = { [weak self] targets in
             self?.onDelete?(targets)
+        }
+        contentController.onMutate = { [weak self] identity, mutation in
+            self?.onMutate?(identity, mutation)
         }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
         addSplitViewItem(NSSplitViewItem(viewController: contentController))
@@ -442,6 +476,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func openResourceExec(_ sender: Any?) { contentController.performCommand(.openExec) }
     @objc func startResourcePortForward(_ sender: Any?) { contentController.performCommand(.startPortForward) }
     @objc func deleteResourceSelection(_ sender: Any?) { contentController.performCommand(.delete) }
+    @objc func scaleResourceSelection(_ sender: Any?) { contentController.performCommand(.scale) }
+    @objc func restartResourceSelection(_ sender: Any?) { contentController.performCommand(.restart) }
+    @objc func editResourceMetadata(_ sender: Any?) { contentController.performCommand(.editMetadata) }
 
     func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
         contentController.canPerformCommand(command)
@@ -871,6 +908,7 @@ private final class ResourceListViewController: NSViewController,
     var onOpenLogs: (([ResourceIdentity]) -> Void)?
     var onOpenExec: ((ResourceIdentity) -> Void)?
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
+    var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
 
     init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
@@ -1439,6 +1477,15 @@ private final class ResourceListViewController: NSViewController,
             }
             guard !targets.isEmpty else { NSSound.beep(); return }
             onDelete?(targets)
+        case .scale:
+            guard let identity = model.selectedIdentities.only else { return }
+            onMutate?(identity, .scale)
+        case .restart:
+            guard let identity = model.selectedIdentities.only else { return }
+            onMutate?(identity, .rolloutRestart)
+        case .editMetadata:
+            guard let identity = model.selectedIdentities.only else { return }
+            onMutate?(identity, .metadata)
         case .moveDown, .moveUp:
             let delta = command == .moveDown ? 1 : -1
             let next = min(max(tableView.selectedRow + delta, 0), max(0, tableView.numberOfRows - 1))
@@ -1471,6 +1518,15 @@ private final class ResourceListViewController: NSViewController,
                 && (selected[0].resource == "pods" || selected[0].resource == "services")
         case .delete:
             return !selected.isEmpty
+        case .scale:
+            return selected.count == 1 && selected[0].namespace.isEmpty == false
+                && ["deployments", "statefulsets", "replicasets"].contains(selected[0].resource)
+        case .restart:
+            return selected.count == 1 && selected[0].group == "apps"
+                && selected[0].version == "v1"
+                && ["deployments", "statefulsets", "daemonsets"].contains(selected[0].resource)
+        case .editMetadata:
+            return selected.count == 1
         case .focusFilter, .selectAll, .moveDown, .moveUp:
             return true
         }
@@ -1479,7 +1535,7 @@ private final class ResourceListViewController: NSViewController,
 
 private enum ResourceTableCommand: Equatable {
     case focusFilter, open, openYAML, openEvents, openLogs, openExec
-    case startPortForward, selectAll, delete, moveUp, moveDown
+    case startPortForward, selectAll, delete, scale, restart, editMetadata, moveUp, moveDown
 }
 
 @MainActor

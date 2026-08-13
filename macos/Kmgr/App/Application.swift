@@ -331,6 +331,22 @@ final class Application: NSObject, NSApplicationDelegate {
             keyEquivalent: "p"
         ).keyEquivalentModifierMask = []
         resourceMenu.addItem(.separator())
+        resourceMenu.addItem(
+            withTitle: "Scale…",
+            action: #selector(ClusterWorkspaceWindowController.scaleResourceSelection(_:)),
+            keyEquivalent: ""
+        )
+        resourceMenu.addItem(
+            withTitle: "Rollout Restart…",
+            action: #selector(ClusterWorkspaceWindowController.restartResourceSelection(_:)),
+            keyEquivalent: ""
+        )
+        resourceMenu.addItem(
+            withTitle: "Edit Labels / Annotations…",
+            action: #selector(ClusterWorkspaceWindowController.editResourceMetadata(_:)),
+            keyEquivalent: ""
+        )
+        resourceMenu.addItem(.separator())
         let deleteItem = resourceMenu.addItem(
             withTitle: "Delete…",
             action: #selector(ClusterWorkspaceWindowController.deleteResourceSelection(_:)),
