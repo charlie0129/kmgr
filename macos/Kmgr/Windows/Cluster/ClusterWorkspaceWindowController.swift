@@ -1341,6 +1341,8 @@ private final class ResourceListViewController: NSViewController,
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private var tableTopWithoutErrorConstraint: NSLayoutConstraint?
+    private var tableTopWithErrorConstraint: NSLayoutConstraint?
     private var model = ResourceTableModel()
     private var generationGate = GenerationSequenceGate()
     private var resource: DiscoveredResource?
@@ -1457,6 +1459,16 @@ private final class ResourceListViewController: NSViewController,
         root.addSubview(errorLabel)
         root.addSubview(scrollView)
         root.addSubview(statusLine)
+        let tableTopWithoutError = scrollView.topAnchor.constraint(
+            equalTo: header.bottomAnchor,
+            constant: 5
+        )
+        let tableTopWithError = scrollView.topAnchor.constraint(
+            equalTo: errorLabel.bottomAnchor,
+            constant: 5
+        )
+        tableTopWithoutErrorConstraint = tableTopWithoutError
+        tableTopWithErrorConstraint = tableTopWithError
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
@@ -1466,7 +1478,7 @@ private final class ResourceListViewController: NSViewController,
             errorLabel.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 5),
+            tableTopWithoutError,
             scrollView.bottomAnchor.constraint(equalTo: statusLine.topAnchor, constant: -2),
             statusLine.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
             statusLine.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
@@ -1523,9 +1535,10 @@ private final class ResourceListViewController: NSViewController,
         generationGate.reset()
         recoveredResourceTrust.requireValidation()
         freshnessLabel.stringValue = "Disconnected"
-        errorLabel.stringValue = "The Kubernetes engine restarted. Rows shown here are from the last connected generation."
-        errorLabel.textColor = .systemOrange
-        errorLabel.isHidden = false
+        showInlineIssue(
+            "The Kubernetes engine restarted. Rows shown here are from the last connected generation.",
+            color: .systemOrange
+        )
         updateStatusLine()
     }
 
@@ -1739,7 +1752,7 @@ private final class ResourceListViewController: NSViewController,
         lastStreamResourceID = resource.id
         lastStreamScope = scope
         snapshotUIDs.removeAll(keepingCapacity: true)
-        errorLabel.isHidden = true
+        hideInlineIssue()
         titleLabel.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
         scopeLabel.stringValue = scope.presentation
         freshnessLabel.stringValue = "Loading…"
@@ -1932,9 +1945,22 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func show(error: Error) {
-        errorLabel.stringValue = error.localizedDescription
-        errorLabel.isHidden = false
+        showInlineIssue(error.localizedDescription)
         freshnessLabel.stringValue = "Disconnected"
+    }
+
+    private func showInlineIssue(_ message: String, color: NSColor = .systemRed) {
+        errorLabel.stringValue = message
+        errorLabel.textColor = color
+        errorLabel.isHidden = false
+        tableTopWithoutErrorConstraint?.isActive = false
+        tableTopWithErrorConstraint?.isActive = true
+    }
+
+    private func hideInlineIssue() {
+        errorLabel.isHidden = true
+        tableTopWithErrorConstraint?.isActive = false
+        tableTopWithoutErrorConstraint?.isActive = true
     }
 
     private func updateStatusLine() {
