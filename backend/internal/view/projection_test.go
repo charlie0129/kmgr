@@ -418,6 +418,129 @@ func TestProjectorEmitsPodResourceUsageWithEffectiveAccounting(t *testing.T) {
 	}
 }
 
+func TestPodCELMetricsActivationIncludesEffectiveSchedulerAccounting(t *testing.T) {
+	t.Parallel()
+	always := corev1.ContainerRestartPolicyAlways
+	podValue := &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{
+			UID: "uid-a", Namespace: "team-a", Name: "api",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "app",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("500m"),
+						corev1.ResourceMemory: resource.MustParse("256Mi"),
+						"hugepages-2Mi":       resource.MustParse("4Mi"),
+						"aliyun.com/ppu":      resource.MustParse("1"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("1"),
+						corev1.ResourceMemory: resource.MustParse("512Mi"),
+						"hugepages-2Mi":       resource.MustParse("4Mi"),
+						"aliyun.com/ppu":      resource.MustParse("2"),
+					},
+				},
+			}},
+			InitContainers: []corev1.Container{{
+				Name: "sidecar-init", RestartPolicy: &always,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("100m"),
+						"hugepages-2Mi":    resource.MustParse("2Mi"),
+						"aliyun.com/ppu":   resource.MustParse("1"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("200m"),
+						"hugepages-2Mi":    resource.MustParse("2Mi"),
+						"aliyun.com/ppu":   resource.MustParse("1"),
+					},
+				},
+			}, {
+				Name: "setup",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("2"),
+						"hugepages-2Mi":    resource.MustParse("8Mi"),
+						"aliyun.com/ppu":   resource.MustParse("2"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("3"),
+						"hugepages-2Mi":    resource.MustParse("8Mi"),
+						"aliyun.com/ppu":   resource.MustParse("2"),
+					},
+				},
+			}},
+			Overhead: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("50m"),
+				"hugepages-2Mi":    resource.MustParse("2Mi"),
+				"aliyun.com/ppu":   resource.MustParse("1"),
+			},
+		},
+	}
+	object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(podValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope:   NamespaceScope{All: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation := projector.metricsForObject(&unstructured.Unstructured{Object: object})
+	if available, ok := activation["accountingAvailable"].(bool); !ok || !available {
+		t.Fatalf("accountingAvailable = %#v", activation["accountingAvailable"])
+	}
+	requests := activation["requests"].(map[string]any)
+	limits := activation["limits"].(map[string]any)
+	assertActivationNumber(t, requests, "cpu", 2.15)
+	assertActivationNumber(t, limits, "cpu", 3.25)
+	assertActivationNumber(t, requests, "hugepages-2Mi", 12*1024*1024)
+	assertActivationNumber(t, limits, "hugepages-2Mi", 12*1024*1024)
+	assertActivationNumber(t, requests, "aliyun.com/ppu", 4)
+	assertActivationNumber(t, limits, "aliyun.com/ppu", 4)
+	if _, found := requests["nvidia.com/gpu"]; found {
+		t.Fatal("different accelerator key appeared in Pod requests")
+	}
+}
+
+func TestPodCELMetricsActivationDegradesWhenAccountingCannotDecode(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope:   NamespaceScope{All: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := pod("uid-a", "team-a", "api", "Running", 0, nil, time.Time{})
+	value.Object["spec"].(map[string]any)["containers"] = "malformed"
+	activation := projector.metricsForObject(value)
+	if available, ok := activation["accountingAvailable"].(bool); !ok || available {
+		t.Fatalf("accountingAvailable = %#v", activation["accountingAvailable"])
+	}
+	if requests := activation["requests"].(map[string]any); len(requests) != 0 {
+		t.Fatalf("malformed Pod requests = %#v", requests)
+	}
+	if limits := activation["limits"].(map[string]any); len(limits) != 0 {
+		t.Fatalf("malformed Pod limits = %#v", limits)
+	}
+}
+
+func assertActivationNumber(t *testing.T, values map[string]any, key string, want float64) {
+	t.Helper()
+	got, ok := values[key].(float64)
+	if !ok || math.Abs(got-want) > 1e-9 {
+		t.Fatalf("activation[%q] = %#v; want %g", key, values[key], want)
+	}
+}
+
 func TestProjectorKeepsUnavailableAndRealZeroMetricsDistinct(t *testing.T) {
 	t.Parallel()
 	base := ProjectionSpec{

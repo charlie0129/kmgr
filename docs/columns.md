@@ -9,6 +9,30 @@ Column definitions are stored at `~/Library/Application Support/kmgr/columns.yam
 - `context`: dynamic non-sensitive GVR, namespace-scope, and view metadata.
 - `now`: one CEL timestamp captured once for an entire projection batch.
 
+For Pod and Node views, `metrics` has this stable dynamic shape:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `available` | `bool` | Actual provider-backed usage is available for this refresh. |
+| `stale` | `bool` | Provider-backed usage is retained from a failed refresh. |
+| `provider` | `string` | Actual-usage provider identity (`metrics.k8s.io/v1beta1`). |
+| `resources` | `map<string, number>` | Actual usage keyed by exact resource name; CPU is nanocores, byte resources are bytes, and generic resources are counts. |
+| `measuredAt` | `timestamp`, optional | Provider sample timestamp. |
+| `accountingAvailable` | `bool` | Scheduler accounting could be calculated for this object/revision. |
+| `requests` | `map<string, number>` | Effective Pod requests or aggregate Node requests, keyed by exact resource name. |
+| `limits` | `map<string, number>` | Effective Pod limits or aggregate Node limits, keyed by exact resource name. |
+| `allocatable` | `map<string, number>` | Node allocatable resources; present on Node views. |
+| `capacity` | `map<string, number>` | Node physical capacity; present on Node views. |
+| `podCount` | `integer` | Relevant bound Pod count; present when Node accounting is ready. |
+
+Scheduler-map CPU values are cores, memory/storage/huge-page values are bytes,
+and extended resources are counts. Pod requests and limits use Kubernetes'
+effective scheduling formula, including regular containers, restartable init
+containers, non-restartable init containers, Pod-level resources, and Pod
+overhead. Exact keys such as `hugepages-2Mi`, `hugepages-1Gi`,
+`nvidia.com/gpu`, and `aliyun.com/ppu` are independent map entries and are
+never summed together.
+
 CEL optional syntax is enabled. For example:
 
 ```cel

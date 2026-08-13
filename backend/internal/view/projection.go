@@ -439,7 +439,18 @@ func (p *Projector) metricsForObject(object *unstructured.Unstructured) map[stri
 		p.spec.Metrics, string(object.GetUID()), object.GetNamespace(), object.GetName(), kind,
 	)
 	activation := metricsActivation(sample, p.spec.Metrics.State)
-	if kind != metrics.NodeMetrics {
+	if kind == metrics.PodMetrics {
+		var pod corev1.Pod
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &pod); err != nil {
+			activation["accountingAvailable"] = false
+			activation["requests"] = map[string]any{}
+			activation["limits"] = map[string]any{}
+			return activation
+		}
+		accounting := metrics.AccountPod(&pod, nil)
+		activation["accountingAvailable"] = true
+		activation["requests"] = resourceListActivation(accounting.Requests)
+		activation["limits"] = resourceListActivation(accounting.Limits)
 		return activation
 	}
 	accounting, ready := p.nodeAccountingFor(object)
