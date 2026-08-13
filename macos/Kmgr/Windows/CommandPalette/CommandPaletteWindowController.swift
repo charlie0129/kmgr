@@ -10,12 +10,8 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         var resources: [DiscoveredResource]
         var namespaces: [String]
         var namespaceScope: NamespaceSelection
-        var selectedIdentities: [ResourceIdentity]
+        let commandContext: CommandContext
         var recentObjects: [RecentObject]
-    }
-
-    enum Operation: Hashable {
-        case startPortForward(ResourceIdentity)
     }
 
     private enum Mode {
@@ -24,21 +20,20 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     }
 
     private enum Item: Hashable {
-        case operation(Operation)
+        case operation(PaletteOperation)
         case result(PaletteResult)
 
         var title: String {
             switch self {
-            case .operation(.startPortForward): "Start Port Forward…"
+            case .operation(let operation): operation.title
             case .result(let result): result.title
             }
         }
 
         var detail: String {
             switch self {
-            case .operation(.startPortForward(let identity)):
-                let namespace = identity.namespace.isEmpty ? "cluster-scoped" : identity.namespace
-                return "\(namespace)/\(identity.name)"
+            case .operation:
+                return "Captured resource selection"
             case .result(.resource(let resource)):
                 return resource.group.isEmpty ? resource.resource : "\(resource.resource).\(resource.group)"
             case .result(.searchResource):
@@ -59,11 +54,40 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
 
         var imageName: String {
             switch self {
-            case .operation(.startPortForward): "arrow.left.arrow.right"
+            case .operation(let operation):
+                switch operation {
+                case .openDetails: "info.circle"
+                case .openYAML: "doc.plaintext"
+                case .openEvents: "clock.arrow.circlepath"
+                case .openLogs: "text.alignleft"
+                case .openExec: "terminal"
+                case .startPortForward: "arrow.left.arrow.right"
+                case .delete: "trash"
+                case .scale: "arrow.up.left.and.arrow.down.right"
+                case .restart: "arrow.clockwise"
+                case .editMetadata: "tag"
+                case .copyName, .copyNamespacedName, .copyReference: "doc.on.doc"
+                }
             case .result(.resource): "tablecells"
             case .result(.searchResource): "magnifyingglass"
             case .result(.namespace): "folder"
             case .result(.object): "shippingbox"
+            }
+        }
+
+        static func operationDetail(
+            _ operation: PaletteOperation,
+            selection: [ResourceIdentity]
+        ) -> String {
+            guard let only = selection.first, selection.count == 1 else {
+                return "\(selection.count.formatted()) captured resources"
+            }
+            let qualified = only.namespace.isEmpty ? only.name : "\(only.namespace)/\(only.name)"
+            switch operation {
+            case .copyName, .copyNamespacedName, .copyReference:
+                return "Copy from captured \(qualified)"
+            default:
+                return "Captured \(qualified) · UID-pinned"
             }
         }
     }
@@ -91,7 +115,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     var onOpenResource: ((DiscoveredResource) -> Void)?
     var onChangeNamespace: ((String) -> Void)?
     var onOpenObject: ((ResourceIdentity) -> Void)?
-    var onOperation: ((Operation) -> Void)?
+    var onOperation: ((PaletteOperation, CommandContext) -> Void)?
     var onClose: (() -> Void)?
 
     init(
@@ -151,9 +175,18 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? PaletteResultCell
             ?? PaletteResultCell(identifier: identifier)
         let item = items[row]
+        let detail: String
+        if case .operation(let operation) = item {
+            detail = Item.operationDetail(
+                operation,
+                selection: context.commandContext.selectedIdentities
+            )
+        } else {
+            detail = item.detail
+        }
         cell.configure(
             title: item.title,
-            detail: item.detail,
+            detail: detail,
             image: NSImage(systemSymbolName: item.imageName, accessibilityDescription: nil)
         )
         return cell
@@ -205,7 +238,8 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         switch item {
         case .operation(let operation):
             let callback = onOperation
-            closeAndRun { callback?(operation) }
+            let commandContext = context.commandContext
+            closeAndRun { callback?(operation, commandContext) }
         case .result(.resource(let resource)):
             let callback = onOpenResource
             closeAndRun { callback?(resource) }
@@ -290,9 +324,10 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             .trimmingCharacters(in: .whitespacesAndNewlines)
         var values: [Item] = []
 
-        if let target = eligiblePortForwardTarget(), matchesPortForwardOperation(query) {
-            values.append(.operation(.startPortForward(target)))
-        }
+        values.append(contentsOf: PaletteOperationRanking.operations(
+            query: query,
+            context: context.commandContext
+        ).map(Item.operation))
 
         values.append(contentsOf: PaletteRanking.resources(
             query: query,
@@ -578,24 +613,6 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         if let selected {
             tableView.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
         }
-    }
-
-    private func eligiblePortForwardTarget() -> ResourceIdentity? {
-        guard context.selectedIdentities.count == 1, let value = context.selectedIdentities.first else {
-            return nil
-        }
-        let isPod = value.group.isEmpty && value.version == "v1" && value.resource == "pods"
-        let isService = value.group.isEmpty && value.version == "v1" && value.resource == "services"
-        return isPod || isService ? value : nil
-    }
-
-    private func matchesPortForwardOperation(_ query: String) -> Bool {
-        let needle = query.lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return needle.isEmpty
-            || "start port forward".contains(needle)
-            || "port-forward".contains(needle)
-            || "forward".hasPrefix(needle)
     }
 
     private func positionRelativeToParent() {

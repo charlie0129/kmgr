@@ -244,6 +244,123 @@ public enum PaletteResult: Hashable, Sendable {
     }
 }
 
+/// A resource operation shown by the command palette. The operation carries
+/// no live UI reference; activation is paired with the immutable
+/// ``CommandContext`` captured before the palette opens.
+public enum PaletteOperation: CaseIterable, Hashable, Sendable {
+    case openDetails
+    case openYAML
+    case openEvents
+    case openLogs
+    case openExec
+    case startPortForward
+    case delete
+    case scale
+    case restart
+    case editMetadata
+    case copyName
+    case copyNamespacedName
+    case copyReference
+
+    public var commandID: CommandID {
+        switch self {
+        case .openDetails: .openDetails
+        case .openYAML: .openYAML
+        case .openEvents: .openEvents
+        case .openLogs: .openLogs
+        case .openExec: .openExec
+        case .startPortForward: .startPortForward
+        case .delete: .delete
+        case .scale: .scale
+        case .restart: .restart
+        case .editMetadata: .editMetadata
+        case .copyName: .copyName
+        case .copyNamespacedName: .copyNamespacedName
+        case .copyReference: .copyReference
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .openDetails: "Open Details"
+        case .openYAML: "Open YAML"
+        case .openEvents: "Open Events"
+        case .openLogs: "Open Logs…"
+        case .openExec: "Open Terminal…"
+        case .startPortForward: "Start Port Forward…"
+        case .delete: "Delete…"
+        case .scale: "Scale…"
+        case .restart: "Rollout Restart…"
+        case .editMetadata: "Edit Labels / Annotations…"
+        case .copyName: "Copy Name"
+        case .copyNamespacedName: "Copy Namespace/Name"
+        case .copyReference: "Copy kubectl Reference"
+        }
+    }
+
+    fileprivate var searchTerms: [String] {
+        switch self {
+        case .openDetails: ["open details", "details", "inspect", "view"]
+        case .openYAML: ["open yaml", "yaml", "manifest"]
+        case .openEvents: ["open events", "events"]
+        case .openLogs: ["open logs", "logs", "log"]
+        case .openExec: ["open terminal", "terminal", "exec", "shell"]
+        case .startPortForward: ["start port forward", "port forward", "port-forward", "forward"]
+        case .delete: ["delete", "remove"]
+        case .scale: ["scale", "replicas"]
+        case .restart: ["rollout restart", "restart", "rollout"]
+        case .editMetadata: ["edit labels annotations", "metadata", "labels", "annotations"]
+        case .copyName: ["copy name", "name"]
+        case .copyNamespacedName: ["copy namespace name", "namespace/name", "namespaced name"]
+        case .copyReference: ["copy kubectl reference", "kubectl", "reference"]
+        }
+    }
+}
+
+public enum PaletteOperationRanking {
+    /// Returns only operations valid for the captured responder and full
+    /// identity selection. Stable declaration order is the empty-query rank;
+    /// typed queries prefer exact terms, then prefixes, then substrings.
+    public static func operations(
+        query: String,
+        context: CommandContext,
+        limit: Int = 20
+    ) -> [PaletteOperation] {
+        let needle = normalized(query)
+        let ranked = PaletteOperation.allCases.compactMap { operation -> (Int, PaletteOperation)? in
+            guard CommandValidator.isEnabled(operation.commandID, in: context) else { return nil }
+            guard !needle.isEmpty else { return (0, operation) }
+            let terms = operation.searchTerms.map { normalized($0) }
+            let score: Int
+            if terms.contains(needle) {
+                score = 1_000
+            } else if terms.contains(where: { $0.hasPrefix(needle) }) {
+                score = 800
+            } else if terms.contains(where: { $0.contains(needle) }) {
+                score = 500
+            } else {
+                return nil
+            }
+            return (score, operation)
+        }.sorted {
+            if $0.0 != $1.0 { return $0.0 > $1.0 }
+            guard
+                let lhs = PaletteOperation.allCases.firstIndex(of: $0.1),
+                let rhs = PaletteOperation.allCases.firstIndex(of: $1.1)
+            else { return $0.1.title < $1.1.title }
+            return lhs < rhs
+        }
+        return ranked.prefix(max(0, limit)).map(\.1)
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(whereSeparator: { $0.isWhitespace || $0 == "-" || $0 == "/" })
+            .joined(separator: " ")
+    }
+}
+
 public enum PaletteRanking {
     public static func recentObjects(
         query: String,

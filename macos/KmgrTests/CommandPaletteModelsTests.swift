@@ -149,6 +149,95 @@ import Testing
     #expect(value.identity == identity)
 }
 
+@Test func paletteOperationsUseOnlyCapturedResponderAndSelection() {
+    let captured = CommandContext.capturingResourceSelection(
+        firstResponder: .resourceTable,
+        selectedIdentities: [paletteIdentity("api", uid: "uid-api")]
+    )
+    let valid = PaletteOperationRanking.operations(query: "", context: captured)
+
+    #expect(valid.contains(.openDetails))
+    #expect(valid.contains(.openYAML))
+    #expect(valid.contains(.openEvents))
+    #expect(valid.contains(.openLogs))
+    #expect(valid.contains(.openExec))
+    #expect(valid.contains(.startPortForward))
+    #expect(valid.contains(.delete))
+    #expect(valid.contains(.copyReference))
+    #expect(valid.contains(.scale) == false)
+    #expect(valid.contains(.restart) == false)
+
+    let typing = CommandContext.capturingResourceSelection(
+        firstResponder: .filterField,
+        selectedIdentities: captured.selectedIdentities
+    )
+    #expect(PaletteOperationRanking.operations(query: "", context: typing).isEmpty)
+}
+
+@Test func paletteOperationRankingFiltersAndRanksOnlyValidCommands() {
+    var deployment = paletteIdentity("api", uid: "uid-deployment")
+    deployment.group = "apps"
+    deployment.resource = "deployments"
+    let context = CommandContext.capturingResourceSelection(
+        firstResponder: .resourceTable,
+        selectedIdentities: [deployment]
+    )
+
+    #expect(PaletteOperationRanking.operations(query: "restart", context: context) == [.restart])
+    #expect(PaletteOperationRanking.operations(query: "replicas", context: context) == [.scale])
+    #expect(PaletteOperationRanking.operations(query: "terminal", context: context).isEmpty)
+}
+
+@Test func capturedCommandContextDerivesCompatibilityFromFullIdentities() {
+    let first = paletteIdentity("api", uid: "uid-api")
+    let second = paletteIdentity("worker", uid: "uid-worker")
+    let context = CommandContext.capturingResourceSelection(
+        firstResponder: .resourceTable,
+        selectedIdentities: [first, second],
+        hiddenSelectionUIDs: [first.uid, "not-selected"]
+    )
+
+    #expect(context.selectedIdentities == [first, second])
+    #expect(context.hiddenSelectionUIDs == [first.uid])
+    #expect(context.logCompatibleSelection)
+    #expect(context.execCompatibleSelection == false)
+    #expect(context.portForwardCompatibleSelection == false)
+}
+
+@Test func disconnectedSnapshotSuppressesNetworkOperationsButKeepsCopies() {
+    let context = CommandContext.capturingResourceSelection(
+        firstResponder: .resourceTable,
+        selectedIdentities: [paletteIdentity("api", uid: "uid-api")],
+        networkActionsAllowed: false
+    )
+    let valid = PaletteOperationRanking.operations(query: "", context: context)
+
+    #expect(valid == [.copyName, .copyNamespacedName, .copyReference])
+}
+
+@Test func resourceListResponderClassificationHonorsFieldEditorsAndDescendants() {
+    #expect(ResourceListResponderClassifier.classify(
+        tableOwnsResponder: true,
+        filterOwnsResponder: false,
+        tableHasActiveEditor: false
+    ) == .resourceTable)
+    #expect(ResourceListResponderClassifier.classify(
+        tableOwnsResponder: true,
+        filterOwnsResponder: false,
+        tableHasActiveEditor: true
+    ) == .other)
+    #expect(ResourceListResponderClassifier.classify(
+        tableOwnsResponder: false,
+        filterOwnsResponder: true,
+        tableHasActiveEditor: false
+    ) == .filterField)
+    #expect(ResourceListResponderClassifier.classify(
+        tableOwnsResponder: true,
+        filterOwnsResponder: true,
+        tableHasActiveEditor: false
+    ) == .filterField)
+}
+
 private func paletteIdentity(_ name: String, uid: String) -> ResourceIdentity {
     ResourceIdentity(
         clusterSessionID: "session",

@@ -390,28 +390,87 @@ public enum ResponderContext: String, Hashable, Codable, Sendable {
     }
 }
 
+public enum ResourceListResponderClassifier {
+    /// Converts AppKit ownership facts into the stable responder context used
+    /// by command validation. A field editor belongs to its text control even
+    /// though `NSWindow.firstResponder` is the editor, not the control. Table
+    /// descendants count only while the table has no active cell editor.
+    public static func classify(
+        tableOwnsResponder: Bool,
+        filterOwnsResponder: Bool,
+        tableHasActiveEditor: Bool
+    ) -> ResponderContext {
+        if filterOwnsResponder { return .filterField }
+        if tableOwnsResponder && !tableHasActiveEditor { return .resourceTable }
+        return .other
+    }
+}
+
 public struct CommandContext: Hashable, Sendable {
-    public var firstResponder: ResponderContext
-    public var selectedIdentities: [ResourceIdentity]
-    public var logCompatibleSelection: Bool
-    public var execCompatibleSelection: Bool
-    public var portForwardCompatibleSelection: Bool
-    public var activeEditorHasChanges: Bool
+    public let firstResponder: ResponderContext
+    public let selectedIdentities: [ResourceIdentity]
+    public let hiddenSelectionUIDs: Set<ResourceUID>
+    public let logCompatibleSelection: Bool
+    public let execCompatibleSelection: Bool
+    public let portForwardCompatibleSelection: Bool
+    public let activeEditorHasChanges: Bool
+    public let networkActionsAllowed: Bool
 
     public init(
         firstResponder: ResponderContext,
         selectedIdentities: [ResourceIdentity] = [],
+        hiddenSelectionUIDs: Set<ResourceUID> = [],
         logCompatibleSelection: Bool = false,
         execCompatibleSelection: Bool = false,
         portForwardCompatibleSelection: Bool = false,
-        activeEditorHasChanges: Bool = false
+        activeEditorHasChanges: Bool = false,
+        networkActionsAllowed: Bool = true
     ) {
         self.firstResponder = firstResponder
         self.selectedIdentities = selectedIdentities
+        self.hiddenSelectionUIDs = hiddenSelectionUIDs.intersection(
+            Set(selectedIdentities.map(\.uid))
+        )
         self.logCompatibleSelection = logCompatibleSelection
         self.execCompatibleSelection = execCompatibleSelection
         self.portForwardCompatibleSelection = portForwardCompatibleSelection
         self.activeEditorHasChanges = activeEditorHasChanges
+        self.networkActionsAllowed = networkActionsAllowed
+    }
+
+    /// Builds one immutable value snapshot for resource-table commands. The
+    /// compatibility facts are derived from the copied full identities so a
+    /// later table selection change cannot retarget a command palette action.
+    public static func capturingResourceSelection(
+        firstResponder: ResponderContext,
+        selectedIdentities: [ResourceIdentity],
+        hiddenSelectionUIDs: Set<ResourceUID> = [],
+        networkActionsAllowed: Bool = true
+    ) -> Self {
+        let isPod: (ResourceIdentity) -> Bool = {
+            $0.group.isEmpty && $0.version == "v1" && $0.resource == "pods"
+        }
+        let logCompatible = !selectedIdentities.isEmpty
+            && selectedIdentities.count <= 128
+            && selectedIdentities.allSatisfy(isPod)
+        let execCompatible = selectedIdentities.count == 1
+            && selectedIdentities.first.map(isPod) == true
+        let portForwardCompatible = selectedIdentities.count == 1
+            && selectedIdentities.first.map {
+                $0.group.isEmpty && $0.version == "v1"
+                    && ($0.resource == "pods" || $0.resource == "services")
+            } == true
+        return Self(
+            firstResponder: firstResponder,
+            selectedIdentities: selectedIdentities,
+            hiddenSelectionUIDs: hiddenSelectionUIDs.intersection(
+                Set(selectedIdentities.map(\.uid))
+            ),
+            logCompatibleSelection: logCompatible,
+            execCompatibleSelection: execCompatible,
+            portForwardCompatibleSelection: portForwardCompatible,
+            networkActionsAllowed: networkActionsAllowed
+        )
     }
 }
 
@@ -421,6 +480,14 @@ public enum CommandValidator {
     /// considered valid while an editor, filter, or terminal owns focus.
     public static func isEnabled(_ command: CommandID, in context: CommandContext) -> Bool {
         let count = context.selectedIdentities.count
+        switch command {
+        case .copyName, .copyNamespacedName, .copyReference, .selectAll,
+            .focusFilter:
+            break
+        case .openDetails, .openYAML, .openEvents, .openLogs, .openExec,
+            .startPortForward, .delete, .scale, .restart, .editMetadata, .save:
+            guard context.networkActionsAllowed else { return false }
+        }
         switch command {
         case .openDetails, .openYAML, .openEvents:
             return context.firstResponder == .resourceTable && count == 1

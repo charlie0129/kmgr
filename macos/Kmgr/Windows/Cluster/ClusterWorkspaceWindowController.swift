@@ -341,6 +341,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var resources: [DiscoveredResource] = []
     private var namespaces: [String] = []
     private var paletteController: CommandPaletteWindowController?
+    private var palettePresentationTask: Task<Void, Never>?
     private var objectOpenTask: Task<Void, Never>?
     private var detailController: ObjectDetailViewController?
     private var pendingRestorationState: ClusterWindowRestorationState?
@@ -467,6 +468,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     func engineDidDisconnect(message: String) {
         namespaceTask?.cancel()
         objectOpenTask?.cancel()
+        palettePresentationTask?.cancel()
+        palettePresentationTask = nil
+        paletteController?.close()
+        paletteController = nil
         detailController?.engineDidDisconnect()
         contentController.engineDidDisconnect()
         connectionLabel.stringValue = "Engine disconnected · reconnecting…"
@@ -523,6 +528,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     func stop() {
         namespaceTask?.cancel()
+        palettePresentationTask?.cancel()
+        palettePresentationTask = nil
         paletteController?.close()
         paletteController = nil
         objectOpenTask?.cancel()
@@ -716,22 +723,52 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             paletteController.showWindow(nil)
             return
         }
-        Task { [weak self, recentObjectStore] in
-            guard let self else { return }
-            let recentObjects = await recentObjectStore.recent(sessionID: session.sessionID)
-            guard !Task.isCancelled, paletteController == nil else { return }
-            installCommandPalette(recentObjects: recentObjects)
+        guard palettePresentationTask == nil else { return }
+
+        // Capture responder, scope, discovery snapshot, and full UID-pinned
+        // identities synchronously at the Command-K event. Fetching recents is
+        // asynchronous, so reading any of these values afterward could target
+        // a different selection or responder.
+        let capturedSession = session
+        let capturedResources = resources
+        let capturedNamespaces = namespaces
+        let capturedScope = selectedNamespaceScope()
+        let capturedCommandContext = contentController.captureCommandContext()
+        palettePresentationTask = Task { [weak self, recentObjectStore] in
+            let recentObjects = await recentObjectStore.recent(
+                sessionID: capturedSession.sessionID
+            )
+            guard !Task.isCancelled, let self else { return }
+            palettePresentationTask = nil
+            guard paletteController == nil, session.sessionID == capturedSession.sessionID else {
+                return
+            }
+            installCommandPalette(
+                session: capturedSession,
+                resources: capturedResources,
+                namespaces: capturedNamespaces,
+                namespaceScope: capturedScope,
+                commandContext: capturedCommandContext,
+                recentObjects: recentObjects
+            )
         }
     }
 
-    private func installCommandPalette(recentObjects: [RecentObject]) {
+    private func installCommandPalette(
+        session: OpenedClusterSession,
+        resources: [DiscoveredResource],
+        namespaces: [String],
+        namespaceScope: NamespaceSelection,
+        commandContext: CommandContext,
+        recentObjects: [RecentObject]
+    ) {
         let controller = CommandPaletteWindowController(
             context: .init(
                 session: session,
                 resources: resources,
                 namespaces: namespaces,
-                namespaceScope: selectedNamespaceScope(),
-                selectedIdentities: contentController.selectedIdentitiesForNetworkActions,
+                namespaceScope: namespaceScope,
+                commandContext: commandContext,
                 recentObjects: recentObjects
             ),
             objectSearchProvider: objectSearchProvider
@@ -749,9 +786,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         controller.onOpenObject = { [weak self] identity in
             self?.freshOpen(identity)
         }
-        controller.onOperation = { [weak self] operation in
-            guard case .startPortForward(let identity) = operation else { return }
-            self?.onStartPortForward?(identity)
+        controller.onOperation = { [weak self] operation, capturedContext in
+            self?.performPaletteOperation(operation, capturedContext: capturedContext)
         }
         controller.onClose = { [weak self, weak controller] in
             guard self?.paletteController === controller else { return }
@@ -760,6 +796,29 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         paletteController = controller
         view.window?.addChildWindow(controller.window!, ordered: .above)
         controller.showWindow(nil)
+    }
+
+    private func performPaletteOperation(
+        _ operation: PaletteOperation,
+        capturedContext: CommandContext
+    ) {
+        guard CommandValidator.isEnabled(operation.commandID, in: capturedContext) else {
+            NSSound.beep()
+            return
+        }
+        guard capturedContext.selectedIdentities.allSatisfy({
+            $0.clusterSessionID == session.sessionID
+        }) else {
+            // A helper generation change invalidates the session portion of
+            // every captured identity. Never rebind and replay an operation.
+            NSSound.beep()
+            return
+        }
+        contentController.performCapturedCommand(
+            operation.resourceTableCommand,
+            identities: capturedContext.selectedIdentities,
+            hiddenSelectionUIDs: capturedContext.hiddenSelectionUIDs
+        )
     }
 
     private func freshOpen(_ identity: ResourceIdentity) {
@@ -1586,10 +1645,31 @@ private final class ResourceListViewController: NSViewController,
 
     var selectedIdentities: [ResourceIdentity] { model.selectedIdentities }
 
-    var selectedIdentitiesForNetworkActions: [ResourceIdentity] {
+    func captureCommandContext() -> CommandContext {
         let selected = model.selectedIdentities
-        guard recoveredResourceTrust.permitsNetworkActions(for: selected) else { return [] }
-        return selected
+        let visibleUIDs = Set(model.orderedVisibleUIDs)
+        let window = view.window
+        let firstResponder = window?.firstResponder
+        let filterOwnsResponder = firstResponder === filterField
+            || filterField.currentEditor() === firstResponder
+            || (firstResponder as? NSView).map { $0.isDescendant(of: filterField) } == true
+        let tableOwnsResponder = firstResponder === tableView
+            || (firstResponder as? NSView).map { $0.isDescendant(of: tableView) } == true
+        let responder = ResourceListResponderClassifier.classify(
+            tableOwnsResponder: tableOwnsResponder,
+            filterOwnsResponder: filterOwnsResponder,
+            tableHasActiveEditor: tableView.currentEditor() != nil
+        )
+        return .capturingResourceSelection(
+            firstResponder: responder,
+            selectedIdentities: selected,
+            hiddenSelectionUIDs: Set(selected.lazy.map(\.uid).filter {
+                !visibleUIDs.contains($0)
+            }),
+            networkActionsAllowed: recoveredResourceTrust.permitsNetworkActions(
+                for: selected
+            )
+        )
     }
 
     @discardableResult
@@ -2373,38 +2453,49 @@ private final class ResourceListViewController: NSViewController,
         openSelectedObject(initialTab: .automatic)
     }
 
-    private func openSelectedObject(initialTab: ObjectDetailInitialTab) {
-        guard let identity = model.selectedIdentities.only else { return }
+    private func openSelectedObject(
+        initialTab: ObjectDetailInitialTab,
+        identities: [ResourceIdentity]? = nil
+    ) {
+        guard let identity = (identities ?? model.selectedIdentities).only else { return }
         onOpenObject?(identity, initialTab)
     }
 
-    private func handle(_ command: ResourceTableCommand) {
+    private func handle(
+        _ command: ResourceTableCommand,
+        identities capturedIdentities: [ResourceIdentity]? = nil,
+        hiddenSelectionUIDs: Set<ResourceUID>? = nil
+    ) {
+        let selected = capturedIdentities ?? model.selectedIdentities
         switch command {
         case .focusFilter:
             view.window?.makeFirstResponder(filterField)
         case .open:
-            openSelectedObjectFromTable()
+            if capturedIdentities == nil {
+                openSelectedObjectFromTable()
+            } else {
+                openSelectedObject(initialTab: .automatic, identities: selected)
+            }
         case .openYAML:
-            openSelectedObject(initialTab: .yaml)
+            openSelectedObject(initialTab: .yaml, identities: selected)
         case .openEvents:
-            openSelectedObject(initialTab: .events)
+            openSelectedObject(initialTab: .events, identities: selected)
         case .startPortForward:
-            guard let identity = model.selectedIdentities.only,
+            guard let identity = selected.only,
                 identity.group.isEmpty,
                 identity.version == "v1",
                 identity.resource == "pods" || identity.resource == "services"
             else { return }
             onStartPortForward?(identity)
         case .openLogs:
-            let identities = model.selectedIdentities
-            guard !identities.isEmpty, identities.count <= 128,
-                identities.allSatisfy({
+            guard !selected.isEmpty, selected.count <= 128,
+                selected.allSatisfy({
                     $0.group.isEmpty && $0.version == "v1" && $0.resource == "pods"
                 })
             else { NSSound.beep(); return }
-            onOpenLogs?(identities)
+            onOpenLogs?(selected)
         case .openExec:
-            guard let identity = model.selectedIdentities.only,
+            guard let identity = selected.only,
                 identity.group.isEmpty, identity.version == "v1", identity.resource == "pods"
             else { NSSound.beep(); return }
             onOpenExec?(identity)
@@ -2415,32 +2506,37 @@ private final class ResourceListViewController: NSViewController,
             suppressSelectionCallbacks = false
             updateStatusLine()
         case .delete:
-            let visible = Set(model.orderedVisibleUIDs)
-            let targets = model.selectedIdentities.map { identity in
+            let currentVisibleUIDs = Set(model.orderedVisibleUIDs)
+            let hidden = hiddenSelectionUIDs ?? Set(
+                selected.lazy.map(\.uid).filter {
+                    !currentVisibleUIDs.contains($0)
+                }
+            )
+            let targets = selected.map { identity in
                 ResourceDeleteTarget(
                     identity: identity,
-                    hiddenByFilter: !visible.contains(identity.uid)
+                    hiddenByFilter: hidden.contains(identity.uid)
                 )
             }
             guard !targets.isEmpty else { NSSound.beep(); return }
             onDelete?(targets)
         case .scale:
-            guard let identity = model.selectedIdentities.only else { return }
+            guard let identity = selected.only else { return }
             onMutate?(identity, .scale)
         case .restart:
-            guard let identity = model.selectedIdentities.only else { return }
+            guard let identity = selected.only else { return }
             onMutate?(identity, .rolloutRestart)
         case .editMetadata:
-            guard let identity = model.selectedIdentities.only else { return }
+            guard let identity = selected.only else { return }
             onMutate?(identity, .metadata)
         case .copyName:
-            copySelectedIdentities { $0.name }
+            copyIdentities(selected) { $0.name }
         case .copyNamespacedName:
-            copySelectedIdentities { identity in
+            copyIdentities(selected) { identity in
                 identity.namespace.isEmpty ? identity.name : "\(identity.namespace)/\(identity.name)"
             }
         case .copyReference:
-            copySelectedIdentities { identity in
+            copyIdentities(selected) { identity in
                 var reference = "\(identity.resource)/\(identity.name)"
                 if !identity.namespace.isEmpty { reference += " -n \(identity.namespace)" }
                 return reference
@@ -2453,8 +2549,11 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
-    private func copySelectedIdentities(_ transform: (ResourceIdentity) -> String) {
-        let values = model.selectedIdentities.map(transform)
+    private func copyIdentities(
+        _ identities: [ResourceIdentity],
+        transform: (ResourceIdentity) -> String
+    ) {
+        let values = identities.map(transform)
         guard !values.isEmpty else { NSSound.beep(); return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(values.joined(separator: "\n"), forType: .string)
@@ -2463,6 +2562,22 @@ private final class ResourceListViewController: NSViewController,
     func performCommand(_ command: ResourceTableCommand) {
         guard canPerformCommand(command) else { NSSound.beep(); return }
         handle(command)
+    }
+
+    /// Executes a palette operation against the immutable identity snapshot
+    /// captured when Command-K was pressed. This deliberately bypasses current
+    /// responder/selection validation; the captured CommandContext has already
+    /// been validated and the full identities remain the operation targets.
+    func performCapturedCommand(
+        _ command: ResourceTableCommand,
+        identities: [ResourceIdentity],
+        hiddenSelectionUIDs: Set<ResourceUID> = []
+    ) {
+        handle(
+            command,
+            identities: identities,
+            hiddenSelectionUIDs: hiddenSelectionUIDs
+        )
     }
 
     func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
@@ -2525,6 +2640,26 @@ private enum ResourceTableCommand: Equatable {
     case focusFilter, open, openYAML, openEvents, openLogs, openExec
     case startPortForward, selectAll, delete, scale, restart, editMetadata
     case copyName, copyNamespacedName, copyReference, moveUp, moveDown
+}
+
+private extension PaletteOperation {
+    var resourceTableCommand: ResourceTableCommand {
+        switch self {
+        case .openDetails: .open
+        case .openYAML: .openYAML
+        case .openEvents: .openEvents
+        case .openLogs: .openLogs
+        case .openExec: .openExec
+        case .startPortForward: .startPortForward
+        case .delete: .delete
+        case .scale: .scale
+        case .restart: .restart
+        case .editMetadata: .editMetadata
+        case .copyName: .copyName
+        case .copyNamespacedName: .copyNamespacedName
+        case .copyReference: .copyReference
+        }
+    }
 }
 
 private final class ResourceTableCommandBox {
