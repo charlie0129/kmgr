@@ -12,6 +12,7 @@ import (
 	appconfig "github.com/charlie0129/kmgr/backend/internal/config"
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	"github.com/charlie0129/kmgr/backend/internal/operation"
+	"github.com/charlie0129/kmgr/backend/internal/portforward"
 	streamlogs "github.com/charlie0129/kmgr/backend/internal/stream/logs"
 	"github.com/charlie0129/kmgr/backend/internal/view"
 	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
@@ -43,6 +44,7 @@ type Server struct {
 	sessions  *cluster.SessionRegistry
 	views     *view.Runtime
 	logs      *streamlogs.Manager
+	forwards  *portforward.Manager
 	logger    *slog.Logger
 	closeOnce sync.Once
 }
@@ -118,6 +120,21 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		viewRuntime.Close()
 		return nil, err
 	}
+	forwardManager, err := portforward.NewManager(portforward.Config{
+		Sessions: portforward.ClusterSessions{Sessions: sessions},
+	})
+	if err != nil {
+		logManager.Close()
+		viewRuntime.Close()
+		return nil, err
+	}
+	forwardService, err := portforward.NewGRPCService(forwardManager)
+	if err != nil {
+		forwardManager.Close()
+		logManager.Close()
+		viewRuntime.Close()
+		return nil, err
+	}
 	serverOptions := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(
 			authenticator.UnaryServerInterceptor,
@@ -136,6 +153,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	kmgrv1.RegisterObjectServiceServer(grpcServer, objectService)
 	kmgrv1.RegisterOperationServiceServer(grpcServer, operationService)
 	kmgrv1.RegisterLogServiceServer(grpcServer, logService)
+	kmgrv1.RegisterPortForwardServiceServer(grpcServer, forwardService)
 
 	return &Server{
 		grpc:     grpcServer,
@@ -145,6 +163,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		sessions: sessions,
 		views:    viewRuntime,
 		logs:     logManager,
+		forwards: forwardManager,
 		logger:   options.Logger,
 	}, nil
 }
@@ -171,6 +190,7 @@ func (s *Server) Shutdown(timeout time.Duration) {
 		}
 		s.views.Close()
 		s.logs.Close()
+		s.forwards.Close()
 		stopped := make(chan struct{})
 		go func() {
 			s.grpc.GracefulStop()
