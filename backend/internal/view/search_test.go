@@ -1102,6 +1102,9 @@ func TestFinalSharedListDeliveryKeepsDetachAndReopenOnOnePipeline(t *testing.T) 
 		"rv-final", "", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{}),
 	)}
 	client.firstPageGate = make(chan struct{})
+	var releaseListOnce sync.Once
+	releaseList := func() { releaseListOnce.Do(func() { close(client.firstPageGate) }) }
+	defer releaseList()
 	runtime, err := NewRuntime(RuntimeConfig{
 		Source: &fakeResourceSource{authority: "cluster", client: client},
 	})
@@ -1109,6 +1112,12 @@ func TestFinalSharedListDeliveryKeepsDetachAndReopenOnOnePipeline(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer runtime.Close()
+	projectionStarted := make(chan struct{})
+	releaseProjection := make(chan struct{})
+	var projectionStartedOnce sync.Once
+	var releaseProjectionOnce sync.Once
+	unblockProjection := func() { releaseProjectionOnce.Do(func() { close(releaseProjection) }) }
+	defer unblockProjection()
 
 	finalBatch := make(chan SearchBatch, 1)
 	searchDone := make(chan error, 1)
@@ -1128,48 +1137,72 @@ func TestFinalSharedListDeliveryKeepsDetachAndReopenOnOnePipeline(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Hold final projection after the coordinator commits its store but before
-	// it releases the handoff gate. This makes the detach/reopen window fully
-	// deterministic without adding a production-only hook.
+	// Make the final LIST batch flush one already-pending full projection. The
+	// expensive portion of runProjection executes without Subscription.mu, so
+	// this holds the coordinator's final-delivery gate while still allowing the
+	// close handoff latch to retire and detach the first subscription.
 	first.mu.Lock()
-	close(client.firstPageGate)
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		for _, transient := range runtime.transientSearchLists {
-			if transient.terminal && transient.view == first.resource {
-				return first.resource.store.ResourceVersion() == "rv-final"
-			}
-		}
-		return false
-	})
+	first.projectionResnapshot = true
+	first.projector.now = func() time.Time {
+		projectionStartedOnce.Do(func() { close(projectionStarted) })
+		<-releaseProjection
+		return time.Unix(100, 0)
+	}
+	first.mu.Unlock()
+	releaseList()
+	select {
+	case <-projectionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("final shared-LIST projection did not start")
+	}
+	runtime.mu.Lock()
+	transient := first.resource.transientSearchList
+	terminal := transient != nil && transient.terminal && transient.view == first.resource
+	resourceVersion := first.resource.store.ResourceVersion()
+	runtime.mu.Unlock()
+	if !terminal || resourceVersion != "rv-final" {
+		t.Fatalf("final delivery gate terminal=%t resourceVersion=%q, want terminal rv-final", terminal, resourceVersion)
+	}
 
 	closeDone := make(chan struct{})
 	go func() {
 		first.Close()
 		close(closeDone)
 	}()
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		return runtime.views[first.key] == nil
-	})
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("first subscription did not detach while final projection was blocked")
+	}
+	runtime.mu.Lock()
+	firstDetached := runtime.views[first.key] == nil
+	runtime.mu.Unlock()
+	if !firstDetached {
+		t.Fatal("first subscription close completed without detaching its view")
+	}
 	second, err := runtime.Open(openView("session", "second", 1))
 	if err != nil {
-		first.mu.Unlock()
 		t.Fatal(err)
 	}
 	defer second.Close()
 	if got := client.listCalls.Load(); got != 1 {
-		first.mu.Unlock()
 		t.Fatalf("reopen during final delivery issued %d LISTs, want 1", got)
 	}
-	first.mu.Unlock()
-	<-closeDone
-	if err := <-searchDone; err != nil {
-		t.Fatal(err)
+	unblockProjection()
+	select {
+	case err := <-searchDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shared search did not finish after final projection was released")
 	}
-	batch := <-finalBatch
+	var batch SearchBatch
+	select {
+	case batch = <-finalBatch:
+	case <-time.After(time.Second):
+		t.Fatal("shared search omitted its final batch")
+	}
 	if !batch.Reusable {
 		t.Fatal("completed shared LIST did not advertise its reusable view store")
 	}

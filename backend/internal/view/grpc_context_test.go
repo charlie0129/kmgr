@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/store"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -182,6 +183,75 @@ func TestStreamViewApplicationDeadlineClosesConsumer(t *testing.T) {
 	}
 }
 
+func TestStreamViewAcknowledgesOnlyCompleteSuccessfulSendBatch(t *testing.T) {
+	client := newSearchClient()
+	service := newViewContextService(t, client)
+	request := openView("session", "send-failure", 1)
+	request.Context.RequestId = "send-failure-request"
+	key := resourceKey{
+		authorityID: "authority", version: "v1", resource: "pods", namespace: "ns",
+	}
+	entry := &resourceRuntime{
+		key: key, store: store.New(), client: client, state: resourceRunning,
+		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+		accountingReady: true,
+	}
+	entry.store.Upsert(pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}))
+	entry.store.SetResourceVersion("rv-1")
+	service.runtime.mu.Lock()
+	service.runtime.resources[key] = entry
+	service.runtime.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := newViewTestStream[kmgrv1.ViewEvent](ctx)
+	sendFailure := errors.New("injected send failure")
+	var sendKinds []string
+	stream.send = func(event *kmgrv1.ViewEvent) error {
+		if event.GetStatus() != nil {
+			sendKinds = append(sendKinds, "status")
+		}
+		if event.GetSnapshot() != nil {
+			sendKinds = append(sendKinds, "snapshot")
+			return sendFailure
+		}
+		return nil
+	}
+
+	if err := service.StreamView(request, stream); !errors.Is(err, sendFailure) {
+		t.Fatalf("stream error = %v, want injected Send failure", err)
+	}
+	service.runtime.mu.Lock()
+	state := service.runtime.deliveryStates[viewKey{sessionID: "session", viewID: "send-failure"}]
+	service.runtime.mu.Unlock()
+	if state == nil {
+		t.Fatal("failed stream lost retained delivery state")
+	}
+	state.mu.Lock()
+	_, retained := state.knownUIDs["uid-a"]
+	state.mu.Unlock()
+	if len(sendKinds) != 2 || sendKinds[0] != "status" || sendKinds[1] != "snapshot" {
+		t.Fatalf("send sequence = %v, want successful status then failed snapshot", sendKinds)
+	}
+	if !retained {
+		t.Fatal("partially sent snapshot identity was not retained conservatively")
+	}
+
+	// The batch was not acknowledged, so a compatible generation must still
+	// reconstruct a tombstone if the possibly delivered row is now absent.
+	entry.store.Delete("uid-a")
+	replacementRequest := openView("session", "send-failure", 2)
+	replacementRequest.Context.RequestId = "send-failure-replacement"
+	replacement, err := service.runtime.Open(replacementRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	drainSubscription(t, replacement)
+	if events := drainSubscription(t, replacement); !containsRemovedUID(events, "uid-a") {
+		t.Fatalf("replacement omitted partial-send tombstone: %#v", events)
+	}
+}
+
 func TestRuntimeOpenRejectsMissingRequestIDAndExpiredDeadline(t *testing.T) {
 	t.Parallel()
 	runtime, err := NewRuntime(RuntimeConfig{
@@ -308,6 +378,7 @@ type viewTestStream[T any] struct {
 	ctx    context.Context
 	mu     sync.Mutex
 	values []*T
+	send   func(*T) error
 }
 
 func newViewTestStream[T any](ctx context.Context) *viewTestStream[T] {
@@ -316,6 +387,11 @@ func newViewTestStream[T any](ctx context.Context) *viewTestStream[T] {
 
 func (s *viewTestStream[T]) Context() context.Context { return s.ctx }
 func (s *viewTestStream[T]) Send(value *T) error {
+	if s.send != nil {
+		if err := s.send(value); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.values = append(s.values, value)

@@ -507,7 +507,7 @@ func (s *GRPCService) StreamView(
 	if err := operationContext.Err(); err != nil {
 		return viewStatusError(err)
 	}
-	subscription, err := s.runtime.Open(request)
+	subscription, err := s.runtime.OpenContext(operationContext, request)
 	if err != nil {
 		return viewStatusError(err)
 	}
@@ -524,6 +524,9 @@ func (s *GRPCService) StreamView(
 			if err := stream.Send(event); err != nil {
 				return err
 			}
+		}
+		if err := subscription.AcknowledgeDelivery(events); err != nil {
+			return viewStatusError(err)
 		}
 	}
 }

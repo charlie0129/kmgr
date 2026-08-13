@@ -599,7 +599,7 @@ func (r *Runtime) finishTransientView(
 	}
 	var startSubscribers []*Subscription
 	var startError *kmgrv1.StructuredError
-	if !view.running {
+	if view.state == resourceIdle {
 		startSubscribers, startError = r.startResourceLocked(view)
 	}
 	r.mu.Unlock()

@@ -127,6 +127,167 @@ func TestRuntimeReturnsWarmSnapshotBeforeResumeAndAvoidsRelist(t *testing.T) {
 	}
 }
 
+func TestRuntimeReopenWaitsForStoppedPipelineBeforeRestart(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	firstCanceled := make(chan struct{})
+	releaseFirstExit := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var runs atomic.Int64
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay: 5 * time.Millisecond, BatchDelay: time.Millisecond,
+		pipelineRunHook: func(ctx context.Context, run func(context.Context) error) error {
+			number := runs.Add(1)
+			if number == 2 {
+				close(secondStarted)
+			}
+			err := run(ctx)
+			if number == 1 {
+				close(firstCanceled)
+				<-releaseFirstExit
+			}
+			return err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	first, err := runtime.Open(openView("session", "first", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	first.Close()
+	select {
+	case <-firstCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("released pipeline did not observe cancellation")
+	}
+
+	second, err := runtime.Open(openView("session", "second", 1))
+	if err != nil {
+		close(releaseFirstExit)
+		t.Fatal(err)
+	}
+	defer second.Close()
+	select {
+	case <-secondStarted:
+		close(releaseFirstExit)
+		t.Fatal("replacement pipeline started before old Run exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := runs.Load(); got != 1 {
+		close(releaseFirstExit)
+		t.Fatalf("pipeline runs while stopping = %d, want 1", got)
+	}
+	close(releaseFirstExit)
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("replacement pipeline did not start after old Run exited")
+	}
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 2 })
+}
+
+func TestRuntimeDefersWarmAdmissionUntilPipelineExitAcknowledged(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	client.listPages = []*unstructured.UnstructuredList{listPage(
+		"rv-warm", "", pod("uid-warm", "ns", "warm", "Running", 0, nil, time.Time{}),
+	)}
+	pipelineCanceled := make(chan struct{})
+	releaseExit := make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay: 5 * time.Millisecond, BatchDelay: time.Millisecond,
+		pipelineRunHook: func(ctx context.Context, run func(context.Context) error) error {
+			err := run(ctx)
+			close(pipelineCanceled)
+			<-releaseExit
+			return err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, subscription, "uid-warm")
+	key := subscription.resource.key
+	subscription.Close()
+	select {
+	case <-pipelineCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not acknowledge cancellation")
+	}
+	runtime.mu.Lock()
+	state := subscription.resource.state
+	runtime.mu.Unlock()
+	if state != resourceStopping || runtime.warm.Len() != 0 {
+		close(releaseExit)
+		t.Fatalf("before Run exit: state=%v warm=%d", state, runtime.warm.Len())
+	}
+
+	close(releaseExit)
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		cached, warm := runtime.warm.Get(key)
+		return warm && cached.Value == subscription.resource && subscription.resource.state == resourceIdle
+	})
+}
+
+func TestRuntimeAcceptsMatchingLateBatchWhilePipelineStopping(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster-a", client: client}, BatchDelay: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope:   NamespaceScope{Namespaces: []string{"ns"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &resourceRuntime{
+		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
+		store: store.New(), client: client, state: resourceStopping, runNumber: 9,
+		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+	}
+	subscription := newSubscription(viewKey{sessionID: "session", viewID: "view"}, 1, projector, time.Hour, 100, 100)
+	subscription.resource = entry
+	entry.subscribers[subscription] = struct{}{}
+	runtime.mu.Lock()
+	runtime.resources[entry.key] = entry
+	runtime.mu.Unlock()
+
+	late := pod("uid-late", "ns", "late", "Running", 0, nil, time.Time{})
+	entry.store.Upsert(late)
+	runtime.receiveBatch(entry, 9, watcher.Batch{Upserts: []*unstructured.Unstructured{late}})
+	subscription.flushProjection()
+	subscription.mu.Lock()
+	row := subscription.rows["uid-late"]
+	subscription.mu.Unlock()
+	runtime.mu.Lock()
+	revision := entry.revision
+	runtime.mu.Unlock()
+	if row == nil || revision != 1 {
+		t.Fatalf("late stopping batch: row=%#v revision=%d", row, revision)
+	}
+}
+
 func TestRuntimeDropsReleasedResourceRejectedByWarmObjectBudget(t *testing.T) {
 	t.Parallel()
 	client := newScriptedResource()
@@ -187,6 +348,9 @@ func TestRuntimeDropsReleasedResourceRejectedByWarmObjectBudget(t *testing.T) {
 	events, err := second.Next(ctx)
 	cancel()
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.AcknowledgeDelivery(events); err != nil {
 		t.Fatal(err)
 	}
 	var freshness []kmgrv1.ViewFreshness
@@ -1160,6 +1324,9 @@ func drainSubscription(t *testing.T, subscription *Subscription) []*kmgrv1.ViewE
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := subscription.AcknowledgeDelivery(events); err != nil {
+		t.Fatal(err)
+	}
 	return events
 }
 
@@ -1251,6 +1418,547 @@ func TestRuntimeLifecycleMutexIsNotHeldDuringRowProjection(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("row projection did not finish")
+	}
+}
+
+func TestRuntimeWarmOpenProjectionDoesNotHoldLifecycleMutex(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay: time.Hour, OpenProjectionLimit: 1,
+		openProjectionHook: func() {
+			close(started)
+			<-release
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	entry := &resourceRuntime{
+		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
+		store: store.New(), client: client,
+		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+	}
+	entry.store.Upsert(pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}))
+	entry.store.SetResourceVersion("rv-warm")
+	entry.lastStatus = watcher.Status{Phase: watcher.PhaseResuming, Stale: true, ResourceVersion: "rv-warm"}
+	runtime.mu.Lock()
+	runtime.resources[entry.key] = entry
+	runtime.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		subscription, openErr := runtime.OpenContext(context.Background(), openView("session", "warm", 1))
+		if subscription != nil {
+			subscription.Close()
+		}
+		done <- openErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("warm projection did not start")
+	}
+	lifecycle := make(chan int, 1)
+	go func() { lifecycle <- runtime.ActiveResourceCount() }()
+	select {
+	case <-lifecycle:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("runtime lifecycle mutex was held by warm projection")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeOpenSealsInitialSnapshotAndCatchesUpAfterProjectionRace(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int64
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay: time.Hour,
+		openProjectionHook: func() {
+			if calls.Add(1) == 1 {
+				close(firstStarted)
+				<-releaseFirst
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	entry := &resourceRuntime{
+		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
+		store: store.New(), client: client, state: resourceRunning, runNumber: 7,
+		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+	}
+	entry.store.Upsert(pod("uid-old", "ns", "old", "Running", 0, nil, time.Time{}))
+	entry.store.SetResourceVersion("rv-old")
+	entry.lastStatus = watcher.Status{Phase: watcher.PhaseWatching, ResourceVersion: "rv-old"}
+	runtime.mu.Lock()
+	runtime.resources[entry.key] = entry
+	runtime.mu.Unlock()
+
+	done := make(chan struct {
+		subscription *Subscription
+		err          error
+	}, 1)
+	go func() {
+		subscription, openErr := runtime.Open(openView("session", "view", 1))
+		done <- struct {
+			subscription *Subscription
+			err          error
+		}{subscription, openErr}
+	}()
+	<-firstStarted
+	newObject := pod("uid-new", "ns", "new", "Running", 0, nil, time.Time{})
+	entry.store.Upsert(newObject)
+	runtime.receiveBatch(entry, 7, watcher.Batch{Upserts: []*unstructured.Unstructured{newObject}})
+	close(releaseFirst)
+	result := <-done
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	defer result.subscription.Close()
+	if calls.Load() != 1 {
+		t.Fatalf("initial projection calls = %d, want exactly one", calls.Load())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	firstEvents, err := result.subscription.Next(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := result.subscription.AcknowledgeDelivery(firstEvents); err != nil {
+		t.Fatal(err)
+	}
+	var firstUIDs []string
+	for _, event := range firstEvents {
+		for _, row := range event.GetSnapshot().GetRows() {
+			firstUIDs = append(firstUIDs, row.GetIdentity().GetUid())
+		}
+	}
+	if !slices.Contains(firstUIDs, "uid-old") || slices.Contains(firstUIDs, "uid-new") {
+		t.Fatalf("sealed first snapshot UIDs = %v", firstUIDs)
+	}
+	waitForSnapshotUID(t, result.subscription, "uid-new")
+}
+
+func TestRuntimeOpenDeliversDeleteRaceAfterSealedSnapshot(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	projectionStarted := make(chan struct{})
+	releaseProjection := make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay: time.Hour, BatchDelay: time.Millisecond,
+		openProjectionHook: func() {
+			close(projectionStarted)
+			<-releaseProjection
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	entry := &resourceRuntime{
+		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
+		store: store.New(), client: client, state: resourceRunning, runNumber: 5,
+		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+		accountingReady: true,
+	}
+	entry.store.Upsert(pod("uid-delete", "ns", "delete", "Running", 0, nil, time.Time{}))
+	entry.store.SetResourceVersion("rv-before")
+	entry.lastStatus = watcher.Status{Phase: watcher.PhaseWatching, ResourceVersion: "rv-before"}
+	runtime.mu.Lock()
+	runtime.resources[entry.key] = entry
+	runtime.mu.Unlock()
+
+	done := make(chan struct {
+		subscription *Subscription
+		err          error
+	}, 1)
+	go func() {
+		subscription, openErr := runtime.Open(openView("session", "delete-race", 1))
+		done <- struct {
+			subscription *Subscription
+			err          error
+		}{subscription, openErr}
+	}()
+	<-projectionStarted
+	entry.store.Delete("uid-delete")
+	entry.store.SetResourceVersion("rv-after")
+	runtime.receiveBatch(entry, 5, watcher.Batch{RemovedUIDs: []types.UID{"uid-delete"}})
+	close(releaseProjection)
+	result := <-done
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	defer result.subscription.Close()
+
+	first := drainSubscription(t, result.subscription)
+	var sealed []string
+	for _, event := range first {
+		for _, row := range event.GetSnapshot().GetRows() {
+			sealed = append(sealed, row.GetIdentity().GetUid())
+		}
+	}
+	if !slices.Contains(sealed, "uid-delete") {
+		t.Fatalf("sealed initial UIDs = %v", sealed)
+	}
+	second := drainSubscription(t, result.subscription)
+	var removed []string
+	for _, event := range second {
+		removed = append(removed, event.GetDelta().GetRemovedUids()...)
+	}
+	if !slices.Contains(removed, "uid-delete") {
+		t.Fatalf("authoritative catch-up removals = %v, events=%#v", removed, second)
+	}
+}
+
+func TestRuntimeOpenCompletesUnderContinuousWatchChurn(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	projectionStarted := make(chan struct{})
+	releaseProjection := make(chan struct{})
+	var calls atomic.Int64
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay: time.Hour,
+		openProjectionHook: func() {
+			calls.Add(1)
+			close(projectionStarted)
+			<-releaseProjection
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	entry := &resourceRuntime{
+		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
+		store: store.New(), client: client, state: resourceRunning, runNumber: 11,
+		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+	}
+	entry.store.Upsert(pod("uid-base", "ns", "base", "Running", 0, nil, time.Time{}))
+	entry.store.SetResourceVersion("rv-base")
+	runtime.mu.Lock()
+	runtime.resources[entry.key] = entry
+	runtime.mu.Unlock()
+	done := make(chan struct {
+		subscription *Subscription
+		err          error
+	}, 1)
+	go func() {
+		subscription, openErr := runtime.Open(openView("session", "churn", 1))
+		done <- struct {
+			subscription *Subscription
+			err          error
+		}{subscription, openErr}
+	}()
+	<-projectionStarted
+	for index := range 100 {
+		object := pod(fmt.Sprintf("uid-%d", index), "ns", fmt.Sprintf("pod-%d", index), "Running", 0, nil, time.Time{})
+		entry.store.Upsert(object)
+		runtime.receiveBatch(entry, 11, watcher.Batch{Upserts: []*unstructured.Unstructured{object}})
+	}
+	close(releaseProjection)
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		defer result.subscription.Close()
+	case <-time.After(time.Second):
+		t.Fatal("Open did not make bounded progress under watch churn")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("initial projection calls = %d, want one", got)
+	}
+}
+
+func TestRuntimeOpenStrictGenerationAndPendingCancellation(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:              &fakeResourceSource{authority: "cluster-a", client: newScriptedResource()},
+		OpenProjectionLimit: 1,
+		openProjectionHook: func() {
+			close(started)
+			<-release
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, openErr := runtime.OpenContext(context.Background(), openView("session", "same", 1))
+		done <- openErr
+	}()
+	<-started
+	if _, err := runtime.Open(openView("session", "same", 1)); !errors.Is(err, ErrStaleViewOpen) {
+		close(release)
+		t.Fatalf("equal generation error = %v", err)
+	}
+	if !runtime.Cancel("session", "same", 1) {
+		close(release)
+		t.Fatal("pending generation cancellation was rejected")
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("pending open error = %v, want canceled", err)
+	}
+	if _, err := runtime.Open(openView("session", "same", 1)); !errors.Is(err, ErrStaleViewOpen) {
+		t.Fatalf("canceled generation reopened: %v", err)
+	}
+}
+
+func TestRuntimeNewerOpenSupersedesPendingAttemptWithoutClosingCommittedView(t *testing.T) {
+	t.Parallel()
+	var hookCalls atomic.Int64
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: newScriptedResource()},
+		ReleaseDelay: time.Hour, OpenProjectionLimit: 2,
+		openProjectionHook: func() {
+			if hookCalls.Add(1) == 2 {
+				close(firstStarted)
+				<-releaseFirst
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	committed, err := runtime.Open(openView("session", "same", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer committed.Close()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, openErr := runtime.OpenContext(context.Background(), openView("session", "same", 2))
+		firstDone <- openErr
+	}()
+	<-firstStarted
+	select {
+	case <-committed.done:
+		close(releaseFirst)
+		t.Fatal("pending replacement closed committed generation")
+	default:
+	}
+	third, err := runtime.Open(openView("session", "same", 3))
+	if err != nil {
+		close(releaseFirst)
+		t.Fatal(err)
+	}
+	defer third.Close()
+	close(releaseFirst)
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("superseded generation error = %v, want canceled", err)
+	}
+	select {
+	case <-committed.done:
+	case <-time.After(time.Second):
+		t.Fatal("committed generation was not closed after replacement committed")
+	}
+	if _, err := runtime.Open(openView("session", "same", 2)); !errors.Is(err, ErrStaleViewOpen) {
+		t.Fatalf("older generation reopened: %v", err)
+	}
+}
+
+func TestRuntimeReplacementTransfersClientKnownUIDsAndPendingTombstones(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	client.listPages = []*unstructured.UnstructuredList{listPage(
+		"rv-live", "", pod("uid-live", "ns", "live", "Running", 0, nil, time.Time{}),
+	)}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	first, err := runtime.Open(openView("session", "same", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, first, "uid-live")
+	first.deliveryState.mu.Lock()
+	first.deliveryState.knownUIDs["uid-deleted"] = struct{}{}
+	first.deliveryState.mu.Unlock()
+	first.resource.store.Delete("uid-deleted")
+
+	second, err := runtime.Open(openView("session", "same", 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	second.mu.Lock()
+	livePending, liveKnown := second.knownUIDs["uid-live"]
+	deletedPending, deletedKnown := second.knownUIDs["uid-deleted"]
+	_, removalQueued := second.pendingRemoved["uid-deleted"]
+	second.mu.Unlock()
+	if !liveKnown || livePending || !deletedKnown || !deletedPending || !removalQueued {
+		t.Fatalf("transferred known live=(%t,%t) deleted=(%t,%t) queued=%t",
+			liveKnown, livePending, deletedKnown, deletedPending, removalQueued)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	initial, err := second.Next(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.AcknowledgeDelivery(initial); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	events, err := second.Next(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed := make([]string, 0)
+	for _, event := range events {
+		removed = append(removed, event.GetDelta().GetRemovedUids()...)
+	}
+	if !slices.Contains(removed, "uid-deleted") {
+		t.Fatalf("replacement removal events = %v", removed)
+	}
+}
+
+func TestRuntimeCanceledOpenReleasesInProgressSearchHandoff(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage("rv-final", "")}
+	client.firstPageGate = make(chan struct{})
+	projectionStarted := make(chan struct{})
+	releaseProjection := make(chan struct{})
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client},
+		openProjectionHook: func() {
+			close(projectionStarted)
+			<-releaseProjection
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	searchDone := make(chan error, 1)
+	go func() {
+		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(SearchBatch) error { return nil })
+	}()
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 1 })
+	ctx, cancel := context.WithCancel(context.Background())
+	openDone := make(chan error, 1)
+	go func() {
+		_, openErr := runtime.OpenContext(ctx, openView("session", "view", 1))
+		openDone <- openErr
+	}()
+	<-projectionStarted
+	cancel()
+	close(releaseProjection)
+	if err := <-openDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("open error = %v, want canceled", err)
+	}
+	runtime.mu.Lock()
+	transient := runtime.transientSearchLists[searchSnapshotKey{
+		resource:       resourceKey{authorityID: "cluster", version: "v1", resource: "pods", namespace: "ns"},
+		namespaceScope: "namespaces:ns",
+	}]
+	if transient == nil || transient.view != nil {
+		runtime.mu.Unlock()
+		close(client.firstPageGate)
+		t.Fatalf("canceled handoff retained view: %#v", transient)
+	}
+	runtime.mu.Unlock()
+	close(client.firstPageGate)
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeOpenProjectionAdmissionIsProcessBounded(t *testing.T) {
+	t.Parallel()
+	const limit = 2
+	release := make(chan struct{})
+	started := make(chan struct{}, 8)
+	var active atomic.Int64
+	var peak atomic.Int64
+	hook := func() {
+		current := active.Add(1)
+		for {
+			old := peak.Load()
+			if current <= old || peak.CompareAndSwap(old, current) {
+				break
+			}
+		}
+		started <- struct{}{}
+		<-release
+		active.Add(-1)
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:              &fakeResourceSource{authority: "cluster-a", client: newScriptedResource()},
+		OpenProjectionLimit: limit, openProjectionHook: hook,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	var wait sync.WaitGroup
+	errorsCh := make(chan error, 8)
+	for index := range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			subscription, openErr := runtime.Open(openView("session", fmt.Sprintf("view-%d", index), 1))
+			if subscription != nil {
+				subscription.Close()
+			}
+			errorsCh <- openErr
+		}()
+	}
+	for range limit {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("projection admission did not fill")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("projection admission exceeded limit")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	wait.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := peak.Load(); got != limit {
+		t.Fatalf("peak initial projections = %d, want %d", got, limit)
 	}
 }
 
@@ -2110,6 +2818,11 @@ func waitForSnapshotUID(t *testing.T, subscription *Subscription, uid string) {
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
 		}
+		if err == nil {
+			if acknowledgeErr := subscription.AcknowledgeDelivery(events); acknowledgeErr != nil {
+				t.Fatal(acknowledgeErr)
+			}
+		}
 		for _, event := range events {
 			for _, row := range event.GetSnapshot().GetRows() {
 				if row.GetIdentity().GetUid() == uid {
@@ -2136,6 +2849,11 @@ func waitForRow(t *testing.T, subscription *Subscription, uid string) *kmgrv1.Re
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
 		}
+		if err == nil {
+			if acknowledgeErr := subscription.AcknowledgeDelivery(events); acknowledgeErr != nil {
+				t.Fatal(acknowledgeErr)
+			}
+		}
 		for _, event := range events {
 			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
 				if row.GetIdentity().GetUid() == uid {
@@ -2161,6 +2879,11 @@ func waitForUsageAvailable(
 		cancel()
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
+		}
+		if err == nil {
+			if acknowledgeErr := subscription.AcknowledgeDelivery(events); acknowledgeErr != nil {
+				t.Fatal(acknowledgeErr)
+			}
 		}
 		for _, event := range events {
 			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
@@ -2193,6 +2916,11 @@ func waitForNodeAccounting(
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
 		}
+		if err == nil {
+			if acknowledgeErr := subscription.AcknowledgeDelivery(events); acknowledgeErr != nil {
+				t.Fatal(acknowledgeErr)
+			}
+		}
 		for _, event := range events {
 			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
 				if row.GetIdentity().GetUid() != uid {
@@ -2222,6 +2950,11 @@ func waitForNodeAccountingUnavailable(
 		cancel()
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
+		}
+		if err == nil {
+			if acknowledgeErr := subscription.AcknowledgeDelivery(events); acknowledgeErr != nil {
+				t.Fatal(acknowledgeErr)
+			}
 		}
 		for _, event := range events {
 			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
