@@ -1,33 +1,41 @@
 import AppKit
 import KmgrCore
+import OSLog
 
-/// The first independent cluster workspace surface. Resource discovery and the
-/// table-first split view will replace the centered loading state without
-/// changing this window/session ownership boundary.
 @MainActor
 final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate {
     let session: OpenedClusterSession
     var onClose: (() -> Void)?
 
-    init(session: OpenedClusterSession) {
+    private let provider: any WorkspaceResourceProviding
+    private let workspaceController: ClusterWorkspaceViewController
+
+    convenience init(session: OpenedClusterSession) {
+        self.init(session: session, provider: UnavailableWorkspaceResourceProvider())
+    }
+
+    init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
+        self.provider = provider
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1080, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "\(session.contextName) — \(Product.applicationName)"
         window.subtitle = session.serverHostname
-        window.minSize = NSSize(width: 760, height: 480)
+        window.minSize = NSSize(width: 820, height: 520)
         window.tabbingMode = .disallowed
         window.setFrameAutosaveName("ClusterWorkspace-\(session.contextName)")
         window.center()
 
+        workspaceController = ClusterWorkspaceViewController(session: session, provider: provider)
         super.init(window: window)
         window.delegate = self
-        window.contentViewController = ClusterWorkspacePlaceholderViewController(session: session)
+        window.contentViewController = workspaceController
+        window.toolbar = workspaceController.makeToolbar()
     }
 
     @available(*, unavailable)
@@ -35,70 +43,854 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         fatalError("ClusterWorkspaceWindowController is programmatic")
     }
 
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        workspaceController.start()
+    }
+
     func windowWillClose(_ notification: Notification) {
+        workspaceController.stop()
+        Task { [provider, session] in
+            await provider.closeSession(sessionID: session.sessionID)
+        }
         onClose?()
     }
 }
 
 @MainActor
-private final class ClusterWorkspacePlaceholderViewController: NSViewController {
+private final class ClusterWorkspaceViewController: NSSplitViewController,
+    NSToolbarDelegate, NSSearchFieldDelegate
+{
     private let session: OpenedClusterSession
+    private let provider: any WorkspaceResourceProviding
+    private let sidebarController: ResourceSidebarViewController
+    private let contentController: ResourceListViewController
+    private let namespaceControl = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let connectionLabel = NSTextField(labelWithString: "Connected")
+    private let forwardsButton = NSButton(title: "Forwards 0", target: nil, action: nil)
+    private var namespaceTask: Task<Void, Never>?
 
-    init(session: OpenedClusterSession) {
+    init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
+        self.provider = provider
+        sidebarController = ResourceSidebarViewController(session: session, provider: provider)
+        contentController = ResourceListViewController(session: session, provider: provider)
         super.init(nibName: nil, bundle: nil)
+
+        sidebarController.onSelectResource = { [weak self] resource in
+            guard let self else { return }
+            contentController.open(resource: resource, scope: selectedNamespaceScope())
+        }
+        addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
+        addSplitViewItem(NSSplitViewItem(viewController: contentController))
+        splitViewItems[0].minimumThickness = 180
+        splitViewItems[0].maximumThickness = 340
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
-        fatalError("ClusterWorkspacePlaceholderViewController is programmatic")
+        fatalError("ClusterWorkspaceViewController is programmatic")
     }
+
+    func start() {
+        sidebarController.start()
+        loadNamespaces()
+    }
+
+    func stop() {
+        namespaceTask?.cancel()
+        sidebarController.stop()
+        contentController.stop()
+    }
+
+    func makeToolbar() -> NSToolbar {
+        let toolbar = NSToolbar(identifier: "cluster-workspace")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconAndLabel
+        toolbar.allowsUserCustomization = false
+        return toolbar
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.toggleSidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.toggleSidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards]
+    }
+
+    func toolbar(
+        _ toolbar: NSToolbar,
+        itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+        willBeInsertedIntoToolbar flag: Bool
+    ) -> NSToolbarItem? {
+        switch itemIdentifier {
+        case .toggleSidebar:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Sidebar"
+            item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle Sidebar")
+            item.target = self
+            item.action = #selector(toggleWorkspaceSidebar)
+            return item
+        case .back, .forward:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = itemIdentifier == .back ? "Back" : "Forward"
+            item.image = NSImage(
+                systemSymbolName: itemIdentifier == .back ? "chevron.left" : "chevron.right",
+                accessibilityDescription: item.label
+            )
+            item.target = contentController
+            item.action = itemIdentifier == .back
+                ? #selector(ResourceListViewController.goBack)
+                : #selector(ResourceListViewController.goForward)
+            return item
+        case .cluster:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = session.contextName
+            let button = NSButton(title: session.contextName, target: nil, action: nil)
+            button.bezelStyle = .texturedRounded
+            button.toolTip = "\(session.clusterName) · \(session.serverHostname)"
+            item.view = button
+            return item
+        case .namespace:
+            namespaceControl.addItem(withTitle: "All namespaces")
+            namespaceControl.target = self
+            namespaceControl.action = #selector(namespaceChanged)
+            namespaceControl.toolTip = "Namespace scope"
+            namespaceControl.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Namespace"
+            item.view = namespaceControl
+            return item
+        case .palette:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Commands"
+            item.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Command Palette")
+            item.target = contentController
+            item.action = #selector(ResourceListViewController.showCommandPalette)
+            return item
+        case .connection:
+            connectionLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            connectionLabel.textColor = .secondaryLabelColor
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Connection"
+            item.view = connectionLabel
+            return item
+        case .forwards:
+            forwardsButton.bezelStyle = .texturedRounded
+            forwardsButton.image = NSImage(systemSymbolName: "arrow.left.arrow.right", accessibilityDescription: nil)
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Port Forwards"
+            item.view = forwardsButton
+            return item
+        default:
+            return nil
+        }
+    }
+
+    @objc private func toggleWorkspaceSidebar() {
+        splitViewItems[0].animator().isCollapsed.toggle()
+    }
+
+    @objc private func namespaceChanged() {
+        contentController.changeNamespaceScope(selectedNamespaceScope())
+    }
+
+    private func selectedNamespaceScope() -> NamespaceSelection {
+        if namespaceControl.indexOfSelectedItem <= 0 { return NamespaceSelection() }
+        return .namespace(namespaceControl.titleOfSelectedItem ?? session.defaultNamespace)
+    }
+
+    private func loadNamespaces() {
+        namespaceTask?.cancel()
+        namespaceTask = Task { [weak self, provider, session] in
+            guard let self else { return }
+            do {
+                let namespaces = try await provider.listNamespaces(sessionID: session.sessionID)
+                guard !Task.isCancelled else { return }
+                let previous = namespaceControl.titleOfSelectedItem
+                namespaceControl.removeAllItems()
+                namespaceControl.addItem(withTitle: "All namespaces")
+                namespaceControl.addItems(withTitles: namespaces)
+                if !session.defaultNamespace.isEmpty,
+                    let index = namespaceControl.itemTitles.firstIndex(of: session.defaultNamespace)
+                {
+                    namespaceControl.selectItem(at: index)
+                } else if let previous,
+                    let index = namespaceControl.itemTitles.firstIndex(of: previous)
+                {
+                    namespaceControl.selectItem(at: index)
+                }
+            } catch {
+                connectionLabel.stringValue = "Namespace list unavailable"
+                connectionLabel.textColor = .systemOrange
+            }
+        }
+    }
+}
+
+private extension NSToolbarItem.Identifier {
+    static let back = Self("workspace.back")
+    static let forward = Self("workspace.forward")
+    static let cluster = Self("workspace.cluster")
+    static let namespace = Self("workspace.namespace")
+    static let palette = Self("workspace.palette")
+    static let connection = Self("workspace.connection")
+    static let forwards = Self("workspace.forwards")
+}
+
+@MainActor
+private final class ResourceSidebarViewController: NSViewController,
+    NSOutlineViewDataSource, NSOutlineViewDelegate
+{
+    private struct Section: Hashable {
+        var title: String
+        var resources: [DiscoveredResource]
+    }
+
+    private let session: OpenedClusterSession
+    private let provider: any WorkspaceResourceProviding
+    private let outlineView = NSOutlineView()
+    private let searchField = NSSearchField()
+    private let statusLabel = NSTextField(labelWithString: "Loading discovery…")
+    private var sections: [Section] = []
+    private var allResources: [DiscoveredResource] = []
+    private var task: Task<Void, Never>?
+    var onSelectResource: ((DiscoveredResource) -> Void)?
+
+    init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
+        self.session = session
+        self.provider = provider
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("programmatic") }
 
     override func loadView() {
         let root = NSView()
+        searchField.placeholderString = "Filter resources"
+        searchField.target = self
+        searchField.action = #selector(searchChanged)
+        searchField.translatesAutoresizingMaskIntoConstraints = false
 
-        let contextLabel = NSTextField(labelWithString: session.contextName)
-        contextLabel.font = .systemFont(ofSize: 26, weight: .semibold)
-        contextLabel.alignment = .center
+        let column = NSTableColumn(identifier: .init("resource"))
+        column.title = "Resources"
+        outlineView.addTableColumn(column)
+        outlineView.outlineTableColumn = column
+        outlineView.headerView = nil
+        outlineView.rowSizeStyle = .small
+        outlineView.delegate = self
+        outlineView.dataSource = self
+        outlineView.autoresizesOutlineColumn = true
+        outlineView.setAccessibilityLabel("Kubernetes resource kinds")
 
-        let clusterValue = session.clusterName.isEmpty ? "—" : session.clusterName
-        let hostValue = session.serverHostname.isEmpty ? "—" : session.serverHostname
-        let namespaceValue = session.defaultNamespace.isEmpty ? "default" : session.defaultNamespace
-        let detailsLabel = NSTextField(
-            wrappingLabelWithString:
-                "Cluster: \(clusterValue)   ·   Server: \(hostValue)   ·   Namespace: \(namespaceValue)"
-        )
-        detailsLabel.textColor = .secondaryLabelColor
-        detailsLabel.alignment = .center
-
-        let progress = NSProgressIndicator()
-        progress.style = .spinning
-        progress.controlSize = .small
-        progress.startAnimation(nil)
-
-        let statusLabel = NSTextField(labelWithString: "Connected · Loading resource discovery…")
+        let scroll = NSScrollView()
+        scroll.documentView = outlineView
+        scroll.hasVerticalScroller = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let statusRow = NSStackView(views: [progress, statusLabel])
-        statusRow.orientation = .horizontal
-        statusRow.alignment = .centerY
-        statusRow.spacing = 7
-
-        let content = NSStackView(views: [contextLabel, detailsLabel, statusRow])
-        content.orientation = .vertical
-        content.alignment = .centerX
-        content.spacing = 10
-        content.translatesAutoresizingMaskIntoConstraints = false
-
-        root.addSubview(content)
+        root.addSubview(searchField)
+        root.addSubview(scroll)
+        root.addSubview(statusLabel)
         NSLayoutConstraint.activate([
-            content.centerXAnchor.constraint(equalTo: root.centerXAnchor),
-            content.centerYAnchor.constraint(equalTo: root.centerYAnchor),
-            content.leadingAnchor.constraint(greaterThanOrEqualTo: root.leadingAnchor, constant: 32),
-            content.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -32),
-            detailsLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 720)
+            searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            searchField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            searchField.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 6),
+            scroll.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -4),
+            statusLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            statusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            statusLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -6),
         ])
         view = root
+    }
+
+    func start() {
+        guard task == nil else { return }
+        task = Task { [weak self, provider, session] in
+            guard let self else { return }
+            do {
+                let resources = try await provider.discoverResources(sessionID: session.sessionID, refresh: false)
+                guard !Task.isCancelled else { return }
+                allResources = resources.filter { $0.verbs.contains("list") }
+                rebuildSections()
+                statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds"
+                if let pods = allResources.first(where: { $0.group.isEmpty && $0.resource == "pods" }) {
+                    select(resource: pods)
+                } else if let first = allResources.first {
+                    select(resource: first)
+                }
+            } catch {
+                statusLabel.stringValue = error.localizedDescription
+                statusLabel.textColor = .systemRed
+            }
+        }
+    }
+
+    func stop() {
+        task?.cancel()
+        task = nil
+    }
+
+    @objc private func searchChanged() { rebuildSections() }
+
+    private func rebuildSections() {
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let visible = query.isEmpty ? allResources : allResources.filter {
+            ([$0.kind, $0.resource] + $0.shortNames)
+                .contains { $0.lowercased().contains(query) }
+        }
+        let pinnedIDs = Set(DefaultSidebarPins.values.map(\.id))
+        let pinned = visible.filter { pinnedIDs.contains($0.id) }.sorted { pinIndex($0.id) < pinIndex($1.id) }
+        var grouped: [String: [DiscoveredResource]] = [:]
+        for resource in visible where !pinnedIDs.contains(resource.id) {
+            grouped[sectionName(for: resource), default: []].append(resource)
+        }
+        sections = []
+        if !pinned.isEmpty { sections.append(Section(title: "Pinned", resources: pinned)) }
+        for title in ["Workloads", "Network", "Config", "Storage", "RBAC", "Cluster", "Custom Resources"] {
+            if let resources = grouped[title], !resources.isEmpty {
+                sections.append(Section(title: title, resources: resources.sorted { $0.kind < $1.kind }))
+            }
+        }
+        outlineView.reloadData()
+        for index in sections.indices { outlineView.expandItem(sections[index]) }
+    }
+
+    private func pinIndex(_ id: String) -> Int {
+        DefaultSidebarPins.values.firstIndex { $0.id == id } ?? .max
+    }
+
+    private func sectionName(for resource: DiscoveredResource) -> String {
+        if !resource.group.isEmpty && !["apps", "batch", "networking.k8s.io", "storage.k8s.io", "rbac.authorization.k8s.io", "policy"].contains(resource.group) {
+            return "Custom Resources"
+        }
+        if ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob", "Pod"].contains(resource.kind) { return "Workloads" }
+        if ["Service", "Ingress", "Endpoint", "EndpointSlice", "NetworkPolicy"].contains(resource.kind) { return "Network" }
+        if ["ConfigMap", "Secret", "ResourceQuota", "LimitRange"].contains(resource.kind) { return "Config" }
+        if resource.group == "storage.k8s.io" || resource.kind.contains("Volume") || resource.kind == "StorageClass" { return "Storage" }
+        if resource.group == "rbac.authorization.k8s.io" || resource.kind.contains("Role") || resource.kind.contains("Binding") { return "RBAC" }
+        return "Cluster"
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        if item == nil { return sections.count }
+        return (item as? Section)?.resources.count ?? 0
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        if let section = item as? Section { return section.resources[index] }
+        return sections[index]
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        item is Section
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool { item is Section }
+
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        viewFor tableColumn: NSTableColumn?,
+        item: Any
+    ) -> NSView? {
+        let identifier = NSUserInterfaceItemIdentifier("sidebar-cell")
+        let cell = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
+            ?? NSTableCellView()
+        cell.identifier = identifier
+        if cell.textField == nil {
+            let label = NSTextField(labelWithString: "")
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            cell.textField = label
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+        }
+        if let section = item as? Section {
+            cell.textField?.stringValue = section.title
+            cell.textField?.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        } else if let resource = item as? DiscoveredResource {
+            cell.textField?.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
+            cell.textField?.font = .systemFont(ofSize: NSFont.systemFontSize)
+        }
+        return cell
+    }
+
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard outlineView.selectedRow >= 0,
+            let resource = outlineView.item(atRow: outlineView.selectedRow) as? DiscoveredResource
+        else { return }
+        onSelectResource?(resource)
+    }
+
+    private func select(resource: DiscoveredResource) {
+        for row in 0..<outlineView.numberOfRows where (outlineView.item(atRow: row) as? DiscoveredResource)?.id == resource.id {
+            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            onSelectResource?(resource)
+            break
+        }
+    }
+}
+
+@MainActor
+private final class ResourceListViewController: NSViewController,
+    NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate
+{
+    private let session: OpenedClusterSession
+    private let provider: any WorkspaceResourceProviding
+    private let titleLabel = NSTextField(labelWithString: "Resources")
+    private let scopeLabel = NSTextField(labelWithString: "All namespaces")
+    private let freshnessLabel = NSTextField(labelWithString: "Idle")
+    private let countLabel = NSTextField(labelWithString: "0 objects")
+    private let filterField = NSSearchField()
+    private let tableView = ResourceTableView()
+    private let scrollView = NSScrollView()
+    private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private var model = ResourceTableModel()
+    private var generationGate = GenerationSequenceGate()
+    private var resource: DiscoveredResource?
+    private var scope = NamespaceSelection()
+    private var viewID = UUID().uuidString.lowercased()
+    private var generation: UInt64 = 0
+    private var filterRevision: UInt64 = 0
+    private var streamTask: Task<Void, Never>?
+    private var filterTask: Task<Void, Never>?
+    private var suppressSelectionCallbacks = false
+    private var history = WorkspaceNavigationHistory()
+    private var columnIDs: [String] = []
+    private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
+
+    init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
+        self.session = session
+        self.provider = provider
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("programmatic") }
+
+    override func loadView() {
+        let root = NSView()
+        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        scopeLabel.textColor = .secondaryLabelColor
+        freshnessLabel.textColor = .secondaryLabelColor
+        countLabel.textColor = .secondaryLabelColor
+        filterField.placeholderString = "Filter resources  /"
+        filterField.delegate = self
+        filterField.sendsSearchStringImmediately = true
+
+        let columnsButton = NSButton(title: "Columns…", target: self, action: #selector(showColumns))
+        columnsButton.bezelStyle = .texturedRounded
+        let header = NSStackView(views: [titleLabel, countLabel, scopeLabel, freshnessLabel, NSView(), filterField, columnsButton])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 9
+        header.translatesAutoresizingMaskIntoConstraints = false
+        filterField.widthAnchor.constraint(equalToConstant: 230).isActive = true
+
+        tableView.delegate = self
+        tableView.dataSource = self
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.allowsMultipleSelection = true
+        tableView.allowsEmptySelection = true
+        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        tableView.doubleAction = #selector(openSelectedObject)
+        tableView.target = self
+        tableView.rowSizeStyle = .medium
+        tableView.setAccessibilityLabel("Kubernetes resources")
+        tableView.onCommand = { [weak self] command in self?.handle(command) }
+
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        errorLabel.isHidden = true
+        errorLabel.textColor = .systemRed
+        errorLabel.backgroundColor = NSColor.systemRed.withAlphaComponent(0.08)
+        errorLabel.drawsBackground = true
+        errorLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let statusLine = NSTextField(labelWithString: "0 objects · 0 selected · Idle")
+        statusLine.identifier = .init("resource-status-line")
+        statusLine.textColor = .secondaryLabelColor
+        statusLine.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        statusLine.translatesAutoresizingMaskIntoConstraints = false
+
+        root.addSubview(header)
+        root.addSubview(errorLabel)
+        root.addSubview(scrollView)
+        root.addSubview(statusLine)
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            header.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            header.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            errorLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            errorLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            errorLabel.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
+            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 5),
+            scrollView.bottomAnchor.constraint(equalTo: statusLine.topAnchor, constant: -2),
+            statusLine.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            statusLine.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            statusLine.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
+        ])
+        view = root
+    }
+
+    func open(resource: DiscoveredResource, scope: NamespaceSelection) {
+        if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
+        self.resource = resource
+        self.scope = scope
+        let state = ResourceNavigationState(
+            group: resource.group, version: resource.version, resource: resource.resource,
+            kind: resource.kind, namespaceSelection: scope
+        )
+        history.navigate(to: .resource(state))
+        configureColumns(for: resource)
+        openStream()
+    }
+
+    func changeNamespaceScope(_ scope: NamespaceSelection) {
+        guard self.scope != scope else { return }
+        if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
+        self.scope = scope
+        if var state = navigationState() {
+            state.namespaceSelection = scope
+            history.navigate(to: .resource(state))
+        }
+        openStream()
+    }
+
+    func stop() {
+        filterTask?.cancel()
+        streamTask?.cancel()
+        let generation = generation
+        Task { [provider, session, viewID] in
+            await provider.cancelView(sessionID: session.sessionID, viewID: viewID, generation: generation)
+        }
+    }
+
+    @objc func goBack() {
+        if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
+        guard let destination = history.goBack() else { return }
+        restore(destination)
+    }
+
+    @objc func goForward() {
+        if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
+        guard let destination = history.goForward() else { return }
+        restore(destination)
+    }
+
+    @objc func showCommandPalette() {
+        let alert = NSAlert()
+        alert.messageText = "Command Palette"
+        alert.informativeText = "Resource and operation search is available through the backend search stream; the native palette surface is the next UI slice."
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: view.window!)
+    }
+
+    @objc private func showColumns() {
+        let alert = NSAlert()
+        alert.messageText = "Columns"
+        alert.informativeText = "Columns are resizable, reorderable, and sortable in the table header. CEL column configuration is loaded by the Go projection layer."
+        alert.addButton(withTitle: "OK")
+        if let window = view.window { alert.beginSheetModal(for: window) }
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        filterRevision &+= 1
+        filterTask?.cancel()
+        let revision = filterRevision
+        filterTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled, self?.filterRevision == revision else { return }
+            self?.openStream()
+        }
+    }
+
+    private func openStream() {
+        guard let resource else { return }
+        let previousGeneration = generation
+        streamTask?.cancel()
+        if previousGeneration > 0 {
+            Task { [provider, session, viewID] in
+                await provider.cancelView(sessionID: session.sessionID, viewID: viewID, generation: previousGeneration)
+            }
+        }
+        generation &+= 1
+        generationGate.reset()
+        model = ResourceTableModel()
+        tableView.reloadData()
+        errorLabel.isHidden = true
+        titleLabel.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
+        scopeLabel.stringValue = scope.presentation
+        freshnessLabel.stringValue = "Loading…"
+        let request = ResourceViewRequest(
+            sessionID: session.sessionID,
+            viewID: viewID,
+            generation: generation,
+            resource: resource,
+            allNamespaces: scope.allNamespaces,
+            namespaces: scope.namespaces,
+            filterExpression: filterField.stringValue,
+            filterRevision: filterRevision,
+            columnIDs: columnIDs
+        )
+        streamTask = Task { [weak self, provider] in
+            do {
+                for try await message in provider.streamView(request: request) {
+                    guard !Task.isCancelled else { return }
+                    self?.receive(message)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.show(error: error)
+            }
+        }
+    }
+
+    private func receive(_ message: ResourceViewMessage) {
+        let cursor = message.cursor
+        guard cursor.generation == generation else { return }
+        let disposition = generationGate.accept(cursor)
+        guard disposition == .acceptedNewGeneration || disposition == .acceptedNextSequence else { return }
+
+        switch message {
+        case .status(_, let status):
+            freshnessLabel.stringValue = status.presentation
+            countLabel.stringValue = "\(status.rowsVisible.formatted()) objects"
+        case .snapshot(_, let chunk):
+            let capture = captureUpdate()
+            if chunk.first {
+                model = ResourceTableModel()
+            }
+            let plan = model.apply(
+                ResourceRowBatch(
+                    upserts: chunk.rows,
+                    visibleOrder: .append(chunk.rows.map { $0.identity.uid })
+                ),
+                capture: capture
+            )
+            applyTablePlan(plan)
+        case .delta(_, let delta):
+            let capture = captureUpdate()
+            let order: VisibleOrderUpdate = delta.orderIsComplete
+                ? .replace(delta.orderedUIDs)
+                : .unchanged
+            let plan = model.apply(ResourceRowBatch(
+                upserts: delta.upserts,
+                removedUIDs: delta.removedUIDs,
+                visibleOrder: order
+            ), capture: capture)
+            applyTablePlan(plan)
+        case .failure(_, let issue):
+            show(error: issue)
+        }
+        updateStatusLine()
+    }
+
+    private func captureUpdate() -> ResourceTableUpdateCapture {
+        let firstRow = tableView.rows(in: tableView.visibleRect).location
+        let uid = model.orderedVisibleUIDs.indices.contains(firstRow)
+            ? model.orderedVisibleUIDs[firstRow] : nil
+        return model.captureUpdate(topVisibleUID: uid)
+    }
+
+    private func applyTablePlan(_ plan: ResourceTableUpdatePlan) {
+        suppressSelectionCallbacks = true
+        tableView.reloadData()
+        tableView.selectRowIndexes(IndexSet(plan.selectedRowIndexes), byExtendingSelection: false)
+        suppressSelectionCallbacks = false
+        if let restoration = plan.scrollRestoration,
+            model.orderedVisibleUIDs.indices.contains(restoration.rowIndex)
+        {
+            tableView.scrollRowToVisible(restoration.rowIndex)
+        }
+    }
+
+    private func show(error: Error) {
+        errorLabel.stringValue = error.localizedDescription
+        errorLabel.isHidden = false
+        freshnessLabel.stringValue = "Disconnected"
+    }
+
+    private func updateStatusLine() {
+        countLabel.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects"
+        if let status = view.viewWithTag(0)?.subviews.compactMap({ $0 as? NSTextField }).first(where: { $0.identifier?.rawValue == "resource-status-line" }) {
+            status.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects · \(model.selectionCounts.selected) selected · \(freshnessLabel.stringValue)"
+        }
+    }
+
+    private func configureColumns(for resource: DiscoveredResource) {
+        columnIDs = resource.namespaced ? ["namespace", "name"] : ["name"]
+        if resource.resource == "pods" {
+            columnIDs += ["ready", "status", "restarts", "node", "age"]
+        } else {
+            columnIDs += ["status", "age"]
+        }
+        tableView.tableColumns.forEach(tableView.removeTableColumn)
+        for columnID in columnIDs {
+            let column = NSTableColumn(identifier: .init(columnID))
+            column.title = columnTitle(columnID)
+            column.width = columnWidth(columnID)
+            column.minWidth = 55
+            column.sortDescriptorPrototype = NSSortDescriptor(key: columnID, ascending: true)
+            tableView.addTableColumn(column)
+        }
+    }
+
+    private func columnTitle(_ id: String) -> String {
+        ["namespace": "Namespace", "name": "Name", "ready": "Ready", "status": "Status", "restarts": "Restarts", "node": "Node", "age": "Age"][id] ?? id
+    }
+
+    private func columnWidth(_ id: String) -> CGFloat {
+        ["namespace": 150, "name": 280, "ready": 70, "status": 130, "restarts": 75, "node": 180, "age": 75][id] ?? 120
+    }
+
+    private func navigationState() -> ResourceNavigationState? {
+        guard let resource else { return nil }
+        return ResourceNavigationState(
+            group: resource.group, version: resource.version, resource: resource.resource,
+            kind: resource.kind, namespaceSelection: scope,
+            filter: filterField.stringValue,
+            selectedUIDs: model.selectedUIDs,
+            scrollAnchor: captureUpdate().scrollAnchor
+        )
+    }
+
+    private func restore(_ destination: WorkspaceDestination) {
+        guard case .resource(let state) = destination else { return }
+        resource = DiscoveredResource(
+            group: state.group, version: state.version, resource: state.resource,
+            kind: state.kind, namespaced: !state.namespaceSelection.namespaces.isEmpty || state.namespaceSelection.allNamespaces,
+            verbs: ["list", "watch"]
+        )
+        scope = state.namespaceSelection
+        filterField.stringValue = state.filter
+        configureColumns(for: resource!)
+        openStream()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { model.orderedVisibleUIDs.count }
+
+    func tableView(
+        _ tableView: NSTableView,
+        viewFor tableColumn: NSTableColumn?,
+        row: Int
+    ) -> NSView? {
+        guard model.orderedVisibleUIDs.indices.contains(row), let tableColumn else { return nil }
+        let identifier = NSUserInterfaceItemIdentifier("cell.\(tableColumn.identifier.rawValue)")
+        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
+            ?? NSTableCellView()
+        cell.identifier = identifier
+        if cell.textField == nil {
+            let label = NSTextField(labelWithString: "")
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            cell.textField = label
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+        }
+        let uid = model.orderedVisibleUIDs[row]
+        let value = model.rowByUID[uid]?[tableColumn.identifier.rawValue]
+        cell.textField?.stringValue = value?.displayText ?? "—"
+        cell.textField?.toolTip = value?.tooltip
+        switch value?.severity {
+        case .warning: cell.textField?.textColor = .systemOrange
+        case .critical: cell.textField?.textColor = .systemRed
+        case .informational: cell.textField?.textColor = .systemBlue
+        default: cell.textField?.textColor = .labelColor
+        }
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !suppressSelectionCallbacks else { return }
+        model.replaceSelectionFromVisibleRows(
+            indexes: Array(tableView.selectedRowIndexes),
+            anchorIndex: tableView.selectedRow >= 0 ? tableView.selectedRow : nil
+        )
+        updateStatusLine()
+    }
+
+    func tableView(
+        _ tableView: NSTableView,
+        sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
+    ) {
+        guard let descriptor = tableView.sortDescriptors.first,
+            let key = descriptor.key
+        else { return }
+        // Sorting is backend-authoritative. Until the IPC provider exposes a
+        // dedicated navigation mutation, reopening applies the same column set
+        // and stable UID tie-breaker; this keeps AppKit off raw object work.
+        logger.debug("Requested backend table sort for \(key, privacy: .public)")
+        openStream()
+    }
+
+    @objc private func openSelectedObject() {
+        guard model.selectionCounts.selected == 1 else { return }
+        NSSound.beep()
+    }
+
+    private func handle(_ command: ResourceTableCommand) {
+        switch command {
+        case .focusFilter:
+            view.window?.makeFirstResponder(filterField)
+        case .open:
+            openSelectedObject()
+        case .selectAll:
+            model.selectAllVisible()
+            suppressSelectionCallbacks = true
+            tableView.selectAll(nil)
+            suppressSelectionCallbacks = false
+            updateStatusLine()
+        case .delete:
+            NSSound.beep()
+        case .moveDown, .moveUp:
+            let delta = command == .moveDown ? 1 : -1
+            let next = min(max(tableView.selectedRow + delta, 0), max(0, tableView.numberOfRows - 1))
+            tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+            tableView.scrollRowToVisible(next)
+        }
+    }
+}
+
+private enum ResourceTableCommand: Equatable {
+    case focusFilter, open, selectAll, delete, moveUp, moveDown
+}
+
+@MainActor
+private final class ResourceTableView: NSTableView {
+    var onCommand: ((ResourceTableCommand) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        guard currentEditor() == nil else { super.keyDown(with: event); return }
+        let command = event.modifierFlags.contains(.command)
+        switch (event.charactersIgnoringModifiers, event.keyCode, command) {
+        case ("/", _, false): onCommand?(.focusFilter)
+        case ("j", _, false): onCommand?(.moveDown)
+        case ("k", _, false): onCommand?(.moveUp)
+        case (_, 36, false): onCommand?(.open)
+        case ("a", _, true): onCommand?(.selectAll)
+        case (_, 51, true): onCommand?(.delete)
+        default: super.keyDown(with: event)
+        }
     }
 }

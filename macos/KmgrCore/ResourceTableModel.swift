@@ -352,6 +352,21 @@ public struct ResourceTableModel: Hashable, Sendable {
         }
     }
 
+    /// Restores a captured UID selection when reopening a navigation entry.
+    /// Missing UIDs are ignored; a same-name object with a new UID cannot
+    /// inherit selection.
+    public mutating func restoreSelection(
+        uids: Set<ResourceUID>,
+        anchorUID: ResourceUID? = nil
+    ) {
+        selectedUIDs = uids.filter { rowByUID[$0] != nil }
+        if let anchorUID, selectedUIDs.contains(anchorUID) {
+            selectionAnchorUID = anchorUID
+        } else {
+            selectionAnchorUID = selectedUIDs.first
+        }
+    }
+
     public mutating func clearSelection() {
         selectedUIDs.removeAll(keepingCapacity: true)
         selectionAnchorUID = nil
