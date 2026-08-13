@@ -331,6 +331,7 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 	}
 	streamKey := viewKey{sessionID: sessionID, viewID: viewID}
 
+	var replaced *Subscription
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -342,6 +343,7 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 	}
 	if previous := r.views[streamKey]; previous != nil {
 		r.detachLocked(previous)
+		replaced = previous
 	}
 	entry := r.resources[key]
 	if entry == nil {
@@ -401,21 +403,26 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 	if metricSubscription == nil {
 		projector = subscription.projector
 	}
-	entry.subscribers[subscription] = struct{}{}
-	r.views[streamKey] = subscription
-
 	warmRows := projector.Project(entry.store.Snapshot())
 	if len(warmRows) != 0 {
-		subscription.replaceAllLocked(warmRows)
+		subscription.initializeRows(warmRows)
 		subscription.setStatusLocked(statusForWarmEntry(entry))
 	} else {
 		subscription.setStatusLocked(&kmgrv1.ViewStatus{Freshness: kmgrv1.ViewFreshness_VIEW_FRESHNESS_LOADING})
-		subscription.replaceAllLocked(nil)
+		subscription.initializeRows(nil)
 	}
+	entry.subscribers[subscription] = struct{}{}
+	r.views[streamKey] = subscription
+	var startSubscribers []*Subscription
+	var startError *kmgrv1.StructuredError
 	if !entry.running {
-		r.startResourceLocked(entry)
+		startSubscribers, startError = r.startResourceLocked(entry)
 	}
 	r.mu.Unlock()
+	if replaced != nil {
+		replaced.close()
+	}
+	deliverSubscriptionError(startSubscribers, startError)
 	// Enqueue the base projection before metrics can publish. Starting this
 	// goroutine after releasing the runtime lock also keeps a very fast metrics
 	// response from contending with the base LIST/WATCH setup.
@@ -439,7 +446,7 @@ func (r *Runtime) attachNodeAccounting(subscription *Subscription, sessionID, au
 	}
 	key := resourceKey{authorityID: authorityID, version: "v1", resource: "pods"}
 	r.mu.Lock()
-	if r.closed || subscription.closed || r.views[subscription.key] != subscription {
+	if r.closed || r.views[subscription.key] != subscription {
 		r.mu.Unlock()
 		return
 	}
@@ -473,8 +480,10 @@ func (r *Runtime) attachNodeAccounting(subscription *Subscription, sessionID, au
 	}
 	entry.dependents[subscription] = struct{}{}
 	subscription.nodePods = entry
+	var startSubscribers []*Subscription
+	var startError *kmgrv1.StructuredError
 	if !entry.running {
-		r.startResourceLocked(entry)
+		startSubscribers, startError = r.startResourceLocked(entry)
 	}
 	var current *nodeAccountingResult
 	if entry.accountingReady || entry.accountingError != nil {
@@ -483,6 +492,7 @@ func (r *Runtime) attachNodeAccounting(subscription *Subscription, sessionID, au
 		)
 	}
 	r.mu.Unlock()
+	deliverSubscriptionError(startSubscribers, startError)
 	if current != nil {
 		subscription.applyNodeAccounting(current)
 	}
@@ -518,7 +528,7 @@ func sameError(left, right error) bool {
 
 func (r *Runtime) applyNodeAccountingError(subscription *Subscription, err error) {
 	r.mu.Lock()
-	if r.closed || subscription == nil || subscription.closed || r.views[subscription.key] != subscription {
+	if r.closed || subscription == nil || r.views[subscription.key] != subscription {
 		r.mu.Unlock()
 		return
 	}
@@ -531,7 +541,7 @@ func (r *Runtime) applyNodeAccountingError(subscription *Subscription, err error
 	subscription.applyNodeAccounting(result)
 }
 
-func (r *Runtime) startResourceLocked(entry *resourceRuntime) {
+func (r *Runtime) startResourceLocked(entry *resourceRuntime) ([]*Subscription, *kmgrv1.StructuredError) {
 	entry.runNumber++
 	runNumber := entry.runNumber
 	ctx, cancel := context.WithCancel(context.Background())
@@ -555,43 +565,65 @@ func (r *Runtime) startResourceLocked(entry *resourceRuntime) {
 		entry.cancel()
 		entry.cancel = nil
 		entry.ctx = nil
+		subscriptions := make([]*Subscription, 0, len(entry.subscribers))
 		for subscription := range entry.subscribers {
-			subscription.setError(structuredViewError("watch resource", err, true))
+			subscriptions = append(subscriptions, subscription)
 		}
 		if len(entry.dependents) != 0 {
 			entry.accountingReady = false
 			entry.accountingError = fmt.Errorf("watch Pods: %w", err)
 			r.scheduleNodeAccountingLocked(nil, entry, false, entry.accountingError)
 		}
-		return
+		return subscriptions, structuredViewError("watch resource", err, true)
 	}
 	go func() {
 		err := pipeline.Run(ctx)
 		r.resourceStopped(entry, runNumber, err)
 	}()
+	return nil, nil
+}
+
+func deliverSubscriptionError(subscriptions []*Subscription, value *kmgrv1.StructuredError) {
+	if value == nil {
+		return
+	}
+	for _, subscription := range subscriptions {
+		subscription.setError(value)
+	}
 }
 
 func (r *Runtime) receiveStatus(entry *resourceRuntime, runNumber uint64, status watcher.Status) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if entry.runNumber != runNumber || !entry.running {
+		r.mu.Unlock()
 		return
 	}
 	entry.lastStatus = status
 	translated := statusFromPipeline(status)
+	subscriptions := make([]*Subscription, 0, len(entry.subscribers))
 	for subscription := range entry.subscribers {
+		subscriptions = append(subscriptions, subscription)
+	}
+	r.mu.Unlock()
+	for _, subscription := range subscriptions {
 		subscription.setStatus(translated)
 	}
 }
 
 func (r *Runtime) receiveBatch(entry *resourceRuntime, runNumber uint64, batch watcher.Batch) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if entry.runNumber != runNumber || !entry.running {
+		r.mu.Unlock()
 		return
 	}
+	// Capture consumers while the lifecycle graph is stable, then project the
+	// batch after releasing the runtime-wide mutex. Subscription.applyBatch has
+	// its own closed/generation gate, so a concurrent detach is safe; more
+	// importantly, CEL and typed row projection for one view can no longer
+	// block unrelated view opens, closes, cache release, or diagnostics.
+	subscriptions := make([]*Subscription, 0, len(entry.subscribers))
 	for subscription := range entry.subscribers {
-		subscription.applyBatch(batch)
+		subscriptions = append(subscriptions, subscription)
 	}
 	if batch.SnapshotComplete {
 		entry.accountingReady = true
@@ -614,22 +646,29 @@ func (r *Runtime) receiveBatch(entry *resourceRuntime, runNumber uint64, batch w
 			r.scheduleNodeAccountingLocked(entry, pods, true, nil)
 		}
 	}
+	r.mu.Unlock()
+
+	for _, subscription := range subscriptions {
+		subscription.applyBatch(batch)
+	}
 }
 
 func (r *Runtime) resourceStopped(entry *resourceRuntime, runNumber uint64, err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if entry.runNumber != runNumber {
+		r.mu.Unlock()
 		return
 	}
 	entry.running = false
 	entry.cancel = nil
 	entry.ctx = nil
 	if len(entry.subscribers)+len(entry.dependents) == 0 || errors.Is(err, context.Canceled) {
+		r.mu.Unlock()
 		return
 	}
+	subscriptions := make([]*Subscription, 0, len(entry.subscribers))
 	for subscription := range entry.subscribers {
-		subscription.setError(structuredViewError("watch resource", err, true))
+		subscriptions = append(subscriptions, subscription)
 	}
 	if len(entry.dependents) != 0 {
 		// Preserve a previously complete cached revision while surfacing that
@@ -638,6 +677,8 @@ func (r *Runtime) resourceStopped(entry *resourceRuntime, runNumber uint64, err 
 		entry.accountingError = err
 		r.scheduleNodeAccountingLocked(nil, entry, entry.accountingReady, entry.accountingError)
 	}
+	r.mu.Unlock()
+	deliverSubscriptionError(subscriptions, structuredViewError("watch resource", err, true))
 }
 
 func isNodeResourceKey(key resourceKey) bool {
@@ -659,7 +700,7 @@ func (r *Runtime) scheduleNodeAccountingLocked(
 	}
 	selected := make(map[*resourceRuntime]struct{})
 	for subscription := range pods.dependents {
-		if subscription == nil || subscription.closed || subscription.resource == nil {
+		if subscription == nil || subscription.resource == nil {
 			continue
 		}
 		if nodes == nil || subscription.resource == nodes {
@@ -744,7 +785,7 @@ func (r *Runtime) runNodeAccounting(work *nodeAccountingWork) {
 func (r *Runtime) nodeAccountingSubscribersLocked(key nodeAccountingKey) []*Subscription {
 	result := make([]*Subscription, 0, len(key.pods.dependents))
 	for subscription := range key.pods.dependents {
-		if subscription == nil || subscription.closed || subscription.resource != key.nodes ||
+		if subscription == nil || subscription.resource != key.nodes ||
 			subscription.nodePods != key.pods || r.views[subscription.key] != subscription {
 			continue
 		}
@@ -783,17 +824,19 @@ func computeNodeAccounting(
 // Cancel is idempotent. A stale cancellation cannot close a newer generation.
 func (r *Runtime) Cancel(sessionID, viewID string, generation uint64) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	subscription := r.views[viewKey{sessionID: sessionID, viewID: viewID}]
 	if subscription == nil || subscription.generation != generation {
+		r.mu.Unlock()
 		return false
 	}
 	r.detachLocked(subscription)
+	r.mu.Unlock()
+	subscription.close()
 	return true
 }
 
 func (r *Runtime) detachLocked(subscription *Subscription) {
-	if subscription == nil || subscription.closed {
+	if subscription == nil || r.views[subscription.key] != subscription {
 		return
 	}
 	delete(r.views, subscription.key)
@@ -805,7 +848,6 @@ func (r *Runtime) detachLocked(subscription *Subscription) {
 		r.removeUnusedNodeAccountingLocked(entry, dependency)
 		r.scheduleReleaseLocked(dependency)
 	}
-	subscription.closeLocked()
 	r.scheduleReleaseLocked(entry)
 }
 
@@ -859,21 +901,27 @@ func (r *Runtime) releaseResource(key resourceKey, entry *resourceRuntime, runNu
 
 func (r *Runtime) closeSubscription(subscription *Subscription) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	detached := false
 	if current := r.views[subscription.key]; current == subscription {
 		r.detachLocked(subscription)
+		detached = true
+	}
+	r.mu.Unlock()
+	if detached {
+		subscription.close()
 	}
 }
 
 func (r *Runtime) Close() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.closed {
+		r.mu.Unlock()
 		return
 	}
 	r.closed = true
+	subscriptions := make([]*Subscription, 0, len(r.views))
 	for _, subscription := range r.views {
-		subscription.closeLocked()
+		subscriptions = append(subscriptions, subscription)
 	}
 	clear(r.views)
 	for key, entry := range r.resources {
@@ -883,9 +931,14 @@ func (r *Runtime) Close() {
 		if entry.cancel != nil {
 			entry.cancel()
 		}
+		entry.running = false
 		delete(r.resources, key)
 	}
 	clear(r.nodeAccounting)
+	r.mu.Unlock()
+	for _, subscription := range subscriptions {
+		subscription.close()
+	}
 }
 
 // ActiveResourceCount is exposed for lifecycle tests and redacted diagnostics.
@@ -1044,9 +1097,17 @@ func (s *Subscription) attachMetrics(subscription *metrics.Subscription) {
 	if subscription == nil {
 		return
 	}
-	s.metrics = subscription
 	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		cancel()
+		subscription.Close()
+		return
+	}
+	s.metrics = subscription
 	s.metricCancel = cancel
+	s.mu.Unlock()
 	go s.receiveMetrics(ctx, subscription)
 }
 
@@ -1110,9 +1171,10 @@ func (s *Subscription) replaceProjectionLocked(projected []*kmgrv1.ResourceRow) 
 	s.signalLocked(false)
 }
 
-func (s *Subscription) replaceAllLocked(rows []*kmgrv1.ResourceRow) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// initializeRows is called only before the subscription is published in the
+// runtime lifecycle graph. Keeping initialization lock-free avoids acquiring
+// Subscription.mu while Runtime.mu protects that publication.
+func (s *Subscription) initializeRows(rows []*kmgrv1.ResourceRow) {
 	clear(s.rows)
 	s.order = s.order[:0]
 	for _, row := range rows {
@@ -1335,7 +1397,7 @@ func (s *Subscription) errorEventLocked(value *kmgrv1.StructuredError) *kmgrv1.V
 	return &kmgrv1.ViewEvent{Cursor: s.cursorLocked(), Payload: &kmgrv1.ViewEvent_Error{Error: value}}
 }
 
-func (s *Subscription) closeLocked() {
+func (s *Subscription) close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {

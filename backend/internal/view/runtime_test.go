@@ -317,6 +317,75 @@ func TestSubscriptionCapturesNowOnceForWatchBatch(t *testing.T) {
 	}
 }
 
+func TestRuntimeLifecycleMutexIsNotHeldDuringRowProjection(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	client.listPages = []*unstructured.UnstructuredList{listPage("rv-1", "")}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:     &fakeResourceSource{authority: "cluster-a", client: client},
+		BatchDelay: time.Hour, PipelineTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	subscription, err := runtime.Open(openView("session-1", "view-1", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	subscription.mu.Lock()
+	subscription.projector.now = func() time.Time {
+		startOnce.Do(func() { close(started) })
+		<-release
+		return time.Unix(100, 0)
+	}
+	entry := subscription.resource
+	runtime.mu.Lock()
+	runNumber := entry.runNumber
+	runtime.mu.Unlock()
+	subscription.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		runtime.receiveBatch(entry, runNumber, watcher.Batch{
+			Upserts: []*unstructured.Unstructured{
+				pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}),
+			},
+		})
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("row projection did not start")
+	}
+
+	lifecycle := make(chan int, 1)
+	go func() { lifecycle <- runtime.ActiveResourceCount() }()
+	select {
+	case count := <-lifecycle:
+		if count != 1 {
+			close(release)
+			t.Fatalf("active resource count = %d, want 1", count)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		t.Fatal("runtime lifecycle mutex was held during row projection")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("row projection did not finish")
+	}
+}
+
 func TestStaleCancelCannotCloseReplacementGeneration(t *testing.T) {
 	t.Parallel()
 	source := &fakeResourceSource{authority: "cluster-a", client: newScriptedResource()}
