@@ -1022,7 +1022,6 @@ func (r *Runtime) detachLocked(subscription *Subscription) {
 	}
 	r.scheduleReleaseLocked(entry)
 }
-
 func (r *Runtime) removeUnusedNodeAccountingLocked(nodes, pods *resourceRuntime) {
 	if nodes == nil || pods == nil {
 		return
@@ -1407,15 +1406,31 @@ type Subscription struct {
 	pendingRemoved         map[string]struct{}
 	pendingStatuses        []*kmgrv1.ViewStatus
 	pendingError           *kmgrv1.StructuredError
-	orderDirty             bool
-	resnapshot             bool
-	notify                 chan struct{}
-	done                   chan struct{}
-	timer                  *time.Timer
-	batchDelay             time.Duration
-	chunkSize              int
-	pendingLimit           int
-	closed                 bool
+	pendingObjects         map[string]*unstructured.Unstructured
+	// knownUIDs is the exact set the client may retain. The bool records an
+	// undrained confirmed deletion without allocating a second unbounded map.
+	knownUIDs            map[string]bool
+	removalOverflow      bool
+	projectionTimer      *time.Timer
+	projectionScheduled  bool
+	projectionRunning    bool
+	projectionResnapshot bool
+	projectionRevision   uint64
+	projectionScheduleID uint64
+	projectionPasses     uint64
+	projectedObjects     uint64
+	// scheduleProjection is replaced by tests to make coalescing flushes
+	// deterministic. Production uses one batchDelay timer.
+	scheduleProjection func(func()) *time.Timer
+	orderDirty         bool
+	resnapshot         bool
+	notify             chan struct{}
+	done               chan struct{}
+	timer              *time.Timer
+	batchDelay         time.Duration
+	chunkSize          int
+	pendingLimit       int
+	closed             bool
 }
 
 func newSubscription(
@@ -1426,19 +1441,25 @@ func newSubscription(
 	chunkSize int,
 	pendingLimit int,
 ) *Subscription {
-	return &Subscription{
+	subscription := &Subscription{
 		key:            key,
 		generation:     generation,
 		projector:      projector,
 		rows:           make(map[string]*kmgrv1.ResourceRow),
 		pendingUpserts: make(map[string]*kmgrv1.ResourceRow),
 		pendingRemoved: make(map[string]struct{}),
+		pendingObjects: make(map[string]*unstructured.Unstructured),
+		knownUIDs:      make(map[string]bool),
 		notify:         make(chan struct{}, 1),
 		done:           make(chan struct{}),
 		batchDelay:     batchDelay,
 		chunkSize:      chunkSize,
 		pendingLimit:   pendingLimit,
 	}
+	subscription.scheduleProjection = func(flush func()) *time.Timer {
+		return time.AfterFunc(batchDelay, flush)
+	}
+	return subscription
 }
 
 func (s *Subscription) Generation() uint64 { return s.generation }
@@ -1503,12 +1524,15 @@ func (s *Subscription) receiveMetrics(ctx context.Context, subscription *metrics
 
 func (s *Subscription) applyMetrics(snapshot metrics.Snapshot) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed || s.resource == nil {
+		s.mu.Unlock()
 		return
 	}
 	s.projector = s.projector.WithMetrics(snapshot)
-	s.replaceProjectionLocked(s.projector.Project(s.resource.store.Snapshot()))
+	s.projectionRevision++
+	s.projectionResnapshot = true
+	s.scheduleProjectionLocked()
+	s.mu.Unlock()
 }
 
 func (s *Subscription) applyNodeAccounting(result *nodeAccountingResult) {
@@ -1522,29 +1546,9 @@ func (s *Subscription) applyNodeAccounting(result *nodeAccountingResult) {
 	}
 	s.nodeAccountingRevision = result.revision
 	s.projector = s.projector.WithNodeAccounting(result.snapshot)
-	s.replaceProjectionLocked(s.projector.Project(s.resource.store.Snapshot()))
-}
-
-func (s *Subscription) replaceProjectionLocked(projected []*kmgrv1.ResourceRow) {
-	clear(s.rows)
-	s.order = s.order[:0]
-	clear(s.pendingRemoved)
-	clear(s.pendingUpserts)
-	for _, row := range projected {
-		uid := row.GetIdentity().GetUid()
-		if uid == "" {
-			continue
-		}
-		s.rows[uid] = row
-		s.order = append(s.order, uid)
-		s.pendingUpserts[uid] = row
-	}
-	s.orderDirty = true
-	if len(s.pendingUpserts) > s.pendingLimit {
-		s.resnapshot = true
-		clear(s.pendingUpserts)
-	}
-	s.signalLocked(false)
+	s.projectionRevision++
+	s.projectionResnapshot = true
+	s.scheduleProjectionLocked()
 }
 
 // initializeRows is called only before the subscription is published in the
@@ -1563,23 +1567,40 @@ func (s *Subscription) initializeRows(rows []*kmgrv1.ResourceRow) {
 	}
 	clear(s.pendingUpserts)
 	clear(s.pendingRemoved)
+	clear(s.knownUIDs)
+	s.removalOverflow = false
 	s.resnapshot = true
 	s.orderDirty = false
 	s.signalLocked(true)
 }
 
 func (s *Subscription) applyBatch(batch watcher.Batch) {
+	if !batch.FromList && !batch.SnapshotComplete {
+		s.enqueueWatchBatch(batch)
+		return
+	}
+	s.flushProjection()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
+	// LIST pages and snapshot-complete batches are projection barriers. An
+	// older WATCH projection may still be running when flushProjection returns;
+	// advancing the revision before touching rows prevents that work from
+	// committing over the newer authoritative LIST state.
+	s.projectionRevision++
+	// Any WATCH objects claimed before this authoritative LIST page are older
+	// than the barrier. Dropping them prevents a later WATCH from causing those
+	// stranded objects to be projected over the LIST state.
+	clear(s.pendingObjects)
+	s.projectionResnapshot = false
 	batchProjector := s.projector.beginBatch()
 	for _, uid := range batch.RemovedUIDs {
 		key := string(uid)
 		delete(s.rows, key)
 		delete(s.pendingUpserts, key)
-		s.pendingRemoved[key] = struct{}{}
+		s.enqueueRemovalLocked(key)
 		s.orderDirty = true
 	}
 	for _, object := range batch.Upserts {
@@ -1595,6 +1616,9 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 			continue
 		}
 		delete(s.pendingRemoved, uid)
+		if s.knownUIDs != nil {
+			s.knownUIDs[uid] = false
+		}
 		s.rows[uid] = row
 		s.pendingUpserts[uid] = row
 		if previous == nil || s.projector.compareRows(previous, row) != 0 {
@@ -1607,7 +1631,6 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 	if len(s.pendingUpserts)+len(s.pendingRemoved) > s.pendingLimit {
 		s.resnapshot = true
 		clear(s.pendingUpserts)
-		clear(s.pendingRemoved)
 	}
 	if batch.SnapshotComplete {
 		s.pendingStatuses = append(s.pendingStatuses, &kmgrv1.ViewStatus{
@@ -1618,6 +1641,270 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 		})
 	}
 	s.signalLocked(batch.FromList)
+}
+
+// enqueueWatchBatch keeps WATCH ingestion to bounded map work. Upserts are
+// projected newest-per-UID after one short coalescing window; removals are
+// applied and signaled immediately so deleted rows never linger behind CEL or
+// a full-table sort.
+func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	removed := false
+	for _, uid := range batch.RemovedUIDs {
+		key := string(uid)
+		if key == "" {
+			continue
+		}
+		delete(s.pendingObjects, key)
+		// A claimed object is absent from pendingObjects and may not have a
+		// committed row yet. Every valid tombstone must therefore invalidate
+		// in-flight work, not only tombstones for currently visible rows.
+		s.projectionRevision++
+		if s.projectionRunning && s.resource != nil {
+			s.projectionResnapshot = true
+		}
+		delete(s.rows, key)
+		delete(s.pendingUpserts, key)
+		// The client can retain a filter-hidden identity for selection even
+		// after it is absent from rows. Every valid Kubernetes tombstone must
+		// therefore be delivered, regardless of current projection visibility.
+		if s.enqueueRemovalLocked(key) {
+			removed = true
+		}
+	}
+	for _, object := range batch.Upserts {
+		if object == nil || object.GetUID() == "" {
+			continue
+		}
+		key := string(object.GetUID())
+		s.pendingObjects[key] = object
+	}
+	if len(s.pendingObjects) > s.pendingLimit {
+		clear(s.pendingObjects)
+		s.projectionResnapshot = true
+	}
+	if removed {
+		s.signalLocked(true)
+	}
+	if len(s.pendingObjects) != 0 || s.projectionResnapshot {
+		s.scheduleProjectionLocked()
+	}
+}
+
+func (s *Subscription) enqueueRemovalLocked(uid string) bool {
+	if uid == "" {
+		return false
+	}
+	pending, known := s.knownUIDs[uid]
+	if s.knownUIDs != nil && !known {
+		return false
+	}
+	if len(s.pendingRemoved) < s.pendingLimit {
+		s.pendingRemoved[uid] = struct{}{}
+	} else {
+		s.removalOverflow = true
+	}
+	if s.knownUIDs != nil {
+		s.knownUIDs[uid] = true
+	}
+	if len(s.pendingRemoved) >= s.pendingLimit || s.removalOverflow {
+		s.resnapshot = true
+	}
+	return !pending
+}
+
+func (s *Subscription) scheduleProjectionLocked() {
+	if s.closed || s.projectionScheduled || s.projectionRunning {
+		return
+	}
+	s.projectionScheduled = true
+	s.projectionScheduleID++
+	scheduleID := s.projectionScheduleID
+	// Production scheduling is non-blocking. Tests replace this hook with one
+	// that captures (but does not synchronously invoke) the callback.
+	s.projectionTimer = s.scheduleProjection(func() {
+		s.flushScheduledProjection(scheduleID)
+	})
+}
+
+func (s *Subscription) cancelProjectionScheduleLocked() {
+	if s.projectionTimer != nil {
+		s.projectionTimer.Stop()
+		s.projectionTimer = nil
+	}
+	if s.projectionScheduled {
+		s.projectionScheduled = false
+		s.projectionScheduleID++
+	}
+}
+
+func (s *Subscription) flushScheduledProjection(scheduleID uint64) {
+	s.mu.Lock()
+	if s.closed || !s.projectionScheduled || s.projectionScheduleID != scheduleID {
+		s.mu.Unlock()
+		return
+	}
+	s.projectionScheduled = false
+	s.projectionTimer = nil
+	if s.projectionRunning || (len(s.pendingObjects) == 0 && !s.projectionResnapshot) {
+		s.mu.Unlock()
+		return
+	}
+	s.projectionRunning = true
+	s.mu.Unlock()
+	s.runProjection()
+}
+
+// flushProjection synchronously starts any queued projection. It exists both
+// as a LIST barrier and as deterministic test control; production WATCH
+// delivery normally enters through flushScheduledProjection.
+func (s *Subscription) flushProjection() {
+	s.mu.Lock()
+	s.cancelProjectionScheduleLocked()
+	if s.closed || s.projectionRunning ||
+		(len(s.pendingObjects) == 0 && !s.projectionResnapshot) {
+		s.mu.Unlock()
+		return
+	}
+	s.projectionRunning = true
+	s.mu.Unlock()
+	s.runProjection()
+}
+
+// runProjection snapshots coalesced state under Subscription.mu, performs CEL
+// projection and sorting without either the lifecycle or subscription mutex,
+// then commits only against the same row/projector revision. A removal, LIST
+// barrier, or enrichment revision that races the work causes a retry from the
+// authoritative object store.
+func (s *Subscription) runProjection() {
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.projectionRunning = false
+			s.mu.Unlock()
+			return
+		}
+		if len(s.pendingObjects) == 0 && !s.projectionResnapshot {
+			s.projectionRunning = false
+			s.mu.Unlock()
+			return
+		}
+		revision := s.projectionRevision
+		projector := s.projector
+		full := s.projectionResnapshot
+		s.projectionResnapshot = false
+		objects := make([]*unstructured.Unstructured, 0, len(s.pendingObjects))
+		for _, object := range s.pendingObjects {
+			objects = append(objects, object)
+		}
+		clear(s.pendingObjects)
+		baseRows := make(map[string]*kmgrv1.ResourceRow, len(s.rows))
+		if !full || s.resource == nil {
+			for uid, row := range s.rows {
+				baseRows[uid] = row
+			}
+		}
+		resource := s.resource
+		s.mu.Unlock()
+
+		if full && resource != nil {
+			objects = resource.store.Snapshot()
+		}
+		batchProjector := projector.beginBatch()
+		projectedObjects := uint64(0)
+		for _, object := range objects {
+			if object == nil || object.GetUID() == "" {
+				continue
+			}
+			projectedObjects++
+			uid := string(object.GetUID())
+			row, visible := batchProjector.projectOne(object)
+			if visible {
+				baseRows[uid] = row
+			} else {
+				delete(baseRows, uid)
+			}
+		}
+		ordered := make([]*kmgrv1.ResourceRow, 0, len(baseRows))
+		for _, row := range baseRows {
+			ordered = append(ordered, row)
+		}
+		slices.SortStableFunc(ordered, projector.compareRows)
+
+		s.mu.Lock()
+		s.projectionPasses++
+		s.projectedObjects += projectedObjects
+		if s.closed {
+			s.projectionRunning = false
+			s.mu.Unlock()
+			return
+		}
+		if s.projectionRevision != revision {
+			if s.projectionResnapshot || len(s.pendingObjects) != 0 {
+				s.mu.Unlock()
+				continue
+			}
+			s.projectionRunning = false
+			s.mu.Unlock()
+			return
+		}
+		s.rows = baseRows
+		s.order = s.order[:0]
+		for _, row := range ordered {
+			s.order = append(s.order, row.GetIdentity().GetUid())
+		}
+		if full {
+			clear(s.pendingUpserts)
+			if s.knownUIDs != nil {
+				for uid := range s.rows {
+					s.knownUIDs[uid] = false
+					delete(s.pendingRemoved, uid)
+				}
+			}
+			s.resnapshot = true
+			s.orderDirty = false
+		} else {
+			for _, object := range objects {
+				if object == nil || object.GetUID() == "" {
+					continue
+				}
+				uid := string(object.GetUID())
+				row := s.rows[uid]
+				if row == nil {
+					// Filter invisibility is represented by the complete order, not
+					// RemovedUids: clients retain hidden-row selection and only a
+					// confirmed Kubernetes deletion may remove the identity.
+					delete(s.pendingUpserts, uid)
+					continue
+				}
+				delete(s.pendingRemoved, uid)
+				if s.knownUIDs != nil {
+					s.knownUIDs[uid] = false
+				}
+				s.pendingUpserts[uid] = row
+			}
+			s.orderDirty = true
+		}
+		// Rows and their complete order changed as one atomic projection
+		// commit. Advance the revision so a concurrent LIST projection that
+		// started from older rows cannot later replace this state.
+		s.projectionRevision++
+		if len(s.pendingUpserts)+len(s.pendingRemoved) > s.pendingLimit {
+			s.resnapshot = true
+			clear(s.pendingUpserts)
+		}
+		s.signalLocked(false)
+		if len(s.pendingObjects) == 0 && !s.projectionResnapshot {
+			s.projectionRunning = false
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *Subscription) rebuildOrderLocked() {
@@ -1702,6 +1989,27 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 	}
 	s.pendingStatuses = nil
 	if s.resnapshot {
+		// WATCH removals deliberately leave tombstones in order so ingestion is
+		// bounded map work. Compact once only when a slow client needs a full
+		// snapshot; ordinary removal deltas need no replacement order because
+		// clients preserve survivor order themselves.
+		if len(s.order) != len(s.rows) {
+			kept := 0
+			for _, uid := range s.order {
+				if s.rows[uid] == nil {
+					continue
+				}
+				s.order[kept] = uid
+				kept++
+			}
+			clear(s.order[kept:])
+			s.order = s.order[:kept]
+		}
+		// Snapshot order controls visibility but does not prove Kubernetes
+		// deletion to clients. Preserve and emit true tombstones separately so
+		// a concurrent metrics/overflow full projection cannot turn a delete
+		// into a hidden ghost row or retained selection.
+		events = s.appendRemovalEventsLocked(events)
 		if len(s.order) == 0 {
 			events = append(events, s.snapshotEventLocked(&kmgrv1.SnapshotChunk{
 				FirstChunk: true, LastChunk: true,
@@ -1723,24 +2031,22 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 		s.orderDirty = false
 		clear(s.pendingUpserts)
 		clear(s.pendingRemoved)
-	} else if len(s.pendingUpserts) != 0 || len(s.pendingRemoved) != 0 || s.orderDirty {
+	} else if len(s.pendingUpserts) != 0 || len(s.pendingRemoved) != 0 || s.removalOverflow || s.orderDirty {
 		upserts := make([]*kmgrv1.ResourceRow, 0, len(s.pendingUpserts))
 		for _, uid := range s.order {
 			if row := s.pendingUpserts[uid]; row != nil {
 				upserts = append(upserts, row)
 			}
 		}
-		removed := make([]string, 0, len(s.pendingRemoved))
-		for uid := range s.pendingRemoved {
-			removed = append(removed, uid)
-		}
-		sort.Strings(removed)
-		delta := &kmgrv1.RowDelta{Upserts: upserts, RemovedUids: removed}
+		delta := &kmgrv1.RowDelta{Upserts: upserts}
 		if s.orderDirty {
 			delta.OrderedUids = append([]string(nil), s.order...)
 			delta.OrderIsComplete = true
 		}
-		events = append(events, s.deltaEventLocked(delta))
+		if len(delta.Upserts) != 0 || delta.OrderIsComplete {
+			events = append(events, s.deltaEventLocked(delta))
+		}
+		events = s.appendRemovalEventsLocked(events)
 		clear(s.pendingUpserts)
 		clear(s.pendingRemoved)
 		s.orderDirty = false
@@ -1749,7 +2055,68 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 		events = append(events, s.errorEventLocked(s.pendingError))
 		s.pendingError = nil
 	}
+	s.updateKnownUIDsLocked(events)
 	return events
+}
+
+func (s *Subscription) pendingRemovalUIDsLocked() []string {
+	removed := make([]string, 0, len(s.knownUIDs))
+	if s.knownUIDs != nil {
+		for uid, pending := range s.knownUIDs {
+			if pending {
+				removed = append(removed, uid)
+			}
+		}
+		return removed
+	}
+	removed = make([]string, 0, len(s.pendingRemoved))
+	for uid := range s.pendingRemoved {
+		removed = append(removed, uid)
+	}
+	return removed
+}
+
+func (s *Subscription) appendRemovalEventsLocked(events []*kmgrv1.ViewEvent) []*kmgrv1.ViewEvent {
+	if len(s.pendingRemoved) == 0 && !s.removalOverflow {
+		return events
+	}
+	removed := s.pendingRemovalUIDsLocked()
+	sort.Strings(removed)
+	limit := max(min(s.chunkSize, s.pendingLimit), 1)
+	for start := 0; start < len(removed); start += limit {
+		end := min(start+limit, len(removed))
+		events = append(events, s.deltaEventLocked(&kmgrv1.RowDelta{
+			RemovedUids: append([]string(nil), removed[start:end]...),
+		}))
+	}
+	return events
+}
+
+// knownUIDs is the exact set of identities this stream generation may have
+// caused the client to retain, including filter-hidden rows. It bounds a large
+// undrained delete burst to the client-known set and lets snapshot fallback
+// reconstruct exact tombstones without retaining one entry per unseen UID.
+func (s *Subscription) updateKnownUIDsLocked(events []*kmgrv1.ViewEvent) {
+	for _, event := range events {
+		if snapshot := event.GetSnapshot(); snapshot != nil {
+			for _, row := range snapshot.GetRows() {
+				if uid := row.GetIdentity().GetUid(); uid != "" {
+					s.knownUIDs[uid] = false
+				}
+			}
+		}
+		if delta := event.GetDelta(); delta != nil {
+			for _, uid := range delta.GetRemovedUids() {
+				delete(s.knownUIDs, uid)
+			}
+			for _, row := range delta.GetUpserts() {
+				if uid := row.GetIdentity().GetUid(); uid != "" {
+					s.knownUIDs[uid] = false
+				}
+			}
+		}
+	}
+	s.removalOverflow = false
 }
 
 func (s *Subscription) cursorLocked() *kmgrv1.StreamCursor {
@@ -1785,6 +2152,8 @@ func (s *Subscription) close() {
 		s.timer.Stop()
 		s.timer = nil
 	}
+	s.cancelProjectionScheduleLocked()
+	clear(s.pendingObjects)
 	close(s.done)
 }
 

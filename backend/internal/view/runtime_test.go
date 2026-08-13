@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
+	"github.com/charlie0129/kmgr/backend/internal/store"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -322,28 +323,25 @@ func TestRuntimeRelistKeepsWarmRowsUntilFinalPage(t *testing.T) {
 }
 
 func TestSlowSubscriptionFallsBackToBoundedSnapshot(t *testing.T) {
-	t.Parallel()
-	source := &fakeResourceSource{authority: "cluster-a", client: newScriptedResource()}
-	runtime, err := NewRuntime(RuntimeConfig{Source: source, PendingRowLimit: 2, SnapshotChunkSize: 2, BatchDelay: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	subscription, err := runtime.Open(openView("session-1", "view-1", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Drain the initial empty snapshot/status first.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	_, _ = subscription.Next(ctx)
-	cancel()
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, _ := newControlledProjectionSubscription(projector)
+	subscription.chunkSize = 2
+	subscription.pendingLimit = 2
+	subscription.resource = &resourceRuntime{store: store.New()}
 
 	objects := []*unstructured.Unstructured{
 		pod("uid-1", "ns", "one", "Running", 0, nil, time.Time{}),
 		pod("uid-2", "ns", "two", "Running", 0, nil, time.Time{}),
 		pod("uid-3", "ns", "three", "Running", 0, nil, time.Time{}),
 	}
+	// Runtime batches arrive only after watcher has applied them to the
+	// authoritative store. This direct unit-test injection must mirror that
+	// contract so overflow can fall back to a bounded full resnapshot.
+	for _, object := range objects {
+		subscription.resource.store.Upsert(object)
+	}
 	subscription.applyBatch(watcher.Batch{Upserts: objects})
+	subscription.flushProjection()
 	subscription.mu.Lock()
 	if !subscription.resnapshot || len(subscription.pendingUpserts) != 0 {
 		t.Fatalf("slow mailbox state: resnapshot=%v pending=%d", subscription.resnapshot, len(subscription.pendingUpserts))
@@ -351,7 +349,7 @@ func TestSlowSubscriptionFallsBackToBoundedSnapshot(t *testing.T) {
 	subscription.signalLocked(true)
 	subscription.mu.Unlock()
 
-	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	events, err := subscription.Next(ctx)
 	if err != nil {
@@ -403,14 +401,780 @@ func TestSubscriptionCapturesNowOnceForWatchBatch(t *testing.T) {
 		pod("uid-a", "ns", "api", "Running", 0, nil, now.Add(-time.Minute)),
 		pod("uid-b", "ns", "worker", "Running", 0, nil, now.Add(-2*time.Minute)),
 	}})
+	subscription.flushProjection()
 	if clockCalls != 1 {
 		t.Fatalf("watch batch clock calls = %d, want 1", clockCalls)
+	}
+}
+
+func TestSubscriptionCoalescesWatchBurstNewestPerUID(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+
+	for index := range 100 {
+		subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+			pod("uid-a", "ns", fmt.Sprintf("api-%03d", index), "Running", int64(index), nil, time.Time{}),
+		}})
+	}
+
+	subscription.mu.Lock()
+	if len(subscription.pendingObjects) != 1 || subscription.rows["uid-a"] != nil ||
+		subscription.projectionPasses != 0 || subscription.projectedObjects != 0 {
+		t.Fatalf("before flush: pending=%d row=%v passes=%d objects=%d",
+			len(subscription.pendingObjects), subscription.rows["uid-a"],
+			subscription.projectionPasses, subscription.projectedObjects)
+	}
+	subscription.mu.Unlock()
+
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	row := subscription.rows["uid-a"]
+	passes, objects := subscription.projectionPasses, subscription.projectedObjects
+	subscription.mu.Unlock()
+	if row == nil || row.GetIdentity().GetName() != "api-099" {
+		t.Fatalf("coalesced row = %#v, want newest api-099", row)
+	}
+	if passes != 1 || objects != 1 {
+		t.Fatalf("projection work: passes=%d objects=%d, want one/one", passes, objects)
+	}
+}
+
+func TestSubscriptionCoalescesReorderBurstToOneFinalOrder(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", []SortDescriptor{{ColumnID: "restarts", Descending: true}})
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "a", "Running", 1, nil, time.Time{}),
+		pod("uid-b", "ns", "b", "Running", 2, nil, time.Time{}),
+		pod("uid-c", "ns", "c", "Running", 3, nil, time.Time{}),
+	}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "a", "Running", 8, nil, time.Time{}),
+		pod("uid-b", "ns", "b", "Running", 7, nil, time.Time{}),
+	}})
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "a", "Running", 4, nil, time.Time{}),
+		pod("uid-c", "ns", "c", "Running", 9, nil, time.Time{}),
+	}})
+	subscription.mu.Lock()
+	passesBefore := subscription.projectionPasses
+	subscription.mu.Unlock()
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+
+	events := drainSubscription(t, subscription)
+	var delta *kmgrv1.RowDelta
+	for _, event := range events {
+		if event.GetDelta() != nil {
+			delta = event.GetDelta()
+		}
+	}
+	if delta == nil || !delta.GetOrderIsComplete() ||
+		!slices.Equal(delta.GetOrderedUids(), []string{"uid-c", "uid-b", "uid-a"}) {
+		t.Fatalf("reorder delta = %#v", delta)
+	}
+	subscription.mu.Lock()
+	passesAfter := subscription.projectionPasses
+	subscription.mu.Unlock()
+	if passesAfter != passesBefore+1 {
+		t.Fatalf("reorder burst projection passes = %d, want %d", passesAfter, passesBefore+1)
+	}
+}
+
+func TestSubscriptionDeleteInvalidatesInFlightUncommittedProjection(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	entryStore := store.New()
+	subscription.resource = &resourceRuntime{store: entryStore}
+	object := pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{})
+	entryStore.Upsert(object)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	projector.now = func() time.Time {
+		once.Do(func() { close(started) })
+		<-release
+		return time.Unix(100, 0)
+	}
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{object}})
+	projectionDone := runCapturedProjection(t, scheduled)
+	awaitSignal(t, started, "projection start")
+
+	entryStore.Delete("uid-a")
+	deleteDone := make(chan struct{})
+	go func() {
+		subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-a"}})
+		close(deleteDone)
+	}()
+	awaitSignal(t, deleteDone, "delete ingestion while projection is blocked")
+	close(release)
+	awaitSignal(t, projectionDone, "projection completion")
+
+	subscription.mu.Lock()
+	row := subscription.rows["uid-a"]
+	running := subscription.projectionRunning
+	subscription.mu.Unlock()
+	if row != nil || running {
+		t.Fatalf("deleted uncommitted row resurrected: row=%#v running=%t", row, running)
+	}
+}
+
+func TestSubscriptionRemovalIsPromptWhileProjectionBlocked(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	baseline, _ := projector.ProjectOne(pod("uid-old", "ns", "old", "Running", 0, nil, time.Time{}))
+	subscription.initializeRows([]*kmgrv1.ResourceRow{baseline})
+	drainSubscription(t, subscription)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	projector.now = func() time.Time {
+		once.Do(func() { close(started) })
+		<-release
+		return time.Unix(100, 0)
+	}
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-new", "ns", "new", "Running", 0, nil, time.Time{}),
+	}})
+	projectionDone := runCapturedProjection(t, scheduled)
+	awaitSignal(t, started, "projection start")
+
+	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-old"}})
+	select {
+	case <-subscription.notify:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("removal was not signaled while projection was blocked")
+	}
+	subscription.mu.Lock()
+	_, retained := subscription.rows["uid-old"]
+	_, pendingRemoval := subscription.pendingRemoved["uid-old"]
+	orderDirty := subscription.orderDirty
+	subscription.mu.Unlock()
+	if retained || pendingRemoval == false || orderDirty {
+		close(release)
+		t.Fatalf("prompt removal state: retained=%t pending=%t order_dirty=%t",
+			retained, pendingRemoval, orderDirty)
+	}
+
+	close(release)
+	awaitSignal(t, projectionDone, "projection completion")
+}
+
+func TestSubscriptionListBarrierInvalidatesInFlightWatchProjection(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	entryStore := store.New()
+	subscription.resource = &resourceRuntime{store: entryStore}
+	watchObject := pod("uid-a", "ns", "from-watch", "Running", 0, nil, time.Time{})
+	entryStore.Upsert(watchObject)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int64
+	projector.now = func() time.Time {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return time.Unix(100, 0)
+	}
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{watchObject}})
+	projectionDone := runCapturedProjection(t, scheduled)
+	awaitSignal(t, started, "WATCH projection start")
+
+	listDone := make(chan struct{})
+	go func() {
+		subscription.applyBatch(watcher.Batch{FromList: true, Upserts: []*unstructured.Unstructured{
+			pod("uid-a", "ns", "from-list", "Running", 0, nil, time.Time{}),
+		}})
+		close(listDone)
+	}()
+	awaitSignal(t, listDone, "LIST barrier while WATCH projection is blocked")
+	close(release)
+	awaitSignal(t, projectionDone, "WATCH projection completion")
+
+	subscription.mu.Lock()
+	row := subscription.rows["uid-a"]
+	subscription.mu.Unlock()
+	if row == nil || row.GetIdentity().GetName() != "from-list" {
+		t.Fatalf("stale WATCH projection overwrote LIST row: %#v", row)
+	}
+}
+
+func TestSubscriptionListBarrierDoesNotStrandNewerWatchObject(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int64
+	projector.now = func() time.Time {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return time.Unix(100, 0)
+	}
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-stale", "ns", "stale", "Running", 0, nil, time.Time{}),
+	}})
+	projectionDone := runCapturedProjection(t, scheduled)
+	awaitSignal(t, started, "stale WATCH projection start")
+
+	subscription.applyBatch(watcher.Batch{FromList: true, Upserts: []*unstructured.Unstructured{
+		pod("uid-list", "ns", "listed", "Running", 0, nil, time.Time{}),
+	}})
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-new", "ns", "new", "Running", 0, nil, time.Time{}),
+	}})
+	close(release)
+	awaitSignal(t, projectionDone, "post-barrier WATCH projection")
+
+	subscription.mu.Lock()
+	row := subscription.rows["uid-new"]
+	pending, running := len(subscription.pendingObjects), subscription.projectionRunning
+	subscription.mu.Unlock()
+	if row == nil || pending != 0 || running {
+		t.Fatalf("newer WATCH object stranded: row=%#v pending=%d running=%t", row, pending, running)
+	}
+}
+
+func TestSubscriptionListBarrierDiscardsOlderQueuedWatchObjects(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "stale-watch", "Running", 0, nil, time.Time{}),
+	}})
+	staleFlush := receiveCapturedProjection(t, scheduled)
+
+	subscription.applyBatch(watcher.Batch{FromList: true, Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "authoritative-list", "Running", 0, nil, time.Time{}),
+	}})
+	staleFlush()
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-b", "ns", "new-watch", "Running", 0, nil, time.Time{}),
+	}})
+	flushCapturedProjection(t, scheduled)
+
+	subscription.mu.Lock()
+	rowA, rowB := subscription.rows["uid-a"], subscription.rows["uid-b"]
+	subscription.mu.Unlock()
+	if rowA == nil || rowA.GetIdentity().GetName() != "authoritative-list" || rowB == nil {
+		t.Fatalf("post-barrier rows: uid-a=%#v uid-b=%#v", rowA, rowB)
+	}
+}
+
+func TestSubscriptionMetricsRevisionRetriesInFlightProjection(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	entryStore := store.New()
+	subscription.resource = &resourceRuntime{store: entryStore}
+	object := pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{})
+	entryStore.Upsert(object)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int64
+	projector.now = func() time.Time {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return time.Unix(100, 0)
+	}
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{object}})
+	projectionDone := runCapturedProjection(t, scheduled)
+	awaitSignal(t, started, "projection start")
+
+	subscription.applyMetrics(metrics.Snapshot{UpdatedAt: time.Unix(200, 0)})
+	close(release)
+	awaitSignal(t, projectionDone, "projection retry completion")
+
+	subscription.mu.Lock()
+	passes := subscription.projectionPasses
+	row := subscription.rows["uid-a"]
+	running, retryPending := subscription.projectionRunning, subscription.projectionResnapshot
+	subscription.mu.Unlock()
+	if passes != 2 || row == nil || running || retryPending {
+		t.Fatalf("metrics retry state: passes=%d row=%#v running=%t pending=%t",
+			passes, row, running, retryPending)
+	}
+}
+
+func TestSubscriptionFullReprojectionPreservesTrueRemoval(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	entryStore := store.New()
+	subscription.resource = &resourceRuntime{store: entryStore}
+	object := pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{})
+	entryStore.Upsert(object)
+	row, _ := projector.ProjectOne(object)
+	subscription.initializeRows([]*kmgrv1.ResourceRow{row})
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	entryStore.Delete("uid-a")
+	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-a"}})
+	subscription.applyMetrics(metrics.Snapshot{UpdatedAt: time.Unix(200, 0)})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+
+	events := drainSubscription(t, subscription)
+	sawRemoval := false
+	snapshotUIDs := make([]string, 0)
+	for _, event := range events {
+		sawRemoval = sawRemoval || slices.Contains(event.GetDelta().GetRemovedUids(), "uid-a")
+		for _, snapshotRow := range event.GetSnapshot().GetRows() {
+			snapshotUIDs = append(snapshotUIDs, snapshotRow.GetIdentity().GetUid())
+		}
+	}
+	if !sawRemoval || slices.Contains(snapshotUIDs, "uid-a") {
+		t.Fatalf("full reprojection delivery: removal=%t snapshot_uids=%v events=%#v",
+			sawRemoval, snapshotUIDs, events)
+	}
+}
+
+func TestSubscriptionOverflowPreservesUndrainedTrueRemoval(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, _ := newControlledProjectionSubscription(projector)
+	subscription.pendingLimit = 2
+	entryStore := store.New()
+	subscription.resource = &resourceRuntime{store: entryStore}
+	removedObject := pod("uid-old", "ns", "old", "Running", 0, nil, time.Time{})
+	removedRow, _ := projector.ProjectOne(removedObject)
+	subscription.initializeRows([]*kmgrv1.ResourceRow{removedRow})
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-old"}})
+	objects := []*unstructured.Unstructured{
+		pod("uid-1", "ns", "one", "Running", 0, nil, time.Time{}),
+		pod("uid-2", "ns", "two", "Running", 0, nil, time.Time{}),
+		pod("uid-3", "ns", "three", "Running", 0, nil, time.Time{}),
+	}
+	for _, object := range objects {
+		entryStore.Upsert(object)
+	}
+	subscription.applyBatch(watcher.Batch{Upserts: objects})
+	subscription.flushProjection()
+	subscription.mu.Lock()
+	_, pending := subscription.pendingRemoved["uid-old"]
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	if !pending {
+		t.Fatal("overflow fallback discarded an undrained Kubernetes removal")
+	}
+
+	events := drainSubscription(t, subscription)
+	for _, event := range events {
+		if slices.Contains(event.GetDelta().GetRemovedUids(), "uid-old") {
+			return
+		}
+	}
+	t.Fatalf("overflow delivery omitted true removal: %#v", events)
+}
+
+func TestSubscriptionInvisibleUpdatesUseOrderInsteadOfRemoval(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "status:running", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	visible := pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{})
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{visible}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "api", "Pending", 0, nil, time.Time{}),
+	}})
+	flushCapturedProjection(t, scheduled)
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "api", "Failed", 0, nil, time.Time{}),
+	}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+
+	events := drainSubscription(t, subscription)
+	var delta *kmgrv1.RowDelta
+	for _, event := range events {
+		if event.GetDelta() != nil {
+			delta = event.GetDelta()
+		}
+	}
+	if delta == nil || !delta.GetOrderIsComplete() ||
+		slices.Contains(delta.GetOrderedUids(), "uid-a") ||
+		slices.Contains(delta.GetRemovedUids(), "uid-a") {
+		t.Fatalf("invisible update delta = %#v", delta)
+	}
+}
+
+func TestSubscriptionInvisibleUpsertRetainsUndrainedTrueRemoval(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "status:running", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	visible, _ := projector.ProjectOne(pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}))
+	subscription.initializeRows([]*kmgrv1.ResourceRow{visible})
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-a"}})
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "api", "Pending", 0, nil, time.Time{}),
+	}})
+	flushCapturedProjection(t, scheduled)
+
+	subscription.mu.Lock()
+	_, pending := subscription.pendingRemoved["uid-a"]
+	subscription.mu.Unlock()
+	if !pending {
+		t.Fatal("invisible same-UID upsert canceled an undrained Kubernetes removal")
+	}
+}
+
+func TestSubscriptionDeleteAfterFilterHidingStillEmitsRemoval(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "status:running", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	visible := pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{})
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{visible}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "api", "Pending", 0, nil, time.Time{}),
+	}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-a"}})
+	events := drainSubscription(t, subscription)
+	for _, event := range events {
+		if slices.Contains(event.GetDelta().GetRemovedUids(), "uid-a") {
+			return
+		}
+	}
+	t.Fatalf("delete after filter hiding omitted removal: %#v", events)
+}
+
+func TestSubscriptionRemovalMailboxIsBoundedByClientKnownUIDs(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	subscription.pendingLimit = 2
+	visible := pod("uid-known", "ns", "known", "Running", 0, nil, time.Time{})
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{visible}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	removed := make([]types.UID, 0, 1001)
+	removed = append(removed, "uid-known")
+	for index := range 1000 {
+		removed = append(removed, types.UID(fmt.Sprintf("uid-unseen-%04d", index)))
+	}
+	subscription.applyBatch(watcher.Batch{RemovedUIDs: removed})
+
+	subscription.mu.Lock()
+	pending := len(subscription.pendingRemoved)
+	_, retainedKnown := subscription.pendingRemoved["uid-known"]
+	known := len(subscription.knownUIDs)
+	subscription.mu.Unlock()
+	if pending != 1 || !retainedKnown || known != 1 {
+		t.Fatalf("bounded removal mailbox: pending=%d retained_known=%t known=%d",
+			pending, retainedKnown, known)
+	}
+	events := drainSubscription(t, subscription)
+	found := false
+	for _, event := range events {
+		found = found || slices.Contains(event.GetDelta().GetRemovedUids(), "uid-known")
+	}
+	if !found {
+		t.Fatalf("bounded mailbox did not deliver known removal: %#v", events)
+	}
+	subscription.mu.Lock()
+	known = len(subscription.knownUIDs)
+	subscription.mu.Unlock()
+	if known != 0 {
+		t.Fatalf("delivered removal retained %d client-known UIDs", known)
+	}
+	for _, event := range events {
+		if delta := event.GetDelta(); delta != nil && len(delta.GetUpserts()) == 0 &&
+			len(delta.GetRemovedUids()) == 0 && !delta.GetOrderIsComplete() {
+			t.Fatalf("removal-only drain emitted empty delta: %#v", events)
+		}
+	}
+}
+
+func TestSubscriptionRemovalOverflowUsesBoundedKnownUIDSet(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	objects := []*unstructured.Unstructured{
+		pod("uid-1", "ns", "one", "Running", 0, nil, time.Time{}),
+		pod("uid-2", "ns", "two", "Running", 0, nil, time.Time{}),
+		pod("uid-3", "ns", "three", "Running", 0, nil, time.Time{}),
+	}
+	subscription.applyBatch(watcher.Batch{Upserts: objects})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+	subscription.pendingLimit = 2
+
+	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-1", "uid-2", "uid-3"}})
+	subscription.mu.Lock()
+	pending, known := len(subscription.pendingRemoved), len(subscription.knownUIDs)
+	overflow := subscription.removalOverflow
+	resnapshot := subscription.resnapshot
+	subscription.mu.Unlock()
+	if pending != 2 || known != 3 || !overflow || !resnapshot {
+		t.Fatalf("overflow state: pending=%d known=%d overflow=%t resnapshot=%t",
+			pending, known, overflow, resnapshot)
+	}
+
+	events := drainSubscription(t, subscription)
+	var removed []string
+	for _, event := range events {
+		batch := event.GetDelta().GetRemovedUids()
+		if len(batch) > 2 {
+			t.Fatalf("removal delta size = %d, want <= 2", len(batch))
+		}
+		removed = append(removed, batch...)
+	}
+	slices.Sort(removed)
+	if !slices.Equal(removed, []string{"uid-1", "uid-2", "uid-3"}) {
+		t.Fatalf("overflow removals = %v", removed)
+	}
+}
+
+func TestSubscriptionVisibleUpsertCancelsOnlyItsPendingRemoval(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	subscription.pendingLimit = 1
+	objects := []*unstructured.Unstructured{
+		pod("uid-a", "ns", "a", "Running", 0, nil, time.Time{}),
+		pod("uid-b", "ns", "b", "Running", 0, nil, time.Time{}),
+	}
+	subscription.pendingLimit = 100
+	subscription.applyBatch(watcher.Batch{Upserts: objects})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+	subscription.pendingLimit = 1
+
+	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-a", "uid-b"}})
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "a-revived", "Running", 1, nil, time.Time{}),
+	}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+
+	events := drainSubscription(t, subscription)
+	var removed []string
+	var upserted []string
+	for _, event := range events {
+		removed = append(removed, event.GetDelta().GetRemovedUids()...)
+		for _, row := range event.GetDelta().GetUpserts() {
+			upserted = append(upserted, row.GetIdentity().GetUid())
+		}
+		for _, row := range event.GetSnapshot().GetRows() {
+			upserted = append(upserted, row.GetIdentity().GetUid())
+		}
+	}
+	if !slices.Equal(removed, []string{"uid-b"}) || !slices.Contains(upserted, "uid-a") {
+		t.Fatalf("revival delivery: removed=%v upserted=%v events=%#v", removed, upserted, events)
+	}
+}
+
+func TestSubscriptionListRemovalsAreBoundedByClientKnownUIDs(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	subscription.pendingLimit = 2
+	visible := pod("uid-known", "ns", "known", "Running", 0, nil, time.Time{})
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{visible}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	removed := make([]types.UID, 0, 1001)
+	removed = append(removed, "uid-known")
+	for index := range 1000 {
+		removed = append(removed, types.UID(fmt.Sprintf("uid-unseen-%04d", index)))
+	}
+	subscription.applyBatch(watcher.Batch{FromList: true, RemovedUIDs: removed})
+
+	subscription.mu.Lock()
+	pending, known := len(subscription.pendingRemoved), len(subscription.knownUIDs)
+	overflow := subscription.removalOverflow
+	subscription.mu.Unlock()
+	if pending != 1 || known != 1 || overflow {
+		t.Fatalf("LIST removal state: pending=%d known=%d overflow=%t", pending, known, overflow)
+	}
+	events := drainSubscription(t, subscription)
+	for _, event := range events {
+		if slices.Contains(event.GetDelta().GetRemovedUids(), "uid-known") {
+			return
+		}
+	}
+	t.Fatalf("LIST reconciliation omitted known removal: %#v", events)
+}
+
+func TestSubscriptionIgnoresStaleScheduledFlushAfterManualFlushAndClose(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}),
+	}})
+	stale := receiveCapturedProjection(t, scheduled)
+	subscription.flushProjection()
+	stale()
+	subscription.close()
+	stale()
+
+	subscription.mu.Lock()
+	passes := subscription.projectionPasses
+	timer := subscription.projectionTimer
+	scheduledState := subscription.projectionScheduled
+	subscription.mu.Unlock()
+	if passes != 1 || timer != nil || scheduledState {
+		t.Fatalf("stale callback state: passes=%d timer=%v scheduled=%t", passes, timer, scheduledState)
+	}
+}
+
+func newRuntimeTestProjector(
+	t *testing.T,
+	filter string,
+	sortOrder []SortDescriptor,
+) *Projector {
+	t.Helper()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs:        []string{"name", "status", "restarts"},
+		FilterExpression: filter,
+		Sort:             sortOrder,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return projector
+}
+
+func newControlledProjectionSubscription(
+	projector *Projector,
+) (*Subscription, <-chan func()) {
+	subscription := newSubscription(
+		viewKey{sessionID: "session-a", viewID: "view-a"},
+		1,
+		projector,
+		time.Hour,
+		100,
+		100,
+	)
+	scheduled := make(chan func(), 16)
+	subscription.scheduleProjection = func(flush func()) *time.Timer {
+		scheduled <- flush
+		return nil
+	}
+	return subscription, scheduled
+}
+
+func receiveCapturedProjection(t *testing.T, scheduled <-chan func()) func() {
+	t.Helper()
+	select {
+	case flush := <-scheduled:
+		return flush
+	case <-time.After(time.Second):
+		t.Fatal("projection was not scheduled")
+		return nil
+	}
+}
+
+func flushCapturedProjection(t *testing.T, scheduled <-chan func()) {
+	t.Helper()
+	receiveCapturedProjection(t, scheduled)()
+}
+
+func runCapturedProjection(t *testing.T, scheduled <-chan func()) <-chan struct{} {
+	t.Helper()
+	flush := receiveCapturedProjection(t, scheduled)
+	done := make(chan struct{})
+	go func() {
+		flush()
+		close(done)
+	}()
+	return done
+}
+
+func awaitSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func drainSubscription(t *testing.T, subscription *Subscription) []*kmgrv1.ViewEvent {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	events, err := subscription.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+func drainNotify(subscription *Subscription) {
+	select {
+	case <-subscription.notify:
+	default:
 	}
 }
 
 func TestRuntimeLifecycleMutexIsNotHeldDuringRowProjection(t *testing.T) {
 	t.Parallel()
 	client := newScriptedResource()
+	watchStarted := make(chan struct{}, 1)
+	client.watchStarted = watchStarted
 	client.listPages = []*unstructured.UnstructuredList{listPage("rv-1", "")}
 	runtime, err := NewRuntime(RuntimeConfig{
 		Source:     &fakeResourceSource{authority: "cluster-a", client: client},
@@ -425,6 +1189,17 @@ func TestRuntimeLifecycleMutexIsNotHeldDuringRowProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer subscription.Close()
+	select {
+	case <-watchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("initial LIST did not advance to WATCH")
+	}
+	// Watch starts only after the synchronous SnapshotComplete callback has
+	// returned. Taking Subscription.mu once makes the test's hook installation
+	// ordered after that final LIST projection as well.
+	subscription.mu.Lock()
+	subscription.mu.Unlock()
+	drainNotify(subscription)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -439,17 +1214,19 @@ func TestRuntimeLifecycleMutexIsNotHeldDuringRowProjection(t *testing.T) {
 	runtime.mu.Lock()
 	runNumber := entry.runNumber
 	runtime.mu.Unlock()
+	scheduled := make(chan func(), 1)
+	subscription.scheduleProjection = func(flush func()) *time.Timer {
+		scheduled <- flush
+		return nil
+	}
 	subscription.mu.Unlock()
 
-	done := make(chan struct{})
-	go func() {
-		runtime.receiveBatch(entry, runNumber, watcher.Batch{
-			Upserts: []*unstructured.Unstructured{
-				pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}),
-			},
-		})
-		close(done)
-	}()
+	runtime.receiveBatch(entry, runNumber, watcher.Batch{
+		Upserts: []*unstructured.Unstructured{
+			pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}),
+		},
+	})
+	done := runCapturedProjection(t, scheduled)
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -1195,6 +1972,7 @@ type scriptedResource struct {
 	expireNextWatch bool
 	watches         []*controllableWatch
 	watchRVs        []string
+	watchStarted    chan<- struct{}
 	listCalls       atomic.Int64
 	watchCalls      atomic.Int64
 }
@@ -1235,6 +2013,12 @@ func (c *scriptedResource) Watch(_ context.Context, options metav1.ListOptions) 
 	stream := newControllableWatch()
 	c.watches = append(c.watches, stream)
 	c.watchRVs = append(c.watchRVs, options.ResourceVersion)
+	if c.watchStarted != nil {
+		select {
+		case c.watchStarted <- struct{}{}:
+		default:
+		}
+	}
 	if c.expireNextWatch {
 		c.expireNextWatch = false
 		stream.channel <- watch.Event{Type: watch.Error, Object: &metav1.Status{
