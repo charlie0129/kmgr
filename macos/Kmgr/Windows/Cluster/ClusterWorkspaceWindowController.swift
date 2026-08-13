@@ -10,7 +10,9 @@ struct ResourceColumnsRequest {
 }
 
 @MainActor
-final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate {
+final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate,
+    NSMenuItemValidation
+{
     let session: OpenedClusterSession
     var onClose: (() -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
@@ -181,6 +183,29 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     @objc func showCommandPalette(_ sender: Any?) {
         workspaceController.presentCommandPalette()
+    }
+
+    @objc func openResourceDetails(_ sender: Any?) { workspaceController.openResourceDetails(sender) }
+    @objc func openResourceYAML(_ sender: Any?) { workspaceController.openResourceYAML(sender) }
+    @objc func openResourceEvents(_ sender: Any?) { workspaceController.openResourceEvents(sender) }
+    @objc func openResourceLogs(_ sender: Any?) { workspaceController.openResourceLogs(sender) }
+    @objc func openResourceExec(_ sender: Any?) { workspaceController.openResourceExec(sender) }
+    @objc func startResourcePortForward(_ sender: Any?) { workspaceController.startResourcePortForward(sender) }
+    @objc func deleteResourceSelection(_ sender: Any?) { workspaceController.deleteResourceSelection(sender) }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        let command: ResourceTableCommand?
+        switch menuItem.action {
+        case #selector(openResourceDetails(_:)): command = .open
+        case #selector(openResourceYAML(_:)): command = .openYAML
+        case #selector(openResourceEvents(_:)): command = .openEvents
+        case #selector(openResourceLogs(_:)): command = .openLogs
+        case #selector(openResourceExec(_:)): command = .openExec
+        case #selector(startResourcePortForward(_:)): command = .startPortForward
+        case #selector(deleteResourceSelection(_:)): command = .delete
+        default: command = nil
+        }
+        return command.map(workspaceController.canPerformCommand) ?? true
     }
 }
 
@@ -408,6 +433,18 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     @objc private func showCommandPalette() {
         presentCommandPalette()
+    }
+
+    @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
+    @objc func openResourceYAML(_ sender: Any?) { contentController.performCommand(.openYAML) }
+    @objc func openResourceEvents(_ sender: Any?) { contentController.performCommand(.openEvents) }
+    @objc func openResourceLogs(_ sender: Any?) { contentController.performCommand(.openLogs) }
+    @objc func openResourceExec(_ sender: Any?) { contentController.performCommand(.openExec) }
+    @objc func startResourcePortForward(_ sender: Any?) { contentController.performCommand(.startPortForward) }
+    @objc func deleteResourceSelection(_ sender: Any?) { contentController.performCommand(.delete) }
+
+    func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
+        contentController.canPerformCommand(command)
     }
 
     func presentCommandPalette() {
@@ -1407,6 +1444,35 @@ private final class ResourceListViewController: NSViewController,
             let next = min(max(tableView.selectedRow + delta, 0), max(0, tableView.numberOfRows - 1))
             tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
             tableView.scrollRowToVisible(next)
+        }
+    }
+
+    func performCommand(_ command: ResourceTableCommand) {
+        guard canPerformCommand(command) else { NSSound.beep(); return }
+        handle(command)
+    }
+
+    func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
+        guard view.window?.firstResponder === tableView else { return false }
+        let selected = model.selectedIdentities
+        switch command {
+        case .open, .openYAML, .openEvents:
+            return selected.count == 1
+        case .openLogs:
+            return !selected.isEmpty && selected.count <= 128 && selected.allSatisfy {
+                $0.group.isEmpty && $0.version == "v1" && $0.resource == "pods"
+            }
+        case .openExec:
+            return selected.count == 1 && selected[0].group.isEmpty
+                && selected[0].version == "v1" && selected[0].resource == "pods"
+        case .startPortForward:
+            return selected.count == 1 && selected[0].group.isEmpty
+                && selected[0].version == "v1"
+                && (selected[0].resource == "pods" || selected[0].resource == "services")
+        case .delete:
+            return !selected.isEmpty
+        case .focusFilter, .selectAll, .moveDown, .moveUp:
+            return true
         }
     }
 }

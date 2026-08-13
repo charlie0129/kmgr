@@ -296,6 +296,50 @@ final class Application: NSObject, NSApplicationDelegate {
         fileItem.submenu = fileMenu
         mainMenu.addItem(fileItem)
 
+        let resourceItem = NSMenuItem()
+        let resourceMenu = NSMenu(title: "Resource")
+        let detailsItem = resourceMenu.addItem(
+            withTitle: "Open Details",
+            action: #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
+            keyEquivalent: "\r"
+        )
+        detailsItem.keyEquivalentModifierMask = []
+        resourceMenu.addItem(
+            withTitle: "Open YAML",
+            action: #selector(ClusterWorkspaceWindowController.openResourceYAML(_:)),
+            keyEquivalent: "y"
+        ).keyEquivalentModifierMask = []
+        resourceMenu.addItem(
+            withTitle: "Open Events",
+            action: #selector(ClusterWorkspaceWindowController.openResourceEvents(_:)),
+            keyEquivalent: "e"
+        ).keyEquivalentModifierMask = []
+        resourceMenu.addItem(.separator())
+        resourceMenu.addItem(
+            withTitle: "Open Logs…",
+            action: #selector(ClusterWorkspaceWindowController.openResourceLogs(_:)),
+            keyEquivalent: "l"
+        ).keyEquivalentModifierMask = []
+        resourceMenu.addItem(
+            withTitle: "Open Terminal…",
+            action: #selector(ClusterWorkspaceWindowController.openResourceExec(_:)),
+            keyEquivalent: "s"
+        ).keyEquivalentModifierMask = []
+        resourceMenu.addItem(
+            withTitle: "Start Port Forward…",
+            action: #selector(ClusterWorkspaceWindowController.startResourcePortForward(_:)),
+            keyEquivalent: "p"
+        ).keyEquivalentModifierMask = []
+        resourceMenu.addItem(.separator())
+        let deleteItem = resourceMenu.addItem(
+            withTitle: "Delete…",
+            action: #selector(ClusterWorkspaceWindowController.deleteResourceSelection(_:)),
+            keyEquivalent: "\u{8}"
+        )
+        deleteItem.keyEquivalentModifierMask = .command
+        resourceItem.submenu = resourceMenu
+        mainMenu.addItem(resourceItem)
+
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(
