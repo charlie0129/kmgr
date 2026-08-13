@@ -15,6 +15,7 @@ import (
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
+	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 	viewfilter "github.com/charlie0129/kmgr/backend/internal/view/filter"
 )
 
@@ -32,6 +33,7 @@ type ProjectionSpec struct {
 	ColumnIDs        []string
 	FilterExpression string
 	Sort             []SortDescriptor
+	CELPrograms      map[string]*viewcolumns.Program
 	Now              time.Time
 }
 
@@ -174,6 +176,9 @@ func (p *Projector) includesNamespace(namespace string) bool {
 }
 
 func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID string) *kmgrv1.Cell {
+	if program := p.spec.CELPrograms[columnID]; program != nil {
+		return p.celCell(object, program)
+	}
 	cell := &kmgrv1.Cell{ColumnId: columnID, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL}
 	switch columnID {
 	case "namespace":
@@ -239,6 +244,54 @@ func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID stri
 		setStringCell(cell, DefaultMissingCell)
 		cell.Tooltip = fmt.Sprintf("Column %q is not available for this resource", columnID)
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+	}
+	return cell
+}
+
+func (p *Projector) celCell(object *unstructured.Unstructured, program *viewcolumns.Program) *kmgrv1.Cell {
+	definition := program.Definition()
+	missing := definition.Missing
+	if missing == "" {
+		missing = viewcolumns.DefaultMissing
+	}
+	cell := &kmgrv1.Cell{
+		ColumnId: definition.ID, DisplayText: missing,
+		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+	}
+	isSecret := p.spec.Resource.Group == "" && p.spec.Resource.Version == "v1" &&
+		p.spec.Resource.Resource == "secrets"
+	value, err := program.Evaluate(viewcolumns.Activation{
+		Object:  viewcolumns.SanitizeObjectActivation(object.Object, isSecret),
+		Metrics: map[string]any{},
+		Context: map[string]any{
+			"clusterSessionID": p.spec.ClusterSessionID,
+			"group":            p.spec.Resource.Group, "version": p.spec.Resource.Version,
+			"resource": p.spec.Resource.Resource, "kind": p.spec.Resource.Kind,
+			"namespaced":    p.spec.Resource.Namespaced,
+			"allNamespaces": p.spec.NamespaceScope.All,
+			"namespaces":    append([]string(nil), p.spec.NamespaceScope.Namespaces...),
+		},
+		Now: p.spec.Now,
+	})
+	if err != nil {
+		cell.Tooltip = err.Error()
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
+		return cell
+	}
+	cell.DisplayText = value.Display
+	switch {
+	case value.String != nil:
+		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: *value.String}
+	case value.Integer != nil:
+		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: float64(*value.Integer)}
+	case value.Number != nil:
+		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: *value.Number}
+	case value.Boolean != nil:
+		cell.TypedValue = &kmgrv1.Cell_BoolValue{BoolValue: *value.Boolean}
+	case value.Time != nil:
+		cell.TypedValue = &kmgrv1.Cell_TimestampUnixMs{TimestampUnixMs: value.Time.UnixMilli()}
+	case value.Duration != nil:
+		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: value.Duration.Seconds()}
 	}
 	return cell
 }

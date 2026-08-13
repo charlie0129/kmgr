@@ -7,6 +7,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 )
 
 func TestProjectorFiltersAndSortsTypedValues(t *testing.T) {
@@ -44,6 +46,75 @@ func TestProjectorFiltersAndSortsTypedValues(t *testing.T) {
 	}
 	if rows[0].GetCells()[4].GetTimestampUnixMs() == 0 {
 		t.Fatal("age has no typed timestamp")
+	}
+}
+
+func TestProjectorEvaluatesCompiledCELAndSortsByTypedResult(t *testing.T) {
+	t.Parallel()
+	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program, err := compiler.Compile(viewcolumns.Definition{
+		ID: "priority", Title: "Priority", Expression: "object.spec.priority",
+		ResultType: viewcolumns.ResultInteger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs:        []string{"name", "priority"},
+		CELPrograms:      map[string]*viewcolumns.Program{"priority": program},
+		Sort:             []SortDescriptor{{ColumnID: "priority", Descending: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	low := pod("uid-low", "ns", "low", "Running", 0, nil, time.Time{})
+	low.Object["spec"].(map[string]any)["priority"] = int64(2)
+	high := pod("uid-high", "ns", "high", "Running", 0, nil, time.Time{})
+	high.Object["spec"].(map[string]any)["priority"] = int64(10)
+	rows := projector.Project([]*unstructured.Unstructured{low, high})
+	if got := []string{rows[0].GetIdentity().GetUid(), rows[1].GetIdentity().GetUid()}; !slices.Equal(got, []string{"uid-high", "uid-low"}) {
+		t.Fatalf("typed CEL order = %v", got)
+	}
+	if rows[0].GetCells()[1].GetNumberValue() != 10 {
+		t.Fatalf("typed CEL cell = %#v", rows[0].GetCells()[1])
+	}
+}
+
+func TestProjectorSanitizesSecretActivationBeforeCEL(t *testing.T) {
+	t.Parallel()
+	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program, err := compiler.Compile(viewcolumns.Definition{
+		ID: "leak", Title: "Leak", Expression: `object.?data[?"token"].orValue("redacted")`,
+		ResultType: viewcolumns.ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "secrets", Kind: "Secret", Namespaced: true},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs:        []string{"name", "leak"},
+		CELPrograms:      map[string]*viewcolumns.Program{"leak": program},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := pod("uid-secret", "ns", "credentials", "", 0, nil, time.Time{})
+	secret.SetKind("Secret")
+	secret.Object["data"] = map[string]any{"token": "must-not-cross-projection"}
+	rows := projector.Project([]*unstructured.Unstructured{secret})
+	if got := rows[0].GetCells()[1].GetDisplayText(); got != "redacted" {
+		t.Fatalf("Secret CEL result = %q", got)
 	}
 }
 

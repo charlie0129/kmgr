@@ -83,6 +83,16 @@ type Program struct {
 	program    cel.Program
 }
 
+// Definition returns the immutable, validated definition used to compile the
+// program. Callers use this metadata to preserve declared result types without
+// reparsing rendered values.
+func (p *Program) Definition() Definition {
+	if p == nil {
+		return Definition{}
+	}
+	return p.definition
+}
+
 func NewCompiler(costLimit uint64) (*Compiler, error) {
 	if costLimit == 0 {
 		return nil, errors.New("CEL cost limit must be positive")

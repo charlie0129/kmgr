@@ -2,14 +2,18 @@ package transport
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	appconfig "github.com/charlie0129/kmgr/backend/internal/config"
 	"github.com/charlie0129/kmgr/backend/internal/object"
+	"github.com/charlie0129/kmgr/backend/internal/operation"
 	"github.com/charlie0129/kmgr/backend/internal/view"
+	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 )
@@ -23,6 +27,7 @@ type ServerOptions struct {
 	ClientFactory cluster.ClientFactory
 	SessionProber SessionProber
 	ProbeTimeout  time.Duration
+	ColumnsPath   string
 	GRPCOptions   []grpc.ServerOption
 }
 
@@ -57,8 +62,23 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		Prober:       options.SessionProber,
 		ProbeTimeout: options.ProbeTimeout,
 	})
+	columnsCompiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
+	if err != nil {
+		return nil, err
+	}
+	columnsPath := options.ColumnsPath
+	if columnsPath == "" {
+		columnsPath, err = appconfig.DefaultColumnsPath()
+		if err != nil {
+			return nil, err
+		}
+	}
+	columnManager, err := appconfig.NewColumnManager(columnsPath, columnsCompiler)
+	if err != nil {
+		return nil, fmt.Errorf("load columns configuration: %w", err)
+	}
 	viewRuntime, err := view.NewRuntime(view.RuntimeConfig{
-		Source: view.ClusterResourceSource{Sessions: sessions},
+		Source: view.ClusterResourceSource{Sessions: sessions}, Columns: columnManager,
 	})
 	if err != nil {
 		return nil, err
@@ -74,6 +94,11 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		return nil, err
 	}
 	objectService, err := object.NewGRPCService(objectReader)
+	if err != nil {
+		viewRuntime.Close()
+		return nil, err
+	}
+	operationService, err := operation.NewGRPCService(objectReader, nil)
 	if err != nil {
 		viewRuntime.Close()
 		return nil, err
@@ -95,6 +120,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	kmgrv1.RegisterClusterServiceServer(grpcServer, clusterService)
 	kmgrv1.RegisterViewServiceServer(grpcServer, viewService)
 	kmgrv1.RegisterObjectServiceServer(grpcServer, objectService)
+	kmgrv1.RegisterOperationServiceServer(grpcServer, operationService)
 
 	return &Server{
 		grpc:     grpcServer,

@@ -20,6 +20,7 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/store"
+	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
 )
 
@@ -108,6 +109,7 @@ func pointerIdentity(value any) string {
 
 type RuntimeConfig struct {
 	Source            ResourceSource
+	Columns           ColumnProgramResolver
 	ReleaseDelay      time.Duration
 	BatchDelay        time.Duration
 	SnapshotChunkSize int
@@ -118,12 +120,23 @@ type RuntimeConfig struct {
 	PipelineTimeout   time.Duration
 }
 
+// ColumnProgramResolver resolves programs once per opened view. Projection
+// never compiles CEL once per Kubernetes object.
+type ColumnProgramResolver interface {
+	Resolve(
+		group, version, resource string,
+		requestedIDs []string,
+		expectedVersion string,
+	) (map[string]*viewcolumns.Program, string, error)
+}
+
 // Runtime shares compatible LIST/WATCH pipelines while giving every workspace
 // an independent filter, sort, generation gate, and bounded output mailbox.
 type Runtime struct {
 	mu sync.Mutex
 
 	source            ResourceSource
+	columns           ColumnProgramResolver
 	releaseDelay      time.Duration
 	batchDelay        time.Duration
 	snapshotChunkSize int
@@ -201,6 +214,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	}
 	return &Runtime{
 		source:            config.Source,
+		columns:           config.Columns,
 		releaseDelay:      releaseDelay,
 		batchDelay:        batchDelay,
 		snapshotChunkSize: chunkSize,
@@ -237,7 +251,7 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 	if err != nil {
 		return nil, err
 	}
-	projector, err := projectorFromProto(sessionID, request.GetSpec())
+	projector, err := projectorFromProto(sessionID, request.GetSpec(), r.columns)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
 	}
@@ -801,7 +815,11 @@ func (s *Subscription) closeLocked() {
 	close(s.done)
 }
 
-func projectorFromProto(sessionID string, spec *kmgrv1.ViewSpec) (*Projector, error) {
+func projectorFromProto(
+	sessionID string,
+	spec *kmgrv1.ViewSpec,
+	resolver ColumnProgramResolver,
+) (*Projector, error) {
 	resource := spec.GetResource()
 	namespaceScope := NamespaceScope{}
 	if scope := spec.GetNamespaceScope(); scope != nil {
@@ -819,6 +837,17 @@ func projectorFromProto(sessionID string, spec *kmgrv1.ViewSpec) (*Projector, er
 			NullsFirst: descriptor.GetNullsFirst(),
 		})
 	}
+	var programs map[string]*viewcolumns.Program
+	if resolver != nil {
+		var err error
+		programs, _, err = resolver.Resolve(
+			resource.GetGroup(), resource.GetVersion(), resource.GetResource(),
+			spec.GetColumnIds(), spec.GetColumnConfigurationVersion(),
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return NewProjector(ProjectionSpec{
 		ClusterSessionID: sessionID,
 		Resource: ResourceType{
@@ -829,6 +858,7 @@ func projectorFromProto(sessionID string, spec *kmgrv1.ViewSpec) (*Projector, er
 		ColumnIDs:        append([]string(nil), spec.GetColumnIds()...),
 		FilterExpression: spec.GetFilterExpression(),
 		Sort:             sortDescriptors,
+		CELPrograms:      programs,
 	})
 }
 
