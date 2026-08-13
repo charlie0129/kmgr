@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -32,8 +34,37 @@ func TestEngineServiceHandshakeAndHealth(t *testing.T) {
 		response.GetNegotiatedProtocol().GetMinor() != ProtocolMinor {
 		t.Fatalf("negotiated protocol = %#v", response.GetNegotiatedProtocol())
 	}
-	if response.GetEngineVersion() != "test-version" || response.GetEngineInstanceId() == "" || len(response.GetCapabilities()) < 2 {
+	if response.GetEngineVersion() != "test-version" || response.GetEngineInstanceId() == "" {
 		t.Fatalf("engine identity/capabilities = %#v", response)
+	}
+	gotCapabilities := make([]string, 0, len(response.GetCapabilities()))
+	for _, capability := range response.GetCapabilities() {
+		if capability.GetVersion() != 1 {
+			t.Fatalf("capability %q version = %d, want 1", capability.GetName(), capability.GetVersion())
+		}
+		gotCapabilities = append(gotCapabilities, capability.GetName())
+	}
+	slices.Sort(gotCapabilities)
+	wantCapabilities := []string{
+		"cluster.contexts",
+		"cluster.discovery",
+		"cluster.sessions",
+		"engine.health",
+		"exec.stream",
+		"logs.stream",
+		"object.data",
+		"object.details",
+		"object.events",
+		"object.relationships",
+		"operation.mutations",
+		"port-forward.manager",
+		"view.column-preview",
+		"view.optional-resources",
+		"view.resources",
+		"view.search",
+	}
+	if !reflect.DeepEqual(gotCapabilities, wantCapabilities) {
+		t.Fatalf("capabilities = %q, want %q", gotCapabilities, wantCapabilities)
 	}
 
 	health, err := service.Health(context.Background(), &kmgrv1.HealthRequest{Context: requestContext("health")})

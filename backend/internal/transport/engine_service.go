@@ -25,8 +25,17 @@ var engineCapabilities = []*kmgrv1.Capability{
 	{Name: "cluster.sessions", Version: 1},
 	{Name: "cluster.discovery", Version: 1},
 	{Name: "view.resources", Version: 1},
+	{Name: "view.search", Version: 1},
+	{Name: "view.column-preview", Version: 1},
+	{Name: "view.optional-resources", Version: 1},
 	{Name: "object.details", Version: 1},
+	{Name: "object.events", Version: 1},
+	{Name: "object.relationships", Version: 1},
 	{Name: "object.data", Version: 1},
+	{Name: "operation.mutations", Version: 1},
+	{Name: "logs.stream", Version: 1},
+	{Name: "exec.stream", Version: 1},
+	{Name: "port-forward.manager", Version: 1},
 }
 
 type EngineService struct {
