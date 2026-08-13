@@ -3,6 +3,7 @@ package object
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"time"
@@ -11,6 +12,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 )
 
 var _ kmgrv1.ObjectServiceServer = (*GRPCService)(nil)
@@ -47,18 +51,175 @@ func (s *GRPCService) GetObject(
 			Error: structuredObjectError(err, request.GetIdentity(), "get-object"),
 		}, nil
 	}
-	response := &kmgrv1.GetObjectResponse{
-		RequestId:       requestID,
-		Identity:        request.GetIdentity(),
-		ResourceVersion: detail.ResourceVersion,
-		YamlUtf8:        slices.Clone(detail.YAML),
-		Labels:          stringEntries(detail.Labels),
-		Annotations:     stringEntries(detail.Annotations),
+	return detailResponse(requestID, request.GetIdentity(), detail), nil
+}
+
+func (s *GRPCService) WatchObject(
+	request *kmgrv1.WatchObjectRequest,
+	stream kmgrv1.ObjectService_WatchObjectServer,
+) error {
+	if request == nil || stream == nil || request.GetContext() == nil ||
+		request.GetObjectStreamId() == "" || request.GetGeneration() == 0 {
+		return status.Error(codes.InvalidArgument, "request context, object stream ID, and generation are required")
 	}
-	for _, field := range detail.Summary {
-		response.SummaryFields = append(response.SummaryFields, &kmgrv1.ObjectSummaryField{
-			SectionId: field.Section, FieldId: field.ID, Label: field.Label,
-			DisplayText: field.Value, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+	requestID, operationContext, cancel, err := objectRequestContext(stream.Context(), request.GetContext())
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	identity, err := identityFromProto(request.GetIdentity(), request.GetContext().GetClusterSessionId())
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	// Verify the UID before opening the watch. When the caller has no resource
+	// version, anchor the watch at this authoritative GET so updates cannot fall
+	// into a GET/WATCH gap.
+	current, err := s.reader.Get(operationContext, identity)
+	if err != nil {
+		return s.sendObjectFailure(stream, request, 1, err, "watch-object")
+	}
+	resourceVersion := request.GetResourceVersion()
+	if resourceVersion == "" {
+		resourceVersion = current.GetResourceVersion()
+	}
+	objectWatch, err := s.reader.Watch(operationContext, identity, resourceVersion)
+	if err != nil {
+		return s.sendObjectFailure(stream, request, 1, err, "watch-object")
+	}
+	defer objectWatch.Stop()
+
+	var sequence uint64 = 1
+	if err := stream.Send(&kmgrv1.ObjectEvent{
+		Cursor: objectCursor(request, sequence),
+		Type:   kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_STATUS,
+		Object: &kmgrv1.GetObjectResponse{
+			RequestId: requestID, Identity: request.GetIdentity(), ResourceVersion: resourceVersion,
+		},
+	}); err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-operationContext.Done():
+			return objectStatusError(operationContext.Err())
+		case event, open := <-objectWatch.ResultChan():
+			if !open {
+				sequence++
+				return s.sendObjectFailure(stream, request, sequence, ErrObjectWatchClosed, "watch-object")
+			}
+			sequence++
+			if event.Type == watch.Error {
+				watchErr := apierrors.FromObject(event.Object)
+				if watchErr == nil {
+					watchErr = errors.New("Kubernetes object watch failed")
+				}
+				return s.sendObjectFailure(stream, request, sequence, watchErr, "watch-object")
+			}
+			value, conversionErr := unstructuredObject(event.Object)
+			if conversionErr != nil {
+				return s.sendObjectFailure(stream, request, sequence, conversionErr, "watch-object")
+			}
+			if event.Type == watch.Bookmark {
+				if err := stream.Send(&kmgrv1.ObjectEvent{
+					Cursor: objectCursor(request, sequence),
+					Type:   kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_STATUS,
+					Object: &kmgrv1.GetObjectResponse{
+						RequestId: requestID, Identity: request.GetIdentity(),
+						ResourceVersion: value.GetResourceVersion(),
+					},
+				}); err != nil {
+					return err
+				}
+				continue
+			}
+			if event.Type != watch.Added && event.Type != watch.Modified && event.Type != watch.Deleted {
+				return s.sendObjectFailure(
+					stream, request, sequence,
+					fmt.Errorf("unsupported Kubernetes watch event type %q", event.Type), "watch-object",
+				)
+			}
+			detail, detailErr := detailFromObject(value, identity, true, true)
+			if detailErr != nil {
+				return s.sendObjectFailure(stream, request, sequence, detailErr, "watch-object")
+			}
+			eventType := kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_UPDATED
+			if event.Type == watch.Deleted {
+				eventType = kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_DELETED
+			}
+			if err := stream.Send(&kmgrv1.ObjectEvent{
+				Cursor: objectCursor(request, sequence), Type: eventType,
+				Object: detailResponse(requestID, request.GetIdentity(), detail),
+			}); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (s *GRPCService) GetEvents(
+	ctx context.Context,
+	request *kmgrv1.GetEventsRequest,
+) (*kmgrv1.GetEventsResponse, error) {
+	requestID, operationContext, cancel, err := objectRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	identity, err := identityFromProto(request.GetIdentity(), request.GetContext().GetClusterSessionId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	values, err := s.reader.Events(operationContext, identity, request.GetLimit())
+	response := &kmgrv1.GetEventsResponse{RequestId: requestID}
+	if err != nil {
+		response.Error = structuredObjectError(err, request.GetIdentity(), "get-events")
+		return response, nil
+	}
+	response.Events = make([]*kmgrv1.KubernetesEvent, 0, len(values))
+	for _, value := range values {
+		response.Events = append(response.Events, &kmgrv1.KubernetesEvent{
+			Identity: identityToProto(value.Identity), Type: value.Type, Reason: value.Reason,
+			Message: value.Message, FirstObservedUnixMs: unixMilliseconds(value.FirstObserved),
+			LastObservedUnixMs: unixMilliseconds(value.LastObserved), Count: value.Count,
+			ReportingController: value.ReportingController,
+		})
+	}
+	return response, nil
+}
+
+func (s *GRPCService) GetRelationships(
+	ctx context.Context,
+	request *kmgrv1.GetRelationshipsRequest,
+) (*kmgrv1.GetRelationshipsResponse, error) {
+	requestID, operationContext, cancel, err := objectRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	identity, err := identityFromProto(request.GetIdentity(), request.GetContext().GetClusterSessionId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	values, err := s.reader.Relationships(
+		operationContext, identity, request.GetIncludeOwners(), request.GetIncludeChildren(),
+	)
+	response := &kmgrv1.GetRelationshipsResponse{RequestId: requestID}
+	if err != nil {
+		response.Error = structuredObjectError(err, request.GetIdentity(), "get-relationships")
+		return response, nil
+	}
+	response.Relationships = make([]*kmgrv1.ResourceRelationship, 0, len(values))
+	for _, value := range values {
+		kind := kmgrv1.RelationshipKind_RELATIONSHIP_KIND_RELATED
+		switch value.Kind {
+		case RelationshipOwner:
+			kind = kmgrv1.RelationshipKind_RELATIONSHIP_KIND_OWNER
+		case RelationshipChild:
+			kind = kmgrv1.RelationshipKind_RELATIONSHIP_KIND_CHILD
+		}
+		response.Relationships = append(response.Relationships, &kmgrv1.ResourceRelationship{
+			Kind: kind, Identity: identityToProto(value.Identity), Label: value.Label, Stale: value.Stale,
 		})
 	}
 	return response, nil
@@ -148,6 +309,79 @@ func stringEntries(values map[string]string) []*kmgrv1.StringMapEntry {
 	return result
 }
 
+func detailResponse(requestID string, identity *kmgrv1.ResourceIdentity, detail Detail) *kmgrv1.GetObjectResponse {
+	response := &kmgrv1.GetObjectResponse{
+		RequestId: requestID, Identity: identity, ResourceVersion: detail.ResourceVersion,
+		YamlUtf8: slices.Clone(detail.YAML), Labels: stringEntries(detail.Labels),
+		Annotations: stringEntries(detail.Annotations),
+	}
+	for _, field := range detail.Summary {
+		response.SummaryFields = append(response.SummaryFields, &kmgrv1.ObjectSummaryField{
+			SectionId: field.Section, FieldId: field.ID, Label: field.Label,
+			DisplayText: field.Value, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+		})
+	}
+	return response
+}
+
+func identityToProto(identity Identity) *kmgrv1.ResourceIdentity {
+	return &kmgrv1.ResourceIdentity{
+		ClusterSessionId: identity.SessionID, Group: identity.Group, Version: identity.Version,
+		Resource: identity.Resource, Namespace: identity.Namespace, Name: identity.Name, Uid: identity.UID,
+	}
+}
+
+func unixMilliseconds(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.UnixMilli()
+}
+
+func objectCursor(request *kmgrv1.WatchObjectRequest, sequence uint64) *kmgrv1.StreamCursor {
+	return &kmgrv1.StreamCursor{
+		StreamId: request.GetObjectStreamId(), Generation: request.GetGeneration(), Sequence: sequence,
+	}
+}
+
+func (s *GRPCService) sendObjectFailure(
+	stream kmgrv1.ObjectService_WatchObjectServer,
+	request *kmgrv1.WatchObjectRequest,
+	sequence uint64,
+	err error,
+	operation string,
+) error {
+	return stream.Send(&kmgrv1.ObjectEvent{
+		Cursor: objectCursor(request, sequence), Type: kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_STATUS,
+		Error: structuredObjectError(err, request.GetIdentity(), operation),
+	})
+}
+
+func unstructuredObject(value runtime.Object) (*unstructured.Unstructured, error) {
+	if current, ok := value.(*unstructured.Unstructured); ok {
+		return current, nil
+	}
+	if value == nil {
+		return nil, errors.New("Kubernetes watch event has no object")
+	}
+	converted, err := runtime.DefaultUnstructuredConverter.ToUnstructured(value)
+	if err != nil {
+		return nil, fmt.Errorf("decode Kubernetes watch object: %w", err)
+	}
+	return &unstructured.Unstructured{Object: converted}, nil
+}
+
+func objectStatusError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, "object watch cancelled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, "object watch deadline exceeded")
+	default:
+		return err
+	}
+}
+
 func structuredObjectError(err error, identity *kmgrv1.ResourceIdentity, operation string) *kmgrv1.StructuredError {
 	result := &kmgrv1.StructuredError{
 		Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL,
@@ -170,6 +404,20 @@ func structuredObjectError(err error, identity *kmgrv1.ResourceIdentity, operati
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED
 		result.Reason = "DataEditorUnsupported"
 		result.Message = "Key/value data editing is available only for ConfigMaps and Secrets."
+	case errors.Is(err, ErrChildRelationshipsUnavailable):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED
+		result.Reason = "ChildRelationshipsUnavailable"
+		result.Message = "Child relationship lookup is unavailable."
+	case errors.Is(err, ErrRelationshipResolutionUnavailable):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
+		result.Reason = "RelationshipResolutionUnavailable"
+		result.Message = "Kubernetes API relationship mapping is unavailable."
+		result.Retryable = true
+	case errors.Is(err, ErrObjectWatchClosed):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
+		result.Reason = "ObjectWatchClosed"
+		result.Message = "The Kubernetes object watch closed and can be reopened."
+		result.Retryable = true
 	case errors.Is(err, ErrSessionNotFound):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
 		result.Reason = "SessionNotFound"

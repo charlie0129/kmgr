@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -72,6 +73,111 @@ func TestDetailReturnsReadableYAMLWithoutJSONCrossingBoundary(t *testing.T) {
 	}
 	if len(detail.Summary) == 0 || detail.Summary[len(detail.Summary)-1].Value != "Running" {
 		t.Fatalf("summary = %#v", detail.Summary)
+	}
+}
+
+func TestPodSummaryIncludesBoundedContainerChoicesAndDeclaredPorts(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "uid")
+	value.Object["spec"] = map[string]any{
+		"containers": []any{
+			map[string]any{
+				"name": "main", "image": "private.example/application:secret-tag",
+				"env": []any{map[string]any{"name": "PASSWORD", "value": "must-not-leak"}},
+				"ports": []any{
+					map[string]any{"name": "http", "containerPort": int64(8080), "protocol": "TCP"},
+				},
+			},
+		},
+		"initContainers":      []any{map[string]any{"name": "migrate"}},
+		"ephemeralContainers": []any{map[string]any{"name": "debugger"}},
+	}
+	detail, err := testReader(t, value).Detail(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "pods", Namespace: "ns", Name: "pod", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct{ section, value string }{
+		"container:main":              {section: "containers", value: "main"},
+		"port:TCP:8080:http":          {section: "ports", value: "http: 8080/TCP"},
+		"initContainer:migrate":       {section: "containers", value: "migrate"},
+		"ephemeralContainer:debugger": {section: "containers", value: "debugger"},
+	}
+	for _, field := range detail.Summary {
+		if expected, found := want[field.ID]; found {
+			if field.Section != expected.section || field.Value != expected.value {
+				t.Fatalf("summary field %#v, want %#v", field, expected)
+			}
+			delete(want, field.ID)
+		}
+		if strings.Contains(field.Value, "must-not-leak") || strings.Contains(field.Value, "secret-tag") {
+			t.Fatalf("summary leaked an image or environment value: %#v", field)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing summary fields: %#v", want)
+	}
+}
+
+func TestServiceSummaryIncludesDeclaredAndTargetPorts(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "Service", "services", "ns", "web", "uid")
+	value.Object["spec"] = map[string]any{"ports": []any{
+		map[string]any{"name": "http", "port": int64(80), "targetPort": int64(8080)},
+		map[string]any{"name": "admin", "port": int64(8443), "targetPort": "admin", "protocol": "TCP"},
+	}}
+	detail, err := testReader(t, value).Detail(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "services", Namespace: "ns", Name: "web", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ports := make([]string, 0, 2)
+	ids := make([]string, 0, 2)
+	for _, field := range detail.Summary {
+		if field.Section == "ports" {
+			ports = append(ports, field.Value)
+			ids = append(ids, field.ID)
+		}
+	}
+	if got, want := strings.Join(ports, ","), "http: 80/TCP → 8080,admin: 8443/TCP → admin"; got != want {
+		t.Fatalf("service port summary = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(ids, ","), "port:TCP:80:http,port:TCP:8443:admin"; got != want {
+		t.Fatalf("service port IDs = %q, want %q", got, want)
+	}
+}
+
+func TestPodSummaryBoundsUntrustedContainerAndPortCounts(t *testing.T) {
+	t.Parallel()
+	containers := make([]any, maximumSummaryContainers+20)
+	ports := make([]any, maximumSummaryPorts+20)
+	for index := range ports {
+		ports[index] = map[string]any{"containerPort": int64(index + 1)}
+	}
+	for index := range containers {
+		containers[index] = map[string]any{"name": fmt.Sprintf("container-%d", index), "ports": ports}
+	}
+	value := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "uid")
+	value.Object["spec"] = map[string]any{"containers": containers}
+	detail, err := testReader(t, value).Detail(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "pods", Namespace: "ns", Name: "pod", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	containerFields := 0
+	portFields := 0
+	for _, field := range detail.Summary {
+		if field.Section == "ports" {
+			portFields++
+		} else if field.Section == "containers" {
+			containerFields++
+		}
+	}
+	if containerFields != maximumSummaryContainers || portFields != maximumSummaryPorts {
+		t.Fatalf("bounded summary counts = containers %d, ports %d", containerFields, portFields)
 	}
 }
 

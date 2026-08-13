@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -95,6 +96,44 @@ func (r ClusterResolver) Resource(
 	return resource.Namespace(namespace), nil
 }
 
+// ResourceForKind resolves an owner reference through the session's discovery-
+// backed RESTMapper. Kubernetes resource names are not derived by pluralizing
+// kinds: that is incorrect for many built-ins and arbitrary CRDs.
+func (r ClusterResolver) ResourceForKind(
+	sessionID string,
+	gvk schema.GroupVersionKind,
+	namespace string,
+) (dynamic.ResourceInterface, schema.GroupVersionResource, string, error) {
+	if r.Sessions == nil {
+		return nil, schema.GroupVersionResource{}, "", ErrSessionNotFound
+	}
+	session, ok := r.Sessions.Get(sessionID)
+	if !ok {
+		return nil, schema.GroupVersionResource{}, "", ErrSessionNotFound
+	}
+	mapper := session.Mapper()
+	if mapper == nil || session.Dynamic() == nil {
+		return nil, schema.GroupVersionResource{}, "", ErrRelationshipResolutionUnavailable
+	}
+	mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return nil, schema.GroupVersionResource{}, "", err
+	}
+	namespaceable := session.Dynamic().Resource(mapping.Resource)
+	var resource dynamic.ResourceInterface = namespaceable
+	resolvedNamespace := ""
+	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+		if namespace == "" {
+			return nil, schema.GroupVersionResource{}, "", fmt.Errorf(
+				"namespaced owner %s has no namespace", gvk.String(),
+			)
+		}
+		resolvedNamespace = namespace
+		resource = namespaceable.Namespace(namespace)
+	}
+	return resource, mapping.Resource, resolvedNamespace, nil
+}
+
 type Reader struct {
 	resolver Resolver
 }
@@ -128,15 +167,25 @@ func (r *Reader) Get(ctx context.Context, identity Identity) (*unstructured.Unst
 	if err != nil {
 		return nil, err
 	}
-	if string(value.GetUID()) != identity.UID {
-		return nil, &IdentityChangedError{
-			ExpectedUID: identity.UID,
-			ActualUID:   string(value.GetUID()),
-			Namespace:   identity.Namespace,
-			Name:        identity.Name,
-		}
+	if err := validateObjectUID(value, identity); err != nil {
+		return nil, err
 	}
 	return value, nil
+}
+
+func validateObjectUID(value *unstructured.Unstructured, identity Identity) error {
+	if value == nil {
+		return errors.New("Kubernetes object is missing")
+	}
+	if string(value.GetUID()) == identity.UID {
+		return nil
+	}
+	return &IdentityChangedError{
+		ExpectedUID: identity.UID,
+		ActualUID:   string(value.GetUID()),
+		Namespace:   identity.Namespace,
+		Name:        identity.Name,
+	}
 }
 
 type Detail struct {
@@ -158,6 +207,17 @@ type SummaryField struct {
 func (r *Reader) Detail(ctx context.Context, identity Identity, includeYAML, includeSummary bool) (Detail, error) {
 	value, err := r.Get(ctx, identity)
 	if err != nil {
+		return Detail{}, err
+	}
+	return detailFromObject(value, identity, includeYAML, includeSummary)
+}
+
+func detailFromObject(
+	value *unstructured.Unstructured,
+	identity Identity,
+	includeYAML, includeSummary bool,
+) (Detail, error) {
+	if err := validateObjectUID(value, identity); err != nil {
 		return Detail{}, err
 	}
 	detail := Detail{
@@ -325,7 +385,179 @@ func summarize(value *unstructured.Unstructured) []SummaryField {
 	if phase, found, _ := unstructured.NestedString(value.Object, "status", "phase"); found && phase != "" {
 		fields = append(fields, SummaryField{Section: "status", ID: "phase", Label: "Status", Value: phase})
 	}
+	switch value.GetKind() {
+	case "Pod":
+		fields = append(fields, podContainerSummary(value.Object)...)
+	case "Service":
+		fields = append(fields, servicePortSummary(value.Object)...)
+	}
 	return fields
+}
+
+const (
+	maximumSummaryContainers    = 64
+	maximumSummaryPorts         = 128
+	maximumSummaryNameBytes     = 253
+	maximumSummaryPortNameBytes = 63
+)
+
+func podContainerSummary(object map[string]any) []SummaryField {
+	type containerGroup struct {
+		path    string
+		id      string
+		label   string
+		section string
+	}
+	groups := []containerGroup{
+		{path: "containers", id: "container", label: "Container", section: "containers"},
+		{path: "initContainers", id: "initContainer", label: "Init Container", section: "containers"},
+		{path: "ephemeralContainers", id: "ephemeralContainer", label: "Ephemeral Container", section: "containers"},
+	}
+	result := make([]SummaryField, 0)
+	remainingContainers := maximumSummaryContainers
+	remainingPorts := maximumSummaryPorts
+	seenContainers := make(map[string]struct{})
+	seenPorts := make(map[string]struct{})
+	for _, group := range groups {
+		if remainingContainers == 0 {
+			break
+		}
+		containers, found, err := unstructured.NestedSlice(object, "spec", group.path)
+		if err != nil || !found {
+			continue
+		}
+		if len(containers) > remainingContainers {
+			containers = containers[:remainingContainers]
+		}
+		remainingContainers -= len(containers)
+		for _, raw := range containers {
+			container, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _, _ := unstructured.NestedString(container, "name")
+			if !validSummaryToken(name, maximumSummaryNameBytes) {
+				continue
+			}
+			containerID := group.id + ":" + name
+			if _, duplicate := seenContainers[containerID]; !duplicate {
+				seenContainers[containerID] = struct{}{}
+				result = append(result, SummaryField{
+					Section: group.section, ID: containerID, Label: group.label, Value: name,
+				})
+			}
+			if remainingPorts == 0 {
+				continue
+			}
+			ports, found, err := unstructured.NestedSlice(container, "ports")
+			if err != nil || !found {
+				continue
+			}
+			if len(ports) > remainingPorts {
+				ports = ports[:remainingPorts]
+			}
+			remainingPorts -= len(ports)
+			for _, rawPort := range ports {
+				port, ok := rawPort.(map[string]any)
+				if !ok {
+					continue
+				}
+				number, found, _ := unstructured.NestedInt64(port, "containerPort")
+				if !found || number <= 0 {
+					continue
+				}
+				portName, _, _ := unstructured.NestedString(port, "name")
+				if portName != "" && !validSummaryToken(portName, maximumSummaryPortNameBytes) {
+					continue
+				}
+				protocol := summaryProtocol(port)
+				portID := fmt.Sprintf("port:%s:%d:%s", protocol, number, portName)
+				if _, duplicate := seenPorts[portID]; duplicate {
+					continue
+				}
+				seenPorts[portID] = struct{}{}
+				display := fmt.Sprintf("%d/%s", number, protocol)
+				if portName != "" {
+					display = portName + ": " + display
+				}
+				result = append(result, SummaryField{
+					Section: "ports", ID: portID,
+					Label: name + " Port", Value: display,
+				})
+			}
+		}
+	}
+	return result
+}
+
+func servicePortSummary(object map[string]any) []SummaryField {
+	ports, found, err := unstructured.NestedSlice(object, "spec", "ports")
+	if err != nil || !found {
+		return nil
+	}
+	if len(ports) > maximumSummaryPorts {
+		ports = ports[:maximumSummaryPorts]
+	}
+	result := make([]SummaryField, 0, len(ports))
+	seen := make(map[string]struct{})
+	for _, raw := range ports {
+		port, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		number, found, _ := unstructured.NestedInt64(port, "port")
+		if !found || number <= 0 {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(port, "name")
+		if name != "" && !validSummaryToken(name, maximumSummaryPortNameBytes) {
+			continue
+		}
+		protocol := summaryProtocol(port)
+		fieldID := fmt.Sprintf("port:%s:%d:%s", protocol, number, name)
+		if _, duplicate := seen[fieldID]; duplicate {
+			continue
+		}
+		seen[fieldID] = struct{}{}
+		display := fmt.Sprintf("%d/%s", number, protocol)
+		if name != "" {
+			display = name + ": " + display
+		}
+		if target, found, _ := unstructured.NestedString(port, "targetPort"); found &&
+			validSummaryToken(target, maximumSummaryPortNameBytes) {
+			display += " → " + target
+		} else if target, found, _ := unstructured.NestedInt64(port, "targetPort"); found && target > 0 {
+			display += fmt.Sprintf(" → %d", target)
+		}
+		result = append(result, SummaryField{
+			Section: "ports", ID: fieldID, Label: "Port", Value: display,
+		})
+	}
+	return result
+}
+
+func summaryProtocol(port map[string]any) string {
+	protocol, _, _ := unstructured.NestedString(port, "protocol")
+	switch strings.ToUpper(protocol) {
+	case "UDP":
+		return "UDP"
+	case "SCTP":
+		return "SCTP"
+	default:
+		return "TCP"
+	}
+}
+
+func validSummaryToken(value string, maximumBytes int) bool {
+	if value == "" || len(value) > maximumBytes || strings.ContainsRune(value, ':') {
+		return false
+	}
+	for _, current := range value {
+		if current < 0x21 || current > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneStrings(value map[string]string) map[string]string {
