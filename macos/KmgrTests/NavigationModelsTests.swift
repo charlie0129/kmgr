@@ -67,6 +67,37 @@ import Testing
     #expect(pods.namespaced)
 }
 
+@Test func resourceFiltersStartClearAndRestorePerExactGVR() {
+    let pods = GVR(group: "", version: "v1", resource: "pods")
+    let nodes = GVR(group: "", version: "v1", resource: "nodes")
+    var memory = ResourceFilterMemory()
+
+    #expect(memory.switchResource(from: nil, currentFilter: "", to: pods) == "")
+    #expect(memory.switchResource(
+        from: pods,
+        currentFilter: "status:running",
+        to: nodes
+    ) == "")
+    #expect(memory.switchResource(
+        from: nodes,
+        currentFilter: "name:worker",
+        to: pods
+    ) == "status:running")
+    #expect(memory.filter(for: nodes) == "name:worker")
+}
+
+@Test func resourceFilterMemoryDoesNotMixSamePluralAcrossAPIGroupOrVersion() {
+    let stable = GVR(group: "example.io", version: "v1", resource: "widgets")
+    let beta = GVR(group: "example.io", version: "v1beta1", resource: "widgets")
+    let otherGroup = GVR(group: "other.io", version: "v1", resource: "widgets")
+    var memory = ResourceFilterMemory()
+    memory.remember("status:ready", for: stable)
+
+    #expect(memory.filter(for: stable) == "status:ready")
+    #expect(memory.filter(for: beta) == "")
+    #expect(memory.filter(for: otherGroup) == "")
+}
+
 @Test func navigatingAfterBackDropsOnlyForwardBranch() {
     func state(_ resource: String) -> WorkspaceDestination {
         .resource(ResourceNavigationState(

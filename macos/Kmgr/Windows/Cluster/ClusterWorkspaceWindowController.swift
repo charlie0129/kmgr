@@ -1352,6 +1352,7 @@ private final class ResourceListViewController: NSViewController,
     private var filterRevision: UInt64 = 0
     private var streamTask: Task<Void, Never>?
     private var filterTask: Task<Void, Never>?
+    private var filterMemory = ResourceFilterMemory()
     private var suppressSelectionCallbacks = false
     private var history = WorkspaceNavigationHistory()
     private var columnIDs: [String] = []
@@ -1491,12 +1492,20 @@ private final class ResourceListViewController: NSViewController,
         if case .resource = history.current, let current = navigationState() {
             history.replaceCurrent(with: .resource(current))
         }
+        let nextGVR = resourceGVR(for: resource)
+        let restoredFilter = filterMemory.switchResource(
+            from: self.resource.map(resourceGVR(for:)),
+            currentFilter: filterField.stringValue,
+            to: nextGVR
+        )
+        installFilterForNavigation(restoredFilter, resourceGVR: nextGVR)
         self.resource = resource
         self.scope = scope
         pendingScrollAnchor = nil
         let state = ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
-            kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope
+            kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope,
+            filter: restoredFilter
         )
         history.navigate(to: .resource(state))
         configureColumns(for: resource)
@@ -1652,6 +1661,7 @@ private final class ResourceListViewController: NSViewController,
         filterRevision &+= 1
         filterTask?.cancel()
         filterField.stringValue = value
+        rememberCurrentFilter()
         openStream()
         onRestorationChanged?()
         view.window?.makeFirstResponder(filterField)
@@ -1706,6 +1716,7 @@ private final class ResourceListViewController: NSViewController,
     func controlTextDidChange(_ obj: Notification) {
         filterRevision &+= 1
         filterTask?.cancel()
+        rememberCurrentFilter()
         let revision = filterRevision
         filterTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(180))
@@ -2112,6 +2123,7 @@ private final class ResourceListViewController: NSViewController,
         scope = restoration.namespaceScope.namespaceSelection
         pendingScrollAnchor = restoration.scrollAnchor
         filterField.stringValue = restoration.filter
+        filterMemory.remember(restoration.filter, for: resourceGVR(for: restored))
         suppressPresentationCheckpoint = true
         defer { suppressPresentationCheckpoint = false }
         configureColumns(for: restored)
@@ -2154,6 +2166,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func restoreResource(_ state: ResourceNavigationState) {
+        rememberCurrentFilter()
         resource = DiscoveredResource(
             group: state.group, version: state.version, resource: state.resource,
             kind: state.kind, namespaced: state.namespaced,
@@ -2162,7 +2175,10 @@ private final class ResourceListViewController: NSViewController,
         scope = state.namespaceSelection
         pendingScrollAnchor = state.scrollAnchor
         pendingSelectionUIDs = state.selectedUIDs
-        filterField.stringValue = state.filter
+        installFilterForNavigation(
+            state.filter,
+            resourceGVR: GVR(group: state.group, version: state.version, resource: state.resource)
+        )
         suppressPresentationCheckpoint = true
         configureColumns(for: resource!)
         applyColumnPresentation(state.columns)
@@ -2176,6 +2192,25 @@ private final class ResourceListViewController: NSViewController,
         }
         suppressPresentationCheckpoint = false
         openStream()
+    }
+
+    private func installFilterForNavigation(_ filter: String, resourceGVR: GVR) {
+        filterTask?.cancel()
+        filterTask = nil
+        if filterField.stringValue != filter {
+            filterRevision &+= 1
+        }
+        filterField.stringValue = filter
+        filterMemory.remember(filter, for: resourceGVR)
+    }
+
+    private func rememberCurrentFilter() {
+        guard let resource else { return }
+        filterMemory.remember(filterField.stringValue, for: resourceGVR(for: resource))
+    }
+
+    private func resourceGVR(for resource: DiscoveredResource) -> GVR {
+        GVR(group: resource.group, version: resource.version, resource: resource.resource)
     }
 
     private func applyColumnPresentation(_ states: [ColumnPresentationState]) {

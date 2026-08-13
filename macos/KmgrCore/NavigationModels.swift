@@ -69,6 +69,36 @@ public enum WorkspaceDestination: Hashable, Codable, Sendable {
     case object(ResourceIdentity, returnState: ResourceNavigationState)
 }
 
+/// Per-window filter memory keyed by exact Kubernetes resource identity. An
+/// unseen GVR intentionally starts with an empty filter so a filter from Pods,
+/// for example, cannot silently carry into Nodes.
+public struct ResourceFilterMemory: Hashable, Sendable {
+    public private(set) var filtersByGVR: [GVR: String]
+
+    public init(filtersByGVR: [GVR: String] = [:]) {
+        self.filtersByGVR = filtersByGVR
+    }
+
+    public mutating func switchResource(
+        from currentGVR: GVR?,
+        currentFilter: String,
+        to nextGVR: GVR
+    ) -> String {
+        if let currentGVR {
+            filtersByGVR[currentGVR] = currentFilter
+        }
+        return filtersByGVR[nextGVR] ?? ""
+    }
+
+    public mutating func remember(_ filter: String, for gvr: GVR) {
+        filtersByGVR[gvr] = filter
+    }
+
+    public func filter(for gvr: GVR) -> String {
+        filtersByGVR[gvr] ?? ""
+    }
+}
+
 /// Finder-like per-window history. Replacing the current state is used while
 /// the user edits filter/sort/selection; navigating pushes one entry and drops
 /// only the forward branch.
