@@ -6,6 +6,8 @@ import OSLog
 final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate {
     let session: OpenedClusterSession
     var onClose: (() -> Void)?
+    var onOpenObject: ((ResourceIdentity) -> Void)?
+    var onStartPortForward: ((ResourceIdentity) -> Void)?
 
     private let provider: any WorkspaceResourceProviding
     private let workspaceController: ClusterWorkspaceViewController
@@ -13,6 +15,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     init(
         session: OpenedClusterSession,
         provider: any WorkspaceResourceProviding,
+        objectSearchProvider: any ObjectSearchProviding,
+        objectDetailProvider: any ObjectDetailProviding,
         portForwards: PortForwardCoordinator,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
@@ -35,10 +39,18 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController = ClusterWorkspaceViewController(
             session: session,
             provider: provider,
+            objectSearchProvider: objectSearchProvider,
+            objectDetailProvider: objectDetailProvider,
             portForwards: portForwards,
             onShowPortForwards: onShowPortForwards
         )
         super.init(window: window)
+        workspaceController.onOpenObject = { [weak self] identity in
+            self?.onOpenObject?(identity)
+        }
+        workspaceController.onStartPortForward = { [weak self] identity in
+            self?.onStartPortForward?(identity)
+        }
         window.delegate = self
         window.contentViewController = workspaceController
         window.toolbar = workspaceController.makeToolbar()
@@ -61,6 +73,22 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
         onClose?()
     }
+
+    func showObjectFallback(_ identity: ResourceIdentity) {
+        workspaceController.openObjectFallback(identity)
+    }
+
+    func showPortForwardConfigurationPlaceholder(_ identity: ResourceIdentity) {
+        let alert = NSAlert()
+        alert.messageText = "Start Port Forward"
+        alert.informativeText = "Port-forward configuration for \(identity.namespace)/\(identity.name) will open here. The selected Kubernetes UID remains pinned."
+        alert.addButton(withTitle: "OK")
+        if let window { alert.beginSheetModal(for: window) }
+    }
+
+    @objc func showCommandPalette(_ sender: Any?) {
+        workspaceController.presentCommandPalette()
+    }
 }
 
 @MainActor
@@ -69,6 +97,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 {
     private let session: OpenedClusterSession
     private let provider: any WorkspaceResourceProviding
+    private let objectSearchProvider: any ObjectSearchProviding
+    private let objectDetailProvider: any ObjectDetailProviding
     private let portForwards: PortForwardCoordinator
     private let onShowPortForwards: @MainActor () -> Void
     private let sidebarController: ResourceSidebarViewController
@@ -78,24 +108,43 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let forwardsButton = NSButton(title: "Forwards 0", target: nil, action: nil)
     private var namespaceTask: Task<Void, Never>?
     private var portForwardObserver: UUID?
+    private var resources: [DiscoveredResource] = []
+    private var namespaces: [String] = []
+    private var paletteController: CommandPaletteWindowController?
+    private var objectOpenTask: Task<Void, Never>?
+    var onOpenObject: ((ResourceIdentity) -> Void)?
+    var onStartPortForward: ((ResourceIdentity) -> Void)?
 
     init(
         session: OpenedClusterSession,
         provider: any WorkspaceResourceProviding,
+        objectSearchProvider: any ObjectSearchProviding,
+        objectDetailProvider: any ObjectDetailProviding,
         portForwards: PortForwardCoordinator,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
         self.session = session
         self.provider = provider
+        self.objectSearchProvider = objectSearchProvider
+        self.objectDetailProvider = objectDetailProvider
         self.portForwards = portForwards
         self.onShowPortForwards = onShowPortForwards
         sidebarController = ResourceSidebarViewController(session: session, provider: provider)
-        contentController = ResourceListViewController(session: session, provider: provider)
+        contentController = ResourceListViewController(
+            session: session,
+            provider: provider
+        )
         super.init(nibName: nil, bundle: nil)
 
         sidebarController.onSelectResource = { [weak self] resource in
             guard let self else { return }
             contentController.open(resource: resource, scope: selectedNamespaceScope())
+        }
+        sidebarController.onResourcesChanged = { [weak self] resources in
+            self?.resources = resources
+        }
+        contentController.onShowCommandPalette = { [weak self] in
+            self?.showCommandPalette()
         }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
         addSplitViewItem(NSSplitViewItem(viewController: contentController))
@@ -121,6 +170,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     func stop() {
         namespaceTask?.cancel()
+        paletteController?.close()
+        paletteController = nil
+        objectOpenTask?.cancel()
         if let portForwardObserver {
             portForwards.removeObserver(portForwardObserver)
             self.portForwardObserver = nil
@@ -192,8 +244,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Commands"
             item.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Command Palette")
-            item.target = contentController
-            item.action = #selector(ResourceListViewController.showCommandPalette)
+            item.target = self
+            item.action = #selector(showCommandPalette)
             return item
         case .connection:
             connectionLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -229,6 +281,94 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         onShowPortForwards()
     }
 
+    @objc private func showCommandPalette() {
+        presentCommandPalette()
+    }
+
+    func presentCommandPalette() {
+        if let paletteController {
+            paletteController.showWindow(nil)
+            return
+        }
+        let controller = CommandPaletteWindowController(
+            context: .init(
+                session: session,
+                resources: resources,
+                namespaces: namespaces,
+                namespaceScope: selectedNamespaceScope(),
+                selectedIdentities: contentController.selectedIdentities
+            ),
+            objectSearchProvider: objectSearchProvider
+        )
+        controller.onOpenResource = { [weak self] resource in
+            guard let self else { return }
+            contentController.open(resource: resource, scope: selectedNamespaceScope())
+        }
+        controller.onChangeNamespace = { [weak self] namespace in
+            self?.selectNamespace(namespace)
+        }
+        controller.onOpenObject = { [weak self] identity in
+            self?.freshOpen(identity)
+        }
+        controller.onOperation = { [weak self] operation in
+            guard case .startPortForward(let identity) = operation else { return }
+            self?.onStartPortForward?(identity)
+        }
+        controller.onClose = { [weak self, weak controller] in
+            guard self?.paletteController === controller else { return }
+            self?.paletteController = nil
+        }
+        paletteController = controller
+        view.window?.addChildWindow(controller.window!, ordered: .above)
+        controller.showWindow(nil)
+    }
+
+    private func freshOpen(_ identity: ResourceIdentity) {
+        objectOpenTask?.cancel()
+        connectionLabel.stringValue = "Refreshing \(identity.name)…"
+        connectionLabel.textColor = .secondaryLabelColor
+        objectOpenTask = Task { [weak self, objectDetailProvider] in
+            guard let self else { return }
+            do {
+                let detail = try await objectDetailProvider.getObject(identity: identity)
+                guard !Task.isCancelled else { return }
+                connectionLabel.stringValue = "Connected"
+                connectionLabel.textColor = .secondaryLabelColor
+                if let onOpenObject {
+                    onOpenObject(detail.identity)
+                } else {
+                    openObjectFallback(detail.identity)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                connectionLabel.stringValue = error.localizedDescription
+                connectionLabel.textColor = .systemRed
+            }
+        }
+    }
+
+    fileprivate func openObjectFallback(_ identity: ResourceIdentity) {
+        guard let resource = resources.first(where: {
+            $0.group == identity.group && $0.version == identity.version
+                && $0.resource == identity.resource
+        }) else { return }
+        let scope = identity.namespace.isEmpty
+            ? NamespaceSelection()
+            : .namespace(identity.namespace)
+        contentController.open(resource: resource, scope: scope)
+        contentController.setFilter(identity.name)
+    }
+
+    private func selectNamespace(_ namespace: String) {
+        if let index = namespaceControl.itemTitles.firstIndex(of: namespace) {
+            namespaceControl.selectItem(at: index)
+        } else {
+            namespaceControl.addItem(withTitle: namespace)
+            namespaceControl.selectItem(withTitle: namespace)
+        }
+        namespaceChanged()
+    }
+
     private func selectedNamespaceScope() -> NamespaceSelection {
         if namespaceControl.indexOfSelectedItem <= 0 { return NamespaceSelection() }
         return .namespace(namespaceControl.titleOfSelectedItem ?? session.defaultNamespace)
@@ -242,6 +382,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 let namespaces = try await provider.listNamespaces(sessionID: session.sessionID)
                 guard !Task.isCancelled else { return }
                 let previous = namespaceControl.titleOfSelectedItem
+                self.namespaces = namespaces
                 namespaceControl.removeAllItems()
                 namespaceControl.addItem(withTitle: "All namespaces")
                 namespaceControl.addItems(withTitles: namespaces)
@@ -307,6 +448,7 @@ private final class ResourceSidebarViewController: NSViewController,
     private var allResources: [DiscoveredResource] = []
     private var task: Task<Void, Never>?
     var onSelectResource: ((DiscoveredResource) -> Void)?
+    var onResourcesChanged: (([DiscoveredResource]) -> Void)?
 
     init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
@@ -369,6 +511,7 @@ private final class ResourceSidebarViewController: NSViewController,
                 let resources = try await provider.discoverResources(sessionID: session.sessionID, refresh: false)
                 guard !Task.isCancelled else { return }
                 allResources = resources.filter { $0.verbs.contains("list") }
+                onResourcesChanged?(allResources)
                 rebuildSections()
                 statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds"
                 if let pods = allResources.first(where: { $0.group.isEmpty && $0.resource == "pods" }) {
@@ -521,6 +664,7 @@ private final class ResourceListViewController: NSViewController,
     private var lastStreamResourceID: String?
     private var lastStreamScope: NamespaceSelection?
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
+    var onShowCommandPalette: (() -> Void)?
 
     init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
@@ -635,6 +779,16 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
+    var selectedIdentities: [ResourceIdentity] { model.selectedIdentities }
+
+    func setFilter(_ value: String) {
+        filterRevision &+= 1
+        filterTask?.cancel()
+        filterField.stringValue = value
+        openStream()
+        view.window?.makeFirstResponder(filterField)
+    }
+
     @objc func goBack() {
         if let current = navigationState() { history.replaceCurrent(with: .resource(current)) }
         guard let destination = history.goBack() else { return }
@@ -648,11 +802,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     @objc func showCommandPalette() {
-        let alert = NSAlert()
-        alert.messageText = "Command Palette"
-        alert.informativeText = "Resource and operation search is available through the backend search stream; the native palette surface is the next UI slice."
-        alert.addButton(withTitle: "OK")
-        alert.beginSheetModal(for: view.window!)
+        onShowCommandPalette?()
     }
 
     @objc private func showColumns() {

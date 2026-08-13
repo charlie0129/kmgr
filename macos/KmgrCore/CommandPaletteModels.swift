@@ -161,4 +161,49 @@ public enum PaletteRanking {
             [PaletteResult.resource(resource), PaletteResult.searchResource(resource)]
         }.prefix(limit).map { $0 }
     }
+
+    public static func namespaces(
+        query: String,
+        namespaces: [String],
+        limit: Int = 10
+    ) -> [PaletteResult] {
+        var needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for prefix in ["namespace ", "namespace:", "ns ", "ns:"]
+            where needle.hasPrefix(prefix)
+        {
+            needle = String(needle.dropFirst(prefix.count))
+            break
+        }
+        guard !needle.isEmpty else { return [] }
+        let ranked = Set(namespaces).compactMap { namespace -> (Int, String)? in
+            let value = namespace.lowercased()
+            let score: Int
+            if value == needle { score = 1_000 }
+            else if value.hasPrefix(needle) { score = 800 }
+            else if value.contains(needle) { score = 500 }
+            else { return nil }
+            return (score, namespace)
+        }.sorted {
+            $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 > $1.0
+        }
+        return ranked.prefix(max(0, limit)).map { .namespace($0.1) }
+    }
+
+    public static func objects(
+        _ values: [ObjectSearchResult],
+        limit: Int = 100
+    ) -> [PaletteResult] {
+        var byUID: [ResourceUID: ObjectSearchResult] = [:]
+        for value in values { byUID[value.identity.uid] = value }
+        return byUID.values.sorted {
+            if $0.rank != $1.rank { return $0.rank > $1.rank }
+            if $0.identity.namespace != $1.identity.namespace {
+                return $0.identity.namespace < $1.identity.namespace
+            }
+            if $0.identity.name != $1.identity.name {
+                return $0.identity.name < $1.identity.name
+            }
+            return $0.identity.uid.rawValue < $1.identity.uid.rawValue
+        }.prefix(max(0, limit)).map(PaletteResult.object)
+    }
 }

@@ -11,6 +11,8 @@ final class Application: NSObject, NSApplicationDelegate {
     private var workspaceControllers: [ObjectIdentifier: ClusterWorkspaceWindowController] = [:]
     private let clusterContextProvider: any ClusterContextProviding
     private let workspaceResourceProvider: any WorkspaceResourceProviding
+    private let objectSearchProvider: any ObjectSearchProviding
+    private let objectDetailProvider: any ObjectDetailProviding
     private let portForwardCoordinator: PortForwardCoordinator
     private let portForwardsWindowController: PortForwardsWindowController
     private let engineSupervisor: EngineSupervisor
@@ -24,6 +26,12 @@ final class Application: NSObject, NSApplicationDelegate {
             supervisor: supervisor
         )
         self.workspaceResourceProvider = EngineWorkspaceResourceProvider(
+            connection: supervisor.connection
+        )
+        self.objectSearchProvider = EngineObjectSearchProvider(
+            connection: supervisor.connection
+        )
+        self.objectDetailProvider = EngineObjectDetailProvider(
             connection: supervisor.connection
         )
         let portForwards = PortForwardCoordinator(
@@ -120,6 +128,8 @@ final class Application: NSObject, NSApplicationDelegate {
         let controller = ClusterWorkspaceWindowController(
             session: session,
             provider: workspaceResourceProvider,
+            objectSearchProvider: objectSearchProvider,
+            objectDetailProvider: objectDetailProvider,
             portForwards: portForwardCoordinator,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
@@ -130,6 +140,12 @@ final class Application: NSObject, NSApplicationDelegate {
         controller.onClose = { [weak self] in
             self?.workspaceControllers.removeValue(forKey: identifier)
         }
+        controller.onOpenObject = { [weak controller] identity in
+            controller?.showObjectFallback(identity)
+        }
+        controller.onStartPortForward = { [weak controller] identity in
+            controller?.showPortForwardConfigurationPlaceholder(identity)
+        }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
     }
@@ -137,6 +153,14 @@ final class Application: NSObject, NSApplicationDelegate {
     @objc func showPortForwards(_ sender: Any?) {
         portForwardsWindowController.showWindow(sender)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func showCommandPalette(_ sender: Any?) {
+        let keyWindow = NSApp.keyWindow
+        let workspace = workspaceControllers.values.first { controller in
+            controller.window === keyWindow || keyWindow?.parent === controller.window
+        }
+        workspace?.showCommandPalette(sender)
     }
 
     private func installMainMenu() {
@@ -171,6 +195,13 @@ final class Application: NSObject, NSApplicationDelegate {
             keyEquivalent: "m"
         )
         windowMenu.addItem(.separator())
+        let paletteItem = windowMenu.addItem(
+            withTitle: "Command Palette…",
+            action: #selector(showCommandPalette(_:)),
+            keyEquivalent: "k"
+        )
+        paletteItem.keyEquivalentModifierMask = .command
+        paletteItem.target = self
         let portForwardsItem = windowMenu.addItem(
             withTitle: "Port Forwards",
             action: #selector(showPortForwards(_:)),
