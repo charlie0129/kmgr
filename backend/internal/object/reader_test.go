@@ -319,6 +319,22 @@ func TestUpdateConfigMapRenamePreservesBinaryKind(t *testing.T) {
 	}
 }
 
+func TestUpdateDataCreateOnlySetRejectsAnExistingKey(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "ConfigMap", "configmaps", "ns", "settings", "uid")
+	value.Object["data"] = map[string]any{"claimed": "server value"}
+	reader := testReader(t, value)
+	identity := Identity{SessionID: "session", Version: "v1", Resource: "configmaps", Namespace: "ns", Name: "settings", UID: "uid"}
+
+	_, err := reader.UpdateData(context.Background(), identity, "rv-1", []DataMutation{{
+		Type: MutationSet, Key: "claimed", Kind: DataText, Value: []byte("local value"),
+	}})
+	var conflict *DataConflictError
+	if !errors.As(err, &conflict) || conflict.Key != "claimed" || len(conflict.CurrentHash) != 32 {
+		t.Fatalf("create-only set error = %#v, want DataConflictError with current hash", err)
+	}
+}
+
 type fakeResolver struct{ client dynamic.Interface }
 
 func (r fakeResolver) Resource(_ string, gvr schema.GroupVersionResource, namespace string) (dynamic.ResourceInterface, error) {

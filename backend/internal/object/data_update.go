@@ -146,6 +146,14 @@ func validateMutations(current map[string]DataEntry, mutations []DataMutation) e
 			return fmt.Errorf("mutation %d: %w", index, err)
 		}
 		entry, exists := current[mutation.Key]
+		// An empty hash on a set is the explicit create-only precondition. This
+		// prevents an Add Key sheet, opened from an older object version, from
+		// overwriting a key that another actor created in the meantime.
+		if mutation.Type == MutationSet && exists && len(mutation.ExpectedContentHash) == 0 {
+			return &DataConflictError{
+				Key: mutation.Key, CurrentHash: slices.Clone(entry.ContentHash[:]),
+			}
+		}
 		if len(mutation.ExpectedContentHash) != 0 {
 			if !exists {
 				return &DataConflictError{Key: mutation.Key, ExpectedHash: slices.Clone(mutation.ExpectedContentHash), Missing: true}

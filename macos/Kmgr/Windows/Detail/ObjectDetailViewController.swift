@@ -47,6 +47,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let dataValueTextView = NSTextView()
     private let dataValueScroll = NSScrollView()
     private let revealButton = NSButton(title: "Reveal", target: nil, action: nil)
+    private let addKeyButton = NSButton(title: "Add Key", target: nil, action: nil)
+    private let renameKeyButton = NSButton(title: "Rename", target: nil, action: nil)
+    private let deleteKeyButton = NSButton(title: "Delete Key", target: nil, action: nil)
+    private let revertKeyButton = NSButton(title: "Revert", target: nil, action: nil)
+    private let importKeyButton = NSButton(title: "Replace from File…", target: nil, action: nil)
+    private let exportKeyButton = NSButton(title: "Export…", target: nil, action: nil)
     private let saveKeyButton = NSButton(title: "Save Key", target: nil, action: nil)
 
     private var detail: ObjectDetail?
@@ -59,6 +65,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var relationshipsTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var secretRevealed = false
+    private var selectedDataOriginalBytes: Data?
+    private var selectedDataBinaryDraft: Data?
+    private var selectedDataDraftKind: DataValueKind?
     private var isEditingYAML = false
     private var events: [KubernetesObjectEvent] = []
     private var relationships: [ObjectRelationship] = []
@@ -148,6 +157,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         eventsTask?.cancel()
         relationshipsTask?.cancel()
         operationTask?.cancel()
+        releaseDataDrafts()
     }
 
     private var breadcrumbText: String {
@@ -288,14 +298,33 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         dataValueTextView.isEditable = false
         dataValueTextView.isSelectable = true
         dataValueTextView.allowsUndo = true
+        dataValueTextView.delegate = self
         dataValueScroll.documentView = dataValueTextView
         dataValueScroll.hasVerticalScroller = true
+        addKeyButton.target = self
+        addKeyButton.action = #selector(addDataKey)
+        renameKeyButton.target = self
+        renameKeyButton.action = #selector(renameDataKey)
+        deleteKeyButton.target = self
+        deleteKeyButton.action = #selector(deleteDataKey)
+        revertKeyButton.target = self
+        revertKeyButton.action = #selector(revertCurrentKey)
+        importKeyButton.target = self
+        importKeyButton.action = #selector(importCurrentKey)
+        exportKeyButton.target = self
+        exportKeyButton.action = #selector(exportCurrentKey)
         revealButton.target = self
         revealButton.action = #selector(toggleSecretReveal)
         saveKeyButton.target = self
         saveKeyButton.action = #selector(saveCurrentKey)
         saveKeyButton.isEnabled = false
-        let controls = NSStackView(views: [revealButton, saveKeyButton, NSView()])
+        for button in [renameKeyButton, deleteKeyButton, revertKeyButton, importKeyButton, exportKeyButton] {
+            button.isEnabled = false
+        }
+        let controls = NSStackView(views: [
+            addKeyButton, renameKeyButton, deleteKeyButton, revertKeyButton,
+            importKeyButton, exportKeyButton, revealButton, saveKeyButton, NSView(),
+        ])
         controls.orientation = .horizontal
         let editor = NSView()
         controls.translatesAutoresizingMaskIntoConstraints = false
@@ -339,12 +368,14 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func install(detail: ObjectDetail, data: ObjectData?) {
+        releaseDataDrafts()
         self.detail = detail
         objectData = data
         originalYAML = detail.yamlUTF8
         yamlTextView.string = String(decoding: detail.yamlUTF8, as: UTF8.self)
         renderSummary(detail.summaryFields)
         keysTable.reloadData()
+        updateDataEditorControls()
         renderMetrics(detail.metrics)
         statusLabel.stringValue = "Resource version \(detail.resourceVersion)"
         statusLabel.textColor = .secondaryLabelColor
@@ -517,6 +548,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         editButton.isEnabled = false
         saveButton.isEnabled = false
         saveKeyButton.isEnabled = false
+        for button in [addKeyButton, renameKeyButton, deleteKeyButton, revertKeyButton, importKeyButton] {
+            button.isEnabled = false
+        }
         dataValueTextView.isEditable = false
     }
 
@@ -766,9 +800,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        guard notification.object as? NSTableView === keysTable else { return }
+        releaseDataDrafts()
         guard let data = objectData, data.entries.indices.contains(keysTable.selectedRow) else {
             selectedDataEntry = nil
             dataValueTextView.string = ""
+            updateDataEditorControls()
             return
         }
         selectedDataEntry = data.entries[keysTable.selectedRow]
@@ -776,12 +813,15 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         revealButton.isHidden = !data.secret
         revealButton.title = "Reveal"
         displaySelectedData()
+        updateDataEditorControls()
     }
 
     @objc private func toggleSecretReveal() {
         secretRevealed.toggle()
         revealButton.title = secretRevealed ? "Conceal" : "Reveal"
+        if !secretRevealed { releaseDataDrafts() }
         displaySelectedData()
+        updateDataEditorControls()
     }
 
     private func displaySelectedData() {
@@ -792,36 +832,235 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             saveKeyButton.isEnabled = false
             return
         }
-        var bytes = Data()
-        entry.value.withUnsafeBytes { bytes.append(contentsOf: $0) }
-        if entry.kind == .text, let text = String(data: bytes, encoding: .utf8) {
+        var bytes = copyBytes(from: entry)
+        selectedDataOriginalBytes = bytes
+        selectedDataDraftKind = entry.kind
+        if let text = String(data: bytes, encoding: .utf8), !text.contains("\0") {
             dataValueTextView.string = text
             dataValueTextView.isEditable = true
-            saveKeyButton.isEnabled = true
+            selectedDataBinaryDraft = nil
         } else {
             dataValueTextView.string = "Binary value · \(entry.byteSize) bytes"
             dataValueTextView.isEditable = false
-            saveKeyButton.isEnabled = false
+            selectedDataBinaryDraft = bytes
         }
         bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex)
+        updateDataEditorControls()
+    }
+
+    func textDidChange(_ notification: Notification) {
+        guard notification.object as? NSTextView === dataValueTextView else { return }
+        updateDataEditorControls()
+    }
+
+    private var currentDraftBytes: Data? {
+        guard selectedDataEntry != nil else { return nil }
+        if selectedDataDraftKind == .binary, !dataValueTextView.isEditable {
+            return selectedDataBinaryDraft
+        }
+        return Data(dataValueTextView.string.utf8)
+    }
+
+    private var hasDataDraftChanges: Bool {
+        guard let draft = currentDraftBytes, let original = selectedDataOriginalBytes else { return false }
+        return draft != original
+    }
+
+    private func updateDataEditorControls() {
+        let hasSelection = selectedDataEntry != nil && !terminalObjectState
+        let idle = operationTask == nil
+        addKeyButton.isEnabled = objectData != nil && !terminalObjectState && idle
+        renameKeyButton.isEnabled = hasSelection && idle
+        deleteKeyButton.isEnabled = hasSelection && idle
+        importKeyButton.isEnabled = hasSelection && idle && (!((objectData?.secret ?? false)) || secretRevealed)
+        exportKeyButton.isEnabled = hasSelection && idle && (!((objectData?.secret ?? false)) || secretRevealed)
+        revertKeyButton.isEnabled = hasSelection && idle && hasDataDraftChanges
+        saveKeyButton.isEnabled = hasSelection && idle && hasDataDraftChanges
+    }
+
+    private func releaseDataDrafts() {
+        if var value = selectedDataOriginalBytes {
+            value.resetBytes(in: value.startIndex..<value.endIndex)
+        }
+        if var value = selectedDataBinaryDraft {
+            value.resetBytes(in: value.startIndex..<value.endIndex)
+        }
+        selectedDataOriginalBytes = nil
+        selectedDataBinaryDraft = nil
+        selectedDataDraftKind = nil
+        if objectData?.secret == true {
+            dataValueTextView.string = ""
+            dataValueTextView.undoManager?.removeAllActions()
+        }
+    }
+
+    private func copyBytes(from entry: ObjectDataEntry) -> Data {
+        var result = Data()
+        entry.value.withUnsafeBytes { result.append(contentsOf: $0) }
+        return result
+    }
+
+    @objc private func revertCurrentKey() {
+        releaseDataDrafts()
+        displaySelectedData()
+        statusLabel.stringValue = "Local key changes reverted"
+        statusLabel.textColor = .secondaryLabelColor
+    }
+
+    @objc private func addDataKey() {
+        guard let data = objectData else { return }
+        let alert = NSAlert()
+        alert.messageText = "Add Key"
+        alert.informativeText = "The new key is created only if it still does not exist on the server."
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 32, width: 340, height: 24))
+        nameField.placeholderString = "Key name"
+        let kindButton = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 180, height: 26))
+        kindButton.addItems(withTitles: ["Text", "Binary from File"])
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 58))
+        accessory.addSubview(nameField)
+        accessory.addSubview(kindButton)
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let key = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keys = Set(data.entries.map(\.id))
+        if let message = KubernetesDataKeyValidator.validationMessage(for: key, existingKeys: keys) {
+            showValidation(message)
+            return
+        }
+        if kindButton.indexOfSelectedItem == 1 {
+            chooseImportedBytes { [weak self] bytes in
+                self?.performDataMutation(.set(
+                    key: key, kind: .binary, value: bytes, expectedContentHash: Data()
+                ), successMessage: "Added \(key)")
+            }
+        } else {
+            performDataMutation(.set(
+                key: key, kind: .text, value: Data(), expectedContentHash: Data()
+            ), successMessage: "Added \(key)")
+        }
+    }
+
+    @objc private func renameDataKey() {
+        guard let data = objectData, let entry = selectedDataEntry else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename Key"
+        alert.informativeText = "Rename \(entry.id) without changing its value or text/binary kind."
+        let field = NSTextField(string: entry.id)
+        field.frame.size = NSSize(width: 340, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let newKey = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keys = Set(data.entries.map(\.id))
+        if let message = KubernetesDataKeyValidator.validationMessage(
+            for: newKey, existingKeys: keys, allowingExistingKey: entry.id
+        ) {
+            showValidation(message)
+            return
+        }
+        guard newKey != entry.id else { return }
+        performDataMutation(.rename(
+            key: entry.id, newKey: newKey, expectedContentHash: entry.contentHash
+        ), successMessage: "Renamed \(entry.id) to \(newKey)")
+    }
+
+    @objc private func deleteDataKey() {
+        guard let entry = selectedDataEntry else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete key \(entry.id)?"
+        alert.informativeText = "The delete uses the loaded content hash and will fail if this key changed on the server."
+        alert.addButton(withTitle: "Delete Key")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        performDataMutation(.delete(
+            key: entry.id, expectedContentHash: entry.contentHash
+        ), successMessage: "Deleted \(entry.id)")
+    }
+
+    @objc private func importCurrentKey() {
+        guard let entry = selectedDataEntry else { return }
+        chooseImportedBytes { [weak self] bytes in
+            guard let self else { return }
+            selectedDataDraftKind = .binary
+            if let text = String(data: bytes, encoding: .utf8), !text.contains("\0") {
+                selectedDataBinaryDraft = nil
+                dataValueTextView.string = text
+                dataValueTextView.isEditable = true
+            } else {
+                selectedDataBinaryDraft = bytes
+                dataValueTextView.string = "Binary value · \(bytes.count) bytes · unsaved"
+                dataValueTextView.isEditable = false
+            }
+            updateDataEditorControls()
+            statusLabel.stringValue = "Loaded \(bytes.count.formatted()) bytes locally for \(entry.id)"
+            statusLabel.textColor = .secondaryLabelColor
+        }
+    }
+
+    private func chooseImportedBytes(_ completion: @escaping (Data) -> Void) {
+        guard let window = view.window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                completion(try Data(contentsOf: url, options: .mappedIfSafe))
+            } catch {
+                self.show(error: error)
+            }
+        }
+    }
+
+    @objc private func exportCurrentKey() {
+        guard let entry = selectedDataEntry, let window = view.window else { return }
+        var bytes = currentDraftBytes ?? copyBytes(from: entry)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = entry.id
+        panel.beginSheetModal(for: window) { [weak self] response in
+            defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try bytes.write(to: url, options: .atomic)
+                self?.statusLabel.stringValue = "Exported \(entry.id)"
+                self?.statusLabel.textColor = .secondaryLabelColor
+            } catch {
+                self?.show(error: error)
+            }
+        }
     }
 
     @objc private func saveCurrentKey() {
-        guard let data = objectData, let entry = selectedDataEntry else { return }
-        let localValue = Data(dataValueTextView.string.utf8)
+        guard let entry = selectedDataEntry, let localValue = currentDraftBytes else { return }
+        performDataMutation(.set(
+            key: entry.id,
+            kind: selectedDataDraftKind ?? entry.kind,
+            value: localValue,
+            expectedContentHash: entry.contentHash
+        ), successMessage: "Saved \(entry.id)")
+    }
+
+    private func performDataMutation(_ mutation: DataMutationKind, successMessage: String) {
+        guard let data = objectData, operationTask == nil else { return }
+        updateDataEditorControls()
+        statusLabel.stringValue = "Saving key/value data…"
+        statusLabel.textColor = .secondaryLabelColor
         operationTask?.cancel()
         operationTask = Task { [weak self, provider, identity] in
             guard let self else { return }
+            defer {
+                operationTask = nil
+                updateDataEditorControls()
+            }
             do {
                 let stream = try await provider.updateData(
                     identity: identity,
                     expectedResourceVersion: data.resourceVersion,
-                    mutations: [.set(
-                        key: entry.id,
-                        kind: entry.kind,
-                        value: localValue,
-                        expectedContentHash: entry.contentHash
-                    )]
+                    mutations: [mutation]
                 )
                 for try await progress in stream where progress.state.isTerminal {
                     if progress.state != .succeeded {
@@ -832,7 +1071,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                             operation: "update key/value data"
                         )
                     }
-                    statusLabel.stringValue = "Saved \(entry.id)"
+                    statusLabel.stringValue = successMessage
+                    statusLabel.textColor = .secondaryLabelColor
                     loadTask?.cancel()
                     loadTask = nil
                     loadObject()
@@ -841,6 +1081,13 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 show(error: error)
             }
         }
+        updateDataEditorControls()
+    }
+
+    private func showValidation(_ message: String) {
+        statusLabel.stringValue = message
+        statusLabel.textColor = .systemRed
+        NSSound.beep()
     }
 
     private func show(error: Error) {
