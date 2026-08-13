@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	"github.com/charlie0129/kmgr/backend/internal/store"
 	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
@@ -109,6 +110,7 @@ func pointerIdentity(value any) string {
 
 type RuntimeConfig struct {
 	Source            ResourceSource
+	Metrics           MetricSource
 	Columns           ColumnProgramResolver
 	ReleaseDelay      time.Duration
 	BatchDelay        time.Duration
@@ -136,6 +138,7 @@ type Runtime struct {
 	mu sync.Mutex
 
 	source            ResourceSource
+	metrics           MetricSource
 	columns           ColumnProgramResolver
 	releaseDelay      time.Duration
 	batchDelay        time.Duration
@@ -214,6 +217,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	}
 	return &Runtime{
 		source:            config.Source,
+		metrics:           config.Metrics,
 		columns:           config.Columns,
 		releaseDelay:      releaseDelay,
 		batchDelay:        batchDelay,
@@ -309,6 +313,28 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 	)
 	subscription.runtime = r
 	subscription.resource = entry
+	var metricSubscription *metrics.Subscription
+	if r.metrics != nil && needsMetricProvider(projector) {
+		metricKind, _ := metricKindFor(projector.spec.Resource)
+		provider, metricErr := r.metrics.OpenMetrics(
+			sessionID, authorityID, metricKind,
+			metricsNamespace(projector.spec.Resource, serverNamespace),
+		)
+		if metricErr != nil {
+			// Optional metrics setup cannot fail the base resource view. The
+			// projector already renders request/limit or allocatable accounting
+			// with usage unavailable.
+			projector = projector.WithMetrics(metrics.Snapshot{
+				State: metrics.MeasurementUnavailable, Err: metricErr,
+			})
+			subscription.projector = projector
+		} else {
+			metricSubscription = provider.Subscribe()
+		}
+	}
+	if metricSubscription == nil {
+		projector = subscription.projector
+	}
 	entry.subscribers[subscription] = struct{}{}
 	r.views[streamKey] = subscription
 
@@ -324,6 +350,10 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 		r.startResourceLocked(entry)
 	}
 	r.mu.Unlock()
+	// Enqueue the base projection before metrics can publish. Starting this
+	// goroutine after releasing the runtime lock also keeps a very fast metrics
+	// response from contending with the base LIST/WATCH setup.
+	subscription.attachMetrics(metricSubscription)
 	return subscription, nil
 }
 
@@ -501,9 +531,11 @@ func (r *Runtime) ActiveResourceCount() int {
 // Subscription is a bounded, coalescing mailbox. Slow clients retain at most
 // PendingRowLimit delta rows before falling back to one newest snapshot.
 type Subscription struct {
-	runtime  *Runtime
-	resource *resourceRuntime
-	key      viewKey
+	runtime      *Runtime
+	resource     *resourceRuntime
+	key          viewKey
+	metrics      *metrics.Subscription
+	metricCancel context.CancelFunc
 
 	mu              sync.Mutex
 	generation      uint64
@@ -575,6 +607,59 @@ func (s *Subscription) Close() {
 	if s.runtime != nil {
 		s.runtime.closeSubscription(s)
 	}
+}
+
+func (s *Subscription) attachMetrics(subscription *metrics.Subscription) {
+	if subscription == nil {
+		return
+	}
+	s.metrics = subscription
+	ctx, cancel := context.WithCancel(context.Background())
+	s.metricCancel = cancel
+	go s.receiveMetrics(ctx, subscription)
+}
+
+func (s *Subscription) receiveMetrics(ctx context.Context, subscription *metrics.Subscription) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case snapshot, ok := <-subscription.Updates():
+			if !ok {
+				return
+			}
+			s.applyMetrics(snapshot)
+		}
+	}
+}
+
+func (s *Subscription) applyMetrics(snapshot metrics.Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.resource == nil {
+		return
+	}
+	s.projector = s.projector.WithMetrics(snapshot)
+	projected := s.projector.Project(s.resource.store.Snapshot())
+	clear(s.rows)
+	s.order = s.order[:0]
+	clear(s.pendingRemoved)
+	clear(s.pendingUpserts)
+	for _, row := range projected {
+		uid := row.GetIdentity().GetUid()
+		if uid == "" {
+			continue
+		}
+		s.rows[uid] = row
+		s.order = append(s.order, uid)
+		s.pendingUpserts[uid] = row
+	}
+	s.orderDirty = true
+	if len(s.pendingUpserts) > s.pendingLimit {
+		s.resnapshot = true
+		clear(s.pendingUpserts)
+	}
+	s.signalLocked(false)
 }
 
 func (s *Subscription) replaceAllLocked(rows []*kmgrv1.ResourceRow) {
@@ -808,11 +893,23 @@ func (s *Subscription) closeLocked() {
 		return
 	}
 	s.closed = true
+	s.closeMetricsLocked()
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil
 	}
 	close(s.done)
+}
+
+func (s *Subscription) closeMetricsLocked() {
+	if s.metricCancel != nil {
+		s.metricCancel()
+		s.metricCancel = nil
+	}
+	if s.metrics != nil {
+		s.metrics.Close()
+		s.metrics = nil
+	}
 }
 
 func projectorFromProto(

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -257,6 +258,164 @@ func TestStaleCancelCannotCloseReplacementGeneration(t *testing.T) {
 	}
 }
 
+func TestRuntimeMetricsAreLazyNonBlockingAndStopWithFinalView(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	podValue := pod("uid-metric", "ns", "api", "Running", 0, nil, time.Time{})
+	container := podValue.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	container["resources"] = map[string]any{
+		"requests": map[string]any{"cpu": "500m"},
+		"limits":   map[string]any{"cpu": "1"},
+	}
+	client.listPages = []*unstructured.UnstructuredList{listPage("rv-1", "", podValue)}
+	fetcher := &runtimeBlockingMetricFetcher{
+		started: make(chan struct{}, 1),
+		result:  make(chan runtimeMetricResult, 1),
+		stopped: make(chan struct{}),
+	}
+	provider, err := metrics.NewProvider(fetcher, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricSource := &fakeMetricSource{provider: provider}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:  &fakeResourceSource{authority: "cluster-a", client: client},
+		Metrics: metricSource, BatchDelay: time.Millisecond, ReleaseDelay: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	plainRequest := openView("session-1", "plain", 1)
+	plain, err := runtime.Open(plainRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, plain, "uid-metric")
+	if metricSource.opens.Load() != 0 || fetcher.calls.Load() != 0 {
+		t.Fatal("plain resource view woke the metrics provider")
+	}
+	plain.Close()
+
+	metricRequest := openView("session-1", "metric", 1)
+	metricRequest.Spec.ColumnIds = []string{"name", PodCPUColumn}
+	metricView, err := runtime.Open(metricRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fetcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("metric view did not start lazy fetch")
+	}
+	// The Metrics API is still blocked, but the Pod row and scheduler
+	// accounting must already be available.
+	base := waitForRow(t, metricView, "uid-metric")
+	baseCPU := cellByID(base, PodCPUColumn).GetUsage()
+	if baseCPU.GetUsageAvailable() || baseCPU.GetRequested() != 0.5 || baseCPU.GetLimit() != 1 {
+		t.Fatalf("base row before metrics = %#v", baseCPU)
+	}
+
+	fetcher.result <- runtimeMetricResult{samples: map[string]metrics.Sample{
+		"uid-metric": {
+			MeasuredAt: time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
+			Resources:  map[string]int64{"cpu": 250_000_000},
+		},
+	}}
+	updated := waitForUsageAvailable(t, metricView, "uid-metric", PodCPUColumn)
+	if got := updated.GetUsage().GetUsed(); got != 0.25 {
+		t.Fatalf("metric delta CPU = %v", got)
+	}
+	eventually(t, time.Second, func() bool { return fetcher.calls.Load() >= 2 })
+	metricView.Close()
+	select {
+	case <-fetcher.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("final metric view did not stop provider")
+	}
+}
+
+func TestRuntimeMetricsFailureKeepsBaseRows(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	client.listPages = []*unstructured.UnstructuredList{listPage(
+		"rv-1", "", pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}),
+	)}
+	provider, err := metrics.NewProvider(metricFetcherFunc(func(context.Context) (map[string]metrics.Sample, error) {
+		return nil, metrics.ErrMetricsAPIForbidden
+	}), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:  &fakeResourceSource{authority: "cluster-a", client: client},
+		Metrics: &fakeMetricSource{provider: provider}, BatchDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	request := openView("session-1", "metric", 1)
+	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
+	subscription, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := waitForRow(t, subscription, "uid-a")
+	if row.GetIdentity().GetName() != "api" || cellByID(row, PodCPUColumn).GetUsage().GetUsageAvailable() {
+		t.Fatalf("base row after forbidden metrics = %#v", row)
+	}
+}
+
+type fakeMetricSource struct {
+	provider *metrics.Provider
+	err      error
+	opens    atomic.Int64
+}
+
+func (s *fakeMetricSource) OpenMetrics(string, string, metrics.APIKind, string) (*metrics.Provider, error) {
+	s.opens.Add(1)
+	return s.provider, s.err
+}
+
+type metricFetcherFunc func(context.Context) (map[string]metrics.Sample, error)
+
+func (f metricFetcherFunc) Fetch(ctx context.Context) (map[string]metrics.Sample, error) {
+	return f(ctx)
+}
+
+type runtimeMetricResult struct {
+	samples map[string]metrics.Sample
+	err     error
+}
+
+type runtimeBlockingMetricFetcher struct {
+	started chan struct{}
+	result  chan runtimeMetricResult
+	stopped chan struct{}
+	once    sync.Once
+	calls   atomic.Int64
+}
+
+func (f *runtimeBlockingMetricFetcher) Fetch(ctx context.Context) (map[string]metrics.Sample, error) {
+	f.calls.Add(1)
+	select {
+	case f.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		f.once.Do(func() { close(f.stopped) })
+		return nil, ctx.Err()
+	case result := <-f.result:
+		if result.err != nil {
+			return nil, result.err
+		}
+		return result.samples, nil
+	}
+}
+
 type fakeResourceSource struct {
 	authority string
 	client    watcher.ListerWatcher
@@ -409,6 +568,58 @@ func waitForSnapshotUID(t *testing.T, subscription *Subscription, uid string) {
 		}
 	}
 	t.Fatalf("never observed UID %q", uid)
+}
+
+func waitForRow(t *testing.T, subscription *Subscription, uid string) *kmgrv1.ResourceRow {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		events, err := subscription.Next(ctx)
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
+				if row.GetIdentity().GetUid() == uid {
+					return row
+				}
+			}
+		}
+	}
+	t.Fatalf("never observed row UID %q", uid)
+	return nil
+}
+
+func waitForUsageAvailable(
+	t *testing.T,
+	subscription *Subscription,
+	uid, columnID string,
+) *kmgrv1.Cell {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		events, err := subscription.Next(ctx)
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
+				if row.GetIdentity().GetUid() != uid {
+					continue
+				}
+				cell := cellByID(row, columnID)
+				if cell.GetUsage().GetUsageAvailable() {
+					return cell
+				}
+			}
+		}
+	}
+	t.Fatalf("never observed available usage for %q/%q", uid, columnID)
+	return nil
 }
 
 func eventually(t *testing.T, timeout time.Duration, condition func() bool) {

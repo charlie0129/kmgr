@@ -133,7 +133,15 @@ func (p *Provider) run(ctx context.Context) {
 			snapshot.Samples = cloneSamples(samples)
 			backoff = p.interval
 		} else {
-			snapshot.State = MeasurementUnavailable
+			p.mu.Lock()
+			latest := cloneSnapshot(p.latest)
+			p.mu.Unlock()
+			if (latest.State == MeasurementCurrent || latest.State == MeasurementStale) && latest.Samples != nil {
+				snapshot.State = MeasurementStale
+				snapshot.Samples = latest.Samples
+			} else {
+				snapshot.State = MeasurementUnavailable
+			}
 			backoff = min(max(backoff*2, p.interval), 2*time.Minute)
 		}
 		p.publish(snapshot)
@@ -197,6 +205,12 @@ func cloneSamples(values map[string]Sample) map[string]Sample {
 func safeMetricsError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, ErrMetricsAPIForbidden) {
+		return ErrMetricsAPIForbidden
+	}
+	if errors.Is(err, ErrMetricsAPIUnavailable) {
+		return ErrMetricsAPIUnavailable
 	}
 	return fmt.Errorf("metrics provider unavailable: %T", err)
 }

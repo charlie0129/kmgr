@@ -14,6 +14,7 @@ import (
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/common/types/traits"
+	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
 )
 
 const (
@@ -79,8 +80,9 @@ type Compiler struct {
 }
 
 type Program struct {
-	definition Definition
-	program    cel.Program
+	definition  Definition
+	program     cel.Program
+	usesMetrics bool
 }
 
 // Definition returns the immutable, validated definition used to compile the
@@ -91,6 +93,13 @@ func (p *Program) Definition() Definition {
 		return Definition{}
 	}
 	return p.definition
+}
+
+// UsesMetrics reports whether the compiled expression reads the metrics
+// activation. Resource views use this dependency bit to keep optional metrics
+// providers completely idle for CEL programs that only inspect objects.
+func (p *Program) UsesMetrics() bool {
+	return p != nil && p.usesMetrics
 }
 
 func NewCompiler(costLimit uint64) (*Compiler, error) {
@@ -138,7 +147,56 @@ func (c *Compiler) Compile(definition Definition) (*Program, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build column %q program: %w", definition.ID, err)
 	}
-	return &Program{definition: definition, program: program}, nil
+	return &Program{
+		definition:  definition,
+		program:     program,
+		usesMetrics: expressionReferencesIdentifier(ast.Expr(), "metrics"),
+	}, nil
+}
+
+func expressionReferencesIdentifier(expression *exprpb.Expr, identifier string) bool {
+	if expression == nil {
+		return false
+	}
+	if expression.GetIdentExpr().GetName() == identifier {
+		return true
+	}
+	if selection := expression.GetSelectExpr(); selection != nil {
+		return expressionReferencesIdentifier(selection.GetOperand(), identifier)
+	}
+	if call := expression.GetCallExpr(); call != nil {
+		if expressionReferencesIdentifier(call.GetTarget(), identifier) {
+			return true
+		}
+		for _, argument := range call.GetArgs() {
+			if expressionReferencesIdentifier(argument, identifier) {
+				return true
+			}
+		}
+	}
+	if list := expression.GetListExpr(); list != nil {
+		for _, element := range list.GetElements() {
+			if expressionReferencesIdentifier(element, identifier) {
+				return true
+			}
+		}
+	}
+	if mapping := expression.GetStructExpr(); mapping != nil {
+		for _, entry := range mapping.GetEntries() {
+			if expressionReferencesIdentifier(entry.GetMapKey(), identifier) ||
+				expressionReferencesIdentifier(entry.GetValue(), identifier) {
+				return true
+			}
+		}
+	}
+	if comprehension := expression.GetComprehensionExpr(); comprehension != nil {
+		return expressionReferencesIdentifier(comprehension.GetIterRange(), identifier) ||
+			expressionReferencesIdentifier(comprehension.GetAccuInit(), identifier) ||
+			expressionReferencesIdentifier(comprehension.GetLoopCondition(), identifier) ||
+			expressionReferencesIdentifier(comprehension.GetLoopStep(), identifier) ||
+			expressionReferencesIdentifier(comprehension.GetResult(), identifier)
+	}
+	return false
 }
 
 func (p *Program) Evaluate(activation Activation) (Value, error) {

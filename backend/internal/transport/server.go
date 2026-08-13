@@ -84,7 +84,9 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		return nil, fmt.Errorf("load columns configuration: %w", err)
 	}
 	viewRuntime, err := view.NewRuntime(view.RuntimeConfig{
-		Source: view.ClusterResourceSource{Sessions: sessions}, Columns: columnManager,
+		Source:  view.ClusterResourceSource{Sessions: sessions},
+		Metrics: &view.KubernetesMetricSource{Sessions: sessions},
+		Columns: columnManager,
 	})
 	if err != nil {
 		return nil, err

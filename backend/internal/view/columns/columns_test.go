@@ -184,6 +184,29 @@ func TestCompilerValidatesVersionAndLimits(t *testing.T) {
 	}
 }
 
+func TestProgramDetectsMetricsDependencyWithoutMatchingLiterals(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	metricProgram, err := compiler.Compile(Definition{
+		ID: "cpu", Expression: `metrics.?resources[?"cpu"].orValue(0)`, ResultType: ResultInteger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !metricProgram.UsesMetrics() {
+		t.Fatal("metrics activation dependency was not detected")
+	}
+	objectProgram, err := compiler.Compile(Definition{
+		ID: "label", Expression: `object.metadata.name + "-metrics"`, ResultType: ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if objectProgram.UsesMetrics() {
+		t.Fatal("string literal woke optional metrics provider")
+	}
+}
+
 func newCompiler(t *testing.T, cost uint64) *Compiler {
 	t.Helper()
 	compiler, err := NewCompiler(cost)

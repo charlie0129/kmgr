@@ -3,6 +3,8 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -89,6 +91,51 @@ func TestProviderDegradesFailureWithoutLeakingErrorPayload(t *testing.T) {
 	}
 }
 
+func TestProviderPreservesSafeMetricsErrorCategory(t *testing.T) {
+	t.Parallel()
+	provider, err := NewProvider(&sequenceFetcher{err: fmt.Errorf("%w: unsafe remote body", ErrMetricsAPIForbidden)}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription := provider.Subscribe()
+	defer subscription.Close()
+	select {
+	case snapshot := <-subscription.Updates():
+		if !errors.Is(snapshot.Err, ErrMetricsAPIForbidden) || strings.Contains(snapshot.Err.Error(), "unsafe remote body") {
+			t.Fatalf("safe error category = %v", snapshot.Err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no metrics failure snapshot")
+	}
+}
+
+func TestProviderRetainsLastGoodValuesAsStaleAfterRefreshFailure(t *testing.T) {
+	t.Parallel()
+	fetcher := &successThenFailureFetcher{}
+	provider, err := NewProvider(fetcher, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription := provider.Subscribe()
+	defer subscription.Close()
+	select {
+	case snapshot := <-subscription.Updates():
+		if snapshot.State != MeasurementCurrent || snapshot.Samples["pod"].Resources["cpu"] != 42 {
+			t.Fatalf("first snapshot = %#v", snapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no current metrics snapshot")
+	}
+	select {
+	case snapshot := <-subscription.Updates():
+		if snapshot.State != MeasurementStale || snapshot.Samples["pod"].Resources["cpu"] != 42 || snapshot.Err == nil {
+			t.Fatalf("stale snapshot = %#v", snapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no stale metrics snapshot")
+	}
+}
+
 type blockingFetcher struct {
 	started chan struct{}
 	stopped chan struct{}
@@ -112,6 +159,15 @@ type sequenceFetcher struct {
 	values []map[string]Sample
 	err    error
 	calls  atomic.Int64
+}
+
+type successThenFailureFetcher struct{ calls atomic.Int64 }
+
+func (f *successThenFailureFetcher) Fetch(context.Context) (map[string]Sample, error) {
+	if f.calls.Add(1) == 1 {
+		return map[string]Sample{"pod": {Resources: map[string]int64{"cpu": 42}}}, nil
+	}
+	return nil, errors.New("temporary refresh failure with unsafe upstream details")
 }
 
 func (f *sequenceFetcher) Fetch(context.Context) (map[string]Sample, error) {

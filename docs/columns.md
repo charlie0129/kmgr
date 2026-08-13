@@ -21,3 +21,25 @@ The supported declared types are `string`, `integer`, `number`, `boolean`, `quan
 Evaluation is deterministic and side-effect free. Each evaluation has a runtime cost limit (10,000 by default), a maximum of 128 list elements, and a 4 KiB rendered-value limit. Programs are compiled and type-checked when their definition/environment changes, then reused. Absent, null, and empty optional results render as `—` unless the definition supplies another missing value. Runtime failures belong to the individual column/cell and do not discard a row or view.
 
 Sorting uses the typed result retained alongside display text. It never reparses formatted display text.
+
+## Built-in resource usage columns
+
+Pod and Node views use the built-in IDs `cpu`, `memory`, and
+`ephemeral-storage`. Pods render actual usage / effective request / effective
+limit; Nodes render actual usage / allocatable, with physical capacity in the
+tooltip. These cells remain typed `resourceUsage` values even when actual usage
+is unavailable, so scheduler accounting is not confused with measured usage.
+
+An explicitly configured exact resource uses the ID
+`resource:<kubernetes-resource-name>`, for example
+`resource:hugepages-2Mi`, `resource:nvidia.com/gpu`, or
+`resource:aliyun.com/ppu`. In `columns.yaml`, declare it as a `metric` source
+whose `value` is the same ID and whose type is `resourceUsage`. Exact names are never merged. Metrics Server usually
+does not report huge-page or accelerator utilization, so these Pod cells show
+effective request / limit with actual usage unavailable; they never label
+allocation as utilization.
+
+CPU and memory columns subscribe lazily to `metrics.k8s.io/v1beta1`. A view
+without a metric column (and without a CEL expression that reads `metrics`)
+does not start a metrics fetch. Metrics failure leaves the base rows and
+request/limit or allocatable accounting intact.

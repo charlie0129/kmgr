@@ -12,8 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 	viewfilter "github.com/charlie0129/kmgr/backend/internal/view/filter"
@@ -34,6 +38,7 @@ type ProjectionSpec struct {
 	FilterExpression string
 	Sort             []SortDescriptor
 	CELPrograms      map[string]*viewcolumns.Program
+	Metrics          metrics.Snapshot
 	Now              time.Time
 }
 
@@ -60,6 +65,19 @@ type Projector struct {
 	spec       ProjectionSpec
 	filter     *viewfilter.Filter
 	namespaces map[string]struct{}
+}
+
+// WithMetrics returns an immutable projection revision for one optional
+// metrics snapshot. Base object projection and metric refreshes may therefore
+// run independently without sharing mutable activation state.
+func (p *Projector) WithMetrics(snapshot metrics.Snapshot) *Projector {
+	if p == nil {
+		return nil
+	}
+	copy := *p
+	copy.spec = p.spec
+	copy.spec.Metrics = snapshot
+	return &copy
 }
 
 func NewProjector(spec ProjectionSpec) (*Projector, error) {
@@ -179,6 +197,9 @@ func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID stri
 	if program := p.spec.CELPrograms[columnID]; program != nil {
 		return p.celCell(object, program)
 	}
+	if resourceName, metricColumn := metricColumnResource(p.spec.Resource, columnID); metricColumn {
+		return p.resourceUsageCell(object, columnID, resourceName)
+	}
 	cell := &kmgrv1.Cell{ColumnId: columnID, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL}
 	switch columnID {
 	case "namespace":
@@ -262,7 +283,7 @@ func (p *Projector) celCell(object *unstructured.Unstructured, program *viewcolu
 		p.spec.Resource.Resource == "secrets"
 	value, err := program.Evaluate(viewcolumns.Activation{
 		Object:  viewcolumns.SanitizeObjectActivation(object.Object, isSecret),
-		Metrics: map[string]any{},
+		Metrics: p.metricsForObject(object),
 		Context: map[string]any{
 			"clusterSessionID": p.spec.ClusterSessionID,
 			"group":            p.spec.Resource.Group, "version": p.spec.Resource.Version,
@@ -296,6 +317,232 @@ func (p *Projector) celCell(object *unstructured.Unstructured, program *viewcolu
 	return cell
 }
 
+func (p *Projector) metricsForObject(object *unstructured.Unstructured) map[string]any {
+	kind, supported := metricKindFor(p.spec.Resource)
+	if !supported || object == nil {
+		return map[string]any{}
+	}
+	sample := sampleForObject(
+		p.spec.Metrics, string(object.GetUID()), object.GetNamespace(), object.GetName(), kind,
+	)
+	return metricsActivation(sample, p.spec.Metrics.State)
+}
+
+func (p *Projector) resourceUsageCell(
+	object *unstructured.Unstructured,
+	columnID string,
+	resourceName corev1.ResourceName,
+) *kmgrv1.Cell {
+	cell := &kmgrv1.Cell{
+		ColumnId: columnID,
+		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+	}
+	usage := &kmgrv1.ResourceUsageValue{ResourceName: string(resourceName)}
+	cell.TypedValue = &kmgrv1.Cell_Usage{Usage: usage}
+
+	kind, supported := metricKindFor(p.spec.Resource)
+	if !supported || object == nil {
+		cell.DisplayText = DefaultMissingCell
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		cell.Tooltip = "Resource accounting is not available for this resource type"
+		return cell
+	}
+	sample := sampleForObject(
+		p.spec.Metrics, string(object.GetUID()), object.GetNamespace(), object.GetName(), kind,
+	)
+	measurement := metrics.UnavailableMeasurement("Kubernetes Metrics API has not reported this resource")
+	if p.spec.Metrics.Err != nil {
+		switch {
+		case errors.Is(p.spec.Metrics.Err, metrics.ErrMetricsAPIForbidden):
+			measurement = metrics.UnavailableMeasurement("Kubernetes Metrics API access is forbidden")
+		case errors.Is(p.spec.Metrics.Err, metrics.ErrMetricsAPIUnavailable):
+			measurement = metrics.UnavailableMeasurement("Kubernetes Metrics API is unavailable")
+		default:
+			measurement = metrics.UnavailableMeasurement("metrics provider is unavailable")
+		}
+	}
+	if p.spec.Metrics.State == metrics.MeasurementCurrent || p.spec.Metrics.State == metrics.MeasurementStale {
+		measurement = metrics.MeasurementFor(
+			sample, resourceName, metrics.MetricsAPIGroupVersion, measurementScope(kind),
+		)
+		if measurement.HasValue() && p.spec.Metrics.State == metrics.MeasurementStale {
+			measurement = metrics.StaleMeasurement(
+				measurement.Quantity, measurement.Provider, measurement.Scope,
+				measurement.Timestamp, "the latest metrics refresh failed",
+			)
+		}
+	}
+
+	switch kind {
+	case metrics.PodMetrics:
+		var pod corev1.Pod
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &pod); err != nil {
+			cell.DisplayText = DefaultMissingCell
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
+			cell.Tooltip = "Pod resource accounting could not be calculated"
+			return cell
+		}
+		accounting := metrics.AccountPod(&pod, metrics.ResourceMeasurements{resourceName: measurement})
+		request, hasRequest := accounting.Requests[resourceName]
+		limit, hasLimit := accounting.Limits[resourceName]
+		setUsageQuantities(usage, measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil)
+		cell.DisplayText = formatUsageDisplay(
+			measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil,
+		)
+		cell.Tooltip = formatUsageTooltip(
+			measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil, nil,
+		)
+	case metrics.NodeMetrics:
+		var node corev1.Node
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &node); err != nil {
+			cell.DisplayText = DefaultMissingCell
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
+			cell.Tooltip = "Node resource accounting could not be calculated"
+			return cell
+		}
+		allocatable, hasAllocatable := node.Status.Allocatable[resourceName]
+		capacity, hasCapacity := node.Status.Capacity[resourceName]
+		setUsageQuantities(usage, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable))
+		cell.DisplayText = formatUsageDisplay(
+			measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
+		)
+		cell.Tooltip = formatUsageTooltip(
+			measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
+			optionalQuantity(capacity, hasCapacity),
+		)
+	}
+	if measurement.State == metrics.MeasurementStale {
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
+	} else if !measurement.HasValue() {
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+	}
+	return cell
+}
+
+func setUsageQuantities(
+	value *kmgrv1.ResourceUsageValue,
+	measurement metrics.Measurement,
+	request, limit, allocatable *resource.Quantity,
+) {
+	name := corev1.ResourceName(value.GetResourceName())
+	value.Unit = resourceUnit(name)
+	value.UsageAvailable = measurement.HasValue()
+	if measurement.HasValue() {
+		value.Used = quantityNumeric(name, measurement.Quantity)
+		value.MeasuredAtUnixMs = measurement.Timestamp.UnixMilli()
+		value.Provider = measurement.Provider
+		value.MeasurementScope = measurement.Scope
+	}
+	if request != nil {
+		value.Requested = quantityNumeric(name, *request)
+	}
+	if limit != nil {
+		value.Limit = quantityNumeric(name, *limit)
+	}
+	if allocatable != nil {
+		value.Capacity = quantityNumeric(name, *allocatable)
+	}
+}
+
+func optionalQuantity(value resource.Quantity, present bool) *resource.Quantity {
+	if !present {
+		return nil
+	}
+	copy := value.DeepCopy()
+	return &copy
+}
+
+func measurementScope(kind metrics.APIKind) string {
+	if kind == metrics.PodMetrics {
+		return "pod containers"
+	}
+	return "node"
+}
+
+func resourceUnit(name corev1.ResourceName) string {
+	if name == corev1.ResourceCPU {
+		return "cores"
+	}
+	if name == corev1.ResourceMemory || name == corev1.ResourceEphemeralStorage ||
+		strings.HasPrefix(string(name), corev1.ResourceHugePagesPrefix) {
+		return "bytes"
+	}
+	return "count"
+}
+
+func quantityNumeric(name corev1.ResourceName, quantity resource.Quantity) float64 {
+	if quantity.IsZero() {
+		return 0
+	}
+	return quantity.AsApproximateFloat64()
+}
+
+func formatUsageDisplay(
+	measurement metrics.Measurement,
+	request, limit, allocatable *resource.Quantity,
+) string {
+	parts := make([]string, 0, 3)
+	if measurement.HasValue() {
+		parts = append(parts, measurement.Quantity.String())
+	} else {
+		parts = append(parts, DefaultMissingCell)
+	}
+	if allocatable != nil {
+		parts = append(parts, allocatable.String())
+		return strings.Join(parts, " / ")
+	}
+	parts = append(parts, quantityDisplay(request), quantityDisplay(limit))
+	return strings.Join(parts, " / ")
+}
+
+func quantityDisplay(quantity *resource.Quantity) string {
+	if quantity == nil {
+		return DefaultMissingCell
+	}
+	return quantity.String()
+}
+
+func formatUsageTooltip(
+	measurement metrics.Measurement,
+	request, limit, allocatable, capacity *resource.Quantity,
+) string {
+	parts := make([]string, 0, 6)
+	if measurement.HasValue() {
+		parts = append(parts, "Actual usage: "+measurement.Quantity.String())
+		if measurement.Provider != "" {
+			parts = append(parts, "Provider: "+measurement.Provider)
+		}
+		if measurement.Scope != "" {
+			parts = append(parts, "Scope: "+measurement.Scope)
+		}
+		if !measurement.Timestamp.IsZero() {
+			parts = append(parts, "Measured: "+measurement.Timestamp.Format(time.RFC3339))
+		}
+		if measurement.State == metrics.MeasurementStale {
+			parts = append(parts, "State: stale (the latest refresh failed)")
+		}
+	} else {
+		unavailable := "Actual usage: unavailable"
+		if measurement.Message != "" {
+			unavailable += " (" + measurement.Message + ")"
+		}
+		parts = append(parts, unavailable)
+	}
+	if request != nil {
+		parts = append(parts, "Effective request: "+request.String())
+	}
+	if limit != nil {
+		parts = append(parts, "Effective limit: "+limit.String())
+	}
+	if allocatable != nil {
+		parts = append(parts, "Allocatable: "+allocatable.String())
+	}
+	if capacity != nil {
+		parts = append(parts, "Physical capacity: "+capacity.String())
+	}
+	return strings.Join(parts, "\n")
+}
+
 func (p *Projector) compareRows(left, right *kmgrv1.ResourceRow) int {
 	for _, descriptor := range p.spec.Sort {
 		leftCell := cellByID(left, descriptor.ColumnID)
@@ -318,13 +565,15 @@ func (p *Projector) compareRows(left, right *kmgrv1.ResourceRow) int {
 }
 
 func defaultColumns(resource ResourceType) []string {
-	columns := make([]string, 0, 6)
+	columns := make([]string, 0, 9)
 	if resource.Namespaced {
 		columns = append(columns, "namespace")
 	}
 	columns = append(columns, "name")
 	if strings.EqualFold(resource.Kind, "Pod") || resource.Resource == "pods" {
-		columns = append(columns, "ready", "status", "restarts", "node")
+		columns = append(columns, "ready", "status", "restarts", "node", PodCPUColumn, PodMemoryColumn)
+	} else if strings.EqualFold(resource.Kind, "Node") || resource.Resource == "nodes" {
+		columns = append(columns, "status", NodeCPUUsageColumn, NodeMemoryUsageColumn)
 	} else {
 		columns = append(columns, "status")
 	}
@@ -513,8 +762,53 @@ func compareCells(left, right *kmgrv1.Cell, nullsFirst bool) int {
 		if rightValue, ok := right.GetTypedValue().(*kmgrv1.Cell_OpaqueSortValue); ok {
 			return slices.Compare(leftValue.OpaqueSortValue, rightValue.OpaqueSortValue)
 		}
+	case *kmgrv1.Cell_Usage:
+		if rightValue, ok := right.GetTypedValue().(*kmgrv1.Cell_Usage); ok {
+			return compareUsageValues(leftValue.Usage, rightValue.Usage)
+		}
 	}
 	return strings.Compare(left.GetDisplayText(), right.GetDisplayText())
+}
+
+func compareUsageValues(left, right *kmgrv1.ResourceUsageValue) int {
+	leftValue, leftAvailable := usageSortValue(left)
+	rightValue, rightAvailable := usageSortValue(right)
+	if leftAvailable != rightAvailable {
+		if leftAvailable {
+			return 1
+		}
+		return -1
+	}
+	return cmp.Compare(leftValue, rightValue)
+}
+
+func usageSortValue(value *kmgrv1.ResourceUsageValue) (float64, bool) {
+	if value == nil {
+		return 0, false
+	}
+	if value.GetUsageAvailable() {
+		denominator := value.GetCapacity()
+		if denominator == 0 {
+			denominator = value.GetRequested()
+		}
+		if denominator == 0 {
+			denominator = value.GetLimit()
+		}
+		if denominator != 0 {
+			return value.GetUsed() / denominator, true
+		}
+		return value.GetUsed(), true
+	}
+	if value.GetRequested() != 0 && value.GetCapacity() != 0 {
+		return value.GetRequested() / value.GetCapacity(), true
+	}
+	if value.GetRequested() != 0 {
+		return value.GetRequested(), true
+	}
+	if value.GetLimit() != 0 {
+		return value.GetLimit(), true
+	}
+	return 0, false
 }
 
 func formatAge(duration time.Duration) string {
