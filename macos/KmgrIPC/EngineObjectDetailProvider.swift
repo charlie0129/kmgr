@@ -734,16 +734,26 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
     private static func usage(_ value: Kmgr_V1_ResourceUsageValue) -> ResourceUsageValue {
         ResourceUsageValue(
             usage: value.usageAvailable ? value.used : nil,
-            request: value.requested,
-            limit: value.limit,
-            capacity: value.capacity,
-            sortValue: value.usageAvailable ? value.used : value.requested,
+            request: value.hasRequested ? value.requested : nil,
+            limit: value.hasLimit ? value.limit : nil,
+            capacity: value.hasCapacity ? value.capacity : nil,
+            sortValue: usageSortValue(value),
             unit: value.unit,
             resourceName: value.resourceName,
             measuredAtUnixMilliseconds: value.measuredAtUnixMs == 0 ? nil : value.measuredAtUnixMs,
             provider: value.provider,
             measurementScope: value.measurementScope
         )
+    }
+
+    private static func usageSortValue(
+        _ value: Kmgr_V1_ResourceUsageValue
+    ) -> Double? {
+        if value.usageAvailable { return value.used }
+        if value.hasRequested { return value.requested }
+        if value.hasLimit { return value.limit }
+        if value.hasCapacity { return value.capacity }
+        return nil
     }
 
     private static func severity(_ value: Kmgr_V1_CellSeverity) -> CellSeverity {

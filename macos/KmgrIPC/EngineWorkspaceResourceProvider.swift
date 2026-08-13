@@ -534,13 +534,19 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         let typedValue: CellTypedValue? = switch cell.typedValue {
         case .stringValue(let value): .string(value)
         case .numberValue(let value): .number(value)
+        case .integerValue(let value): .integer(value)
+        case .quantityValue(let value): .quantity(KubernetesQuantityValue(
+            exact: value.exact,
+            display: value.display,
+            sortValue: value.sortValue
+        ))
         case .timestampUnixMs(let value): .timestampUnixMilliseconds(value)
         case .usage(let value): .usage(ResourceUsageValue(
             usage: value.usageAvailable ? value.used : nil,
-            request: value.requested,
-            limit: value.limit,
-            capacity: value.capacity,
-            sortValue: value.usageAvailable ? value.used : value.requested,
+            request: value.hasRequested ? value.requested : nil,
+            limit: value.hasLimit ? value.limit : nil,
+            capacity: value.hasCapacity ? value.capacity : nil,
+            sortValue: usageSortValue(value),
             unit: value.unit,
             resourceName: value.resourceName,
             measuredAtUnixMilliseconds: value.measuredAtUnixMs > 0
@@ -566,6 +572,16 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
             tooltip: cell.tooltip,
             severity: severity
         )
+    }
+
+    private static func usageSortValue(
+        _ value: Kmgr_V1_ResourceUsageValue
+    ) -> Double? {
+        if value.usageAvailable { return value.used }
+        if value.hasRequested { return value.requested }
+        if value.hasLimit { return value.limit }
+        if value.hasCapacity { return value.capacity }
+        return nil
     }
 
     private static func seconds(_ duration: Duration) -> TimeInterval {

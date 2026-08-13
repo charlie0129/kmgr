@@ -94,6 +94,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     ) async throws {}
 
     func installWatch(_ values: [Kmgr_V1_ObjectEvent]) { watched = values }
+    func installObject(_ value: Kmgr_V1_GetObjectResponse) { object = value }
     func installEvents(_ value: Kmgr_V1_GetEventsResponse) { events = value }
     func installRelationships(_ value: Kmgr_V1_GetRelationshipsResponse) {
         relationships = value
@@ -108,6 +109,26 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     func capturedRelationshipCancel() -> Kmgr_V1_CancelRelationshipScanRequest? {
         relationshipCancelRequest
     }
+}
+
+@Test func objectDetailProviderPreservesAbsentAndExplicitZeroUsageComponents() async throws {
+    let rpc = ObjectDetailRPCCapture()
+    var response = Kmgr_V1_GetObjectResponse()
+    response.identity = protoIdentity(name: "api", uid: "uid-api")
+    var usage = Kmgr_V1_ResourceUsageValue()
+    usage.used = 0
+    usage.usageAvailable = true
+    usage.requested = 0
+    response.metrics = [usage]
+    await rpc.installObject(response)
+
+    let detail = try await EngineObjectDetailProvider(
+        rpc: rpc, identifier: { "request" }
+    ).getObject(identity: identity(name: "api", uid: "uid-api"))
+    #expect(detail.metrics.first?.usage == 0)
+    #expect(detail.metrics.first?.request == 0)
+    #expect(detail.metrics.first?.limit == nil)
+    #expect(detail.metrics.first?.capacity == nil)
 }
 
 @Test func objectDetailProviderMapsUIDPinnedWatchEnvelope() async throws {

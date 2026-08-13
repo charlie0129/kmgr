@@ -32,6 +32,47 @@ func TestCompileOptionalAndTypedEvaluation(t *testing.T) {
 	}
 }
 
+func TestIntegerAndQuantityResultsRetainExactTypes(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	integerProgram, err := compiler.Compile(Definition{
+		ID: "large-integer", Expression: "9007199254740993", ResultType: ResultInteger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	integer, err := integerProgram.Evaluate(Activation{})
+	if err != nil || integer.Integer == nil || *integer.Integer != 9_007_199_254_740_993 {
+		t.Fatalf("integer result = %#v, %v", integer, err)
+	}
+
+	quantityProgram, err := compiler.Compile(Definition{
+		ID: "memory", Expression: `"1Gi"`, ResultType: ResultQuantity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quantity, err := quantityProgram.Evaluate(Activation{})
+	if err != nil || quantity.Quantity == nil || quantity.Quantity.String() != "1Gi" || quantity.String != nil {
+		t.Fatalf("quantity result = %#v, %v", quantity, err)
+	}
+
+	invalidProgram, err := compiler.Compile(Definition{
+		ID: "invalid", Expression: `"not-a-quantity"`, ResultType: ResultQuantity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invalidProgram.Evaluate(Activation{}); err == nil || !strings.Contains(err.Error(), "invalid Kubernetes quantity") {
+		t.Fatalf("invalid quantity error = %v", err)
+	}
+	if _, err := compiler.Compile(Definition{
+		ID: "list", Expression: `["1Gi"]`, ResultType: ResultQuantity,
+	}); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("quantity list compile error = %v", err)
+	}
+}
+
 func TestCompileRejectsStaticTypeMismatchAndInvalidExpression(t *testing.T) {
 	t.Parallel()
 	compiler := newCompiler(t, DefaultCostLimit)

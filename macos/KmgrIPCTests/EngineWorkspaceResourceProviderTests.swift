@@ -74,7 +74,7 @@ struct EngineWorkspaceResourceProviderTests {
             namespaces: ["apps"],
             filterExpression: "status:Running",
             filterRevision: 4,
-            columnIDs: ["name", "ready", "cpu", "debug", "sort"],
+            columnIDs: ["name", "ready", "large", "memory", "cpu", "debug", "sort"],
             sort: [
                 ResourceSortDescriptor(
                     columnID: "ready",
@@ -122,6 +122,12 @@ struct EngineWorkspaceResourceProviderTests {
         ))
         #expect(row["name"]?.typedValue == .string("api-0"))
         #expect(row["ready"]?.typedValue == .number(1))
+        #expect(row["large"]?.typedValue == .integer(9_007_199_254_740_993))
+        #expect(row["memory"]?.typedValue == .quantity(KubernetesQuantityValue(
+            exact: "9007199254740993m",
+            display: "9007199254740993m",
+            sortValue: 9_007_199_254_740.992
+        )))
         #expect(row["created"]?.typedValue == .timestampUnixMilliseconds(1_234_000))
         #expect(row["debug"]?.typedValue == .boolean(true))
         #expect(row["sort"]?.typedValue == .opaqueSortValue(Data([0x01, 0x02])))
@@ -166,7 +172,7 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(captured?.spec.namespaceScope.namespaces == ["apps"])
         #expect(captured?.spec.filterExpression == "status:Running")
         #expect(captured?.spec.filterRevision == 4)
-        #expect(captured?.spec.columnIds == ["name", "ready", "cpu", "debug", "sort"])
+        #expect(captured?.spec.columnIds == ["name", "ready", "large", "memory", "cpu", "debug", "sort"])
         #expect(captured?.spec.sort.first?.direction == .descending)
         #expect(captured?.spec.sort.first?.nullsFirst == true)
     }
@@ -349,6 +355,20 @@ struct EngineWorkspaceResourceProviderTests {
         created.displayText = "20m"
         created.timestampUnixMs = 1_234_000
 
+        var large = Kmgr_V1_Cell()
+        large.columnID = "large"
+        large.displayText = "9007199254740993"
+        large.integerValue = 9_007_199_254_740_993
+
+        var quantityValue = Kmgr_V1_KubernetesQuantityValue()
+        quantityValue.exact = "9007199254740993m"
+        quantityValue.display = "9007199254740993m"
+        quantityValue.sortValue = 9_007_199_254_740.992
+        var memory = Kmgr_V1_Cell()
+        memory.columnID = "memory"
+        memory.displayText = quantityValue.display
+        memory.quantityValue = quantityValue
+
         var usageValue = Kmgr_V1_ResourceUsageValue()
         usageValue.used = 0.42
         usageValue.requested = 0.5
@@ -377,7 +397,7 @@ struct EngineWorkspaceResourceProviderTests {
         sort.opaqueSortValue = Data([0x01, 0x02])
         sort.severity = .muted
 
-        row.cells = [name, ready, created, usage, debug, sort]
+        row.cells = [name, ready, large, memory, created, usage, debug, sort]
         return row
     }
 }

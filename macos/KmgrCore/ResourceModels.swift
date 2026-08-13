@@ -102,10 +102,26 @@ public struct ResourceUsageValue: Hashable, Codable, Sendable {
     }
 }
 
+/// A CEL-produced Kubernetes quantity. `exact` is the authoritative canonical
+/// quantity and `sortValue` is an approximate numeric hint for native UI
+/// affordances; the helper performs authoritative Kubernetes-semantic sorting.
+public struct KubernetesQuantityValue: Hashable, Codable, Sendable {
+    public var exact: String
+    public var display: String
+    public var sortValue: Double
+
+    public init(exact: String, display: String, sortValue: Double) {
+        self.exact = exact
+        self.display = display
+        self.sortValue = sortValue
+    }
+}
+
 public enum CellTypedValue: Hashable, Codable, Sendable {
     case string(String)
     case number(Double)
     case integer(Int64)
+    case quantity(KubernetesQuantityValue)
     case timestampUnixMilliseconds(Int64)
     case usage(ResourceUsageValue)
     case boolean(Bool)

@@ -151,8 +151,75 @@ func TestProjectorEvaluatesCompiledCELAndSortsByTypedResult(t *testing.T) {
 	if got := []string{rows[0].GetIdentity().GetUid(), rows[1].GetIdentity().GetUid()}; !slices.Equal(got, []string{"uid-high", "uid-low"}) {
 		t.Fatalf("typed CEL order = %v", got)
 	}
-	if rows[0].GetCells()[1].GetNumberValue() != 10 {
+	if rows[0].GetCells()[1].GetIntegerValue() != 10 {
 		t.Fatalf("typed CEL cell = %#v", rows[0].GetCells()[1])
+	}
+}
+
+func TestCELIntegerAndQuantityCellsUseExactTypedWireValues(t *testing.T) {
+	t.Parallel()
+	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	largeInteger, err := compiler.Compile(viewcolumns.Definition{
+		ID: "large", Expression: "object.spec.large", ResultType: viewcolumns.ResultInteger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quantity, err := compiler.Compile(viewcolumns.Definition{
+		ID: "memory", Expression: "object.spec.memory", ResultType: viewcolumns.ResultQuantity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs:        []string{"large", "memory"},
+		CELPrograms: map[string]*viewcolumns.Program{
+			"large": largeInteger, "memory": quantity,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object := pod("uid", "ns", "pod", "Running", 0, nil, time.Time{})
+	object.Object["spec"].(map[string]any)["large"] = int64(9_007_199_254_740_993)
+	object.Object["spec"].(map[string]any)["memory"] = "9007199254740993m"
+	row, visible := projector.ProjectOne(object)
+	if !visible {
+		t.Fatal("row hidden")
+	}
+	if got := cellByID(row, "large").GetIntegerValue(); got != 9_007_199_254_740_993 {
+		t.Fatalf("large integer = %d", got)
+	}
+	wireQuantity := cellByID(row, "memory").GetQuantityValue()
+	if wireQuantity.GetExact() != "9007199254740993m" {
+		t.Fatalf("quantity = %#v", wireQuantity)
+	}
+}
+
+func TestQuantityCellSortUsesKubernetesSemantics(t *testing.T) {
+	t.Parallel()
+	quantityCell := func(exact, display string) *kmgrv1.Cell {
+		return &kmgrv1.Cell{DisplayText: display, TypedValue: &kmgrv1.Cell_QuantityValue{
+			QuantityValue: &kmgrv1.KubernetesQuantityValue{Exact: exact},
+		}}
+	}
+	if compareCells(quantityCell("900m", "zzz"), quantityCell("1", "aaa"), false) >= 0 {
+		t.Fatal("quantity cells were sorted lexically by exact/display text")
+	}
+	// Values beyond exact IEEE-754 integer precision must still compare by the
+	// exact Kubernetes quantity rather than the approximate sort hint.
+	left := quantityCell("9007199254740993", "left")
+	right := quantityCell("9007199254740992", "right")
+	left.GetQuantityValue().SortValue = float64(9_007_199_254_740_993)
+	right.GetQuantityValue().SortValue = float64(9_007_199_254_740_992)
+	if compareCells(left, right, false) <= 0 {
+		t.Fatal("exact quantities collapsed through their double sort hints")
 	}
 }
 
@@ -972,6 +1039,12 @@ func TestExactResourceCellsDistinguishAbsentFromPresentZero(t *testing.T) {
 	} else if value, available := usageSortValue(cell.GetUsage()); !available || value != 0 {
 		t.Fatalf("present zero sort value = %v, %v", value, available)
 	}
+	if value, available := usageSortValue(&kmgrv1.ResourceUsageValue{ResourceName: "nvidia.com/gpu"}); available || value != 0 {
+		t.Fatalf("absent usage components produced a sort value = %v, %v", value, available)
+	}
+	if value, available := usageSortValue(&kmgrv1.ResourceUsageValue{Capacity: numberPointer(0)}); !available || value != 0 {
+		t.Fatalf("present zero capacity sort value = %v, %v", value, available)
+	}
 
 	podProjector, err := NewProjector(ProjectionSpec{
 		ClusterSessionID: "session-a",
@@ -1061,10 +1134,10 @@ func TestProjectorNodeAccountingSurvivesMetricsFailure(t *testing.T) {
 func TestCompareUsageCellsUsesTypedValuesNotDisplayText(t *testing.T) {
 	t.Parallel()
 	left := &kmgrv1.Cell{TypedValue: &kmgrv1.Cell_Usage{Usage: &kmgrv1.ResourceUsageValue{
-		Used: 9, Requested: 10, UsageAvailable: true,
+		Used: 9, Requested: numberPointer(10), UsageAvailable: true,
 	}}, DisplayText: "zzz"}
 	right := &kmgrv1.Cell{TypedValue: &kmgrv1.Cell_Usage{Usage: &kmgrv1.ResourceUsageValue{
-		Used: 1, Requested: 10, UsageAvailable: true,
+		Used: 1, Requested: numberPointer(10), UsageAvailable: true,
 	}}, DisplayText: "aaa"}
 	if compareCells(left, right, false) <= 0 {
 		t.Fatal("resource usage sort reparsed display text")

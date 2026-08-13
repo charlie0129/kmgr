@@ -101,15 +101,25 @@ enum CellSeverity {
 
 message ResourceUsageValue {
   double used = 1;
-  double requested = 2;
-  double limit = 3;
-  double capacity = 4;
+  optional double requested = 2;
+  optional double limit = 3;
+  optional double capacity = 4;
   string unit = 5;
   string resource_name = 6;
   int64 measured_at_unix_ms = 7;
   string provider = 8;
   string measurement_scope = 9;
   bool usage_available = 10;
+}
+
+// KubernetesQuantityValue preserves the exact Kubernetes quantity while also
+// carrying a convenient numeric hint for native UI affordances. Authoritative
+// comparisons must parse exact with Kubernetes quantity semantics because the
+// double hint is necessarily approximate for very large or precise values.
+message KubernetesQuantityValue {
+  string exact = 1;
+  double sort_value = 2;
+  string display = 3;
 }
 
 message Cell {
@@ -122,6 +132,8 @@ message Cell {
     ResourceUsageValue usage = 6;
     bool bool_value = 9;
     bytes opaque_sort_value = 10;
+    int64 integer_value = 11;
+    KubernetesQuantityValue quantity_value = 12;
   }
   string tooltip = 7;
   CellSeverity severity = 8;

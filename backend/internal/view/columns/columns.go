@@ -15,6 +15,7 @@ import (
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/common/types/traits"
 	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
@@ -60,6 +61,7 @@ type Activation struct {
 type Value struct {
 	Display  string
 	String   *string
+	Quantity *resource.Quantity
 	Integer  *int64
 	Number   *float64
 	Boolean  *bool
@@ -260,7 +262,7 @@ func (p *Program) coerce(result ref.Val) (Value, error) {
 	}
 
 	switch p.definition.ResultType {
-	case ResultString, ResultQuantity:
+	case ResultString:
 		if list, ok := result.(traits.Lister); ok {
 			return p.stringList(list)
 		}
@@ -272,6 +274,20 @@ func (p *Program) coerce(result ref.Val) (Value, error) {
 			return Value{Display: text, String: &text}, nil
 		}
 		return Value{}, typeMismatch(p.definition.ResultType, result)
+	case ResultQuantity:
+		value, ok := result.(types.String)
+		if !ok {
+			return Value{}, typeMismatch(p.definition.ResultType, result)
+		}
+		text := string(value)
+		if err := validateOutput(text); err != nil {
+			return Value{}, err
+		}
+		quantity, err := resource.ParseQuantity(text)
+		if err != nil {
+			return Value{}, fmt.Errorf("invalid Kubernetes quantity %q: %w", text, err)
+		}
+		return Value{Display: text, Quantity: &quantity}, nil
 	case ResultInteger:
 		value, ok := result.(types.Int)
 		if !ok {
@@ -392,8 +408,10 @@ func validateStaticType(actual *cel.Type, declared ResultType) error {
 
 	wants := []*cel.Type{}
 	switch declared {
-	case ResultString, ResultQuantity:
+	case ResultString:
 		wants = []*cel.Type{cel.StringType, cel.ListType(cel.DynType)}
+	case ResultQuantity:
+		wants = []*cel.Type{cel.StringType}
 	case ResultInteger:
 		wants = []*cel.Type{cel.IntType}
 	case ResultNumber:

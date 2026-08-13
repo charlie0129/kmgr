@@ -497,8 +497,10 @@ func (p *Projector) celCell(program *viewcolumns.Program, activation viewcolumns
 	switch {
 	case value.String != nil:
 		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: *value.String}
+	case value.Quantity != nil:
+		cell.TypedValue = quantityCellValue(*value.Quantity, value.Display)
 	case value.Integer != nil:
-		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: float64(*value.Integer)}
+		cell.TypedValue = &kmgrv1.Cell_IntegerValue{IntegerValue: *value.Integer}
 	case value.Number != nil:
 		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: *value.Number}
 	case value.Boolean != nil:
@@ -509,6 +511,12 @@ func (p *Projector) celCell(program *viewcolumns.Program, activation viewcolumns
 		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: value.Duration.Seconds()}
 	}
 	return cell
+}
+
+func quantityCellValue(value resource.Quantity, display string) *kmgrv1.Cell_QuantityValue {
+	return &kmgrv1.Cell_QuantityValue{QuantityValue: &kmgrv1.KubernetesQuantityValue{
+		Exact: value.String(), Display: display, SortValue: value.AsApproximateFloat64(),
+	}}
 }
 
 func (p *Projector) metricsForObject(object *unstructured.Unstructured) map[string]any {
@@ -728,14 +736,14 @@ func (p *Projector) nodeAllocationCell(
 	label := "Summed effective requests"
 	if field == nodeLimited {
 		value = optionalQuantity(limited, hasLimit)
-		usage.Limit = quantityNumeric(resourceName, limited)
+		usage.Limit = numberPointer(quantityNumeric(resourceName, limited))
 		label = "Summed effective limits"
 	} else {
 		value = optionalQuantity(requested, hasRequest)
-		usage.Requested = quantityNumeric(resourceName, requested)
+		usage.Requested = numberPointer(quantityNumeric(resourceName, requested))
 	}
 	if hasAllocatable {
-		usage.Capacity = quantityNumeric(resourceName, allocatable)
+		usage.Capacity = numberPointer(quantityNumeric(resourceName, allocatable))
 	}
 	cell.DisplayText = formatResourceQuantity(resourceName, value) + " / " +
 		formatResourceQuantity(resourceName, optionalQuantity(allocatable, hasAllocatable))
@@ -779,9 +787,9 @@ func (p *Projector) nodePodCountCell(object *unstructured.Unstructured, columnID
 	}
 	allocatable, hasAllocatable := accounting.Allocatable[corev1.ResourcePods]
 	capacity, hasCapacity := accounting.Capacity[corev1.ResourcePods]
-	usage.Requested = float64(accounting.PodCount)
+	usage.Requested = numberPointer(float64(accounting.PodCount))
 	if hasAllocatable {
-		usage.Capacity = quantityNumeric(corev1.ResourcePods, allocatable)
+		usage.Capacity = numberPointer(quantityNumeric(corev1.ResourcePods, allocatable))
 	}
 	cell.DisplayText = strconv.FormatInt(accounting.PodCount, 10) + " / " +
 		exactQuantityDisplay(optionalQuantity(allocatable, hasAllocatable))
@@ -811,15 +819,17 @@ func setUsageQuantities(
 		value.MeasurementScope = measurement.Scope
 	}
 	if request != nil {
-		value.Requested = quantityNumeric(name, *request)
+		value.Requested = numberPointer(quantityNumeric(name, *request))
 	}
 	if limit != nil {
-		value.Limit = quantityNumeric(name, *limit)
+		value.Limit = numberPointer(quantityNumeric(name, *limit))
 	}
 	if allocatable != nil {
-		value.Capacity = quantityNumeric(name, *allocatable)
+		value.Capacity = numberPointer(quantityNumeric(name, *allocatable))
 	}
 }
+
+func numberPointer(value float64) *float64 { return &value }
 
 func optionalQuantity(value resource.Quantity, present bool) *resource.Quantity {
 	if !present {
@@ -1129,6 +1139,14 @@ func compareCells(left, right *kmgrv1.Cell, nullsFirst bool) int {
 			}
 			return cmp.Compare(leftValue.NumberValue, rightValue.NumberValue)
 		}
+	case *kmgrv1.Cell_IntegerValue:
+		if rightValue, ok := right.GetTypedValue().(*kmgrv1.Cell_IntegerValue); ok {
+			return cmp.Compare(leftValue.IntegerValue, rightValue.IntegerValue)
+		}
+	case *kmgrv1.Cell_QuantityValue:
+		if rightValue, ok := right.GetTypedValue().(*kmgrv1.Cell_QuantityValue); ok {
+			return compareQuantityValues(leftValue.QuantityValue, rightValue.QuantityValue)
+		}
 	case *kmgrv1.Cell_TimestampUnixMs:
 		if rightValue, ok := right.GetTypedValue().(*kmgrv1.Cell_TimestampUnixMs); ok {
 			return cmp.Compare(leftValue.TimestampUnixMs, rightValue.TimestampUnixMs)
@@ -1154,6 +1172,18 @@ func compareCells(left, right *kmgrv1.Cell, nullsFirst bool) int {
 		}
 	}
 	return strings.Compare(left.GetDisplayText(), right.GetDisplayText())
+}
+
+func compareQuantityValues(left, right *kmgrv1.KubernetesQuantityValue) int {
+	leftQuantity, leftErr := resource.ParseQuantity(left.GetExact())
+	rightQuantity, rightErr := resource.ParseQuantity(right.GetExact())
+	if leftErr == nil && rightErr == nil {
+		return leftQuantity.Cmp(rightQuantity)
+	}
+	// Invalid quantities cannot be emitted by the current compiler, but older
+	// or newer peers may send values this process cannot parse. Keep ordering
+	// deterministic without trusting an approximate hint as authoritative.
+	return strings.Compare(left.GetExact(), right.GetExact())
 }
 
 func compareUsageValues(left, right *kmgrv1.ResourceUsageValue) int {
@@ -1185,25 +1215,22 @@ func usageSortValue(value *kmgrv1.ResourceUsageValue) (float64, bool) {
 		}
 		return value.GetUsed(), true
 	}
-	if value.GetCapacity() != 0 {
-		if value.GetRequested() != 0 {
+	if value.Capacity != nil {
+		if value.GetCapacity() != 0 && value.Requested != nil {
 			return value.GetRequested() / value.GetCapacity(), true
 		}
-		if value.GetLimit() != 0 {
+		if value.GetCapacity() != 0 && value.Limit != nil {
 			return value.GetLimit() / value.GetCapacity(), true
 		}
 	}
-	if value.GetRequested() != 0 {
+	if value.Requested != nil {
 		return value.GetRequested(), true
 	}
-	if value.GetLimit() != 0 {
+	if value.Limit != nil {
 		return value.GetLimit(), true
 	}
-	// Exact-resource cells are omitted entirely when the resource is absent.
-	// A retained typed value whose quantities are all zero therefore represents
-	// a real Kubernetes zero and must participate in numeric sorting.
-	if value.GetResourceName() != "" {
-		return 0, true
+	if value.Capacity != nil {
+		return value.GetCapacity(), true
 	}
 	return 0, false
 }

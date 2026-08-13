@@ -28,6 +28,32 @@ func TestPreviewColumnCompilesAndEvaluatesDeterministicSample(t *testing.T) {
 	}
 }
 
+func TestPreviewColumnPreservesExactIntegerAndQuantityTypes(t *testing.T) {
+	t.Parallel()
+	service := newPreviewService(t, &fakeResourceSource{authority: "authority", client: newSearchClient()})
+
+	integer, err := service.PreviewColumn(context.Background(), previewRequest(
+		"9007199254740993", "integer", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := integer.GetPreview().GetIntegerValue(); got != 9_007_199_254_740_993 {
+		t.Fatalf("integer preview = %d", got)
+	}
+
+	quantity, err := service.PreviewColumn(context.Background(), previewRequest(
+		`"1Gi"`, "quantity", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := quantity.GetPreview().GetQuantityValue()
+	if value.GetExact() != "1Gi" || value.GetDisplay() != "1Gi" || value.GetSortValue() != 1_073_741_824 {
+		t.Fatalf("quantity preview = %#v", value)
+	}
+}
+
 func TestPreviewColumnReturnsCompileAndEvaluationErrorsInline(t *testing.T) {
 	t.Parallel()
 	service := newPreviewService(t, &fakeResourceSource{authority: "authority", client: newSearchClient()})

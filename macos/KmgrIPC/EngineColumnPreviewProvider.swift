@@ -172,14 +172,20 @@ public struct EngineColumnPreviewProvider: ColumnPreviewProviding {
         let typedValue: CellTypedValue? = switch value.typedValue {
         case .stringValue(let string): .string(string)
         case .numberValue(let number): .number(number)
+        case .integerValue(let integer): .integer(integer)
+        case .quantityValue(let quantity): .quantity(KubernetesQuantityValue(
+            exact: quantity.exact,
+            display: quantity.display,
+            sortValue: quantity.sortValue
+        ))
         case .timestampUnixMs(let milliseconds):
             .timestampUnixMilliseconds(milliseconds)
         case .usage(let usage): .usage(ResourceUsageValue(
             usage: usage.usageAvailable ? usage.used : nil,
-            request: usage.requested,
-            limit: usage.limit,
-            capacity: usage.capacity,
-            sortValue: usage.usageAvailable ? usage.used : usage.requested,
+            request: usage.hasRequested ? usage.requested : nil,
+            limit: usage.hasLimit ? usage.limit : nil,
+            capacity: usage.hasCapacity ? usage.capacity : nil,
+            sortValue: usageSortValue(usage),
             unit: usage.unit,
             resourceName: usage.resourceName,
             measuredAtUnixMilliseconds: usage.measuredAtUnixMs > 0
@@ -205,6 +211,16 @@ public struct EngineColumnPreviewProvider: ColumnPreviewProviding {
             tooltip: value.tooltip,
             severity: severity
         )
+    }
+
+    private static func usageSortValue(
+        _ value: Kmgr_V1_ResourceUsageValue
+    ) -> Double? {
+        if value.usageAvailable { return value.used }
+        if value.hasRequested { return value.requested }
+        if value.hasLimit { return value.limit }
+        if value.hasCapacity { return value.capacity }
+        return nil
     }
 
     private static func seconds(_ duration: Duration) -> TimeInterval {

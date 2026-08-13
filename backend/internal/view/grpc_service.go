@@ -274,8 +274,10 @@ func cellForCELValue(columnID string, value viewcolumns.Value) *kmgrv1.Cell {
 	switch {
 	case value.String != nil:
 		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: *value.String}
+	case value.Quantity != nil:
+		cell.TypedValue = quantityCellValue(*value.Quantity, value.Display)
 	case value.Integer != nil:
-		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: float64(*value.Integer)}
+		cell.TypedValue = &kmgrv1.Cell_IntegerValue{IntegerValue: *value.Integer}
 	case value.Number != nil:
 		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: *value.Number}
 	case value.Boolean != nil:

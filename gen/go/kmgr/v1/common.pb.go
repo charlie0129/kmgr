@@ -825,9 +825,9 @@ func (x *StringMapEntry) GetValue() string {
 type ResourceUsageValue struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	Used             float64                `protobuf:"fixed64,1,opt,name=used,proto3" json:"used,omitempty"`
-	Requested        float64                `protobuf:"fixed64,2,opt,name=requested,proto3" json:"requested,omitempty"`
-	Limit            float64                `protobuf:"fixed64,3,opt,name=limit,proto3" json:"limit,omitempty"`
-	Capacity         float64                `protobuf:"fixed64,4,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	Requested        *float64               `protobuf:"fixed64,2,opt,name=requested,proto3,oneof" json:"requested,omitempty"`
+	Limit            *float64               `protobuf:"fixed64,3,opt,name=limit,proto3,oneof" json:"limit,omitempty"`
+	Capacity         *float64               `protobuf:"fixed64,4,opt,name=capacity,proto3,oneof" json:"capacity,omitempty"`
 	Unit             string                 `protobuf:"bytes,5,opt,name=unit,proto3" json:"unit,omitempty"`
 	ResourceName     string                 `protobuf:"bytes,6,opt,name=resource_name,json=resourceName,proto3" json:"resource_name,omitempty"`
 	MeasuredAtUnixMs int64                  `protobuf:"varint,7,opt,name=measured_at_unix_ms,json=measuredAtUnixMs,proto3" json:"measured_at_unix_ms,omitempty"`
@@ -876,22 +876,22 @@ func (x *ResourceUsageValue) GetUsed() float64 {
 }
 
 func (x *ResourceUsageValue) GetRequested() float64 {
-	if x != nil {
-		return x.Requested
+	if x != nil && x.Requested != nil {
+		return *x.Requested
 	}
 	return 0
 }
 
 func (x *ResourceUsageValue) GetLimit() float64 {
-	if x != nil {
-		return x.Limit
+	if x != nil && x.Limit != nil {
+		return *x.Limit
 	}
 	return 0
 }
 
 func (x *ResourceUsageValue) GetCapacity() float64 {
-	if x != nil {
-		return x.Capacity
+	if x != nil && x.Capacity != nil {
+		return *x.Capacity
 	}
 	return 0
 }
@@ -938,6 +938,70 @@ func (x *ResourceUsageValue) GetUsageAvailable() bool {
 	return false
 }
 
+// KubernetesQuantityValue preserves the exact Kubernetes quantity while also
+// carrying a convenient numeric hint for native UI affordances. Authoritative
+// comparisons must parse exact with Kubernetes quantity semantics because the
+// double hint is necessarily approximate for very large or precise values.
+type KubernetesQuantityValue struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Exact         string                 `protobuf:"bytes,1,opt,name=exact,proto3" json:"exact,omitempty"`
+	SortValue     float64                `protobuf:"fixed64,2,opt,name=sort_value,json=sortValue,proto3" json:"sort_value,omitempty"`
+	Display       string                 `protobuf:"bytes,3,opt,name=display,proto3" json:"display,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KubernetesQuantityValue) Reset() {
+	*x = KubernetesQuantityValue{}
+	mi := &file_kmgr_v1_common_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KubernetesQuantityValue) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KubernetesQuantityValue) ProtoMessage() {}
+
+func (x *KubernetesQuantityValue) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_common_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KubernetesQuantityValue.ProtoReflect.Descriptor instead.
+func (*KubernetesQuantityValue) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *KubernetesQuantityValue) GetExact() string {
+	if x != nil {
+		return x.Exact
+	}
+	return ""
+}
+
+func (x *KubernetesQuantityValue) GetSortValue() float64 {
+	if x != nil {
+		return x.SortValue
+	}
+	return 0
+}
+
+func (x *KubernetesQuantityValue) GetDisplay() string {
+	if x != nil {
+		return x.Display
+	}
+	return ""
+}
+
 type Cell struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	ColumnId    string                 `protobuf:"bytes,1,opt,name=column_id,json=columnId,proto3" json:"column_id,omitempty"`
@@ -950,6 +1014,8 @@ type Cell struct {
 	//	*Cell_Usage
 	//	*Cell_BoolValue
 	//	*Cell_OpaqueSortValue
+	//	*Cell_IntegerValue
+	//	*Cell_QuantityValue
 	TypedValue    isCell_TypedValue `protobuf_oneof:"typed_value"`
 	Tooltip       string            `protobuf:"bytes,7,opt,name=tooltip,proto3" json:"tooltip,omitempty"`
 	Severity      CellSeverity      `protobuf:"varint,8,opt,name=severity,proto3,enum=kmgr.v1.CellSeverity" json:"severity,omitempty"`
@@ -959,7 +1025,7 @@ type Cell struct {
 
 func (x *Cell) Reset() {
 	*x = Cell{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[10]
+	mi := &file_kmgr_v1_common_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -971,7 +1037,7 @@ func (x *Cell) String() string {
 func (*Cell) ProtoMessage() {}
 
 func (x *Cell) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[10]
+	mi := &file_kmgr_v1_common_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -984,7 +1050,7 @@ func (x *Cell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Cell.ProtoReflect.Descriptor instead.
 func (*Cell) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{10}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Cell) GetColumnId() string {
@@ -1062,6 +1128,24 @@ func (x *Cell) GetOpaqueSortValue() []byte {
 	return nil
 }
 
+func (x *Cell) GetIntegerValue() int64 {
+	if x != nil {
+		if x, ok := x.TypedValue.(*Cell_IntegerValue); ok {
+			return x.IntegerValue
+		}
+	}
+	return 0
+}
+
+func (x *Cell) GetQuantityValue() *KubernetesQuantityValue {
+	if x != nil {
+		if x, ok := x.TypedValue.(*Cell_QuantityValue); ok {
+			return x.QuantityValue
+		}
+	}
+	return nil
+}
+
 func (x *Cell) GetTooltip() string {
 	if x != nil {
 		return x.Tooltip
@@ -1104,6 +1188,14 @@ type Cell_OpaqueSortValue struct {
 	OpaqueSortValue []byte `protobuf:"bytes,10,opt,name=opaque_sort_value,json=opaqueSortValue,proto3,oneof"`
 }
 
+type Cell_IntegerValue struct {
+	IntegerValue int64 `protobuf:"varint,11,opt,name=integer_value,json=integerValue,proto3,oneof"`
+}
+
+type Cell_QuantityValue struct {
+	QuantityValue *KubernetesQuantityValue `protobuf:"bytes,12,opt,name=quantity_value,json=quantityValue,proto3,oneof"`
+}
+
 func (*Cell_StringValue) isCell_TypedValue() {}
 
 func (*Cell_NumberValue) isCell_TypedValue() {}
@@ -1116,6 +1208,10 @@ func (*Cell_BoolValue) isCell_TypedValue() {}
 
 func (*Cell_OpaqueSortValue) isCell_TypedValue() {}
 
+func (*Cell_IntegerValue) isCell_TypedValue() {}
+
+func (*Cell_QuantityValue) isCell_TypedValue() {}
+
 type ResourceRow struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Identity      *ResourceIdentity      `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
@@ -1126,7 +1222,7 @@ type ResourceRow struct {
 
 func (x *ResourceRow) Reset() {
 	*x = ResourceRow{}
-	mi := &file_kmgr_v1_common_proto_msgTypes[11]
+	mi := &file_kmgr_v1_common_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1138,7 +1234,7 @@ func (x *ResourceRow) String() string {
 func (*ResourceRow) ProtoMessage() {}
 
 func (x *ResourceRow) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_common_proto_msgTypes[11]
+	mi := &file_kmgr_v1_common_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1151,7 +1247,7 @@ func (x *ResourceRow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceRow.ProtoReflect.Descriptor instead.
 func (*ResourceRow) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{11}
+	return file_kmgr_v1_common_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ResourceRow) GetIdentity() *ResourceIdentity {
@@ -1229,19 +1325,28 @@ const file_kmgr_v1_common_proto_rawDesc = "" +
 	"namespaces\"8\n" +
 	"\x0eStringMapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\"\xd2\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\x86\x03\n" +
 	"\x12ResourceUsageValue\x12\x12\n" +
-	"\x04used\x18\x01 \x01(\x01R\x04used\x12\x1c\n" +
-	"\trequested\x18\x02 \x01(\x01R\trequested\x12\x14\n" +
-	"\x05limit\x18\x03 \x01(\x01R\x05limit\x12\x1a\n" +
-	"\bcapacity\x18\x04 \x01(\x01R\bcapacity\x12\x12\n" +
+	"\x04used\x18\x01 \x01(\x01R\x04used\x12!\n" +
+	"\trequested\x18\x02 \x01(\x01H\x00R\trequested\x88\x01\x01\x12\x19\n" +
+	"\x05limit\x18\x03 \x01(\x01H\x01R\x05limit\x88\x01\x01\x12\x1f\n" +
+	"\bcapacity\x18\x04 \x01(\x01H\x02R\bcapacity\x88\x01\x01\x12\x12\n" +
 	"\x04unit\x18\x05 \x01(\tR\x04unit\x12#\n" +
 	"\rresource_name\x18\x06 \x01(\tR\fresourceName\x12-\n" +
 	"\x13measured_at_unix_ms\x18\a \x01(\x03R\x10measuredAtUnixMs\x12\x1a\n" +
 	"\bprovider\x18\b \x01(\tR\bprovider\x12+\n" +
 	"\x11measurement_scope\x18\t \x01(\tR\x10measurementScope\x12'\n" +
 	"\x0fusage_available\x18\n" +
-	" \x01(\bR\x0eusageAvailable\"\x9e\x03\n" +
+	" \x01(\bR\x0eusageAvailableB\f\n" +
+	"\n" +
+	"_requestedB\b\n" +
+	"\x06_limitB\v\n" +
+	"\t_capacity\"h\n" +
+	"\x17KubernetesQuantityValue\x12\x14\n" +
+	"\x05exact\x18\x01 \x01(\tR\x05exact\x12\x1d\n" +
+	"\n" +
+	"sort_value\x18\x02 \x01(\x01R\tsortValue\x12\x18\n" +
+	"\adisplay\x18\x03 \x01(\tR\adisplay\"\x90\x04\n" +
 	"\x04Cell\x12\x1b\n" +
 	"\tcolumn_id\x18\x01 \x01(\tR\bcolumnId\x12!\n" +
 	"\fdisplay_text\x18\x02 \x01(\tR\vdisplayText\x12#\n" +
@@ -1252,7 +1357,9 @@ const file_kmgr_v1_common_proto_rawDesc = "" +
 	"\n" +
 	"bool_value\x18\t \x01(\bH\x00R\tboolValue\x12,\n" +
 	"\x11opaque_sort_value\x18\n" +
-	" \x01(\fH\x00R\x0fopaqueSortValue\x12\x18\n" +
+	" \x01(\fH\x00R\x0fopaqueSortValue\x12%\n" +
+	"\rinteger_value\x18\v \x01(\x03H\x00R\fintegerValue\x12I\n" +
+	"\x0equantity_value\x18\f \x01(\v2 .kmgr.v1.KubernetesQuantityValueH\x00R\rquantityValue\x12\x18\n" +
 	"\atooltip\x18\a \x01(\tR\atooltip\x121\n" +
 	"\bseverity\x18\b \x01(\x0e2\x15.kmgr.v1.CellSeverityR\bseverityB\r\n" +
 	"\vtyped_value\"i\n" +
@@ -1300,38 +1407,40 @@ func file_kmgr_v1_common_proto_rawDescGZIP() []byte {
 }
 
 var file_kmgr_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_kmgr_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_kmgr_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_kmgr_v1_common_proto_goTypes = []any{
-	(ErrorCategory)(0),         // 0: kmgr.v1.ErrorCategory
-	(CellSeverity)(0),          // 1: kmgr.v1.CellSeverity
-	(PropagationPolicy)(0),     // 2: kmgr.v1.PropagationPolicy
-	(*RequestContext)(nil),     // 3: kmgr.v1.RequestContext
-	(*StreamCursor)(nil),       // 4: kmgr.v1.StreamCursor
-	(*Empty)(nil),              // 5: kmgr.v1.Empty
-	(*Acknowledgement)(nil),    // 6: kmgr.v1.Acknowledgement
-	(*StructuredError)(nil),    // 7: kmgr.v1.StructuredError
-	(*ResourceType)(nil),       // 8: kmgr.v1.ResourceType
-	(*ResourceIdentity)(nil),   // 9: kmgr.v1.ResourceIdentity
-	(*NamespaceScope)(nil),     // 10: kmgr.v1.NamespaceScope
-	(*StringMapEntry)(nil),     // 11: kmgr.v1.StringMapEntry
-	(*ResourceUsageValue)(nil), // 12: kmgr.v1.ResourceUsageValue
-	(*Cell)(nil),               // 13: kmgr.v1.Cell
-	(*ResourceRow)(nil),        // 14: kmgr.v1.ResourceRow
-	nil,                        // 15: kmgr.v1.StructuredError.SafeDetailsEntry
+	(ErrorCategory)(0),              // 0: kmgr.v1.ErrorCategory
+	(CellSeverity)(0),               // 1: kmgr.v1.CellSeverity
+	(PropagationPolicy)(0),          // 2: kmgr.v1.PropagationPolicy
+	(*RequestContext)(nil),          // 3: kmgr.v1.RequestContext
+	(*StreamCursor)(nil),            // 4: kmgr.v1.StreamCursor
+	(*Empty)(nil),                   // 5: kmgr.v1.Empty
+	(*Acknowledgement)(nil),         // 6: kmgr.v1.Acknowledgement
+	(*StructuredError)(nil),         // 7: kmgr.v1.StructuredError
+	(*ResourceType)(nil),            // 8: kmgr.v1.ResourceType
+	(*ResourceIdentity)(nil),        // 9: kmgr.v1.ResourceIdentity
+	(*NamespaceScope)(nil),          // 10: kmgr.v1.NamespaceScope
+	(*StringMapEntry)(nil),          // 11: kmgr.v1.StringMapEntry
+	(*ResourceUsageValue)(nil),      // 12: kmgr.v1.ResourceUsageValue
+	(*KubernetesQuantityValue)(nil), // 13: kmgr.v1.KubernetesQuantityValue
+	(*Cell)(nil),                    // 14: kmgr.v1.Cell
+	(*ResourceRow)(nil),             // 15: kmgr.v1.ResourceRow
+	nil,                             // 16: kmgr.v1.StructuredError.SafeDetailsEntry
 }
 var file_kmgr_v1_common_proto_depIdxs = []int32{
 	0,  // 0: kmgr.v1.StructuredError.category:type_name -> kmgr.v1.ErrorCategory
 	9,  // 1: kmgr.v1.StructuredError.resource:type_name -> kmgr.v1.ResourceIdentity
-	15, // 2: kmgr.v1.StructuredError.safe_details:type_name -> kmgr.v1.StructuredError.SafeDetailsEntry
+	16, // 2: kmgr.v1.StructuredError.safe_details:type_name -> kmgr.v1.StructuredError.SafeDetailsEntry
 	12, // 3: kmgr.v1.Cell.usage:type_name -> kmgr.v1.ResourceUsageValue
-	1,  // 4: kmgr.v1.Cell.severity:type_name -> kmgr.v1.CellSeverity
-	9,  // 5: kmgr.v1.ResourceRow.identity:type_name -> kmgr.v1.ResourceIdentity
-	13, // 6: kmgr.v1.ResourceRow.cells:type_name -> kmgr.v1.Cell
-	7,  // [7:7] is the sub-list for method output_type
-	7,  // [7:7] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	13, // 4: kmgr.v1.Cell.quantity_value:type_name -> kmgr.v1.KubernetesQuantityValue
+	1,  // 5: kmgr.v1.Cell.severity:type_name -> kmgr.v1.CellSeverity
+	9,  // 6: kmgr.v1.ResourceRow.identity:type_name -> kmgr.v1.ResourceIdentity
+	14, // 7: kmgr.v1.ResourceRow.cells:type_name -> kmgr.v1.Cell
+	8,  // [8:8] is the sub-list for method output_type
+	8,  // [8:8] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_common_proto_init() }
@@ -1339,13 +1448,16 @@ func file_kmgr_v1_common_proto_init() {
 	if File_kmgr_v1_common_proto != nil {
 		return
 	}
-	file_kmgr_v1_common_proto_msgTypes[10].OneofWrappers = []any{
+	file_kmgr_v1_common_proto_msgTypes[9].OneofWrappers = []any{}
+	file_kmgr_v1_common_proto_msgTypes[11].OneofWrappers = []any{
 		(*Cell_StringValue)(nil),
 		(*Cell_NumberValue)(nil),
 		(*Cell_TimestampUnixMs)(nil),
 		(*Cell_Usage)(nil),
 		(*Cell_BoolValue)(nil),
 		(*Cell_OpaqueSortValue)(nil),
+		(*Cell_IntegerValue)(nil),
+		(*Cell_QuantityValue)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1353,7 +1465,7 @@ func file_kmgr_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_common_proto_rawDesc), len(file_kmgr_v1_common_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   13,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

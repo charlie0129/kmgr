@@ -20,8 +20,8 @@ struct EngineColumnPreviewProviderTests {
         response.evaluatedObject.name = "api"
         response.evaluatedObject.uid = "uid-api"
         response.preview.columnID = "available"
-        response.preview.displayText = "4"
-        response.preview.numberValue = 4
+        response.preview.displayText = "9007199254740993"
+        response.preview.integerValue = 9_007_199_254_740_993
         response.preview.tooltip = "Available replicas"
         response.preview.severity = .warning
 
@@ -65,8 +65,8 @@ struct EngineColumnPreviewProviderTests {
         #expect(!result.usedSampleObject)
         #expect(result.preview == Cell(
             columnID: "available",
-            displayText: "4",
-            typedValue: .number(4),
+            displayText: "9007199254740993",
+            typedValue: .integer(9_007_199_254_740_993),
             tooltip: "Available replicas",
             severity: .warning
         ))
@@ -106,6 +106,58 @@ struct EngineColumnPreviewProviderTests {
         #expect(captured?.selectedObject.name == "api")
         #expect(captured?.selectedObject.uid == "uid-api")
         #expect(await rpc.capturedTimeout() == .seconds(7))
+    }
+
+    @Test("maps exact quantity previews and absent usage components")
+    func mapsTypedQuantityAndUsagePresence() async throws {
+        var response = Kmgr_V1_PreviewColumnResponse()
+        response.requestID = "preview-request"
+        response.celEnvironment = "kmgr.cel/v1"
+        response.preview.columnID = "memory"
+        response.preview.displayText = "1Gi"
+        response.preview.quantityValue.exact = "1Gi"
+        response.preview.quantityValue.display = "1Gi"
+        response.preview.quantityValue.sortValue = 1_073_741_824
+
+        let quantityResult = try await deterministicProvider(
+            rpc: FakeColumnPreviewRPC(response: response)
+        ).previewColumn(Self.request())
+        #expect(quantityResult.preview.typedValue == .quantity(
+            KubernetesQuantityValue(
+                exact: "1Gi", display: "1Gi", sortValue: 1_073_741_824
+            )
+        ))
+
+        var usageResponse = response
+        usageResponse.preview.typedValue = nil
+        usageResponse.preview.usage.used = 0
+        usageResponse.preview.usage.usageAvailable = true
+        usageResponse.preview.usage.requested = 0
+        let usageResult = try await deterministicProvider(
+            rpc: FakeColumnPreviewRPC(response: usageResponse)
+        ).previewColumn(Self.request())
+        guard case .usage(let usage)? = usageResult.preview.typedValue else {
+            Issue.record("Expected usage value")
+            return
+        }
+        #expect(usage.usage == 0)
+        #expect(usage.request == 0)
+        #expect(usage.limit == nil)
+        #expect(usage.capacity == nil)
+        #expect(usage.sortValue == 0)
+
+        usageResponse.preview.usage.clearRequested()
+        usageResponse.preview.usage.usageAvailable = false
+        let absentResult = try await deterministicProvider(
+            rpc: FakeColumnPreviewRPC(response: usageResponse)
+        ).previewColumn(Self.request())
+        guard case .usage(let absent)? = absentResult.preview.typedValue else {
+            Issue.record("Expected absent usage value")
+            return
+        }
+        #expect(absent.usage == nil)
+        #expect(absent.request == nil)
+        #expect(absent.sortValue == nil)
     }
 
     @Test("omits selected identity and maps a sample-object usage cell")

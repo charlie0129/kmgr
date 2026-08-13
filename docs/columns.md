@@ -40,7 +40,7 @@ object.?spec.?nodeName.orValue("—")
 object.?metadata.?labels[?"team"].orValue("—")
 ```
 
-The supported declared types are `string`, `integer`, `number`, `boolean`, `quantity`, `timestamp`, and `duration`. Quantity values currently use their exact Kubernetes quantity string; typed native quantity and resource-usage results are provided by built-in metric columns. A string column may accept a list of scalar values, joined by its configured separator.
+The supported declared types are `string`, `integer`, `number`, `boolean`, `quantity`, `timestamp`, and `duration`. Quantity expressions return one Kubernetes quantity string; the helper validates and retains its exact canonical quantity alongside display text and an approximate numeric UI hint. Authoritative sorting uses Kubernetes quantity semantics, not lexical display order or the approximate hint. Integer results remain signed 64-bit values across IPC and are not converted through a double. A string column may accept a list of scalar values, joined by its configured separator.
 
 Evaluation is deterministic and side-effect free. Each evaluation has a runtime cost limit (10,000 by default), a maximum of 128 list elements, and a 4 KiB rendered-value limit. Programs are compiled and type-checked when their definition/environment changes, then reused. Absent, null, and empty optional results render as `—` unless the definition supplies another missing value. Runtime failures belong to the individual column/cell and do not discard a row or view.
 

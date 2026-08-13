@@ -405,11 +405,32 @@ public struct Kmgr_V1_ResourceUsageValue: Sendable {
 
   public var used: Double = 0
 
-  public var requested: Double = 0
+  public var requested: Double {
+    get {return _requested ?? 0}
+    set {_requested = newValue}
+  }
+  /// Returns true if `requested` has been explicitly set.
+  public var hasRequested: Bool {return self._requested != nil}
+  /// Clears the value of `requested`. Subsequent reads from it will return its default value.
+  public mutating func clearRequested() {self._requested = nil}
 
-  public var limit: Double = 0
+  public var limit: Double {
+    get {return _limit ?? 0}
+    set {_limit = newValue}
+  }
+  /// Returns true if `limit` has been explicitly set.
+  public var hasLimit: Bool {return self._limit != nil}
+  /// Clears the value of `limit`. Subsequent reads from it will return its default value.
+  public mutating func clearLimit() {self._limit = nil}
 
-  public var capacity: Double = 0
+  public var capacity: Double {
+    get {return _capacity ?? 0}
+    set {_capacity = newValue}
+  }
+  /// Returns true if `capacity` has been explicitly set.
+  public var hasCapacity: Bool {return self._capacity != nil}
+  /// Clears the value of `capacity`. Subsequent reads from it will return its default value.
+  public mutating func clearCapacity() {self._capacity = nil}
 
   public var unit: String = String()
 
@@ -422,6 +443,30 @@ public struct Kmgr_V1_ResourceUsageValue: Sendable {
   public var measurementScope: String = String()
 
   public var usageAvailable: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _requested: Double? = nil
+  fileprivate var _limit: Double? = nil
+  fileprivate var _capacity: Double? = nil
+}
+
+/// KubernetesQuantityValue preserves the exact Kubernetes quantity while also
+/// carrying a convenient numeric hint for native UI affordances. Authoritative
+/// comparisons must parse exact with Kubernetes quantity semantics because the
+/// double hint is necessarily approximate for very large or precise values.
+public struct Kmgr_V1_KubernetesQuantityValue: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var exact: String = String()
+
+  public var sortValue: Double = 0
+
+  public var display: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -487,6 +532,22 @@ public struct Kmgr_V1_Cell: Sendable {
     set {typedValue = .opaqueSortValue(newValue)}
   }
 
+  public var integerValue: Int64 {
+    get {
+      if case .integerValue(let v)? = typedValue {return v}
+      return 0
+    }
+    set {typedValue = .integerValue(newValue)}
+  }
+
+  public var quantityValue: Kmgr_V1_KubernetesQuantityValue {
+    get {
+      if case .quantityValue(let v)? = typedValue {return v}
+      return Kmgr_V1_KubernetesQuantityValue()
+    }
+    set {typedValue = .quantityValue(newValue)}
+  }
+
   public var tooltip: String = String()
 
   public var severity: Kmgr_V1_CellSeverity = .unspecified
@@ -500,6 +561,8 @@ public struct Kmgr_V1_Cell: Sendable {
     case usage(Kmgr_V1_ResourceUsageValue)
     case boolValue(Bool)
     case opaqueSortValue(Data)
+    case integerValue(Int64)
+    case quantityValue(Kmgr_V1_KubernetesQuantityValue)
 
   }
 
@@ -1010,9 +1073,9 @@ extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._Mess
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularDoubleField(value: &self.used) }()
-      case 2: try { try decoder.decodeSingularDoubleField(value: &self.requested) }()
-      case 3: try { try decoder.decodeSingularDoubleField(value: &self.limit) }()
-      case 4: try { try decoder.decodeSingularDoubleField(value: &self.capacity) }()
+      case 2: try { try decoder.decodeSingularDoubleField(value: &self._requested) }()
+      case 3: try { try decoder.decodeSingularDoubleField(value: &self._limit) }()
+      case 4: try { try decoder.decodeSingularDoubleField(value: &self._capacity) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.unit) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.resourceName) }()
       case 7: try { try decoder.decodeSingularInt64Field(value: &self.measuredAtUnixMs) }()
@@ -1025,18 +1088,22 @@ extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._Mess
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if self.used.bitPattern != 0 {
       try visitor.visitSingularDoubleField(value: self.used, fieldNumber: 1)
     }
-    if self.requested.bitPattern != 0 {
-      try visitor.visitSingularDoubleField(value: self.requested, fieldNumber: 2)
-    }
-    if self.limit.bitPattern != 0 {
-      try visitor.visitSingularDoubleField(value: self.limit, fieldNumber: 3)
-    }
-    if self.capacity.bitPattern != 0 {
-      try visitor.visitSingularDoubleField(value: self.capacity, fieldNumber: 4)
-    }
+    try { if let v = self._requested {
+      try visitor.visitSingularDoubleField(value: v, fieldNumber: 2)
+    } }()
+    try { if let v = self._limit {
+      try visitor.visitSingularDoubleField(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._capacity {
+      try visitor.visitSingularDoubleField(value: v, fieldNumber: 4)
+    } }()
     if !self.unit.isEmpty {
       try visitor.visitSingularStringField(value: self.unit, fieldNumber: 5)
     }
@@ -1060,9 +1127,9 @@ extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
   public static func ==(lhs: Kmgr_V1_ResourceUsageValue, rhs: Kmgr_V1_ResourceUsageValue) -> Bool {
     if lhs.used != rhs.used {return false}
-    if lhs.requested != rhs.requested {return false}
-    if lhs.limit != rhs.limit {return false}
-    if lhs.capacity != rhs.capacity {return false}
+    if lhs._requested != rhs._requested {return false}
+    if lhs._limit != rhs._limit {return false}
+    if lhs._capacity != rhs._capacity {return false}
     if lhs.unit != rhs.unit {return false}
     if lhs.resourceName != rhs.resourceName {return false}
     if lhs.measuredAtUnixMs != rhs.measuredAtUnixMs {return false}
@@ -1074,9 +1141,49 @@ extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._Mess
   }
 }
 
+extension Kmgr_V1_KubernetesQuantityValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".KubernetesQuantityValue"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}exact\0\u{3}sort_value\0\u{1}display\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.exact) }()
+      case 2: try { try decoder.decodeSingularDoubleField(value: &self.sortValue) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.display) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.exact.isEmpty {
+      try visitor.visitSingularStringField(value: self.exact, fieldNumber: 1)
+    }
+    if self.sortValue.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.sortValue, fieldNumber: 2)
+    }
+    if !self.display.isEmpty {
+      try visitor.visitSingularStringField(value: self.display, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_KubernetesQuantityValue, rhs: Kmgr_V1_KubernetesQuantityValue) -> Bool {
+    if lhs.exact != rhs.exact {return false}
+    if lhs.sortValue != rhs.sortValue {return false}
+    if lhs.display != rhs.display {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Kmgr_V1_Cell: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Cell"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}column_id\0\u{3}display_text\0\u{3}string_value\0\u{3}number_value\0\u{3}timestamp_unix_ms\0\u{1}usage\0\u{1}tooltip\0\u{1}severity\0\u{3}bool_value\0\u{3}opaque_sort_value\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}column_id\0\u{3}display_text\0\u{3}string_value\0\u{3}number_value\0\u{3}timestamp_unix_ms\0\u{1}usage\0\u{1}tooltip\0\u{1}severity\0\u{3}bool_value\0\u{3}opaque_sort_value\0\u{3}integer_value\0\u{3}quantity_value\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1141,6 +1248,27 @@ extension Kmgr_V1_Cell: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementat
           self.typedValue = .opaqueSortValue(v)
         }
       }()
+      case 11: try {
+        var v: Int64?
+        try decoder.decodeSingularInt64Field(value: &v)
+        if let v = v {
+          if self.typedValue != nil {try decoder.handleConflictingOneOf()}
+          self.typedValue = .integerValue(v)
+        }
+      }()
+      case 12: try {
+        var v: Kmgr_V1_KubernetesQuantityValue?
+        var hadOneofValue = false
+        if let current = self.typedValue {
+          hadOneofValue = true
+          if case .quantityValue(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.typedValue = .quantityValue(v)
+        }
+      }()
       default: break
       }
     }
@@ -1190,6 +1318,14 @@ extension Kmgr_V1_Cell: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementat
     case .opaqueSortValue?: try {
       guard case .opaqueSortValue(let v)? = self.typedValue else { preconditionFailure() }
       try visitor.visitSingularBytesField(value: v, fieldNumber: 10)
+    }()
+    case .integerValue?: try {
+      guard case .integerValue(let v)? = self.typedValue else { preconditionFailure() }
+      try visitor.visitSingularInt64Field(value: v, fieldNumber: 11)
+    }()
+    case .quantityValue?: try {
+      guard case .quantityValue(let v)? = self.typedValue else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
     }()
     default: break
     }
