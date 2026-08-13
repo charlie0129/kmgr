@@ -74,6 +74,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         )
         window.title = "\(session.contextName) — \(Product.applicationName)"
         window.subtitle = session.serverHostname
+        window.toolbarStyle = .unified
         window.minSize = NSSize(width: 820, height: 520)
         window.tabbingMode = .disallowed
         window.center()
@@ -543,11 +544,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
+        [.sidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
+        [.sidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
     }
 
     func toolbar(
@@ -556,10 +557,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
         switch itemIdentifier {
-        case .toggleSidebar:
+        case .sidebar:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Sidebar"
             item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle Sidebar")
+            item.isNavigational = true
             item.target = self
             item.action = #selector(toggleWorkspaceSidebar)
             return item
@@ -570,6 +572,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 systemSymbolName: itemIdentifier == .back ? "chevron.left" : "chevron.right",
                 accessibilityDescription: item.label
             )
+            item.isNavigational = true
             item.target = self
             item.action = itemIdentifier == .back ? #selector(goBack) : #selector(goForward)
             return item
@@ -579,6 +582,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             let button = NSButton(title: session.contextName, target: self, action: #selector(showClusterDetails))
             button.bezelStyle = .texturedRounded
             button.toolTip = "\(session.clusterName) · \(session.serverHostname)"
+            item.isNavigational = true
             item.view = button
             return item
         case .namespace:
@@ -589,6 +593,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             namespaceControl.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Namespace"
+            item.isNavigational = true
             item.view = namespaceControl
             return item
         case .palette:
@@ -608,6 +613,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         case .forwards:
             forwardsButton.bezelStyle = .texturedRounded
             forwardsButton.image = NSImage(systemSymbolName: "arrow.left.arrow.right", accessibilityDescription: nil)
+            forwardsButton.imagePosition = .imageLeading
+            forwardsButton.imageHugsTitle = true
             forwardsButton.target = self
             forwardsButton.action = #selector(showPortForwards)
             forwardsButton.setAccessibilityLabel("Open app-wide Port Forwards")
@@ -921,6 +928,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 }
 
 private extension NSToolbarItem.Identifier {
+    static let sidebar = Self("workspace.sidebar")
     static let back = Self("workspace.back")
     static let forward = Self("workspace.forward")
     static let cluster = Self("workspace.cluster")
