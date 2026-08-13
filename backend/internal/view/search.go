@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -90,22 +91,37 @@ func (r *Runtime) Search(
 			result := makeSearchResult(query.SessionID, query.Resource, value, 10_000, false)
 			return emit(SearchBatch{Results: []*kmgrv1.SearchResult{result}, Examined: 1, Complete: true, UsedDirectGet: true})
 		}
-		if getErr != nil {
+		// A bare query can be both a possible exact identity and a prefix or
+		// substring search. NotFound disproves only the exact interpretation, so
+		// continue through compatible caches and the scoped paginated LIST.
+		if getErr != nil && !apierrors.IsNotFound(getErr) {
 			return getErr
 		}
 	}
 
 	r.mu.Lock()
-	var cachedObjects []*unstructured.Unstructured
+	var cachedEntries []*resourceRuntime
 	for key, entry := range r.resources {
 		if compatibleSearchKey(keyPrefix, key) {
-			cachedObjects = append(cachedObjects, entry.store.Snapshot()...)
+			cachedEntries = append(cachedEntries, entry)
 		}
 	}
 	r.mu.Unlock()
-	if len(cachedObjects) != 0 {
-		results := rankSearchObjects(query, cachedObjects, limit, true)
-		if err := emit(SearchBatch{Results: results, Examined: uint64(len(cachedObjects)), Complete: !query.AllowPaginatedList}); err != nil {
+	cachedResults := newBoundedSearchResults(limit)
+	var examined uint64
+	for _, entry := range cachedEntries {
+		for _, value := range entry.store.Snapshot() {
+			examined++
+			if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
+				continue
+			}
+			if rank, match := searchRank(query.Query, value.GetNamespace(), value.GetName()); match {
+				cachedResults.Add(makeSearchResult(query.SessionID, query.Resource, value, rank, true))
+			}
+		}
+	}
+	if examined != 0 {
+		if err := emit(SearchBatch{Results: cachedResults.Sorted(), Examined: examined, Complete: !query.AllowPaginatedList}); err != nil {
 			return err
 		}
 		if !query.AllowPaginatedList {
@@ -117,8 +133,7 @@ func (r *Runtime) Search(
 	}
 
 	options := metav1.ListOptions{Limit: DefaultSearchPageSize}
-	seen := make(map[string]*kmgrv1.SearchResult)
-	var examined uint64
+	seen := newBoundedSearchResults(limit)
 	for {
 		list, err := client.List(ctx, options)
 		if err != nil {
@@ -131,10 +146,10 @@ func (r *Runtime) Search(
 				continue
 			}
 			if rank, match := searchRank(query.Query, value.GetNamespace(), value.GetName()); match {
-				seen[string(value.GetUID())] = makeSearchResult(query.SessionID, query.Resource, value, rank, false)
+				seen.Add(makeSearchResult(query.SessionID, query.Resource, value, rank, false))
 			}
 		}
-		results := sortedSearchResults(seen, limit)
+		results := seen.Sorted()
 		complete := list.GetContinue() == ""
 		if err := emit(SearchBatch{Results: results, Examined: examined, Complete: complete, Reusable: complete}); err != nil {
 			return err
@@ -174,6 +189,12 @@ func searchServerNamespace(resource ResourceType, scope NamespaceScope) string {
 func exactSearchIdentity(query string, resource ResourceType, scope NamespaceScope) (namespace, name string, ok bool) {
 	if resource.Namespaced {
 		if before, after, found := strings.Cut(query, "/"); found && before != "" && after != "" && !strings.Contains(after, "/") {
+			// Do not probe a namespace outside the captured palette scope. Besides
+			// avoiding needless traffic, this prevents a scoped search from leaking
+			// whether an object exists elsewhere.
+			if !includesSearchNamespace(before, resource, scope) {
+				return "", "", false
+			}
 			return before, after, true
 		}
 		if !strings.Contains(query, "/") && !scope.All && len(scope.Namespaces) == 1 {
@@ -198,16 +219,16 @@ func includesSearchNamespace(namespace string, resource ResourceType, scope Name
 }
 
 func rankSearchObjects(query SearchQuery, objects []*unstructured.Unstructured, limit int, stale bool) []*kmgrv1.SearchResult {
-	seen := make(map[string]*kmgrv1.SearchResult)
+	seen := newBoundedSearchResults(limit)
 	for _, value := range objects {
 		if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
 			continue
 		}
 		if rank, match := searchRank(query.Query, value.GetNamespace(), value.GetName()); match {
-			seen[string(value.GetUID())] = makeSearchResult(query.SessionID, query.Resource, value, rank, stale)
+			seen.Add(makeSearchResult(query.SessionID, query.Resource, value, rank, stale))
 		}
 	}
-	return sortedSearchResults(seen, limit)
+	return seen.Sorted()
 }
 
 func searchRank(query, namespace, name string) (float64, bool) {
@@ -258,17 +279,52 @@ func sortedSearchResults(values map[string]*kmgrv1.SearchResult, limit int) []*k
 	for _, value := range values {
 		result = append(result, value)
 	}
-	slices.SortFunc(result, func(left, right *kmgrv1.SearchResult) int {
-		if result := cmp.Compare(right.GetRank(), left.GetRank()); result != 0 {
-			return result
-		}
-		if result := cmp.Compare(left.GetIdentity().GetNamespace(), right.GetIdentity().GetNamespace()); result != 0 {
-			return result
-		}
-		if result := cmp.Compare(left.GetIdentity().GetName(), right.GetIdentity().GetName()); result != 0 {
-			return result
-		}
-		return cmp.Compare(left.GetIdentity().GetUid(), right.GetIdentity().GetUid())
-	})
+	slices.SortFunc(result, compareSearchResults)
 	return result[:min(limit, len(result))]
+}
+
+// boundedSearchResults retains only the best resultLimit candidates. A partial
+// palette search may match every object in a very large resource, so retaining
+// all matches until the final page would defeat the bounded result contract.
+type boundedSearchResults struct {
+	limit  int
+	values map[string]*kmgrv1.SearchResult
+}
+
+func newBoundedSearchResults(limit int) *boundedSearchResults {
+	return &boundedSearchResults{limit: limit, values: make(map[string]*kmgrv1.SearchResult, limit)}
+}
+
+func (r *boundedSearchResults) Add(value *kmgrv1.SearchResult) {
+	uid := value.GetIdentity().GetUid()
+	r.values[uid] = value
+	if len(r.values) <= r.limit {
+		return
+	}
+	var worstUID string
+	var worst *kmgrv1.SearchResult
+	for candidateUID, candidate := range r.values {
+		if worst == nil || compareSearchResults(candidate, worst) > 0 {
+			worstUID = candidateUID
+			worst = candidate
+		}
+	}
+	delete(r.values, worstUID)
+}
+
+func (r *boundedSearchResults) Sorted() []*kmgrv1.SearchResult {
+	return sortedSearchResults(r.values, r.limit)
+}
+
+func compareSearchResults(left, right *kmgrv1.SearchResult) int {
+	if result := cmp.Compare(right.GetRank(), left.GetRank()); result != 0 {
+		return result
+	}
+	if result := cmp.Compare(left.GetIdentity().GetNamespace(), right.GetIdentity().GetNamespace()); result != 0 {
+		return result
+	}
+	if result := cmp.Compare(left.GetIdentity().GetName(), right.GetIdentity().GetName()); result != 0 {
+		return result
+	}
+	return cmp.Compare(left.GetIdentity().GetUid(), right.GetIdentity().GetUid())
 }

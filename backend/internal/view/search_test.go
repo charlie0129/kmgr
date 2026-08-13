@@ -3,14 +3,17 @@ package view
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
@@ -130,6 +133,255 @@ func TestExactSearchUsesDirectGet(t *testing.T) {
 	}
 }
 
+func TestNamespacedPartialSearchFallsBackAfterExactGetNotFound(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv", "", pod("worker", "team", "api-worker", "Running", 0, nil, time.Time{})),
+	}
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	var final SearchBatch
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID: "session", Resource: ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"team"}}, Query: "api", AllowPaginatedList: true,
+	}, func(batch SearchBatch) error {
+		final = batch
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.getCalls.Load() != 1 || client.listCalls.Load() != 1 || client.watchCalls.Load() != 0 {
+		t.Fatalf("calls = GET %d LIST %d WATCH %d", client.getCalls.Load(), client.listCalls.Load(), client.watchCalls.Load())
+	}
+	if !final.Complete || final.UsedDirectGet || len(final.Results) != 1 || final.Results[0].GetIdentity().GetName() != "api-worker" {
+		t.Fatalf("fallback result = %#v", final)
+	}
+}
+
+func TestClusterScopedPartialSearchFallsBackAfterExactGetNotFound(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv", "", pod("worker", "", "worker-a", "Running", 0, nil, time.Time{})),
+	}
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	var final SearchBatch
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID: "session", Resource: ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
+		NamespaceScope: NamespaceScope{All: true}, Query: "work", AllowPaginatedList: true,
+	}, func(batch SearchBatch) error {
+		final = batch
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.getCalls.Load() != 1 || client.listCalls.Load() != 1 || client.watchCalls.Load() != 0 {
+		t.Fatalf("calls = GET %d LIST %d WATCH %d", client.getCalls.Load(), client.listCalls.Load(), client.watchCalls.Load())
+	}
+	if !final.Complete || final.UsedDirectGet || len(final.Results) != 1 || final.Results[0].GetIdentity().GetName() != "worker-a" {
+		t.Fatalf("fallback result = %#v", final)
+	}
+}
+
+func TestExactSearchDoesNotHideNonNotFoundErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		err   error
+		check func(error) bool
+	}{
+		{
+			name: "forbidden",
+			err: apierrors.NewForbidden(
+				schema.GroupResource{Resource: "pods"}, "api", errors.New("denied"),
+			),
+			check: apierrors.IsForbidden,
+		},
+		{name: "transport", err: errors.New("connection failed"), check: func(err error) bool {
+			return err != nil && err.Error() == "connection failed"
+		}},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			client := newSearchClient()
+			client.getErr = test.err
+			client.pages = []*unstructured.UnstructuredList{
+				listPage("rv", "", pod("would-match", "team", "api-worker", "Running", 0, nil, time.Time{})),
+			}
+			runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			err = runtime.Search(context.Background(), SearchQuery{
+				SessionID: "session", Resource: ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+				NamespaceScope: NamespaceScope{Namespaces: []string{"team"}}, Query: "api", AllowPaginatedList: true,
+			}, func(SearchBatch) error { return nil })
+			if !test.check(err) {
+				t.Fatalf("Search error = %v", err)
+			}
+			if client.getCalls.Load() != 1 || client.listCalls.Load() != 0 || client.watchCalls.Load() != 0 {
+				t.Fatalf("calls = GET %d LIST %d WATCH %d", client.getCalls.Load(), client.listCalls.Load(), client.watchCalls.Load())
+			}
+		})
+	}
+}
+
+func TestExactSearchRejectsNamespaceOutsideScopeBeforeGet(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv", "", pod("allowed", "allowed", "api", "Running", 0, nil, time.Time{})),
+	}
+	source := &namespaceRecordingSearchSource{authority: "cluster", client: client}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	var final SearchBatch
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID: "session", Resource: ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"allowed"}}, Query: "other/api", AllowPaginatedList: true,
+	}, func(batch SearchBatch) error {
+		final = batch
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.getCalls.Load() != 0 || client.listCalls.Load() != 1 {
+		t.Fatalf("calls = GET %d LIST %d", client.getCalls.Load(), client.listCalls.Load())
+	}
+	if got := source.openedNamespaces(); !slices.Equal(got, []string{"allowed"}) {
+		t.Fatalf("opened namespaces = %v", got)
+	}
+	if !final.Complete || len(final.Results) != 0 {
+		t.Fatalf("out-of-scope result = %#v", final)
+	}
+}
+
+func TestSearchProgressRemainsMonotonicAcrossCacheAndList(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage(
+		"cached-rv", "",
+		pod("cached-a", "ns", "api-cached-a", "Running", 0, nil, time.Time{}),
+		pod("cached-b", "ns", "api-cached-b", "Running", 0, nil, time.Time{}),
+	)}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster", client: client},
+		ReleaseDelay: 5 * time.Millisecond, PipelineTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, subscription, "cached-a")
+	subscription.Close()
+	eventually(t, time.Second, func() bool { return client.lastWatchStopped() })
+
+	client.setPages(
+		listPage("list-rv", "next", pod("listed-a", "ns", "api-listed-a", "Running", 0, nil, time.Time{})),
+		listPage("list-rv", "", pod("listed-b", "ns", "api-listed-b", "Running", 0, nil, time.Time{})),
+	)
+	var progress []uint64
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID: "session", Resource: ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{All: true}, Query: "api", AllowPaginatedList: true,
+	}, func(batch SearchBatch) error {
+		progress = append(progress, batch.Examined)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(progress, []uint64{2, 3, 4}) {
+		t.Fatalf("progress = %v", progress)
+	}
+}
+
+func TestBoundedSearchResultsRetainsOnlyBestLimit(t *testing.T) {
+	t.Parallel()
+	const limit = 7
+	retained := newBoundedSearchResults(limit)
+	resource := ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true}
+	for index := range 10_000 {
+		value := pod(fmt.Sprintf("uid-%05d", index), "team", fmt.Sprintf("api-%05d", index), "Running", 0, nil, time.Time{})
+		retained.Add(makeSearchResult("session", resource, value, float64(index), false))
+		if len(retained.values) > limit {
+			t.Fatalf("retained %d candidates after item %d", len(retained.values), index)
+		}
+	}
+	results := retained.Sorted()
+	if len(results) != limit || results[0].GetRank() != 9_999 || results[limit-1].GetRank() != 9_993 {
+		t.Fatalf("bounded results = %#v", results)
+	}
+}
+
+func TestPaginatedSearchNeverEmitsMoreThanResultLimit(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	pages := make([]*unstructured.UnstructuredList, 0, 4)
+	for pageIndex := range 4 {
+		objects := make([]*unstructured.Unstructured, 0, 75)
+		for index := range 75 {
+			ordinal := pageIndex*75 + index
+			objects = append(objects, pod(
+				fmt.Sprintf("uid-%03d", ordinal), "team", fmt.Sprintf("api-%03d", 299-ordinal),
+				"Running", 0, nil, time.Time{},
+			))
+		}
+		continuation := ""
+		if pageIndex < 3 {
+			continuation = fmt.Sprintf("page-%d", pageIndex+1)
+		}
+		pages = append(pages, listPage("rv", continuation, objects...))
+	}
+	client.pages = pages
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	var final SearchBatch
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID: "session", Resource: ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{All: true}, Query: "api", ResultLimit: 5, AllowPaginatedList: true,
+	}, func(batch SearchBatch) error {
+		if len(batch.Results) > 5 {
+			t.Fatalf("emitted %d results", len(batch.Results))
+		}
+		final = batch
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !final.Complete || len(final.Results) != 5 || final.Examined != 300 {
+		t.Fatalf("final bounded batch = %#v", final)
+	}
+}
+
 func TestPaginatedSearchCancellation(t *testing.T) {
 	t.Parallel()
 	client := newSearchClient()
@@ -163,9 +415,11 @@ type searchClient struct {
 	pages          []*unstructured.UnstructuredList
 	pageIndex      int
 	getObjects     map[string]*unstructured.Unstructured
+	getErr         error
 	secondPageGate chan struct{}
 	watches        []*controllableWatch
 	listCalls      atomic.Int64
+	getCalls       atomic.Int64
 	watchCalls     atomic.Int64
 }
 
@@ -207,12 +461,23 @@ func (c *searchClient) Watch(context.Context, metav1.ListOptions) (watch.Interfa
 }
 
 func (c *searchClient) Get(_ context.Context, name string, _ metav1.GetOptions, _ ...string) (*unstructured.Unstructured, error) {
+	c.getCalls.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.getErr != nil {
+		return nil, c.getErr
+	}
 	if value := c.getObjects[name]; value != nil {
 		return value.DeepCopy(), nil
 	}
-	return nil, errors.New("not found")
+	return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "objects"}, name)
+}
+
+func (c *searchClient) setPages(pages ...*unstructured.UnstructuredList) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pages = pages
+	c.pageIndex = 0
 }
 
 func (c *searchClient) lastWatchStopped() bool {
@@ -222,3 +487,27 @@ func (c *searchClient) lastWatchStopped() bool {
 }
 
 var _ watcher.ListerWatcher = (*searchClient)(nil)
+
+type namespaceRecordingSearchSource struct {
+	mu         sync.Mutex
+	authority  string
+	client     watcher.ListerWatcher
+	namespaces []string
+}
+
+func (s *namespaceRecordingSearchSource) OpenResource(
+	_ string,
+	_ schema.GroupVersionResource,
+	namespace string,
+) (string, watcher.ListerWatcher, error) {
+	s.mu.Lock()
+	s.namespaces = append(s.namespaces, namespace)
+	s.mu.Unlock()
+	return s.authority, s.client, nil
+}
+
+func (s *namespaceRecordingSearchSource) openedNamespaces() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.namespaces)
+}
