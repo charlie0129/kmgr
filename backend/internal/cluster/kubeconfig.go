@@ -48,6 +48,7 @@ type ContextInfo struct {
 	ClusterName                string
 	ServerHostname             string
 	DefaultNamespace           string
+	AuthenticationHint         string
 	SourcePath                 string
 	ContextSourcePath          string
 	ClusterSourcePath          string
@@ -99,6 +100,31 @@ func (e *UnsupportedAuthenticationError) Error() string {
 // path-list whose earlier entries win, otherwise ~/.kube/config is used.
 func Discover() (*Catalog, error) {
 	return DiscoverWithRules(clientcmd.NewDefaultClientConfigLoadingRules())
+}
+
+// DiscoverPaths loads an explicitly supplied kubeconfig precedence list using
+// the same merge behavior as KUBECONFIG. An empty list uses the normal ambient
+// kubeconfig loading rules.
+func DiscoverPaths(paths []string) (*Catalog, error) {
+	if len(paths) == 0 {
+		return Discover()
+	}
+
+	precedence := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			return nil, errors.New("kubeconfig path must not be empty")
+		}
+		precedence = append(precedence, filepath.Clean(path))
+	}
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	rules.ExplicitPath = ""
+	rules.Precedence = precedence
+	// Explicit paths supplied by the app are already the complete precedence
+	// list. Do not run client-go's legacy home-directory migration rules.
+	rules.MigrationRules = nil
+	rules.WarnIfAllMissing = false
+	return DiscoverWithRules(rules)
 }
 
 // DiscoverWithRules is useful to embed discovery in callers with an explicit
@@ -267,6 +293,7 @@ func buildContextInfo(config *clientcmdapi.Config, byID map[string]string) []Con
 			ClusterName:                contextConfig.Cluster,
 			ServerHostname:             serverHostname(server),
 			DefaultNamespace:           namespace,
+			AuthenticationHint:         authenticationHint(authInfo),
 			SourcePath:                 firstNonEmpty(contextSource, clusterSource, authSource),
 			ContextSourcePath:          contextSource,
 			ClusterSourcePath:          clusterSource,
@@ -340,6 +367,35 @@ func unsupportedAuthentication(authInfo *clientcmdapi.AuthInfo) []UnsupportedAut
 		mechanisms = append(mechanisms, UnsupportedAuthProvider)
 	}
 	return mechanisms
+}
+
+func authenticationHint(authInfo *clientcmdapi.AuthInfo) string {
+	if authInfo == nil {
+		return "No credentials"
+	}
+	mechanisms := unsupportedAuthentication(authInfo)
+	if len(mechanisms) != 0 {
+		names := make([]string, len(mechanisms))
+		for index, mechanism := range mechanisms {
+			names[index] = string(mechanism)
+		}
+		return "Unsupported: " + strings.Join(names, ", ")
+	}
+
+	var methods []string
+	if authInfo.ClientCertificate != "" || len(authInfo.ClientCertificateData) != 0 {
+		methods = append(methods, "Client certificate")
+	}
+	if authInfo.Token != "" || authInfo.TokenFile != "" {
+		methods = append(methods, "Bearer token")
+	}
+	if authInfo.Username != "" || authInfo.Password != "" {
+		methods = append(methods, "Username/password")
+	}
+	if len(methods) == 0 {
+		return "No credentials"
+	}
+	return strings.Join(methods, " + ")
 }
 
 func stableID(kind string, values ...string) string {

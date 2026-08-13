@@ -330,6 +330,46 @@ contexts: []
 	}
 }
 
+func TestDiscoverPathsUsesExplicitMergeOrder(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	first := filepath.Join(directory, "first")
+	second := filepath.Join(directory, "second")
+	writeFile(t, first, `
+apiVersion: v1
+kind: Config
+clusters:
+- name: target
+  cluster: {server: https://first.example.test}
+contexts:
+- name: first
+  context: {cluster: target}
+`)
+	writeFile(t, second, `
+apiVersion: v1
+kind: Config
+clusters:
+- name: target
+  cluster: {server: https://ignored.example.test}
+- name: other
+  cluster: {server: https://second.example.test}
+contexts:
+- name: second
+  context: {cluster: other}
+`)
+	catalog, err := DiscoverPaths([]string{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := contextNames(catalog.Contexts()); !reflect.DeepEqual(names, []string{"first", "second"}) {
+		t.Fatalf("context names = %v", names)
+	}
+	info, ok := catalog.Context("first")
+	if !ok || info.ServerHostname != "first.example.test" {
+		t.Fatalf("first-precedence context = %#v", info)
+	}
+}
+
 func discoverExplicit(t *testing.T, path string) *Catalog {
 	t.Helper()
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
