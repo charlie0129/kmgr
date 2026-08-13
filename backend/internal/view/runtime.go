@@ -29,12 +29,15 @@ import (
 )
 
 const (
-	DefaultViewReleaseDelay = 3 * time.Second
-	DefaultViewBatchDelay   = 35 * time.Millisecond
-	DefaultSnapshotChunk    = 500
-	DefaultPendingRowLimit  = 4096
-	DefaultWarmViewLimit    = 24
-	DefaultWarmObjectLimit  = 250_000
+	DefaultViewReleaseDelay          = 3 * time.Second
+	DefaultViewBatchDelay            = 35 * time.Millisecond
+	DefaultSnapshotChunk             = 500
+	DefaultPendingRowLimit           = 4096
+	DefaultWarmViewLimit             = 24
+	DefaultWarmObjectLimit           = 250_000
+	DefaultSearchSnapshotLimit       = 4
+	DefaultSearchSnapshotObjectLimit = 250_000
+	DefaultSearchSnapshotTTL         = 30 * time.Second
 )
 
 var (
@@ -112,17 +115,20 @@ func pointerIdentity(value any) string {
 }
 
 type RuntimeConfig struct {
-	Source            ResourceSource
-	Metrics           MetricSource
-	Columns           ColumnProgramResolver
-	ReleaseDelay      time.Duration
-	BatchDelay        time.Duration
-	SnapshotChunkSize int
-	PendingRowLimit   int
-	WarmViewLimit     int
-	WarmObjectLimit   int
-	PipelinePageSize  int64
-	PipelineTimeout   time.Duration
+	Source                    ResourceSource
+	Metrics                   MetricSource
+	Columns                   ColumnProgramResolver
+	ReleaseDelay              time.Duration
+	BatchDelay                time.Duration
+	SnapshotChunkSize         int
+	PendingRowLimit           int
+	WarmViewLimit             int
+	WarmObjectLimit           int
+	PipelinePageSize          int64
+	PipelineTimeout           time.Duration
+	SearchSnapshotLimit       int
+	SearchSnapshotObjectLimit int
+	SearchSnapshotTTL         time.Duration
 }
 
 // ColumnProgramResolver resolves programs once per opened view. Projection
@@ -161,6 +167,13 @@ type Runtime struct {
 	views     map[viewKey]*Subscription
 	warm      *watcher.WarmCache[resourceKey, *resourceRuntime]
 
+	searchSnapshots           map[searchSnapshotKey]*completedSearchSnapshot
+	searchSnapshotLimit       int
+	searchSnapshotObjects     int
+	searchSnapshotObjectLimit int
+	searchSnapshotTTL         time.Duration
+	searchSnapshotSequence    uint64
+
 	nodeAccounting         map[nodeAccountingKey]*nodeAccountingWork
 	nodeAccountingRevision uint64
 	nodeAccountingComputer nodeAccountingComputer
@@ -198,6 +211,27 @@ type resourceKey struct {
 	namespace   string
 	labels      string
 	fields      string
+}
+
+// searchSnapshotKey is deliberately stricter than resourceKey. A namespaced
+// view whose client is cluster-scoped still has a logical namespace scope, so
+// two multi-namespace views must not exchange snapshots merely because both
+// clients LIST with namespace="".
+type searchSnapshotKey struct {
+	resource       resourceKey
+	namespaceScope string
+}
+
+// completedSearchSnapshot is a short-lived, single-consumer handoff from a
+// command-palette LIST to a subsequently opened resource view. Once consumed,
+// the normal resourceRuntime owns the store and its LIST/WATCH lifetime.
+type completedSearchSnapshot struct {
+	store           *store.UIDStore
+	objectCount     int
+	completedAt     time.Time
+	sequence        uint64
+	expiresAt       time.Time
+	expirationTimer *time.Timer
 }
 
 type resourceRuntime struct {
@@ -257,7 +291,8 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if config.Source == nil {
 		return nil, errors.New("resource source must not be nil")
 	}
-	if config.ReleaseDelay < 0 || config.BatchDelay < 0 || config.PipelinePageSize < 0 || config.PipelineTimeout < 0 {
+	if config.ReleaseDelay < 0 || config.BatchDelay < 0 || config.PipelinePageSize < 0 || config.PipelineTimeout < 0 ||
+		config.SearchSnapshotLimit < 0 || config.SearchSnapshotObjectLimit < 0 || config.SearchSnapshotTTL < 0 {
 		return nil, errors.New("view runtime durations and page size must not be negative")
 	}
 	releaseDelay := config.ReleaseDelay
@@ -287,21 +322,40 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if chunkSize <= 0 || pendingLimit <= 0 || warmViews <= 0 || warmObjects <= 0 {
 		return nil, errors.New("view runtime limits must be positive")
 	}
+	searchSnapshotLimit := config.SearchSnapshotLimit
+	if searchSnapshotLimit == 0 {
+		searchSnapshotLimit = DefaultSearchSnapshotLimit
+	}
+	searchSnapshotObjectLimit := config.SearchSnapshotObjectLimit
+	if searchSnapshotObjectLimit == 0 {
+		searchSnapshotObjectLimit = DefaultSearchSnapshotObjectLimit
+	}
+	searchSnapshotTTL := config.SearchSnapshotTTL
+	if searchSnapshotTTL == 0 {
+		searchSnapshotTTL = DefaultSearchSnapshotTTL
+	}
+	if searchSnapshotLimit <= 0 || searchSnapshotObjectLimit <= 0 {
+		return nil, errors.New("search snapshot limits must be positive")
+	}
 	return &Runtime{
-		source:                 config.Source,
-		metrics:                config.Metrics,
-		columns:                config.Columns,
-		releaseDelay:           releaseDelay,
-		batchDelay:             batchDelay,
-		snapshotChunkSize:      chunkSize,
-		pendingRowLimit:        pendingLimit,
-		pageSize:               config.PipelinePageSize,
-		watchTimeout:           config.PipelineTimeout,
-		resources:              make(map[resourceKey]*resourceRuntime),
-		views:                  make(map[viewKey]*Subscription),
-		warm:                   watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects),
-		nodeAccounting:         make(map[nodeAccountingKey]*nodeAccountingWork),
-		nodeAccountingComputer: computeNodeAccounting,
+		source:                    config.Source,
+		metrics:                   config.Metrics,
+		columns:                   config.Columns,
+		releaseDelay:              releaseDelay,
+		batchDelay:                batchDelay,
+		snapshotChunkSize:         chunkSize,
+		pendingRowLimit:           pendingLimit,
+		pageSize:                  config.PipelinePageSize,
+		watchTimeout:              config.PipelineTimeout,
+		resources:                 make(map[resourceKey]*resourceRuntime),
+		views:                     make(map[viewKey]*Subscription),
+		warm:                      watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects),
+		searchSnapshots:           make(map[searchSnapshotKey]*completedSearchSnapshot),
+		searchSnapshotLimit:       searchSnapshotLimit,
+		searchSnapshotObjectLimit: searchSnapshotObjectLimit,
+		searchSnapshotTTL:         searchSnapshotTTL,
+		nodeAccounting:            make(map[nodeAccountingKey]*nodeAccountingWork),
+		nodeAccountingComputer:    computeNodeAccounting,
 	}, nil
 }
 
@@ -364,13 +418,33 @@ func (r *Runtime) Open(request *kmgrv1.OpenViewRequest) (*Subscription, error) {
 			entry = cached.Value
 		}
 	}
+	var searchSnapshot *completedSearchSnapshot
 	if entry == nil {
+		searchSnapshot = r.consumeSearchSnapshotLocked(searchSnapshotKey{
+			resource:       key,
+			namespaceScope: canonicalNamespaceScope(projector.spec.Resource, projector.spec.NamespaceScope),
+		})
+	}
+	if entry == nil {
+		entryStore := store.New()
+		if searchSnapshot != nil {
+			entryStore = searchSnapshot.store
+		}
 		entry = &resourceRuntime{
 			key:         key,
-			store:       store.New(),
+			store:       entryStore,
 			client:      client,
 			subscribers: make(map[*Subscription]struct{}),
 			dependents:  make(map[*Subscription]struct{}),
+		}
+		if searchSnapshot != nil {
+			entry.accountingReady = true
+			entry.lastStatus = watcher.Status{
+				Phase:            watcher.PhaseResuming,
+				Stale:            true,
+				ResourceVersion:  entryStore.ResourceVersion(),
+				LastSynchronized: searchSnapshot.completedAt,
+			}
 		}
 		r.resources[key] = entry
 	}
@@ -947,11 +1021,120 @@ func (r *Runtime) Close() {
 		entry.running = false
 		delete(r.resources, key)
 	}
+	for key, snapshot := range r.searchSnapshots {
+		r.removeSearchSnapshotLocked(key, snapshot)
+	}
 	clear(r.nodeAccounting)
 	r.mu.Unlock()
 	for _, subscription := range subscriptions {
 		subscription.close()
 	}
+}
+
+// installSearchSnapshot retains one completed, validated LIST for a short
+// handoff window. Entry and aggregate object budgets evict the oldest
+// snapshots first. It returns the installed identity so a failed final emit
+// can revoke exactly that snapshot without deleting a newer replacement.
+func (r *Runtime) installSearchSnapshot(
+	key searchSnapshotKey,
+	snapshotStore *store.UIDStore,
+) (*completedSearchSnapshot, bool) {
+	if snapshotStore == nil || snapshotStore.ResourceVersion() == "" {
+		return nil, false
+	}
+	objectCount := snapshotStore.Len()
+	if objectCount > r.searchSnapshotObjectLimit {
+		return nil, false
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil, false
+	}
+	if previous := r.searchSnapshots[key]; previous != nil {
+		r.removeSearchSnapshotLocked(key, previous)
+	}
+	now := time.Now()
+	r.searchSnapshotSequence++
+	snapshot := &completedSearchSnapshot{
+		store: snapshotStore, objectCount: objectCount, completedAt: now,
+		sequence: r.searchSnapshotSequence, expiresAt: now.Add(r.searchSnapshotTTL),
+	}
+	r.searchSnapshots[key] = snapshot
+	r.searchSnapshotObjects += objectCount
+	snapshot.expirationTimer = time.AfterFunc(r.searchSnapshotTTL, func() {
+		r.expireSearchSnapshot(key, snapshot)
+	})
+
+	for len(r.searchSnapshots) > r.searchSnapshotLimit ||
+		r.searchSnapshotObjects > r.searchSnapshotObjectLimit {
+		evictionKey, eviction := r.oldestSearchSnapshotLocked()
+		if eviction == nil {
+			break
+		}
+		r.removeSearchSnapshotLocked(evictionKey, eviction)
+	}
+	if r.searchSnapshots[key] != snapshot {
+		return nil, false
+	}
+	return snapshot, true
+}
+
+func (r *Runtime) consumeSearchSnapshotLocked(key searchSnapshotKey) *completedSearchSnapshot {
+	snapshot := r.searchSnapshots[key]
+	if snapshot == nil {
+		return nil
+	}
+	if !time.Now().Before(snapshot.expiresAt) {
+		r.removeSearchSnapshotLocked(key, snapshot)
+		return nil
+	}
+	r.removeSearchSnapshotLocked(key, snapshot)
+	return snapshot
+}
+
+func (r *Runtime) revokeSearchSnapshot(key searchSnapshotKey, snapshot *completedSearchSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.removeSearchSnapshotLocked(key, snapshot)
+}
+
+func (r *Runtime) expireSearchSnapshot(key searchSnapshotKey, snapshot *completedSearchSnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.removeSearchSnapshotLocked(key, snapshot)
+}
+
+func (r *Runtime) removeSearchSnapshotLocked(key searchSnapshotKey, expected *completedSearchSnapshot) {
+	current := r.searchSnapshots[key]
+	if current == nil || (expected != nil && current != expected) {
+		return
+	}
+	delete(r.searchSnapshots, key)
+	if current.expirationTimer != nil {
+		current.expirationTimer.Stop()
+		current.expirationTimer = nil
+	}
+	r.searchSnapshotObjects -= current.objectCount
+	if r.searchSnapshotObjects < 0 {
+		// Defensive only: every mutation is serialized under Runtime.mu.
+		r.searchSnapshotObjects = 0
+	}
+}
+
+func (r *Runtime) oldestSearchSnapshotLocked() (searchSnapshotKey, *completedSearchSnapshot) {
+	var oldestKey searchSnapshotKey
+	var oldest *completedSearchSnapshot
+	for key, snapshot := range r.searchSnapshots {
+		if oldest == nil || snapshot.sequence < oldest.sequence {
+			oldestKey, oldest = key, snapshot
+		}
+	}
+	return oldestKey, oldest
 }
 
 // ActiveResourceCount is exposed for lifecycle tests and redacted diagnostics.

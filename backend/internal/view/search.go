@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
@@ -197,6 +198,10 @@ func (r *Runtime) Search(
 		authorityID: authorityID, group: gvr.Group, version: gvr.Version,
 		resource: gvr.Resource, namespace: serverNamespace,
 	}
+	snapshotKey := searchSnapshotKey{
+		resource:       keyPrefix,
+		namespaceScope: canonicalNamespaceScope(query.Resource, query.NamespaceScope),
+	}
 
 	// Exact namespace/name can use one authoritative GET even if this kind has
 	// never been listed. It is never satisfied solely from stale cache.
@@ -260,14 +265,45 @@ func (r *Runtime) Search(
 
 	options := metav1.ListOptions{Limit: DefaultSearchPageSize}
 	seen := newBoundedSearchResults(limit)
+	snapshotStore := store.New()
+	seenContinueTokens := make(map[string]struct{})
+	var snapshotResourceVersion string
 	for {
 		list, err := client.List(ctx, options)
 		if err != nil {
 			return err
 		}
+		if list == nil {
+			return errors.New("search list returned nil page")
+		}
+		pageResourceVersion := list.GetResourceVersion()
+		if pageResourceVersion == "" {
+			return errors.New("search list page has no resourceVersion")
+		}
+		if snapshotResourceVersion == "" {
+			snapshotResourceVersion = pageResourceVersion
+		} else if pageResourceVersion != snapshotResourceVersion {
+			return fmt.Errorf(
+				"search paginated list resourceVersion changed from %q to %q",
+				snapshotResourceVersion, pageResourceVersion,
+			)
+		}
+		if snapshotStore != nil && len(list.Items) > r.searchSnapshotObjectLimit-snapshotStore.Len() {
+			// Abandon before inserting this page. This keeps retained data at or
+			// below the configured object bound even for a very large first page.
+			snapshotStore = nil
+		}
+		for index := range list.Items {
+			if list.Items[index].GetUID() == "" {
+				return fmt.Errorf("search list page item %d has no UID", index)
+			}
+		}
 		examined += uint64(len(list.Items))
 		for index := range list.Items {
 			value := &list.Items[index]
+			if snapshotStore != nil {
+				snapshotStore.Upsert(value)
+			}
 			if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
 				continue
 			}
@@ -276,14 +312,28 @@ func (r *Runtime) Search(
 			}
 		}
 		results := seen.Sorted()
-		complete := list.GetContinue() == ""
-		if err := emit(SearchBatch{Results: results, Examined: examined, Complete: complete, Reusable: complete}); err != nil {
+		continueToken := list.GetContinue()
+		complete := continueToken == ""
+		var installed *completedSearchSnapshot
+		reusable := false
+		if complete && snapshotStore != nil {
+			snapshotStore.SetResourceVersion(snapshotResourceVersion)
+			installed, reusable = r.installSearchSnapshot(snapshotKey, snapshotStore)
+		}
+		if err := emit(SearchBatch{Results: results, Examined: examined, Complete: complete, Reusable: reusable}); err != nil {
+			// The caller did not observe the reusable offer. Avoid retaining a
+			// hidden handoff that could unexpectedly seed a later view.
+			r.revokeSearchSnapshot(snapshotKey, installed)
 			return err
 		}
 		if complete {
 			return nil
 		}
-		options.Continue = list.GetContinue()
+		if _, duplicate := seenContinueTokens[continueToken]; duplicate {
+			return fmt.Errorf("search server repeated continue token %q", continueToken)
+		}
+		seenContinueTokens[continueToken] = struct{}{}
+		options.Continue = continueToken
 	}
 }
 
@@ -306,10 +356,43 @@ func compatibleSearchKey(prefix, value resourceKey) bool {
 }
 
 func searchServerNamespace(resource ResourceType, scope NamespaceScope) string {
-	if !resource.Namespaced || scope.All || len(scope.Namespaces) != 1 {
+	if !resource.Namespaced || scope.All || len(scope.Namespaces) > 1 {
 		return ""
 	}
+	if len(scope.Namespaces) == 0 {
+		return "default"
+	}
 	return scope.Namespaces[0]
+}
+
+// canonicalNamespaceScope captures logical scope independently from the
+// namespace used to construct the dynamic client. Sorting/deduplication makes
+// equivalent caller orderings reusable while keeping distinct multi-namespace
+// scopes isolated.
+func canonicalNamespaceScope(resource ResourceType, scope NamespaceScope) string {
+	if !resource.Namespaced {
+		return "cluster"
+	}
+	if scope.All {
+		return "all"
+	}
+	namespaces := make([]string, 0, len(scope.Namespaces))
+	seen := make(map[string]struct{}, len(scope.Namespaces))
+	for _, namespace := range scope.Namespaces {
+		if namespace == "" {
+			continue
+		}
+		if _, duplicate := seen[namespace]; duplicate {
+			continue
+		}
+		seen[namespace] = struct{}{}
+		namespaces = append(namespaces, namespace)
+	}
+	if len(namespaces) == 0 {
+		namespaces = append(namespaces, "default")
+	}
+	sort.Strings(namespaces)
+	return "namespaces:" + strings.Join(namespaces, "\x00")
 }
 
 func exactSearchIdentity(query string, resource ResourceType, scope NamespaceScope) (namespace, name string, ok bool) {

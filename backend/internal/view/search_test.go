@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -337,6 +338,538 @@ func TestPartialSearchUsesPaginatedListWithoutWatch(t *testing.T) {
 	}
 }
 
+func TestCompletedPaginatedSearchSeedsViewAndResumesWatch(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv-final", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+		listPage("rv-final", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+	}
+	source := &fakeResourceSource{authority: "cluster", client: client}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source, PipelineTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	var final SearchBatch
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID:      "palette-session",
+		Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"ns"}},
+		Query:          "api", AllowPaginatedList: true,
+	}, func(batch SearchBatch) error {
+		final = batch
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !final.Complete || !final.Reusable || client.listCalls.Load() != 2 || client.watchCalls.Load() != 0 {
+		t.Fatalf("search final=%#v LIST=%d WATCH=%d", final, client.listCalls.Load(), client.watchCalls.Load())
+	}
+
+	// A different workspace session may consume the handoff when its backend
+	// authority, GVR, namespace scope, and selectors are identical.
+	subscription, err := runtime.Open(openView("view-session", "pods", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	events, err := subscription.Next(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshotUIDs []string
+	for _, event := range events {
+		for _, row := range event.GetSnapshot().GetRows() {
+			snapshotUIDs = append(snapshotUIDs, row.GetIdentity().GetUid())
+		}
+	}
+	if !slices.Contains(snapshotUIDs, "one") || !slices.Contains(snapshotUIDs, "two") {
+		t.Fatalf("initial snapshot UIDs = %v", snapshotUIDs)
+	}
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	if client.listCalls.Load() != 2 {
+		t.Fatalf("view repeated LIST; calls = %d", client.listCalls.Load())
+	}
+	if got := client.lastWatchResourceVersion(); got != "rv-final" {
+		t.Fatalf("watch resourceVersion = %q, want rv-final", got)
+	}
+}
+
+func TestCompletedSearchSnapshotRequiresExactLogicalScopeAndSelectors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*kmgrv1.OpenViewRequest)
+	}{
+		{
+			name: "different multi-namespace scope",
+			mutate: func(request *kmgrv1.OpenViewRequest) {
+				request.Spec.NamespaceScope = &kmgrv1.NamespaceScope{Namespaces: []string{"a", "c"}}
+			},
+		},
+		{
+			name: "label selector",
+			mutate: func(request *kmgrv1.OpenViewRequest) {
+				request.Spec.NamespaceScope = &kmgrv1.NamespaceScope{Namespaces: []string{"b", "a"}}
+				request.Spec.LabelSelector = "app=api"
+			},
+		},
+		{
+			name: "field selector",
+			mutate: func(request *kmgrv1.OpenViewRequest) {
+				request.Spec.NamespaceScope = &kmgrv1.NamespaceScope{Namespaces: []string{"a", "b"}}
+				request.Spec.FieldSelector = "status.phase=Running"
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			client := newSearchClient()
+			client.pages = []*unstructured.UnstructuredList{listPage(
+				"search-rv", "", pod("one", "a", "api", "Running", 0, nil, time.Time{}),
+			)}
+			runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			err = runtime.Search(context.Background(), SearchQuery{
+				SessionID:      "session",
+				Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+				NamespaceScope: NamespaceScope{Namespaces: []string{"a", "b"}},
+				Query:          "api", AllowPaginatedList: true,
+			}, func(SearchBatch) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			client.setPages(listPage("view-rv", ""))
+			request := openView("session", "view", 1)
+			test.mutate(request)
+			subscription, err := runtime.Open(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer subscription.Close()
+			eventually(t, time.Second, func() bool { return client.listCalls.Load() == 2 })
+		})
+	}
+}
+
+func TestCompletedSearchSnapshotCanonicalizesNamespaceOrder(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage(
+		"search-rv", "", pod("one", "a", "api", "Running", 0, nil, time.Time{}),
+	)}
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID:      "session",
+		Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"b", "a", "a"}},
+		Query:          "api", AllowPaginatedList: true,
+	}, func(SearchBatch) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := openView("session", "view", 1)
+	request.Spec.NamespaceScope = &kmgrv1.NamespaceScope{Namespaces: []string{"a", "b"}}
+	subscription, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	waitForSnapshotUID(t, subscription, "one")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	if client.listCalls.Load() != 1 || client.lastWatchResourceVersion() != "search-rv" {
+		t.Fatalf("LIST=%d watch RV=%q", client.listCalls.Load(), client.lastWatchResourceVersion())
+	}
+}
+
+func TestCompletedSearchSnapshotRequiresExactAuthorityAndGVR(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		searchKey   searchSnapshotKey
+		request     *kmgrv1.OpenViewRequest
+		authorityID string
+	}{
+		{
+			name: "authority",
+			searchKey: searchSnapshotKey{resource: resourceKey{
+				authorityID: "other-cluster", version: "v1", resource: "pods", namespace: "ns",
+			}, namespaceScope: "namespaces:ns"},
+			request: openView("session", "view", 1), authorityID: "cluster",
+		},
+		{
+			name: "group",
+			searchKey: searchSnapshotKey{resource: resourceKey{
+				authorityID: "cluster", group: "example.io", version: "v1", resource: "pods", namespace: "ns",
+			}, namespaceScope: "namespaces:ns"},
+			request: openView("session", "view", 1), authorityID: "cluster",
+		},
+		{
+			name: "version",
+			searchKey: searchSnapshotKey{resource: resourceKey{
+				authorityID: "cluster", version: "v2", resource: "pods", namespace: "ns",
+			}, namespaceScope: "namespaces:ns"},
+			request: openView("session", "view", 1), authorityID: "cluster",
+		},
+		{
+			name: "resource",
+			searchKey: searchSnapshotKey{resource: resourceKey{
+				authorityID: "cluster", version: "v1", resource: "widgets", namespace: "ns",
+			}, namespaceScope: "namespaces:ns"},
+			request: openView("session", "view", 1), authorityID: "cluster",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			client := newSearchClient()
+			client.pages = []*unstructured.UnstructuredList{listPage("view-rv", "")}
+			runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: test.authorityID, client: client}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			candidate := store.New()
+			candidate.Upsert(pod("one", "ns", "api", "Running", 0, nil, time.Time{}))
+			candidate.SetResourceVersion("search-rv")
+			if _, retained := runtime.installSearchSnapshot(test.searchKey, candidate); !retained {
+				t.Fatal("mismatched snapshot was not retained for test")
+			}
+			subscription, err := runtime.Open(test.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer subscription.Close()
+			eventually(t, time.Second, func() bool { return client.listCalls.Load() == 1 })
+			if client.lastWatchResourceVersion() == "search-rv" {
+				t.Fatal("mismatched snapshot seeded view")
+			}
+		})
+	}
+}
+
+func TestEmptyNamespacedSearchScopeMatchesDefaultViewScope(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage(
+		"search-rv", "", pod("one", "default", "api", "Running", 0, nil, time.Time{}),
+	)}
+	source := &namespaceRecordingSearchSource{authority: "cluster", client: client}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID: "session",
+		Resource:  ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		Query:     "api", AllowPaginatedList: true,
+	}, func(SearchBatch) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := openView("session", "view", 1)
+	request.Spec.NamespaceScope = nil
+	subscription, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	waitForSnapshotUID(t, subscription, "one")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	if got := source.openedNamespaces(); !slices.Equal(got, []string{"default", "default"}) {
+		t.Fatalf("search/view server namespaces = %v", got)
+	}
+	if client.listCalls.Load() != 1 || client.lastWatchResourceVersion() != "search-rv" {
+		t.Fatalf("LIST=%d watch RV=%q", client.listCalls.Load(), client.lastWatchResourceVersion())
+	}
+}
+
+func TestOversizedSearchSnapshotIsAbandonedAndNotReusable(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv", "next",
+			pod("one", "ns", "api-one", "Running", 0, nil, time.Time{}),
+			pod("two", "ns", "api-two", "Running", 0, nil, time.Time{}),
+		),
+		listPage("rv", "", pod("three", "ns", "api-three", "Running", 0, nil, time.Time{})),
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client}, SearchSnapshotObjectLimit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	var final SearchBatch
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID:      "session",
+		Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"ns"}},
+		Query:          "api", AllowPaginatedList: true,
+	}, func(batch SearchBatch) error { final = batch; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Reusable || len(runtime.searchSnapshots) != 0 || runtime.searchSnapshotObjects != 0 {
+		t.Fatalf("oversized final=%#v snapshots=%d objects=%d", final, len(runtime.searchSnapshots), runtime.searchSnapshotObjects)
+	}
+	if len(final.Results) != 3 || final.Examined != 3 {
+		t.Fatalf("bounded search result was lost: %#v", final)
+	}
+}
+
+func TestExpiredSearchSnapshotFallsBackToList(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage(
+		"search-rv", "", pod("one", "ns", "api", "Running", 0, nil, time.Time{}),
+	)}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client}, SearchSnapshotTTL: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID:      "session",
+		Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"ns"}}, Query: "api", AllowPaginatedList: true,
+	}, func(SearchBatch) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		return len(runtime.searchSnapshots) == 0 && runtime.searchSnapshotObjects == 0
+	})
+	client.setPages(listPage("view-rv", ""))
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 2 })
+}
+
+func TestSearchSnapshotIsSingleUse(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage(
+		"search-rv", "", pod("one", "ns", "api", "Running", 0, nil, time.Time{}),
+	)}
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID:      "session",
+		Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"ns"}}, Query: "api", AllowPaginatedList: true,
+	}, func(SearchBatch) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := searchSnapshotKey{resource: resourceKey{
+		authorityID: "cluster", version: "v1", resource: "pods", namespace: "ns",
+	}, namespaceScope: canonicalNamespaceScope(
+		ResourceType{Version: "v1", Resource: "pods", Namespaced: true},
+		NamespaceScope{Namespaces: []string{"ns"}},
+	)}
+	runtime.mu.Lock()
+	first := runtime.consumeSearchSnapshotLocked(key)
+	second := runtime.consumeSearchSnapshotLocked(key)
+	objects := runtime.searchSnapshotObjects
+	runtime.mu.Unlock()
+	if first == nil || second != nil || objects != 0 || first.expirationTimer != nil {
+		t.Fatalf("single-use first=%p second=%p objects=%d timer=%v", first, second, objects, first.expirationTimer)
+	}
+}
+
+func TestSearchSnapshotBudgetsEvictOldest(t *testing.T) {
+	t.Parallel()
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:              &fakeResourceSource{authority: "cluster", client: newSearchClient()},
+		SearchSnapshotLimit: 2, SearchSnapshotObjectLimit: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	install := func(resource string, count int) (searchSnapshotKey, bool) {
+		key := searchSnapshotKey{resource: resourceKey{
+			authorityID: "cluster", version: "v1", resource: resource,
+		}, namespaceScope: "cluster"}
+		candidate := store.New()
+		for index := range count {
+			candidate.Upsert(pod(
+				fmt.Sprintf("%s-%d", resource, index), "", fmt.Sprintf("%s-%d", resource, index),
+				"Running", 0, nil, time.Time{},
+			))
+		}
+		candidate.SetResourceVersion("rv")
+		_, retained := runtime.installSearchSnapshot(key, candidate)
+		return key, retained
+	}
+	first, retained := install("first", 1)
+	if !retained {
+		t.Fatal("first snapshot was not retained")
+	}
+	second, retained := install("second", 1)
+	if !retained {
+		t.Fatal("second snapshot was not retained")
+	}
+	third, retained := install("third", 1)
+	if !retained {
+		t.Fatal("third snapshot was not retained")
+	}
+	runtime.mu.Lock()
+	if runtime.searchSnapshots[first] != nil || runtime.searchSnapshots[second] == nil ||
+		runtime.searchSnapshots[third] == nil || runtime.searchSnapshotObjects != 2 {
+		t.Fatalf("entry eviction snapshots=%v objects=%d", runtime.searchSnapshots, runtime.searchSnapshotObjects)
+	}
+	runtime.mu.Unlock()
+
+	fourth, retained := install("fourth", 2)
+	if !retained {
+		t.Fatal("new aggregate-budget snapshot was unexpectedly evicted")
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.searchSnapshots[second] != nil || runtime.searchSnapshots[third] == nil ||
+		runtime.searchSnapshots[fourth] == nil || runtime.searchSnapshotObjects != 3 {
+		t.Fatalf("object eviction snapshots=%v objects=%d", runtime.searchSnapshots, runtime.searchSnapshotObjects)
+	}
+}
+
+func TestSearchFinalEmitFailureRevokesSnapshot(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage(
+		"rv", "", pod("one", "ns", "api", "Running", 0, nil, time.Time{}),
+	)}
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	wantErr := errors.New("stream closed")
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID:      "session",
+		Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"ns"}}, Query: "api", AllowPaginatedList: true,
+	}, func(batch SearchBatch) error {
+		if !batch.Reusable {
+			t.Fatal("final batch did not offer retained snapshot")
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Search error = %v", err)
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if len(runtime.searchSnapshots) != 0 || runtime.searchSnapshotObjects != 0 {
+		t.Fatalf("failed emit retained snapshots=%d objects=%d", len(runtime.searchSnapshots), runtime.searchSnapshotObjects)
+	}
+}
+
+func TestSearchRejectsInvalidListSnapshots(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		pages []*unstructured.UnstructuredList
+		want  string
+	}{
+		{name: "nil page", pages: []*unstructured.UnstructuredList{nil}, want: "nil page"},
+		{name: "missing resource version", pages: []*unstructured.UnstructuredList{listPage("", "")}, want: "no resourceVersion"},
+		{name: "changing resource version", pages: []*unstructured.UnstructuredList{
+			listPage("one", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+			listPage("two", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+		}, want: "resourceVersion changed"},
+		{name: "missing UID", pages: []*unstructured.UnstructuredList{
+			listPage("rv", "", pod("", "ns", "api", "Running", 0, nil, time.Time{})),
+		}, want: "has no UID"},
+		{name: "repeated continue token", pages: []*unstructured.UnstructuredList{
+			listPage("rv", "same"), listPage("rv", "same"),
+		}, want: "repeated continue token"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			client := newSearchClient()
+			client.pages = test.pages
+			runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{authority: "cluster", client: client}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			err = runtime.Search(context.Background(), SearchQuery{
+				SessionID:      "session",
+				Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+				NamespaceScope: NamespaceScope{All: true}, Query: "api", AllowPaginatedList: true,
+			}, func(SearchBatch) error { return nil })
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Search error = %v, want %q", err, test.want)
+			}
+			runtime.mu.Lock()
+			defer runtime.mu.Unlock()
+			if len(runtime.searchSnapshots) != 0 || runtime.searchSnapshotObjects != 0 {
+				t.Fatalf("invalid LIST retained snapshots=%d objects=%d", len(runtime.searchSnapshots), runtime.searchSnapshotObjects)
+			}
+		})
+	}
+}
+
+func TestRuntimeCloseClearsSearchSnapshots(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage(
+		"rv", "", pod("one", "ns", "api", "Running", 0, nil, time.Time{}),
+	)}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client}, SearchSnapshotTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID:      "session",
+		Resource:       ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope: NamespaceScope{Namespaces: []string{"ns"}}, Query: "api", AllowPaginatedList: true,
+	}, func(SearchBatch) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.Close()
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if len(runtime.searchSnapshots) != 0 || runtime.searchSnapshotObjects != 0 {
+		t.Fatalf("Close retained snapshots=%d objects=%d", len(runtime.searchSnapshots), runtime.searchSnapshotObjects)
+	}
+}
+
 func TestExactSearchUsesDirectGet(t *testing.T) {
 	t.Parallel()
 	client := newSearchClient()
@@ -637,16 +1170,35 @@ func TestPaginatedSearchCancellation(t *testing.T) {
 }
 
 type searchClient struct {
-	mu             sync.Mutex
-	pages          []*unstructured.UnstructuredList
-	pageIndex      int
-	getObjects     map[string]*unstructured.Unstructured
-	getErr         error
-	secondPageGate chan struct{}
-	watches        []*controllableWatch
-	listCalls      atomic.Int64
-	getCalls       atomic.Int64
-	watchCalls     atomic.Int64
+	mu                    sync.Mutex
+	pages                 []*unstructured.UnstructuredList
+	pageIndex             int
+	getObjects            map[string]*unstructured.Unstructured
+	getErr                error
+	secondPageGate        chan struct{}
+	watches               []*controllableWatch
+	watchResourceVersions []string
+	listCalls             atomic.Int64
+	getCalls              atomic.Int64
+	watchCalls            atomic.Int64
+}
+
+func (c *searchClient) lastWatchResourceVersion() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.watches) == 0 {
+		return ""
+	}
+	if len(c.watchResourceVersions) == 0 {
+		return ""
+	}
+	return c.watchResourceVersions[len(c.watchResourceVersions)-1]
+}
+
+func (c *searchClient) lastWatchStopped() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.watches) != 0 && c.watches[len(c.watches)-1].stopped.Load()
 }
 
 func newSearchClient() *searchClient {
@@ -663,7 +1215,10 @@ func (c *searchClient) List(ctx context.Context, options metav1.ListOptions) (*u
 		c.pageIndex = 0
 	}
 	index := c.pageIndex
-	page := c.pages[min(index, len(c.pages)-1)].DeepCopy()
+	var page *unstructured.UnstructuredList
+	if candidate := c.pages[min(index, len(c.pages)-1)]; candidate != nil {
+		page = candidate.DeepCopy()
+	}
 	c.pageIndex++
 	gate := c.secondPageGate
 	c.mu.Unlock()
@@ -677,11 +1232,12 @@ func (c *searchClient) List(ctx context.Context, options metav1.ListOptions) (*u
 	return page, nil
 }
 
-func (c *searchClient) Watch(context.Context, metav1.ListOptions) (watch.Interface, error) {
+func (c *searchClient) Watch(_ context.Context, options metav1.ListOptions) (watch.Interface, error) {
 	c.watchCalls.Add(1)
 	stream := newControllableWatch()
 	c.mu.Lock()
 	c.watches = append(c.watches, stream)
+	c.watchResourceVersions = append(c.watchResourceVersions, options.ResourceVersion)
 	c.mu.Unlock()
 	return stream, nil
 }
@@ -704,12 +1260,6 @@ func (c *searchClient) setPages(pages ...*unstructured.UnstructuredList) {
 	defer c.mu.Unlock()
 	c.pages = pages
 	c.pageIndex = 0
-}
-
-func (c *searchClient) lastWatchStopped() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.watches) != 0 && c.watches[len(c.watches)-1].stopped.Load()
 }
 
 var _ watcher.ListerWatcher = (*searchClient)(nil)
