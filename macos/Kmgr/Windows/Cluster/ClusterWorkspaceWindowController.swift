@@ -28,6 +28,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let execProvider: any ExecSessionProviding
     private let portForwards: PortForwardCoordinator
     private let columnsConfigurationPath: String
+    private let logDisplayConfiguration: LogDisplayConfiguration
     private let workspaceController: ClusterWorkspaceViewController
     private var restoration: ClusterWindowRestorationRecord
     private var portForwardConfigurationController: PortForwardConfigurationWindowController?
@@ -46,6 +47,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         execProvider: any ExecSessionProviding,
         portForwards: PortForwardCoordinator,
         columnsConfigurationPath: String,
+        logDisplayConfiguration: LogDisplayConfiguration,
         restoration: ClusterWindowRestorationRecord,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
@@ -58,6 +60,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.restoration = restoration
         self.portForwards = portForwards
         self.columnsConfigurationPath = columnsConfigurationPath
+        self.logDisplayConfiguration = logDisplayConfiguration
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
@@ -157,7 +160,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             session: session,
             pods: identities,
             detailProvider: objectDetailProvider,
-            logProvider: logProvider
+            logProvider: logProvider,
+            displayConfiguration: logDisplayConfiguration
         )
         controller.onOpenWindow = { [weak self] in self?.onOpenLogWindow?($0) }
         controller.onDismiss = { [weak self, weak controller] in

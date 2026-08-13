@@ -170,6 +170,9 @@ final class Application: NSObject, NSApplicationDelegate {
             execProvider: execProvider,
             portForwards: portForwardCoordinator,
             columnsConfigurationPath: engineColumnsConfigurationPath,
+            logDisplayConfiguration: LogDisplayConfiguration(
+                preferences: preferencesStore.current.logs
+            ),
             restoration: restoration,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
