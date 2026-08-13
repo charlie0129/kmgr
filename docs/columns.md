@@ -79,6 +79,13 @@ Pod and Node views use the built-in IDs `cpu`, `memory`, and
 limit; Nodes render actual usage / allocatable, with physical capacity in the
 tooltip. These cells remain typed `resourceUsage` values even when actual usage
 is unavailable, so scheduler accounting is not confused with measured usage.
+CPU display values use millicores below one core and compact decimal cores at
+or above one core. Memory, ephemeral storage, and each exact huge-page resource
+use the largest readable binary unit (`Ki`, `Mi`, `Gi`, and so on), with up to
+two fractional digits. Tooltips retain the exact canonical Kubernetes
+Quantity, and sorting continues to use the unformatted typed numeric value.
+Generic extended resources retain their canonical Quantity text because their
+units are resource-specific counts rather than bytes.
 
 An explicitly configured exact resource uses the value
 `resource:<kubernetes-resource-name>`, for example

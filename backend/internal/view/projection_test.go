@@ -423,6 +423,64 @@ func TestProjectorEmitsPodResourceUsageWithEffectiveAccounting(t *testing.T) {
 	}
 }
 
+func TestProjectorFormatsPodCPUAndByteResourceTriplesWithoutChangingTypedValues(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs: []string{
+			PodCPUColumn, PodMemoryColumn, PodEphemeralStorageColumn, metricColumnID("hugepages-2Mi"),
+		},
+		Metrics: metrics.Snapshot{
+			State: metrics.MeasurementCurrent,
+			Samples: map[string]metrics.Sample{"uid-readable": {Resources: map[string]int64{
+				string(corev1.ResourceCPU):              23_256_000_000,
+				string(corev1.ResourceMemory):           17_576_384 * 1024,
+				string(corev1.ResourceEphemeralStorage): 134_217_728_000,
+			}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := pod("uid-readable", "team-a", "readable", "Running", 0, nil, time.Time{})
+	container := value.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	container["resources"] = map[string]any{
+		"requests": map[string]any{
+			"cpu": "64", "memory": "128Gi", "ephemeral-storage": "134217728000", "hugepages-2Mi": "131072Ki",
+		},
+		"limits": map[string]any{
+			"cpu": "64", "memory": "128Gi", "ephemeral-storage": "274877906944", "hugepages-2Mi": "1Gi",
+		},
+	}
+	row, visible := projector.ProjectOne(value)
+	if !visible {
+		t.Fatal("Pod row was not visible")
+	}
+	for id, want := range map[string]string{
+		PodCPUColumn:                    "23.256 / 64 / 64",
+		PodMemoryColumn:                 "16.76Gi / 128Gi / 128Gi",
+		PodEphemeralStorageColumn:       "125Gi / 125Gi / 256Gi",
+		metricColumnID("hugepages-2Mi"): "— / 128Mi / 1Gi",
+	} {
+		if got := cellByID(row, id).GetDisplayText(); got != want {
+			t.Errorf("%s display = %q; want %q", id, got, want)
+		}
+	}
+	cpu := cellByID(row, PodCPUColumn).GetUsage()
+	if cpu.GetUsed() != 23.256 || cpu.GetRequested() != 64 || cpu.GetLimit() != 64 {
+		t.Fatalf("CPU typed values changed during formatting: %#v", cpu)
+	}
+	memory := cellByID(row, PodMemoryColumn).GetUsage()
+	if memory.GetUsed() != 17_576_384*1024 || memory.GetRequested() != 128*1024*1024*1024 {
+		t.Fatalf("memory typed values changed during formatting: %#v", memory)
+	}
+	if tooltip := cellByID(row, PodMemoryColumn).GetTooltip(); !strings.Contains(tooltip, "Actual usage: 17576384Ki") || !strings.Contains(tooltip, "Effective request: 128Gi") {
+		t.Fatalf("memory tooltip lost exact Kubernetes quantities: %q", tooltip)
+	}
+}
+
 func TestPodCELMetricsActivationIncludesEffectiveSchedulerAccounting(t *testing.T) {
 	t.Parallel()
 	always := corev1.ContainerRestartPolicyAlways
@@ -695,6 +753,70 @@ func TestProjectorEmitsNodeSchedulerAccountingAndExactResources(t *testing.T) {
 		if usage.GetResourceName() != strings.TrimPrefix(id, metricResourceColumnPrefix) || usage.GetRequested() != want {
 			t.Fatalf("exact resource %q = %#v", id, usage)
 		}
+	}
+}
+
+func TestProjectorFormatsNodeUsageAllocationAndExactByteResources(t *testing.T) {
+	t.Parallel()
+	accounting := metrics.NodeAccounting{
+		Name: "node-readable",
+		Capacity: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("64"), corev1.ResourceMemory: resource.MustParse("128Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("2Ti"), "hugepages-2Mi": resource.MustParse("1Gi"),
+		},
+		Allocatable: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("63500m"), corev1.ResourceMemory: resource.MustParse("128Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("17576384Ki"), "hugepages-2Mi": resource.MustParse("768Mi"),
+		},
+		Requested: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("23256m"), corev1.ResourceMemory: resource.MustParse("17576384Ki"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("134217728000"), "hugepages-2Mi": resource.MustParse("131072Ki"),
+		},
+	}
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
+		ColumnIDs: []string{
+			NodeCPUUsageColumn, NodeCPURequestsColumn, NodeMemoryUsageColumn, NodeMemoryRequestsColumn,
+			NodeEphemeralStorageUsageColumn, NodeEphemeralStorageRequestsColumn, metricColumnID("hugepages-2Mi"),
+		},
+		Metrics: metrics.Snapshot{State: metrics.MeasurementCurrent, Samples: map[string]metrics.Sample{
+			"node-readable": {Resources: map[string]int64{
+				string(corev1.ResourceCPU):              23_256_000_000,
+				string(corev1.ResourceMemory):           17_576_384 * 1024,
+				string(corev1.ResourceEphemeralStorage): 134_217_728_000,
+			}},
+		}},
+		NodeAccounting: NodeAccountingSnapshot{
+			Active: true, Ready: true, Nodes: map[string]metrics.NodeAccounting{"node-readable": accounting},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, visible := projector.ProjectOne(nodeObject("node-readable", "node-readable", accounting.Allocatable, accounting.Capacity))
+	if !visible {
+		t.Fatal("Node row was not visible")
+	}
+	for id, want := range map[string]string{
+		NodeCPUUsageColumn:                 "23.256 / 63.5",
+		NodeCPURequestsColumn:              "23.256 / 63.5",
+		NodeMemoryUsageColumn:              "16.76Gi / 128Gi",
+		NodeMemoryRequestsColumn:           "16.76Gi / 128Gi",
+		NodeEphemeralStorageUsageColumn:    "125Gi / 16.76Gi",
+		NodeEphemeralStorageRequestsColumn: "125Gi / 16.76Gi",
+		metricColumnID("hugepages-2Mi"):    "128Mi / 768Mi",
+	} {
+		if got := cellByID(row, id).GetDisplayText(); got != want {
+			t.Errorf("%s display = %q; want %q", id, got, want)
+		}
+	}
+	requestedCPU := cellByID(row, NodeCPURequestsColumn).GetUsage()
+	if requestedCPU.GetRequested() != 23.256 || requestedCPU.GetCapacity() != 63.5 {
+		t.Fatalf("Node CPU typed values changed during formatting: %#v", requestedCPU)
+	}
+	if tooltip := cellByID(row, NodeCPURequestsColumn).GetTooltip(); !strings.Contains(tooltip, "Summed effective requests: 23256m") || !strings.Contains(tooltip, "Allocatable: 63500m") {
+		t.Fatalf("Node CPU tooltip lost exact Kubernetes quantities: %q", tooltip)
 	}
 }
 

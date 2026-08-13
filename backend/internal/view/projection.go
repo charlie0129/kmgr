@@ -545,7 +545,7 @@ func (p *Projector) resourceUsageCell(
 		}
 		setUsageQuantities(usage, measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil)
 		cell.DisplayText = formatUsageDisplay(
-			measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil,
+			resourceName, measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil,
 		)
 		cell.Tooltip = formatUsageTooltip(
 			measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil, nil,
@@ -570,7 +570,7 @@ func (p *Projector) resourceUsageCell(
 		}
 		setUsageQuantities(usage, measurement, request, limit, optionalQuantity(allocatable, hasAllocatable))
 		cell.DisplayText = formatUsageDisplay(
-			measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
+			resourceName, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
 		)
 		cell.Tooltip = formatUsageTooltip(
 			measurement, request, limit, optionalQuantity(allocatable, hasAllocatable),
@@ -656,8 +656,9 @@ func (p *Projector) nodeAllocationCell(
 	if hasAllocatable {
 		usage.Capacity = quantityNumeric(resourceName, allocatable)
 	}
-	cell.DisplayText = quantityDisplay(value) + " / " + quantityDisplay(optionalQuantity(allocatable, hasAllocatable))
-	parts := []string{label + ": " + quantityDisplay(value)}
+	cell.DisplayText = formatResourceQuantity(resourceName, value) + " / " +
+		formatResourceQuantity(resourceName, optionalQuantity(allocatable, hasAllocatable))
+	parts := []string{label + ": " + exactQuantityDisplay(value)}
 	if field == nodeRequested && hasLimit {
 		parts = append(parts, "Summed effective limits: "+limited.String())
 	}
@@ -701,7 +702,8 @@ func (p *Projector) nodePodCountCell(object *unstructured.Unstructured, columnID
 	if hasAllocatable {
 		usage.Capacity = quantityNumeric(corev1.ResourcePods, allocatable)
 	}
-	cell.DisplayText = strconv.FormatInt(accounting.PodCount, 10) + " / " + quantityDisplay(optionalQuantity(allocatable, hasAllocatable))
+	cell.DisplayText = strconv.FormatInt(accounting.PodCount, 10) + " / " +
+		exactQuantityDisplay(optionalQuantity(allocatable, hasAllocatable))
 	parts := []string{"Bound non-terminal Pods: " + strconv.FormatInt(accounting.PodCount, 10)}
 	if hasAllocatable {
 		parts = append(parts, "Allocatable Pod capacity: "+allocatable.String())
@@ -772,24 +774,25 @@ func quantityNumeric(name corev1.ResourceName, quantity resource.Quantity) float
 }
 
 func formatUsageDisplay(
+	resourceName corev1.ResourceName,
 	measurement metrics.Measurement,
 	request, limit, allocatable *resource.Quantity,
 ) string {
 	parts := make([]string, 0, 3)
 	if measurement.HasValue() {
-		parts = append(parts, measurement.Quantity.String())
+		parts = append(parts, formatResourceQuantity(resourceName, &measurement.Quantity))
 	} else {
 		parts = append(parts, DefaultMissingCell)
 	}
 	if allocatable != nil {
-		parts = append(parts, allocatable.String())
+		parts = append(parts, formatResourceQuantity(resourceName, allocatable))
 		return strings.Join(parts, " / ")
 	}
-	parts = append(parts, quantityDisplay(request), quantityDisplay(limit))
+	parts = append(parts, formatResourceQuantity(resourceName, request), formatResourceQuantity(resourceName, limit))
 	return strings.Join(parts, " / ")
 }
 
-func quantityDisplay(quantity *resource.Quantity) string {
+func exactQuantityDisplay(quantity *resource.Quantity) string {
 	if quantity == nil {
 		return DefaultMissingCell
 	}
