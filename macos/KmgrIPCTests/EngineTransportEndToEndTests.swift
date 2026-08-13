@@ -43,8 +43,16 @@ struct EngineTransportEndToEndTests {
             let firstGeneration = try await fixture.generation(1)
             try await expectBadTokenRejected(socketPath: firstGeneration.socketPath)
 
-            #expect(firstGeneration.processID > 1)
-            #expect(Darwin.kill(firstGeneration.processID, SIGKILL) == 0)
+            let socketAttributes = try FileManager.default.attributesOfItem(
+                atPath: firstGeneration.socketPath
+            )
+            let directoryAttributes = try FileManager.default.attributesOfItem(
+                atPath: URL(fileURLWithPath: firstGeneration.socketPath)
+                    .deletingLastPathComponent().path
+            )
+            #expect((socketAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+            #expect((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+            try fixture.crash(firstGeneration)
 
             let second = try await waitForNewGeneration(
                 from: supervisor,
@@ -198,6 +206,16 @@ private struct EngineProcessFixture {
         throw EngineTransportEndToEndTestError.fixtureTimedOut("generation \(number)")
     }
 
+    func crash(_ generation: EngineGeneration) throws {
+        guard generation.processID > 1, owns(processID: generation.processID)
+        else {
+            throw EngineTransportEndToEndTestError.unrecognizedHelperProcess
+        }
+        guard Darwin.kill(generation.processID, SIGKILL) == 0 else {
+            throw EngineTransportEndToEndTestError.signalFailed(errno)
+        }
+    }
+
     func cleanup() {
         for number in 1...Self.trackedGenerationLimit {
             let pidURL = stateURL.appendingPathComponent("pid.\(number)")
@@ -205,7 +223,7 @@ private struct EngineProcessFixture {
                 let processID = pid_t(pidText.trimmingCharacters(in: .whitespacesAndNewlines)),
                 processID > 1,
                 Darwin.kill(processID, 0) == 0,
-                executablePath(processID) == rootURL.appendingPathComponent("kmgr-engine").path
+                owns(processID: processID)
             else { continue }
             _ = Darwin.kill(processID, SIGKILL)
         }
@@ -213,6 +231,14 @@ private struct EngineProcessFixture {
             rootURL.lastPathComponent.hasPrefix("ke.")
         else { return }
         try? FileManager.default.removeItem(at: rootURL)
+    }
+
+    private func owns(processID: pid_t) -> Bool {
+        let expectedPath = rootURL.appendingPathComponent("kmgr-engine")
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        guard let actualPath = executablePath(processID) else { return false }
+        return URL(fileURLWithPath: actualPath)
+            .resolvingSymlinksInPath().standardizedFileURL.path == expectedPath
     }
 
     private static func buildEngine(at outputURL: URL) throws {
@@ -327,4 +353,6 @@ private enum EngineTransportEndToEndTestError: Error {
     case fixtureTimedOut(String)
     case supervisorFailed(String)
     case badTokenAccepted
+    case unrecognizedHelperProcess
+    case signalFailed(Int32)
 }
