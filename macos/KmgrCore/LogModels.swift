@@ -142,38 +142,257 @@ public protocol LogStreamProviding: Sendable {
 public struct LogRecordRing: Sendable {
     public let recordLimit: Int
     public let byteLimit: Int
-    public private(set) var records: [LogRecord] = []
+    public let fragmentByteLimit: Int
+    private var storage: [LogRecord] = []
+    private var head = 0
     public private(set) var byteCount = 0
     public private(set) var droppedRecords: UInt64 = 0
     public private(set) var droppedBytes: UInt64 = 0
 
-    public init(recordLimit: Int = 20_000, byteLimit: Int = 16 << 20) {
-        precondition(recordLimit > 0 && byteLimit > 0)
+    public init(
+        recordLimit: Int = 20_000,
+        byteLimit: Int = 16 << 20,
+        fragmentByteLimit: Int = 64 << 10
+    ) {
+        precondition(recordLimit > 0 && byteLimit > 0 && fragmentByteLimit > 0)
         self.recordLimit = recordLimit
         self.byteLimit = byteLimit
+        self.fragmentByteLimit = min(fragmentByteLimit, byteLimit)
     }
+
+    public var records: [LogRecord] {
+        head == storage.count ? [] : Array(storage[head...])
+    }
+
+    public var recordCount: Int { storage.count - head }
 
     public mutating func append(contentsOf newRecords: [LogRecord]) {
         for record in newRecords {
-            let size = record.data.count
-            guard size <= byteLimit else {
-                droppedRecords &+= 1
-                droppedBytes &+= UInt64(size)
+            if record.data.isEmpty {
+                appendOne(record)
                 continue
             }
-            while !records.isEmpty && (records.count >= recordLimit || byteCount + size > byteLimit) {
-                let removed = records.removeFirst()
-                byteCount -= removed.data.count
-                droppedRecords &+= 1
-                droppedBytes &+= UInt64(removed.data.count)
+            var offset = 0
+            while offset < record.data.count {
+                let end = min(offset + fragmentByteLimit, record.data.count)
+                var fragment = record
+                fragment.data = record.data.subdata(in: offset..<end)
+                fragment.endsWithNewline = record.endsWithNewline && end == record.data.count
+                appendOne(fragment)
+                offset = end
             }
-            records.append(record)
-            byteCount += size
         }
     }
 
     public mutating func clear() {
-        records.removeAll(keepingCapacity: true)
+        storage.removeAll(keepingCapacity: true)
+        head = 0
         byteCount = 0
+    }
+
+    private mutating func appendOne(_ record: LogRecord) {
+        let size = record.data.count
+        while recordCount > 0 && (recordCount >= recordLimit || byteCount + size > byteLimit) {
+            let removed = storage[head]
+            storage[head] = LogRecord(sourceID: "", data: Data(), endsWithNewline: false)
+            head += 1
+            byteCount -= removed.data.count
+            droppedRecords &+= 1
+            droppedBytes &+= UInt64(removed.data.count)
+        }
+        storage.append(record)
+        byteCount += size
+        compactStorageIfNeeded()
+    }
+
+    /// Eviction advances an index instead of repeatedly shifting every record.
+    /// Periodic compaction keeps allocation bounded under sustained streams.
+    private mutating func compactStorageIfNeeded() {
+        guard head >= 4_096, head >= storage.count / 2 else { return }
+        storage.removeFirst(head)
+        head = 0
+    }
+}
+
+public struct LogRecordRingStatistics: Hashable, Sendable {
+    public var recordCount: Int
+    public var byteCount: Int
+    public var droppedRecords: UInt64
+    public var droppedBytes: UInt64
+
+    public init(
+        recordCount: Int,
+        byteCount: Int,
+        droppedRecords: UInt64,
+        droppedBytes: UInt64
+    ) {
+        self.recordCount = recordCount
+        self.byteCount = byteCount
+        self.droppedRecords = droppedRecords
+        self.droppedBytes = droppedBytes
+    }
+}
+
+public struct LogDisplayConfiguration: Hashable, Sendable {
+    public static let `default` = Self()
+
+    public var recordLimit: Int
+    public var byteLimit: Int
+    public var renderBatchMilliseconds: Int
+
+    public init(
+        recordLimit: Int = 20_000,
+        byteLimit: Int = 16 << 20,
+        renderBatchMilliseconds: Int = 40
+    ) {
+        precondition(recordLimit > 0 && byteLimit > 0 && renderBatchMilliseconds > 0)
+        self.recordLimit = recordLimit
+        self.byteLimit = byteLimit
+        self.renderBatchMilliseconds = renderBatchMilliseconds
+    }
+
+    public init(preferences: LogDisplayPreferences) {
+        self.init(
+            recordLimit: preferences.recordLimit,
+            byteLimit: preferences.byteLimit,
+            renderBatchMilliseconds: preferences.renderBatchMilliseconds
+        )
+    }
+}
+
+public struct LogRecordRingSnapshot: Sendable {
+    public var records: [LogRecord]
+    public var statistics: LogRecordRingStatistics
+
+    public init(records: [LogRecord], statistics: LogRecordRingStatistics) {
+        self.records = records
+        self.statistics = statistics
+    }
+}
+
+/// Serializes ring mutations away from AppKit's main actor. The actor never
+/// decodes log bytes and exposes only bounded snapshots for batched rendering.
+public actor LogRecordStore {
+    private var ring: LogRecordRing
+
+    public init(
+        recordLimit: Int = 20_000,
+        byteLimit: Int = 16 << 20,
+        fragmentByteLimit: Int = 64 << 10
+    ) {
+        ring = LogRecordRing(
+            recordLimit: recordLimit,
+            byteLimit: byteLimit,
+            fragmentByteLimit: fragmentByteLimit
+        )
+    }
+
+    @discardableResult
+    public func append(contentsOf records: [LogRecord]) -> LogRecordRingStatistics {
+        ring.append(contentsOf: records)
+        return statistics(for: ring)
+    }
+
+    @discardableResult
+    public func clear() -> LogRecordRingStatistics {
+        ring.clear()
+        return statistics(for: ring)
+    }
+
+    public func statistics() -> LogRecordRingStatistics {
+        statistics(for: ring)
+    }
+
+    public func snapshot() -> LogRecordRingSnapshot {
+        LogRecordRingSnapshot(records: ring.records, statistics: statistics(for: ring))
+    }
+
+    private func statistics(for ring: LogRecordRing) -> LogRecordRingStatistics {
+        LogRecordRingStatistics(
+            recordCount: ring.recordCount,
+            byteCount: ring.byteCount,
+            droppedRecords: ring.droppedRecords,
+            droppedBytes: ring.droppedBytes
+        )
+    }
+}
+
+public struct RenderedLogText: Hashable, Sendable {
+    public var text: String
+    public var renderedRecords: Int
+    public var omittedRecords: Int
+    public var omittedSourceBytes: UInt64
+    public var outputUTF8Bytes: Int
+
+    public init(
+        text: String,
+        renderedRecords: Int,
+        omittedRecords: Int,
+        omittedSourceBytes: UInt64,
+        outputUTF8Bytes: Int
+    ) {
+        self.text = text
+        self.renderedRecords = renderedRecords
+        self.omittedRecords = omittedRecords
+        self.omittedSourceBytes = omittedSourceBytes
+        self.outputUTF8Bytes = outputUTF8Bytes
+    }
+}
+
+/// Pure, cancellation-aware renderer used from a detached task. It retains the
+/// newest matching records when source labels or UTF-8 replacement expansion
+/// would exceed the configured visible-text budget.
+public enum LogTextRenderer {
+    public static func render(
+        records: [LogRecord],
+        sourceLabels: [String: String],
+        showSourceLabels: Bool,
+        filter: String,
+        maximumOutputUTF8Bytes: Int
+    ) throws -> RenderedLogText {
+        precondition(maximumOutputUTF8Bytes > 0)
+        let foldedFilter = filter.lowercased()
+        var chunks: [String] = []
+        chunks.reserveCapacity(min(records.count, 4_096))
+        var outputBytes = 0
+        var omittedRecords = 0
+        var omittedBytes: UInt64 = 0
+
+        for (offset, record) in records.reversed().enumerated() {
+            if offset & 63 == 0 { try Task.checkCancellation() }
+            let decoded = String(decoding: record.data, as: UTF8.self)
+            if !foldedFilter.isEmpty && !decoded.lowercased().contains(foldedFilter) {
+                continue
+            }
+            let prefix: String
+            if showSourceLabels, let label = sourceLabels[record.sourceID] {
+                prefix = "[\(displaySafeLabel(label))] "
+            } else {
+                prefix = ""
+            }
+            let chunk = prefix + decoded + (record.endsWithNewline ? "\n" : "")
+            let chunkBytes = chunk.utf8.count
+            if chunkBytes > maximumOutputUTF8Bytes - outputBytes {
+                omittedRecords += 1
+                omittedBytes &+= UInt64(record.data.count)
+                continue
+            }
+            chunks.append(chunk)
+            outputBytes += chunkBytes
+        }
+        try Task.checkCancellation()
+        return RenderedLogText(
+            text: chunks.reversed().joined(),
+            renderedRecords: chunks.count,
+            omittedRecords: omittedRecords,
+            omittedSourceBytes: omittedBytes,
+            outputUTF8Bytes: outputBytes
+        )
+    }
+
+    private static func displaySafeLabel(_ value: String) -> String {
+        String(value.unicodeScalars.map { scalar in
+            CharacterSet.controlCharacters.contains(scalar) ? "�" : String(scalar)
+        }.joined().prefix(512))
     }
 }

@@ -12,6 +12,7 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
     private let pods: [ResourceIdentity]
     private let detailProvider: any ObjectDetailProviding
     private let logProvider: any LogStreamProviding
+    private let displayConfiguration: LogDisplayConfiguration
     private let containerButton = NSPopUpButton()
     private let followButton = NSButton(checkboxWithTitle: "Follow", target: nil, action: nil)
     private let previousButton = NSButton(checkboxWithTitle: "Previous container logs", target: nil, action: nil)
@@ -31,13 +32,15 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
         session: OpenedClusterSession,
         pods: [ResourceIdentity],
         detailProvider: any ObjectDetailProviding,
-        logProvider: any LogStreamProviding
+        logProvider: any LogStreamProviding,
+        displayConfiguration: LogDisplayConfiguration = .default
     ) {
         precondition(!pods.isEmpty && pods.count <= 128)
         self.session = session
         self.pods = pods
         self.detailProvider = detailProvider
         self.logProvider = logProvider
+        self.displayConfiguration = displayConfiguration
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 600, height: 390),
             styleMask: [.titled, .closable],
@@ -239,7 +242,8 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
                 timestamps: timestampsButton.state == .on,
                 sinceSeconds: since > 0 ? since : nil,
                 tailLines: tail
-            )
+            ),
+            displayConfiguration: displayConfiguration
         )
         onOpenWindow?(controller)
         closeSheet()

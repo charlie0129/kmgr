@@ -13,10 +13,20 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var streamTask: Task<Void, Never>?
     private var renderTask: Task<Void, Never>?
     private var gate = GenerationSequenceGate()
-    private var ring: LogRecordRing
+    private let recordStore: LogRecordStore
     private var options: LogOptions
+    private let renderBatchMilliseconds: Int
+    private let maximumRenderedUTF8Bytes: Int
+    private let sourceLabels: [String: String]
     private var isPaused = false
     private var pendingRender = false
+    private var renderDirty = false
+    private var needsRenderWhenVisible = false
+    private var isClosing = false
+    private var latestStoreDrops: UInt64 = 0
+    private var latestStreamDrops: UInt64 = 0
+    private var latestRenderOmissions = 0
+    private var latestStreamState: LogStreamState = .connecting
 
     private let textView = NSTextView()
     private let scrollView = NSScrollView()
@@ -35,15 +45,25 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         sources: [LogSource],
         provider: any LogStreamProviding,
         options: LogOptions = LogOptions(),
-        recordLimit: Int = 20_000,
-        byteLimit: Int = 16 << 20
+        displayConfiguration: LogDisplayConfiguration = .default
     ) {
         precondition(!sources.isEmpty)
         self.session = session
         self.sources = sources
         self.provider = provider
         self.options = options
-        self.ring = LogRecordRing(recordLimit: recordLimit, byteLimit: byteLimit)
+        self.recordStore = LogRecordStore(
+            recordLimit: displayConfiguration.recordLimit,
+            byteLimit: displayConfiguration.byteLimit
+        )
+        self.renderBatchMilliseconds = displayConfiguration.renderBatchMilliseconds
+        // Preferences may retain far more history than AppKit can safely lay
+        // out in one main-thread NSTextView.string replacement.
+        self.maximumRenderedUTF8Bytes = min(displayConfiguration.byteLimit, 32 << 20)
+        self.sourceLabels = Dictionary(
+            sources.map { ($0.sourceID, $0.label) },
+            uniquingKeysWith: { first, _ in first }
+        )
         let titleSources = sources.count == 1 ? sources[0].label : "\(sources.count) Pods"
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 640),
@@ -68,8 +88,22 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func windowWillClose(_ notification: Notification) {
+        isClosing = true
         stopStream()
         onClose?()
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        suspendRenderingWhileHidden()
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        resumeRenderingIfVisible()
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        if canRenderNow { resumeRenderingIfVisible() }
+        else { suspendRenderingWhileHidden() }
     }
 
     func controlTextDidChange(_ obj: Notification) { scheduleRender() }
@@ -180,7 +214,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             do {
                 for try await message in provider.streamLogs(request: request) {
                     guard !Task.isCancelled else { return }
-                    self?.receive(message)
+                    await self?.receive(message)
                 }
             } catch {
                 guard !Task.isCancelled else { return }
@@ -192,6 +226,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     private func stopStream() {
         renderTask?.cancel()
+        renderTask = nil
         streamTask?.cancel()
         let generation = generation
         Task { [provider, session, streamID] in
@@ -203,19 +238,20 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
-    private func receive(_ message: LogStreamMessage) {
+    private func receive(_ message: LogStreamMessage) async {
         let disposition = gate.accept(message.cursor)
         guard disposition == .acceptedNewGeneration || disposition == .acceptedNextSequence else { return }
         switch message {
         case .records(_, let records, _):
-            ring.append(contentsOf: records)
+            let statistics = await recordStore.append(contentsOf: records)
+            guard !Task.isCancelled else { return }
+            latestStoreDrops = statistics.droppedRecords
+            updateStatusLabel()
             if !isPaused { scheduleRender() }
         case .status(_, let status):
-            let state = status.state.rawValue.capitalized
-            let drops = status.droppedRecords + ring.droppedRecords
-            statusLabel.stringValue = drops == 0
-                ? state
-                : "\(state) · \(drops.formatted()) records dropped"
+            latestStreamState = status.state
+            latestStreamDrops = status.droppedRecords
+            updateStatusLabel()
             statusLabel.textColor = status.state == .failed ? .systemRed : .secondaryLabelColor
             if let issue = status.issue { statusLabel.stringValue += " · \(issue.message)" }
         case .failure(_, let issue):
@@ -224,35 +260,86 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
+    private func updateStatusLabel() {
+        let state = latestStreamState.rawValue.capitalized
+        let drops = latestStreamDrops + latestStoreDrops
+        var parts = [state]
+        if drops > 0 { parts.append("\(drops.formatted()) records dropped") }
+        if latestRenderOmissions > 0 {
+            parts.append("\(latestRenderOmissions.formatted()) omitted from display")
+        }
+        statusLabel.stringValue = parts.joined(separator: " · ")
+    }
+
     /// Coalesce main-thread text rebuilding to at most one pass per 40 ms.
     private func scheduleRender() {
-        guard !pendingRender else { return }
+        guard !isPaused, !isClosing else { return }
+        guard canRenderNow else {
+            needsRenderWhenVisible = true
+            return
+        }
+        guard !pendingRender else {
+            renderDirty = true
+            return
+        }
         pendingRender = true
+        renderDirty = false
         renderTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(40))
-            guard !Task.isCancelled, let self else { return }
+            guard let delay = self?.renderBatchMilliseconds else { return }
+            try? await Task.sleep(for: .milliseconds(delay))
+            guard let self else { return }
+            if !Task.isCancelled {
+                if canRenderNow, !isPaused {
+                    await render()
+                } else {
+                    needsRenderWhenVisible = true
+                }
+            }
+
+            let needsFollowUp = renderDirty
             pendingRender = false
-            render()
+            renderTask = nil
+            if needsFollowUp {
+                scheduleRender()
+            }
         }
     }
 
-    private func render() {
+    private func render() async {
         let wasAtTail = isAtTail
         let selectedRange = textView.selectedRange()
-        let filter = searchField.stringValue.lowercased()
+        let filter = searchField.stringValue
         let showLabels = sources.count > 1
-        var output = Data()
-        for record in ring.records {
-            if !filter.isEmpty,
-                !String(decoding: record.data, as: UTF8.self).lowercased().contains(filter)
-            { continue }
-            if showLabels, let source = sources.first(where: { $0.sourceID == record.sourceID }) {
-                output.append(contentsOf: "[\(source.label)] ".utf8)
-            }
-            output.append(record.data)
-            if record.endsWithNewline { output.append(0x0a) }
+        let snapshot = await recordStore.snapshot()
+        let records = snapshot.records
+        let labels = sourceLabels
+        let byteLimit = maximumRenderedUTF8Bytes
+        let rendered: RenderedLogText
+        let renderer = Task.detached(priority: .userInitiated) {
+            try LogTextRenderer.render(
+                records: records,
+                sourceLabels: labels,
+                showSourceLabels: showLabels,
+                filter: filter,
+                maximumOutputUTF8Bytes: byteLimit
+            )
         }
-        textView.string = String(decoding: output, as: UTF8.self)
+        do {
+            rendered = try await withTaskCancellationHandler {
+                try await renderer.value
+            } onCancel: {
+                renderer.cancel()
+            }
+        } catch {
+            return
+        }
+        guard !Task.isCancelled, canRenderNow, !isPaused else {
+            needsRenderWhenVisible = true
+            return
+        }
+        textView.string = rendered.text
+        latestRenderOmissions = rendered.omittedRecords
+        updateStatusLabel()
         let length = (textView.string as NSString).length
         if selectedRange.location <= length {
             textView.setSelectedRange(NSRange(
@@ -261,6 +348,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             ))
         }
         if wasAtTail { textView.scrollToEndOfDocument(nil) }
+        needsRenderWhenVisible = false
     }
 
     private var isAtTail: Bool {
@@ -282,8 +370,36 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     @objc private func clearVisibleBuffer() {
-        ring.clear()
+        // Prevent an in-flight formatting pass from restoring the snapshot the
+        // user just cleared. New records mark the cancelled pass dirty and are
+        // picked up by its single serialized follow-up.
+        renderTask?.cancel()
+        Task { [weak self, recordStore] in
+            _ = await recordStore.clear()
+            guard let self else { return }
+            latestStoreDrops = 0
+            latestRenderOmissions = 0
+            updateStatusLabel()
+        }
         textView.string = ""
+    }
+
+    private var canRenderNow: Bool {
+        guard let window, window.isVisible, !window.isMiniaturized else { return false }
+        return window.occlusionState.contains(.visible)
+    }
+
+    private func suspendRenderingWhileHidden() {
+        guard !canRenderNow else { return }
+        if pendingRender || !textView.string.isEmpty {
+            needsRenderWhenVisible = true
+        }
+        renderTask?.cancel()
+    }
+
+    private func resumeRenderingIfVisible() {
+        guard canRenderNow, !isPaused, needsRenderWhenVisible else { return }
+        scheduleRender()
     }
 
     @objc private func saveVisibleBuffer() {
