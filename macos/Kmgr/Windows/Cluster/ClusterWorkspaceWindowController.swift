@@ -2,11 +2,19 @@ import AppKit
 import KmgrCore
 import OSLog
 
+struct ResourceColumnsRequest {
+    var resourceTitle: String
+    var match: ColumnResourceMatch
+    var defaultColumns: [ColumnDefinition]
+    var apply: @MainActor ([ColumnDefinition]) -> Void
+}
+
 @MainActor
 final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate {
     let session: OpenedClusterSession
     var onClose: (() -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
+    var onShowColumns: ((ResourceColumnsRequest) -> Void)?
 
     private let provider: any WorkspaceResourceProviding
     private let objectDetailProvider: any ObjectDetailProviding
@@ -51,6 +59,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         super.init(window: window)
         workspaceController.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
+        }
+        workspaceController.onShowColumns = { [weak self] request in
+            self?.onShowColumns?(request)
         }
         window.delegate = self
         window.contentViewController = workspaceController
@@ -124,6 +135,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var objectOpenTask: Task<Void, Never>?
     private var detailController: ObjectDetailViewController?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
+    var onShowColumns: ((ResourceColumnsRequest) -> Void)?
 
     init(
         session: OpenedClusterSession,
@@ -166,6 +178,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
+        }
+        contentController.onShowColumns = { [weak self] request in
+            self?.onShowColumns?(request)
         }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
         addSplitViewItem(NSSplitViewItem(viewController: contentController))
@@ -721,6 +736,9 @@ private final class ResourceListViewController: NSViewController,
     private var suppressSelectionCallbacks = false
     private var history = WorkspaceNavigationHistory()
     private var columnIDs: [String] = []
+    private var columnDefinitionsByID: [String: ColumnDefinition] = [:]
+    private var columnDefinitionsByResourceID: [String: [ColumnDefinition]] = [:]
+    private var suppressSortChanges = false
     private var snapshotUIDs: [ResourceUID] = []
     private var lastStreamResourceID: String?
     private var lastStreamScope: NamespaceSelection?
@@ -728,6 +746,7 @@ private final class ResourceListViewController: NSViewController,
     var onShowCommandPalette: (() -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
+    var onShowColumns: ((ResourceColumnsRequest) -> Void)?
 
     init(session: OpenedClusterSession, provider: any WorkspaceResourceProviding) {
         self.session = session
@@ -882,11 +901,20 @@ private final class ResourceListViewController: NSViewController,
     }
 
     @objc private func showColumns() {
-        let alert = NSAlert()
-        alert.messageText = "Columns"
-        alert.informativeText = "Columns are resizable, reorderable, and sortable in the table header. CEL column configuration is loaded by the Go projection layer."
-        alert.addButton(withTitle: "OK")
-        if let window = view.window { alert.beginSheetModal(for: window) }
+        guard let resource else { return }
+        let resourceID = resource.id
+        onShowColumns?(ResourceColumnsRequest(
+            resourceTitle: resource.kind.isEmpty ? resource.resource : resource.kind,
+            match: ColumnResourceMatch(
+                group: resource.group,
+                version: resource.version,
+                resource: resource.resource
+            ),
+            defaultColumns: defaultColumnDefinitions(for: resource),
+            apply: { [weak self] definitions in
+                self?.applyColumns(definitions, forResourceID: resourceID)
+            }
+        ))
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -1033,27 +1061,87 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func configureColumns(for resource: DiscoveredResource) {
-        columnIDs = resource.namespaced ? ["namespace", "name"] : ["name"]
+        installColumns(
+            columnDefinitionsByResourceID[resource.id] ?? defaultColumnDefinitions(for: resource)
+        )
+    }
+
+    private func applyColumns(_ definitions: [ColumnDefinition], forResourceID resourceID: String) {
+        guard resource?.id == resourceID else { return }
+        columnDefinitionsByResourceID[resourceID] = definitions
+        installColumns(definitions)
+        openStream()
+    }
+
+    private func installColumns(_ definitions: [ColumnDefinition]) {
+        columnDefinitionsByID.removeAll(keepingCapacity: true)
+        for definition in definitions {
+            columnDefinitionsByID[definition.id] = definition
+        }
+        let enabled = definitions.filter(\.isEnabled)
+        columnIDs = enabled.map(\.id)
+
+        suppressSortChanges = true
+        defer { suppressSortChanges = false }
+        tableView.tableColumns.forEach(tableView.removeTableColumn)
+        for definition in enabled {
+            let column = NSTableColumn(identifier: .init(definition.id))
+            column.title = definition.title
+            column.width = definition.width.map { CGFloat($0) } ?? columnWidth(definition.id)
+            column.minWidth = 55
+            column.sortDescriptorPrototype = NSSortDescriptor(key: definition.id, ascending: true)
+            tableView.addTableColumn(column)
+        }
+        let enabledIDs = Set(columnIDs)
+        tableView.sortDescriptors = tableView.sortDescriptors.filter { descriptor in
+            descriptor.key.map(enabledIDs.contains) ?? false
+        }
+        tableView.reloadData()
+    }
+
+    private func defaultColumnDefinitions(for resource: DiscoveredResource) -> [ColumnDefinition] {
+        var ids = resource.namespaced ? ["namespace", "name"] : ["name"]
         if resource.resource == "pods" {
-            columnIDs += [
+            ids += [
                 "ready", "status", "restarts", "node",
                 "cpu", "memory", "ephemeral-storage", "age",
             ]
         } else if resource.group.isEmpty && resource.version == "v1"
             && resource.resource == "nodes"
         {
-            columnIDs += ["status", "cpu", "memory", "ephemeral-storage", "age"]
+            ids += ["status", "cpu", "memory", "ephemeral-storage", "age"]
         } else {
-            columnIDs += ["status", "age"]
+            ids += ["status", "age"]
         }
-        tableView.tableColumns.forEach(tableView.removeTableColumn)
-        for columnID in columnIDs {
-            let column = NSTableColumn(identifier: .init(columnID))
-            column.title = columnTitle(columnID)
-            column.width = columnWidth(columnID)
-            column.minWidth = 55
-            column.sortDescriptorPrototype = NSSortDescriptor(key: columnID, ascending: true)
-            tableView.addTableColumn(column)
+        return ids.map { id in
+            ColumnDefinition(
+                id: id,
+                title: columnTitle(id),
+                source: ["cpu", "memory", "ephemeral-storage"].contains(id) ? .metric : .builtin,
+                value: id,
+                type: columnType(id),
+                alignment: columnAlignment(id),
+                width: Double(columnWidth(id)),
+                enabled: true
+            )
+        }
+    }
+
+    private func columnType(_ id: String) -> ColumnResultType {
+        switch id {
+        case "ready": .number
+        case "restarts": .integer
+        case "cpu", "memory", "ephemeral-storage": .resourceUsage
+        case "age": .timestamp
+        default: .string
+        }
+    }
+
+    private func columnAlignment(_ id: String) -> ColumnAlignment {
+        switch id {
+        case "ready": .center
+        case "restarts", "cpu", "memory", "ephemeral-storage", "age": .trailing
+        default: .leading
         }
     }
 
@@ -1136,6 +1224,11 @@ private final class ResourceListViewController: NSViewController,
         let value = model.rowByUID[uid]?[tableColumn.identifier.rawValue]
         cell.textField?.stringValue = value?.displayText ?? "—"
         cell.textField?.toolTip = value?.tooltip
+        switch columnDefinitionsByID[tableColumn.identifier.rawValue]?.alignment ?? .leading {
+        case .leading: cell.textField?.alignment = .left
+        case .center: cell.textField?.alignment = .center
+        case .trailing: cell.textField?.alignment = .right
+        }
         switch value?.severity {
         case .warning: cell.textField?.textColor = .systemOrange
         case .critical: cell.textField?.textColor = .systemRed
@@ -1159,6 +1252,7 @@ private final class ResourceListViewController: NSViewController,
         _ tableView: NSTableView,
         sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
     ) {
+        guard !suppressSortChanges else { return }
         guard let descriptor = tableView.sortDescriptors.first,
             let key = descriptor.key
         else { return }

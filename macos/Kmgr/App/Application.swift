@@ -9,10 +9,13 @@ final class Application: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "application")
     private var chooserControllers: [ObjectIdentifier: ClusterManagerWindowController] = [:]
     private var workspaceControllers: [ObjectIdentifier: ClusterWorkspaceWindowController] = [:]
+    private var columnsManagerControllers: [ObjectIdentifier: ColumnsManagerWindowController] = [:]
     private let clusterContextProvider: any ClusterContextProviding
     private let workspaceResourceProvider: any WorkspaceResourceProviding
     private let objectSearchProvider: any ObjectSearchProviding
     private let objectDetailProvider: any ObjectDetailProviding
+    private let preferencesStore: AppPreferencesStore
+    private let settingsWindowController: SettingsWindowController
     private let portForwardCoordinator: PortForwardCoordinator
     private let portForwardsWindowController: PortForwardsWindowController
     private let engineSupervisor: EngineSupervisor
@@ -22,6 +25,10 @@ final class Application: NSObject, NSApplicationDelegate {
     override init() {
         let supervisor = EngineSupervisor()
         self.engineSupervisor = supervisor
+        let preferences = AppPreferencesStore()
+        self.preferencesStore = preferences
+        let settings = SettingsWindowController(preferencesStore: preferences)
+        self.settingsWindowController = settings
         self.clusterContextProvider = EngineClusterContextProvider(
             supervisor: supervisor
         )
@@ -42,6 +49,9 @@ final class Application: NSObject, NSApplicationDelegate {
             coordinator: portForwards
         )
         super.init()
+        settings.onPreferencesChanged = { [weak self] preferences in
+            self?.applyAppearance(preferences.appearance)
+        }
     }
 
     static func main() {
@@ -54,6 +64,7 @@ final class Application: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
+        applyAppearance(preferencesStore.current.appearance)
         engineSupervisor.start()
         showClusterManager()
         NSApp.activate(ignoringOtherApps: true)
@@ -138,13 +149,60 @@ final class Application: NSObject, NSApplicationDelegate {
         let identifier = ObjectIdentifier(controller)
         workspaceControllers[identifier] = controller
         controller.onClose = { [weak self] in
+            self?.columnsManagerControllers.removeValue(forKey: identifier)?.close()
             self?.workspaceControllers.removeValue(forKey: identifier)
         }
         controller.onStartPortForward = { [weak controller] identity in
             controller?.showPortForwardConfiguration(identity)
         }
+        controller.onShowColumns = { [weak self, weak controller] request in
+            guard let self, let controller else { return }
+            self.showColumns(request, for: controller)
+        }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showSettings(_ sender: Any?) {
+        settingsWindowController.showWindow(sender)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func showColumns(
+        _ request: ResourceColumnsRequest,
+        for workspace: ClusterWorkspaceWindowController
+    ) {
+        let identifier = ObjectIdentifier(workspace)
+        if let current = columnsManagerControllers[identifier] {
+            current.window?.makeKeyAndOrderFront(nil)
+            NSSound.beep()
+            return
+        }
+        guard let parent = workspace.window else { return }
+
+        let configurationPath = preferencesStore.current.columnsConfigurationPath
+        let controller = ColumnsManagerWindowController(
+            resourceTitle: request.resourceTitle,
+            match: request.match,
+            defaultColumns: request.defaultColumns,
+            configurationPath: configurationPath
+        )
+        controller.onDraftChanged = request.apply
+        controller.onSaved = request.apply
+        controller.onClose = { [weak self, weak controller] in
+            guard self?.columnsManagerControllers[identifier] === controller else { return }
+            self?.columnsManagerControllers.removeValue(forKey: identifier)
+        }
+        columnsManagerControllers[identifier] = controller
+
+        // Keep the table and manager synchronized as soon as the sheet opens,
+        // including definitions that were persisted outside this process.
+        if let document = try? ColumnConfigurationFileStore(path: configurationPath).load() {
+            let columns = document.views.first(where: { $0.match == request.match })?.columns
+                ?? request.defaultColumns
+            request.apply(columns)
+        }
+        controller.beginSheet(for: parent)
     }
 
     @objc func showPortForwards(_ sender: Any?) {
@@ -160,11 +218,26 @@ final class Application: NSObject, NSApplicationDelegate {
         workspace?.showCommandPalette(sender)
     }
 
+    private func applyAppearance(_ preference: AppearancePreference) {
+        switch preference {
+        case .system: NSApp.appearance = nil
+        case .light: NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+
     private func installMainMenu() {
         let mainMenu = NSMenu()
 
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
+        let settingsItem = appMenu.addItem(
+            withTitle: "Settings…",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Quit \(Product.applicationName)",
             action: #selector(NSApplication.terminate(_:)),
