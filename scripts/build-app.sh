@@ -8,9 +8,15 @@ contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 helpers_dir="$contents_dir/Helpers"
 resources_dir="$contents_dir/Resources"
+version=$(git -C "$repo_root" describe --always --dirty 2>/dev/null || print dev)
 
 case "$configuration" in
-  debug|release) ;;
+  debug)
+    go_ldflags=(-X "main.version=$version")
+    ;;
+  release)
+    go_ldflags=(-s -w -X "main.version=$version")
+    ;;
   *) print -u2 "CONFIGURATION must be 'debug' or 'release'"; exit 2 ;;
 esac
 
@@ -29,7 +35,7 @@ mkdir -p "$macos_dir" "$helpers_dir" "$resources_dir"
 
 go build \
   -trimpath \
-  -ldflags "-X main.version=$(git -C "$repo_root" describe --always --dirty 2>/dev/null || print dev)" \
+  -ldflags "${(j: :)go_ldflags}" \
   -o "$helpers_dir/kmgr-engine" \
   "$repo_root/backend/cmd/kmgr-engine"
 
@@ -47,8 +53,16 @@ cp "$swift_bin_dir/Kmgr" "$macos_dir/Kmgr"
 cp "$repo_root/macos/Kmgr/Resources/Info.plist" "$contents_dir/Info.plist"
 chmod 0755 "$macos_dir/Kmgr" "$helpers_dir/kmgr-engine"
 
-# Copying SwiftPM's linker-signed executable into a bundle invalidates its
-# original ad-hoc seal. Sign nested code first, then seal the finished bundle.
+if [[ "$configuration" == release ]]; then
+  # SwiftPM emits a separate dSYM for Release. Remove the copied executable's
+  # remaining symbol table before signing; keep the dSYM in macos/.build for
+  # crash symbolication and for a distribution pipeline to archive separately.
+  xcrun strip -u -r "$macos_dir/Kmgr"
+fi
+
+# Copying and, for Release, stripping SwiftPM's linker-signed executable
+# invalidates its original ad-hoc seal. Sign nested code first, then seal the
+# finished bundle. All binary mutations must remain above these calls.
 # A distribution pipeline can replace both signatures with Developer ID.
 codesign --force --sign - "$helpers_dir/kmgr-engine"
 codesign --force --sign - "$app_dir"
