@@ -97,6 +97,35 @@ func TestKubernetesNodeMetricsFetcherAndRealZero(t *testing.T) {
 	}
 }
 
+func TestKubernetesMetricsFetcherPreservesSubMillicoreCPUPrecision(t *testing.T) {
+	t.Parallel()
+	metric := metricsapi.NodeMetrics{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Usage: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("1500n"),
+		},
+	}
+	client := metricsfake.NewSimpleClientset()
+	client.PrependReactor("list", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, &metricsapi.NodeMetricsList{Items: []metricsapi.NodeMetrics{metric}}, nil
+	})
+	samples, err := (KubernetesFetcher{
+		Client: client.MetricsV1beta1(), Kind: NodeMetrics,
+	}).Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := samples["node-a"].Resources[string(corev1.ResourceCPU)]; got != 1500 {
+		t.Fatalf("CPU nanocores = %d, want 1500", got)
+	}
+	measurement := MeasurementFor(
+		samples["node-a"], corev1.ResourceCPU, MetricsAPIGroupVersion, "node",
+	)
+	if got := measurement.Quantity.ScaledValue(resource.Nano); got != 1500 {
+		t.Fatalf("round-tripped CPU nanocores = %d, want 1500", got)
+	}
+}
+
 func TestKubernetesMetricsFetcherClassifiesForbiddenWithoutRemotePayload(t *testing.T) {
 	t.Parallel()
 	client := metricsfake.NewSimpleClientset()

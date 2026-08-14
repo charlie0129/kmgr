@@ -100,7 +100,9 @@ func addUsage(result map[string]int64, usage corev1.ResourceList) {
 	for name, quantity := range usage {
 		var value int64
 		if name == corev1.ResourceCPU {
-			value = quantity.MilliValue() * 1_000_000
+			// Preserve the Metrics API's nanocore precision. MilliValue rounds
+			// every positive sub-millicore sample up to one millicore.
+			value = quantity.ScaledValue(resource.Nano)
 		} else {
 			value = quantity.Value()
 		}

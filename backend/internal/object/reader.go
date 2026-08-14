@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -224,6 +226,11 @@ type Detail struct {
 	Labels          map[string]string
 	Annotations     map[string]string
 	Summary         []SummaryField
+	// object is the same fresh, UID-validated value used to build the detail.
+	// It stays package-private so optional enrichers can calculate from the
+	// authoritative read without performing a second GET or exposing raw
+	// Secret data through the response contract.
+	object *unstructured.Unstructured
 }
 
 type SummaryField struct {
@@ -254,6 +261,7 @@ func detailFromObject(
 		ResourceVersion: value.GetResourceVersion(),
 		Labels:          cloneStrings(value.GetLabels()),
 		Annotations:     cloneStrings(value.GetAnnotations()),
+		object:          value,
 	}
 	if includeYAML {
 		jsonBytes, err := value.MarshalJSON()
@@ -400,25 +408,58 @@ func isSafeUTF8(value []byte) bool {
 
 func summarize(value *unstructured.Unstructured) []SummaryField {
 	fields := []SummaryField{
-		{Section: "identity", ID: "kind", Label: "Kind", Value: value.GetKind()},
-		{Section: "identity", ID: "namespace", Label: "Namespace", Value: valueOrDash(value.GetNamespace())},
-		{Section: "identity", ID: "name", Label: "Name", Value: value.GetName()},
-		{Section: "identity", ID: "uid", Label: "UID", Value: string(value.GetUID())},
-		{Section: "identity", ID: "resourceVersion", Label: "Resource Version", Value: value.GetResourceVersion()},
+		{Section: "identity", ID: "kind", Label: "Kind", Value: boundedSummaryText(value.GetKind())},
+		{Section: "identity", ID: "namespace", Label: "Namespace", Value: boundedSummaryText(valueOrDash(value.GetNamespace()))},
+		{Section: "identity", ID: "name", Label: "Name", Value: boundedSummaryText(value.GetName())},
+		{Section: "identity", ID: "uid", Label: "UID", Value: boundedSummaryText(string(value.GetUID()))},
+		{Section: "identity", ID: "resourceVersion", Label: "Resource Version", Value: boundedSummaryText(value.GetResourceVersion())},
 	}
 	if created := value.GetCreationTimestamp(); !created.IsZero() {
 		fields = append(fields, SummaryField{
 			Section: "identity", ID: "created", Label: "Created", Value: created.Time.Format("2006-01-02 15:04:05Z07:00"),
 		})
 	}
-	if phase, found, _ := unstructured.NestedString(value.Object, "status", "phase"); found && phase != "" {
-		fields = append(fields, SummaryField{Section: "status", ID: "phase", Label: "Status", Value: phase})
+	if generation := value.GetGeneration(); generation > 0 {
+		fields = append(fields, SummaryField{
+			Section: "identity", ID: "generation", Label: "Generation", Value: fmt.Sprint(generation),
+		})
 	}
+	if deleted := value.GetDeletionTimestamp(); deleted != nil && !deleted.IsZero() {
+		fields = append(fields, SummaryField{
+			Section: "identity", ID: "deleting", Label: "Deleting Since",
+			Value: deleted.Time.Format("2006-01-02 15:04:05Z07:00"),
+		})
+	}
+
+	// Secret payloads can occur under data, stringData, or provider-specific
+	// status fields. Keep their summary strictly metadata-only; decoded values
+	// remain exclusive to the explicitly revealed Data surface.
+	if value.GetKind() != "Secret" {
+		fields = append(fields, genericStatusSummary(value.Object)...)
+		fields = append(fields, conditionSummary(value.Object)...)
+	}
+	fields = append(fields, ownerReferenceSummary(value)...)
+
 	switch value.GetKind() {
 	case "Pod":
+		fields = append(fields, podOverviewSummary(value.Object)...)
 		fields = append(fields, podContainerSummary(value.Object)...)
 	case "Service":
+		fields = append(fields, serviceOverviewSummary(value.Object)...)
 		fields = append(fields, servicePortSummary(value.Object)...)
+	case "Secret":
+		if secretType, found, _ := unstructured.NestedString(value.Object, "type"); found && secretType != "" {
+			fields = append(fields, SummaryField{
+				Section: "secret", ID: "type", Label: "Type", Value: secretType,
+			})
+		}
+	}
+	// Apply one final bound to every presentation string, including fields
+	// produced by resource-specific helpers. This keeps future helpers from
+	// accidentally turning untrusted API values into an unbounded UI response.
+	for index := range fields {
+		fields[index].Label = boundedSummaryLabel(fields[index].Label)
+		fields[index].Value = boundedSummaryText(fields[index].Value)
 	}
 	return fields
 }
@@ -426,9 +467,239 @@ func summarize(value *unstructured.Unstructured) []SummaryField {
 const (
 	maximumSummaryContainers    = 64
 	maximumSummaryPorts         = 128
+	maximumSummaryConditions    = 64
+	maximumSummaryOwners        = 64
+	maximumSummarySelectors     = 64
+	maximumSummaryAddresses     = 64
 	maximumSummaryNameBytes     = 253
 	maximumSummaryPortNameBytes = 63
+	maximumSummaryLabelBytes    = 128
+	maximumSummaryValueBytes    = 512
 )
+
+func genericStatusSummary(object map[string]any) []SummaryField {
+	result := make([]SummaryField, 0, 8)
+	if phase, found, _ := unstructured.NestedString(object, "status", "phase"); found && phase != "" {
+		result = append(result, SummaryField{
+			Section: "status", ID: "phase", Label: "Status", Value: boundedSummaryText(phase),
+		})
+	}
+	integerFields := []struct {
+		path    []string
+		id      string
+		label   string
+		section string
+	}{
+		{path: []string{"status", "observedGeneration"}, id: "observedGeneration", label: "Observed Generation", section: "status"},
+		{path: []string{"spec", "replicas"}, id: "desiredReplicas", label: "Desired Replicas", section: "replicas"},
+		{path: []string{"status", "replicas"}, id: "replicas", label: "Current Replicas", section: "replicas"},
+		{path: []string{"status", "readyReplicas"}, id: "readyReplicas", label: "Ready Replicas", section: "replicas"},
+		{path: []string{"status", "availableReplicas"}, id: "availableReplicas", label: "Available Replicas", section: "replicas"},
+		{path: []string{"status", "updatedReplicas"}, id: "updatedReplicas", label: "Updated Replicas", section: "replicas"},
+		{path: []string{"status", "unavailableReplicas"}, id: "unavailableReplicas", label: "Unavailable Replicas", section: "replicas"},
+	}
+	for _, field := range integerFields {
+		if number, found, _ := unstructured.NestedInt64(object, field.path...); found {
+			result = append(result, SummaryField{
+				Section: field.section, ID: field.id, Label: field.label, Value: fmt.Sprint(number),
+			})
+		}
+	}
+	return result
+}
+
+func conditionSummary(object map[string]any) []SummaryField {
+	conditions, found, err := unstructured.NestedSlice(object, "status", "conditions")
+	if err != nil || !found {
+		return nil
+	}
+	originalCount := len(conditions)
+	if len(conditions) > maximumSummaryConditions {
+		conditions = conditions[:maximumSummaryConditions]
+	}
+	result := make([]SummaryField, 0, len(conditions)+1)
+	for index, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		typeName, _, _ := unstructured.NestedString(condition, "type")
+		status, _, _ := unstructured.NestedString(condition, "status")
+		reason, _, _ := unstructured.NestedString(condition, "reason")
+		message, _, _ := unstructured.NestedString(condition, "message")
+		transitioned, _, _ := unstructured.NestedString(condition, "lastTransitionTime")
+		if typeName == "" && status == "" && reason == "" && message == "" {
+			continue
+		}
+		label := boundedSummaryLabel(typeName)
+		if label == "" {
+			label = fmt.Sprintf("Condition %d", index+1)
+		}
+		parts := make([]string, 0, 4)
+		if status != "" {
+			parts = append(parts, status)
+		}
+		if reason != "" {
+			parts = append(parts, reason)
+		}
+		if message != "" {
+			parts = append(parts, message)
+		}
+		if transitioned != "" {
+			parts = append(parts, "since "+transitioned)
+		}
+		result = append(result, SummaryField{
+			Section: "conditions", ID: fmt.Sprintf("condition:%d", index), Label: label,
+			Value: boundedSummaryText(strings.Join(parts, " · ")),
+		})
+	}
+	if omitted := originalCount - len(conditions); omitted > 0 {
+		result = append(result, omittedSummaryField("conditions", "conditionsOmitted", "Conditions", omitted))
+	}
+	return result
+}
+
+func ownerReferenceSummary(value *unstructured.Unstructured) []SummaryField {
+	owners := value.GetOwnerReferences()
+	originalCount := len(owners)
+	if len(owners) > maximumSummaryOwners {
+		owners = owners[:maximumSummaryOwners]
+	}
+	result := make([]SummaryField, 0, len(owners)+1)
+	for index, owner := range owners {
+		name := boundedSummaryText(owner.Name)
+		if name == "" {
+			continue
+		}
+		kind := boundedSummaryLabel(owner.Kind)
+		if kind == "" {
+			kind = "Object"
+		}
+		parts := []string{kind + "/" + name}
+		if owner.Controller != nil && *owner.Controller {
+			parts = append(parts, "controller")
+		}
+		if uid := boundedSummaryText(string(owner.UID)); uid != "" {
+			parts = append(parts, "UID "+uid)
+		}
+		result = append(result, SummaryField{
+			Section: "owners", ID: fmt.Sprintf("owner:%d", index), Label: "Owner",
+			Value: boundedSummaryText(strings.Join(parts, " · ")),
+		})
+	}
+	if omitted := originalCount - len(owners); omitted > 0 {
+		result = append(result, omittedSummaryField("owners", "ownersOmitted", "Owner References", omitted))
+	}
+	return result
+}
+
+func podOverviewSummary(object map[string]any) []SummaryField {
+	result := make([]SummaryField, 0, 3)
+	for _, field := range []struct {
+		path  []string
+		id    string
+		label string
+	}{
+		{path: []string{"spec", "nodeName"}, id: "node", label: "Node"},
+		{path: []string{"status", "podIP"}, id: "podIP", label: "Pod IP"},
+		{path: []string{"status", "hostIP"}, id: "hostIP", label: "Host IP"},
+	} {
+		if value, found, _ := unstructured.NestedString(object, field.path...); found && value != "" {
+			result = append(result, SummaryField{
+				Section: "network", ID: field.id, Label: field.label, Value: boundedSummaryText(value),
+			})
+		}
+	}
+	return result
+}
+
+func serviceOverviewSummary(object map[string]any) []SummaryField {
+	result := make([]SummaryField, 0)
+	for _, field := range []struct {
+		path  []string
+		id    string
+		label string
+	}{
+		{path: []string{"spec", "type"}, id: "type", label: "Type"},
+		{path: []string{"spec", "clusterIP"}, id: "clusterIP", label: "Cluster IP"},
+		{path: []string{"spec", "externalName"}, id: "externalName", label: "External Name"},
+	} {
+		if value, found, _ := unstructured.NestedString(object, field.path...); found && value != "" {
+			result = append(result, SummaryField{
+				Section: "service", ID: field.id, Label: field.label, Value: boundedSummaryText(value),
+			})
+		}
+	}
+
+	selectors, found, err := unstructured.NestedStringMap(object, "spec", "selector")
+	if err == nil && found {
+		keys := make([]string, 0, len(selectors))
+		for key := range selectors {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		originalCount := len(keys)
+		if len(keys) > maximumSummarySelectors {
+			keys = keys[:maximumSummarySelectors]
+		}
+		for index, key := range keys {
+			result = append(result, SummaryField{
+				Section: "selectors", ID: fmt.Sprintf("selector:%d", index),
+				Label: boundedSummaryLabel(key), Value: boundedSummaryText(selectors[key]),
+			})
+		}
+		if omitted := originalCount - len(keys); omitted > 0 {
+			result = append(result, omittedSummaryField("selectors", "selectorsOmitted", "Selectors", omitted))
+		}
+	}
+
+	result = append(result, serviceAddressSummary(object)...)
+	return result
+}
+
+func serviceAddressSummary(object map[string]any) []SummaryField {
+	addresses := make([]SummaryField, 0)
+	omitted := 0
+	appendAddress := func(id, label, value string) {
+		value = boundedSummaryText(value)
+		if value == "" {
+			return
+		}
+		if len(addresses) >= maximumSummaryAddresses {
+			omitted++
+			return
+		}
+		addresses = append(addresses, SummaryField{
+			Section: "endpoints", ID: fmt.Sprintf("%s:%d", id, len(addresses)),
+			Label: label, Value: value,
+		})
+	}
+	if externalIPs, found, _ := unstructured.NestedStringSlice(object, "spec", "externalIPs"); found {
+		for _, address := range externalIPs {
+			appendAddress("externalIP", "External IP", address)
+		}
+	}
+	ingress, found, err := unstructured.NestedSlice(object, "status", "loadBalancer", "ingress")
+	if err == nil && found {
+		for _, raw := range ingress {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if ip, _, _ := unstructured.NestedString(entry, "ip"); ip != "" {
+				appendAddress("loadBalancer", "Load Balancer", ip)
+			} else if hostname, _, _ := unstructured.NestedString(entry, "hostname"); hostname != "" {
+				appendAddress("loadBalancer", "Load Balancer", hostname)
+			}
+		}
+	}
+	if omitted > 0 {
+		addresses = append(addresses, omittedSummaryField(
+			"endpoints", "endpointsOmitted", "Endpoint Addresses", omitted,
+		))
+	}
+	return addresses
+}
 
 func podContainerSummary(object map[string]any) []SummaryField {
 	type containerGroup struct {
@@ -575,6 +846,43 @@ func summaryProtocol(port map[string]any) string {
 	default:
 		return "TCP"
 	}
+}
+
+func omittedSummaryField(section, id, label string, count int) SummaryField {
+	return SummaryField{
+		Section: section, ID: id, Label: "Additional " + label,
+		Value: fmt.Sprintf("%d not shown", count),
+	}
+}
+
+func boundedSummaryLabel(value string) string {
+	return boundedNormalizedText(value, maximumSummaryLabelBytes)
+}
+
+func boundedSummaryText(value string) string {
+	return boundedNormalizedText(value, maximumSummaryValueBytes)
+}
+
+func boundedNormalizedText(value string, maximumBytes int) string {
+	value = strings.Map(func(current rune) rune {
+		if unicode.IsSpace(current) {
+			return ' '
+		}
+		if unicode.IsControl(current) {
+			return -1
+		}
+		return current
+	}, strings.ToValidUTF8(value, "�"))
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) <= maximumBytes {
+		return value
+	}
+	const suffix = "…"
+	end := maximumBytes - len(suffix)
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end] + suffix
 }
 
 func validSummaryToken(value string, maximumBytes int) bool {

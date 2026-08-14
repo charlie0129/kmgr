@@ -30,6 +30,80 @@ enum ObjectDetailInitialTab {
     }
 }
 
+enum ObjectDetailSummaryPresentation {
+    static let maximumMetadataEntriesPerSection = 64
+    static let maximumMetadataKeyCharacters = 320
+    static let maximumMetadataValueCharacters = 256
+
+    static func fields(for detail: ObjectDetail) -> [ObjectSummaryField] {
+        detail.summaryFields
+            + metadataFields(sectionID: "labels", values: detail.labels)
+            + metadataFields(sectionID: "annotations", values: detail.annotations)
+    }
+
+    private static func metadataFields(
+        sectionID: String,
+        values: [String: String]
+    ) -> [ObjectSummaryField] {
+        let ordered = values.sorted { $0.key < $1.key }
+        let visible = ordered.prefix(maximumMetadataEntriesPerSection)
+        var fields = visible.map { key, value in
+            let normalized = normalizedMetadataText(value)
+            let display = bounded(normalized, maximumCharacters: maximumMetadataValueCharacters)
+            let truncated = display != normalized
+            return ObjectSummaryField(
+                sectionID: sectionID,
+                fieldID: key,
+                label: bounded(
+                    normalizedMetadataText(key),
+                    maximumCharacters: maximumMetadataKeyCharacters
+                ),
+                displayText: display.isEmpty ? "—" : display,
+                tooltip: truncated
+                    ? "Value truncated after \(maximumMetadataValueCharacters) characters."
+                    : ""
+            )
+        }
+        let omitted = ordered.count - visible.count
+        if omitted > 0 {
+            fields.append(ObjectSummaryField(
+                sectionID: sectionID,
+                fieldID: "additionalEntries",
+                label: "Additional Entries",
+                displayText: "\(omitted) not shown"
+            ))
+        }
+        return fields
+    }
+
+    private static func normalizedMetadataText(_ value: String) -> String {
+        value.unicodeScalars
+            .map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }
+            .joined()
+            .split(whereSeparator: \Character.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    private static func bounded(_ value: String, maximumCharacters: Int) -> String {
+        guard value.count > maximumCharacters else { return value }
+        return String(value.prefix(maximumCharacters - 1)) + "…"
+    }
+}
+
+enum ObjectDetailWatchPresentation {
+    /// WatchObject has no include-metrics contract. An empty metrics array on
+    /// a watch update therefore means "not carried by this stream", not that
+    /// the Metrics API retracted the values fetched by GetObject.
+    static func merging(_ update: ObjectDetail, previous: ObjectDetail?) -> ObjectDetail {
+        guard update.metrics.isEmpty, let previous, !previous.metrics.isEmpty else {
+            return update
+        }
+        var merged = update
+        merged.metrics = previous.metrics
+        return merged
+    }
+}
+
 /// A fresh, UID-authoritative detail surface. It replaces the table area in a
 /// workspace; no inspector or bottom drawer is introduced.
 @MainActor
@@ -591,7 +665,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         objectData = data
         conflictedDataKey = nil
         installYAML(detail.yamlUTF8)
-        renderSummary(detail.summaryFields)
+        renderSummary(detail)
         keysTable.reloadData()
         updateDataEditorControls()
         renderMetrics(detail.metrics)
@@ -644,7 +718,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             detail = updatedDetail
             showYAMLPresentation()
         }
-        renderSummary(updatedDetail.summaryFields)
+        renderSummary(updatedDetail)
         renderMetrics(updatedDetail.metrics)
 
         if let updatedData {
@@ -687,17 +761,20 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
     }
 
-    private func renderSummary(_ fields: [ObjectSummaryField]) {
+    private func renderSummary(_ detail: ObjectDetail) {
         clear(summaryStack)
+        let fields = ObjectDetailSummaryPresentation.fields(for: detail)
         var lastSection = ""
         for field in fields {
             if field.sectionID != lastSection {
                 let heading = NSTextField(labelWithString: field.sectionID.capitalized)
+                heading.identifier = NSUserInterfaceItemIdentifier("object-detail-summary-section")
                 heading.font = .systemFont(ofSize: 13, weight: .semibold)
                 summaryStack.addArrangedSubview(heading)
                 lastSection = field.sectionID
             }
             let label = NSTextField(labelWithString: "\(field.label):  \(field.displayText)")
+            label.identifier = NSUserInterfaceItemIdentifier("object-detail-summary-field")
             label.toolTip = field.tooltip
             label.textColor = field.severity == .critical ? .systemRed : .labelColor
             summaryStack.addArrangedSubview(label)
@@ -720,11 +797,19 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         for value in metrics {
             let title = value.resourceName.isEmpty ? "Resource" : value.resourceName
             let used = value.usage.map { metricNumber($0, unit: value.unit) } ?? "Unavailable"
-            let requested = value.request.map { metricNumber($0, unit: value.unit) } ?? "—"
-            let limit = value.limit.map { metricNumber($0, unit: value.unit) } ?? "—"
-            let label = NSTextField(
-                labelWithString: "\(title):  \(used) used · \(requested) requested · \(limit) limit"
-            )
+
+            var components = ["\(used) used"]
+            if value.request != nil || value.limit != nil {
+                let requested = value.request.map { metricNumber($0, unit: value.unit) } ?? "—"
+                let limit = value.limit.map { metricNumber($0, unit: value.unit) } ?? "—"
+                components.append("\(requested) requested")
+                components.append("\(limit) limit")
+            }
+            if let capacity = value.capacity {
+                components.append("\(metricNumber(capacity, unit: value.unit)) allocatable")
+            }
+            let label = NSTextField(labelWithString: "\(title):  \(components.joined(separator: " · "))")
+            label.identifier = NSUserInterfaceItemIdentifier("object-detail-metric")
             if let measured = value.measuredAtUnixMilliseconds {
                 label.toolTip = "Measured \(Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(measured) / 1_000))) · \(value.provider)"
             }
@@ -740,7 +825,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func metricNumber(_ value: Double, unit: String) -> String {
-        value.formatted(.number.precision(.fractionLength(0...2))) + (unit.isEmpty ? "" : " \(unit)")
+        KubernetesResourceQuantityFormatter.compact(value, unit: unit)
     }
 
     @objc private func tabChanged() {
@@ -824,10 +909,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             }
             return
         }
-        detail = updated
-        installYAML(updated.yamlUTF8)
-        renderSummary(updated.summaryFields)
-        renderMetrics(updated.metrics)
+        let presented = ObjectDetailWatchPresentation.merging(updated, previous: detail)
+        detail = presented
+        installYAML(presented.yamlUTF8)
+        renderSummary(presented)
+        renderMetrics(presented.metrics)
         statusLabel.stringValue = "Watching · resource version \(updated.resourceVersion)"
         statusLabel.textColor = .secondaryLabelColor
     }

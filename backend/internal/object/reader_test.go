@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -123,10 +125,19 @@ func TestPodSummaryIncludesBoundedContainerChoicesAndDeclaredPorts(t *testing.T)
 func TestServiceSummaryIncludesDeclaredAndTargetPorts(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Service", "services", "ns", "web", "uid")
-	value.Object["spec"] = map[string]any{"ports": []any{
-		map[string]any{"name": "http", "port": int64(80), "targetPort": int64(8080)},
-		map[string]any{"name": "admin", "port": int64(8443), "targetPort": "admin", "protocol": "TCP"},
-	}}
+	value.Object["spec"] = map[string]any{
+		"type":        "LoadBalancer",
+		"clusterIP":   "10.0.0.42",
+		"selector":    map[string]any{"tier": "frontend", "app": "api"},
+		"externalIPs": []any{"203.0.113.10"},
+		"ports": []any{
+			map[string]any{"name": "http", "port": int64(80), "targetPort": int64(8080)},
+			map[string]any{"name": "admin", "port": int64(8443), "targetPort": "admin", "protocol": "TCP"},
+		},
+	}
+	value.Object["status"] = map[string]any{"loadBalancer": map[string]any{"ingress": []any{
+		map[string]any{"hostname": "public.example.test"},
+	}}}
 	detail, err := testReader(t, value).Detail(context.Background(), Identity{
 		SessionID: "session", Version: "v1", Resource: "services", Namespace: "ns", Name: "web", UID: "uid",
 	}, false, true)
@@ -146,6 +157,176 @@ func TestServiceSummaryIncludesDeclaredAndTargetPorts(t *testing.T) {
 	}
 	if got, want := strings.Join(ids, ","), "port:TCP:80:http,port:TCP:8443:admin"; got != want {
 		t.Fatalf("service port IDs = %q, want %q", got, want)
+	}
+	selectors := make([]string, 0, 2)
+	addresses := make([]string, 0, 2)
+	serviceFields := make(map[string]string)
+	for _, field := range detail.Summary {
+		switch field.Section {
+		case "selectors":
+			selectors = append(selectors, field.Label+"="+field.Value)
+		case "endpoints":
+			addresses = append(addresses, field.Value)
+		case "service":
+			serviceFields[field.ID] = field.Value
+		}
+	}
+	if got, want := strings.Join(selectors, ","), "app=api,tier=frontend"; got != want {
+		t.Fatalf("service selectors = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(addresses, ","), "203.0.113.10,public.example.test"; got != want {
+		t.Fatalf("service endpoint addresses = %q, want %q", got, want)
+	}
+	if serviceFields["type"] != "LoadBalancer" || serviceFields["clusterIP"] != "10.0.0.42" {
+		t.Fatalf("service overview = %#v", serviceFields)
+	}
+}
+
+func TestGenericSummaryIncludesConditionsOwnersAndWorkloadStatus(t *testing.T) {
+	t.Parallel()
+	controller := true
+	value := kubernetesObject("apps/v1", "Deployment", "deployments", "team-a", "api", "uid")
+	value.SetGeneration(7)
+	value.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "api-784dc9", UID: "owner-uid", Controller: &controller,
+	}})
+	value.Object["spec"] = map[string]any{"replicas": int64(5)}
+	value.Object["status"] = map[string]any{
+		"observedGeneration": int64(7), "replicas": int64(5), "readyReplicas": int64(4),
+		"conditions": []any{map[string]any{
+			"type": "Available", "status": "True", "reason": "MinimumReplicasAvailable",
+			"message":            "Deployment has minimum availability",
+			"lastTransitionTime": "2026-08-14T02:03:04Z",
+		}},
+	}
+	detail, err := testReader(t, value).Detail(context.Background(), Identity{
+		SessionID: "session", Group: "apps", Version: "v1", Resource: "deployments",
+		Namespace: "team-a", Name: "api", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]SummaryField)
+	for _, field := range detail.Summary {
+		byID[field.ID] = field
+	}
+	for id, expected := range map[string]string{
+		"generation":         "7",
+		"observedGeneration": "7",
+		"desiredReplicas":    "5",
+		"replicas":           "5",
+		"readyReplicas":      "4",
+	} {
+		if byID[id].Value != expected {
+			t.Errorf("summary[%q] = %#v, want value %q", id, byID[id], expected)
+		}
+	}
+	condition := byID["condition:0"]
+	if condition.Section != "conditions" || condition.Label != "Available" ||
+		!strings.Contains(condition.Value, "MinimumReplicasAvailable") ||
+		!strings.Contains(condition.Value, "Deployment has minimum availability") {
+		t.Errorf("condition summary = %#v", condition)
+	}
+	owner := byID["owner:0"]
+	if owner.Section != "owners" || !strings.Contains(owner.Value, "ReplicaSet/api-784dc9") ||
+		!strings.Contains(owner.Value, "controller") || !strings.Contains(owner.Value, "owner-uid") {
+		t.Errorf("owner summary = %#v", owner)
+	}
+}
+
+func TestSummaryBoundsGenericMetadataAndNormalizesUntrustedText(t *testing.T) {
+	t.Parallel()
+	multibyte := boundedSummaryText(strings.Repeat("界", maximumSummaryValueBytes))
+	if !utf8.ValidString(multibyte) || len(multibyte) > maximumSummaryValueBytes ||
+		!strings.HasSuffix(multibyte, "…") {
+		t.Fatalf("multibyte summary bound produced %d invalid bytes", len(multibyte))
+	}
+	conditionCount := maximumSummaryConditions + 20
+	ownerCount := maximumSummaryOwners + 20
+	selectorCount := maximumSummarySelectors + 20
+	conditions := make([]any, conditionCount)
+	owners := make([]any, ownerCount)
+	selectors := make(map[string]any, selectorCount)
+	for index := range conditions {
+		conditions[index] = map[string]any{
+			"type": fmt.Sprintf("Ready-%d", index), "status": "False",
+			"message": strings.Repeat("very long\ncondition\x00 ", maximumSummaryValueBytes),
+		}
+	}
+	for index := range owners {
+		owners[index] = map[string]any{
+			"apiVersion": "apps/v1", "kind": "Deployment", "name": fmt.Sprintf("owner-%d", index),
+			"uid": fmt.Sprintf("owner-uid-%d", index),
+		}
+	}
+	for index := range selectorCount {
+		selectors[fmt.Sprintf("selector-%03d", index)] = strings.Repeat("x", maximumSummaryValueBytes+100)
+	}
+	value := kubernetesObject("v1", "Service", "services", "ns", "web", "uid")
+	metadata := value.Object["metadata"].(map[string]any)
+	metadata["ownerReferences"] = owners
+	value.Object["spec"] = map[string]any{"selector": selectors}
+	value.Object["status"] = map[string]any{"conditions": conditions}
+	detail, err := testReader(t, value).Detail(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "services", Namespace: "ns", Name: "web", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]int)
+	omissionMarkers := make(map[string]bool)
+	for _, field := range detail.Summary {
+		counts[field.Section]++
+		if len(field.Label) > maximumSummaryLabelBytes || len(field.Value) > maximumSummaryValueBytes {
+			t.Fatalf("unbounded summary field = %#v", field)
+		}
+		if strings.ContainsAny(field.Value, "\x00\n\r\t") {
+			t.Fatalf("summary did not normalize whitespace: %#v", field)
+		}
+		if strings.HasSuffix(field.ID, "Omitted") {
+			omissionMarkers[field.Section] = true
+		}
+	}
+	for section, maximum := range map[string]int{
+		"conditions": maximumSummaryConditions + 1,
+		"owners":     maximumSummaryOwners + 1,
+		"selectors":  maximumSummarySelectors + 1,
+	} {
+		if counts[section] != maximum || !omissionMarkers[section] {
+			t.Errorf("%s summary count/marker = %d/%t, want %d/true", section, counts[section], omissionMarkers[section], maximum)
+		}
+	}
+}
+
+func TestSecretSummaryNeverIncludesPayloadOrProviderStatus(t *testing.T) {
+	t.Parallel()
+	const sentinel = "must-never-cross-the-secret-summary-boundary"
+	value := kubernetesObject("v1", "Secret", "secrets", "ns", "credentials", "uid")
+	value.Object["data"] = map[string]any{"token": base64.StdEncoding.EncodeToString([]byte(sentinel))}
+	value.Object["stringData"] = map[string]any{"password": sentinel}
+	value.Object["type"] = "kubernetes.io/tls"
+	value.Object["status"] = map[string]any{
+		"phase":      sentinel,
+		"conditions": []any{map[string]any{"type": "Synced", "message": sentinel}},
+	}
+	detail, err := testReader(t, value).Detail(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "secrets", Namespace: "ns", Name: "credentials", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundType := false
+	for _, field := range detail.Summary {
+		if strings.Contains(field.Label, sentinel) || strings.Contains(field.Value, sentinel) ||
+			field.Section == "status" || field.Section == "conditions" {
+			t.Fatalf("Secret summary exposed a payload-derived field: %#v", field)
+		}
+		if field.Section == "secret" && field.ID == "type" && field.Value == "kubernetes.io/tls" {
+			foundType = true
+		}
+	}
+	if !foundType {
+		t.Fatalf("Secret summary omitted its non-sensitive type: %#v", detail.Summary)
 	}
 }
 

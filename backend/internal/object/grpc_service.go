@@ -23,9 +23,10 @@ var _ kmgrv1.ObjectServiceServer = (*GRPCService)(nil)
 
 type GRPCService struct {
 	kmgrv1.UnimplementedObjectServiceServer
-	reader *Reader
-	scanMu sync.Mutex
-	scans  map[relationshipScanKey]context.CancelFunc
+	reader          *Reader
+	metricsProvider DetailMetricsProvider
+	scanMu          sync.Mutex
+	scans           map[relationshipScanKey]context.CancelFunc
 }
 
 type relationshipScanKey struct {
@@ -34,11 +35,18 @@ type relationshipScanKey struct {
 	generation uint64
 }
 
-func NewGRPCService(reader *Reader) (*GRPCService, error) {
+func NewGRPCService(reader *Reader, metricsProviders ...DetailMetricsProvider) (*GRPCService, error) {
 	if reader == nil {
 		return nil, errors.New("object reader must not be nil")
 	}
-	return &GRPCService{reader: reader, scans: make(map[relationshipScanKey]context.CancelFunc)}, nil
+	if len(metricsProviders) > 1 {
+		return nil, errors.New("at most one object detail metrics provider may be configured")
+	}
+	service := &GRPCService{reader: reader, scans: make(map[relationshipScanKey]context.CancelFunc)}
+	if len(metricsProviders) == 1 {
+		service.metricsProvider = metricsProviders[0]
+	}
+	return service, nil
 }
 
 func (s *GRPCService) GetObject(
@@ -61,7 +69,17 @@ func (s *GRPCService) GetObject(
 			Error: structuredObjectError(err, request.GetIdentity(), "get-object"),
 		}, nil
 	}
-	return detailResponse(requestID, request.GetIdentity(), detail), nil
+	response := detailResponse(requestID, request.GetIdentity(), detail)
+	if request.GetIncludeMetrics() && s.metricsProvider != nil {
+		// Metrics are optional enrichment. Authentication, discovery, or
+		// Metrics API failures must not turn a successful authoritative object
+		// read into a failed detail page. Providers may still return safe
+		// scheduler accounting when measured usage is unavailable.
+		if values, _ := s.metricsProvider.Metrics(operationContext, identity, detail.object); len(values) > 0 {
+			response.Metrics = values
+		}
+	}
+	return response, nil
 }
 
 func (s *GRPCService) WatchObject(

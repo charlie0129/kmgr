@@ -125,6 +125,125 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(notice.stringValue.contains("Data"))
     }
 
+    @Test("Summary visibly renders sorted labels and annotations from object metadata")
+    func summaryMetadataRendering() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let detail = ObjectDetail(
+            identity: identity,
+            resourceVersion: "rv-1",
+            summaryFields: [ObjectSummaryField(
+                sectionID: "status",
+                fieldID: "available",
+                label: "Available",
+                displayText: "True"
+            )],
+            labels: ["tier": "frontend", "app": "api"],
+            annotations: ["example.test/note": "first\n  second"]
+        )
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: LoadedObjectDetailProvider(
+                detail: detail,
+                data: ObjectData(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    entries: [],
+                    secret: false
+                )
+            ),
+            initialTab: .summary
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        try await waitUntil {
+            descendants(of: controller.view).contains {
+                ($0 as? NSTextField)?.stringValue == "example.test/note:  first second"
+            }
+        }
+        let headings = descendants(of: controller.view).compactMap { $0 as? NSTextField }
+            .filter { $0.identifier?.rawValue == "object-detail-summary-section" }
+            .map(\.stringValue)
+        let fields = descendants(of: controller.view).compactMap { $0 as? NSTextField }
+            .filter { $0.identifier?.rawValue == "object-detail-summary-field" }
+            .map(\.stringValue)
+
+        #expect(headings == ["Status", "Labels", "Annotations"])
+        #expect(fields == [
+            "Available:  True",
+            "app:  api",
+            "tier:  frontend",
+            "example.test/note:  first second",
+        ])
+    }
+
+    @Test("Summary metadata output is bounded and reports omitted entries")
+    func boundedSummaryMetadata() throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: "pods",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let labels = Dictionary(uniqueKeysWithValues:
+            (0..<(ObjectDetailSummaryPresentation.maximumMetadataEntriesPerSection + 10))
+                .map { (String(format: "key-%03d", $0), "value-\($0)") }
+        )
+        let fields = ObjectDetailSummaryPresentation.fields(for: ObjectDetail(
+            identity: identity,
+            resourceVersion: "rv-1",
+            labels: labels,
+            annotations: ["long": String(repeating: "x", count: 2_000)]
+        ))
+        let labelFields = fields.filter { $0.sectionID == "labels" }
+        let annotation = try #require(fields.first { $0.sectionID == "annotations" })
+
+        #expect(labelFields.count
+            == ObjectDetailSummaryPresentation.maximumMetadataEntriesPerSection + 1)
+        #expect(labelFields.last?.displayText == "10 not shown")
+        #expect(annotation.displayText.count
+            == ObjectDetailSummaryPresentation.maximumMetadataValueCharacters)
+        #expect(annotation.displayText.hasSuffix("…"))
+        #expect(annotation.tooltip.contains("truncated"))
+    }
+
+    @Test("Summary metadata removes control characters")
+    func summaryMetadataControlCharacters() throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: "pods",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let fields = ObjectDetailSummaryPresentation.fields(for: ObjectDetail(
+            identity: identity,
+            resourceVersion: "rv-1",
+            labels: ["unsafe\u{0000}key": "first\u{0007}\nsecond"],
+            annotations: [:]
+        ))
+        let label = try #require(fields.first { $0.sectionID == "labels" })
+
+        #expect(label.label == "unsafe key")
+        #expect(label.displayText == "first second")
+        #expect(!label.label.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains))
+        #expect(!label.displayText.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains))
+    }
+
     @Test("line-number geometry grows at digit boundaries")
     func lineNumberGeometry() {
         #expect(LineNumberRulerView.lineCount(in: "") == 1)
