@@ -33,7 +33,12 @@ make generate  # regenerate checked-in protobuf sources
 `make app` defaults to a developer-friendly bundle with a SwiftPM Debug
 executable and a Go helper that retains its symbol and DWARF data. It embeds
 `kmgr-engine` under `Kmgr.app/Contents/Helpers`, signs the nested helper first,
-then ad-hoc signs the bundle. No signing identity is required.
+then ad-hoc signs the bundle. It finishes with a strict offline check of bundle
+metadata, executable layout, nested signatures, and the no-App-Sandbox policy.
+No signing identity is required. The same verifier can inspect an existing
+artifact with `./scripts/verify-app.sh`; the complete deterministic and
+runtime-only release checklist is in
+[docs/release-verification.md](docs/release-verification.md).
 
 Use `CONFIGURATION=release make app` for a smaller distribution candidate. It
 builds optimized Swift code, removes the copied Swift executable's symbol table

@@ -34,10 +34,14 @@ script=$(<"$build_script")
 strip_number=$(grep -nF 'xcrun strip -u -r "$macos_dir/Kmgr"' "$build_script" | cut -d: -f1)
 helper_sign_number=$(grep -nF 'codesign --force --sign - "$helpers_dir/kmgr-engine"' "$build_script" | cut -d: -f1)
 bundle_sign_number=$(grep -nF 'codesign --force --sign - "$app_dir"' "$build_script" | cut -d: -f1)
-[[ -n "$strip_number" && -n "$helper_sign_number" && -n "$bundle_sign_number" ]] ||
+verify_number=$(grep -nF '"$repo_root/scripts/verify-app.sh" "$app_dir"' "$build_script" | cut -d: -f1)
+[[ -n "$strip_number" && -n "$helper_sign_number" &&
+  -n "$bundle_sign_number" && -n "$verify_number" ]] ||
   fail "could not locate strip/signing commands"
-(( strip_number < helper_sign_number && helper_sign_number < bundle_sign_number )) ||
-  fail "binary mutations must precede nested-code and bundle signing"
+(( strip_number < helper_sign_number &&
+  helper_sign_number < bundle_sign_number &&
+  bundle_sign_number < verify_number )) ||
+  fail "binary mutations must precede signing and signed-bundle verification"
 
 release_pprof_dependency=$(cd "$repo_root" && go list -deps -f \
   '{{if eq .ImportPath "net/http/pprof"}}{{.ImportPath}}{{end}}' ./backend/cmd/kmgr-engine)

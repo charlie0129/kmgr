@@ -70,4 +70,6 @@ fi
 codesign --force --sign - "$helpers_dir/kmgr-engine"
 codesign --force --sign - "$app_dir"
 
+"$repo_root/scripts/verify-app.sh" "$app_dir"
+
 print "$app_dir"

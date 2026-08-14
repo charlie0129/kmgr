@@ -12,14 +12,14 @@ beyond the 100,000 live identities.
 Run the optimized harness from the repository root:
 
 ```sh
-swift test --package-path macos -c release --filter LargeViewHarness
+swift test --package-path macos -c release --no-parallel --filter LargeViewHarness
 ```
 
 Print phase timings for local comparisons:
 
 ```sh
 KMGR_PERF_DIAGNOSTICS=1 \
-  swift test --package-path macos -c release --filter LargeViewHarness
+  swift test --package-path macos -c release --no-parallel --filter LargeViewHarness
 ```
 
 The normal test has no elapsed-time pass/fail threshold, so shared CI load
@@ -28,7 +28,7 @@ Apple Silicon development machine:
 
 ```sh
 KMGR_PERF_BUDGETS=1 \
-  swift test --package-path macos -c release --filter LargeViewHarness
+  swift test --package-path macos -c release --no-parallel --filter LargeViewHarness
 ```
 
 That opt-in command uses deliberately generous phase budgets: 15 seconds for
