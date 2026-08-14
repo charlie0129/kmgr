@@ -55,6 +55,36 @@ public enum ExecContainerCatalog {
         }
     }
 
+    /// Chooses from the authoritative summary while preserving Pod spec order.
+    /// Kubernetes' conventional default-container annotation wins when it names
+    /// an eligible container. Without it, a regular container is preferred to
+    /// an ephemeral or init container.
+    public static func automaticCandidate(
+        from fields: [ObjectSummaryField],
+        defaultContainerName: String? = nil
+    ) -> ExecContainerCandidate? {
+        let candidateByName = Dictionary(
+            uniqueKeysWithValues: candidates(from: fields).map { ($0.name, $0) }
+        )
+        var ordered: [ExecContainerCandidate] = []
+        var seenNames = Set<String>()
+        for field in fields where field.sectionID == "containers" {
+            guard let parsed = candidate(from: field),
+                seenNames.insert(parsed.name).inserted,
+                let preferredKind = candidateByName[parsed.name]
+            else { continue }
+            ordered.append(preferredKind)
+        }
+        if let defaultContainerName,
+            let annotated = ordered.first(where: { $0.name == defaultContainerName })
+        {
+            return annotated
+        }
+        return ordered.first(where: { $0.kind == .regular })
+            ?? ordered.first(where: { $0.kind == .ephemeral })
+            ?? ordered.first(where: { $0.kind == .initContainer })
+    }
+
     private static func candidate(from field: ObjectSummaryField) -> ExecContainerCandidate? {
         let mappings: [(prefix: String, kind: ExecContainerKind)] = [
             ("container:", .regular),
@@ -69,6 +99,109 @@ public enum ExecContainerCatalog {
             return ExecContainerCandidate(name: name, kind: mapping.kind)
         }
         return nil
+    }
+}
+
+public struct AutomaticExecLaunchPlan: Hashable, Sendable {
+    public var request: ExecSessionRequest
+    public var fallbackShellCommand: [String]?
+
+    public init(
+        request: ExecSessionRequest,
+        fallbackShellCommand: [String]?
+    ) {
+        self.request = request
+        self.fallbackShellCommand = fallbackShellCommand
+    }
+}
+
+public enum AutomaticExecLaunchPlanner {
+    public static let defaultContainerAnnotation =
+        "kubectl.kubernetes.io/default-container"
+
+    /// Produces the exact first exec request from a fresh, UID-authoritative
+    /// Pod detail. The helper independently repeats the UID check immediately
+    /// before opening Kubernetes' exec stream.
+    public static func plan(
+        session: OpenedClusterSession,
+        target: PodExecTarget,
+        detail: ObjectDetail,
+        execSessionID: String
+    ) throws -> AutomaticExecLaunchPlan {
+        let pod = target.pod
+        guard pod.clusterSessionID == session.sessionID,
+            pod.group.isEmpty,
+            pod.version == "v1",
+            pod.resource == "pods",
+            !pod.namespace.isEmpty,
+            !pod.name.isEmpty,
+            !pod.uid.rawValue.isEmpty
+        else { throw AutomaticExecLaunchError.invalidPodIdentity }
+        guard detail.identity == pod else {
+            throw AutomaticExecLaunchError.objectIdentityMismatch
+        }
+        guard !execSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AutomaticExecLaunchError.invalidExecSessionID
+        }
+
+        let candidate: ExecContainerCandidate
+        if let preferred = target.preferredContainer {
+            guard !preferred.isEmpty,
+                let selected = ExecContainerCatalog.candidates(
+                    from: detail.summaryFields
+                ).first(where: { $0.name == preferred })
+            else {
+                throw AutomaticExecLaunchError.preferredContainerUnavailable(preferred)
+            }
+            candidate = selected
+        } else {
+            let annotated = detail.annotations[defaultContainerAnnotation]
+            guard let selected = ExecContainerCatalog.automaticCandidate(
+                from: detail.summaryFields,
+                defaultContainerName: annotated
+            ) else { throw AutomaticExecLaunchError.noEligibleContainer }
+            candidate = selected
+        }
+
+        let request = ExecSessionRequest(
+            sessionID: session.sessionID,
+            execSessionID: execSessionID,
+            generation: 1,
+            pod: pod,
+            contextName: session.contextName,
+            clusterName: session.clusterName,
+            container: candidate.name,
+            command: ["/bin/bash"]
+        )
+        return AutomaticExecLaunchPlan(
+            request: request,
+            fallbackShellCommand: ["/bin/sh"]
+        )
+    }
+}
+
+public enum AutomaticExecLaunchError: Error, Hashable, Sendable {
+    case invalidPodIdentity
+    case objectIdentityMismatch
+    case invalidExecSessionID
+    case noEligibleContainer
+    case preferredContainerUnavailable(String)
+}
+
+extension AutomaticExecLaunchError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .invalidPodIdentity:
+            "Terminal exec requires one complete, UID-pinned Pod from this cluster session."
+        case .objectIdentityMismatch:
+            "The authoritative refresh returned a different Kubernetes object."
+        case .invalidExecSessionID:
+            "The terminal session identifier is invalid."
+        case .noEligibleContainer:
+            "The selected Pod declares no container eligible for terminal exec."
+        case .preferredContainerUnavailable(let name):
+            "Container \(name.isEmpty ? "(empty)" : name) is no longer present in the selected Pod."
+        }
     }
 }
 

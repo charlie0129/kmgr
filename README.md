@@ -101,9 +101,10 @@ app-wide Port Forwards window.
   follow, previous logs, timestamps, tail, and since remain adjustable in the
   live window toolbar alongside filtering, pause, copy, and explicit save. The
   context and exact source labels remain visible above the bounded log buffer.
-- Pod exec uses a SwiftTerm window and direct argv transport. The configuration
-  can probe `/bin/bash` then `/bin/sh`, or run an explicit executable without
-  shell parsing.
+- Pod exec uses a SwiftTerm window and direct argv transport. `S` automatically
+  chooses the annotated/default regular container and probes `/bin/bash` then
+  `/bin/sh`; Shift-S opens configuration for choosing a container or running an
+  explicit executable without shell parsing.
 - Pod and Service port-forwards bind loopback by default and retry with
   exponential backoff capped at 15 seconds until explicitly stopped. A direct
   Pod forward rechecks its pinned UID before every retry. If the Pod was
@@ -154,13 +155,18 @@ focus, and hides when no supported context is active.
 | `Y` | Open YAML for one object |
 | `E` | Open Events for one object |
 | `L` | Tail all containers for compatible selected Pods or workloads |
-| `S` | Configure exec for one Pod |
+| `S` | Open a terminal for one Pod using automatic container and shell defaults |
+| Shift-S | Configure the container, shell, or executable for one Pod |
 | `P` | Configure a port-forward for one Pod or Service |
 | Command-Backspace | Confirm deletion of selected resources |
 | Command-S | Save the active YAML or key/value edit |
 
 Standard AppKit text editing, copy, undo/redo, find, and window behavior remain
 with the focused native control.
+
+In a Pod's Containers subresource, `L`/Return opens the selected container's
+logs, `S` opens its terminal, Shift-S configures its terminal, and `P` starts a
+port-forward for the UID-pinned parent Pod.
 
 ## Programmable columns and filtering
 

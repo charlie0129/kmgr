@@ -61,3 +61,139 @@ import Testing
         ).validatedCommand()
     }
 }
+
+@Test func automaticExecHonorsDefaultContainerAndProbesCommonShells() throws {
+    let pod = execPlannerPod()
+    let fields = [
+        ObjectSummaryField(
+            sectionID: "containers", fieldID: "container:sidecar",
+            label: "Container", displayText: "sidecar"
+        ),
+        ObjectSummaryField(
+            sectionID: "containers", fieldID: "container:api",
+            label: "Container", displayText: "api"
+        ),
+    ]
+    let plan = try AutomaticExecLaunchPlanner.plan(
+        session: execPlannerSession(),
+        target: PodExecTarget(pod: pod),
+        detail: ObjectDetail(
+            identity: pod,
+            resourceVersion: "42",
+            summaryFields: fields,
+            annotations: [
+                AutomaticExecLaunchPlanner.defaultContainerAnnotation: "api",
+            ]
+        ),
+        execSessionID: "exec-1"
+    )
+
+    #expect(plan.request.container == "api")
+    #expect(plan.request.command == ["/bin/bash"])
+    #expect(plan.fallbackShellCommand == ["/bin/sh"])
+    #expect(plan.request.pod.uid == ResourceUID("pod-uid"))
+    #expect(plan.request.execSessionID == "exec-1")
+}
+
+@Test func automaticExecUsesSpecOrderAndPinsExplicitContainerRows() throws {
+    let pod = execPlannerPod()
+    let detail = ObjectDetail(
+        identity: pod,
+        resourceVersion: "42",
+        summaryFields: [
+            ObjectSummaryField(
+                sectionID: "containers", fieldID: "ephemeralContainer:debug",
+                label: "Ephemeral Container", displayText: "debug"
+            ),
+            ObjectSummaryField(
+                sectionID: "containers", fieldID: "container:sidecar",
+                label: "Container", displayText: "sidecar"
+            ),
+            ObjectSummaryField(
+                sectionID: "containers", fieldID: "container:api",
+                label: "Container", displayText: "api"
+            ),
+        ]
+    )
+
+    let automatic = try AutomaticExecLaunchPlanner.plan(
+        session: execPlannerSession(),
+        target: PodExecTarget(pod: pod),
+        detail: detail,
+        execSessionID: "exec-auto"
+    )
+    let selected = try AutomaticExecLaunchPlanner.plan(
+        session: execPlannerSession(),
+        target: PodExecTarget(pod: pod, preferredContainer: "debug"),
+        detail: detail,
+        execSessionID: "exec-selected"
+    )
+
+    #expect(automatic.request.container == "sidecar")
+    #expect(selected.request.container == "debug")
+}
+
+@Test func automaticExecRejectsReplacementPodsAndVanishedSelectedContainers() {
+    let pod = execPlannerPod()
+    let replacement = ResourceIdentity(
+        clusterSessionID: pod.clusterSessionID,
+        group: pod.group,
+        version: pod.version,
+        resource: pod.resource,
+        namespace: pod.namespace,
+        name: pod.name,
+        uid: ResourceUID("replacement-uid")
+    )
+    #expect(throws: AutomaticExecLaunchError.objectIdentityMismatch) {
+        try AutomaticExecLaunchPlanner.plan(
+            session: execPlannerSession(),
+            target: PodExecTarget(pod: pod),
+            detail: ObjectDetail(
+                identity: replacement,
+                resourceVersion: "43",
+                summaryFields: []
+            ),
+            execSessionID: "exec-replacement"
+        )
+    }
+
+    #expect(throws: AutomaticExecLaunchError.preferredContainerUnavailable("old")) {
+        try AutomaticExecLaunchPlanner.plan(
+            session: execPlannerSession(),
+            target: PodExecTarget(pod: pod, preferredContainer: "old"),
+            detail: ObjectDetail(
+                identity: pod,
+                resourceVersion: "44",
+                summaryFields: [
+                    ObjectSummaryField(
+                        sectionID: "containers", fieldID: "container:new",
+                        label: "Container", displayText: "new"
+                    ),
+                ]
+            ),
+            execSessionID: "exec-vanished"
+        )
+    }
+}
+
+private func execPlannerSession() -> OpenedClusterSession {
+    OpenedClusterSession(
+        sessionID: "cluster-session",
+        contextName: "production",
+        clusterName: "cluster-a",
+        serverHostname: "api.example.test",
+        defaultNamespace: "default"
+    )
+}
+
+private func execPlannerPod() -> ResourceIdentity {
+    ResourceIdentity(
+        clusterSessionID: "cluster-session",
+        group: "",
+        version: "v1",
+        resource: "pods",
+        namespace: "team-a",
+        name: "api",
+        uid: ResourceUID("pod-uid")
+    )
+}

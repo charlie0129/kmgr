@@ -111,6 +111,11 @@ public enum ContextualShortcutCatalog {
         }
         if availability.canOpenTerminal {
             items.append(item("resource.terminal", "S", "Open Pod terminal"))
+            items.append(item(
+                "resource.terminal.configure",
+                "\u{21E7}S",
+                "Configure Pod terminal"
+            ))
         }
         if availability.canStartPortForward {
             items.append(item("resource.port-forward", "P", "Start port-forward"))
@@ -140,13 +145,32 @@ public enum ContextualShortcutCatalog {
         ]
     )
 
-    public static func containerList(canOpenLogs: Bool) -> ContextualShortcutSnapshot {
+    public static func containerList(
+        canOpenLogs: Bool,
+        canOpenTerminal: Bool,
+        canStartPortForward: Bool
+    ) -> ContextualShortcutSnapshot {
         var items: [ContextualShortcutItem] = []
         if canOpenLogs {
             items.append(item(
                 "container.logs",
                 "L / Return",
                 "Open selected container logs"
+            ))
+        }
+        if canOpenTerminal {
+            items.append(item("container.terminal", "S", "Open selected container terminal"))
+            items.append(item(
+                "container.terminal.configure",
+                "\u{21E7}S",
+                "Configure selected container terminal"
+            ))
+        }
+        if canStartPortForward {
+            items.append(item(
+                "container.port-forward",
+                "P",
+                "Start parent Pod port-forward"
             ))
         }
         items.append(namespaceItem)

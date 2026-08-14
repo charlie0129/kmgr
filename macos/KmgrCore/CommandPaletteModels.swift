@@ -289,7 +289,7 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
         case .openYAML: "Open YAML"
         case .openEvents: "Open Events"
         case .openLogs: "Open Logs…"
-        case .openExec: "Open Terminal…"
+        case .openExec: "Open Terminal"
         case .startPortForward: "Start Port Forward…"
         case .delete: "Delete…"
         case .scale: "Scale…"

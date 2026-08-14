@@ -599,6 +599,114 @@ struct ClusterWorkspaceToolbarTests {
         #expect(controller.contextualShortcutSnapshot?.contextID == "pod-containers")
     }
 
+    @Test("S opens automatic Pod terminal while Shift-S opens configuration")
+    func podTerminalShortcutsHaveDistinctLaunchPaths() async throws {
+        let pod = toolbarPodIdentity()
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: toolbarPodDetail(pod)
+            )
+        )
+        var opened: TerminalWindowController?
+        controller.onOpenTerminalWindow = { opened = $0 }
+        controller.showWindow(nil)
+        defer {
+            if let window = controller.window, let sheet = window.attachedSheet {
+                window.endSheet(sheet)
+            }
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+        table.keyDown(with: try workspaceLetterKey("s"))
+        try await waitUntil { opened != nil }
+
+        #expect(opened?.window?.subtitle == "default/api · api")
+        #expect(window.attachedSheet == nil)
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("S") == true)
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("\u{21E7}S") == true)
+
+        table.keyDown(with: try workspaceLetterKey("s", modifiers: [.shift]))
+        try await waitUntil { window.attachedSheet != nil }
+        #expect(window.attachedSheet?.title == "test-cluster — test-context — Configure Terminal")
+    }
+
+    @Test("Container view responder commands retain Pod and selected-container context")
+    func containerResponderCommandsRouteThroughWorkspace() async throws {
+        let pod = toolbarPodIdentity()
+        let logs = ResolvingToolbarLogProvider(containers: ["api"])
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            logProvider: logs,
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: toolbarPodDetail(pod)
+            )
+        )
+        var openedLog: LogWindowController?
+        var openedTerminal: TerminalWindowController?
+        var forwarded: ResourceIdentity?
+        controller.onOpenLogWindow = { openedLog = $0 }
+        controller.onOpenTerminalWindow = { openedTerminal = $0 }
+        controller.onStartPortForward = { forwarded = $0 }
+        controller.showWindow(nil)
+        defer {
+            if let window = controller.window, let sheet = window.attachedSheet {
+                window.endSheet(sheet)
+            }
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourceTable = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        try await waitUntil { resourceTable.numberOfRows == 1 }
+        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(resourceTable))
+        controller.enterResource(nil)
+
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSTableView }.contains {
+                $0.accessibilityLabel() == "Pod containers"
+            }
+        }
+        let containerTable = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Pod containers" })
+        containerTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(containerTable))
+        controller.openResourceLogs(nil)
+        try await waitUntil { openedLog != nil }
+        controller.openResourceExec(nil)
+        try await waitUntil { openedTerminal != nil }
+        controller.startResourcePortForward(nil)
+
+        #expect(openedLog?.sources.map(\.container) == ["api"])
+        #expect(openedTerminal?.window?.subtitle == "default/api · api")
+        #expect(forwarded == pod)
+
+        for action in [
+            #selector(ClusterWorkspaceWindowController.openResourceLogs(_:)),
+            #selector(ClusterWorkspaceWindowController.openResourceExec(_:)),
+            #selector(ClusterWorkspaceWindowController.configureResourceExec(_:)),
+            #selector(ClusterWorkspaceWindowController.startResourcePortForward(_:)),
+        ] {
+            let item = NSMenuItem(title: "Test", action: action, keyEquivalent: "")
+            #expect(controller.validateMenuItem(item))
+            #expect(!item.isHidden)
+        }
+
+        controller.configureResourceExec(nil)
+        try await waitUntil { window.attachedSheet != nil }
+        #expect(window.attachedSheet?.title == "test-cluster — test-context — Configure Terminal")
+    }
+
     @Test("a slower Enter cannot replace a newer explicit YAML view")
     func explicitDetailSupersedesPendingDrillDown() async throws {
         let pod = toolbarPodIdentity()
@@ -1278,6 +1386,7 @@ private func makeWorkspace(
     provider: any WorkspaceResourceProviding = NoopWorkspaceResourceProvider(),
     logProvider: any LogStreamProviding = NoopLogProvider(),
     objectDetailProvider: any ObjectDetailProviding = NoopToolbarObjectDetailProvider(),
+    execProvider: any ExecSessionProviding = NoopExecProvider(),
     namespacePickerPresenter: @escaping NamespacePickerPresenter = { control, sender in
         control.performClick(sender)
     },
@@ -1300,7 +1409,7 @@ private func makeWorkspace(
         objectDetailProvider: objectDetailProvider,
         operationProvider: NoopOperationProvider(),
         logProvider: logProvider,
-        execProvider: NoopExecProvider(),
+        execProvider: execProvider,
         portForwards: portForwards,
         columnsConfigurationPath: "/tmp/kmgr-toolbar-test-columns.yaml",
         logDisplayConfiguration: .default,
@@ -1770,6 +1879,25 @@ private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
 }
 
+private func workspaceLetterKey(
+    _ characters: String,
+    modifiers: NSEvent.ModifierFlags = []
+) throws -> NSEvent {
+    try #require(NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: modifiers,
+        timestamp: 0,
+        windowNumber: 0,
+        context: nil,
+        characters: modifiers.contains(.shift)
+            ? characters.uppercased() : characters,
+        charactersIgnoringModifiers: characters,
+        isARepeat: false,
+        keyCode: 1
+    ))
+}
+
 @MainActor
 private func waitUntil(
     timeout: Duration = .seconds(2),
@@ -1985,7 +2113,12 @@ private struct NoopLogProvider: LogStreamProviding {
 
 private final class ResolvingToolbarLogProvider: LogStreamProviding, @unchecked Sendable {
     private let lock = NSLock()
+    private let containers: [String]
     private var storedResolvedResources: [ResourceIdentity] = []
+
+    init(containers: [String] = ["sidecar", "app"]) {
+        self.containers = containers
+    }
 
     var resolvedResources: [ResourceIdentity] {
         lock.withLock { storedResolvedResources }
@@ -2002,7 +2135,7 @@ private final class ResolvingToolbarLogProvider: LogStreamProviding, @unchecked 
             )
         }
         return LogSourceResolution(
-            pods: [PodLogSourceInventory(identity: pod, containers: ["sidecar", "app"])],
+            pods: [PodLogSourceInventory(identity: pod, containers: containers)],
             staticWorkloadSnapshot: false
         )
     }

@@ -91,6 +91,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var portForwardConfigurationController: PortForwardConfigurationWindowController?
     private var logOpenTask: Task<Void, Never>?
     private var logOpenRevision: UInt64 = 0
+    private var automaticExecOpenTask: Task<Void, Never>?
+    private var automaticExecOpenRevision: UInt64 = 0
     private var execConfigurationController: ExecConfigurationWindowController?
     private var deleteResourcesController: DeleteResourcesWindowController?
     private var resourceMutationController: ResourceMutationWindowController?
@@ -185,8 +187,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onOpenLogs = { [weak self] request in
             self?.openLogs(request)
         }
-        workspaceController.onOpenExec = { [weak self] identity in
-            self?.showExecConfiguration(identity)
+        workspaceController.onOpenExec = { [weak self] target in
+            self?.openAutomaticExec(target)
+        }
+        workspaceController.onConfigureExec = { [weak self] target in
+            self?.showExecConfiguration(target)
         }
         workspaceController.onDelete = { [weak self] targets in
             self?.showDeleteResources(targets)
@@ -263,6 +268,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         logOpenRevision &+= 1
         logOpenTask?.cancel()
         logOpenTask = nil
+        automaticExecOpenRevision &+= 1
+        automaticExecOpenTask?.cancel()
+        automaticExecOpenTask = nil
         execConfigurationController?.close()
         deleteResourcesController?.close()
         resourceMutationController?.close()
@@ -276,6 +284,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         logOpenRevision &+= 1
         logOpenTask?.cancel()
         logOpenTask = nil
+        automaticExecOpenRevision &+= 1
+        automaticExecOpenTask?.cancel()
+        automaticExecOpenTask = nil
         workspaceController.stop()
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
@@ -382,11 +393,65 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
     }
 
-    private func showExecConfiguration(_ identity: ResourceIdentity) {
-        guard let window, execConfigurationController == nil else { NSSound.beep(); return }
+    private func openAutomaticExec(_ target: PodExecTarget) {
+        guard automaticExecOpenTask == nil,
+            execConfigurationController == nil
+        else { NSSound.beep(); return }
+        automaticExecOpenRevision &+= 1
+        let revision = automaticExecOpenRevision
+        let sessionID = session.sessionID
+        automaticExecOpenTask = Task {
+            defer {
+                if automaticExecOpenRevision == revision {
+                    automaticExecOpenTask = nil
+                }
+            }
+            do {
+                let controller = try await AutomaticExecWindowFactory.makeWindow(
+                    session: session,
+                    target: target,
+                    objectDetailProvider: objectDetailProvider,
+                    execProvider: execProvider
+                )
+                guard !Task.isCancelled,
+                    automaticExecOpenRevision == revision,
+                    session.sessionID == sessionID
+                else { return }
+                onOpenTerminalWindow?(controller)
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled,
+                    automaticExecOpenRevision == revision,
+                    session.sessionID == sessionID
+                else { return }
+                presentExecOpenFailure(error)
+            }
+        }
+    }
+
+    private func presentExecOpenFailure(_ error: Error) {
+        let presentation = UserFacingErrorPresentation(error)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Unable to Open Terminal"
+        alert.informativeText = presentation.detailedText
+        alert.addButton(withTitle: "OK")
+        if let window, window.attachedSheet == nil {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    private func showExecConfiguration(_ target: PodExecTarget) {
+        guard let window,
+            automaticExecOpenTask == nil,
+            execConfigurationController == nil
+        else { NSSound.beep(); return }
         let controller = ExecConfigurationWindowController(
             session: session,
-            podIdentity: identity,
+            podIdentity: target.pod,
+            preferredContainer: target.preferredContainer,
             objectDetailProvider: objectDetailProvider,
             execProvider: execProvider
         )
@@ -466,6 +531,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func openResourceEvents(_ sender: Any?) { workspaceController.openResourceEvents(sender) }
     @objc func openResourceLogs(_ sender: Any?) { workspaceController.openResourceLogs(sender) }
     @objc func openResourceExec(_ sender: Any?) { workspaceController.openResourceExec(sender) }
+    @objc func configureResourceExec(_ sender: Any?) {
+        workspaceController.configureResourceExec(sender)
+    }
     @objc func startResourcePortForward(_ sender: Any?) { workspaceController.startResourcePortForward(sender) }
     @objc func deleteResourceSelection(_ sender: Any?) { workspaceController.deleteResourceSelection(sender) }
     @objc func scaleResourceSelection(_ sender: Any?) { workspaceController.scaleResourceSelection(sender) }
@@ -494,6 +562,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(openResourceEvents(_:)): command = .openEvents
         case #selector(openResourceLogs(_:)): command = .openLogs
         case #selector(openResourceExec(_:)): command = .openExec
+        case #selector(configureResourceExec(_:)): command = .configureExec
         case #selector(startResourcePortForward(_:)): command = .startPortForward
         case #selector(deleteResourceSelection(_:)): command = .delete
         case #selector(scaleResourceSelection(_:)): command = .scale
@@ -551,7 +620,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
-    var onOpenExec: ((ResourceIdentity) -> Void)?
+    var onOpenExec: ((PodExecTarget) -> Void)?
+    var onConfigureExec: ((PodExecTarget) -> Void)?
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: ((ClusterWindowRestorationState) -> Void)?
@@ -643,8 +713,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onOpenLogs = { [weak self] request in
             self?.onOpenLogs?(request)
         }
-        contentController.onOpenExec = { [weak self] identity in
-            self?.onOpenExec?(identity)
+        contentController.onOpenExec = { [weak self] target in
+            self?.onOpenExec?(target)
+        }
+        contentController.onConfigureExec = { [weak self] target in
+            self?.onConfigureExec?(target)
         }
         contentController.onDelete = { [weak self] targets in
             self?.onDelete?(targets)
@@ -1088,9 +1161,14 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
     @objc func openResourceYAML(_ sender: Any?) { contentController.performCommand(.openYAML) }
     @objc func openResourceEvents(_ sender: Any?) { contentController.performCommand(.openEvents) }
-    @objc func openResourceLogs(_ sender: Any?) { contentController.performCommand(.openLogs) }
-    @objc func openResourceExec(_ sender: Any?) { contentController.performCommand(.openExec) }
-    @objc func startResourcePortForward(_ sender: Any?) { contentController.performCommand(.startPortForward) }
+    @objc func openResourceLogs(_ sender: Any?) { performNetworkCommand(.openLogs) }
+    @objc func openResourceExec(_ sender: Any?) { performNetworkCommand(.openExec) }
+    @objc func configureResourceExec(_ sender: Any?) {
+        performNetworkCommand(.configureExec)
+    }
+    @objc func startResourcePortForward(_ sender: Any?) {
+        performNetworkCommand(.startPortForward)
+    }
     @objc func deleteResourceSelection(_ sender: Any?) { contentController.performCommand(.delete) }
     @objc func scaleResourceSelection(_ sender: Any?) { contentController.performCommand(.scale) }
     @objc func restartResourceSelection(_ sender: Any?) { contentController.performCommand(.restart) }
@@ -1102,11 +1180,33 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func copyResourceReference(_ sender: Any?) { contentController.performCommand(.copyReference) }
 
     func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
-        contentController.canPerformCommand(command)
+        if let action = command.subresourceNetworkAction,
+            let subresourceController,
+            subresourceController.isCompatible(with: action)
+        {
+            return subresourceController.canPerform(action)
+        }
+        return contentController.canPerformCommand(command)
     }
 
     func isCommandCompatible(_ command: ResourceTableCommand) -> Bool {
-        contentController.isCommandCompatible(command)
+        if let action = command.subresourceNetworkAction,
+            let subresourceController
+        {
+            return subresourceController.isCompatible(with: action)
+        }
+        return contentController.isCommandCompatible(command)
+    }
+
+    private func performNetworkCommand(_ command: ResourceTableCommand) {
+        if let action = command.subresourceNetworkAction,
+            let subresourceController,
+            subresourceController.isCompatible(with: action)
+        {
+            if !subresourceController.perform(action) { NSSound.beep() }
+            return
+        }
+        contentController.performCommand(command)
     }
 
     func presentCommandPalette() {
@@ -1338,6 +1438,13 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         let controller = ObjectSubresourceListViewController(content: content)
         controller.onBack = { [weak self] in self?.goBack() }
         controller.onOpenLogs = { [weak self] request in self?.onOpenLogs?(request) }
+        controller.onOpenExec = { [weak self] target in self?.onOpenExec?(target) }
+        controller.onConfigureExec = { [weak self] target in
+            self?.onConfigureExec?(target)
+        }
+        controller.onStartPortForward = { [weak self] identity in
+            self?.onStartPortForward?(identity)
+        }
         controller.onOpenDataEditor = { [weak self] identity in
             self?.showObject(identity, initialTab: .data)
         }
@@ -2146,7 +2253,8 @@ private final class ResourceListViewController: NSViewController,
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
-    var onOpenExec: ((ResourceIdentity) -> Void)?
+    var onOpenExec: ((PodExecTarget) -> Void)?
+    var onConfigureExec: ((PodExecTarget) -> Void)?
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: (() -> Void)?
@@ -2573,7 +2681,8 @@ private final class ResourceListViewController: NSViewController,
         ])
         addGroup([
             ("Open Logs…", .openLogs),
-            ("Open Terminal…", .openExec),
+            ("Open Terminal", .openExec),
+            ("Configure Terminal…", .configureExec),
             ("Start Port Forward…", .startPortForward),
         ])
         addGroup([
@@ -4389,7 +4498,12 @@ private final class ResourceListViewController: NSViewController,
             guard let identity = selected.only,
                 identity.group.isEmpty, identity.version == "v1", identity.resource == "pods"
             else { NSSound.beep(); return }
-            onOpenExec?(identity)
+            onOpenExec?(PodExecTarget(pod: identity))
+        case .configureExec:
+            guard let identity = selected.only,
+                identity.group.isEmpty, identity.version == "v1", identity.resource == "pods"
+            else { NSSound.beep(); return }
+            onConfigureExec?(PodExecTarget(pod: identity))
         case .selectAll:
             model.selectAllVisible()
             suppressSelectionCallbacks = true
@@ -4520,7 +4634,7 @@ private final class ResourceListViewController: NSViewController,
             return selected.count == 1
         case .openLogs:
             return LogResourceCompatibility.supportsSelection(selected)
-        case .openExec:
+        case .openExec, .configureExec:
             return selected.count == 1 && selected[0].group.isEmpty
                 && selected[0].version == "v1" && selected[0].resource == "pods"
         case .startPortForward:
@@ -4547,9 +4661,21 @@ private final class ResourceListViewController: NSViewController,
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, enter, open, openYAML, openEvents, openLogs, openExec
+    case focusFilter, enter, open, openYAML, openEvents, openLogs, openExec, configureExec
     case startPortForward, selectAll, delete, scale, restart, editMetadata
     case copyName, copyNamespacedName, copyReference, moveUp, moveDown, extendUp, extendDown
+}
+
+private extension ResourceTableCommand {
+    var subresourceNetworkAction: ObjectSubresourceNetworkAction? {
+        switch self {
+        case .openLogs: .openLogs
+        case .openExec: .openAutomaticExec
+        case .configureExec: .configureExec
+        case .startPortForward: .startPortForward
+        default: nil
+        }
+    }
 }
 
 private extension PaletteOperation {
@@ -4626,7 +4752,12 @@ private final class ResourceTableView: NSTableView {
         case ("y", _, false), ("Y", _, false): onCommand?(.openYAML)
         case ("e", _, false), ("E", _, false): onCommand?(.openEvents)
         case ("l", _, false), ("L", _, false): onCommand?(.openLogs)
-        case ("s", _, false), ("S", _, false): onCommand?(.openExec)
+        case ("s", _, false), ("S", _, false):
+            guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
+                super.keyDown(with: event)
+                return
+            }
+            onCommand?(event.modifierFlags.contains(.shift) ? .configureExec : .openExec)
         case ("p", _, false), ("P", _, false): onCommand?(.startPortForward)
         case ("a", _, true): onCommand?(.selectAll)
         case (_, 51, true): onCommand?(.delete)

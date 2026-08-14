@@ -39,23 +39,36 @@ enum ObjectSubresourceContent: Hashable, Sendable {
     }
 }
 
+enum ObjectSubresourceNetworkAction: Equatable {
+    case openLogs
+    case openAutomaticExec
+    case configureExec
+    case startPortForward
+}
+
 @MainActor
 final class ObjectSubresourceListViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate
 {
     var onBack: (() -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
+    var onOpenExec: ((PodExecTarget) -> Void)?
+    var onConfigureExec: ((PodExecTarget) -> Void)?
+    var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onOpenDataEditor: ((ResourceIdentity) -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
 
     var contextualShortcutSnapshot: ContextualShortcutSnapshot {
         switch content {
         case .containers:
-            ContextualShortcutCatalog.containerList(
-                canOpenLogs: networkActionsEnabled && tableView.selectedRow >= 0
+            let hasSelectedContainer = tableView.selectedRow >= 0
+            return ContextualShortcutCatalog.containerList(
+                canOpenLogs: networkActionsEnabled && hasSelectedContainer,
+                canOpenTerminal: networkActionsEnabled && hasSelectedContainer,
+                canStartPortForward: networkActionsEnabled
             )
         case .data:
-            ContextualShortcutCatalog.dataList(canOpenEditor: networkActionsEnabled)
+            return ContextualShortcutCatalog.dataList(canOpenEditor: networkActionsEnabled)
         }
     }
 
@@ -250,12 +263,16 @@ final class ObjectSubresourceListViewController: NSViewController,
         tableView.allowsEmptySelection = true
         tableView.rowHeight = 26
         tableView.onPrimaryAction = { [weak self] in self?.performPrimaryAction() }
+        tableView.onNetworkAction = { [weak self] action in
+            _ = self?.perform(action)
+        }
         tableView.onBack = { [weak self] in self?.onBack?() }
     }
 
     private var shortcutHint: String {
         switch content {
-        case .containers: "L or Return: selected container logs · Escape: back"
+        case .containers:
+            "L/Return: logs · S: terminal · \u{21E7}S: configure · P: port-forward · Escape: back"
         case .data: "Return: Data editor · Escape: back"
         }
     }
@@ -279,6 +296,49 @@ final class ObjectSubresourceListViewController: NSViewController,
         }
     }
 
+    func isCompatible(with action: ObjectSubresourceNetworkAction) -> Bool {
+        if case .containers = content { return true }
+        return false
+    }
+
+    func canPerform(_ action: ObjectSubresourceNetworkAction) -> Bool {
+        guard isCompatible(with: action), networkActionsEnabled else { return false }
+        if action == .startPortForward { return true }
+        return selectedContainerTarget() != nil
+    }
+
+    @discardableResult
+    func perform(_ action: ObjectSubresourceNetworkAction) -> Bool {
+        guard canPerform(action) else { return false }
+        switch action {
+        case .openLogs:
+            guard case .containers(let pod, _) = content,
+                let target = selectedContainerTarget(),
+                let container = target.preferredContainer
+            else { return false }
+            onOpenLogs?(.namedContainer(container, in: pod))
+        case .openAutomaticExec:
+            guard let target = selectedContainerTarget() else { return false }
+            onOpenExec?(target)
+        case .configureExec:
+            guard let target = selectedContainerTarget() else { return false }
+            onConfigureExec?(target)
+        case .startPortForward:
+            onStartPortForward?(content.parent)
+        }
+        return true
+    }
+
+    private func selectedContainerTarget() -> PodExecTarget? {
+        guard case .containers(let pod, let values) = content,
+            values.indices.contains(tableView.selectedRow)
+        else { return nil }
+        return PodExecTarget(
+            pod: pod,
+            preferredContainer: values[tableView.selectedRow].name
+        )
+    }
+
     @objc private func back() { onBack?() }
 
     private func updateSelectionControls() {
@@ -294,13 +354,28 @@ final class ObjectSubresourceListViewController: NSViewController,
 @MainActor
 private final class ObjectSubresourceTableView: NSTableView {
     var onPrimaryAction: (() -> Void)?
+    var onNetworkAction: ((ObjectSubresourceNetworkAction) -> Void)?
     var onBack: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
         guard currentEditor() == nil else { super.keyDown(with: event); return }
+        let modifiers = event.modifierFlags.intersection([
+            .shift, .command, .control, .option,
+        ])
+        let hasUnsupportedModifier = !modifiers.intersection([
+            .command, .control, .option,
+        ]).isEmpty
+        let shifted = modifiers.contains(.shift)
         switch (event.charactersIgnoringModifiers?.lowercased(), event.keyCode) {
-        case ("l", _), (_, 36): onPrimaryAction?()
-        case (_, 53): onBack?()
+        case ("l", _) where !hasUnsupportedModifier && !shifted,
+            (_, 36) where modifiers.isEmpty:
+            onPrimaryAction?()
+        case ("s", _) where !hasUnsupportedModifier:
+            onNetworkAction?(shifted ? .configureExec : .openAutomaticExec)
+        case ("p", _) where !hasUnsupportedModifier && !shifted:
+            onNetworkAction?(.startPortForward)
+        case (_, 53) where modifiers.isEmpty:
+            onBack?()
         default: super.keyDown(with: event)
         }
     }

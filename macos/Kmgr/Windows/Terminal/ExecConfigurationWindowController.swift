@@ -15,6 +15,7 @@ final class ExecConfigurationWindowController: NSWindowController,
 
     private let session: OpenedClusterSession
     private let podIdentity: ResourceIdentity
+    private let preferredContainer: String?
     private let objectDetailProvider: any ObjectDetailProviding
     private let execProvider: any ExecSessionProviding
 
@@ -44,11 +45,13 @@ final class ExecConfigurationWindowController: NSWindowController,
     init(
         session: OpenedClusterSession,
         podIdentity: ResourceIdentity,
+        preferredContainer: String? = nil,
         objectDetailProvider: any ObjectDetailProviding,
         execProvider: any ExecSessionProviding
     ) {
         self.session = session
         self.podIdentity = podIdentity
+        self.preferredContainer = preferredContainer
         self.objectDetailProvider = objectDetailProvider
         self.execProvider = execProvider
 
@@ -59,7 +62,7 @@ final class ExecConfigurationWindowController: NSWindowController,
             defer: false
         )
         let clusterPresentation = ClusterIdentityPresentation(session: session)
-        panel.title = "\(clusterPresentation.titlePrefix) — Open Terminal"
+        panel.title = "\(clusterPresentation.titlePrefix) — Configure Terminal"
         panel.isReleasedWhenClosed = false
         panel.tabbingMode = .disallowed
         super.init(window: panel)
@@ -281,9 +284,10 @@ final class ExecConfigurationWindowController: NSWindowController,
         containers = values
         containerButton.removeAllItems()
         containerButton.addItems(withTitles: values.map(\.displayTitle))
-        if let firstRegular = values.firstIndex(where: { $0.kind == .regular }) {
-            containerButton.selectItem(at: firstRegular)
-        }
+        let selectedIndex = preferredContainer.flatMap { preferred in
+            values.firstIndex(where: { $0.name == preferred })
+        } ?? values.firstIndex(where: { $0.kind == .regular })
+        if let selectedIndex { containerButton.selectItem(at: selectedIndex) }
         containerButton.isEnabled = true
     }
 

@@ -59,7 +59,7 @@ struct ClusterIdentityPresentationTests {
         )
 
         #expect(logs.window?.title == "cluster-a — production/admin@corp — Open Logs")
-        #expect(exec.window?.title == "cluster-a — production/admin@corp — Open Terminal")
+        #expect(exec.window?.title == "cluster-a — production/admin@corp — Configure Terminal")
         #expect(forward.window?.title ==
             "cluster-a — production/admin@corp — Start Port Forward")
 

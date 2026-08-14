@@ -116,6 +116,86 @@ struct TerminalWindowControllerTests {
         #expect(status.toolTip == "Running")
         #expect(!reconnect.isEnabled)
     }
+
+    @Test("Control-D closes the window after the remote process confirms exit")
+    func controlDClosesAfterConfirmedExit() async throws {
+        let provider = OrderedExecProvider()
+        let controller = TerminalWindowController(
+            request: execRequest(command: ["/bin/sh"]),
+            provider: provider
+        )
+        var closeCount = 0
+        controller.onClose = { closeCount += 1 }
+        controller.showWindow(nil)
+        defer {
+            if controller.window?.isVisible == true { closeTerminal(controller) }
+        }
+        try await waitForExecEvent(provider) { $0.contains("opened:1") }
+        provider.emitStatus(
+            generation: 1,
+            status: ExecStatus(state: .running, statusReason: "Running")
+        )
+        let connectedStatus = try terminalStatus(in: controller)
+        try await waitForTerminalControl(connectedStatus) {
+            $0.stringValue == "Connected"
+        }
+
+        try sendControlD(to: controller)
+        try await waitForExecEvent(provider) { $0.contains("stdin:1:04") }
+        #expect(controller.window?.isVisible == true)
+        #expect(closeCount == 0)
+
+        provider.emitStatus(
+            generation: 1,
+            status: ExecStatus(state: .exited, exitCode: 0, statusReason: "complete")
+        )
+        try await waitForTerminalWindowClose(controller)
+        #expect(closeCount == 1)
+    }
+
+    @Test("Control-D does not close on a failed or disconnected session")
+    func controlDDoesNotCloseOnFailure() async throws {
+        let provider = OrderedExecProvider()
+        let controller = TerminalWindowController(
+            request: execRequest(command: ["/bin/sh"]),
+            provider: provider
+        )
+        var closeCount = 0
+        controller.onClose = { closeCount += 1 }
+        controller.showWindow(nil)
+        defer { closeTerminal(controller) }
+        try await waitForExecEvent(provider) { $0.contains("opened:1") }
+        provider.emitStatus(
+            generation: 1,
+            status: ExecStatus(state: .running, statusReason: "Running")
+        )
+        let connectedStatus = try terminalStatus(in: controller)
+        try await waitForTerminalControl(connectedStatus) {
+            $0.stringValue == "Connected"
+        }
+        try sendControlD(to: controller)
+        try await waitForExecEvent(provider) { $0.contains("stdin:1:04") }
+
+        provider.emitStatus(
+            generation: 1,
+            status: ExecStatus(
+                state: .failed,
+                statusReason: "transport failed",
+                issue: ClusterManagerIssue(
+                    category: .unavailable,
+                    reason: "ExecDisconnected",
+                    message: "The terminal disconnected from the engine.",
+                    retryable: true
+                )
+            )
+        )
+        let status = try terminalStatus(in: controller)
+        try await waitForTerminalControl(status) {
+            $0.stringValue == "Cluster unavailable"
+        }
+        #expect(controller.window?.isVisible == true)
+        #expect(closeCount == 0)
+    }
 }
 }
 
@@ -166,6 +246,35 @@ private func closeTerminal(_ controller: TerminalWindowController) {
     controller.windowWillClose(Notification(name: NSWindow.willCloseNotification, object: window))
     window.delegate = nil
     controller.close()
+}
+
+@MainActor
+private func sendControlD(to controller: TerminalWindowController) throws {
+    let event = try #require(NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: [.control],
+        timestamp: 0,
+        windowNumber: controller.window?.windowNumber ?? 0,
+        context: nil,
+        characters: "\u{04}",
+        charactersIgnoringModifiers: "d",
+        isARepeat: false,
+        keyCode: 2
+    ))
+    let responder = try #require(controller.window?.firstResponder)
+    responder.keyDown(with: event)
+}
+
+@MainActor
+private func waitForTerminalWindowClose(
+    _ controller: TerminalWindowController
+) async throws {
+    for _ in 0..<300 {
+        if controller.window?.isVisible == false { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Timed out waiting for terminal window to close")
 }
 
 private final class OrderedExecProvider: ExecSessionProviding, @unchecked Sendable {
@@ -249,7 +358,10 @@ private final class OrderedExecSession: ExecSession, @unchecked Sendable {
         continuation.yield(event)
     }
 
-    func sendStdin(_ data: Data) async throws {}
+    func sendStdin(_ data: Data) async throws {
+        let hex = data.map { String(format: "%02x", $0) }.joined()
+        record("stdin:\(generation):\(hex)")
+    }
 
     func resize(_ size: TerminalSize) async throws {}
 

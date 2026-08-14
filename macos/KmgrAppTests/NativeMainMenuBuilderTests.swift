@@ -167,6 +167,26 @@ struct NativeMainMenuBuilderTests {
         }
     }
 
+    @Test("terminal defaults and configuration have distinct responder shortcuts")
+    func terminalCommands() throws {
+        let resource = try #require(submenu("Resource", in: makeMenu().main))
+        let direct = try #require(resource.item(withTitle: "Open Terminal"))
+        expectResponderItem(
+            direct,
+            action: #selector(ClusterWorkspaceWindowController.openResourceExec(_:)),
+            keyEquivalent: "s",
+            modifiers: []
+        )
+
+        let configured = try #require(resource.item(withTitle: "Configure Terminal…"))
+        expectResponderItem(
+            configured,
+            action: #selector(ClusterWorkspaceWindowController.configureResourceExec(_:)),
+            keyEquivalent: "s",
+            modifiers: [.shift]
+        )
+    }
+
     private func makeMenu(target: MenuTarget = MenuTarget()) -> NativeMainMenu {
         NativeMainMenuBuilder.make(actions: NativeMainMenuActions(
             target: target,

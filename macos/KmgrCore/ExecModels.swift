@@ -1,5 +1,21 @@
 import Foundation
 
+/// One UID-pinned Pod exec target. Resource-list launches leave the container
+/// unspecified so the authoritative Pod snapshot can choose a sensible
+/// default; a Container subresource row preserves its exact container name.
+public struct PodExecTarget: Hashable, Sendable {
+    public var pod: ResourceIdentity
+    public var preferredContainer: String?
+
+    public init(
+        pod: ResourceIdentity,
+        preferredContainer: String? = nil
+    ) {
+        self.pod = pod
+        self.preferredContainer = preferredContainer
+    }
+}
+
 public struct TerminalSize: Hashable, Sendable {
     public var columns: UInt32
     public var rows: UInt32

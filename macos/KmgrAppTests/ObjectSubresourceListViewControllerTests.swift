@@ -19,13 +19,22 @@ struct ObjectSubresourceListViewControllerTests {
         ))
         controller.loadView()
         var opened: LogOpenRequest?
+        var automaticExec: PodExecTarget?
+        var configuredExec: PodExecTarget?
+        var forwarded: ResourceIdentity?
         controller.onOpenLogs = { opened = $0 }
+        controller.onOpenExec = { automaticExec = $0 }
+        controller.onConfigureExec = { configuredExec = $0 }
+        controller.onStartPortForward = { forwarded = $0 }
         let table = try #require(subresourceDescendants(of: controller.view)
             .compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Pod containers" })
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         #expect(controller.contextualShortcutSnapshot.items.map(\.keys)
-            == ["L / Return", "\u{21E7}\u{2318}N", "Escape"])
+            == [
+                "L / Return", "S", "\u{21E7}S", "P",
+                "\u{21E7}\u{2318}N", "Escape",
+            ])
         let button = try #require(subresourceDescendants(of: controller.view)
             .compactMap { $0 as? NSButton }
             .first { $0.title == "Open Selected Container Logs" })
@@ -34,11 +43,25 @@ struct ObjectSubresourceListViewControllerTests {
         #expect(opened == .namedContainer("migrate", in: pod))
         #expect(table.tableColumns.map(\.title) == ["Container", "Type"])
 
+        table.keyDown(with: try subresourceKey("s"))
+        table.keyDown(with: try subresourceKey("s", modifiers: [.shift]))
+        table.keyDown(with: try subresourceKey("p"))
+        let expectedTarget = PodExecTarget(
+            pod: pod,
+            preferredContainer: "migrate"
+        )
+        #expect(automaticExec == expectedTarget)
+        #expect(configuredExec == expectedTarget)
+        #expect(forwarded == pod)
+
         opened = nil
         controller.setNetworkActionsEnabled(false)
         #expect(!button.isEnabled)
         #expect(controller.contextualShortcutSnapshot.items.map(\.keys)
             == ["\u{21E7}\u{2318}N", "Escape"])
+        automaticExec = nil
+        configuredExec = nil
+        forwarded = nil
         button.performClick(nil)
         let returnEvent = try #require(NSEvent.keyEvent(
             with: .keyDown,
@@ -54,6 +77,12 @@ struct ObjectSubresourceListViewControllerTests {
         ))
         table.keyDown(with: returnEvent)
         #expect(opened == nil)
+        table.keyDown(with: try subresourceKey("s"))
+        table.keyDown(with: try subresourceKey("s", modifiers: [.shift]))
+        table.keyDown(with: try subresourceKey("p"))
+        #expect(automaticExec == nil)
+        #expect(configuredExec == nil)
+        #expect(forwarded == nil)
     }
 
     @Test("data list exposes metadata without retaining or rendering values")
@@ -115,6 +144,25 @@ struct ObjectSubresourceListViewControllerTests {
         #expect(edited == object)
     }
 }
+}
+
+private func subresourceKey(
+    _ characters: String,
+    modifiers: NSEvent.ModifierFlags = []
+) throws -> NSEvent {
+    try #require(NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: modifiers,
+        timestamp: 0,
+        windowNumber: 0,
+        context: nil,
+        characters: modifiers.contains(.shift)
+            ? characters.uppercased() : characters,
+        charactersIgnoringModifiers: characters,
+        isARepeat: false,
+        keyCode: 1
+    ))
 }
 
 @MainActor

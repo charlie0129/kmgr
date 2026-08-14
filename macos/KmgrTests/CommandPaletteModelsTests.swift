@@ -199,6 +199,7 @@ import Testing
     #expect(valid.contains(.openEvents))
     #expect(valid.contains(.openLogs))
     #expect(valid.contains(.openExec))
+    #expect(PaletteOperation.openExec.title == "Open Terminal")
     #expect(valid.contains(.startPortForward))
     #expect(valid.contains(.delete))
     #expect(valid.contains(.copyReference))

@@ -42,6 +42,9 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         window.contentViewController = terminalController
         window.toolbar = terminalController.makeToolbar()
+        terminalController.onConfirmedEOFExit = { [weak self] in
+            self?.window?.performClose(nil)
+        }
     }
 
     @available(*, unavailable)
@@ -96,6 +99,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
 {
     let terminalView: TerminalView
     let podDisplayName: String
+    var onConfirmedEOFExit: (() -> Void)?
 
     private let baseRequest: ExecSessionRequest
     private let provider: any ExecSessionProviding
@@ -123,6 +127,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     private var lastIssue: ClusterManagerIssue?
     private var lastExitCode: Int32?
     private var lastSentSize: TerminalSize?
+    private var eofAutoClosePolicy = TerminalEOFAutoClosePolicy()
     private var stopped = false
 
     var remoteProcessIsActive: Bool {
@@ -224,6 +229,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         )
         request.initialSize = request.tty ? currentSize : nil
         currentAttemptProducedOutput = false
+        eofAutoClosePolicy.beginGeneration(attemptGeneration)
         lastIssue = nil
         lastExitCode = nil
         state = .connecting
@@ -402,6 +408,12 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             {
                 return
             }
+            if eofAutoClosePolicy.shouldClose(
+                after: status,
+                generation: attemptGeneration
+            ) {
+                onConfirmedEOFExit?()
+            }
         case .failure(_, let issue):
             state = .failed
             lastIssue = issue
@@ -540,7 +552,11 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     }
 
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
-        enqueue(.stdin(Data(data)))
+        let payload = Data(data)
+        if commandContinuation != nil, activeGeneration == generation {
+            eofAutoClosePolicy.observeInput(payload, generation: generation)
+        }
+        enqueue(.stdin(payload))
     }
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {

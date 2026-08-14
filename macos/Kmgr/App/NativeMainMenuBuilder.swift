@@ -242,10 +242,17 @@ enum NativeMainMenuBuilder {
         )
         addResponderItem(
             to: menu,
-            title: "Open Terminal…",
+            title: "Open Terminal",
             action: #selector(ClusterWorkspaceWindowController.openResourceExec(_:)),
             keyEquivalent: "s",
             modifiers: []
+        )
+        addResponderItem(
+            to: menu,
+            title: "Configure Terminal…",
+            action: #selector(ClusterWorkspaceWindowController.configureResourceExec(_:)),
+            keyEquivalent: "s",
+            modifiers: [.shift]
         )
         addResponderItem(
             to: menu,
