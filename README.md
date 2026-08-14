@@ -142,12 +142,13 @@ so they do not steal input from filters, YAML/data editors, logs, or terminals.
 | Shift-click / Shift-Up / Shift-Down | Extend native selection |
 | Command-click | Toggle one selected row |
 | Command-A | Select all visible rows |
-| Return | Open details for exactly one object |
+| Return | Enter a useful subresource, such as Pod containers or workload Pods |
+| Command-Return | Open details for exactly one object |
 | Command-[ / Command-] | Back / Forward |
 | Escape | Clear selection or return focus to the table |
 | `Y` | Open YAML for one object |
 | `E` | Open Events for one object |
-| `L` | Configure logs for compatible selected Pods or workloads |
+| `L` | Tail all containers for compatible selected Pods or workloads |
 | `S` | Configure exec for one Pod |
 | `P` | Configure a port-forward for one Pod or Service |
 | Command-Backspace | Confirm deletion of selected resources |

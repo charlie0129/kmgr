@@ -109,6 +109,18 @@ struct NativeMainMenuBuilderTests {
 
         for (title, selector, key, modifiers) in [
             (
+                "Enter Subresource",
+                #selector(ClusterWorkspaceWindowController.enterResource(_:)),
+                "\r",
+                NSEvent.ModifierFlags()
+            ),
+            (
+                "Open Details",
+                #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
+                "\r",
+                NSEvent.ModifierFlags.command
+            ),
+            (
                 "Focus Resource Filter",
                 #selector(ClusterWorkspaceWindowController.focusResourceFilter(_:)),
                 "/",

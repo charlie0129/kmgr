@@ -114,7 +114,7 @@ import Testing
     #expect(history.entries == [state("pods"), state("nodes"), state("events")])
 }
 
-@Test func helperRecoveryRebindsEveryObjectHistoryEntryToTheNewSession() {
+@Test func helperRecoveryRebindsEveryUIDPinnedHistoryEntryToTheNewSession() {
     let table = ResourceNavigationState(
         group: "", version: "v1", resource: "pods", kind: "Pod",
         namespaceSelection: .namespace("team-a")
@@ -125,16 +125,20 @@ import Testing
     second.clusterSessionID = "old-session"
     var history = WorkspaceNavigationHistory(initial: .resource(table))
     history.navigate(to: .object(first, returnState: table))
-    history.navigate(to: .object(second, returnState: table))
+    history.navigate(to: .subresource(second, returnState: table))
 
     history.rebindClusterSessionID("new-session")
 
     let objectSessions = history.entries.compactMap { destination -> String? in
-        guard case .object(let identity, _) = destination else { return nil }
-        return identity.clusterSessionID
+        switch destination {
+        case .object(let identity, _), .subresource(let identity, _):
+            identity.clusterSessionID
+        case .resource:
+            nil
+        }
     }
     #expect(objectSessions == ["new-session", "new-session"])
-    #expect(history.current == .object(
+    #expect(history.current == .subresource(
         ResourceIdentity(
             clusterSessionID: "new-session", group: second.group,
             version: second.version, resource: second.resource,

@@ -199,10 +199,17 @@ enum NativeMainMenuBuilder {
         menu.addItem(.separator())
         addResponderItem(
             to: menu,
+            title: "Enter Subresource",
+            action: #selector(ClusterWorkspaceWindowController.enterResource(_:)),
+            keyEquivalent: "\r",
+            modifiers: []
+        )
+        addResponderItem(
+            to: menu,
             title: "Open Details",
             action: #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
             keyEquivalent: "\r",
-            modifiers: []
+            modifiers: [.command]
         )
         addResponderItem(
             to: menu,

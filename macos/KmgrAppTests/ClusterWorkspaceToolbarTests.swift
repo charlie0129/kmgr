@@ -172,6 +172,296 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
+    @Test("resource filter grows with the content surface but remains bounded")
+    func resourceFilterUsesBoundedProportionalWidth() throws {
+        let controller = makeWorkspace()
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+        let resourceRoot = try #require(filter.superview?.superview)
+
+        window.setContentSize(NSSize(width: 980, height: 650))
+        root.layoutSubtreeIfNeeded()
+        let compactWidth = filter.frame.width
+
+        window.setContentSize(NSSize(width: 1_440, height: 650))
+        root.layoutSubtreeIfNeeded()
+        let expandedWidth = filter.frame.width
+
+        #expect(expandedWidth > compactWidth)
+        #expect(expandedWidth <= 560.5)
+        #expect(expandedWidth <= resourceRoot.bounds.width * 0.5 + 0.5)
+    }
+
+    @Test("Return applies a pending resource filter and restores table focus")
+    func returnAppliesResourceFilterImmediately() async throws {
+        let provider = FilterValidationWorkspaceResourceProvider()
+        let controller = makeWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+
+        try await waitUntil { provider.streamRequestCount == 1 && table.numberOfRows == 1 }
+        controller.focusResourceFilter(nil)
+        filter.stringValue = "name:api"
+        filter.delegate?.controlTextDidChange?(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: filter
+        ))
+        #expect(provider.streamRequestCount == 1)
+
+        let handled = filter.delegate?.control?(
+            filter,
+            textView: NSTextView(),
+            doCommandBy: #selector(NSResponder.insertNewline(_:))
+        )
+        #expect(handled == true)
+        #expect(window.firstResponder === table)
+        try await waitUntil(timeout: .milliseconds(120)) {
+            provider.streamRequestCount == 2
+        }
+    }
+
+    @Test("Return on a Pod replaces the resource table with its container list")
+    func returnEntersPodContainers() async throws {
+        let pod = ResourceIdentity(
+            clusterSessionID: "test-session",
+            group: "",
+            version: "v1",
+            resource: "pods",
+            namespace: "default",
+            name: "api",
+            uid: "pod-api"
+        )
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: pod,
+                resourceVersion: "rv-1",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "containers",
+                    fieldID: "container:api",
+                    label: "Container",
+                    displayText: "api"
+                )]
+            ))
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourceTable = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { resourceTable.numberOfRows == 1 }
+        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(resourceTable))
+        controller.enterResource(nil)
+
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSTableView }
+                .contains { $0.accessibilityLabel() == "Pod containers" }
+        }
+        let containerTable = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Pod containers" })
+        #expect(containerTable.numberOfRows == 1)
+        #expect(containerTable.tableColumns.map(\.title) == ["Container", "Type"])
+    }
+
+    @Test("a slower Enter cannot replace a newer explicit YAML view")
+    func explicitDetailSupersedesPendingDrillDown() async throws {
+        let pod = toolbarPodIdentity()
+        let gate = DelayedDetailGate(blockedRequests: [1, 2])
+        let detail = toolbarPodDetail(pod)
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: detail,
+                gate: gate
+            )
+        )
+        controller.showWindow(nil)
+        defer {
+            Task { await gate.releaseAll() }
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        try await waitUntil { table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+
+        controller.enterResource(nil)
+        try await waitUntilAsync { await gate.requestCount == 1 }
+        controller.openResourceYAML(nil)
+        try await waitUntilAsync { await gate.requestCount == 2 }
+        await gate.releaseAll()
+
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSTextView }
+                .contains {
+                    $0.accessibilityLabel() == "Kubernetes object YAML"
+                        && $0.string.contains("kind: Pod")
+                }
+        }
+        try await Task.sleep(for: .milliseconds(40))
+        #expect(descendants(of: root).compactMap { $0 as? NSTableView }
+            .contains { $0.accessibilityLabel() == "Pod containers" } == false)
+    }
+
+    @Test("Back cancels a pending Forward restoration of a subresource")
+    func backSupersedesPendingSubresourceRestoration() async throws {
+        let pod = toolbarPodIdentity()
+        let gate = DelayedDetailGate(blockedRequests: [2])
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: toolbarPodDetail(pod),
+                gate: gate
+            )
+        )
+        controller.showWindow(nil)
+        defer {
+            Task { await gate.releaseAll() }
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourceTable = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        try await waitUntil { resourceTable.numberOfRows == 1 }
+        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(resourceTable))
+        controller.enterResource(nil)
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSTableView }
+                .contains { $0.accessibilityLabel() == "Pod containers" }
+        }
+
+        controller.navigateBack(nil)
+        controller.navigateForward(nil)
+        try await waitUntilAsync { await gate.requestCount == 2 }
+        controller.navigateBack(nil)
+        await gate.releaseAll()
+        try await Task.sleep(for: .milliseconds(40))
+
+        #expect(descendants(of: root).compactMap { $0 as? NSTableView }
+            .contains { $0.accessibilityLabel() == "Kubernetes resources" })
+        #expect(descendants(of: root).compactMap { $0 as? NSTableView }
+            .contains { $0.accessibilityLabel() == "Pod containers" } == false)
+    }
+
+    @Test("Back from Namespace Pods restores the toolbar namespace scope")
+    func namespaceDrillDownBackRestoresToolbarScope() async throws {
+        let namespace = ResourceIdentity(
+            clusterSessionID: "test-session", group: "", version: "v1",
+            resource: "namespaces", namespace: "", name: "payments",
+            uid: "namespace-payments"
+        )
+        let restoration = ClusterWindowRestorationRecord(
+            id: "namespace-drill-down",
+            state: ClusterWindowRestorationState(
+                contextName: "test-context",
+                gvr: GVR(group: "", version: "v1", resource: "namespaces"),
+                namespaceScope: .all
+            )
+        )
+        let controller = makeWorkspace(
+            provider: NamespaceDrillDownWorkspaceResourceProvider(namespace: namespace),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: namespace,
+                resourceVersion: "rv-1"
+            )),
+            restoration: restoration
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let namespaceControl = try #require(window.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.namespace"
+        }?.view as? NSPopUpButton)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+        controller.enterResource(nil)
+        try await waitUntil { namespaceControl.titleOfSelectedItem == "payments" }
+
+        controller.navigateBack(nil)
+        try await waitUntil {
+            namespaceControl.titleOfSelectedItem == "All namespaces"
+                && table.numberOfRows == 1
+        }
+    }
+
+    @Test("helper recovery refetches a visible subresource with the new session")
+    func helperRecoveryRebindsVisibleSubresource() async throws {
+        let pod = toolbarPodIdentity()
+        let gate = DelayedDetailGate(blockedRequests: [2])
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: toolbarPodDetail(pod),
+                gate: gate,
+                rebindIdentityToRequest: true
+            )
+        )
+        controller.showWindow(nil)
+        defer {
+            Task { await gate.releaseAll() }
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourceTable = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        try await waitUntil { resourceTable.numberOfRows == 1 }
+        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(resourceTable))
+        controller.enterResource(nil)
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSButton }
+                .contains { $0.title == "Open Selected Container Logs" && $0.isEnabled }
+        }
+
+        controller.engineDidDisconnect(message: "test helper restart")
+        let disabledButton = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Open Selected Container Logs" })
+        #expect(!disabledButton.isEnabled)
+
+        controller.recover(with: OpenedClusterSession(
+            sessionID: "recovered-session",
+            contextName: "test-context",
+            clusterName: "test-cluster",
+            serverHostname: "example.invalid",
+            defaultNamespace: "default"
+        ))
+        try await waitUntilAsync { await gate.requestCount == 2 }
+        let requested = await gate.requestedIdentities
+        #expect(requested.map(\.clusterSessionID) == ["test-session", "recovered-session"])
+        #expect(requested.map(\.uid) == [pod.uid, pod.uid])
+        await gate.releaseAll()
+
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSButton }
+                .contains { $0.title == "Open Selected Container Logs" && $0.isEnabled }
+        }
+    }
+
     @Test("Pod log action resolves all containers and opens no setup sheet")
     func podLogsOpenDirectlyWithAllContainers() async throws {
         let logs = ResolvingToolbarLogProvider()
@@ -663,6 +953,7 @@ private func makeWorkspace(
     ),
     provider: any WorkspaceResourceProviding = NoopWorkspaceResourceProvider(),
     logProvider: any LogStreamProviding = NoopLogProvider(),
+    objectDetailProvider: any ObjectDetailProviding = NoopToolbarObjectDetailProvider(),
     restoration: ClusterWindowRestorationRecord = ClusterWindowRestorationRecord(
         id: "toolbar-test",
         contextName: "test-context"
@@ -676,7 +967,7 @@ private func makeWorkspace(
         connectionActivityProvider: NoopConnectionActivityProvider(),
         optionalResourceCatalogProvider: NoopOptionalResourceCatalogProvider(),
         objectSearchProvider: NoopObjectSearchProvider(),
-        objectDetailProvider: NoopToolbarObjectDetailProvider(),
+        objectDetailProvider: objectDetailProvider,
         operationProvider: NoopOperationProvider(),
         logProvider: logProvider,
         execProvider: NoopExecProvider(),
@@ -990,6 +1281,62 @@ private final class FilterValidationWorkspaceResourceProvider: WorkspaceResource
     func closeSession(sessionID: String) async {}
 }
 
+private struct NamespaceDrillDownWorkspaceResourceProvider: WorkspaceResourceProviding {
+    var namespace: ResourceIdentity
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        .init(resources: [
+            DiscoveredResource(
+                group: "", version: "v1", resource: "namespaces", kind: "Namespace",
+                namespaced: false, verbs: ["list", "watch"]
+            ),
+            DiscoveredResource(
+                group: "", version: "v1", resource: "pods", kind: "Pod",
+                namespaced: true, verbs: ["list", "watch"]
+            ),
+        ])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { ["payments"] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        let rows: [ResourceRow]
+        if request.resource.resource == "namespaces" {
+            var rebound = namespace
+            rebound.clusterSessionID = request.sessionID
+            rows = [ResourceRow(identity: rebound, cells: [
+                Cell(columnID: "name", displayText: rebound.name, typedValue: .string(rebound.name)),
+            ])]
+        } else {
+            rows = []
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.snapshot(
+                cursor: StreamCursor(generation: request.generation, sequence: 1),
+                chunk: ResourceSnapshotChunk(
+                    rows: rows,
+                    first: true,
+                    last: true,
+                    index: 0,
+                    estimatedTotalRows: UInt64(rows.count)
+                )
+            ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                status: ResourceViewStatus(freshness: .watching, rowsVisible: UInt64(rows.count))
+            ))
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
 private struct SelectAllFilterWorkspaceResourceProvider: WorkspaceResourceProviding {
     func discoverResources(sessionID: String, refresh: Bool) async throws
         -> ResourceDiscoveryResult {
@@ -1111,6 +1458,71 @@ private func waitUntil(
     }
 }
 
+private func waitUntilAsync(
+    timeout: Duration = .seconds(2),
+    condition: @escaping @Sendable () async -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !(await condition()) {
+        guard clock.now < deadline else {
+            throw ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "AppKitAsyncTestTimeout",
+                message: "Timed out waiting for an asynchronous test condition.",
+                operation: "test cluster workspace navigation"
+            )
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+private func toolbarPodIdentity() -> ResourceIdentity {
+    ResourceIdentity(
+        clusterSessionID: "test-session", group: "", version: "v1",
+        resource: "pods", namespace: "default", name: "api", uid: "pod-api"
+    )
+}
+
+private func toolbarPodDetail(_ pod: ResourceIdentity) -> ObjectDetail {
+    ObjectDetail(
+        identity: pod,
+        resourceVersion: "rv-1",
+        yamlUTF8: Data("apiVersion: v1\nkind: Pod\nmetadata:\n  name: api\n".utf8),
+        summaryFields: [ObjectSummaryField(
+            sectionID: "containers", fieldID: "container:api",
+            label: "Container", displayText: "api"
+        )]
+    )
+}
+
+private actor DelayedDetailGate {
+    private let blockedRequests: Set<Int>
+    private var requests = 0
+    private var identities: [ResourceIdentity] = []
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(blockedRequests: Set<Int>) {
+        self.blockedRequests = blockedRequests
+    }
+
+    var requestCount: Int { requests }
+    var requestedIdentities: [ResourceIdentity] { identities }
+
+    func intercept(_ identity: ResourceIdentity) async {
+        requests += 1
+        identities.append(identity)
+        guard blockedRequests.contains(requests) else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func releaseAll() {
+        let pending = waiters
+        waiters.removeAll(keepingCapacity: false)
+        for waiter in pending { waiter.resume() }
+    }
+}
+
 private struct NoopWorkspaceResourceProvider: WorkspaceResourceProviding {
     func discoverResources(sessionID: String, refresh: Bool) async throws
         -> ResourceDiscoveryResult { .init(resources: []) }
@@ -1148,8 +1560,36 @@ private struct NoopObjectSearchProvider: ObjectSearchProviding {
 }
 
 private struct NoopToolbarObjectDetailProvider: ObjectDetailProviding {
+    var detail: ObjectDetail?
+    var gate: DelayedDetailGate?
+    var rebindIdentityToRequest: Bool
+
+    init(
+        detail: ObjectDetail? = nil,
+        gate: DelayedDetailGate? = nil,
+        rebindIdentityToRequest: Bool = false
+    ) {
+        self.detail = detail
+        self.gate = gate
+        self.rebindIdentityToRequest = rebindIdentityToRequest
+    }
+
     func getObject(identity: ResourceIdentity) async throws -> ObjectDetail {
-        throw CancellationError()
+        await gate?.intercept(identity)
+        guard var detail else { throw CancellationError() }
+        if rebindIdentityToRequest {
+            guard detail.identity.uid == identity.uid,
+                detail.identity.group == identity.group,
+                detail.identity.version == identity.version,
+                detail.identity.resource == identity.resource,
+                detail.identity.namespace == identity.namespace,
+                detail.identity.name == identity.name
+            else { throw CancellationError() }
+            detail.identity = identity
+            return detail
+        }
+        guard detail.identity == identity else { throw CancellationError() }
+        return detail
     }
     func watchObject(identity: ResourceIdentity, resourceVersion: String)
         -> AsyncThrowingStream<ObjectWatchEvent, Error> {

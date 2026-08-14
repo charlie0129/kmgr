@@ -182,6 +182,64 @@ func TestServiceSummaryIncludesDeclaredAndTargetPorts(t *testing.T) {
 	}
 }
 
+func TestWorkloadSummaryCarriesOnlyRepresentablePodSelectors(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job"} {
+		t.Run(kind, func(t *testing.T) {
+			value := kubernetesObject("apps/v1", kind, strings.ToLower(kind)+"s", "ns", "workload", "uid")
+			value.Object["spec"] = map[string]any{"selector": map[string]any{
+				"matchLabels": map[string]any{"tier": "frontend", "app": "api"},
+				"matchExpressions": []any{map[string]any{
+					"key": "track", "operator": "In", "values": []any{"stable"},
+				}},
+			}}
+			fields := summarize(value)
+			selectors := make(map[string]string)
+			for _, field := range fields {
+				if field.Section == "selectors" {
+					selectors[field.ID] = field.Label + "=" + field.Value
+				}
+			}
+			if selectors["selector:0"] != "app=api" || selectors["selector:1"] != "tier=frontend" {
+				t.Fatalf("selector summary = %#v", selectors)
+			}
+			if !strings.Contains(selectors["selectorExpressions"], "cannot be represented") {
+				t.Fatalf("match-expression marker = %q", selectors["selectorExpressions"])
+			}
+		})
+	}
+}
+
+func TestReplicationControllerSummaryCarriesFlatPodSelector(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "ReplicationController", "replicationcontrollers", "ns", "legacy", "uid")
+	value.Object["spec"] = map[string]any{"selector": map[string]any{"app": "legacy"}}
+	fields := summarize(value)
+	for _, field := range fields {
+		if field.Section == "selectors" && field.Label == "app" && field.Value == "legacy" {
+			return
+		}
+	}
+	t.Fatalf("flat selector missing from %#v", fields)
+}
+
+func TestWorkloadSummaryPreservesMaximumQualifiedSelectorKey(t *testing.T) {
+	t.Parallel()
+	prefix := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." +
+		strings.Repeat("c", 63) + "." + strings.Repeat("d", 61)
+	key := prefix + "/" + strings.Repeat("e", 63)
+	value := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "workload", "uid")
+	value.Object["spec"] = map[string]any{"selector": map[string]any{
+		"matchLabels": map[string]any{key: "selected"},
+	}}
+	for _, field := range summarize(value) {
+		if field.Section == "selectors" && field.Label == key && field.Value == "selected" {
+			return
+		}
+	}
+	t.Fatalf("qualified selector key was truncated in %#v", summarize(value))
+}
+
 func TestGenericSummaryIncludesConditionsOwnersAndWorkloadStatus(t *testing.T) {
 	t.Parallel()
 	controller := true
@@ -350,15 +408,21 @@ func TestPodSummaryBoundsUntrustedContainerAndPortCounts(t *testing.T) {
 	}
 	containerFields := 0
 	portFields := 0
+	omittedContainers := ""
 	for _, field := range detail.Summary {
 		if field.Section == "ports" {
 			portFields++
+		} else if field.Section == "containers" && field.ID == "containersOmitted" {
+			omittedContainers = field.Value
 		} else if field.Section == "containers" {
 			containerFields++
 		}
 	}
 	if containerFields != maximumSummaryContainers || portFields != maximumSummaryPorts {
 		t.Fatalf("bounded summary counts = containers %d, ports %d", containerFields, portFields)
+	}
+	if omittedContainers != "20 not shown" {
+		t.Fatalf("omitted container marker = %q", omittedContainers)
 	}
 }
 

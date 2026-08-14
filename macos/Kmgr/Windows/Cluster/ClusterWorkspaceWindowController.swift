@@ -6,6 +6,7 @@ struct ResourceColumnsRequest {
     var resourceTitle: String
     var match: ColumnResourceMatch
     var defaultColumns: [ColumnDefinition]
+    var discoveredColumns: [ColumnDefinition]
     var previewContext: ColumnPreviewContext
     var apply: @MainActor ([ColumnDefinition]) -> Void
 }
@@ -437,6 +438,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func extendResourceSelectionDown(_ sender: Any?) {
         workspaceController.extendResourceSelectionDown(sender)
     }
+    @objc func enterResource(_ sender: Any?) { workspaceController.enterResource(sender) }
     @objc func openResourceDetails(_ sender: Any?) { workspaceController.openResourceDetails(sender) }
     @objc func openResourceYAML(_ sender: Any?) { workspaceController.openResourceYAML(sender) }
     @objc func openResourceEvents(_ sender: Any?) { workspaceController.openResourceEvents(sender) }
@@ -461,6 +463,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(moveResourceSelectionDown(_:)): command = .moveDown
         case #selector(extendResourceSelectionUp(_:)): command = .extendUp
         case #selector(extendResourceSelectionDown(_:)): command = .extendDown
+        case #selector(enterResource(_:)): command = .enter
         case #selector(openResourceDetails(_:)): command = .open
         case #selector(openResourceYAML(_:)): command = .openYAML
         case #selector(openResourceEvents(_:)): command = .openEvents
@@ -514,7 +517,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var paletteController: CommandPaletteWindowController?
     private var palettePresentationTask: Task<Void, Never>?
     private var objectOpenTask: Task<Void, Never>?
+    private var objectOpenRevision: UInt64 = 0
     private var detailController: ObjectDetailViewController?
+    private var subresourceController: ObjectSubresourceListViewController?
     private var pendingRestorationState: ClusterWindowRestorationState?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
@@ -566,6 +571,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         sidebarController.onSelectResource = { [weak self] resource in
             guard let self else { return }
             guard pendingRestorationState == nil else { return }
+            invalidateObjectOpenTask()
             showResourceList(resume: false)
             contentController.open(resource: resource, scope: selectedNamespaceScope())
             checkpointRestoration()
@@ -579,6 +585,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onOpenObject = { [weak self] identity, tab in
             self?.showObject(identity, initialTab: tab)
+        }
+        contentController.onEnterObject = { [weak self] identity in
+            self?.enterObject(identity)
         }
         contentController.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
@@ -662,7 +671,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     func engineDidDisconnect(message: String) {
         namespaceTask?.cancel()
-        objectOpenTask?.cancel()
+        invalidateObjectOpenTask()
         palettePresentationTask?.cancel()
         palettePresentationTask = nil
         paletteController?.close()
@@ -671,6 +680,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         // accept an exact-GVR result from the helper generation that just died.
         sidebarController.stop()
         detailController?.engineDidDisconnect()
+        subresourceController?.setNetworkActionsEnabled(false)
         contentController.engineDidDisconnect()
         connectionActivityTask?.cancel()
         connectionActivityTask = nil
@@ -710,6 +720,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             session: recoveredSession,
             opensCurrentResource: resumesCurrentResource
         )
+        if case .subresource(let identity, let returnState) = contentController.currentDestination {
+            restoreSubresource(identity, returnState: returnState)
+        }
         sidebarController.recover(session: recoveredSession) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -849,7 +862,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         palettePresentationTask = nil
         paletteController?.close()
         paletteController = nil
-        objectOpenTask?.cancel()
+        invalidateObjectOpenTask()
         detailController?.stop()
         detailController = nil
         if let portForwardObserver {
@@ -993,6 +1006,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func moveResourceSelectionDown(_ sender: Any?) { contentController.performCommand(.moveDown) }
     @objc func extendResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.extendUp) }
     @objc func extendResourceSelectionDown(_ sender: Any?) { contentController.performCommand(.extendDown) }
+    @objc func enterResource(_ sender: Any?) { contentController.performCommand(.enter) }
     @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
     @objc func openResourceYAML(_ sender: Any?) { contentController.performCommand(.openYAML) }
     @objc func openResourceEvents(_ sender: Any?) { contentController.performCommand(.openEvents) }
@@ -1078,6 +1092,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         )
         controller.onOpenResource = { [weak self] resource in
             guard let self else { return }
+            invalidateObjectOpenTask()
             showResourceList(resume: false)
             contentController.open(resource: resource, scope: selectedNamespaceScope())
             checkpointRestoration()
@@ -1125,14 +1140,18 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func freshOpen(_ identity: ResourceIdentity) {
-        objectOpenTask?.cancel()
+        let revision = beginObjectOpenTask()
         connectionActivityView.setState(.connecting, detail: "Refreshing \(identity.name)…")
         objectOpenTask = Task { [weak self, objectDetailProvider] in
             guard let self else { return }
+            defer {
+                if objectOpenRevision == revision { objectOpenTask = nil }
+            }
             do {
                 let detail = try await objectDetailProvider.getObject(identity: identity)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
                 connectionActivityView.setState(.connected)
+                objectOpenTask = nil
                 showObject(detail.identity, initialTab: .automatic)
             } catch {
                 guard !Task.isCancelled else { return }
@@ -1140,6 +1159,113 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 connectionActivityView.setState(.failed, detail: presentation.detailedText)
             }
         }
+    }
+
+    private func enterObject(_ identity: ResourceIdentity) {
+        guard ResourceDrillDownPlanner.hasPotentialTarget(identity),
+            let returnState = contentController.captureNavigationState(),
+            returnState.selectedUIDs.contains(identity.uid)
+        else { return }
+
+        let revision = beginObjectOpenTask()
+        objectOpenTask = Task { [weak self, objectDetailProvider] in
+            guard let self else { return }
+            defer {
+                if objectOpenRevision == revision { objectOpenTask = nil }
+            }
+            do {
+                let detail = try await objectDetailProvider.getObject(identity: identity)
+                guard !Task.isCancelled, objectOpenRevision == revision,
+                    detail.identity == identity,
+                    drillDownSourceIsCurrent(identity, returnState: returnState),
+                    let plan = ResourceDrillDownPlanner.plan(for: detail)
+                else { return }
+
+                switch plan {
+                case .resource(let query):
+                    openDrillDownResource(query)
+                case .containers(let pod, let values):
+                    showSubresource(
+                        .containers(pod: pod, values: values),
+                        returnState: returnState
+                    )
+                case .data(let object):
+                    let data = try await objectDetailProvider.getData(identity: object)
+                    guard !Task.isCancelled, objectOpenRevision == revision,
+                        data.identity == object,
+                        drillDownSourceIsCurrent(identity, returnState: returnState)
+                    else { return }
+                    showSubresource(
+                        .data(
+                            object: object,
+                            values: data.entries.map(DataSubresourceRow.init(entry:))
+                        ),
+                        returnState: returnState
+                    )
+                }
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
+                let presentation = UserFacingErrorPresentation(error)
+                connectionActivityView.setState(.failed, detail: presentation.detailedText)
+            }
+        }
+    }
+
+    private func drillDownSourceIsCurrent(
+        _ identity: ResourceIdentity,
+        returnState: ResourceNavigationState
+    ) -> Bool {
+        guard case .resource = contentController.currentDestination,
+            let current = contentController.captureNavigationState()
+        else { return false }
+        return current.group == returnState.group
+            && current.version == returnState.version
+            && current.resource == returnState.resource
+            && current.namespaceSelection == returnState.namespaceSelection
+            && current.filter == returnState.filter
+            && current.selectedUIDs.contains(identity.uid)
+    }
+
+    private func openDrillDownResource(_ query: ResourceDrillDownQuery) {
+        guard let target = resources.first(where: {
+            $0.group == query.group && $0.version == query.version
+                && $0.resource == query.resource && $0.verbs.contains("list")
+        }) else { return }
+        showResourceList(resume: false)
+        applyNamespaceScopeSelection(query.namespaceScope)
+        contentController.open(
+            resource: target,
+            scope: query.namespaceScope,
+            initialFilter: query.filterExpression
+        )
+        sidebarController.selectResource(matching: target.id)
+        checkpointRestoration()
+        view.window?.makeFirstResponder(contentController.tableResponder)
+    }
+
+    private func showSubresource(
+        _ content: ObjectSubresourceContent,
+        returnState: ResourceNavigationState
+    ) {
+        contentController.navigateToSubresource(content.parent, returnState: returnState)
+        displaySubresource(content)
+        checkpointRestoration()
+    }
+
+    private func displaySubresource(_ content: ObjectSubresourceContent) {
+        detailController?.stop()
+        detailController = nil
+        contentController.suspend()
+        let controller = ObjectSubresourceListViewController(content: content)
+        controller.onBack = { [weak self] in self?.goBack() }
+        controller.onOpenLogs = { [weak self] request in self?.onOpenLogs?(request) }
+        controller.onOpenDataEditor = { [weak self] identity in
+            self?.showObject(identity, initialTab: .data)
+        }
+        subresourceController = controller
+        replaceMainContent(with: controller)
+        view.window?.makeFirstResponder(controller.view)
     }
 
     private func showObject(
@@ -1157,7 +1283,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         _ identity: ResourceIdentity,
         initialTab: ObjectDetailInitialTab
     ) {
+        invalidateObjectOpenTask()
         detailController?.stop()
+        subresourceController = nil
         contentController.suspend()
         let controller = ObjectDetailViewController(
             identity: identity,
@@ -1172,10 +1300,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func showResourceList(resume: Bool = true) {
-        guard detailController != nil else { return }
+        guard detailController != nil || subresourceController != nil else { return }
         detailController?.stop()
         replaceMainContent(with: contentController)
         detailController = nil
+        subresourceController = nil
         if resume { contentController.resume() }
         view.window?.makeFirstResponder(contentController.tableResponder)
     }
@@ -1206,13 +1335,81 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private func restore(_ destination: WorkspaceDestination) {
         switch destination {
         case .resource(let state):
+            invalidateObjectOpenTask()
             showResourceList(resume: false)
+            applyNamespaceScopeSelection(state.namespaceSelection)
             contentController.restoreResource(state)
             sidebarController.selectResource(matchingCurrent: contentController.currentResourceID)
             view.window?.makeFirstResponder(contentController.tableResponder)
         case .object(let identity, _):
             displayObject(identity, initialTab: .automatic)
+        case .subresource(let identity, let returnState):
+            restoreSubresource(identity, returnState: returnState)
         }
+    }
+
+    private func restoreSubresource(
+        _ identity: ResourceIdentity,
+        returnState: ResourceNavigationState
+    ) {
+        let revision = beginObjectOpenTask()
+        objectOpenTask = Task { [weak self, objectDetailProvider] in
+            guard let self else { return }
+            defer {
+                if objectOpenRevision == revision { objectOpenTask = nil }
+            }
+            do {
+                let detail = try await objectDetailProvider.getObject(identity: identity)
+                guard !Task.isCancelled, objectOpenRevision == revision,
+                    detail.identity == identity,
+                    subresourceDestinationIsCurrent(identity),
+                    let plan = ResourceDrillDownPlanner.plan(for: detail)
+                else { return }
+                switch plan {
+                case .containers(let pod, let values):
+                    displaySubresource(.containers(pod: pod, values: values))
+                case .data(let object):
+                    let data = try await objectDetailProvider.getData(identity: object)
+                    guard !Task.isCancelled, objectOpenRevision == revision,
+                        data.identity == object,
+                        subresourceDestinationIsCurrent(identity)
+                    else { return }
+                    displaySubresource(.data(
+                        object: object,
+                        values: data.entries.map(DataSubresourceRow.init(entry:))
+                    ))
+                case .resource:
+                    // Resource-to-resource drill-downs have their own resource
+                    // history entry and are never encoded as a local child.
+                    showResourceList(resume: false)
+                    applyNamespaceScopeSelection(returnState.namespaceSelection)
+                    contentController.restoreResource(returnState)
+                }
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
+                let presentation = UserFacingErrorPresentation(error)
+                connectionActivityView.setState(.failed, detail: presentation.detailedText)
+            }
+        }
+    }
+
+    private func subresourceDestinationIsCurrent(_ identity: ResourceIdentity) -> Bool {
+        guard case .subresource(let current, _) = contentController.currentDestination else {
+            return false
+        }
+        return current == identity
+    }
+
+    private func invalidateObjectOpenTask() {
+        objectOpenRevision &+= 1
+        objectOpenTask?.cancel()
+        objectOpenTask = nil
+    }
+
+    private func beginObjectOpenTask() -> UInt64 {
+        invalidateObjectOpenTask()
+        return objectOpenRevision
     }
 
     private func selectNamespace(_ namespace: String) {
@@ -1849,6 +2046,7 @@ private final class ResourceListViewController: NSViewController,
     private var projectionRequestInterval: OSSignpostIntervalState?
     private var projectionRequestGeneration: UInt64?
     var onShowCommandPalette: (() -> Void)?
+    var onEnterObject: ((ResourceIdentity) -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
@@ -1896,6 +2094,10 @@ private final class ResourceListViewController: NSViewController,
         filterField.setAccessibilityLabel("Filter Kubernetes resources")
         filterField.delegate = self
         filterField.sendsSearchStringImmediately = true
+        // Let the filter use roughly half of the resource surface for long
+        // selectors, while yielding first when the status labels need room.
+        filterField.setContentHuggingPriority(.init(200), for: .horizontal)
+        filterField.setContentCompressionResistancePriority(.init(499), for: .horizontal)
 
         let columnsButton = NSButton(title: "Columns…", target: self, action: #selector(showColumns))
         columnsButton.bezelStyle = .texturedRounded
@@ -1907,7 +2109,26 @@ private final class ResourceListViewController: NSViewController,
         header.alignment = .centerY
         header.spacing = 9
         header.translatesAutoresizingMaskIntoConstraints = false
-        filterField.widthAnchor.constraint(equalToConstant: 230).isActive = true
+        root.addSubview(header)
+        let preferredFilterWidth = filterField.widthAnchor.constraint(
+            equalTo: root.widthAnchor,
+            multiplier: 0.5,
+            constant: -24
+        )
+        preferredFilterWidth.priority = .init(240)
+        let minimumFilterWidth = filterField.widthAnchor.constraint(
+            greaterThanOrEqualToConstant: 180
+        )
+        minimumFilterWidth.priority = .init(500)
+        NSLayoutConstraint.activate([
+            preferredFilterWidth,
+            minimumFilterWidth,
+            filterField.widthAnchor.constraint(lessThanOrEqualToConstant: 560),
+            filterField.widthAnchor.constraint(
+                lessThanOrEqualTo: root.widthAnchor,
+                multiplier: 0.5
+            ),
+        ])
 
         tableView.delegate = self
         tableView.dataSource = self
@@ -1915,7 +2136,7 @@ private final class ResourceListViewController: NSViewController,
         tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        tableView.doubleAction = #selector(openSelectedObjectFromTable)
+        tableView.doubleAction = #selector(enterSelectedObjectFromTable)
         tableView.target = self
         tableView.rowSizeStyle = .medium
         tableView.setAccessibilityLabel("Kubernetes resources")
@@ -1949,7 +2170,6 @@ private final class ResourceListViewController: NSViewController,
         statusLine.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         statusLine.translatesAutoresizingMaskIntoConstraints = false
 
-        root.addSubview(header)
         root.addSubview(errorLabel)
         root.addSubview(scrollView)
         root.addSubview(statusLine)
@@ -1981,16 +2201,24 @@ private final class ResourceListViewController: NSViewController,
         view = root
     }
 
-    func open(resource: DiscoveredResource, scope: NamespaceSelection) {
+    func open(
+        resource: DiscoveredResource,
+        scope: NamespaceSelection,
+        initialFilter: String? = nil
+    ) {
         if case .resource = history.current, let current = navigationState() {
             history.replaceCurrent(with: .resource(current))
         }
         let nextGVR = resourceGVR(for: resource)
-        let restoredFilter = filterMemory.switchResource(
+        let rememberedFilter = filterMemory.switchResource(
             from: self.resource.map(resourceGVR(for:)),
             currentFilter: filterField.stringValue,
             to: nextGVR
         )
+        let restoredFilter = initialFilter ?? rememberedFilter
+        if initialFilter != nil {
+            filterMemory.remember(restoredFilter, for: nextGVR)
+        }
         installFilterForNavigation(restoredFilter, resourceGVR: nextGVR)
         self.resource = resource
         self.scope = scope
@@ -2102,6 +2330,8 @@ private final class ResourceListViewController: NSViewController,
 
     var selectedIdentities: [ResourceIdentity] { model.selectedIdentities }
 
+    var currentDestination: WorkspaceDestination? { history.current }
+
     func captureCommandContext() -> CommandContext {
         let selected = model.selectedIdentities
         let visibleUIDs = Set(model.orderedVisibleUIDs)
@@ -2180,6 +2410,7 @@ private final class ResourceListViewController: NSViewController,
             for (title, command) in compatible { add(title, command) }
         }
         addGroup([
+            ("Enter Subresource", .enter),
             ("Open Details", .open),
             ("Open YAML", .openYAML),
             ("Open Events", .openEvents),
@@ -2229,6 +2460,16 @@ private final class ResourceListViewController: NSViewController,
         history.navigate(to: .object(identity, returnState: returnState))
     }
 
+    func navigateToSubresource(
+        _ identity: ResourceIdentity,
+        returnState: ResourceNavigationState
+    ) {
+        if case .resource = history.current {
+            history.replaceCurrent(with: .resource(returnState))
+        }
+        history.navigate(to: .subresource(identity, returnState: returnState))
+    }
+
     func goBack() -> WorkspaceDestination? {
         if case .resource = history.current, let current = navigationState() {
             history.replaceCurrent(with: .resource(current))
@@ -2251,6 +2492,11 @@ private final class ResourceListViewController: NSViewController,
         guard isAuthenticated, resourceCatalogValidated else { NSSound.beep(); return }
         guard let resource else { return }
         let resourceID = resource.id
+        let resourceGVR = resourceGVR(for: resource)
+        let discoveredColumns = optionalResourceOverlayState.applies(
+            sessionID: session.sessionID,
+            gvr: resourceGVR
+        ) ? optionalResourceOverlayState.overlay.definitions : []
         onShowColumns?(ResourceColumnsRequest(
             resourceTitle: resource.kind.isEmpty ? resource.resource : resource.kind,
             match: ColumnResourceMatch(
@@ -2259,6 +2505,7 @@ private final class ResourceListViewController: NSViewController,
                 resource: resource.resource
             ),
             defaultColumns: defaultColumnDefinitions(for: resource),
+            discoveredColumns: discoveredColumns,
             previewContext: ColumnPreviewContext(
                 sessionID: session.sessionID,
                 resource: resource,
@@ -2289,6 +2536,26 @@ private final class ResourceListViewController: NSViewController,
             self?.openStream()
             self?.onRestorationChanged?()
         }
+    }
+
+    func control(
+        _ control: NSControl,
+        textView: NSTextView,
+        doCommandBy commandSelector: Selector
+    ) -> Bool {
+        guard control === filterField,
+            commandSelector == #selector(NSResponder.insertNewline(_:))
+        else { return false }
+
+        // Do not make an explicit Return wait for the typing debounce. This
+        // also gives keyboard navigation back to the resource table.
+        filterTask?.cancel()
+        filterTask = nil
+        rememberCurrentFilter()
+        openStream()
+        onRestorationChanged?()
+        view.window?.makeFirstResponder(tableView)
+        return true
     }
 
     @objc private func scrollBoundsChanged(_ notification: Notification) {
@@ -3669,6 +3936,13 @@ private final class ResourceListViewController: NSViewController,
         openSelectedObject(initialTab: .automatic)
     }
 
+    @objc private func enterSelectedObjectFromTable() {
+        guard canPerformCommand(.enter, requiringTableFocus: false),
+            let identity = model.selectedIdentities.only
+        else { return }
+        onEnterObject?(identity)
+    }
+
     private func openSelectedObject(
         initialTab: ObjectDetailInitialTab,
         identities: [ResourceIdentity]? = nil
@@ -3686,6 +3960,9 @@ private final class ResourceListViewController: NSViewController,
         switch command {
         case .focusFilter:
             view.window?.makeFirstResponder(filterField)
+        case .enter:
+            guard let identity = selected.only else { return }
+            onEnterObject?(identity)
         case .open:
             if capturedIdentities == nil {
                 openSelectedObjectFromTable()
@@ -3834,6 +4111,9 @@ private final class ResourceListViewController: NSViewController,
         with selected: [ResourceIdentity]
     ) -> Bool {
         switch command {
+        case .enter:
+            return selected.count == 1
+                && ResourceDrillDownPlanner.hasPotentialTarget(selected[0])
         case .open, .openYAML, .openEvents:
             return selected.count == 1
         case .openLogs:
@@ -3865,7 +4145,7 @@ private final class ResourceListViewController: NSViewController,
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, open, openYAML, openEvents, openLogs, openExec
+    case focusFilter, enter, open, openYAML, openEvents, openLogs, openExec
     case startPortForward, selectAll, delete, scale, restart, editMetadata
     case copyName, copyNamespacedName, copyReference, moveUp, moveDown, extendUp, extendDown
 }
@@ -3940,7 +4220,7 @@ private final class ResourceTableView: NSTableView {
         case ("/", _, false): onCommand?(.focusFilter)
         case ("j", _, false): onCommand?(.moveDown)
         case ("k", _, false): onCommand?(.moveUp)
-        case (_, 36, false): onCommand?(.open)
+        case (_, 36, false): onCommand?(.enter)
         case ("y", _, false), ("Y", _, false): onCommand?(.openYAML)
         case ("e", _, false), ("E", _, false): onCommand?(.openEvents)
         case ("l", _, false), ("L", _, false): onCommand?(.openLogs)

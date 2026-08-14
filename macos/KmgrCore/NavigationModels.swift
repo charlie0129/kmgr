@@ -73,6 +73,7 @@ public struct ResourceNavigationState: Hashable, Codable, Sendable {
 public enum WorkspaceDestination: Hashable, Codable, Sendable {
     case resource(ResourceNavigationState)
     case object(ResourceIdentity, returnState: ResourceNavigationState)
+    case subresource(ResourceIdentity, returnState: ResourceNavigationState)
 }
 
 /// Per-window filter memory keyed by exact Kubernetes resource identity. An
@@ -176,6 +177,9 @@ public struct WorkspaceNavigationHistory: Hashable, Codable, Sendable {
             case .object(var identity, let returnState):
                 identity.clusterSessionID = sessionID
                 return .object(identity, returnState: returnState)
+            case .subresource(var identity, let returnState):
+                identity.clusterSessionID = sessionID
+                return .subresource(identity, returnState: returnState)
             }
         }
     }

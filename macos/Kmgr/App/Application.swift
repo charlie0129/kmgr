@@ -478,6 +478,7 @@ final class Application: NSObject, NSApplicationDelegate {
             resourceTitle: request.resourceTitle,
             match: request.match,
             defaultColumns: request.defaultColumns,
+            discoveredColumns: request.discoveredColumns,
             previewProvider: columnPreviewProvider,
             previewContext: request.previewContext,
             configurationPath: configurationPath

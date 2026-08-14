@@ -480,6 +480,10 @@ func summarize(value *unstructured.Unstructured) []SummaryField {
 	case "Service":
 		fields = append(fields, serviceOverviewSummary(value.Object)...)
 		fields = append(fields, servicePortSummary(value.Object)...)
+	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job":
+		fields = append(fields, workloadSelectorSummary(value.Object)...)
+	case "ReplicationController":
+		fields = append(fields, flatSelectorSummary(value.Object, "spec", "selector")...)
 	case "Secret":
 		if secretType, found, _ := unstructured.NestedString(value.Object, "type"); found && secretType != "" {
 			fields = append(fields, SummaryField{
@@ -506,8 +510,11 @@ const (
 	maximumSummaryAddresses     = 64
 	maximumSummaryNameBytes     = 253
 	maximumSummaryPortNameBytes = 63
-	maximumSummaryLabelBytes    = 128
-	maximumSummaryValueBytes    = 512
+	// A qualified Kubernetes label key can contain a 253-byte DNS prefix,
+	// one slash, and a 63-byte name. Preserve it exactly so selector summaries
+	// remain safe machine-readable drill-down inputs as well as presentation.
+	maximumSummaryLabelBytes = 320
+	maximumSummaryValueBytes = 512
 )
 
 func genericStatusSummary(object map[string]any) []SummaryField {
@@ -664,7 +671,15 @@ func serviceOverviewSummary(object map[string]any) []SummaryField {
 		}
 	}
 
-	selectors, found, err := unstructured.NestedStringMap(object, "spec", "selector")
+	result = append(result, flatSelectorSummary(object, "spec", "selector")...)
+
+	result = append(result, serviceAddressSummary(object)...)
+	return result
+}
+
+func flatSelectorSummary(object map[string]any, path ...string) []SummaryField {
+	result := make([]SummaryField, 0)
+	selectors, found, err := unstructured.NestedStringMap(object, path...)
 	if err == nil && found {
 		keys := make([]string, 0, len(selectors))
 		for key := range selectors {
@@ -685,8 +700,20 @@ func serviceOverviewSummary(object map[string]any) []SummaryField {
 			result = append(result, omittedSummaryField("selectors", "selectorsOmitted", "Selectors", omitted))
 		}
 	}
+	return result
+}
 
-	result = append(result, serviceAddressSummary(object)...)
+func workloadSelectorSummary(object map[string]any) []SummaryField {
+	result := flatSelectorSummary(object, "spec", "selector", "matchLabels")
+	expressions, found, err := unstructured.NestedSlice(
+		object, "spec", "selector", "matchExpressions",
+	)
+	if err == nil && found && len(expressions) > 0 {
+		result = append(result, SummaryField{
+			Section: "selectors", ID: "selectorExpressions", Label: "Match Expressions",
+			Value: fmt.Sprintf("%d cannot be represented by the resource filter", len(expressions)),
+		})
+	}
 	return result
 }
 
@@ -749,17 +776,16 @@ func podContainerSummary(object map[string]any) []SummaryField {
 	result := make([]SummaryField, 0)
 	remainingContainers := maximumSummaryContainers
 	remainingPorts := maximumSummaryPorts
+	omittedContainers := 0
 	seenContainers := make(map[string]struct{})
 	seenPorts := make(map[string]struct{})
 	for _, group := range groups {
-		if remainingContainers == 0 {
-			break
-		}
 		containers, found, err := unstructured.NestedSlice(object, "spec", group.path)
 		if err != nil || !found {
 			continue
 		}
 		if len(containers) > remainingContainers {
+			omittedContainers += len(containers) - remainingContainers
 			containers = containers[:remainingContainers]
 		}
 		remainingContainers -= len(containers)
@@ -819,6 +845,11 @@ func podContainerSummary(object map[string]any) []SummaryField {
 				})
 			}
 		}
+	}
+	if omittedContainers > 0 {
+		result = append(result, omittedSummaryField(
+			"containers", "containersOmitted", "Containers", omittedContainers,
+		))
 	}
 	return result
 }
