@@ -88,22 +88,54 @@ func cloneStatus(value Status) Status {
 
 func (o *TrackedOperation) Done() <-chan struct{} { return o.done }
 func (o *TrackedOperation) Cancel()               { o.cancel() }
+
+// CancelNotStarted atomically cancels every item that has not claimed its
+// running state yet. Running items keep their operation context and are
+// allowed to finish; runners must treat a false running report as a rejected
+// claim and skip the corresponding work.
+func (o *TrackedOperation) CancelNotStarted() bool {
+	accepted := false
+	o.update(func(status *Status) bool {
+		for index := range status.Items {
+			if status.Items[index].State != ItemStatePending {
+				continue
+			}
+			status.Items[index].State = ItemStateCancelled
+			status.Items[index].Err = context.Canceled
+			accepted = true
+		}
+		if !accepted {
+			return false
+		}
+		status.CompletedItems = completedItemCount(status.Items)
+		if status.CompletedItems == status.TotalItems {
+			status.State = aggregateState(status.Items, nil)
+			if status.State == StateFailed || status.State == StateCancelled {
+				status.Err = firstOperationError(status.Items)
+			}
+		}
+		return true
+	})
+	return accepted
+}
+
 func (o *TrackedOperation) Changed() <-chan struct{} {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return o.changed
 }
 
-func (o *TrackedOperation) update(change func(*Status) bool) {
+func (o *TrackedOperation) update(change func(*Status) bool) bool {
 	o.mu.Lock()
 	if !change(&o.status) {
 		o.mu.Unlock()
-		return
+		return false
 	}
 	o.status.Revision++
 	close(o.changed)
 	o.changed = make(chan struct{})
 	o.mu.Unlock()
+	return true
 }
 
 type Runner func(context.Context) (string, error)
@@ -114,7 +146,10 @@ type ItemUpdate struct {
 	Err                error
 }
 
-type Reporter func(index int, update ItemUpdate)
+// Reporter atomically applies an item transition. A running report returns
+// false when cancellation or a deadline won before the item started; the
+// runner must then skip that item's work.
+type Reporter func(index int, update ItemUpdate) bool
 type MultiRunner func(context.Context, Reporter) error
 
 type Manager struct {
@@ -198,7 +233,9 @@ func (m *Manager) StartOne(
 		return nil, errors.New("operation runner must not be nil")
 	}
 	return m.StartMany(parent, operationID, operationName, []object.Identity{identity}, func(ctx context.Context, report Reporter) error {
-		report(0, ItemUpdate{State: ItemStateRunning})
+		if !report(0, ItemUpdate{State: ItemStateRunning}) {
+			return nil
+		}
 		resourceVersion, err := run(ctx)
 		state := ItemStateSucceeded
 		switch {
@@ -245,9 +282,12 @@ func (m *Manager) StartMany(
 		items[index] = ItemStatus{Identity: identity, State: ItemStatePending}
 	}
 
-	operationParent, releaseParent := context.WithCancelCause(m.ctx)
-	stopParent := context.AfterFunc(parent, func() {
-		releaseParent(context.Cause(parent))
+	// Keep the caller as the direct parent so its exact Deadline remains
+	// visible to Kubernetes. Manager shutdown is the second cancellation
+	// source and is bridged with its original cause.
+	operationParent, releaseParent := context.WithCancelCause(parent)
+	stopManager := context.AfterFunc(m.ctx, func() {
+		releaseParent(context.Cause(m.ctx))
 	})
 	ctx, cancel := context.WithCancel(operationParent)
 	operation := &TrackedOperation{
@@ -261,7 +301,7 @@ func (m *Manager) StartMany(
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		stopParent()
+		stopManager()
 		releaseParent(context.Canceled)
 		cancel()
 		return nil, ErrManagerClosed
@@ -269,7 +309,7 @@ func (m *Manager) StartMany(
 	m.evictTerminalLocked(m.now())
 	if _, duplicate := m.operations[operationID]; duplicate {
 		m.mu.Unlock()
-		stopParent()
+		stopManager()
 		releaseParent(context.Canceled)
 		cancel()
 		return nil, fmt.Errorf("operation ID %q already exists", operationID)
@@ -277,7 +317,7 @@ func (m *Manager) StartMany(
 	m.evictForCapacityLocked()
 	if m.maxTracked >= 0 && len(m.operations) >= m.maxTracked {
 		m.mu.Unlock()
-		stopParent()
+		stopManager()
 		releaseParent(context.Canceled)
 		cancel()
 		return nil, ErrManagerFull
@@ -287,22 +327,28 @@ func (m *Manager) StartMany(
 
 	go func() {
 		defer func() {
-			stopParent()
+			stopManager()
 			releaseParent(context.Canceled)
 			cancel()
 			m.recordTerminal(operationID, operation)
 			close(operation.done)
 		}()
 		operation.update(func(status *Status) bool {
+			if status.State != StatePending || status.CompletedItems == status.TotalItems {
+				return false
+			}
 			status.State = StateRunning
 			return true
 		})
-		report := func(index int, update ItemUpdate) {
+		report := func(index int, update ItemUpdate) bool {
 			if index < 0 || index >= len(items) || update.State == 0 {
-				return
+				return false
 			}
-			operation.update(func(status *Status) bool {
+			return operation.update(func(status *Status) bool {
 				current := status.Items[index].State
+				if update.State == ItemStateRunning && context.Cause(ctx) != nil {
+					return false
+				}
 				if itemTerminal(current) || !validItemTransition(current, update.State) {
 					return false
 				}

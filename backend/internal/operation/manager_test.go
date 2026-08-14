@@ -82,6 +82,71 @@ func TestManagerCancelsPendingItems(t *testing.T) {
 	}
 }
 
+func TestManagerCancelNotStartedLeavesRunningItemsAlive(t *testing.T) {
+	t.Parallel()
+	manager := NewManager()
+	t.Cleanup(manager.Close)
+	firstStarted := make(chan struct{})
+	finishFirst := make(chan struct{})
+	contextStillLive := make(chan bool, 1)
+	secondClaimed := make(chan bool, 1)
+	operation, err := manager.StartMany(context.Background(), "cancel-queued", "delete", []object.Identity{
+		operationTestIdentity("one", "uid-one"), operationTestIdentity("two", "uid-two"),
+	}, func(ctx context.Context, report Reporter) error {
+		if !report(0, ItemUpdate{State: ItemStateRunning}) {
+			return errors.New("first item did not claim its running state")
+		}
+		close(firstStarted)
+		<-finishFirst
+		select {
+		case <-ctx.Done():
+			contextStillLive <- false
+		default:
+			contextStillLive <- true
+		}
+		report(0, ItemUpdate{State: ItemStateSucceeded})
+		claimed := report(1, ItemUpdate{State: ItemStateRunning})
+		secondClaimed <- claimed
+		if claimed {
+			report(1, ItemUpdate{State: ItemStateSucceeded})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-firstStarted
+	if status := operation.Status(); status.State != StateRunning ||
+		status.Items[0].State != ItemStateRunning || status.Items[1].State != ItemStatePending {
+		t.Fatalf("pre-cancel status = %#v", status)
+	}
+	if !operation.CancelNotStarted() {
+		t.Fatal("pending-only cancellation was not accepted")
+	}
+	status := operation.Status()
+	if status.State != StateRunning || status.CompletedItems != 1 ||
+		status.Items[0].State != ItemStateRunning || status.Items[1].State != ItemStateCancelled ||
+		!errors.Is(status.Items[1].Err, context.Canceled) {
+		t.Fatalf("pending-only status = %#v", status)
+	}
+	close(finishFirst)
+	<-operation.Done()
+	if !<-contextStillLive {
+		t.Fatal("pending-only cancellation cancelled the running item's context")
+	}
+	if <-secondClaimed {
+		t.Fatal("cancelled pending item claimed its running state")
+	}
+	status = operation.Status()
+	if status.State != StatePartiallySucceeded || status.CompletedItems != 2 ||
+		status.Items[0].State != ItemStateSucceeded || status.Items[1].State != ItemStateCancelled {
+		t.Fatalf("terminal pending-only status = %#v", status)
+	}
+	if operation.CancelNotStarted() {
+		t.Fatal("terminal operation accepted pending-only cancellation")
+	}
+}
+
 func TestManagerHonorsCallerCancellationWithoutLosingShutdownOwnership(t *testing.T) {
 	t.Parallel()
 	manager := NewManager()

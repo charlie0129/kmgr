@@ -105,12 +105,13 @@ func (s *GRPCService) ApplyYaml(
 		)
 		return response, nil
 	}
-	// Operation lifetime follows the cluster session/helper, not the unary RPC.
-	// Explicit cancellation is provided through CancelOperation.
+	// Operation lifetime follows the application deadline and cluster
+	// session/helper, not the unary transport RPC. Explicit cancellation is
+	// provided through CancelOperation.
 	yamlCopy := append([]byte(nil), request.GetYamlUtf8()...)
 	expectedResourceVersion := request.GetExpectedResourceVersion()
 	forceFieldOwnership := request.GetForceFieldOwnership()
-	_, err = s.manager.Start(context.Background(), request.GetOperationId(), identity, func(ctx context.Context) (string, error) {
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "apply-yaml", identity, func(ctx context.Context) (string, error) {
 		defer clear(yamlCopy)
 		applied, err := s.backend.ApplyYAML(
 			ctx, identity, yamlCopy, expectedResourceVersion, forceFieldOwnership,
@@ -150,7 +151,7 @@ func (s *GRPCService) UpdateData(
 		)
 		return response, nil
 	}
-	_, err = s.manager.StartOne(context.Background(), request.GetOperationId(), "update-data", identity, func(ctx context.Context) (string, error) {
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "update-data", identity, func(ctx context.Context) (string, error) {
 		defer clearDataMutations(mutations)
 		updated, err := s.backend.UpdateData(ctx, identity, expectedResourceVersion, mutations)
 		return updated.ResourceVersion, err
@@ -187,9 +188,9 @@ func (s *GRPCService) Delete(
 		response.Error = structuredOperationError(err, nil, "delete")
 		return response, nil
 	}
-	_, err = s.manager.StartMany(context.Background(), request.GetOperationId(), "delete", identities, func(ctx context.Context, report Reporter) error {
-		DeleteManyWithProgress(ctx, s.backend, targets, options, func(index int, state ItemState, result DeleteResult) {
-			report(index, ItemUpdate{State: state, Err: result.Err})
+	_, err = s.startAcceptedMany(request.GetContext(), request.GetOperationId(), "delete", identities, func(ctx context.Context, report Reporter) error {
+		DeleteManyWithProgress(ctx, s.backend, targets, options, func(index int, state ItemState, result DeleteResult) bool {
+			return report(index, ItemUpdate{State: state, Err: result.Err})
 		})
 		return nil
 	})
@@ -224,7 +225,7 @@ func (s *GRPCService) Scale(
 		return response, nil
 	}
 	replicas := request.GetReplicas()
-	_, err = s.manager.StartOne(context.Background(), request.GetOperationId(), "scale", identity, func(ctx context.Context) (string, error) {
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "scale", identity, func(ctx context.Context) (string, error) {
 		return ScaleResource(ctx, s.backend, identity, expectedResourceVersion, replicas)
 	})
 	if err != nil {
@@ -257,7 +258,7 @@ func (s *GRPCService) RolloutRestart(
 		)
 		return response, nil
 	}
-	_, err = s.manager.StartOne(context.Background(), request.GetOperationId(), "rollout-restart", identity, func(ctx context.Context) (string, error) {
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "rollout-restart", identity, func(ctx context.Context) (string, error) {
 		return RestartResource(ctx, s.backend, identity, expectedResourceVersion, s.now())
 	})
 	if err != nil {
@@ -291,7 +292,7 @@ func (s *GRPCService) UpdateMetadata(
 		)
 		return response, nil
 	}
-	_, err = s.manager.StartOne(context.Background(), request.GetOperationId(), "update-metadata", identity, func(ctx context.Context) (string, error) {
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "update-metadata", identity, func(ctx context.Context) (string, error) {
 		return UpdateResourceMetadata(ctx, s.backend, identity, expectedResourceVersion, changes)
 	})
 	if err != nil {
@@ -354,10 +355,10 @@ func (s *GRPCService) CancelOperation(
 	if !found || operation.Status().SessionID != request.GetContext().GetClusterSessionId() {
 		return &kmgrv1.Acknowledgement{RequestId: requestID, Accepted: false}, nil
 	}
-	// A single-item YAML operation is either not started or cancellable through
-	// its context; cancel_not_started_only leaves a running request untouched.
-	if request.GetCancelNotStartedOnly() && operation.Status().State != StatePending {
-		return &kmgrv1.Acknowledgement{RequestId: requestID, Accepted: false}, nil
+	if request.GetCancelNotStartedOnly() {
+		return &kmgrv1.Acknowledgement{
+			RequestId: requestID, Accepted: operation.CancelNotStarted(),
+		}, nil
 	}
 	operation.Cancel()
 	return &kmgrv1.Acknowledgement{RequestId: requestID, Accepted: true}, nil
@@ -409,6 +410,72 @@ func (s *GRPCService) startRequest(
 		return "", nil, nil, object.Identity{}, nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	return requestID, operationContext, cancel, identity, &kmgrv1.StartOperationResponse{OperationId: operationID}, nil
+}
+
+func (s *GRPCService) startAcceptedOne(
+	requestContext *kmgrv1.RequestContext,
+	operationID string,
+	operationName string,
+	identity object.Identity,
+	run Runner,
+) (*TrackedOperation, error) {
+	parent, cancel, err := acceptedMutationContext(requestContext)
+	if err != nil {
+		return nil, err
+	}
+	operation, err := s.manager.StartOne(parent, operationID, operationName, identity, run)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	releaseAcceptedMutationContext(operation, cancel)
+	return operation, nil
+}
+
+func (s *GRPCService) startAcceptedMany(
+	requestContext *kmgrv1.RequestContext,
+	operationID string,
+	operationName string,
+	identities []object.Identity,
+	run MultiRunner,
+) (*TrackedOperation, error) {
+	parent, cancel, err := acceptedMutationContext(requestContext)
+	if err != nil {
+		return nil, err
+	}
+	operation, err := s.manager.StartMany(parent, operationID, operationName, identities, run)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	releaseAcceptedMutationContext(operation, cancel)
+	return operation, nil
+}
+
+// acceptedMutationContext deliberately detaches accepted work from the unary
+// transport context while retaining the protocol's application deadline.
+// The manager independently adds helper/session shutdown cancellation.
+func acceptedMutationContext(request *kmgrv1.RequestContext) (context.Context, context.CancelFunc, error) {
+	if request == nil {
+		return nil, nil, status.Error(codes.InvalidArgument, "request context is required")
+	}
+	if request.GetDeadlineUnixMs() == 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		return ctx, cancel, nil
+	}
+	deadline := time.UnixMilli(request.GetDeadlineUnixMs())
+	if !deadline.After(time.Now()) {
+		return nil, nil, status.Error(codes.DeadlineExceeded, "request deadline exceeded")
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	return ctx, cancel, nil
+}
+
+func releaseAcceptedMutationContext(operation *TrackedOperation, cancel context.CancelFunc) {
+	go func() {
+		<-operation.Done()
+		cancel()
+	}()
 }
 
 func dataMutationsFromProto(values []*kmgrv1.DataMutation) ([]object.DataMutation, error) {

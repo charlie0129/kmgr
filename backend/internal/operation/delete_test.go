@@ -2,6 +2,7 @@ package operation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -122,6 +123,68 @@ func TestDeleteManyCancellationSkipsPendingTargets(t *testing.T) {
 	}
 }
 
+func TestDeleteManyRejectedRunningClaimSkipsKubernetesRequest(t *testing.T) {
+	t.Parallel()
+	client := &recordingProvider{}
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	targets := []DeleteTarget{
+		{Identity: deleteIdentity(gvr, "", "first", "one")},
+		{Identity: deleteIdentity(gvr, "", "queued", "two")},
+	}
+	results := DeleteManyWithProgress(
+		context.Background(), client, targets,
+		DeleteOptions{PropagationPolicy: metav1.DeletePropagationBackground, MaxConcurrency: 1},
+		func(index int, state ItemState, _ DeleteResult) bool {
+			return state != ItemStateRunning || index == 0
+		},
+	)
+	if results[0].Err != nil || !errors.Is(results[1].Err, context.Canceled) {
+		t.Fatalf("results = %#v", results)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.calls) != 1 || client.calls[0].name != "first" {
+		t.Fatalf("calls = %#v, want only first", client.calls)
+	}
+}
+
+func TestDeleteManyDeadlineCancelsKubernetesAndQueuedTargets(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	client := &recordingProvider{started: make(chan struct{}, 1), block: make(chan struct{})}
+	defer close(client.block)
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	targets := []DeleteTarget{
+		{Identity: deleteIdentity(gvr, "", "running", "one")},
+		{Identity: deleteIdentity(gvr, "", "queued", "two")},
+		{Identity: deleteIdentity(gvr, "", "also-queued", "three")},
+	}
+	done := make(chan []DeleteResult, 1)
+	go func() {
+		done <- DeleteMany(ctx, client, targets, DeleteOptions{
+			PropagationPolicy: metav1.DeletePropagationBackground, MaxConcurrency: 1,
+		})
+	}()
+	<-client.started
+	var results []DeleteResult
+	select {
+	case results = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("delete did not stop at its deadline")
+	}
+	for index, result := range results {
+		if !errors.Is(result.Err, context.DeadlineExceeded) {
+			t.Fatalf("result %d error = %v, want deadline exceeded", index, result.Err)
+		}
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.calls) != 1 || client.calls[0].name != "running" {
+		t.Fatalf("calls = %#v, want only running target", client.calls)
+	}
+}
+
 type deleteCall struct {
 	namespace string
 	name      string
@@ -171,7 +234,11 @@ func (r *recordingResource) Delete(ctx context.Context, name string, options met
 		}
 	}
 	if r.provider.block != nil {
-		<-r.provider.block
+		select {
+		case <-r.provider.block:
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
 	}
 	return err
 }

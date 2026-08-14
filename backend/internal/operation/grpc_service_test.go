@@ -97,6 +97,128 @@ func TestApplyWatchAndCancelOperation(t *testing.T) {
 	}
 }
 
+func TestAcceptedApplyYamlRetainsApplicationDeadline(t *testing.T) {
+	t.Parallel()
+	observedContext := make(chan context.Context, 1)
+	editor := &fakeYAMLEditor{block: make(chan struct{}), applyContext: observedContext}
+	service := testOperationService(t, editor)
+	requestContext := operationContext("deadline-apply")
+	deadline := time.Now().Add(150 * time.Millisecond)
+	requestContext.DeadlineUnixMs = deadline.UnixMilli()
+	transportContext, cancelTransport := context.WithCancel(context.Background())
+	started, err := service.ApplyYaml(transportContext, &kmgrv1.ApplyYamlRequest{
+		Context: requestContext, OperationId: "deadline-operation", Identity: operationIdentity(),
+		YamlUtf8: []byte("data: deadline"), ExpectedResourceVersion: "rv-1", FieldManager: "kmgr",
+	})
+	if err != nil || !started.GetAccepted() {
+		t.Fatalf("start = %#v, error = %v", started, err)
+	}
+	var backendContext context.Context
+	select {
+	case backendContext = <-observedContext:
+	case <-time.After(time.Second):
+		t.Fatal("accepted apply did not reach the backend")
+	}
+	gotDeadline, ok := backendContext.Deadline()
+	if !ok || !gotDeadline.Equal(time.UnixMilli(requestContext.GetDeadlineUnixMs())) {
+		t.Fatalf("backend deadline = %v, %t, want %v", gotDeadline, ok, time.UnixMilli(requestContext.GetDeadlineUnixMs()))
+	}
+	cancelTransport()
+	operation, found := service.manager.Get("deadline-operation")
+	if !found {
+		t.Fatal("accepted operation was not tracked")
+	}
+	select {
+	case <-operation.Done():
+		t.Fatal("unary transport cancellation stopped accepted mutation work")
+	case <-time.After(20 * time.Millisecond):
+	}
+	select {
+	case <-operation.Done():
+	case <-time.After(time.Second):
+		t.Fatal("accepted mutation did not stop at its application deadline")
+	}
+	status := operation.Status()
+	if status.State != StateCancelled || len(status.Items) != 1 ||
+		status.Items[0].State != ItemStateCancelled ||
+		!errors.Is(status.Items[0].Err, context.DeadlineExceeded) ||
+		!errors.Is(status.Err, context.DeadlineExceeded) {
+		t.Fatalf("deadline status = %#v", status)
+	}
+}
+
+func TestCancelOperationNotStartedOnlyCancelsQueuedDeleteItems(t *testing.T) {
+	t.Parallel()
+	provider := &recordingProvider{started: make(chan struct{}, 1), block: make(chan struct{})}
+	editor := &fakeYAMLEditor{resource: &recordingResource{provider: provider, namespace: "ns"}}
+	service := testOperationService(t, editor)
+	firstIdentity := operationIdentity()
+	firstIdentity.Resource = "pods"
+	firstIdentity.Name = "running"
+	firstIdentity.Uid = "uid-running"
+	queuedIdentity := operationIdentity()
+	queuedIdentity.Resource = "pods"
+	queuedIdentity.Name = "queued"
+	queuedIdentity.Uid = "uid-queued"
+	started, err := service.Delete(context.Background(), &kmgrv1.DeleteRequest{
+		Context: operationContext("delete"), OperationId: "delete-operation",
+		Targets:           []*kmgrv1.DeleteTarget{{Identity: firstIdentity}, {Identity: queuedIdentity}},
+		PropagationPolicy: kmgrv1.PropagationPolicy_PROPAGATION_POLICY_BACKGROUND,
+		MaxConcurrency:    1,
+	})
+	if err != nil || !started.GetAccepted() {
+		t.Fatalf("start = %#v, error = %v", started, err)
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("first delete did not start")
+	}
+	operation, found := service.manager.Get("delete-operation")
+	if !found {
+		t.Fatal("accepted delete operation was not tracked")
+	}
+	eventuallyOperation(t, func() bool {
+		status := operation.Status()
+		return status.State == StateRunning && status.Items[0].State == ItemStateRunning &&
+			status.Items[1].State == ItemStatePending
+	})
+	ack, err := service.CancelOperation(context.Background(), &kmgrv1.CancelOperationRequest{
+		Context: operationContext("cancel-queued"), OperationId: "delete-operation", CancelNotStartedOnly: true,
+	})
+	if err != nil || !ack.GetAccepted() {
+		t.Fatalf("pending-only cancel = %#v, error = %v", ack, err)
+	}
+	status := operation.Status()
+	if status.State != StateRunning || status.Items[0].State != ItemStateRunning ||
+		status.Items[1].State != ItemStateCancelled {
+		t.Fatalf("pending-only delete status = %#v", status)
+	}
+	close(provider.block)
+	select {
+	case <-operation.Done():
+	case <-time.After(time.Second):
+		t.Fatal("delete operation did not finish")
+	}
+	status = operation.Status()
+	if status.State != StatePartiallySucceeded || status.Items[0].State != ItemStateSucceeded ||
+		status.Items[1].State != ItemStateCancelled {
+		t.Fatalf("terminal delete status = %#v", status)
+	}
+	provider.mu.Lock()
+	if len(provider.calls) != 1 || provider.calls[0].name != "running" {
+		provider.mu.Unlock()
+		t.Fatalf("delete calls = %#v, want only running target", provider.calls)
+	}
+	provider.mu.Unlock()
+	ack, err = service.CancelOperation(context.Background(), &kmgrv1.CancelOperationRequest{
+		Context: operationContext("cancel-again"), OperationId: "delete-operation", CancelNotStartedOnly: true,
+	})
+	if err != nil || ack.GetAccepted() {
+		t.Fatalf("terminal pending-only cancel = %#v, error = %v", ack, err)
+	}
+}
+
 func TestApplyYamlRejectsArbitraryFieldManagerAndDuplicateID(t *testing.T) {
 	t.Parallel()
 	editor := &fakeYAMLEditor{block: make(chan struct{})}
@@ -127,16 +249,17 @@ func TestApplyYamlRejectsArbitraryFieldManagerAndDuplicateID(t *testing.T) {
 }
 
 type fakeYAMLEditor struct {
-	mu          sync.Mutex
-	prepared    object.PreparedYAML
-	err         error
-	block       chan struct{}
-	lastPayload string
-	object      *unstructured.Unstructured
-	resource    dynamic.ResourceInterface
-	dataResult  object.Data
-	dataErr     error
-	mutations   []object.DataMutation
+	mu           sync.Mutex
+	prepared     object.PreparedYAML
+	err          error
+	block        chan struct{}
+	lastPayload  string
+	object       *unstructured.Unstructured
+	resource     dynamic.ResourceInterface
+	dataResult   object.Data
+	dataErr      error
+	mutations    []object.DataMutation
+	applyContext chan context.Context
 }
 
 func (e *fakeYAMLEditor) PrepareYAML(
@@ -184,6 +307,12 @@ func (e *fakeYAMLEditor) ApplyYAML(
 	e.lastPayload = string(payload)
 	err := e.err
 	e.mu.Unlock()
+	if e.applyContext != nil {
+		select {
+		case e.applyContext <- ctx:
+		default:
+		}
+	}
 	if e.block != nil {
 		select {
 		case <-ctx.Done():

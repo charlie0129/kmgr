@@ -38,7 +38,10 @@ type DeleteResourceProvider interface {
 	Resource(object.Identity) (dynamic.ResourceInterface, error)
 }
 
-type DeleteProgress func(index int, state ItemState, result DeleteResult)
+// DeleteProgress reports state transitions and atomically claims work when
+// state is ItemStateRunning. Returning false rejects that claim, so no
+// Kubernetes request is dispatched for the item.
+type DeleteProgress func(index int, state ItemState, result DeleteResult) bool
 
 // DeleteMany captures exact identities before execution and applies UID
 // preconditions to every request. Cancellation prevents not-yet-started work;
@@ -105,7 +108,15 @@ func DeleteManyWithProgress(
 					reportDelete(progress, index, ItemStateFailed, results[index])
 					continue
 				}
-				reportDelete(progress, index, ItemStateRunning, results[index])
+				if !reportDelete(progress, index, ItemStateRunning, results[index]) {
+					err := context.Cause(ctx)
+					if err == nil {
+						err = context.Canceled
+					}
+					results[index].Err = err
+					reportDelete(progress, index, ItemStateCancelled, results[index])
+					continue
+				}
 				uid := types.UID(target.Identity.UID)
 				err = resource.Delete(ctx, target.Identity.Name, metav1.DeleteOptions{
 					GracePeriodSeconds: options.GracePeriodSeconds,
@@ -168,8 +179,9 @@ func failAllDeletes(results []DeleteResult, err error, progress DeleteProgress) 
 	return results
 }
 
-func reportDelete(progress DeleteProgress, index int, state ItemState, result DeleteResult) {
-	if progress != nil {
-		progress(index, state, result)
+func reportDelete(progress DeleteProgress, index int, state ItemState, result DeleteResult) bool {
+	if progress == nil {
+		return true
 	}
+	return progress(index, state, result)
 }
