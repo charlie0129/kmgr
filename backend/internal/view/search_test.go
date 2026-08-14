@@ -80,6 +80,127 @@ func TestCachedRootSearchUsesOnlyCurrentAuthorityWithoutOpeningResources(t *test
 	}
 }
 
+func TestCachedRootSearchIncludesKindMatchedObjectsWithoutNameMatch(t *testing.T) {
+	t.Parallel()
+	source := &fakeResourceSource{authority: "authority", client: newSearchClient()}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods"}] = cachedSearchRuntime(
+		pod("pod-api", "team", "api", "Running", 0, nil, time.Time{}),
+	)
+	runtime.resources[resourceKey{authorityID: "authority", group: "example.io", version: "v1", resource: "widgets"}] = cachedSearchRuntime(
+		pod("widget-worker", "team", "worker", "Running", 0, nil, time.Time{}),
+	)
+
+	result, err := runtime.SearchCached(context.Background(), CachedSearchQuery{
+		SessionID: "session", NamespaceScope: NamespaceScope{All: true},
+		Query: "pods", ResultLimit: 10, ExaminationLimit: 100,
+		ResourceFilters: []ResourceType{{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.opens.Load() != 0 {
+		t.Fatalf("kind cache search opened %d resources", source.opens.Load())
+	}
+	if len(result.Results) != 1 || result.Results[0].GetIdentity().GetUid() != "pod-api" ||
+		result.Results[0].GetDisplayText() != "api" || result.Results[0].GetDetailText() != "team · Pod" ||
+		result.Results[0].GetRank() != 600 {
+		t.Fatalf("kind-matched cached results = %#v", result.Results)
+	}
+}
+
+func TestCachedRootSearchPrioritizesKindMatchedStoresBeforeExaminationLimit(t *testing.T) {
+	t.Parallel()
+	source := &fakeResourceSource{authority: "authority", client: newSearchClient()}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	// configmaps sorts before pods by the ordinary deterministic key. The
+	// matched Pod store must still consume the first bounded examination slot.
+	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "configmaps"}] = cachedSearchRuntime(
+		pod("config", "team", "settings", "", 0, nil, time.Time{}),
+	)
+	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods"}] = cachedSearchRuntime(
+		pod("pod-api", "team", "api", "Running", 0, nil, time.Time{}),
+	)
+
+	result, err := runtime.SearchCached(context.Background(), CachedSearchQuery{
+		SessionID: "session", NamespaceScope: NamespaceScope{All: true},
+		Query: "pods", ResultLimit: 10, ExaminationLimit: 1,
+		ResourceFilters: []ResourceType{{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Truncated || result.Examined != 1 || len(result.Results) != 1 ||
+		result.Results[0].GetIdentity().GetUid() != "pod-api" {
+		t.Fatalf("prioritized kind result = %#v", result)
+	}
+}
+
+func TestCachedRootSearchDoesNotTrustFilterNamespaceScopeBit(t *testing.T) {
+	t.Parallel()
+	source := &fakeResourceSource{authority: "authority", client: newSearchClient()}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	runtime.resources[resourceKey{authorityID: "authority", version: "v1", resource: "pods"}] = cachedSearchRuntime(
+		pod("other-pod", "other", "api", "Running", 0, nil, time.Time{}),
+	)
+
+	result, err := runtime.SearchCached(context.Background(), CachedSearchQuery{
+		SessionID: "session", NamespaceScope: NamespaceScope{Namespaces: []string{"team"}},
+		Query: "pods", ResultLimit: 10, ExaminationLimit: 100,
+		ResourceFilters: []ResourceType{{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: false,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 0 {
+		t.Fatalf("malformed scope bit leaked out-of-scope Pod: %#v", result.Results)
+	}
+}
+
+func TestCachedRootSearchValidatesResourceFilters(t *testing.T) {
+	t.Parallel()
+	source := &fakeResourceSource{authority: "authority", client: newSearchClient()}
+	runtime, err := NewRuntime(RuntimeConfig{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	invalid := []CachedSearchQuery{
+		{
+			SessionID: "session", Query: "pods",
+			ResourceFilters: []ResourceType{{Resource: "pods"}},
+		},
+		{
+			SessionID: "session", Query: "pods",
+			ResourceFilters: make([]ResourceType, MaximumCacheResourceFilters+1),
+		},
+	}
+	for _, query := range invalid {
+		if _, err := runtime.SearchCached(context.Background(), query); !errors.Is(err, ErrInvalidView) {
+			t.Fatalf("invalid resource filters error = %v", err)
+		}
+	}
+}
+
 func TestCachedRootSearchDeduplicatesFullGVRAndUID(t *testing.T) {
 	t.Parallel()
 	source := &fakeResourceSource{authority: "authority", client: newSearchClient()}
@@ -199,6 +320,9 @@ func TestSearchCachedObjectsGRPCMapsEnvelopeResultsAndBounds(t *testing.T) {
 		Query:            "api",
 		ResultLimit:      1,
 		ExaminationLimit: 1,
+		ResourceFilters: []*kmgrv1.ResourceType{{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)

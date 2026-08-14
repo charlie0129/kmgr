@@ -40,19 +40,22 @@ public struct CachedObjectSearchRequest: Hashable, Sendable {
     public var query: String
     public var resultLimit: UInt32
     public var examinationLimit: UInt32
+    public var resourceFilters: [DiscoveredResource]
 
     public init(
         sessionID: String,
         namespaceScope: NamespaceSelection,
         query: String,
         resultLimit: UInt32 = 40,
-        examinationLimit: UInt32 = 50_000
+        examinationLimit: UInt32 = 50_000,
+        resourceFilters: [DiscoveredResource] = []
     ) {
         self.sessionID = sessionID
         self.namespaceScope = namespaceScope
         self.query = query
         self.resultLimit = resultLimit
         self.examinationLimit = examinationLimit
+        self.resourceFilters = resourceFilters
     }
 }
 
@@ -365,10 +368,12 @@ public enum PaletteRanking {
     public static func recentObjects(
         query: String,
         values: [RecentObject],
+        matchingResources: [DiscoveredResource] = [],
         limit: Int = 20
     ) -> [PaletteResult] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !needle.isEmpty else { return [] }
+        let matchingGVRs = Set(matchingResources.map(resourceKey))
         return values.compactMap { value -> (Int, RecentObject)? in
             let name = value.identity.name.lowercased()
             let qualified = value.identity.namespace.isEmpty
@@ -380,6 +385,7 @@ public enum PaletteRanking {
             else if qualified.hasPrefix(needle) { score = 890 }
             else if name.contains(needle) { score = 700 }
             else if qualified.contains(needle) { score = 690 }
+            else if matchingGVRs.contains(resourceKey(value.identity)) { score = 600 }
             else { return nil }
             return (score, value)
         }.sorted {
@@ -431,6 +437,26 @@ public enum PaletteRanking {
         guard !needle.isEmpty else {
             return resources.prefix(limit).map(PaletteResult.resource)
         }
+        return matchingResources(
+            query: query,
+            resources: resources,
+            limit: max(0, limit / 2)
+        ).flatMap { resource in
+            [PaletteResult.resource(resource), PaletteResult.searchResource(resource)]
+        }.prefix(limit).map { $0 }
+    }
+
+    /// Exact discovered resources matched by a root-palette kind query. The
+    /// same list scopes supplemental recent/cache matches so entering a kind
+    /// such as `pods` can show Pod `api` without turning into an all-resource
+    /// network search.
+    public static func matchingResources(
+        query: String,
+        resources: [DiscoveredResource],
+        limit: Int = 15
+    ) -> [DiscoveredResource] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return [] }
         let ranked = resources.compactMap { resource -> (Int, DiscoveredResource)? in
             let kind = resource.kind.lowercased()
             let plural = resource.resource.lowercased()
@@ -449,10 +475,16 @@ public enum PaletteRanking {
             return (score, resource)
         }.sorted {
             $0.0 == $1.0 ? $0.1.id < $1.1.id : $0.0 > $1.0
-        }.prefix(max(0, limit / 2))
-        return ranked.flatMap { _, resource in
-            [PaletteResult.resource(resource), PaletteResult.searchResource(resource)]
-        }.prefix(limit).map { $0 }
+        }
+        return ranked.prefix(max(0, limit)).map(\.1)
+    }
+
+    private static func resourceKey(_ value: DiscoveredResource) -> String {
+        [value.group, value.version, value.resource].joined(separator: "\u{0}")
+    }
+
+    private static func resourceKey(_ value: ResourceIdentity) -> String {
+        [value.group, value.version, value.resource].joined(separator: "\u{0}")
     }
 
     public static func namespaces(

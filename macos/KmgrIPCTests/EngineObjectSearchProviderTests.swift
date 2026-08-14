@@ -115,7 +115,11 @@ private actor ObjectSearchRPCCapture: ObjectSearchRPC {
         namespaceScope: .namespace("team"),
         query: "api",
         resultLimit: 20,
-        examinationLimit: 50_000
+        examinationLimit: 50_000,
+        resourceFilters: [DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true
+        )]
     ))
 
     #expect(value.results.first?.identity.uid == "uid-api")
@@ -130,6 +134,11 @@ private actor ObjectSearchRPCCapture: ObjectSearchRPC {
     #expect(request?.query == "api")
     #expect(request?.resultLimit == 20)
     #expect(request?.examinationLimit == 50_000)
+    #expect(request?.resourceFilters.count == 1)
+    #expect(request?.resourceFilters.first?.version == "v1")
+    #expect(request?.resourceFilters.first?.resource == "pods")
+    #expect(request?.resourceFilters.first?.kind == "Pod")
+    #expect(request?.resourceFilters.first?.namespaced == true)
 }
 
 @Test func cachedObjectSearchProviderRejectsMismatchedEnvelope() async {

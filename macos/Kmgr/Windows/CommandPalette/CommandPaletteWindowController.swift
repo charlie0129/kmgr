@@ -353,6 +353,11 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         let query = searchField.stringValue
             .trimmingCharacters(in: .whitespacesAndNewlines)
         var values: [Item] = []
+        let listableResources = context.resources.filter { $0.verbs.contains("list") }
+        let matchingResources = PaletteRanking.matchingResources(
+            query: query,
+            resources: listableResources
+        )
 
         values.append(contentsOf: PaletteOperationRanking.operations(
             query: query,
@@ -361,7 +366,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
 
         values.append(contentsOf: PaletteRanking.resources(
             query: query,
-            resources: context.resources.filter { $0.verbs.contains("list") }
+            resources: listableResources
         ).map(Item.result))
 
         values.append(contentsOf: PaletteRanking.namespaces(
@@ -372,6 +377,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         let recent = PaletteRanking.recentObjects(
             query: query,
             values: context.recentObjects,
+            matchingResources: matchingResources,
             limit: 20
         )
         values.append(contentsOf: recent.map(Item.result))
@@ -382,13 +388,19 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             ? "No matching commands or resource kinds"
             : "\(items.count.formatted()) results · ↑↓ navigate · Return open · Esc close"
         reloadSelectingFirst()
-        scheduleRootCacheSearch(query: query, baseItems: values, recent: recent)
+        scheduleRootCacheSearch(
+            query: query,
+            baseItems: values,
+            recent: recent,
+            resourceFilters: matchingResources
+        )
     }
 
     private func scheduleRootCacheSearch(
         query: String,
         baseItems: [Item],
-        recent: [PaletteResult]
+        recent: [PaletteResult],
+        resourceFilters: [DiscoveredResource]
     ) {
         rootSearchTask?.cancel()
         guard !query.isEmpty else { return }
@@ -403,7 +415,8 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
                     namespaceScope: scope,
                     query: query,
                     resultLimit: 30,
-                    examinationLimit: 50_000
+                    examinationLimit: 50_000,
+                    resourceFilters: resourceFilters
                 ))
                 guard !Task.isCancelled, let self,
                     case .root = mode,

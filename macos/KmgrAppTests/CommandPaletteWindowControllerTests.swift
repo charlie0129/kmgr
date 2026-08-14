@@ -8,6 +8,38 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Command palette window", .serialized)
 struct CommandPaletteWindowControllerTests {
+    @Test("root kind query includes cached objects with unrelated names")
+    func rootKindQueryIncludesCachedObjects() async throws {
+        let provider = ControllablePaletteSearchProvider()
+        provider.setCachedResponse(CachedObjectSearchResponse(
+            results: [paletteObject(
+                name: "api", uid: "pod-api", rank: 600,
+                detail: "default · Pod"
+            )],
+            objectsExamined: 1,
+            examinationTruncated: false
+        ))
+        let controller = makePaletteController(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let controls = try paletteControls(in: controller)
+
+        controls.search.stringValue = "pods"
+        controller.controlTextDidChange(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: controls.search
+        ))
+        try await waitForPalette { provider.cachedRequest != nil }
+        try await waitForPalette { paletteRow(named: "api", in: controls.table) != nil }
+
+        let request = try #require(provider.cachedRequest)
+        #expect(request.query == "pods")
+        #expect(request.resourceFilters.count == 1)
+        #expect(request.resourceFilters.first?.resource == "pods")
+        #expect(paletteRow(named: "Go to Pod", in: controls.table) != nil)
+        #expect(paletteRow(named: "Search Pod…", in: controls.table) != nil)
+    }
+
     @Test("progressive results preserve the selected object identity across reranking")
     func progressiveResultsPreserveSelectionIdentity() async throws {
         let provider = ControllablePaletteSearchProvider()
@@ -228,13 +260,25 @@ private final class ControllablePaletteSearchProvider: ObjectSearchProviding,
 {
     private let lock = NSLock()
     private var storedRequest: ObjectSearchRequest?
+    private var storedCachedRequest: CachedObjectSearchRequest?
+    private var cachedResponse = CachedObjectSearchResponse(
+        results: [], objectsExamined: 0, examinationTruncated: false
+    )
     private var continuation: AsyncThrowingStream<ObjectSearchMessage, Error>.Continuation?
 
     var request: ObjectSearchRequest? { lock.withLock { storedRequest } }
+    var cachedRequest: CachedObjectSearchRequest? { lock.withLock { storedCachedRequest } }
+
+    func setCachedResponse(_ value: CachedObjectSearchResponse) {
+        lock.withLock { cachedResponse = value }
+    }
 
     func searchCachedObjects(request: CachedObjectSearchRequest) async throws
         -> CachedObjectSearchResponse {
-        throw CancellationError()
+        lock.withLock {
+            storedCachedRequest = request
+            return cachedResponse
+        }
     }
 
     func searchObjects(request: ObjectSearchRequest)

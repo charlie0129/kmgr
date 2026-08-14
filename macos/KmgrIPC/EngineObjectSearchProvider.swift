@@ -141,6 +141,15 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
         value.query = request.query
         value.resultLimit = request.resultLimit
         value.examinationLimit = request.examinationLimit
+        value.resourceFilters = request.resourceFilters.map { resource in
+            var filter = Kmgr_V1_ResourceType()
+            filter.group = resource.group
+            filter.version = resource.version
+            filter.resource = resource.resource
+            filter.kind = resource.kind
+            filter.namespaced = resource.namespaced
+            return filter
+        }
         do {
             let response = try await rpc.searchCached(value, timeout: controlTimeout)
             guard response.requestID == value.context.requestID else {

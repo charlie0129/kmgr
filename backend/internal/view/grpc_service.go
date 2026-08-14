@@ -352,6 +352,17 @@ func (s *GRPCService) SearchCachedObjects(
 		return nil, status.Error(codes.InvalidArgument, "request, session, and query are required")
 	}
 	scope := request.GetNamespaceScope()
+	resourceFilters := make([]ResourceType, 0, len(request.GetResourceFilters()))
+	for _, resource := range request.GetResourceFilters() {
+		if resource == nil {
+			continue
+		}
+		resourceFilters = append(resourceFilters, ResourceType{
+			Group: resource.GetGroup(), Version: resource.GetVersion(),
+			Resource: resource.GetResource(), Kind: resource.GetKind(),
+			Namespaced: resource.GetNamespaced(),
+		})
+	}
 	result, err := s.runtime.SearchCached(operationContext, CachedSearchQuery{
 		SessionID: request.GetContext().GetClusterSessionId(),
 		NamespaceScope: NamespaceScope{
@@ -359,6 +370,7 @@ func (s *GRPCService) SearchCachedObjects(
 		},
 		Query: request.GetQuery(), ResultLimit: int(request.GetResultLimit()),
 		ExaminationLimit: int(request.GetExaminationLimit()),
+		ResourceFilters:  resourceFilters,
 	})
 	response := &kmgrv1.SearchCachedObjectsResponse{RequestId: requestID}
 	if err != nil {

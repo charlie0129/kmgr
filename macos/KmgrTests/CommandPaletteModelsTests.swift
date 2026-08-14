@@ -24,6 +24,44 @@ import Testing
     #expect(PaletteRanking.resources(query: "po", resources: [pods]).first == .resource(pods))
 }
 
+@Test func paletteKindQueryIncludesRecentObjectsWhoseNamesDoNotMatchKind() {
+    let pods = DiscoveredResource(
+        group: "", version: "v1", resource: "pods", kind: "Pod",
+        namespaced: true, shortNames: ["po"]
+    )
+    let deployments = DiscoveredResource(
+        group: "apps", version: "v1", resource: "deployments", kind: "Deployment",
+        namespaced: true
+    )
+    let matches = PaletteRanking.matchingResources(
+        query: "pods",
+        resources: [deployments, pods]
+    )
+    let recent = PaletteRanking.recentObjects(
+        query: "pods",
+        values: [
+            RecentObject(identity: paletteIdentity("api", uid: "pod-api"), openedAt: Date()),
+            RecentObject(identity: {
+                var value = paletteIdentity("worker", uid: "deployment-worker")
+                value.group = "apps"
+                value.resource = "deployments"
+                return value
+            }(), openedAt: Date()),
+        ],
+        matchingResources: matches
+    )
+
+    #expect(matches == [pods])
+    #expect(recent.count == 1)
+    guard case .object(let result) = recent.first else {
+        Issue.record("Expected a recent Pod result")
+        return
+    }
+    #expect(result.identity.name == "api")
+    #expect(result.identity.resource == "pods")
+    #expect(result.rank == 600.5)
+}
+
 @Test func paletteRanksNamespacePrefixesWithoutDuplicates() {
     let values = PaletteRanking.namespaces(
         query: "namespace prod",

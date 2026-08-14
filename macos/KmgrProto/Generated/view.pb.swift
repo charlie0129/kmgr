@@ -651,6 +651,11 @@ public struct Kmgr_V1_SearchCachedObjectsRequest: Sendable {
 
   public var examinationLimit: UInt32 = 0
 
+  /// Resource kinds matched by the same root-palette query. Objects from these
+  /// exact GVRs remain relevant even when their names do not contain the kind
+  /// text (for example, query "pods" and cached Pod "api").
+  public var resourceFilters: [Kmgr_V1_ResourceType] = []
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1789,7 +1794,7 @@ extension Kmgr_V1_SearchObjectsRequest: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 extension Kmgr_V1_SearchCachedObjectsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SearchCachedObjectsRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}namespace_scope\0\u{1}query\0\u{3}result_limit\0\u{3}examination_limit\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}namespace_scope\0\u{1}query\0\u{3}result_limit\0\u{3}examination_limit\0\u{3}resource_filters\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1802,6 +1807,7 @@ extension Kmgr_V1_SearchCachedObjectsRequest: SwiftProtobuf.Message, SwiftProtob
       case 3: try { try decoder.decodeSingularStringField(value: &self.query) }()
       case 4: try { try decoder.decodeSingularUInt32Field(value: &self.resultLimit) }()
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self.examinationLimit) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.resourceFilters) }()
       default: break
       }
     }
@@ -1827,6 +1833,9 @@ extension Kmgr_V1_SearchCachedObjectsRequest: SwiftProtobuf.Message, SwiftProtob
     if self.examinationLimit != 0 {
       try visitor.visitSingularUInt32Field(value: self.examinationLimit, fieldNumber: 5)
     }
+    if !self.resourceFilters.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.resourceFilters, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1836,6 +1845,7 @@ extension Kmgr_V1_SearchCachedObjectsRequest: SwiftProtobuf.Message, SwiftProtob
     if lhs.query != rhs.query {return false}
     if lhs.resultLimit != rhs.resultLimit {return false}
     if lhs.examinationLimit != rhs.examinationLimit {return false}
+    if lhs.resourceFilters != rhs.resourceFilters {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

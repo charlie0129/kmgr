@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	DefaultSearchResultLimit = 100
-	MaximumSearchResultLimit = 500
-	DefaultSearchPageSize    = 500
-	DefaultCacheExamination  = 50_000
-	MaximumCacheExamination  = 250_000
+	DefaultSearchResultLimit    = 100
+	MaximumSearchResultLimit    = 500
+	DefaultSearchPageSize       = 500
+	DefaultCacheExamination     = 50_000
+	MaximumCacheExamination     = 250_000
+	MaximumCacheResourceFilters = 64
 )
 
 type SearchQuery struct {
@@ -49,6 +50,7 @@ type CachedSearchQuery struct {
 	Query            string
 	ResultLimit      int
 	ExaminationLimit int
+	ResourceFilters  []ResourceType
 }
 
 type CachedSearchResult struct {
@@ -83,6 +85,10 @@ func (r *Runtime) SearchCached(ctx context.Context, query CachedSearchQuery) (Ca
 	if examinationLimit < 1 || examinationLimit > MaximumCacheExamination {
 		return CachedSearchResult{}, fmt.Errorf("%w: cache examination limit must be 1..%d", ErrInvalidView, MaximumCacheExamination)
 	}
+	resourceFilters, err := cachedSearchResourceFilters(query.ResourceFilters)
+	if err != nil {
+		return CachedSearchResult{}, err
+	}
 	authoritySource, ok := r.source.(interface {
 		AuthorityID(string) (string, bool)
 	})
@@ -114,6 +120,14 @@ func (r *Runtime) SearchCached(ctx context.Context, query CachedSearchQuery) (Ca
 	}
 	r.mu.Unlock()
 	slices.SortFunc(entries, func(left, right cachedSearchEntry) int {
+		_, leftMatched := resourceFilters[cachedSearchResourceKey(left.key)]
+		_, rightMatched := resourceFilters[cachedSearchResourceKey(right.key)]
+		if leftMatched != rightMatched {
+			if leftMatched {
+				return -1
+			}
+			return 1
+		}
 		return cmp.Compare(searchResourceKey(left.key), searchResourceKey(right.key))
 	})
 
@@ -145,18 +159,61 @@ func (r *Runtime) SearchCached(ctx context.Context, query CachedSearchQuery) (Ca
 				Group: entry.key.group, Version: entry.key.version,
 				Resource: entry.key.resource, Namespaced: value.GetNamespace() != "",
 			}
+			matchedResource, resourceMatched := resourceFilters[cachedSearchGVRKey(resource)]
+			if resourceMatched {
+				// The filter comes from the GUI's discovery snapshot. It may enrich
+				// presentation with Kind, but the retained object remains authority
+				// for namespace-scope enforcement.
+				resource.Kind = matchedResource.Kind
+			}
 			if !includesSearchNamespace(value.GetNamespace(), resource, query.NamespaceScope) {
 				continue
 			}
-			if rank, match := searchRankNormalized(
+			rank, nameMatched := searchRankNormalized(
 				normalizedQuery, indexed.NormalizedName, indexed.NormalizedQualified,
-			); match {
+			)
+			if !nameMatched && resourceMatched {
+				rank = 600
+			}
+			if nameMatched || resourceMatched {
 				retained.Add(makeSearchResult(query.SessionID, resource, value, rank, true))
 			}
 		}
 	}
 	result.Results = retained.Sorted()
 	return result, nil
+}
+
+func cachedSearchResourceFilters(values []ResourceType) (map[string]ResourceType, error) {
+	if len(values) > MaximumCacheResourceFilters {
+		return nil, fmt.Errorf(
+			"%w: cached search resource filters must not exceed %d",
+			ErrInvalidView, MaximumCacheResourceFilters,
+		)
+	}
+	result := make(map[string]ResourceType, len(values))
+	for _, value := range values {
+		value.Group = strings.TrimSpace(value.Group)
+		value.Version = strings.TrimSpace(value.Version)
+		value.Resource = strings.TrimSpace(value.Resource)
+		value.Kind = strings.TrimSpace(value.Kind)
+		if value.Version == "" || value.Resource == "" {
+			return nil, fmt.Errorf(
+				"%w: cached search resource filters require version and resource",
+				ErrInvalidView,
+			)
+		}
+		result[cachedSearchGVRKey(value)] = value
+	}
+	return result, nil
+}
+
+func cachedSearchGVRKey(value ResourceType) string {
+	return strings.Join([]string{value.Group, value.Version, value.Resource}, "\x00")
+}
+
+func cachedSearchResourceKey(value resourceKey) string {
+	return strings.Join([]string{value.group, value.version, value.resource}, "\x00")
 }
 
 func searchResourceKey(key resourceKey) string {

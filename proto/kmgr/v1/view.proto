@@ -165,6 +165,10 @@ message SearchCachedObjectsRequest {
   string query = 3;
   uint32 result_limit = 4;
   uint32 examination_limit = 5;
+  // Resource kinds matched by the same root-palette query. Objects from these
+  // exact GVRs remain relevant even when their names do not contain the kind
+  // text (for example, query "pods" and cached Pod "api").
+  repeated ResourceType resource_filters = 6;
 }
 
 message SearchCachedObjectsResponse {

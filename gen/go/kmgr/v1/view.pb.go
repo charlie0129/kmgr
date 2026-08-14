@@ -1243,8 +1243,12 @@ type SearchCachedObjectsRequest struct {
 	Query            string                 `protobuf:"bytes,3,opt,name=query,proto3" json:"query,omitempty"`
 	ResultLimit      uint32                 `protobuf:"varint,4,opt,name=result_limit,json=resultLimit,proto3" json:"result_limit,omitempty"`
 	ExaminationLimit uint32                 `protobuf:"varint,5,opt,name=examination_limit,json=examinationLimit,proto3" json:"examination_limit,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Resource kinds matched by the same root-palette query. Objects from these
+	// exact GVRs remain relevant even when their names do not contain the kind
+	// text (for example, query "pods" and cached Pod "api").
+	ResourceFilters []*ResourceType `protobuf:"bytes,6,rep,name=resource_filters,json=resourceFilters,proto3" json:"resource_filters,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SearchCachedObjectsRequest) Reset() {
@@ -1310,6 +1314,13 @@ func (x *SearchCachedObjectsRequest) GetExaminationLimit() uint32 {
 		return x.ExaminationLimit
 	}
 	return 0
+}
+
+func (x *SearchCachedObjectsRequest) GetResourceFilters() []*ResourceType {
+	if x != nil {
+		return x.ResourceFilters
+	}
+	return nil
 }
 
 type SearchCachedObjectsResponse struct {
@@ -2031,13 +2042,14 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"\x0fnamespace_scope\x18\x06 \x01(\v2\x17.kmgr.v1.NamespaceScopeR\x0enamespaceScope\x12\x14\n" +
 	"\x05query\x18\a \x01(\tR\x05query\x12!\n" +
 	"\fresult_limit\x18\b \x01(\rR\vresultLimit\x120\n" +
-	"\x14allow_paginated_list\x18\t \x01(\bR\x12allowPaginatedList\"\xf7\x01\n" +
+	"\x14allow_paginated_list\x18\t \x01(\bR\x12allowPaginatedList\"\xb9\x02\n" +
 	"\x1aSearchCachedObjectsRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12@\n" +
 	"\x0fnamespace_scope\x18\x02 \x01(\v2\x17.kmgr.v1.NamespaceScopeR\x0enamespaceScope\x12\x14\n" +
 	"\x05query\x18\x03 \x01(\tR\x05query\x12!\n" +
 	"\fresult_limit\x18\x04 \x01(\rR\vresultLimit\x12+\n" +
-	"\x11examination_limit\x18\x05 \x01(\rR\x10examinationLimit\"\xfd\x01\n" +
+	"\x11examination_limit\x18\x05 \x01(\rR\x10examinationLimit\x12@\n" +
+	"\x10resource_filters\x18\x06 \x03(\v2\x15.kmgr.v1.ResourceTypeR\x0fresourceFilters\"\xfd\x01\n" +
 	"\x1bSearchCachedObjectsResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12/\n" +
@@ -2199,39 +2211,40 @@ var file_kmgr_v1_view_proto_depIdxs = []int32{
 	26, // 25: kmgr.v1.SearchObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
 	24, // 26: kmgr.v1.SearchCachedObjectsRequest.context:type_name -> kmgr.v1.RequestContext
 	26, // 27: kmgr.v1.SearchCachedObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
-	17, // 28: kmgr.v1.SearchCachedObjectsResponse.results:type_name -> kmgr.v1.SearchResult
-	29, // 29: kmgr.v1.SearchCachedObjectsResponse.error:type_name -> kmgr.v1.StructuredError
-	27, // 30: kmgr.v1.SearchResult.identity:type_name -> kmgr.v1.ResourceIdentity
-	31, // 31: kmgr.v1.SearchObjectsEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	17, // 32: kmgr.v1.SearchObjectsEvent.results:type_name -> kmgr.v1.SearchResult
-	18, // 33: kmgr.v1.SearchObjectsEvent.progress:type_name -> kmgr.v1.SearchProgress
-	29, // 34: kmgr.v1.SearchObjectsEvent.error:type_name -> kmgr.v1.StructuredError
-	24, // 35: kmgr.v1.CancelSearchRequest.context:type_name -> kmgr.v1.RequestContext
-	24, // 36: kmgr.v1.DiscoverOptionalResourcesRequest.context:type_name -> kmgr.v1.RequestContext
-	25, // 37: kmgr.v1.DiscoverOptionalResourcesRequest.applicable_resource:type_name -> kmgr.v1.ResourceType
-	2,  // 38: kmgr.v1.OptionalResource.category:type_name -> kmgr.v1.OptionalResourceCategory
-	25, // 39: kmgr.v1.OptionalResource.applicable_resource:type_name -> kmgr.v1.ResourceType
-	22, // 40: kmgr.v1.DiscoverOptionalResourcesResponse.resources:type_name -> kmgr.v1.OptionalResource
-	29, // 41: kmgr.v1.DiscoverOptionalResourcesResponse.error:type_name -> kmgr.v1.StructuredError
-	8,  // 42: kmgr.v1.ViewService.StreamView:input_type -> kmgr.v1.OpenViewRequest
-	9,  // 43: kmgr.v1.ViewService.CancelView:input_type -> kmgr.v1.CancelViewRequest
-	3,  // 44: kmgr.v1.ViewService.PreviewColumn:input_type -> kmgr.v1.PreviewColumnRequest
-	21, // 45: kmgr.v1.ViewService.DiscoverOptionalResources:input_type -> kmgr.v1.DiscoverOptionalResourcesRequest
-	15, // 46: kmgr.v1.ViewService.SearchCachedObjects:input_type -> kmgr.v1.SearchCachedObjectsRequest
-	14, // 47: kmgr.v1.ViewService.SearchObjects:input_type -> kmgr.v1.SearchObjectsRequest
-	20, // 48: kmgr.v1.ViewService.CancelSearch:input_type -> kmgr.v1.CancelSearchRequest
-	13, // 49: kmgr.v1.ViewService.StreamView:output_type -> kmgr.v1.ViewEvent
-	32, // 50: kmgr.v1.ViewService.CancelView:output_type -> kmgr.v1.Acknowledgement
-	5,  // 51: kmgr.v1.ViewService.PreviewColumn:output_type -> kmgr.v1.PreviewColumnResponse
-	23, // 52: kmgr.v1.ViewService.DiscoverOptionalResources:output_type -> kmgr.v1.DiscoverOptionalResourcesResponse
-	16, // 53: kmgr.v1.ViewService.SearchCachedObjects:output_type -> kmgr.v1.SearchCachedObjectsResponse
-	19, // 54: kmgr.v1.ViewService.SearchObjects:output_type -> kmgr.v1.SearchObjectsEvent
-	32, // 55: kmgr.v1.ViewService.CancelSearch:output_type -> kmgr.v1.Acknowledgement
-	49, // [49:56] is the sub-list for method output_type
-	42, // [42:49] is the sub-list for method input_type
-	42, // [42:42] is the sub-list for extension type_name
-	42, // [42:42] is the sub-list for extension extendee
-	0,  // [0:42] is the sub-list for field type_name
+	25, // 28: kmgr.v1.SearchCachedObjectsRequest.resource_filters:type_name -> kmgr.v1.ResourceType
+	17, // 29: kmgr.v1.SearchCachedObjectsResponse.results:type_name -> kmgr.v1.SearchResult
+	29, // 30: kmgr.v1.SearchCachedObjectsResponse.error:type_name -> kmgr.v1.StructuredError
+	27, // 31: kmgr.v1.SearchResult.identity:type_name -> kmgr.v1.ResourceIdentity
+	31, // 32: kmgr.v1.SearchObjectsEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	17, // 33: kmgr.v1.SearchObjectsEvent.results:type_name -> kmgr.v1.SearchResult
+	18, // 34: kmgr.v1.SearchObjectsEvent.progress:type_name -> kmgr.v1.SearchProgress
+	29, // 35: kmgr.v1.SearchObjectsEvent.error:type_name -> kmgr.v1.StructuredError
+	24, // 36: kmgr.v1.CancelSearchRequest.context:type_name -> kmgr.v1.RequestContext
+	24, // 37: kmgr.v1.DiscoverOptionalResourcesRequest.context:type_name -> kmgr.v1.RequestContext
+	25, // 38: kmgr.v1.DiscoverOptionalResourcesRequest.applicable_resource:type_name -> kmgr.v1.ResourceType
+	2,  // 39: kmgr.v1.OptionalResource.category:type_name -> kmgr.v1.OptionalResourceCategory
+	25, // 40: kmgr.v1.OptionalResource.applicable_resource:type_name -> kmgr.v1.ResourceType
+	22, // 41: kmgr.v1.DiscoverOptionalResourcesResponse.resources:type_name -> kmgr.v1.OptionalResource
+	29, // 42: kmgr.v1.DiscoverOptionalResourcesResponse.error:type_name -> kmgr.v1.StructuredError
+	8,  // 43: kmgr.v1.ViewService.StreamView:input_type -> kmgr.v1.OpenViewRequest
+	9,  // 44: kmgr.v1.ViewService.CancelView:input_type -> kmgr.v1.CancelViewRequest
+	3,  // 45: kmgr.v1.ViewService.PreviewColumn:input_type -> kmgr.v1.PreviewColumnRequest
+	21, // 46: kmgr.v1.ViewService.DiscoverOptionalResources:input_type -> kmgr.v1.DiscoverOptionalResourcesRequest
+	15, // 47: kmgr.v1.ViewService.SearchCachedObjects:input_type -> kmgr.v1.SearchCachedObjectsRequest
+	14, // 48: kmgr.v1.ViewService.SearchObjects:input_type -> kmgr.v1.SearchObjectsRequest
+	20, // 49: kmgr.v1.ViewService.CancelSearch:input_type -> kmgr.v1.CancelSearchRequest
+	13, // 50: kmgr.v1.ViewService.StreamView:output_type -> kmgr.v1.ViewEvent
+	32, // 51: kmgr.v1.ViewService.CancelView:output_type -> kmgr.v1.Acknowledgement
+	5,  // 52: kmgr.v1.ViewService.PreviewColumn:output_type -> kmgr.v1.PreviewColumnResponse
+	23, // 53: kmgr.v1.ViewService.DiscoverOptionalResources:output_type -> kmgr.v1.DiscoverOptionalResourcesResponse
+	16, // 54: kmgr.v1.ViewService.SearchCachedObjects:output_type -> kmgr.v1.SearchCachedObjectsResponse
+	19, // 55: kmgr.v1.ViewService.SearchObjects:output_type -> kmgr.v1.SearchObjectsEvent
+	32, // 56: kmgr.v1.ViewService.CancelSearch:output_type -> kmgr.v1.Acknowledgement
+	50, // [50:57] is the sub-list for method output_type
+	43, // [43:50] is the sub-list for method input_type
+	43, // [43:43] is the sub-list for extension type_name
+	43, // [43:43] is the sub-list for extension extendee
+	0,  // [0:43] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_view_proto_init() }
