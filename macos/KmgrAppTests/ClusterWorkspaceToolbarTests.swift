@@ -62,10 +62,8 @@ struct ClusterWorkspaceToolbarTests {
 
         try await waitUntil { outline.numberOfRows >= 2 }
         let sectionRow = try #require((0..<outline.numberOfRows).first { row in
-            guard let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true)
-            else { return false }
-            return descendants(of: cell).compactMap { ($0 as? NSTextField)?.stringValue }
-                .contains("Workloads")
+            outline.view(atColumn: 0, row: row, makeIfNecessary: true)
+                is NSVisualEffectView
         })
         let section = try #require(outline.view(
             atColumn: 0,
@@ -76,6 +74,8 @@ struct ClusterWorkspaceToolbarTests {
         #expect(section.material == .sidebar)
         #expect(section.blendingMode == .withinWindow)
         #expect(section.state == .followsWindowActiveState)
+        #expect(descendants(of: section).compactMap { ($0 as? NSTextField)?.stringValue }
+            .contains { !$0.isEmpty })
     }
 
     @Test("Port Forwards button gives its title and arrows separate geometry")
@@ -170,6 +170,82 @@ struct ClusterWorkspaceToolbarTests {
             let item = NSMenuItem(title: "test", action: action, keyEquivalent: "")
             #expect(!controller.validateMenuItem(item))
         }
+    }
+
+    @Test("Pod log action resolves all containers and opens no setup sheet")
+    func podLogsOpenDirectlyWithAllContainers() async throws {
+        let logs = ResolvingToolbarLogProvider()
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            logProvider: logs
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        var opened: LogWindowController?
+        controller.onOpenLogWindow = { opened = $0 }
+
+        try await waitUntil { table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+        controller.openResourceLogs(nil)
+        try await waitUntil { opened != nil }
+
+        let resolved = logs.resolvedResources
+        #expect(resolved.count == 1)
+        let request = try #require(resolved.first)
+        #expect(request.resource == "pods")
+        #expect(request.uid == ResourceUID("pod-api"))
+        #expect(opened?.sources.map(\.container) == ["app", "sidecar"])
+        #expect(window.attachedSheet == nil)
+    }
+
+    @Test("incompatible resource actions are hidden while valid actions remain")
+    func incompatibleMenuActionsAreHidden() async throws {
+        let controller = makeWorkspace(provider: ServiceWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+
+        let logs = NSMenuItem(
+            title: "Open Logs…",
+            action: #selector(ClusterWorkspaceWindowController.openResourceLogs(_:)),
+            keyEquivalent: ""
+        )
+        let restart = NSMenuItem(
+            title: "Rollout Restart…",
+            action: #selector(ClusterWorkspaceWindowController.restartResourceSelection(_:)),
+            keyEquivalent: ""
+        )
+        let forward = NSMenuItem(
+            title: "Start Port Forward…",
+            action: #selector(ClusterWorkspaceWindowController.startResourcePortForward(_:)),
+            keyEquivalent: ""
+        )
+
+        #expect(!controller.validateMenuItem(logs))
+        #expect(logs.isHidden)
+        #expect(!controller.validateMenuItem(restart))
+        #expect(restart.isHidden)
+        #expect(controller.validateMenuItem(forward))
+        #expect(!forward.isHidden)
+
+        let menu = try #require(table.menu)
+        menu.delegate?.menuNeedsUpdate?(menu)
+        #expect(menu.item(withTitle: "Open Logs…") == nil)
+        #expect(menu.item(withTitle: "Rollout Restart…") == nil)
+        #expect(menu.item(withTitle: "Start Port Forward…") != nil)
+        #expect(menu.item(withTitle: "Edit Labels / Annotations…") != nil)
     }
 
     @Test("Edit Select All retains selection hidden by the active filter")
@@ -586,6 +662,7 @@ private func makeWorkspace(
         defaultNamespace: "default"
     ),
     provider: any WorkspaceResourceProviding = NoopWorkspaceResourceProvider(),
+    logProvider: any LogStreamProviding = NoopLogProvider(),
     restoration: ClusterWindowRestorationRecord = ClusterWindowRestorationRecord(
         id: "toolbar-test",
         contextName: "test-context"
@@ -601,7 +678,7 @@ private func makeWorkspace(
         objectSearchProvider: NoopObjectSearchProvider(),
         objectDetailProvider: NoopToolbarObjectDetailProvider(),
         operationProvider: NoopOperationProvider(),
-        logProvider: NoopLogProvider(),
+        logProvider: logProvider,
         execProvider: NoopExecProvider(),
         portForwards: portForwards,
         columnsConfigurationPath: "/tmp/kmgr-toolbar-test-columns.yaml",
@@ -970,6 +1047,45 @@ private struct SelectAllFilterWorkspaceResourceProvider: WorkspaceResourceProvid
     }
 }
 
+private struct ServiceWorkspaceResourceProvider: WorkspaceResourceProviding {
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult {
+        .init(resources: [DiscoveredResource(
+            group: "", version: "v1", resource: "services", kind: "Service",
+            namespaced: true, verbs: ["list", "watch"]
+        )])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { [] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error> {
+        let identity = ResourceIdentity(
+            clusterSessionID: request.sessionID,
+            group: "", version: "v1", resource: "services",
+            namespace: "default", name: "api", uid: "service-api"
+        )
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.snapshot(
+                cursor: StreamCursor(generation: request.generation, sequence: 1),
+                chunk: ResourceSnapshotChunk(
+                    rows: [ResourceRow(identity: identity, cells: [Cell(
+                        columnID: "name", displayText: "api", typedValue: .string("api")
+                    )])],
+                    first: true,
+                    last: true,
+                    index: 0,
+                    estimatedTotalRows: 1
+                )
+            ))
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
@@ -1092,6 +1208,38 @@ private struct NoopLogProvider: LogStreamProviding {
         -> AsyncThrowingStream<LogStreamMessage, Error> {
         AsyncThrowingStream { $0.finish() }
     }
+    func cancelLogs(sessionID: String, streamID: String, generation: UInt64) async {}
+}
+
+private final class ResolvingToolbarLogProvider: LogStreamProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResolvedResources: [ResourceIdentity] = []
+
+    var resolvedResources: [ResourceIdentity] {
+        lock.withLock { storedResolvedResources }
+    }
+
+    func resolveLogSources(resources: [ResourceIdentity]) async throws -> LogSourceResolution {
+        lock.withLock { storedResolvedResources = resources }
+        guard resources.count == 1, let pod = resources.first else {
+            throw ClusterManagerIssue(
+                category: .validation,
+                reason: "UnexpectedTestSelection",
+                message: "Expected one Pod in the test log resolution.",
+                operation: "test direct logs"
+            )
+        }
+        return LogSourceResolution(
+            pods: [PodLogSourceInventory(identity: pod, containers: ["sidecar", "app"])],
+            staticWorkloadSnapshot: false
+        )
+    }
+
+    func streamLogs(request: LogStreamRequest)
+        -> AsyncThrowingStream<LogStreamMessage, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
     func cancelLogs(sessionID: String, streamID: String, generation: UInt64) async {}
 }
 
