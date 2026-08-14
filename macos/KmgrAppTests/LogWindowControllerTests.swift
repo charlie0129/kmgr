@@ -160,6 +160,84 @@ struct LogWindowControllerTests {
         #expect(textView.frame.height > scrollView.contentSize.height)
     }
 
+    @Test("16 MiB single log line has bounded tail-layout work")
+    func multiMegabyteSingleLineTailLayoutStaysWithinBudget() async throws {
+        let fragment = String(repeating: "x", count: 64 << 10)
+        let diagnostics = ProcessInfo.processInfo.environment["KMGR_PERF_DIAGNOSTICS"] == "1"
+        let sizesMiB = diagnostics ? [4, 16, 32] : [16]
+        for sizeMiB in sizesMiB {
+            let fragmentCount = (sizeMiB << 20) / fragment.utf8.count
+            var displayChunks = [fragment]
+            displayChunks.append("\n")
+            displayChunks.reserveCapacity(fragmentCount * 3)
+            for _ in 1..<fragmentCount {
+                displayChunks.append(LogTextRenderer.displayContinuationMarker)
+                displayChunks.append(fragment)
+                displayChunks.append("\n")
+            }
+
+            let textView = NSTextView(
+                frame: NSRect(x: 0, y: 0, width: 800, height: 520)
+            )
+            let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            textView.font = font
+            let scrollView = NSScrollView(
+                frame: NSRect(x: 0, y: 0, width: 800, height: 520)
+            )
+            scrollView.documentView = textView
+            TextDocumentGeometry.configureStreamingLog(textView, in: scrollView)
+            let capacity = TextDocumentGeometry.streamingLogWrappingColumnCapacity(
+                textView,
+                in: scrollView
+            )
+            let (metrics, appendText) = await Task.detached(priority: .userInitiated) {
+                (
+                    LogTextLayoutMetrics(
+                        chunks: displayChunks,
+                        wrappingColumnCapacity: capacity
+                    ),
+                    displayChunks.joined()
+                )
+            }.value
+
+            let clock = ContinuousClock()
+            let installStart = clock.now
+            textView.textStorage?.append(NSAttributedString(
+                string: appendText,
+                attributes: [.font: font]
+            ))
+            let installDuration = installStart.duration(to: clock.now)
+            let tailStart = clock.now
+            TextDocumentGeometry.updateStreamingLog(
+                textView,
+                in: scrollView,
+                wrapsToViewport: false,
+                metrics: metrics,
+                followingTail: true
+            )
+            TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
+            let tailDuration = tailStart.duration(to: clock.now)
+            let totalDuration = installStart.duration(to: clock.now)
+
+            if diagnostics {
+                print(String(format:
+                    "kmgr log diagnostic: %d MiB single line install %.3f ms, tail %.3f ms, total %.3f ms",
+                    sizeMiB,
+                    milliseconds(installDuration),
+                    milliseconds(tailDuration),
+                    milliseconds(totalDuration)
+                ))
+            }
+            let mainActorBudget: Duration = sizeMiB <= 16 ? .seconds(1) : .seconds(2)
+            #expect(totalDuration < mainActorBudget)
+            #expect(textView.textStorage?.length == appendText.utf16.count)
+            #expect(metrics.logicalLineCount == fragmentCount + 1)
+            #expect(metrics.maximumLineWidthUnits <= fragment.utf8.count + 4)
+            #expect(textView.frame.height > scrollView.contentSize.height)
+            #expect(scrollView.contentView.bounds.maxY == textView.bounds.maxY)
+        }
+    }
+
     @Test("log streams remain independent ephemeral windows")
     func logWindowIsIndependentAndNotRestored() throws {
         let controller = LogWindowController(
@@ -639,6 +717,12 @@ private func logSource(pod: String, uid: String, container: String) -> LogSource
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
+}
+
+private func milliseconds(_ duration: Duration) -> Double {
+    let components = duration.components
+    return Double(components.seconds) * 1_000
+        + Double(components.attoseconds) / 1_000_000_000_000_000
 }
 
 @MainActor

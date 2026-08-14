@@ -668,27 +668,44 @@ public actor LogRecordStore {
 }
 
 public struct RenderedLogText: Hashable, Sendable {
+    /// Logical chunks preserve the visible records exactly. In particular,
+    /// fragments of one oversized Kubernetes log line remain joined so saving
+    /// the visible buffer does not introduce display-only line breaks.
     public var chunks: [String]
+    /// TextKit-facing chunks may contain explicit continuation boundaries.
+    /// NSTextView cannot lazily lay out the tail of a multi-megabyte paragraph;
+    /// bounded physical paragraphs let noncontiguous layout skip directly to
+    /// the visible region while retaining `chunks` for lossless export.
+    public var displayChunks: [String]
     public var renderedRecords: Int
     public var omittedRecords: Int
     public var omittedSourceBytes: UInt64
     public var outputUTF8Bytes: Int
+    public var displayOutputUTF8Bytes: Int
+    public var displayContinuationBreaks: Int
 
     public init(
         chunks: [String],
+        displayChunks: [String],
         renderedRecords: Int,
         omittedRecords: Int,
         omittedSourceBytes: UInt64,
-        outputUTF8Bytes: Int
+        outputUTF8Bytes: Int,
+        displayOutputUTF8Bytes: Int,
+        displayContinuationBreaks: Int
     ) {
         self.chunks = chunks
+        self.displayChunks = displayChunks
         self.renderedRecords = renderedRecords
         self.omittedRecords = omittedRecords
         self.omittedSourceBytes = omittedSourceBytes
         self.outputUTF8Bytes = outputUTF8Bytes
+        self.displayOutputUTF8Bytes = displayOutputUTF8Bytes
+        self.displayContinuationBreaks = displayContinuationBreaks
     }
 
     public var text: String { chunks.joined() }
+    public var displayText: String { displayChunks.joined() }
 }
 
 /// A minimal streaming edit from one rendered log snapshot to the next. Log
@@ -780,6 +797,11 @@ public enum LogTextInstallPlanner {
 /// newest matching records when source labels or UTF-8 replacement expansion
 /// would exceed the configured visible-text budget.
 public enum LogTextRenderer {
+    /// Every bounded continuation fragment gets an independent display
+    /// paragraph. The marker makes the projection unambiguous when Wrap is
+    /// disabled; the logical/export projection omits it.
+    public static let displayContinuationMarker = "↪ "
+
     private struct Candidate {
         var record: LogRecord
         var decoded: String
@@ -842,10 +864,11 @@ public enum LogTextRenderer {
             } else {
                 timestampPrefix = ""
             }
-            // A continuation may become the first visible fragment after
-            // filtering, ring eviction, or byte-budget omission. Reserve for
-            // a source prefix and ellipsis on every continuation; the forward
-            // pass uses them only when the preceding fragment is not visible.
+            // A continuation may become the first logical fragment after
+            // filtering, ring eviction, or byte-budget omission. Its display
+            // paragraph also repeats source/timestamp context plus a marker.
+            // Ellipsis and marker have equal UTF-8 width, so this one estimate
+            // conservatively bounds both projections.
             let estimate = sourcePrefix.utf8.count + timestampPrefix.utf8.count
                 + (record.startsLine ? 0 : "… ".utf8.count)
                 + decoded.utf8.count
@@ -869,8 +892,12 @@ public enum LogTextRenderer {
         }
         try Task.checkCancellation()
         var chunks: [String] = []
-        chunks.reserveCapacity(candidates.count)
+        chunks.reserveCapacity(candidates.count * 3)
+        var displayChunks: [String] = []
+        displayChunks.reserveCapacity(candidates.count * 3)
         var outputBytes = 0
+        var displayOutputBytes = 0
+        var displayContinuationBreaks = 0
         var previousVisibleSourceID: String?
         var previousVisibleIndex = -1
         var previousVisibleLineOpen = false
@@ -888,20 +915,39 @@ public enum LogTextRenderer {
             let prefix = beginsVisibleSegment ? candidate.sourcePrefix : ""
             let timestamp = beginsVisibleSegment ? candidate.timestampPrefix : ""
             let truncation = truncatedStart ? "… " : ""
-            let chunk = separator + prefix + timestamp + truncation + candidate.decoded
-                + (record.endsWithNewline ? "\n" : "")
-            chunks.append(chunk)
-            outputBytes += chunk.utf8.count
+            let logicalPrefix = separator + prefix + timestamp + truncation
+            if !logicalPrefix.isEmpty { chunks.append(logicalPrefix) }
+            chunks.append(candidate.decoded)
+            if record.endsWithNewline { chunks.append("\n") }
+            outputBytes += logicalPrefix.utf8.count + candidate.decoded.utf8.count
+                + (record.endsWithNewline ? 1 : 0)
+
+            // Unlike the logical projection, each record's display depends
+            // only on that record. Evicting an old fragment therefore leaves
+            // the retained suffix byte-for-byte stable and lets the AppKit
+            // installer remove/append instead of replacing the whole buffer.
+            let displayPrefix = candidate.sourcePrefix + candidate.timestampPrefix
+                + (record.startsLine ? "" : displayContinuationMarker)
+            if !displayPrefix.isEmpty { displayChunks.append(displayPrefix) }
+            displayChunks.append(candidate.decoded)
+            displayChunks.append("\n")
+            displayOutputBytes += displayPrefix.utf8.count + candidate.decoded.utf8.count + 1
+            if !record.startsLine {
+                displayContinuationBreaks += 1
+            }
             previousVisibleSourceID = record.sourceID
             previousVisibleIndex = candidate.recordIndex
             previousVisibleLineOpen = !record.endsWithNewline
         }
         return RenderedLogText(
             chunks: chunks,
-            renderedRecords: chunks.count,
+            displayChunks: displayChunks,
+            renderedRecords: candidates.count,
             omittedRecords: omittedRecords,
             omittedSourceBytes: omittedBytes,
-            outputUTF8Bytes: outputBytes
+            outputUTF8Bytes: outputBytes,
+            displayOutputUTF8Bytes: displayOutputBytes,
+            displayContinuationBreaks: displayContinuationBreaks
         )
     }
 

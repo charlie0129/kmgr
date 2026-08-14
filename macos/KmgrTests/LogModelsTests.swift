@@ -222,6 +222,90 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     #expect(ring.droppedBytes == 6)
 }
 
+@Test func multiMegabyteLogicalLineUsesBoundedDisplayParagraphsAndLosslessExport() throws {
+    let fragmentBytes = 64 << 10
+    let payloadBytes = 8 << 20
+    var ring = LogRecordRing(
+        recordLimit: 1_024,
+        byteLimit: payloadBytes + fragmentBytes,
+        fragmentByteLimit: fragmentBytes
+    )
+    ring.append(contentsOf: [LogRecord(
+        sourceID: "pod",
+        data: Data(repeating: 0x78, count: payloadBytes),
+        startsLine: true,
+        endsWithNewline: true
+    )])
+
+    let records = ring.records
+    #expect(records.count == payloadBytes / fragmentBytes)
+    #expect(records.allSatisfy { $0.data.count <= fragmentBytes })
+    #expect(records.first?.startsLine == true)
+    #expect(records.dropFirst().allSatisfy { !$0.startsLine })
+
+    let rendered = try LogTextRenderer.render(
+        records: records,
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: payloadBytes + fragmentBytes
+    )
+
+    #expect(rendered.displayContinuationBreaks == records.count - 1)
+    #expect(rendered.text.utf8.count == payloadBytes + 1)
+    #expect(!rendered.text.contains(LogTextRenderer.displayContinuationMarker))
+    #expect(rendered.displayOutputUTF8Bytes <= payloadBytes + fragmentBytes)
+    let physicalLines = rendered.displayText.split(
+        separator: "\n",
+        omittingEmptySubsequences: false
+    )
+    #expect(physicalLines.count == records.count + 1)
+    #expect(physicalLines.dropLast().allSatisfy {
+        $0.utf8.count <= fragmentBytes + "↪ ".utf8.count
+    })
+}
+
+@Test func oversizedLineEvictionRetainsDisplaySuffixIncrementally() throws {
+    func record(_ value: String, startsLine: Bool, endsWithNewline: Bool = false) -> LogRecord {
+        LogRecord(
+            sourceID: "pod",
+            data: Data(value.utf8),
+            startsLine: startsLine,
+            endsWithNewline: endsWithNewline
+        )
+    }
+    let previous = try LogTextRenderer.render(
+        records: [
+            record("first", startsLine: true),
+            record("second", startsLine: false),
+            record("third", startsLine: false),
+        ],
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10
+    )
+    let current = try LogTextRenderer.render(
+        records: [
+            record("second", startsLine: false),
+            record("third", startsLine: false),
+            record("fourth", startsLine: false, endsWithNewline: true),
+        ],
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10
+    )
+
+    let plan = LogTextInstallPlanner.plan(
+        previousChunks: previous.displayChunks,
+        currentChunks: current.displayChunks
+    )
+    #expect(plan.removePrefixUTF16Length == "first\n".utf16.count)
+    #expect(plan.appendText == "↪ fourth\n")
+    #expect(plan.applying(to: previous.displayText) == current.displayText)
+}
+
 @Test func logRendererPrefixesOnlyTheStartOfAHugeLogicalLine() throws {
     let rendered = try LogTextRenderer.render(
         records: [

@@ -52,8 +52,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var latestStoreDrops: UInt64 = 0
     private var latestStreamDrops: UInt64 = 0
     private var latestRenderOmissions = 0
+    private var latestDisplayContinuationBreaks = 0
     private var latestStreamState: LogStreamState = .connecting
     private var renderedChunks: [String] = []
+    private var renderedExportChunks: [String] = []
+    private var renderedDisplayUTF16Length = 0
     private var textLayoutMetrics = LogTextLayoutMetrics.empty
     private var appliedContainerTitle = ""
     private var establishedConfiguration: AppliedStreamConfiguration?
@@ -168,7 +171,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     func windowDidResize(_ notification: Notification) {
         let wasAtTail = isAtTail
         updateTextDocumentGeometry(followingTail: wasAtTail)
-        if wasAtTail { textView.scrollToEndOfDocument(nil) }
+        if wasAtTail { scrollToTail() }
         scheduleLayoutMetricsReconciliation(preservingTail: wasAtTail)
     }
 
@@ -648,8 +651,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         if latestRenderOmissions > 0 {
             parts.append("\(latestRenderOmissions.formatted()) omitted from display")
         }
+        if latestDisplayContinuationBreaks > 0 {
+            parts.append("long lines segmented for display")
+        }
         statusLabel.stringValue = parts.joined(separator: " · ")
-        statusLabel.toolTip = nil
+        statusLabel.toolTip = latestDisplayContinuationBreaks > 0
+            ? "Continuation arrows and line breaks are display-only; Save preserves logical lines."
+            : nil
     }
 
     /// Coalesce detached formatting and incremental text installation to at
@@ -728,10 +736,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                     rendered: result,
                     install: LogTextInstallPlanner.plan(
                         previousChunks: previousChunks,
-                        currentChunks: result.chunks
+                        currentChunks: result.displayChunks
                     ),
                     layoutMetrics: LogTextLayoutMetrics(
-                        chunks: result.chunks,
+                        chunks: result.displayChunks,
                         wrappingColumnCapacity: wrappingColumnCapacity
                     )
                 )
@@ -759,7 +767,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
         let installInterval = logSignposter.beginInterval(
             PerformanceSignpostCatalog.logTextInstall,
-            "output_bytes=\(result.rendered.outputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendText.utf8.count)"
+            "logical_output_bytes=\(result.rendered.outputUTF8Bytes) display_output_bytes=\(result.rendered.displayOutputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendText.utf8.count)"
         )
         let storage = textView.textStorage!
         if storage.length == result.install.previousUTF16Length {
@@ -782,7 +790,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             // normal streaming updates always take the incremental path.
             storage.replaceCharacters(
                 in: NSRange(location: 0, length: storage.length),
-                with: result.rendered.text
+                with: result.rendered.displayText
             )
             if storage.length > 0, let font = textView.font {
                 storage.addAttribute(
@@ -792,14 +800,17 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 )
             }
         }
-        renderedChunks = result.rendered.chunks
+        renderedChunks = result.rendered.displayChunks
+        renderedExportChunks = result.rendered.chunks
+        renderedDisplayUTF16Length = result.install.resultUTF16Length
         cancelLayoutMetricsReconciliation()
         textLayoutMetrics = result.layoutMetrics
         latestRenderOmissions = result.rendered.omittedRecords
+        latestDisplayContinuationBreaks = result.rendered.displayContinuationBreaks
         updateStatusLabel()
         textView.setSelectedRange(result.install.remapSelection(selectedRange))
         updateTextDocumentGeometry(followingTail: wasAtTail)
-        if wasAtTail { textView.scrollToEndOfDocument(nil) }
+        if wasAtTail { scrollToTail() }
         needsRenderWhenVisible = false
         keyVisibilityWakePending = false
         logSignposter.endInterval(
@@ -824,7 +835,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let enabled = wrapButton.state == .on
         scrollView.hasHorizontalScroller = !enabled
         updateTextDocumentGeometry(followingTail: wasAtTail)
-        if wasAtTail { textView.scrollToEndOfDocument(nil) }
+        if wasAtTail { scrollToTail() }
         scheduleLayoutMetricsReconciliation(preservingTail: wasAtTail)
     }
 
@@ -872,8 +883,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             )
             textLayoutMetrics = metrics
             updateTextDocumentGeometry(followingTail: shouldPreserveTail)
-            if shouldPreserveTail { textView.scrollToEndOfDocument(nil) }
+            if shouldPreserveTail { scrollToTail() }
         }
+    }
+
+    private func scrollToTail() {
+        TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
     }
 
     private func cancelLayoutMetricsReconciliation() {
@@ -892,10 +907,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             guard let self else { return }
             latestStoreDrops = 0
             latestRenderOmissions = 0
+            latestDisplayContinuationBreaks = 0
             updateStatusLabel()
         }
         textView.string = ""
         renderedChunks.removeAll(keepingCapacity: true)
+        renderedExportChunks.removeAll(keepingCapacity: true)
+        renderedDisplayUTF16Length = 0
         textLayoutMetrics = .empty
         cancelLayoutMetricsReconciliation()
         updateTextDocumentGeometry()
@@ -938,11 +956,18 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
-    /// NSTextView is AppKit-owned, so capture its immutable String snapshot on
-    /// the main actor. UTF-8 encoding and atomic file I/O then run on a detached
-    /// utility task and cannot stall rendering for a multi-megabyte log line.
+    /// NSTextView is AppKit-owned, so a defensive direct-text snapshot is taken
+    /// on MainActor. Normal rendered logs instead capture their immutable chunk
+    /// array; joining, UTF-8 encoding, and file I/O all stay off MainActor even
+    /// for a multi-megabyte logical line.
     func saveVisibleBufferSnapshot(to url: URL) {
-        let value = textView.string
+        // Tests and defensive callers can mutate NSTextStorage directly. Use
+        // the lossless logical projection only while it still describes the
+        // installed display; otherwise snapshot the AppKit value as before.
+        let hasCurrentProjection = !renderedChunks.isEmpty
+            && textView.textStorage?.length == renderedDisplayUTF16Length
+        let exportChunks = hasCurrentProjection ? renderedExportChunks : nil
+        let fallbackValue = hasCurrentProjection ? nil : textView.string
         let writer = fileWriter
         statusLabel.stringValue = "Saving \(url.lastPathComponent)…"
         statusLabel.toolTip = nil
@@ -950,6 +975,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         Task { [weak self] in
             do {
                 try await Task.detached(priority: .utility) {
+                    let value = exportChunks?.joined() ?? fallbackValue ?? ""
                     try writer(value, url)
                 }.value
                 guard let self, !isClosing else { return }

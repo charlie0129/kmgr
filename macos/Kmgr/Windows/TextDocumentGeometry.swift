@@ -404,4 +404,23 @@ enum TextDocumentGeometry {
         // the detached arithmetic frame authoritative until reconciliation.
         textView.setFrameSize(documentSize)
     }
+
+    /// Follows a streaming log's vertical tail using the authoritative frame
+    /// computed above. `NSTextView.scrollToEndOfDocument` resolves the final
+    /// glyph rect and can rescan a multi-megabyte logical line even after its
+    /// bounded final paragraph is laid out. Arithmetic scrolling is constant
+    /// work and preserves the user's horizontal position.
+    static func scrollStreamingLogToTail(
+        _ textView: NSTextView,
+        in scrollView: NSScrollView
+    ) {
+        let clipView = scrollView.contentView
+        let maximumX = max(0, textView.bounds.width - clipView.bounds.width)
+        let maximumY = max(0, textView.bounds.height - clipView.bounds.height)
+        clipView.scroll(to: NSPoint(
+            x: min(max(0, clipView.bounds.origin.x), maximumX),
+            y: maximumY
+        ))
+        scrollView.reflectScrolledClipView(clipView)
+    }
 }
