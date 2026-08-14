@@ -6,8 +6,10 @@ struct KubernetesResourceQuantityFormatterTests {
     @Test("CPU uses millicores below one core and compact cores above it")
     func cpu() {
         #expect(format(0, unit: "cores") == "0")
+        #expect(format(0.000102, unit: "cores") == "0")
         #expect(format(0.42, unit: "cores") == "420m")
-        #expect(format(0.0005, unit: "cores") == "0.5m")
+        #expect(format(0.0005, unit: "cores") == "0")
+        #expect(format(0.001, unit: "cores") == "1m")
         #expect(format(1.5, unit: "cores") == "1.5")
         #expect(format(23.256, unit: "cores") == "23.256")
     }

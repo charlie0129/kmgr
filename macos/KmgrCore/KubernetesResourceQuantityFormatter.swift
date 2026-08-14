@@ -22,7 +22,9 @@ public enum KubernetesResourceQuantityFormatter {
     }
 
     private static func compactCPU(_ cores: Double) -> String {
-        if cores == 0 { return "0" }
+        // Retain the original Double for sorting and geometry, but suppress
+        // sub-millicore display noise such as 0.000102 cores.
+        if abs(cores) < 0.001 { return "0" }
         if abs(cores) < 1 {
             return compactDecimal(cores * 1_000, fractionalDigits: 3) + "m"
         }

@@ -32,6 +32,12 @@ func isByteResource(name corev1.ResourceName) bool {
 
 func formatCPUQuantity(quantity resource.Quantity) string {
 	cores := quantity.AsApproximateFloat64()
+	// Metrics retain nanocore precision for sorting and pressure calculations,
+	// but sub-millicore core fractions add visual noise to dense tables (for
+	// example 0.000102). Keep this as a presentation-only threshold.
+	if math.Abs(cores) < 0.001 {
+		return "0"
+	}
 	return adaptiveDecimal(cores)
 }
 
