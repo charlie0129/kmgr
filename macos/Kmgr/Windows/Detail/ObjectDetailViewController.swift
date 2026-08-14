@@ -1140,30 +1140,36 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func beginYAMLEdit() {
+        guard operationTask == nil else { return }
         // Editing always starts from the complete authoritative YAML even when
         // managedFields were hidden in the read-only presentation. The backend
         // protects them from apply along with the other server-owned fields.
         yamlTextView.string = yamlPresentation.completeYAML
         isEditingYAML = true
-        yamlTextView.isEditable = true
         editButton.isHidden = true
         managedFieldsButton.isHidden = true
         saveButton.isHidden = false
         cancelButton.isHidden = false
+        updateYAMLEditControls()
         view.window?.makeFirstResponder(yamlTextView)
     }
 
     @objc private func cancelYAMLEdit() {
+        guard operationTask == nil else { return }
         finishYAMLEdit()
     }
 
     @objc private func saveYAML() {
-        guard let detail else { return }
+        guard let detail, operationTask == nil else { return }
         let edited = Data(yamlTextView.string.utf8)
-        operationTask?.cancel()
         statusLabel.stringValue = "Validating…"
         operationTask = Task { [weak self, provider, identity] in
             guard let self else { return }
+            defer {
+                operationTask = nil
+                updateYAMLEditControls()
+                updateDataEditorControls()
+            }
             do {
                 let prepared = try await provider.prepareYAML(
                     identity: identity,
@@ -1208,6 +1214,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 show(error: error)
             }
         }
+        updateYAMLEditControls()
+        updateDataEditorControls()
     }
 
     private func confirm(diff: [SemanticDiffEntry]) -> Bool {
@@ -1224,12 +1232,20 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func finishYAMLEdit() {
         isEditingYAML = false
-        yamlTextView.isEditable = false
         editButton.isHidden = false
         managedFieldsButton.isHidden = !yamlPresentation.hasManagedFields
         saveButton.isHidden = true
         cancelButton.isHidden = true
+        updateYAMLEditControls()
         showYAMLPresentation()
+    }
+
+    private func updateYAMLEditControls() {
+        let idle = operationTask == nil
+        yamlTextView.isEditable = isEditingYAML && idle && !terminalObjectState
+        saveButton.isEnabled = isEditingYAML && idle && !terminalObjectState
+        cancelButton.isEnabled = isEditingYAML && idle
+        editButton.isEnabled = !isEditingYAML && idle && !terminalObjectState
     }
 
     @objc private func toggleManagedFields() {

@@ -424,7 +424,201 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(split.holdingPriorityForSubview(at: 0) == .defaultHigh)
         #expect(keyScroll.hasHorizontalScroller)
     }
+
+    @Test("YAML saves serialize and restore editing controls after failure and success")
+    func yamlSaveLifecycle() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let source = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n"
+        let provider = YAMLSaveObjectDetailProvider(detail: ObjectDetail(
+            identity: identity,
+            resourceVersion: "rv-1",
+            yamlUTF8: Data(source.utf8)
+        ))
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: provider,
+            initialTab: .yaml
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let buttons = descendants(of: controller.view).compactMap { $0 as? NSButton }
+        let edit = try #require(buttons.first { $0.title == "Edit" })
+        let save = try #require(buttons.first { $0.title == "Save" })
+        let cancel = try #require(buttons.first { $0.title == "Cancel" })
+        let editor = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Kubernetes object YAML" })
+        try await waitUntil { editor.string == source }
+
+        edit.performClick(nil)
+        editor.string += "spec:\n  replicas: 2\n"
+        controller.saveDocument(nil)
+        try await waitUntilAsync { await provider.numberOfApplyCalls() == 1 }
+
+        #expect(!save.isEnabled)
+        #expect(!cancel.isEnabled)
+        #expect(!editor.isEditable)
+
+        controller.saveDocument(nil)
+        controller.saveDocument(nil)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await provider.numberOfPrepareCalls() == 1)
+        #expect(await provider.numberOfApplyCalls() == 1)
+        #expect(await provider.maximumConcurrentApplies() == 1)
+
+        await provider.failCurrentApply()
+        try await waitUntil { save.isEnabled && cancel.isEnabled && editor.isEditable }
+
+        controller.saveDocument(nil)
+        try await waitUntilAsync { await provider.numberOfApplyCalls() == 2 }
+        #expect(await provider.maximumConcurrentApplies() == 1)
+        await provider.succeedCurrentApply()
+        try await waitUntil { !edit.isHidden && edit.isEnabled }
+
+        #expect(save.isHidden)
+        #expect(cancel.isHidden)
+        #expect(!editor.isEditable)
+    }
 }
+}
+
+private actor YAMLSaveObjectDetailProvider: ObjectDetailProviding {
+    private let detail: ObjectDetail
+    private var prepareCalls = 0
+    private var applyCalls = 0
+    private var concurrentApplies = 0
+    private var maximumApplies = 0
+    private var pendingApply: AsyncThrowingStream<OperationProgress, Error>.Continuation?
+
+    init(detail: ObjectDetail) {
+        self.detail = detail
+    }
+
+    func getObject(identity: ResourceIdentity) async throws -> ObjectDetail { detail }
+
+    nonisolated func watchObject(
+        identity: ResourceIdentity,
+        resourceVersion: String
+    ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
+        -> [KubernetesObjectEvent]
+    {
+        []
+    }
+
+    func getRelationships(
+        identity: ResourceIdentity,
+        includeChildren: Bool
+    ) async throws -> ObjectRelationships {
+        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
+    }
+
+    nonisolated func scanRelationships(
+        identity: ResourceIdentity
+    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func cancelRelationshipScan(
+        sessionID: String,
+        scanID: String,
+        generation: UInt64
+    ) async {}
+
+    func getData(identity: ResourceIdentity) async throws -> ObjectData {
+        throw CancellationError()
+    }
+
+    func prepareYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> PreparedYAMLEdit {
+        prepareCalls += 1
+        return PreparedYAMLEdit(
+            normalizedYAMLUTF8: yamlUTF8,
+            currentResourceVersion: expectedResourceVersion,
+            diff: []
+        )
+    }
+
+    func applyYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        let pair = AsyncThrowingStream<OperationProgress, Error>.makeStream()
+        pendingApply = pair.continuation
+        applyCalls += 1
+        concurrentApplies += 1
+        maximumApplies = max(maximumApplies, concurrentApplies)
+        return pair.stream
+    }
+
+    func updateData(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String,
+        mutations: [DataMutationKind]
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func numberOfPrepareCalls() -> Int { prepareCalls }
+
+    func numberOfApplyCalls() -> Int { applyCalls }
+
+    func maximumConcurrentApplies() -> Int { maximumApplies }
+
+    func failCurrentApply() {
+        pendingApply?.yield(OperationProgress(
+            cursor: StreamCursor(generation: UInt64(applyCalls), sequence: 1),
+            operationID: "yaml-save-\(applyCalls)",
+            state: .failed,
+            completedItems: 0,
+            totalItems: 1,
+            itemResults: [],
+            issue: ClusterManagerIssue(
+                category: .conflict,
+                reason: "Conflict",
+                message: "The object changed on the server.",
+                operation: "apply YAML"
+            )
+        ))
+        finishCurrentApply()
+    }
+
+    func succeedCurrentApply() {
+        pendingApply?.yield(OperationProgress(
+            cursor: StreamCursor(generation: UInt64(applyCalls), sequence: 1),
+            operationID: "yaml-save-\(applyCalls)",
+            state: .succeeded,
+            completedItems: 1,
+            totalItems: 1,
+            itemResults: []
+        ))
+        finishCurrentApply()
+    }
+
+    private func finishCurrentApply() {
+        pendingApply?.finish()
+        pendingApply = nil
+        concurrentApplies -= 1
+    }
 }
 
 private struct NoopObjectDetailProvider: ObjectDetailProviding {
@@ -575,6 +769,21 @@ private func waitUntil(
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
     while !condition() {
+        guard clock.now < deadline else {
+            throw CancellationError()
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+@MainActor
+private func waitUntilAsync(
+    timeout: Duration = .seconds(2),
+    condition: @escaping @MainActor () async -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !(await condition()) {
         guard clock.now < deadline else {
             throw CancellationError()
         }
