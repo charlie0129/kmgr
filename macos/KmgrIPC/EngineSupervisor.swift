@@ -428,7 +428,6 @@ public final class EngineSupervisor {
                 ]
             )
             currentClient = client
-            connection.install(client)
             connectionTask = Task.detached {
                 do {
                     try await client.runConnections()
@@ -446,6 +445,11 @@ public final class EngineSupervisor {
 
         do {
             let information = try await handshake(client: client, process: process)
+            // Do not publish a generation to ordinary RPC providers until its
+            // authenticated protocol handshake and capability validation have
+            // succeeded. The supervisor retains `currentClient` privately so
+            // shutdown can still stop a helper whose startup is in progress.
+            connection.install(client)
             state = .ready(information)
             let status = await exitWaiter.wait()
             connection.clear(client)

@@ -99,6 +99,68 @@ struct EngineSupervisorLifecycleTests {
         }
     }
 
+    @Test("ordinary RPC connection stays unavailable until handshake succeeds")
+    func connectionIsNotPublishedBeforeHandshake() async throws {
+        // Unix-domain sockets have a small path limit on Darwin, so keep this
+        // fixture directly under /tmp just like the production endpoint tests.
+        let fixtureDirectory = URL(
+            fileURLWithPath: "/tmp/ks.\(String(UUID().uuidString.prefix(8)))",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: fixtureDirectory,
+            withIntermediateDirectories: false
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+
+        let helper = fixtureDirectory.appendingPathComponent("sleeping-helper")
+        try Data("#!/bin/sh\nsleep 2\n".utf8).write(to: helper, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: helper.path
+        )
+        let supervisor = EngineSupervisor(configuration: .init(
+            helperURL: helper,
+            temporaryDirectoryURL: fixtureDirectory,
+            restartPolicy: .init(
+                maximumAttempts: 1,
+                initialDelayMilliseconds: 0,
+                maximumDelayMilliseconds: 0
+            ),
+            startupTimeout: .milliseconds(250),
+            handshakeTimeout: .milliseconds(40),
+            shutdownTimeout: .milliseconds(100)
+        ))
+
+        supervisor.start()
+        do {
+            // Give runGeneration enough time to construct its authenticated
+            // gRPC client. The helper deliberately never creates its socket,
+            // so a successful test must keep that client private throughout
+            // startup.
+            try await Task.sleep(for: .milliseconds(80))
+        } catch {
+            await supervisor.shutdown()
+            throw error
+        }
+        guard case .starting = supervisor.state else {
+            Issue.record("Expected starting state, got \(supervisor.state)")
+            await supervisor.shutdown()
+            return
+        }
+        do {
+            _ = try supervisor.connection.engineClient()
+            Issue.record("Ordinary RPC connection was published before handshake")
+        } catch EngineConnectionError.unavailable {
+            // Expected while the protocol handshake is still pending.
+        } catch {
+            Issue.record("Unexpected connection error: \(error)")
+        }
+
+        await supervisor.shutdown()
+        #expect(supervisor.state == .stopped)
+    }
+
     @Test("start is idempotent while supervision is active")
     func repeatedStartDoesNotCreateAnotherLoop() async {
         let missing = FileManager.default.temporaryDirectory
