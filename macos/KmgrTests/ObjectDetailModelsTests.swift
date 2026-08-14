@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import KmgrCore
 
-@Test func relationshipScanCollectionKeepsCachedChildrenUntilComplete() {
+@Test func relationshipScanCollectionReplacesCachedChildrenAfterAuthoritativeCompletion() {
     let owner = relationship(.owner, resource: "deployments", name: "api", uid: "owner")
     let cached = relationship(.child, resource: "replicasets", name: "cached", uid: "cached")
     let scanned = relationship(.child, resource: "pods", name: "scanned", uid: "scanned")
@@ -19,9 +19,48 @@ import Testing
     collection.apply(RelationshipScanMessage(
         scanID: "scan",
         cursor: StreamCursor(generation: 1, sequence: 2),
-        progress: RelationshipScanProgress(complete: true)
+        progress: RelationshipScanProgress(
+            complete: true,
+            potentiallyIncomplete: false
+        )
     ))
     #expect(Set(collection.values.map(\.identity.uid)) == ["owner", "scanned"])
+}
+
+@Test func relationshipScanCollectionPreservesCachedChildrenAfterPartialCompletion() {
+    let owner = relationship(.owner, resource: "deployments", name: "api", uid: "owner")
+    let cached = relationship(
+        .child, resource: "replicasets", name: "cached-only", uid: "cached-only"
+    )
+    let staleCached = relationship(
+        .child, resource: "pods", name: "shared", uid: "shared"
+    )
+    var scannedReplacement = staleCached
+    scannedReplacement.label = "authoritative scan"
+    scannedReplacement.potentiallyIncomplete = false
+    let scanned = relationship(
+        .child, resource: "pods", name: "scanned-only", uid: "scanned-only"
+    )
+    var collection = RelationshipScanCollection(
+        baseline: [owner, cached, staleCached]
+    )
+
+    collection.apply(RelationshipScanMessage(
+        scanID: "scan",
+        cursor: StreamCursor(generation: 1, sequence: 1),
+        relationships: [scannedReplacement, scanned],
+        progress: RelationshipScanProgress(
+            resourcesFailed: 1,
+            complete: true,
+            potentiallyIncomplete: true
+        )
+    ))
+
+    #expect(Set(collection.values.map(\.identity.uid)) == [
+        "owner", "cached-only", "shared", "scanned-only",
+    ])
+    #expect(collection.values.first { $0.identity.uid == "shared" }?.label ==
+        "authoritative scan")
 }
 
 @Test func relationshipScanCollectionDeduplicatesByFullIdentity() {

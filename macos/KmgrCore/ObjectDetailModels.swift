@@ -181,8 +181,9 @@ public struct RelationshipScanMessage: Hashable, Sendable {
 
 /// Maintains the cache-first relationship baseline while an exhaustive scan
 /// streams child matches. A failed or cancelled scan therefore never erases
-/// useful cached results. Once a scan completes, its authoritative child set
-/// replaces the cached child subset while owner relationships remain intact.
+/// useful cached results. A complete scan replaces the cached child subset only
+/// when discovery and every resource LIST succeeded; partial results merge with
+/// the cache while owner relationships remain intact.
 public struct RelationshipScanCollection: Hashable, Sendable {
     public private(set) var values: [ObjectRelationship]
     private let baseline: [ObjectRelationship]
@@ -198,7 +199,7 @@ public struct RelationshipScanCollection: Hashable, Sendable {
             scannedChildren[relationship.identity] = relationship
         }
         let ownersAndRelated = baseline.filter { $0.kind != .child }
-        if message.progress.complete {
+        if message.progress.complete && !message.progress.potentiallyIncomplete {
             values = Self.sorted(ownersAndRelated + Array(scannedChildren.values))
         } else {
             var merged = Dictionary(
