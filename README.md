@@ -141,6 +141,7 @@ focus, and hides when no supported context is active.
 | --- | --- |
 | Command-N | Open a new Cluster Manager window |
 | Command-K | Open the current workspace's Command Palette |
+| Shift-Command-N | Open the current workspace's namespace picker |
 | `/` | Focus the resource filter |
 | Up / Down, `K` / `J` | Move table selection |
 | Shift-click / Shift-Up / Shift-Down | Extend native selection |
