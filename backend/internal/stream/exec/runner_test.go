@@ -60,11 +60,15 @@ func TestClientGoRunnerVerifiesPodAndBuildsExecRequest(t *testing.T) {
 	executed := false
 	runner := ClientGoRunner{
 		Core: core, Config: config,
-		ExecutorFactory: ExecutorFactoryFunc(func(receivedConfig *rest.Config, requestURL string) (remotecommand.Executor, error) {
+		ExecutorFactory: ExecutorFactoryFunc(func(receivedConfig *rest.Config, requestURL string, ready func()) (remotecommand.Executor, error) {
 			factoryConfig = receivedConfig
 			execURL = requestURL
 			return executorFunc(func(ctx context.Context, options remotecommand.StreamOptions) error {
 				executed = true
+				if started {
+					t.Error("runner reported Running before the executor established its transport")
+				}
+				ready()
 				if ctx == nil || options.Stdin != stdin || options.Stdout != stdout || options.Stderr != stderr ||
 					options.Tty || options.TerminalSizeQueue != resize {
 					t.Errorf("stream options were not forwarded: %#v", options)
@@ -134,7 +138,7 @@ func TestClientGoRunnerRejectsRecreatedPodBeforeExec(t *testing.T) {
 	factoryCalled := false
 	runner := ClientGoRunner{
 		Core: core, Config: config,
-		ExecutorFactory: ExecutorFactoryFunc(func(*rest.Config, string) (remotecommand.Executor, error) {
+		ExecutorFactory: ExecutorFactoryFunc(func(*rest.Config, string, func()) (remotecommand.Executor, error) {
 			factoryCalled = true
 			return nil, errors.New("must not construct an executor")
 		}),
@@ -146,5 +150,36 @@ func TestClientGoRunnerRejectsRecreatedPodBeforeExec(t *testing.T) {
 	}
 	if factoryCalled {
 		t.Fatal("executor factory was called for a recreated Pod")
+	}
+}
+
+func TestClientGoRunnerDoesNotReportRunningWhenTransportUpgradeFails(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"api-0","uid":"pod-uid"}}`)
+	}))
+	defer server.Close()
+	config := &rest.Config{Host: server.URL}
+	core, err := coreclient.NewForConfig(config)
+	if err != nil {
+		t.Fatalf("NewForConfig: %v", err)
+	}
+	upgradeErr := errors.New("upgrade rejected")
+	started := false
+	runner := ClientGoRunner{
+		Core: core, Config: config,
+		ExecutorFactory: ExecutorFactoryFunc(func(*rest.Config, string, func()) (remotecommand.Executor, error) {
+			return executorFunc(func(context.Context, remotecommand.StreamOptions) error {
+				return upgradeErr
+			}), nil
+		}),
+	}
+	err = runner.Run(context.Background(), testStart(1), RunOptions{Started: func() { started = true }})
+	if !errors.Is(err, upgradeErr) {
+		t.Fatalf("Run error = %v, want %v", err, upgradeErr)
+	}
+	if started {
+		t.Fatal("transport upgrade failure was reported as Running")
 	}
 }

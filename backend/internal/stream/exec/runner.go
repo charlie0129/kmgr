@@ -4,14 +4,17 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apihttpstream "k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes/scheme"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	httpstream "k8s.io/streaming/pkg/httpstream"
+	clientgospdy "k8s.io/client-go/transport/spdy"
+	streamhttp "k8s.io/streaming/pkg/httpstream"
 )
 
 type ClientGoRunner struct {
@@ -54,12 +57,15 @@ func (r ClientGoRunner) Run(ctx context.Context, request StartRequest, options R
 	if factory == nil {
 		factory = DefaultExecutorFactory{}
 	}
-	executor, err := factory.New(rest.CopyConfig(r.Config), requestURL)
+	var readyOnce sync.Once
+	ready := func() {
+		if options.Started != nil {
+			readyOnce.Do(options.Started)
+		}
+	}
+	executor, err := factory.New(rest.CopyConfig(r.Config), requestURL, ready)
 	if err != nil {
 		return err
-	}
-	if options.Started != nil {
-		options.Started()
 	}
 	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdin: options.Stdin, Stdout: options.Stdout, Stderr: options.Stderr,
@@ -69,20 +75,78 @@ func (r ClientGoRunner) Run(ctx context.Context, request StartRequest, options R
 
 type DefaultExecutorFactory struct{}
 
-func (DefaultExecutorFactory) New(config *rest.Config, requestURL string) (remotecommand.Executor, error) {
+func (DefaultExecutorFactory) New(
+	config *rest.Config,
+	requestURL string,
+	ready func(),
+) (remotecommand.Executor, error) {
 	parsedURL, err := url.Parse(requestURL)
 	if err != nil {
 		return nil, err
 	}
-	spdyExecutor, err := remotecommand.NewSPDYExecutor(config, http.MethodPost, parsedURL)
+	spdyTransport, spdyUpgrader, err := clientgospdy.RoundTripperFor(config)
 	if err != nil {
 		return nil, err
 	}
-	webSocketExecutor, err := remotecommand.NewWebSocketExecutor(config, http.MethodGet, requestURL)
+	spdyExecutor, err := remotecommand.NewSPDYExecutorForTransports(
+		spdyTransport,
+		readySPDYUpgrader{delegate: spdyUpgrader, ready: ready},
+		http.MethodPost,
+		parsedURL,
+	)
+	if err != nil {
+		return nil, err
+	}
+	webSocketExecutor, err := remotecommand.NewWebSocketExecutor(
+		configWithReadyTransport(config, ready),
+		http.MethodGet,
+		requestURL,
+	)
 	if err != nil {
 		return nil, err
 	}
 	return remotecommand.NewFallbackExecutor(webSocketExecutor, spdyExecutor, func(err error) bool {
-		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+		return streamhttp.IsUpgradeFailure(err) || streamhttp.IsHTTPSProxyError(err)
 	})
+}
+
+// The client-go Executor API does not expose a ready callback. These two
+// adapters signal only after the underlying WebSocket or SPDY upgrade has
+// succeeded, so a rejected upgrade cannot be presented as a running shell.
+type readyRoundTripper struct {
+	delegate http.RoundTripper
+	ready    func()
+}
+
+func (r readyRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := r.delegate.RoundTrip(request)
+	if err == nil && response != nil && r.ready != nil {
+		r.ready()
+	}
+	return response, err
+}
+
+type readySPDYUpgrader struct {
+	delegate clientgospdy.Upgrader
+	ready    func()
+}
+
+func (u readySPDYUpgrader) NewConnection(response *http.Response) (apihttpstream.Connection, error) {
+	connection, err := u.delegate.NewConnection(response)
+	if err == nil && u.ready != nil {
+		u.ready()
+	}
+	return connection, err
+}
+
+func configWithReadyTransport(config *rest.Config, ready func()) *rest.Config {
+	copy := rest.CopyConfig(config)
+	wrapped := copy.WrapTransport
+	copy.WrapTransport = func(roundTripper http.RoundTripper) http.RoundTripper {
+		if wrapped != nil {
+			roundTripper = wrapped(roundTripper)
+		}
+		return readyRoundTripper{delegate: roundTripper, ready: ready}
+	}
+	return copy
 }
