@@ -1691,15 +1691,32 @@ private extension NSToolbarItem.Identifier {
 }
 
 @MainActor
-private final class SidebarSectionView: NSVisualEffectView {
+private final class SidebarSectionRowView: NSTableRowView {
+    let materialView = NSVisualEffectView()
+
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+        materialView.identifier = .init("sidebar-section-background")
+        materialView.material = .sidebar
+        materialView.blendingMode = .withinWindow
+        materialView.state = .followsWindowActiveState
+        materialView.frame = bounds
+        materialView.autoresizingMask = [.width, .height]
+        addSubview(materialView, positioned: .below, relativeTo: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("programmatic") }
+}
+
+@MainActor
+private final class SidebarSectionCellView: NSTableCellView {
     let titleLabel = NSTextField(labelWithString: "")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
         self.identifier = identifier
-        material = .sidebar
-        blendingMode = .withinWindow
-        state = .followsWindowActiveState
 
         titleLabel.font = .systemFont(
             ofSize: NSFont.smallSystemFontSize,
@@ -1967,6 +1984,18 @@ private final class ResourceSidebarViewController: NSViewController,
 
     func outlineView(
         _ outlineView: NSOutlineView,
+        rowViewForItem item: Any
+    ) -> NSTableRowView? {
+        guard item is Section else { return nil }
+        let identifier = NSUserInterfaceItemIdentifier("sidebar-section-row")
+        return outlineView.makeView(
+            withIdentifier: identifier,
+            owner: self
+        ) as? SidebarSectionRowView ?? SidebarSectionRowView(identifier: identifier)
+    }
+
+    func outlineView(
+        _ outlineView: NSOutlineView,
         pasteboardWriterForItem item: Any
     ) -> (any NSPasteboardWriting)? {
         guard let resource = item as? DiscoveredResource, pinStore.contains(id: resource.id) else {
@@ -2018,7 +2047,7 @@ private final class ResourceSidebarViewController: NSViewController,
             let view = outlineView.makeView(
                 withIdentifier: identifier,
                 owner: self
-            ) as? SidebarSectionView ?? SidebarSectionView(identifier: identifier)
+            ) as? SidebarSectionCellView ?? SidebarSectionCellView(identifier: identifier)
             view.titleLabel.stringValue = section.title
             return view
         }

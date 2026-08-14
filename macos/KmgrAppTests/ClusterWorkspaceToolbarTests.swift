@@ -219,7 +219,7 @@ struct ClusterWorkspaceToolbarTests {
         #expect(statusBar.fittingSize.height <= 20)
     }
 
-    @Test("floating sidebar section rows supply a native vibrant background")
+    @Test("sidebar section material spans the full outline row")
     func sidebarSectionRowsHaveBackground() async throws {
         let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
         controller.showWindow(nil)
@@ -230,19 +230,30 @@ struct ClusterWorkspaceToolbarTests {
 
         try await waitUntil { outline.numberOfRows >= 2 }
         let sectionRow = try #require((0..<outline.numberOfRows).first { row in
-            outline.view(atColumn: 0, row: row, makeIfNecessary: true)
-                is NSVisualEffectView
+            outline.view(atColumn: 0, row: row, makeIfNecessary: true)?
+                .identifier?.rawValue == "sidebar-section-cell"
         })
-        let section = try #require(outline.view(
+        let sectionCell = try #require(outline.view(
             atColumn: 0,
             row: sectionRow,
             makeIfNecessary: true
-        ) as? NSVisualEffectView)
+        ))
+        let row = try #require(outline.rowView(atRow: sectionRow, makeIfNecessary: true))
+        let background = try #require(descendants(of: row).compactMap { $0 as? NSVisualEffectView }
+            .first { $0.identifier?.rawValue == "sidebar-section-background" })
+        outline.layoutSubtreeIfNeeded()
+        row.layoutSubtreeIfNeeded()
+        let backgroundFrame = row.convert(background.bounds, from: background)
+        let rowFrame = outline.convert(row.bounds, from: row)
 
-        #expect(section.material == .sidebar)
-        #expect(section.blendingMode == .withinWindow)
-        #expect(section.state == .followsWindowActiveState)
-        #expect(descendants(of: section).compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(background.material == .sidebar)
+        #expect(background.blendingMode == .withinWindow)
+        #expect(background.state == .followsWindowActiveState)
+        #expect(abs(backgroundFrame.minX - row.bounds.minX) < 1)
+        #expect(abs(backgroundFrame.maxX - row.bounds.maxX) < 1)
+        #expect(abs(rowFrame.minX - outline.bounds.minX) < 1)
+        #expect(abs(rowFrame.maxX - outline.bounds.maxX) < 1)
+        #expect(descendants(of: sectionCell).compactMap { ($0 as? NSTextField)?.stringValue }
             .contains { !$0.isEmpty })
     }
 
