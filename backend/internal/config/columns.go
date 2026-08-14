@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	"github.com/charlie0129/kmgr/backend/internal/view/columns"
+	corev1 "k8s.io/api/core/v1"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/yaml"
 )
@@ -271,6 +273,9 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 		)
 	}
 	normalizeLegacyNativeColumnTypes(&document)
+	if err := validateAcceleratorConfiguration(document.Accelerators); err != nil {
+		return nil, err
+	}
 
 	compiled := &CompiledColumns{
 		document: cloneDocument(document),
@@ -297,12 +302,15 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 			if strings.TrimSpace(definition.ID) == "" {
 				return nil, fmt.Errorf("views[%d].columns[%d].id must not be empty", viewIndex, columnIndex)
 			}
+			if strings.TrimSpace(definition.Title) == "" {
+				return nil, fmt.Errorf("views[%d].columns[%d].title must not be empty", viewIndex, columnIndex)
+			}
 			if _, duplicate := seenIDs[definition.ID]; duplicate {
 				return nil, fmt.Errorf("view %s/%s/%s has duplicate column ID %q", key.group, key.version, key.resource, definition.ID)
 			}
 			seenIDs[definition.ID] = struct{}{}
-			if definition.Width < 0 {
-				return nil, fmt.Errorf("column %q width must not be negative", definition.ID)
+			if !validColumnWidth(definition.Width) {
+				return nil, fmt.Errorf("column %q width must be finite and non-negative", definition.ID)
 			}
 			switch definition.Alignment {
 			case "", "leading", "center", "trailing":
@@ -346,6 +354,35 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 		compiled.views[key] = entry
 	}
 	return compiled, nil
+}
+
+func validColumnWidth(width float64) bool {
+	return width >= 0 && !math.IsNaN(width) && !math.IsInf(width, 0)
+}
+
+func validateAcceleratorConfiguration(configuration AcceleratorConfiguration) error {
+	names := make([]string, 0, len(configuration.Resources))
+	for name := range configuration.Resources {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		if !isExtendedResourceName(name) {
+			return fmt.Errorf("accelerators.resources key %q must be a valid Kubernetes extended-resource name", name)
+		}
+	}
+	return nil
+}
+
+// isExtendedResourceName mirrors the Kubernetes core resource contract without
+// importing the implementation-only kubernetes module: extended resources are
+// qualified, outside the native kubernetes.io namespace, and do not use the
+// requests. quota prefix.
+func isExtendedResourceName(name string) bool {
+	return strings.Contains(name, "/") &&
+		!strings.Contains(name, corev1.ResourceDefaultNamespacePrefix) &&
+		!strings.HasPrefix(name, corev1.DefaultResourceRequestsPrefix) &&
+		len(k8svalidation.IsQualifiedName(name)) == 0
 }
 
 // normalizeLegacyNativeColumnTypes accepts the two incorrect declared types

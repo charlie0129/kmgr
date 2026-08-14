@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -180,6 +181,100 @@ accelerators:
 	again := compiled.AcceleratorConfig()
 	if again.AutoDetectSuffixes[0] != "/gpu" || again.Resources["nvidia.com/gpu"].DisplayName != "GPU" {
 		t.Fatalf("AcceleratorConfig was not caller-owned: %#v", again)
+	}
+}
+
+func TestParseColumnsPreservesOmittedAndExplicitlyEmptyAcceleratorSuffixes(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, acceleratorYAML := range map[string]string{
+		"omitted":        "",
+		"explicit empty": "accelerators:\n  autoDetectSuffixes: []\n",
+	} {
+		name, acceleratorYAML := name, acceleratorYAML
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			compiled, err := ParseColumns([]byte(
+				"apiVersion: kmgr.charlie0129.dev/v1alpha1\n"+
+					"celEnvironment: kmgr.cel/v1\n"+acceleratorYAML,
+			), compiler)
+			if err != nil {
+				t.Fatal(err)
+			}
+			suffixes := compiled.AcceleratorConfig().AutoDetectSuffixes
+			if name == "omitted" && suffixes != nil {
+				t.Fatalf("omitted suffixes = %#v; want nil default sentinel", suffixes)
+			}
+			if name == "explicit empty" && (suffixes == nil || len(suffixes) != 0) {
+				t.Fatalf("explicitly empty suffixes = %#v; want non-nil empty slice", suffixes)
+			}
+		})
+	}
+}
+
+func TestParseColumnsRejectsInvalidPresentationAndAcceleratorSchema(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"missing title": `views:
+- match: {version: v1, resource: pods}
+  columns:
+  - {id: name, source: builtin, value: name, type: string}
+`,
+		"blank title": `views:
+- match: {version: v1, resource: pods}
+  columns:
+  - {id: name, title: "  ", source: builtin, value: name, type: string}
+`,
+		"unqualified accelerator": `accelerators:
+  resources:
+    gpu: {}
+`,
+		"native accelerator": `accelerators:
+  resources:
+    kubernetes.io/gpu: {}
+`,
+		"quota-prefixed accelerator": `accelerators:
+  resources:
+    requests.example.com/gpu: {}
+`,
+		"malformed accelerator": `accelerators:
+  resources:
+    bad/resource/name: {}
+`,
+	}
+	for name, body := range cases {
+		name, body := name, body
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			input := "apiVersion: kmgr.charlie0129.dev/v1alpha1\n" +
+				"celEnvironment: kmgr.cel/v1\n" + body
+			if _, err := ParseColumns([]byte(input), compiler); err == nil {
+				t.Fatalf("invalid schema accepted:\n%s", input)
+			}
+		})
+	}
+
+	for name, width := range map[string]float64{
+		"negative":          -1,
+		"positive infinity": math.Inf(1),
+		"negative infinity": math.Inf(-1),
+		"not a number":      math.NaN(),
+	} {
+		if validColumnWidth(width) {
+			t.Errorf("%s width was accepted", name)
+		}
+	}
+	for name, width := range map[string]float64{"zero": 0, "positive": 180.5} {
+		if !validColumnWidth(width) {
+			t.Errorf("%s width was rejected", name)
+		}
 	}
 }
 

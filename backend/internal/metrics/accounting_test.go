@@ -200,6 +200,22 @@ func TestDiscoverAcceleratorsExactKeysAndConfiguredResources(t *testing.T) {
 	}
 }
 
+func TestAcceleratorSuffixDiscoveryIsExactCaseSensitiveAndDisableable(t *testing.T) {
+	nodes := []*corev1.Node{node("node", resourceList(
+		"vendor.example/gpu", "1", "vendor.example/GPU", "2", "vendor.example/mygpu", "3",
+	), nil)}
+
+	if got := DiscoverResources(nodes, nil, AcceleratorConfig{}).Accelerators; !slices.Equal(got, []corev1.ResourceName{"vendor.example/gpu"}) {
+		t.Fatalf("default suffix discovery = %q; want only exact lowercase /gpu", got)
+	}
+	if got := DiscoverResources(nodes, nil, AcceleratorConfig{AutoDetectSuffixes: []string{}}).Accelerators; len(got) != 0 {
+		t.Fatalf("disabled suffix discovery = %q; want none", got)
+	}
+	if got := DiscoverResources(nodes, nil, AcceleratorConfig{AutoDetectSuffixes: []string{"/GPU"}}).Accelerators; !slices.Equal(got, []corev1.ResourceName{"vendor.example/GPU"}) {
+		t.Fatalf("custom suffix discovery = %q; want exact uppercase /GPU", got)
+	}
+}
+
 func TestEphemeralStorageDiscoveryAndUnavailableUsage(t *testing.T) {
 	pod := boundPod("pod", "node", corev1.PodRunning,
 		resourceList(corev1.ResourceEphemeralStorage, "2Gi"), resourceList(corev1.ResourceEphemeralStorage, "4Gi"))
