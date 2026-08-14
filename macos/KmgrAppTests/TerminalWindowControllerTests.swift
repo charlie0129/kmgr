@@ -8,7 +8,7 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Terminal windows", .serialized)
 struct TerminalWindowControllerTests {
-    @Test("fallback starts from terminal status before retiring the previous generation")
+    @Test("fallback waits for server acceptance before retiring the previous generation")
     func fallbackReplacesLiveLease() async throws {
         let provider = OrderedExecProvider()
         let controller = TerminalWindowController(
@@ -24,25 +24,32 @@ struct TerminalWindowControllerTests {
             generation: 1,
             status: ExecStatus(state: .exited, exitCode: 127, statusReason: "not found")
         )
-        try await waitForExecEvent(provider) {
-            $0.contains("opened:2") && $0.contains("cancel:1")
-                && $0.contains("terminated:1")
-        }
-
-        let events = provider.snapshot()
-        let openedReplacement = try #require(events.firstIndex(of: "opened:2"))
-        let cancelledOriginal = try #require(events.firstIndex(of: "cancel:1"))
-        let terminatedOriginal = try #require(events.firstIndex(of: "terminated:1"))
-        #expect(openedReplacement < cancelledOriginal)
-        #expect(openedReplacement < terminatedOriginal)
-        let replacement = try #require(provider.request(generation: 2))
-        #expect(replacement.command == ["/bin/sh"])
-        #expect(replacement.execSessionID == "exec-session")
+        try await waitForExecEvent(provider) { $0.contains("opened:2") }
+        try await Task.sleep(for: .milliseconds(30))
+        var events = provider.snapshot()
+        #expect(!events.contains("cancel:1"))
+        #expect(!events.contains("terminated:1"))
 
         provider.emitStatus(
             generation: 2,
             status: ExecStatus(state: .running, statusReason: "Running")
         )
+        try await waitForExecEvent(provider) {
+            $0.contains("cancel:1") && $0.contains("terminated:1")
+        }
+
+        events = provider.snapshot()
+        let openedReplacement = try #require(events.firstIndex(of: "opened:2"))
+        let acceptedReplacement = try #require(events.firstIndex(of: "emit:2"))
+        let cancelledOriginal = try #require(events.firstIndex(of: "cancel:1"))
+        let terminatedOriginal = try #require(events.firstIndex(of: "terminated:1"))
+        #expect(openedReplacement < acceptedReplacement)
+        #expect(acceptedReplacement < cancelledOriginal)
+        #expect(acceptedReplacement < terminatedOriginal)
+        let replacement = try #require(provider.request(generation: 2))
+        #expect(replacement.command == ["/bin/sh"])
+        #expect(replacement.execSessionID == "exec-session")
+
         let status = try terminalStatus(in: controller)
         try await waitForTerminalControl(status) { $0.stringValue == "Connected" }
         try await Task.sleep(for: .milliseconds(30))
@@ -75,18 +82,25 @@ struct TerminalWindowControllerTests {
         #expect(!events.contains("terminated:1"))
 
         reconnect.performClick(nil)
-        try await waitForExecEvent(provider) {
-            $0.contains("opened:3") && $0.contains("terminated:1")
-        }
+        try await waitForExecEvent(provider) { $0.contains("opened:3") }
+        try await Task.sleep(for: .milliseconds(30))
         events = provider.snapshot()
+        #expect(!events.contains("cancel:1"))
+        #expect(!events.contains("terminated:1"))
         let openedRetry = try #require(events.firstIndex(of: "opened:3"))
-        let cancelledOriginal = try #require(events.firstIndex(of: "cancel:1"))
-        #expect(openedRetry < cancelledOriginal)
 
         provider.emitStatus(
             generation: 3,
             status: ExecStatus(state: .running, statusReason: "Running")
         )
+        try await waitForExecEvent(provider) {
+            $0.contains("cancel:1") && $0.contains("terminated:1")
+        }
+        events = provider.snapshot()
+        let acceptedRetry = try #require(events.firstIndex(of: "emit:3"))
+        let cancelledOriginal = try #require(events.firstIndex(of: "cancel:1"))
+        #expect(openedRetry < acceptedRetry)
+        #expect(acceptedRetry < cancelledOriginal)
         let status = try terminalStatus(in: controller)
         try await waitForTerminalControl(status) { $0.stringValue == "Connected" }
         try await Task.sleep(for: .milliseconds(30))
@@ -183,7 +197,10 @@ private final class OrderedExecProvider: ExecSessionProviding, @unchecked Sendab
     }
 
     func emitStatus(generation: UInt64, status: ExecStatus) {
-        let session = lock.withLock { sessions[generation] }
+        let session = lock.withLock {
+            recordedEvents.append("emit:\(generation)")
+            return sessions[generation]
+        }
         session?.emit(.status(
             cursor: StreamCursor(generation: generation, sequence: 1),
             status: status

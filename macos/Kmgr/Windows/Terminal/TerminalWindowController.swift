@@ -88,6 +88,12 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     private var connectionGeneration: UInt64?
     private var session: (any ExecSession)?
     private var streamTask: Task<Void, Never>?
+    // A replacement session is only locally constructed until its first valid
+    // server event. Keep the previous generation alive across that interval so
+    // the backend can transfer its retained cluster-session authority even
+    // after the originating workspace has closed.
+    private var retainedSession: (any ExecSession)?
+    private var retainedStreamTask: Task<Void, Never>?
     private var connectionTask: Task<Void, Never>?
     private var commandTask: Task<Void, Never>?
     private var commandContinuation: AsyncStream<TerminalCommand>.Continuation?
@@ -171,12 +177,19 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         connectionGeneration = nil
         streamTask?.cancel()
         streamTask = nil
+        retainedStreamTask?.cancel()
+        retainedStreamTask = nil
         stopCommandPump()
         let activeSession = session
+        let previousSession = retainedSession
         session = nil
+        retainedSession = nil
         activeGeneration = nil
-        if let activeSession {
-            Task { await activeSession.cancel() }
+        if activeSession != nil || previousSession != nil {
+            Task {
+                await activeSession?.cancel()
+                await previousSession?.cancel()
+            }
         }
     }
 
@@ -267,11 +280,13 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             Task { await opened.cancel() }
             return
         }
-        let previousSession = session
-        let previousStreamTask = streamTask
+        let previousSession = session ?? retainedSession
+        let previousStreamTask = streamTask ?? retainedStreamTask
 
         session = opened
         activeGeneration = attemptGeneration
+        retainedSession = previousSession
+        retainedStreamTask = previousStreamTask
         startCommandPump(session: opened, generation: attemptGeneration)
         lastSentSize = initialSize
         streamTask = Task { [weak self] in
@@ -283,6 +298,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             do {
                 for try await event in opened.events {
                     guard !Task.isCancelled else { break }
+                    acceptReplacement(generation: attemptGeneration)
                     apply(event, generation: attemptGeneration)
                 }
             } catch is CancellationError {
@@ -292,10 +308,17 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             finishStream(generation: attemptGeneration, error: streamError)
         }
 
+    }
+
+    private func acceptReplacement(generation attemptGeneration: UInt64) {
+        guard activeGeneration == attemptGeneration,
+            let previousSession = retainedSession
+        else { return }
+        let previousStreamTask = retainedStreamTask
+        retainedSession = nil
+        retainedStreamTask = nil
         previousStreamTask?.cancel()
-        if let previousSession {
-            Task { await previousSession.cancel() }
-        }
+        Task { await previousSession.cancel() }
     }
 
     private func finishStream(generation attemptGeneration: UInt64, error: Error?) {
