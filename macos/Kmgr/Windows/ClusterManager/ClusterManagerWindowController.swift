@@ -321,12 +321,19 @@ private final class ClusterManagerViewController: NSViewController,
                 : context.sourcePaths.joined(separator: "\n")
         }
 
-        cell.textField?.stringValue = value
-        cell.textField?.toolTip = tooltip
-        cell.toolTip = tooltip
-        cell.textField?.textColor = context.authentication.isSupported
+        let textColor: NSColor = context.authentication.isSupported
             ? .labelColor
             : .secondaryLabelColor
+        if let textField = cell.textField {
+            ClusterManagerSearchHighlighting.apply(
+                value,
+                query: model.searchQuery,
+                color: textColor,
+                to: textField
+            )
+            textField.toolTip = tooltip
+        }
+        cell.toolTip = tooltip
         return cell
     }
 
@@ -790,5 +797,95 @@ private final class ContextTableView: NSTableView {
             return
         }
         super.keyDown(with: event)
+    }
+}
+
+/// Produces attributed text only for cells requested by AppKit. NSTableView's
+/// reuse/virtualization therefore bounds this work to the visible viewport,
+/// even when the chooser contains thousands of contexts.
+@MainActor
+enum ClusterManagerSearchHighlighting {
+    static func apply(
+        _ value: String,
+        query: String,
+        color: NSColor,
+        to textField: NSTextField
+    ) {
+        let baseFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textField.font = baseFont
+        textField.textColor = color
+        textField.stringValue = value
+
+        let ranges = matchingRanges(in: value, query: query)
+        guard !ranges.isEmpty else { return }
+
+        let fullRange = NSRange(location: 0, length: (value as NSString).length)
+        let highlighted = NSMutableAttributedString(
+            string: value,
+            attributes: [
+                .font: baseFont,
+                .foregroundColor: color,
+            ]
+        )
+        let boldFont = NSFontManager.shared.convert(
+            baseFont,
+            toHaveTrait: .boldFontMask
+        )
+        for range in ranges where NSMaxRange(range) <= NSMaxRange(fullRange) {
+            highlighted.addAttribute(.font, value: boldFont, range: range)
+        }
+        textField.attributedStringValue = highlighted
+    }
+
+    static func matchingRanges(in value: String, query: String) -> [NSRange] {
+        let terms = query
+            .split(whereSeparator: \Character.isWhitespace)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        guard !terms.isEmpty, !value.isEmpty else { return [] }
+
+        let source = value as NSString
+        let options: NSString.CompareOptions = [
+            .caseInsensitive,
+            .diacriticInsensitive,
+            .widthInsensitive,
+        ]
+        var matches: [NSRange] = []
+        for term in terms {
+            var searchRange = NSRange(location: 0, length: source.length)
+            while searchRange.length > 0 {
+                let match = source.range(
+                    of: term,
+                    options: options,
+                    range: searchRange,
+                    locale: .current
+                )
+                guard match.location != NSNotFound else { break }
+                matches.append(match)
+                let nextLocation = NSMaxRange(match)
+                searchRange = NSRange(
+                    location: nextLocation,
+                    length: source.length - nextLocation
+                )
+            }
+        }
+
+        let sorted = matches.sorted {
+            if $0.location != $1.location { return $0.location < $1.location }
+            return $0.length < $1.length
+        }
+        var merged: [NSRange] = []
+        for range in sorted {
+            guard let last = merged.last else {
+                merged.append(range)
+                continue
+            }
+            if range.location <= NSMaxRange(last) {
+                merged[merged.count - 1] = NSUnionRange(last, range)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
     }
 }

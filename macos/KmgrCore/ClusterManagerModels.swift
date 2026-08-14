@@ -299,11 +299,16 @@ public enum ClusterContextListPhase: Hashable, Sendable {
 /// discovery results.
 public struct ClusterManagerModel: Hashable, Sendable {
     public private(set) var allContexts: [ClusterContextSummary]
+    /// The stable projection consumed by AppKit table callbacks. Search work
+    /// happens only when the query or discovery snapshot changes; merely
+    /// asking for a row must remain constant-time.
+    public private(set) var displayedContexts: [ClusterContextSummary]
     public private(set) var searchQuery: String
     public private(set) var selectedContextID: String?
     public var selectedContextName: String? { selectedContext?.name }
     public private(set) var phase: ClusterContextListPhase
     public private(set) var loadRevision: UInt64
+    private var foldedSearchableText: [String]?
 
     public init(
         contexts: [ClusterContextSummary] = [],
@@ -313,26 +318,16 @@ public struct ClusterManagerModel: Hashable, Sendable {
     ) {
         let normalizedContexts = Self.normalized(contexts)
         self.allContexts = normalizedContexts
+        self.displayedContexts = normalizedContexts
         self.searchQuery = searchQuery
         self.selectedContextID = selectedContextName.flatMap { name in
             normalizedContexts.first(where: { $0.name == name })?.id
         }
         self.phase = phase
         self.loadRevision = 0
+        self.foldedSearchableText = nil
+        refreshDisplayedContexts()
         reconcileSelection()
-    }
-
-    public var displayedContexts: [ClusterContextSummary] {
-        let terms = searchQuery
-            .split(whereSeparator: \Character.isWhitespace)
-            .map { Self.fold(String($0)) }
-            .filter { !$0.isEmpty }
-        guard !terms.isEmpty else { return allContexts }
-
-        return allContexts.filter { context in
-            let searchable = Self.fold(context.searchableText)
-            return terms.allSatisfy(searchable.contains)
-        }
     }
 
     public var selectedContext: ClusterContextSummary? {
@@ -362,6 +357,8 @@ public struct ClusterManagerModel: Hashable, Sendable {
         phase = .loading(reload: reload)
         if !reload {
             allContexts.removeAll(keepingCapacity: true)
+            displayedContexts.removeAll(keepingCapacity: true)
+            foldedSearchableText = nil
             selectedContextID = nil
         }
         return loadRevision
@@ -374,6 +371,8 @@ public struct ClusterManagerModel: Hashable, Sendable {
     ) -> Bool {
         guard revision == loadRevision else { return false }
         allContexts = Self.normalized(contexts)
+        foldedSearchableText = nil
+        refreshDisplayedContexts()
         phase = .loaded
         reconcileSelection()
         return true
@@ -391,7 +390,9 @@ public struct ClusterManagerModel: Hashable, Sendable {
     }
 
     public mutating func setSearchQuery(_ query: String) {
+        guard query != searchQuery else { return }
         searchQuery = query
+        refreshDisplayedContexts()
         reconcileSelection()
     }
 
@@ -414,13 +415,40 @@ public struct ClusterManagerModel: Hashable, Sendable {
     }
 
     private mutating func reconcileSelection() {
-        let displayed = displayedContexts
         if let selectedContextID,
-            displayed.contains(where: { $0.id == selectedContextID })
+            displayedContexts.contains(where: { $0.id == selectedContextID })
         {
             return
         }
-        selectedContextID = displayed.first(where: \.isCurrent)?.id ?? displayed.first?.id
+        selectedContextID = displayedContexts.first(where: \.isCurrent)?.id
+            ?? displayedContexts.first?.id
+    }
+
+    private mutating func refreshDisplayedContexts() {
+        let terms = searchQuery
+            .split(whereSeparator: \Character.isWhitespace)
+            .map { Self.fold(String($0)) }
+            .filter { !$0.isEmpty }
+        guard !terms.isEmpty else {
+            displayedContexts = allContexts
+            return
+        }
+
+        if foldedSearchableText?.count != allContexts.count {
+            foldedSearchableText = allContexts.map { Self.fold($0.searchableText) }
+        }
+        guard let foldedSearchableText else {
+            displayedContexts = []
+            return
+        }
+
+        var matches: [ClusterContextSummary] = []
+        matches.reserveCapacity(allContexts.count)
+        for index in allContexts.indices
+        where terms.allSatisfy({ foldedSearchableText[index].contains($0) }) {
+            matches.append(allContexts[index])
+        }
+        displayedContexts = matches
     }
 
     private static func normalized(
