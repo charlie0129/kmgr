@@ -87,9 +87,10 @@ app-wide Port Forwards window.
   and watch updates do not retarget a selection by row index.
 - Details provide Summary, YAML, Events, Relationships, Metrics where
   meaningful, and a Data editor for ConfigMaps and Secrets.
-- YAML edits are parsed in Go, identity-checked, dry-run with server-side
-  apply, shown as a semantic diff, and committed with resource-version conflict
-  protection.
+- YAML edits are parsed in Go, identity-checked, and dry-run as an exact
+  material JSON Patch before the semantic diff is shown. UID/resourceVersion
+  test operations prevent retargeting or stale writes, unchanged unknown fields
+  are preserved, and force field ownership is unsupported.
 - ConfigMap and Secret keys support text and raw binary values. Secret bytes
   are decoded/encoded by the engine and concealed by default in the UI.
 - Logs support one or many UID-pinned Pods plus Deployments, StatefulSets,

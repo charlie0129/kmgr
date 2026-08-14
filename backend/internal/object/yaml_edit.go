@@ -13,15 +13,21 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
+	kubejson "k8s.io/apimachinery/pkg/util/json"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	sigyaml "sigs.k8s.io/yaml"
 )
 
 const YAMLFieldManager = "kmgr"
 
-var ErrInvalidYAML = errors.New("YAML does not contain exactly one Kubernetes object")
+var (
+	ErrInvalidYAML                   = errors.New("YAML does not contain exactly one Kubernetes object")
+	ErrYAMLForceOwnershipUnsupported = errors.New("force field ownership is unavailable for material-diff YAML edits")
+)
 
 type YAMLIdentityMismatchError struct {
 	Field    string
@@ -52,7 +58,7 @@ type AppliedYAML struct {
 }
 
 // PrepareYAML always starts with an authoritative GET and asks the API server
-// to dry-run the exact server-side apply that ApplyYAML would perform.
+// to dry-run the exact minimal JSON patch that ApplyYAML would perform.
 func (r *Reader) PrepareYAML(
 	ctx context.Context,
 	identity Identity,
@@ -60,29 +66,41 @@ func (r *Reader) PrepareYAML(
 	expectedResourceVersion string,
 	forceFieldOwnership bool,
 ) (PreparedYAML, error) {
-	current, desired, normalized, resource, err := r.prepareYAMLInput(
+	if forceFieldOwnership {
+		return PreparedYAML{}, ErrYAMLForceOwnershipUnsupported
+	}
+	prepared, err := r.prepareYAMLInput(
 		ctx, identity, yamlUTF8, expectedResourceVersion,
 	)
 	if err != nil {
 		return PreparedYAML{}, err
 	}
-	dryRun, err := resource.Apply(ctx, identity.Name, desired.DeepCopy(), metav1.ApplyOptions{
-		DryRun:       []string{metav1.DryRunAll},
-		Force:        forceFieldOwnership,
-		FieldManager: YAMLFieldManager,
-	})
-	if err != nil {
-		return PreparedYAML{}, fmt.Errorf("dry-run server-side apply: %w", err)
+	dryRun := prepared.current
+	if len(prepared.patch) != 0 {
+		dryRun, err = prepared.resource.Patch(
+			ctx,
+			identity.Name,
+			types.JSONPatchType,
+			prepared.patch,
+			metav1.PatchOptions{DryRun: []string{metav1.DryRunAll}, FieldManager: YAMLFieldManager},
+		)
+		if err != nil {
+			err = r.classifyYAMLPatchError(ctx, identity, expectedResourceVersion, err)
+			return PreparedYAML{}, fmt.Errorf("dry-run JSON patch: %w", err)
+		}
+		if err := validatePatchedYAMLIdentity(identity, dryRun); err != nil {
+			return PreparedYAML{}, err
+		}
 	}
 	return PreparedYAML{
-		Identity: identity, CurrentResourceVersion: current.GetResourceVersion(),
-		NormalizedYAML: normalized, Diff: semanticYAMLDiff(current, dryRun),
+		Identity: identity, CurrentResourceVersion: prepared.current.GetResourceVersion(),
+		NormalizedYAML: prepared.normalized, Diff: semanticYAMLDiff(prepared.current, dryRun),
 	}, nil
 }
 
 // ApplyYAML repeats all preparation checks immediately before mutation. The
-// resourceVersion embedded in the apply object is also an API-side
-// precondition, closing the race between the fresh GET, dry-run, and apply.
+// UID and resourceVersion test operations in the JSON patch are API-side
+// preconditions, closing the race between the fresh GET, dry-run, and patch.
 func (r *Reader) ApplyYAML(
 	ctx context.Context,
 	identity Identity,
@@ -90,30 +108,52 @@ func (r *Reader) ApplyYAML(
 	expectedResourceVersion string,
 	forceFieldOwnership bool,
 ) (AppliedYAML, error) {
-	_, desired, _, resource, err := r.prepareYAMLInput(ctx, identity, yamlUTF8, expectedResourceVersion)
+	if forceFieldOwnership {
+		return AppliedYAML{}, ErrYAMLForceOwnershipUnsupported
+	}
+	prepared, err := r.prepareYAMLInput(ctx, identity, yamlUTF8, expectedResourceVersion)
 	if err != nil {
 		return AppliedYAML{}, err
 	}
-	options := metav1.ApplyOptions{
-		Force: forceFieldOwnership, FieldManager: YAMLFieldManager,
+	if len(prepared.patch) == 0 {
+		return AppliedYAML{
+			Identity: identity, NewResourceVersion: prepared.current.GetResourceVersion(),
+		}, nil
 	}
-	if _, err := resource.Apply(ctx, identity.Name, desired.DeepCopy(), metav1.ApplyOptions{
-		DryRun: []string{metav1.DryRunAll}, Force: options.Force,
-		FieldManager: options.FieldManager,
-	}); err != nil {
-		return AppliedYAML{}, fmt.Errorf("dry-run server-side apply: %w", err)
+	if dryRun, err := prepared.resource.Patch(
+		ctx,
+		identity.Name,
+		types.JSONPatchType,
+		prepared.patch,
+		metav1.PatchOptions{DryRun: []string{metav1.DryRunAll}, FieldManager: YAMLFieldManager},
+	); err != nil {
+		err = r.classifyYAMLPatchError(ctx, identity, expectedResourceVersion, err)
+		return AppliedYAML{}, fmt.Errorf("dry-run JSON patch: %w", err)
+	} else if err := validatePatchedYAMLIdentity(identity, dryRun); err != nil {
+		return AppliedYAML{}, err
 	}
-	updated, err := resource.Apply(ctx, identity.Name, desired, options)
+	updated, err := prepared.resource.Patch(
+		ctx,
+		identity.Name,
+		types.JSONPatchType,
+		prepared.patch,
+		metav1.PatchOptions{FieldManager: YAMLFieldManager},
+	)
 	if err != nil {
-		return AppliedYAML{}, fmt.Errorf("server-side apply: %w", err)
+		err = r.classifyYAMLPatchError(ctx, identity, expectedResourceVersion, err)
+		return AppliedYAML{}, fmt.Errorf("JSON patch: %w", err)
 	}
-	if string(updated.GetUID()) != identity.UID {
-		return AppliedYAML{}, &IdentityChangedError{
-			ExpectedUID: identity.UID, ActualUID: string(updated.GetUID()),
-			Namespace: identity.Namespace, Name: identity.Name,
-		}
+	if err := validatePatchedYAMLIdentity(identity, updated); err != nil {
+		return AppliedYAML{}, err
 	}
 	return AppliedYAML{Identity: identity, NewResourceVersion: updated.GetResourceVersion()}, nil
+}
+
+type preparedYAMLInput struct {
+	current    *unstructured.Unstructured
+	normalized []byte
+	patch      []byte
+	resource   dynamicResource
 }
 
 func (r *Reader) prepareYAMLInput(
@@ -121,55 +161,189 @@ func (r *Reader) prepareYAMLInput(
 	identity Identity,
 	yamlUTF8 []byte,
 	expectedResourceVersion string,
-) (*unstructured.Unstructured, *unstructured.Unstructured, []byte, dynamicResource, error) {
+) (preparedYAMLInput, error) {
 	if err := identity.Validate(); err != nil {
-		return nil, nil, nil, nil, err
+		return preparedYAMLInput{}, err
 	}
 	if strings.TrimSpace(expectedResourceVersion) == "" {
-		return nil, nil, nil, nil, &ResourceVersionConflictError{Expected: expectedResourceVersion}
+		return preparedYAMLInput{}, &ResourceVersionConflictError{Expected: expectedResourceVersion}
 	}
 	desired, err := parseSingleYAMLObject(yamlUTF8)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return preparedYAMLInput{}, err
 	}
 	current, err := r.Get(ctx, identity)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return preparedYAMLInput{}, err
 	}
 	if current.GetResourceVersion() != expectedResourceVersion {
-		return nil, nil, nil, nil, &ResourceVersionConflictError{
+		return preparedYAMLInput{}, &ResourceVersionConflictError{
 			Expected: expectedResourceVersion, Current: current.GetResourceVersion(),
 		}
 	}
 	if err := validateYAMLIdentity(identity, current, desired, expectedResourceVersion); err != nil {
-		return nil, nil, nil, nil, err
+		return preparedYAMLInput{}, err
 	}
 
 	// These fields are owned by the API server or status controllers and are
-	// never part of a generic editor apply.
-	unstructured.RemoveNestedField(desired.Object, "status")
-	unstructured.RemoveNestedField(desired.Object, "metadata", "managedFields")
+	// never part of a generic editor patch or its normalized preview.
+	desired = sanitizeYAMLEditObject(desired)
 	desired.SetResourceVersion(expectedResourceVersion)
+	patch, err := minimalYAMLJSONPatch(sanitizeYAMLEditObject(current), desired, identity, expectedResourceVersion)
+	if err != nil {
+		return preparedYAMLInput{}, err
+	}
 
 	normalizedJSON, err := desired.MarshalJSON()
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("normalize YAML object: %w", err)
+		return preparedYAMLInput{}, fmt.Errorf("normalize YAML object: %w", err)
 	}
 	normalized, err := sigyaml.JSONToYAML(normalizedJSON)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("format normalized YAML: %w", err)
+		return preparedYAMLInput{}, fmt.Errorf("format normalized YAML: %w", err)
 	}
 	resource, err := r.resolver.Resource(identity.SessionID, identity.GVR(), identity.Namespace)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return preparedYAMLInput{}, err
 	}
-	return current, desired, normalized, resource, nil
+	return preparedYAMLInput{current: current, normalized: normalized, patch: patch, resource: resource}, nil
 }
 
 // dynamicResource names the subset used here without widening Resolver's
 // public contract.
 type dynamicResource interface {
-	Apply(context.Context, string, *unstructured.Unstructured, metav1.ApplyOptions, ...string) (*unstructured.Unstructured, error)
+	Patch(context.Context, string, types.PatchType, []byte, metav1.PatchOptions, ...string) (*unstructured.Unstructured, error)
+}
+
+func sanitizeYAMLEditObject(value *unstructured.Unstructured) *unstructured.Unstructured {
+	if value == nil {
+		return nil
+	}
+	result := value.DeepCopy()
+	unstructured.RemoveNestedField(result.Object, "status")
+	for _, field := range []string{
+		"managedFields",
+		"generation",
+		"creationTimestamp",
+		"deletionTimestamp",
+		"deletionGracePeriodSeconds",
+		"selfLink",
+	} {
+		unstructured.RemoveNestedField(result.Object, "metadata", field)
+	}
+	return result
+}
+
+// minimalYAMLJSONPatch builds the material RFC 6902 change only. Map fields
+// omitted from the edited YAML are removed, explicit nulls remain null values,
+// and changed lists are replaced atomically. Unchanged maps, lists, scalars,
+// and unknown CRD fields do not enter the patch.
+func minimalYAMLJSONPatch(
+	current, desired *unstructured.Unstructured,
+	identity Identity,
+	expectedResourceVersion string,
+) ([]byte, error) {
+	if current == nil || desired == nil {
+		return nil, errors.New("cannot create a YAML JSON patch without current and desired objects")
+	}
+	material := make([]map[string]any, 0, 16)
+	appendMinimalJSONPatch(&material, "", current.Object, desired.Object)
+	if len(material) == 0 {
+		return nil, nil
+	}
+	// The request URL pins GVR, namespace, and name. Test operations close
+	// same-name recreation and concurrent-update races before any mutation.
+	operations := make([]map[string]any, 0, len(material)+2)
+	operations = append(operations,
+		map[string]any{"op": "test", "path": "/metadata/uid", "value": identity.UID},
+		map[string]any{"op": "test", "path": "/metadata/resourceVersion", "value": expectedResourceVersion},
+	)
+	operations = append(operations, material...)
+	encoded, err := json.Marshal(operations)
+	if err != nil {
+		return nil, fmt.Errorf("encode YAML JSON patch: %w", err)
+	}
+	return encoded, nil
+}
+
+func appendMinimalJSONPatch(result *[]map[string]any, path string, current, desired map[string]any) {
+	keys := make([]string, 0, len(current)+len(desired))
+	seen := make(map[string]struct{}, len(current)+len(desired))
+	for key := range current {
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	for key := range desired {
+		if _, exists := seen[key]; !exists {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		currentValue, currentExists := current[key]
+		desiredValue, desiredExists := desired[key]
+		fieldPath := path + "/" + escapeJSONPointerToken(key)
+		switch {
+		case !desiredExists:
+			*result = append(*result, map[string]any{"op": "remove", "path": fieldPath})
+		case !currentExists:
+			*result = append(*result, map[string]any{"op": "add", "path": fieldPath, "value": desiredValue})
+		default:
+			currentMap, currentIsMap := currentValue.(map[string]any)
+			desiredMap, desiredIsMap := desiredValue.(map[string]any)
+			if currentIsMap && desiredIsMap {
+				appendMinimalJSONPatch(result, fieldPath, currentMap, desiredMap)
+				continue
+			}
+			if !reflect.DeepEqual(currentValue, desiredValue) {
+				*result = append(*result, map[string]any{"op": "replace", "path": fieldPath, "value": desiredValue})
+			}
+		}
+	}
+}
+
+func escapeJSONPointerToken(value string) string {
+	value = strings.ReplaceAll(value, "~", "~0")
+	return strings.ReplaceAll(value, "/", "~1")
+}
+
+func validatePatchedYAMLIdentity(identity Identity, value *unstructured.Unstructured) error {
+	if value == nil {
+		return errors.New("Kubernetes API returned no object for YAML patch")
+	}
+	if actualUID := string(value.GetUID()); actualUID != identity.UID {
+		return &IdentityChangedError{
+			ExpectedUID: identity.UID, ActualUID: actualUID,
+			Namespace: identity.Namespace, Name: identity.Name,
+		}
+	}
+	return nil
+}
+
+func (r *Reader) classifyYAMLPatchError(
+	ctx context.Context,
+	identity Identity,
+	expectedResourceVersion string,
+	patchErr error,
+) error {
+	if !apierrors.IsConflict(patchErr) && !apierrors.IsInvalid(patchErr) && !apierrors.IsBadRequest(patchErr) {
+		return patchErr
+	}
+	latest, err := r.Get(ctx, identity)
+	var changed *IdentityChangedError
+	if errors.As(err, &changed) {
+		return err
+	}
+	if apierrors.IsNotFound(err) {
+		return err
+	}
+	if err == nil && latest.GetResourceVersion() != expectedResourceVersion {
+		return &ResourceVersionConflictError{
+			Expected: expectedResourceVersion,
+			Current:  latest.GetResourceVersion(),
+		}
+	}
+	return patchErr
 }
 
 func parseSingleYAMLObject(value []byte) (*unstructured.Unstructured, error) {
@@ -197,7 +371,7 @@ func parseSingleYAMLObject(value []byte) (*unstructured.Unstructured, error) {
 			return nil, fmt.Errorf("%w: multiple YAML documents are not supported", ErrInvalidYAML)
 		}
 		var object map[string]any
-		if err := json.Unmarshal(jsonValue, &object); err != nil || object == nil {
+		if err := kubejson.Unmarshal(jsonValue, &object); err != nil || object == nil {
 			return nil, fmt.Errorf("%w: document must be a mapping", ErrInvalidYAML)
 		}
 		result = &unstructured.Unstructured{Object: object}
@@ -284,7 +458,15 @@ func appendSemanticDiff(result *[]SemanticDiff, path string, before, after any) 
 			if path != "" {
 				child = path + "." + key
 			}
-			appendSemanticDiff(result, child, left[key], right[key])
+			leftValue, leftExists := left[key]
+			if !leftExists {
+				leftValue = missingSemanticDiffValue{}
+			}
+			rightValue, rightExists := right[key]
+			if !rightExists {
+				rightValue = missingSemanticDiffValue{}
+			}
+			appendSemanticDiff(result, child, leftValue, rightValue)
 		}
 		return
 	}
@@ -293,9 +475,14 @@ func appendSemanticDiff(result *[]SemanticDiff, path string, before, after any) 
 	})
 }
 
+type missingSemanticDiffValue struct{}
+
 func summarizeDiffValue(value any, path string) string {
-	if value == nil {
+	if _, missing := value.(missingSemanticDiffValue); missing {
 		return "<absent>"
+	}
+	if value == nil {
+		return "null"
 	}
 	if strings.HasPrefix(path, "data.") || strings.HasPrefix(path, "stringData.") || strings.HasPrefix(path, "binaryData.") {
 		return "<redacted>"
