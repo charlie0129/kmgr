@@ -278,11 +278,13 @@ Pod and Node views use the built-in IDs `cpu`, `memory`, and
 limit; Nodes render actual usage / allocatable, with physical capacity in the
 tooltip. These cells remain typed `resourceUsage` values even when actual usage
 is unavailable, so scheduler accounting is not confused with measured usage.
-CPU display values use millicores below one core and compact decimal cores at
-or above one core. Memory, ephemeral storage, and each exact huge-page resource
-use the largest readable binary unit (`Ki`, `Mi`, `Gi`, and so on), with up to
-two fractional digits. Tooltips retain the exact canonical Kubernetes
-Quantity, and sorting continues to use the unformatted typed numeric value.
+CPU display values consistently use cores with adaptive precision: values of
+ten or more use one fractional digit, ordinary fractions use two, and tiny
+values preserve the leading fractional zeroes plus roughly three significant
+digits. Memory, ephemeral storage, and each exact huge-page resource use the
+largest readable binary unit (`Ki`, `Mi`, `Gi`, and so on), with up to two
+fractional digits. Tooltips retain the exact canonical Kubernetes Quantity,
+and sorting continues to use the unformatted typed numeric value.
 Generic extended resources retain their canonical Quantity text because their
 units are resource-specific counts rather than bytes.
 
@@ -310,10 +312,11 @@ allocation as utilization.
 Once the base Pod or Node snapshot has produced rows, or has completed empty,
 Kmgr performs a cache-only catalog query for optional scheduler resources. It
 uses exact resource names: equal friendly labels never merge vendor resources.
-Present huge-page and accelerator entries become enabled transient columns;
+Present huge-page entries are auto-added as disabled transient columns, while
+present accelerator entries retain their enabled transient behavior;
 configured-but-absent entries remain disabled. Ephemeral storage remains in
 the existing built-in column instead of creating a duplicate exact-resource
-column.
+column, and that built-in starts disabled in the default Pod and Node layouts.
 
 Pod and Node stream messages carry only a bounded advisory set of exact
 scheduler resource names observed behind their compact rows. A new name, or an

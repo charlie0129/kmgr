@@ -236,7 +236,12 @@ struct OptionalResourceColumnOverlayTests {
         ])
         #expect(overlay.definitions.map(\.id) == overlay.definitions.map(\.value))
         #expect(overlay.definitions.map(\.title) == ["GPU", "Huge Pages (2Mi)"])
-        #expect(overlay.definitions.allSatisfy { $0.isEnabled })
+        #expect(overlay.definitions.first {
+            $0.value == "resource:aliyun.com/ppu"
+        }?.isEnabled == true)
+        #expect(overlay.definitions.first {
+            $0.value == "resource:hugepages-2Mi"
+        }?.isEnabled == false)
 
         let applied = overlay.applying(to: persisted)
         #expect(applied.prefix(persisted.count).elementsEqual(persisted))
@@ -290,6 +295,7 @@ struct OptionalResourceColumnOverlayTests {
             persistedDefinitions: []
         )
         #expect(overlay.definitions.map(\.value) == ["resource:hugepages-2Mi"])
+        #expect(overlay.definitions.allSatisfy { !$0.isEnabled })
 
         try overlay.reconcile(
             Self.catalog(resources: [Self.entry(
@@ -302,6 +308,7 @@ struct OptionalResourceColumnOverlayTests {
             persistedDefinitions: []
         )
         #expect(overlay.definitions.map(\.value) == ["resource:hugepages-1Gi"])
+        #expect(overlay.definitions.allSatisfy { !$0.isEnabled })
     }
 
     @Test("newly persisted definitions override an existing overlay immediately")

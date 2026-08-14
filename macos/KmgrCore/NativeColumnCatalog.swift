@@ -219,7 +219,12 @@ public enum NativeColumnCatalog {
             values += ["status", "age"]
         }
         return values.compactMap { value in
-            descriptor(value: value)?.definition()
+            // Ephemeral storage remains in the default definition set so it
+            // is immediately discoverable and can be enabled in Columns, but
+            // does not consume table width or activate a provider by default.
+            descriptor(value: value)?.definition(
+                enabled: value != "ephemeral-storage"
+            )
         }
     }
 

@@ -33,6 +33,7 @@ import Testing
     )
     #expect(pods.first(where: { $0.value == "ready" })?.type == .string)
     #expect(pods.first(where: { $0.value == "age" })?.type == .duration)
+    #expect(pods.first(where: { $0.value == "ephemeral-storage" })?.isEnabled == false)
     #expect(pods.allSatisfy { definition in
         guard let value = definition.value,
             let descriptor = NativeColumnCatalog.descriptor(
@@ -48,6 +49,7 @@ import Testing
         group: "", version: "v1", resource: "nodes", namespaced: false
     )
     #expect(nodes.contains(where: { $0.value == "cpu" && $0.type == .resourceUsage }))
+    #expect(nodes.first(where: { $0.value == "ephemeral-storage" })?.isEnabled == false)
     #expect(!nodes.contains(where: { $0.value == "ready" || $0.value == "node" }))
 
     let custom = NativeColumnCatalog.defaultDefinitions(

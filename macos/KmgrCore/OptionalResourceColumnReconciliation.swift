@@ -95,10 +95,12 @@ public struct OptionalResourceColumnOverlay: Hashable, Sendable {
             // as its display/wire ID so the projector's protocol-compatible
             // fallback can evaluate it without an on-disk configuration edit.
             definition.id = definition.value!
-            // Detected resources appear after discovery; configured-but-absent
-            // resources stay available in Columns without adding an empty
-            // visible column automatically.
-            definition.enabled = entry.isPresent
+            // Detected accelerators retain their automatic visible-column
+            // behavior. Huge-page sizes are auto-added to the ephemeral
+            // catalog overlay but start disabled, keeping them discoverable
+            // without consuming table width by default. Configured-but-absent
+            // resources likewise remain available without an empty column.
+            definition.enabled = entry.isPresent && entry.category != .hugePage
 
             guard let identity = definition.nativeExtractorIdentity,
                 !usedIDs.contains(definition.id),

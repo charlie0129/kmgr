@@ -735,7 +735,7 @@ func TestProjectorEmitsPodResourceUsageWithEffectiveAccounting(t *testing.T) {
 		cpu.GetMeasuredAtUnixMs() != measuredAt.UnixMilli() {
 		t.Fatalf("CPU usage = %#v", cpu)
 	}
-	if got := cellByID(row, PodCPUColumn).GetDisplayText(); got != "420m / 500m / 1" {
+	if got := cellByID(row, PodCPUColumn).GetDisplayText(); got != "0.42 / 0.5 / 1" {
 		t.Fatalf("CPU display = %q", got)
 	}
 	if tooltip := cellByID(row, PodCPUColumn).GetTooltip(); !strings.Contains(tooltip, "Measured: "+measuredAt.Format(time.RFC3339)) ||
@@ -789,7 +789,7 @@ func TestProjectorFormatsPodCPUAndByteResourceTriplesWithoutChangingTypedValues(
 		t.Fatal("Pod row was not visible")
 	}
 	for id, want := range map[string]string{
-		PodCPUColumn:                    "23.256 / 64 / 64",
+		PodCPUColumn:                    "23.3 / 64 / 64",
 		PodMemoryColumn:                 "16.76Gi / 128Gi / 128Gi",
 		PodEphemeralStorageColumn:       "125Gi / 125Gi / 256Gi",
 		metricColumnID("hugepages-2Mi"): "— / 128Mi / 1Gi",
@@ -1134,8 +1134,8 @@ func TestProjectorFormatsNodeUsageAllocationAndExactByteResources(t *testing.T) 
 		t.Fatal("Node row was not visible")
 	}
 	for id, want := range map[string]string{
-		NodeCPUUsageColumn:                 "23.256 / 63.5",
-		NodeCPURequestsColumn:              "23.256 / 63.5",
+		NodeCPUUsageColumn:                 "23.3 / 63.5",
+		NodeCPURequestsColumn:              "23.3 / 63.5",
 		NodeMemoryUsageColumn:              "16.76Gi / 128Gi",
 		NodeMemoryRequestsColumn:           "16.76Gi / 128Gi",
 		NodeEphemeralStorageUsageColumn:    "125Gi / 16.76Gi",

@@ -17,9 +17,9 @@ func TestFormatResourceQuantityUsesReadableSemanticUnits(t *testing.T) {
 	}{
 		{name: "nil", resourceName: corev1.ResourceCPU, want: DefaultMissingCell},
 		{name: "zero CPU", resourceName: corev1.ResourceCPU, quantity: "0", want: "0"},
-		{name: "sub-core CPU", resourceName: corev1.ResourceCPU, quantity: "420m", want: "420m"},
-		{name: "fractional millicore CPU", resourceName: corev1.ResourceCPU, quantity: "500u", want: "0.5m"},
-		{name: "multi-core CPU", resourceName: corev1.ResourceCPU, quantity: "23256m", want: "23.256"},
+		{name: "sub-core CPU", resourceName: corev1.ResourceCPU, quantity: "123400u", want: "0.12"},
+		{name: "tiny CPU retains leading precision", resourceName: corev1.ResourceCPU, quantity: "123u", want: "0.000123"},
+		{name: "multi-core CPU", resourceName: corev1.ResourceCPU, quantity: "12345678900n", want: "12.3"},
 		{name: "fractional core CPU", resourceName: corev1.ResourceCPU, quantity: "1500m", want: "1.5"},
 		{name: "large Ki memory", resourceName: corev1.ResourceMemory, quantity: "17576384Ki", want: "16.76Gi"},
 		{name: "fractional Gi memory", resourceName: corev1.ResourceMemory, quantity: "1536Mi", want: "1.5Gi"},
@@ -41,5 +41,26 @@ func TestFormatResourceQuantityUsesReadableSemanticUnits(t *testing.T) {
 				t.Fatalf("formatResourceQuantity(%q, %q) = %q; want %q", test.resourceName, test.quantity, got, test.want)
 			}
 		})
+	}
+}
+
+func TestAdaptiveDecimalBalancesDensityAndSmallValues(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		value float64
+		want  string
+	}{
+		{value: 0, want: "0"},
+		{value: 0.000123, want: "0.000123"},
+		{value: -0.000123, want: "-0.000123"},
+		{value: 0.01234, want: "0.0123"},
+		{value: 0.1234, want: "0.12"},
+		{value: 1.234, want: "1.23"},
+		{value: 12.3456789, want: "12.3"},
+	}
+	for _, test := range tests {
+		if got := adaptiveDecimal(test.value); got != test.want {
+			t.Errorf("adaptiveDecimal(%g) = %q; want %q", test.value, got, test.want)
+		}
 	}
 }

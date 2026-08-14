@@ -31,6 +31,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private let resourceTitle: String
     private let match: ColumnResourceMatch
     private let defaultColumns: [ColumnDefinition]
+    private let discoveredColumns: [ColumnDefinition]
     private let previewProvider: any ColumnPreviewProviding
     private let previewContext: ColumnPreviewContext
     private let fileStore: ColumnConfigurationFileStore
@@ -68,22 +69,28 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         resourceTitle: String,
         match: ColumnResourceMatch,
         defaultColumns: [ColumnDefinition],
+        discoveredColumns: [ColumnDefinition] = [],
         previewProvider: any ColumnPreviewProviding,
         previewContext: ColumnPreviewContext,
         configurationPath: String = AppPreferences.defaultColumnsConfigurationPath,
         windowDismissal: WindowDismissal = .appKit
     ) {
+        let mergedDefaults = Self.mergingDiscoveredColumns(
+            discoveredColumns,
+            into: defaultColumns
+        )
         self.resourceTitle = resourceTitle
         self.match = match
-        self.defaultColumns = defaultColumns
+        self.discoveredColumns = discoveredColumns
+        self.defaultColumns = mergedDefaults
         self.previewProvider = previewProvider
         self.previewContext = previewContext
         self.windowDismissal = windowDismissal
         fileStore = ColumnConfigurationFileStore(path: configurationPath)
 
         configurationDocument = ColumnsConfigurationDocument()
-        draft = ResourceColumnDraft(match: match, columns: defaultColumns)
-        lastAppliedColumns = defaultColumns
+        draft = ResourceColumnDraft(match: match, columns: mergedDefaults)
+        lastAppliedColumns = mergedDefaults
         persistenceAvailable = false
 
         let window = NSWindow(
@@ -107,6 +114,17 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
+
+    /// Adds cache-discovered native columns to a configured/default layout
+    /// without overriding a user's display ID or exact extractor identity.
+    /// Disabled huge-page definitions therefore appear in Columns and can be
+    /// enabled without requiring the user to type their exact resource key.
+    static func mergingDiscoveredColumns(
+        _ discovered: [ColumnDefinition],
+        into base: [ColumnDefinition]
+    ) -> [ColumnDefinition] {
+        OptionalResourceColumnOverlay(definitions: discovered).applying(to: base)
+    }
 
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
@@ -496,8 +514,12 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
                 try Task.checkCancellation()
                 guard let self else { return }
                 configurationDocument = loaded
-                let columns = loaded.views.first(where: { $0.match == match })?.columns
+                let configured = loaded.views.first(where: { $0.match == match })?.columns
                     ?? defaultColumns
+                let columns = Self.mergingDiscoveredColumns(
+                    discoveredColumns,
+                    into: configured
+                )
                 draft = ResourceColumnDraft(match: match, columns: columns)
                 lastAppliedColumns = columns
                 dirty = false
@@ -938,7 +960,7 @@ final class NativeColumnPickerWindowController: NSWindowController,
 }
 
 @MainActor
-private final class CELColumnEditorWindowController: NSWindowController,
+final class CELColumnEditorWindowController: NSWindowController,
     NSTextFieldDelegate, NSTextViewDelegate, NSWindowDelegate
 {
     private let original: ColumnDefinition?
@@ -975,12 +997,13 @@ private final class CELColumnEditorWindowController: NSWindowController,
         self.previewProvider = previewProvider
         self.previewContext = previewContext
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 610, height: 600),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 650),
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         panel.title = definition == nil ? "Add CEL Column" : "Edit CEL Column"
+        panel.minSize = NSSize(width: 520, height: 600)
         panel.isReleasedWhenClosed = false
         super.init(window: panel)
         panel.delegate = self
@@ -1007,45 +1030,75 @@ private final class CELColumnEditorWindowController: NSWindowController,
             field.bezelStyle = .roundedBezel
         }
         idField.placeholderString = "team"
+        idField.setAccessibilityLabel("Column ID")
         titleField.placeholderString = "Team"
+        titleField.setAccessibilityLabel("Column title")
         missingField.placeholderString = "—"
+        missingField.setAccessibilityLabel("Missing value")
         widthField.placeholderString = "Automatic"
-        widthField.alignment = .right
+        widthField.setAccessibilityLabel("Column width")
+        for field in [idField, titleField, missingField, widthField] {
+            field.alignment = .left
+        }
 
         typeButton.addItems(withTitles: ColumnResultType.allCases.map(ColumnsManagerWindowController.resultTypeTitle))
+        typeButton.alignment = .left
+        typeButton.setAccessibilityLabel("Column result type")
         typeButton.target = self
         typeButton.action = #selector(choiceChanged)
         alignmentButton.addItems(withTitles: ColumnAlignment.allCases.map { $0.rawValue.capitalized })
+        alignmentButton.alignment = .left
+        alignmentButton.setAccessibilityLabel("Column alignment")
         alignmentButton.target = self
         alignmentButton.action = #selector(choiceChanged)
 
         expressionView.delegate = self
+        expressionView.frame = NSRect(x: 0, y: 0, width: 560, height: 140)
+        expressionView.isEditable = true
+        expressionView.isSelectable = true
+        expressionView.allowsUndo = true
         expressionView.isRichText = false
+        expressionView.isVerticallyResizable = true
+        expressionView.isHorizontallyResizable = false
+        expressionView.autoresizingMask = [.width]
         expressionView.isAutomaticQuoteSubstitutionEnabled = false
         expressionView.isAutomaticDashSubstitutionEnabled = false
         expressionView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         expressionView.textContainerInset = NSSize(width: 6, height: 6)
+        expressionView.textContainer?.widthTracksTextView = true
+        expressionView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
         expressionView.setAccessibilityLabel("CEL expression")
         let expressionScroll = NSScrollView()
         expressionScroll.documentView = expressionView
         expressionScroll.hasVerticalScroller = true
+        expressionScroll.autohidesScrollers = true
         expressionScroll.borderType = .bezelBorder
-        expressionScroll.heightAnchor.constraint(equalToConstant: 130).isActive = true
+        expressionScroll.heightAnchor.constraint(equalToConstant: 140).isActive = true
 
-        let grid = NSGridView(views: [
-            gridRow("ID", idField),
-            gridRow("Title", titleField),
-            gridRow("Expression", expressionScroll),
-            gridRow("Result type", typeButton),
-            gridRow("Alignment", alignmentButton),
-            gridRow("Missing value", missingField),
-            gridRow("Width", widthField),
-        ])
-        grid.rowSpacing = 8
-        grid.columnSpacing = 10
-        grid.column(at: 0).xPlacement = .trailing
-        grid.column(at: 1).xPlacement = .fill
-        grid.translatesAutoresizingMaskIntoConstraints = false
+        let idRow = formRow("ID", idField)
+        let titleRow = formRow("Title", titleField)
+        let expressionRow = formRow("Expression", expressionScroll)
+        let typeRow = formRow("Result type", typeButton)
+        let alignmentRow = formRow("Alignment", alignmentButton)
+        let missingRow = formRow("Missing value", missingField)
+        let widthRow = formRow("Width", widthField)
+        let formSections = [
+            pairedFormRow(idRow, titleRow),
+            expressionRow,
+            pairedFormRow(typeRow, alignmentRow),
+            pairedFormRow(missingRow, widthRow),
+        ]
+        let form = NSStackView(views: formSections)
+        form.orientation = .vertical
+        form.alignment = .leading
+        form.spacing = 8
+        form.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate(formSections.map {
+            $0.widthAnchor.constraint(equalTo: form.widthAnchor)
+        })
 
         let help = NSTextField(wrappingLabelWithString:
             "The Go engine compiles CEL against \(ColumnConfigurationSchema.celEnvironment) before activation. Invalid external edits leave the last valid compiled configuration active."
@@ -1084,17 +1137,18 @@ private final class CELColumnEditorWindowController: NSWindowController,
         commitButton.target = self
         commitButton.action = #selector(commit)
         commitButton.keyEquivalent = "\r"
+        commitButton.keyEquivalentModifierMask = [.command]
         let footer = NSStackView(views: [errorLabel, NSView(), cancelButton, commitButton])
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
 
-        let stack = NSStackView(views: [grid, help, previewStack, footer])
+        let stack = NSStackView(views: [form, help, previewStack, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
-        grid.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        form.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         help.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         previewStack.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         footer.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
@@ -1108,12 +1162,37 @@ private final class CELColumnEditorWindowController: NSWindowController,
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
         ])
         panel.contentView = root
+
+        idField.nextKeyView = titleField
+        titleField.nextKeyView = expressionView
+        expressionView.nextKeyView = typeButton
+        typeButton.nextKeyView = alignmentButton
+        alignmentButton.nextKeyView = missingField
+        missingField.nextKeyView = widthField
+        widthField.nextKeyView = cancelButton
+        cancelButton.nextKeyView = commitButton
+        commitButton.nextKeyView = idField
+        panel.initialFirstResponder = idField
     }
 
-    private func gridRow(_ title: String, _ control: NSView) -> [NSView] {
+    private func formRow(_ title: String, _ control: NSView) -> NSStackView {
         let label = NSTextField(labelWithString: title)
-        label.alignment = .right
-        return [label, control]
+        label.alignment = .left
+        let row = NSStackView(views: [label, control])
+        row.orientation = .vertical
+        row.alignment = .leading
+        row.spacing = 3
+        control.widthAnchor.constraint(equalTo: row.widthAnchor).isActive = true
+        return row
+    }
+
+    private func pairedFormRow(_ leading: NSStackView, _ trailing: NSStackView) -> NSStackView {
+        let row = NSStackView(views: [leading, trailing])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.distribution = .fillEqually
+        row.spacing = 12
+        return row
     }
 
     private func install(_ definition: ColumnDefinition?) {

@@ -113,6 +113,108 @@ struct ColumnsManagerWindowControllerTests {
         #expect(exactButtonFrame.minY >= cancelFrame.maxY)
         #expect(exactButtonFrame.minY >= addSelectedFrame.maxY)
     }
+
+    @Test("CEL editor uses full-width leading controls and an editable expression responder")
+    func celEditorLayoutAndFocus() throws {
+        let editor = CELColumnEditorWindowController(
+            definition: nil,
+            reservedIDs: [],
+            previewProvider: NoopColumnPreviewProvider(),
+            previewContext: testPreviewContext()
+        )
+        let panel = try #require(editor.window)
+        panel.setFrame(
+            NSRect(origin: panel.frame.origin, size: panel.minSize),
+            display: false
+        )
+        let root = try #require(panel.contentView)
+        root.needsLayout = true
+        root.layoutSubtreeIfNeeded()
+
+        let idField = try #require(
+            view(accessibilityLabel: "Column ID", beneath: root) as? NSTextField
+        )
+        let titleField = try #require(
+            view(accessibilityLabel: "Column title", beneath: root) as? NSTextField
+        )
+        let expression = try #require(
+            view(accessibilityLabel: "CEL expression", beneath: root) as? NSTextView
+        )
+        let resultType = try #require(
+            view(accessibilityLabel: "Column result type", beneath: root)
+        )
+        let alignment = try #require(
+            view(accessibilityLabel: "Column alignment", beneath: root)
+        )
+        let missing = try #require(
+            view(accessibilityLabel: "Missing value", beneath: root)
+        )
+        let width = try #require(
+            view(accessibilityLabel: "Column width", beneath: root)
+        )
+
+        for control in [idField, titleField, resultType, alignment, missing, width] {
+            let controlFrame = frame(of: control, in: root)
+            #expect(!controlFrame.isEmpty)
+            #expect(controlFrame.width >= 200)
+            #expect(!control.hasAmbiguousLayout)
+        }
+        let expressionFrame = frame(of: expression, in: root)
+        #expect(!expressionFrame.isEmpty)
+        #expect(expressionFrame.width >= 430)
+        #expect(!expression.hasAmbiguousLayout)
+        let labels = descendants(of: root).compactMap { $0 as? NSTextField }.filter {
+            ["ID", "Title", "Expression", "Result type", "Alignment", "Missing value", "Width"]
+                .contains($0.stringValue)
+        }
+        #expect(labels.count == 7)
+        #expect(labels.allSatisfy { $0.alignment == .left })
+
+        #expect(expression.isEditable)
+        #expect(expression.isSelectable)
+        #expect(titleField.nextKeyView === expression)
+        #expect(expression.nextKeyView === resultType)
+        #expect(panel.makeFirstResponder(expression))
+        expression.insertText(
+            "object.metadata.name",
+            replacementRange: NSRange(location: 0, length: 0)
+        )
+        #expect(expression.string == "object.metadata.name")
+    }
+
+    @Test("discovered disabled resources merge without overriding configured identity")
+    func discoveredColumnsMerge() {
+        let configured = ColumnDefinition(
+            id: "my-gpu",
+            title: "Production GPU",
+            source: .metric,
+            value: "resource:nvidia.com/gpu",
+            type: .resourceUsage,
+            enabled: false
+        )
+        let duplicateGPU = ColumnDefinition(
+            id: "resource:nvidia.com/gpu",
+            title: "GPU",
+            source: .metric,
+            value: "resource:nvidia.com/gpu",
+            type: .resourceUsage
+        )
+        let hugePages = ColumnDefinition(
+            id: "resource:hugepages-2Mi",
+            title: "Huge Pages (2Mi)",
+            source: .metric,
+            value: "resource:hugepages-2Mi",
+            type: .resourceUsage,
+            enabled: false
+        )
+
+        let merged = ColumnsManagerWindowController.mergingDiscoveredColumns(
+            [duplicateGPU, hugePages],
+            into: [configured]
+        )
+        #expect(merged == [configured, hugePages])
+        #expect(!merged[1].isEnabled)
+    }
 }
 }
 
@@ -132,22 +234,26 @@ private func makeColumnsManager(
         match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
         defaultColumns: [],
         previewProvider: NoopColumnPreviewProvider(),
-        previewContext: ColumnPreviewContext(
-            sessionID: "test-session",
-            resource: DiscoveredResource(
-                group: "",
-                version: "v1",
-                resource: "pods",
-                kind: "Pod",
-                namespaced: true
-            ),
-            namespaceScope: NamespaceSelection()
-        ),
+        previewContext: testPreviewContext(),
         configurationPath: FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent("columns.yaml")
             .path,
         windowDismissal: windowDismissal
+    )
+}
+
+private func testPreviewContext() -> ColumnPreviewContext {
+    ColumnPreviewContext(
+        sessionID: "test-session",
+        resource: DiscoveredResource(
+            group: "",
+            version: "v1",
+            resource: "pods",
+            kind: "Pod",
+            namespaced: true
+        ),
+        namespaceScope: NamespaceSelection()
     )
 }
 

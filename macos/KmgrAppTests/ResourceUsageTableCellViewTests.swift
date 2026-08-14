@@ -7,7 +7,7 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Resource usage AppKit cell")
 struct ResourceUsageTableCellViewTests {
-    @Test("configures compact text geometry tooltip and accessibility")
+    @Test("configures unobstructed text tooltip and accessibility")
     func configuresCell() {
         let presentation = ResourceUsageCellPresentation(
             displayText: "420m / 500m / 1",
@@ -30,18 +30,12 @@ struct ResourceUsageTableCellViewTests {
         #expect(cell.textField?.stringValue == "420m / 500m / 1")
         #expect(cell.textField?.alignment == .right)
         #expect(cell.toolTip == "Resource: cpu")
-        #expect(cell.usageTrackView.presentation == presentation)
+        #expect(cell.subviews.count == 1)
+        #expect(cell.subviews.first === cell.textField)
         #expect(cell.accessibilityLabel() == "CPU resource usage")
         #expect(cell.accessibilityValue() as? String ==
             "CPU, usage 420 millicores, request 500 millicores, limit 1 core")
     }
 
-    @Test("marker shapes remain distinct without relying on color")
-    func markerStyles() {
-        #expect(ResourceUsageTrackView.markerStyle(for: .usage) == nil)
-        #expect(ResourceUsageTrackView.markerStyle(for: .request) == .tick)
-        #expect(ResourceUsageTrackView.markerStyle(for: .limit) == .doubleTick)
-        #expect(ResourceUsageTrackView.markerStyle(for: .capacity) == .cappedTick)
-    }
 }
 }
