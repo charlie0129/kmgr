@@ -342,6 +342,23 @@ public struct ResourceCellHighlightStore: Sendable {
         return nextDelay
     }
 
+    /// Delay until the earliest highlight reaches its normal expiry. Reduced
+    /// motion callers use this instead of the fade cadence so the steady tint
+    /// costs exactly one wake-up to remove, regardless of how many cells are
+    /// currently highlighted.
+    public func nextExpiryDelay(
+        at instant: ContinuousClock.Instant
+    ) -> Duration? {
+        var nextDelay: Duration?
+        for record in recordsByAddress.values {
+            let elapsed = nonnegativeDuration(from: record.changedAt, to: instant)
+            let candidate = elapsed >= Self.totalDuration
+                ? Duration.zero : Self.totalDuration - elapsed
+            nextDelay = nextDelay.map { min($0, candidate) } ?? candidate
+        }
+        return nextDelay
+    }
+
     private mutating func observe(
         _ candidate: ContinuousClock.Instant
     ) -> ContinuousClock.Instant {

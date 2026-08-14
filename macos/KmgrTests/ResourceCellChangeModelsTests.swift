@@ -454,6 +454,28 @@ func nonExactRestartDefinitionsStayNeutral(definition: ColumnDefinition) {
     ) == nil)
 }
 
+@Test func reducedMotionCanSleepDirectlyUntilTheEarliestExpiry() {
+    let start = ContinuousClock.now
+    let first = ResourceCellAddress(uid: "first", columnID: "cpu")
+    let second = ResourceCellAddress(uid: "second", columnID: "cpu")
+    var store = ResourceCellHighlightStore()
+
+    #expect(store.nextExpiryDelay(at: start) == nil)
+    store.record([ResourceCellChange(address: first)], at: start)
+    #expect(store.nextExpiryDelay(at: start) == .milliseconds(1_500))
+
+    store.record(
+        [ResourceCellChange(address: second)],
+        at: start.advanced(by: .milliseconds(400))
+    )
+    #expect(store.nextExpiryDelay(
+        at: start.advanced(by: .milliseconds(900))
+    ) == .milliseconds(600))
+    #expect(store.nextExpiryDelay(
+        at: start.advanced(by: .milliseconds(1_500))
+    ) == .zero)
+}
+
 private func changeRow(
     uid: ResourceUID,
     name: String = "object",

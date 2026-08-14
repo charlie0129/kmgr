@@ -2074,6 +2074,14 @@ private final class ResourceListViewController: NSViewController,
     private var inlineIssueState = ResourceListInlineIssueState()
     private var inlineIssueToolTip: String?
     private var model = ResourceTableModel()
+    private var rowChangeDetector = ResourceRowChangeDetector(columnDefinitions: [])
+    private var cellHighlightStore = ResourceCellHighlightStore()
+    private let cellEffectsPolicy = ResourceTableCellEffectsPolicy.systemDefault
+    private var cellHighlightRefreshTask: Task<Void, Never>?
+    private var cellHighlightRefreshRevision: UInt64 = 0
+    private var isChangeDetectionArmed = false
+    private var requestedFilterHighlight: ResourceFilterHighlight?
+    private var activeFilterHighlight: ResourceFilterHighlight?
     private var generationGate = GenerationSequenceGate()
     private var resource: DiscoveredResource?
     private var scope = NamespaceSelection()
@@ -2390,6 +2398,7 @@ private final class ResourceListViewController: NSViewController,
     /// the stale session is never reused for mutations.
     func engineDidDisconnect() {
         endProjectionRequest(outcome: "engine-disconnected")
+        clearTransientCellPresentation()
         filterTask?.cancel()
         filterTask = nil
         streamTask?.cancel()
@@ -2407,6 +2416,7 @@ private final class ResourceListViewController: NSViewController,
 
     func showDisconnected(_ message: String, toolTip: String? = nil) {
         endProjectionRequest(outcome: "disconnected")
+        clearTransientCellPresentation()
         streamTask?.cancel()
         streamTask = nil
         cancelOptionalResourceDiscovery(selecting: nil)
@@ -2422,6 +2432,7 @@ private final class ResourceListViewController: NSViewController,
         session: OpenedClusterSession,
         opensCurrentResource: Bool = true
     ) {
+        clearTransientCellPresentation()
         let sessionChanged = self.session.sessionID != session.sessionID
         self.session = session
         isAuthenticated = true
@@ -2440,6 +2451,7 @@ private final class ResourceListViewController: NSViewController,
 
     func suspend() {
         endProjectionRequest(outcome: "cancelled")
+        clearTransientCellPresentation()
         stopFreshnessAgeUpdates()
         freshnessProgressIndicator.stopAnimation(nil)
         freshnessProgressIndicator.isHidden = true
@@ -2670,6 +2682,7 @@ private final class ResourceListViewController: NSViewController,
 
     func controlTextDidChange(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
+        clearTransientCellPresentation()
         filterRevision &+= 1
         filterTask?.cancel()
         endProjectionRequest(outcome: "filter-revision")
@@ -2765,6 +2778,10 @@ private final class ResourceListViewController: NSViewController,
         guard let resource else { return }
         endProjectionRequest(outcome: "superseded")
         cancelCurrentStream()
+        clearTransientCellPresentation()
+        requestedFilterHighlight = ResourceFilterHighlightParser.parse(
+            filterField.stringValue
+        )
         generation &+= 1
         prepareOptionalResourceDiscovery(
             for: resource,
@@ -2860,6 +2877,9 @@ private final class ResourceListViewController: NSViewController,
             )
             var capture = captureUpdate()
             if chunk.first {
+                clearTransientCellPresentation(
+                    keepingRequestedFilterHighlight: true
+                )
                 snapshotUIDs.removeAll(keepingCapacity: true)
             }
             snapshotUIDs.append(contentsOf: chunk.rows.map { $0.identity.uid })
@@ -2896,6 +2916,10 @@ private final class ResourceListViewController: NSViewController,
                 "visible_rows=\(self.model.orderedVisibleUIDs.count) stored_rows=\(self.model.rowByUID.count) selected_rows=\(plan.selectedRowIndexes.count)"
             )
             applyTablePlan(plan)
+            if chunk.last {
+                isChangeDetectionArmed = true
+                activateRequestedFilterHighlight()
+            }
             observeOptionalResourceKeys(
                 chunk.observedOptionalResourceKeys,
                 truncated: chunk.observedOptionalResourceKeysTruncated
@@ -2908,6 +2932,20 @@ private final class ResourceListViewController: NSViewController,
                 shouldPublishContextualShortcuts = true
             }
         case .delta(_, let delta):
+            let detectedChanges: [ResourceCellChange] = isChangeDetectionArmed
+                ? delta.upserts.flatMap { row -> [ResourceCellChange] in
+                    guard !delta.removedUIDs.contains(row.identity.uid) else {
+                        return []
+                    }
+                    return rowChangeDetector.changes(
+                        from: model.rowByUID[row.identity.uid],
+                        to: row
+                    )
+                }
+                : []
+            var affectedCellAddresses = cellHighlightStore.removeAll(
+                forUIDs: delta.removedUIDs
+            )
             let selectedUIDs = model.selectedUIDs
             shouldPublishContextualShortcuts = delta.removedUIDs.contains {
                 selectedUIDs.contains($0)
@@ -2934,7 +2972,16 @@ private final class ResourceListViewController: NSViewController,
                 interval,
                 "visible_rows=\(self.model.orderedVisibleUIDs.count) stored_rows=\(self.model.rowByUID.count) selected_rows=\(plan.selectedRowIndexes.count)"
             )
+            if !detectedChanges.isEmpty {
+                affectedCellAddresses.formUnion(cellHighlightStore.record(
+                    detectedChanges,
+                    at: ContinuousClock.now,
+                    visibleUIDs: visibleResourceUIDsInViewport()
+                ))
+            }
             applyTablePlan(plan)
+            reloadVisibleCellPresentation(at: affectedCellAddresses)
+            scheduleCellHighlightRefresh()
             recoveredResourceTrust.receiveDelta(
                 upsertedUIDs: delta.upserts.map { $0.identity.uid },
                 removedUIDs: delta.removedUIDs
@@ -2990,6 +3037,123 @@ private final class ResourceListViewController: NSViewController,
             PerformanceSignpostCatalog.resourceTableReload,
             interval
         )
+    }
+
+    private func clearTransientCellPresentation(
+        keepingRequestedFilterHighlight: Bool = false
+    ) {
+        let removedAddresses = cellHighlightStore.removeAll()
+        let removedFilterEmphasis = activeFilterHighlight != nil
+        isChangeDetectionArmed = false
+        activeFilterHighlight = nil
+        if !keepingRequestedFilterHighlight {
+            requestedFilterHighlight = nil
+        }
+        cancelCellHighlightRefresh()
+        reloadVisibleCellPresentation(
+            at: removedAddresses,
+            reloadAllVisibleCells: removedFilterEmphasis
+        )
+    }
+
+    private func activateRequestedFilterHighlight() {
+        guard activeFilterHighlight != requestedFilterHighlight else { return }
+        activeFilterHighlight = requestedFilterHighlight
+        reloadVisibleCellPresentation(at: [], reloadAllVisibleCells: true)
+    }
+
+    /// Reconfigures only reusable cells intersecting the current viewport.
+    /// Grouping by table column avoids the row/column cross-product that
+    /// `reloadData(forRowIndexes:columnIndexes:)` otherwise creates.
+    private func reloadVisibleCellPresentation(
+        at addresses: Set<ResourceCellAddress>,
+        reloadAllVisibleCells: Bool = false
+    ) {
+        guard isViewLoaded, !tableView.tableColumns.isEmpty else { return }
+        let visibleRows = visibleTableRowIndexes()
+        guard !visibleRows.isEmpty else { return }
+
+        if reloadAllVisibleCells {
+            tableView.reloadData(
+                forRowIndexes: visibleRows,
+                columnIndexes: IndexSet(integersIn: tableView.tableColumns.indices)
+            )
+            return
+        }
+        guard !addresses.isEmpty else { return }
+
+        for columnIndex in tableView.tableColumns.indices {
+            let columnID = tableView.tableColumns[columnIndex].identifier.rawValue
+            var affectedRows = IndexSet()
+            for rowIndex in visibleRows {
+                let uid = model.orderedVisibleUIDs[rowIndex]
+                if addresses.contains(ResourceCellAddress(
+                    uid: uid,
+                    columnID: columnID
+                )) {
+                    affectedRows.insert(rowIndex)
+                }
+            }
+            if !affectedRows.isEmpty {
+                tableView.reloadData(
+                    forRowIndexes: affectedRows,
+                    columnIndexes: IndexSet(integer: columnIndex)
+                )
+            }
+        }
+    }
+
+    private func visibleTableRowIndexes() -> IndexSet {
+        guard isViewLoaded else { return [] }
+        let visibleRange = tableView.rows(in: tableView.visibleRect)
+        guard visibleRange.location != NSNotFound, visibleRange.length > 0 else {
+            return []
+        }
+        let lowerBound = max(0, visibleRange.location)
+        let upperBound = min(
+            model.orderedVisibleUIDs.count,
+            visibleRange.location + visibleRange.length
+        )
+        guard lowerBound < upperBound else { return [] }
+        return IndexSet(integersIn: lowerBound..<upperBound)
+    }
+
+    private func visibleResourceUIDsInViewport() -> Set<ResourceUID> {
+        Set(visibleTableRowIndexes().map { model.orderedVisibleUIDs[$0] })
+    }
+
+    private func scheduleCellHighlightRefresh() {
+        cancelCellHighlightRefresh()
+        let now = ContinuousClock.now
+        let delay = cellEffectsPolicy.usesContinuousFade
+            ? cellHighlightStore.nextRefreshDelay(at: now)
+            : cellHighlightStore.nextExpiryDelay(at: now)
+        guard let delay else { return }
+
+        let revision = cellHighlightRefreshRevision
+        cellHighlightRefreshTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard let self,
+                cellHighlightRefreshRevision == revision,
+                !Task.isCancelled
+            else { return }
+            cellHighlightRefreshTask = nil
+            let now = ContinuousClock.now
+            let affectedAddresses = cellHighlightStore.addresses
+            cellHighlightStore.expire(at: now)
+            reloadVisibleCellPresentation(at: affectedAddresses)
+            scheduleCellHighlightRefresh()
+        }
+    }
+
+    private func cancelCellHighlightRefresh() {
+        cellHighlightRefreshRevision &+= 1
+        cellHighlightRefreshTask?.cancel()
+        cellHighlightRefreshTask = nil
     }
 
     private func beginProjectionRequest() {
@@ -3535,6 +3699,13 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func installColumns(_ definitions: [ColumnDefinition]) {
+        let enabled = definitions.filter(\.isEnabled)
+        if installedColumnDefinitions != enabled {
+            clearTransientCellPresentation()
+        }
+        rowChangeDetector = ResourceRowChangeDetector(
+            columnDefinitions: definitions
+        )
         let selectedRowIndexes = model.orderedVisibleUIDs.enumerated().compactMap {
             model.selectedUIDs.contains($0.element) ? $0.offset : nil
         }
@@ -3542,7 +3713,6 @@ private final class ResourceListViewController: NSViewController,
         for definition in definitions {
             columnDefinitionsByID[definition.id] = definition
         }
-        let enabled = definitions.filter(\.isEnabled)
         columnIDs = enabled.map(\.id)
 
         suppressSortChanges = true
@@ -3733,6 +3903,7 @@ private final class ResourceListViewController: NSViewController,
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
+        clearTransientCellPresentation()
         model = ResourceTableModel()
         tableView.reloadData()
         titleLabel.stringValue = "Resources"
@@ -4000,6 +4171,13 @@ private final class ResourceListViewController: NSViewController,
         let uid = model.orderedVisibleUIDs[row]
         let value = model.rowByUID[uid]?[columnID]
         let alignment = columnDefinitionsByID[columnID]?.alignment ?? .leading
+        let emphasizedTerm = activeFilterHighlight.flatMap {
+            $0.applies(to: columnID) ? $0.term : nil
+        }
+        let changeHighlight = cellHighlightStore.presentation(
+            for: ResourceCellAddress(uid: uid, columnID: columnID),
+            at: ContinuousClock.now
+        )
         if let value, let presentation = ResourceUsageCellPresentation(cell: value) {
             let identifier = NSUserInterfaceItemIdentifier("usage-cell.\(columnID)")
             let cell = tableView.makeView(
@@ -4007,35 +4185,31 @@ private final class ResourceListViewController: NSViewController,
                 owner: self
             ) as? ResourceUsageTableCellView ?? ResourceUsageTableCellView()
             cell.identifier = identifier
+            cell.effectsPolicy = cellEffectsPolicy
             cell.configure(
                 presentation: presentation,
                 toolTip: value.tooltip.isEmpty ? nil : value.tooltip,
                 alignment: textAlignment(alignment),
-                textColor: textColor(value.severity)
+                textColor: textColor(value.severity),
+                emphasizedTerm: emphasizedTerm,
+                changeHighlight: changeHighlight
             )
             return cell
         }
 
         let identifier = NSUserInterfaceItemIdentifier("cell.\(columnID)")
-        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
-            ?? NSTableCellView()
+        let cell = tableView.makeView(
+            withIdentifier: identifier,
+            owner: self
+        ) as? ResourceTextTableCellView ?? ResourceTextTableCellView()
         cell.identifier = identifier
-        if cell.textField == nil {
-            let label = NSTextField(labelWithString: "")
-            label.lineBreakMode = .byTruncatingTail
-            label.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(label)
-            cell.textField = label
-            NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            ])
-        }
-        cell.textField?.stringValue = value?.displayText ?? "—"
-        cell.textField?.toolTip = value?.tooltip.isEmpty == false ? value?.tooltip : nil
-        cell.textField?.alignment = textAlignment(alignment)
-        cell.textField?.textColor = textColor(value?.severity)
+        cell.effectsPolicy = cellEffectsPolicy
+        cell.configure(
+            cell: value,
+            alignment: textAlignment(alignment),
+            emphasizedTerm: emphasizedTerm,
+            changeHighlight: changeHighlight
+        )
         return cell
     }
 
