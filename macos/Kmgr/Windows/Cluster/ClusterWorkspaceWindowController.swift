@@ -2223,8 +2223,12 @@ private final class ResourceListViewController: NSViewController,
     ] = [:]
     private var suppressSortChanges = false
     private var snapshotUIDs: [ResourceUID] = []
-    private var lastStreamResourceID: String?
-    private var lastStreamScope: NamespaceSelection?
+    private var lastStreamContext: ResourceWarmRowContext?
+    private var isRetainingWarmRowsForCurrentStream = false
+    private var hasReceivedResourcePayloadForCurrentStream = false
+    private var hasReceivedWarmRowReconciliationPayload = false
+    private var backendResourceViewStatus: ResourceViewStatus?
+    private var retainedRowsLastSynchronizedAt: Date?
     private var pendingScrollAnchor: ScrollAnchor?
     private var pendingSelectionUIDs: Set<ResourceUID>?
     private var restorationCheckpointTask: Task<Void, Never>?
@@ -2907,23 +2911,44 @@ private final class ResourceListViewController: NSViewController,
         )
         beginProjectionRequest()
         generationGate.reset()
-        let reprojectsSameView = lastStreamResourceID == resource.id
-            && lastStreamScope == scope
-        let canKeepWarmRows = reprojectsSameView && !model.orderedVisibleUIDs.isEmpty
-        if !reprojectsSameView {
+        let nextStreamContext = ResourceWarmRowContext(
+            sessionID: session.sessionID,
+            gvr: resourceGVR(for: resource),
+            namespaceSelection: scope
+        )
+        let sameDataContext = lastStreamContext == nextStreamContext
+        let canKeepWarmRows = ResourceWarmRowPolicy.canRetain(
+            existingRowCount: model.orderedVisibleUIDs.count,
+            previousContext: lastStreamContext,
+            nextContext: nextStreamContext
+        )
+        if !sameDataContext {
             hasLastUsableResourceViewStatus = false
         }
         if !canKeepWarmRows {
             model = ResourceTableModel()
             tableView.reloadData()
         }
-        lastStreamResourceID = resource.id
-        lastStreamScope = scope
+        lastStreamContext = nextStreamContext
+        isRetainingWarmRowsForCurrentStream = canKeepWarmRows
+        hasReceivedResourcePayloadForCurrentStream = false
+        hasReceivedWarmRowReconciliationPayload = false
+        backendResourceViewStatus = nil
+        retainedRowsLastSynchronizedAt = canKeepWarmRows
+            ? resourceViewStatus?.lastSynchronizedAt : nil
         snapshotUIDs.removeAll(keepingCapacity: true)
         hideInlineIssue()
         titleLabel.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
         scopeLabel.stringValue = scope.presentation
-        installResourceViewStatus(ResourceViewStatus(freshness: .loading))
+        if canKeepWarmRows {
+            installResourceViewStatus(ResourceWarmRowPolicy.refreshingStatus(
+                backendStatus: nil,
+                retainedRowCount: model.orderedVisibleUIDs.count,
+                lastSynchronizedAt: retainedRowsLastSynchronizedAt
+            ))
+        } else {
+            installResourceViewStatus(ResourceViewStatus(freshness: .loading))
+        }
         let request = ResourceViewRequest(
             sessionID: session.sessionID,
             viewID: viewID,
@@ -2984,9 +3009,32 @@ private final class ResourceListViewController: NSViewController,
 
         switch message {
         case .status(_, let status):
-            installResourceViewStatus(status)
-            countLabel.stringValue = "\(status.rowsVisible.formatted()) objects"
+            backendResourceViewStatus = status
+            if isRetainingWarmRowsForCurrentStream {
+                if !finishWarmRowRetentionIfReconciled() {
+                    installResourceViewStatus(ResourceWarmRowPolicy.refreshingStatus(
+                        backendStatus: status,
+                        retainedRowCount: model.orderedVisibleUIDs.count,
+                        lastSynchronizedAt: retainedRowsLastSynchronizedAt
+                    ))
+                }
+                countLabel.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects"
+            } else {
+                installResourceViewStatus(status)
+                countLabel.stringValue = "\(status.rowsVisible.formatted()) objects"
+            }
         case .snapshot(_, let chunk):
+            let isInitialSnapshot = !hasReceivedResourcePayloadForCurrentStream
+            hasReceivedResourcePayloadForCurrentStream = true
+            if ResourceWarmRowPolicy.preservesRetainedRows(
+                for: chunk,
+                backendStatus: backendResourceViewStatus,
+                isRetainingWarmRows: isRetainingWarmRowsForCurrentStream,
+                isFirstSnapshotInStream: isInitialSnapshot
+            ) {
+                snapshotUIDs.removeAll(keepingCapacity: true)
+                break
+            }
             let metadata = message.resourceBatchSignpostMetadata!
             let interval = tableSignposter.beginInterval(
                 PerformanceSignpostCatalog.resourceModelApply,
@@ -3034,6 +3082,8 @@ private final class ResourceListViewController: NSViewController,
             )
             applyTablePlan(plan)
             if chunk.last {
+                hasReceivedWarmRowReconciliationPayload = true
+                finishWarmRowRetentionIfReconciled(force: true)
                 isChangeDetectionArmed = true
                 activateRequestedFilterHighlight()
             }
@@ -3049,6 +3099,7 @@ private final class ResourceListViewController: NSViewController,
                 shouldPublishContextualShortcuts = true
             }
         case .delta(_, let delta):
+            hasReceivedResourcePayloadForCurrentStream = true
             let detectedChanges: [ResourceCellChange] = isChangeDetectionArmed
                 ? delta.upserts.flatMap { row -> [ResourceCellChange] in
                     guard !delta.removedUIDs.contains(row.identity.uid) else {
@@ -3097,6 +3148,8 @@ private final class ResourceListViewController: NSViewController,
                 ))
             }
             applyTablePlan(plan)
+            hasReceivedWarmRowReconciliationPayload = true
+            finishWarmRowRetentionIfReconciled()
             reloadVisibleCellPresentation(at: affectedCellAddresses)
             scheduleCellHighlightRefresh()
             recoveredResourceTrust.receiveDelta(
@@ -3115,6 +3168,31 @@ private final class ResourceListViewController: NSViewController,
         if shouldPublishContextualShortcuts {
             publishContextualShortcutsIfChanged()
         }
+    }
+
+    /// Ends the locally retained presentation only after a real replacement
+    /// payload. `force` is reserved for a completed non-placeholder snapshot;
+    /// delta reconciliation waits for WATCHING/COMPLETE and therefore works
+    /// whether the status or delta arrives first.
+    @discardableResult
+    private func finishWarmRowRetentionIfReconciled(
+        force: Bool = false
+    ) -> Bool {
+        guard isRetainingWarmRowsForCurrentStream,
+            hasReceivedWarmRowReconciliationPayload,
+            force || ResourceWarmRowPolicy.statusConfirmsAuthoritativeReconciliation(
+                backendResourceViewStatus
+            )
+        else { return false }
+
+        isRetainingWarmRowsForCurrentStream = false
+        retainedRowsLastSynchronizedAt = nil
+        var status = backendResourceViewStatus ?? ResourceViewStatus(
+            freshness: .complete
+        )
+        status.rowsVisible = UInt64(model.orderedVisibleUIDs.count)
+        installResourceViewStatus(status)
+        return true
     }
 
     private func restoringPendingSelection(
