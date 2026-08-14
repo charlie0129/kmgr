@@ -84,8 +84,11 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     private let statusLabel = NSTextField(labelWithString: "Not connected")
     private let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
     private var generation: UInt64
+    private var activeGeneration: UInt64?
+    private var connectionGeneration: UInt64?
     private var session: (any ExecSession)?
     private var streamTask: Task<Void, Never>?
+    private var connectionTask: Task<Void, Never>?
     private var commandTask: Task<Void, Never>?
     private var commandContinuation: AsyncStream<TerminalCommand>.Continuation?
     private var state: ExecConnectionState?
@@ -156,26 +159,33 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     }
 
     func start() {
-        guard streamTask == nil, !stopped else { return }
+        guard session == nil, connectionTask == nil, !stopped else { return }
         connect()
     }
 
     func stop() {
         guard !stopped else { return }
         stopped = true
+        connectionTask?.cancel()
+        connectionTask = nil
+        connectionGeneration = nil
         streamTask?.cancel()
         streamTask = nil
         stopCommandPump()
-        if let session {
-            Task { await session.cancel() }
-        }
+        let activeSession = session
         session = nil
+        activeGeneration = nil
+        if let activeSession {
+            Task { await activeSession.cancel() }
+        }
     }
 
     private func connect(statusOverride: String? = nil) {
+        guard connectionTask == nil, !stopped else { return }
         var request = baseRequest
         request.generation = generation
         request.command = activeCommand
+        let attemptGeneration = request.generation
         let currentSize = TerminalSize(
             columns: UInt32(clamping: max(1, terminalView.getTerminal().cols)),
             rows: UInt32(clamping: max(1, terminalView.getTerminal().rows))
@@ -191,53 +201,126 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             statusLabel.toolTip = statusOverride
         }
         reconnectButton.isEnabled = false
-        streamTask = Task { [weak self, provider] in
+        connectionGeneration = attemptGeneration
+        connectionTask = Task { [weak self, provider] in
             guard let self else { return }
             do {
                 let opened = try await provider.startExec(request: request)
-                guard !Task.isCancelled, !stopped else {
+                guard !Task.isCancelled, !stopped,
+                    connectionGeneration == attemptGeneration,
+                    generation == attemptGeneration
+                else {
                     await opened.cancel()
                     return
                 }
-                session = opened
-                startCommandPump(session: opened)
-                lastSentSize = currentSize
-                for try await event in opened.events {
-                    guard !Task.isCancelled else { break }
-                    apply(event)
-                }
+                connectionTask = nil
+                connectionGeneration = nil
+                install(
+                    opened,
+                    generation: attemptGeneration,
+                    initialSize: currentSize
+                )
             } catch is CancellationError {
-                // Normal window close or explicit reconnect.
+                guard !Task.isCancelled else { return }
+                finishConnectionAttempt(
+                    generation: attemptGeneration,
+                    error: ClusterManagerIssue(
+                        category: .unavailable,
+                        reason: "ExecStartCancelled",
+                        message: "The engine cancelled the terminal connection attempt.",
+                        retryable: true,
+                        contextName: baseRequest.contextName,
+                        operation: "exec Pod"
+                    )
+                )
             } catch {
-                applyFailure(error)
+                finishConnectionAttempt(
+                    generation: attemptGeneration,
+                    error: error
+                )
             }
-            stopCommandPump()
-            session = nil
-            streamTask = nil
-            if shouldTryFallbackShell() {
-                usedFallbackShell = true
-                activeCommand = fallbackShellCommand ?? activeCommand
-                generation &+= 1
-                connect(statusOverride: "\(baseRequest.command[0]) unavailable; trying \(activeCommand[0])")
-                return
-            }
-            if state == .connecting || state == .running {
-                state = .failed
-                statusLabel.stringValue = "Disconnected"
-                statusLabel.textColor = .systemRed
-            }
-            reconnectButton.isEnabled = !stopped
         }
     }
 
     private func reconnect() {
-        guard !remoteProcessIsActive else { return }
-        streamTask?.cancel()
-        streamTask = nil
-        stopCommandPump()
+        guard !remoteProcessIsActive, connectionTask == nil, !stopped else { return }
         generation &+= 1
         state = nil
         connect()
+    }
+
+    private func finishConnectionAttempt(generation attemptGeneration: UInt64, error: Error) {
+        guard connectionGeneration == attemptGeneration else { return }
+        connectionTask = nil
+        connectionGeneration = nil
+        guard !stopped, generation == attemptGeneration else { return }
+        applyFailure(error)
+        reconnectButton.isEnabled = true
+    }
+
+    private func install(
+        _ opened: any ExecSession,
+        generation attemptGeneration: UInt64,
+        initialSize: TerminalSize
+    ) {
+        guard !stopped, generation == attemptGeneration else {
+            Task { await opened.cancel() }
+            return
+        }
+        let previousSession = session
+        let previousStreamTask = streamTask
+
+        session = opened
+        activeGeneration = attemptGeneration
+        startCommandPump(session: opened, generation: attemptGeneration)
+        lastSentSize = initialSize
+        streamTask = Task { [weak self] in
+            guard let self else {
+                await opened.cancel()
+                return
+            }
+            var streamError: Error?
+            do {
+                for try await event in opened.events {
+                    guard !Task.isCancelled else { break }
+                    apply(event, generation: attemptGeneration)
+                }
+            } catch is CancellationError {
+            } catch {
+                streamError = error
+            }
+            finishStream(generation: attemptGeneration, error: streamError)
+        }
+
+        previousStreamTask?.cancel()
+        if let previousSession {
+            Task { await previousSession.cancel() }
+        }
+    }
+
+    private func finishStream(generation attemptGeneration: UInt64, error: Error?) {
+        guard activeGeneration == attemptGeneration else { return }
+        session = nil
+        activeGeneration = nil
+        streamTask = nil
+        stopCommandPump()
+        guard !stopped, generation == attemptGeneration else { return }
+
+        if let error {
+            applyFailure(error)
+            if startFallbackShellIfNeeded(from: attemptGeneration) { return }
+        } else if state == .connecting || state == .running {
+            applyFailure(ClusterManagerIssue(
+                category: .unavailable,
+                reason: "ExecDisconnected",
+                message: "The terminal disconnected from the engine.",
+                retryable: true,
+                contextName: baseRequest.contextName,
+                operation: "exec Pod"
+            ))
+            if startFallbackShellIfNeeded(from: attemptGeneration) { return }
+        }
+        reconnectButton.isEnabled = true
     }
 
     private func shouldTryFallbackShell() -> Bool {
@@ -256,7 +339,10 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         return lastIssue.category == .notFound || lastIssue.category == .internalFailure
     }
 
-    private func apply(_ event: ExecServerEvent) {
+    private func apply(_ event: ExecServerEvent, generation attemptGeneration: UInt64) {
+        guard activeGeneration == attemptGeneration,
+            generation == attemptGeneration
+        else { return }
         switch event {
         case .stdout(_, let data), .stderr(_, let data):
             if !data.isEmpty { currentAttemptProducedOutput = true }
@@ -269,12 +355,31 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             lastIssue = status.issue
             updateStatus(status)
             reconnectButton.isEnabled = status.state.isTerminal
+            if status.state.isTerminal,
+                startFallbackShellIfNeeded(from: attemptGeneration)
+            {
+                return
+            }
         case .failure(_, let issue):
             state = .failed
             lastIssue = issue
             showIssue(issue)
             reconnectButton.isEnabled = true
+            if startFallbackShellIfNeeded(from: attemptGeneration) { return }
         }
+    }
+
+    @discardableResult
+    private func startFallbackShellIfNeeded(from attemptGeneration: UInt64) -> Bool {
+        guard generation == attemptGeneration,
+            connectionTask == nil,
+            shouldTryFallbackShell()
+        else { return false }
+        usedFallbackShell = true
+        activeCommand = fallbackShellCommand ?? activeCommand
+        generation &+= 1
+        connect(statusOverride: "\(baseRequest.command[0]) unavailable; trying \(activeCommand[0])")
+        return true
     }
 
     private func applyFailure(_ error: Error) {
@@ -321,7 +426,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         statusLabel.toolTip = issue.message
     }
 
-    private func startCommandPump(session: any ExecSession) {
+    private func startCommandPump(session: any ExecSession, generation attemptGeneration: UInt64) {
         stopCommandPump()
         let pair = AsyncStream<TerminalCommand>.makeStream(
             bufferingPolicy: .bufferingOldest(256)
@@ -338,10 +443,26 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
                 }
             } catch is CancellationError {
             } catch {
-                self?.applyFailure(error)
-                await session.cancel()
+                await self?.handleCommandPumpFailure(
+                    error,
+                    session: session,
+                    generation: attemptGeneration
+                )
             }
         }
+    }
+
+    private func handleCommandPumpFailure(
+        _ error: Error,
+        session: any ExecSession,
+        generation attemptGeneration: UInt64
+    ) async {
+        guard activeGeneration == attemptGeneration,
+            generation == attemptGeneration
+        else { return }
+        applyFailure(error)
+        await session.cancel()
+        stopCommandPump()
     }
 
     private func stopCommandPump() {
