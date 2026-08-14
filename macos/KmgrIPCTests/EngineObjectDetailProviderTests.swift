@@ -6,6 +6,7 @@ import Testing
 
 private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     var object = Kmgr_V1_GetObjectResponse()
+    var objectRequest: Kmgr_V1_GetObjectRequest?
     var watched: [Kmgr_V1_ObjectEvent] = []
     var events = Kmgr_V1_GetEventsResponse()
     var relationships = Kmgr_V1_GetRelationshipsResponse()
@@ -22,6 +23,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
         _ request: Kmgr_V1_GetObjectRequest,
         timeout: Duration
     ) async throws -> Kmgr_V1_GetObjectResponse {
+        objectRequest = request
         var value = object
         value.requestID = request.context.requestID
         return value
@@ -127,6 +129,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
 
     func installWatch(_ values: [Kmgr_V1_ObjectEvent]) { watched = values }
     func installObject(_ value: Kmgr_V1_GetObjectResponse) { object = value }
+    func capturedObject() -> Kmgr_V1_GetObjectRequest? { objectRequest }
     func installEvents(_ value: Kmgr_V1_GetEventsResponse) { events = value }
     func installRelationships(_ value: Kmgr_V1_GetRelationshipsResponse) {
         relationships = value
@@ -160,6 +163,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     let rpc = ObjectDetailRPCCapture()
     var response = Kmgr_V1_GetObjectResponse()
     response.identity = protoIdentity(name: "api", uid: "uid-api")
+    response.yamlUtf8 = Data("kind: Deployment\n".utf8)
     var usage = Kmgr_V1_ResourceUsageValue()
     usage.used = 0
     usage.usageAvailable = true
@@ -174,6 +178,31 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(detail.metrics.first?.request == 0)
     #expect(detail.metrics.first?.limit == nil)
     #expect(detail.metrics.first?.capacity == nil)
+    #expect(detail.yamlUTF8 == Data("kind: Deployment\n".utf8))
+    let request = await rpc.capturedObject()
+    #expect(request?.includeYaml == true)
+}
+
+@Test func objectDetailProviderRejectsSuccessfulEmptyYAML() async {
+    let rpc = ObjectDetailRPCCapture()
+    var response = Kmgr_V1_GetObjectResponse()
+    response.identity = protoIdentity(name: "api", uid: "uid-api")
+    response.resourceVersion = "rv-1"
+    await rpc.installObject(response)
+
+    do {
+        _ = try await EngineObjectDetailProvider(
+            rpc: rpc,
+            identifier: { "request" }
+        ).getObject(identity: identity(name: "api", uid: "uid-api"))
+        Issue.record("Expected a successful response with empty YAML to fail")
+    } catch let issue as ClusterManagerIssue {
+        #expect(issue.category == .internalFailure)
+        #expect(issue.reason == "EmptyObjectYAML")
+        #expect(issue.safeDetails["yaml_bytes"] == "0")
+    } catch {
+        Issue.record("Unexpected empty YAML error: \(error)")
+    }
 }
 
 @Test func objectDetailProviderMapsUIDPinnedWatchEnvelope() async throws {

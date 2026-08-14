@@ -220,6 +220,9 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
             let response = try await rpc.getObject(request, timeout: unaryTimeout)
             try Self.validate(response.requestID, expected: request.context.requestID)
             if response.hasError { throw EngineClusterContextProvider.issue(from: response.error) }
+            guard !response.yamlUtf8.isEmpty else {
+                throw ObjectDetailBridgeError.emptyObjectYAML
+            }
             return Self.detail(response)
         } catch {
             throw Self.issue(error, operation: "get object details")
@@ -837,6 +840,15 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                 operation: operation,
                 safeDetails: ["buffered_message_limit": String(limit)]
             )
+        case ObjectDetailBridgeError.emptyObjectYAML:
+            return ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "EmptyObjectYAML",
+                message: "The engine returned an empty YAML payload for a successful object request.",
+                retryable: true,
+                operation: operation,
+                safeDetails: ["yaml_bytes": "0"]
+            )
         case ObjectDetailBridgeError.requestIDMismatch,
             ObjectDetailBridgeError.objectEnvelopeMismatch,
             ObjectDetailBridgeError.operationEnvelopeMismatch,
@@ -868,6 +880,7 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
 
 private enum ObjectDetailBridgeError: Error {
     case requestIDMismatch
+    case emptyObjectYAML
     case objectEnvelopeMismatch
     case objectBufferExceeded(Int)
     case operationRejected
