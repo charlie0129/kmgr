@@ -150,6 +150,29 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(fallback.text(showingManagedFields: false) == malformed)
     }
 
+    @Test("a canceled queued preparation never enters the YAML builder")
+    func canceledBeforeStartSkipsBuilder() async {
+        let probe = YAMLPresentationBuilderProbe()
+        probe.releaseFirstBuild()
+        let task = Task {
+            try await ObjectDetailViewController.prepareYAMLPresentation(
+                Data("metadata:\n  name: skipped\n".utf8),
+                using: { probe.build($0) }
+            )
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected queued YAML preparation to be canceled")
+        } catch is CancellationError {
+            // Expected: the synchronous builder was never entered.
+        } catch {
+            Issue.record("Unexpected preparation error: \(error)")
+        }
+        #expect(probe.buildCount == 0)
+    }
+
     @Test("managed-fields preparation runs off main and rejects stale results")
     func managedFieldsPreparationConcurrency() async throws {
         let identity = ResourceIdentity(
@@ -224,6 +247,10 @@ struct ObjectDetailYAMLPresentationTests {
                 yamlUTF8: Data(latestYAML.utf8)
             )
         ))
+        try await waitUntil { editor.string.contains("revision: latest") }
+        #expect(probe.buildCount == 1)
+
+        probe.releaseFirstBuild()
         try await waitUntil { probe.buildCount == 2 }
         try await waitUntil {
             editor.string.contains("revision: latest")
@@ -231,10 +258,10 @@ struct ObjectDetailYAMLPresentationTests {
         }
 
         #expect(probe.allBuildsRanOffMain)
+        #expect(probe.maximumConcurrentBuilds == 1)
 
         // The first synchronous builder ignores cancellation until released.
         // Its late presentation must not replace the newer watch generation.
-        probe.releaseFirstBuild()
         try await waitUntil { probe.completedBuildCount == 2 }
         try await Task.sleep(for: .milliseconds(30))
 
@@ -242,6 +269,97 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(editor.string.contains("revision: latest"))
         #expect(!editor.string.contains("stale-manager"))
         #expect(!editor.string.contains("latest-manager"))
+    }
+
+    @Test("rapid YAML updates coalesce to one latest pending presentation")
+    func rapidManagedFieldsUpdatesAreBounded() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        func source(revision: String) -> String {
+            """
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: api
+              managedFields:
+                - manager: manager-\(revision)
+            spec:
+              revision: \(revision)
+
+            """
+        }
+        let initialYAML = source(revision: "initial")
+        let finalYAML = source(revision: "burst-64")
+        let watch = AsyncThrowingStream<ObjectWatchEvent, Error>.makeStream()
+        let provider = LoadedObjectDetailProvider(
+            detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-initial",
+                yamlUTF8: Data(initialYAML.utf8)
+            ),
+            data: ObjectData(
+                identity: identity,
+                resourceVersion: "rv-initial",
+                entries: [],
+                secret: false
+            ),
+            objectWatch: watch.stream
+        )
+        let probe = YAMLPresentationBuilderProbe()
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: provider,
+            initialTab: .yaml,
+            yamlPresentationBuilder: { probe.build($0) }
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer {
+            probe.releaseFirstBuild()
+            watch.continuation.finish()
+            controller.stop()
+        }
+
+        let editor = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Kubernetes object YAML" })
+        try await waitUntil { probe.buildCount == 1 }
+
+        for revision in 1...64 {
+            watch.continuation.yield(.updated(
+                cursor: StreamCursor(generation: 9, sequence: UInt64(revision)),
+                detail: ObjectDetail(
+                    identity: identity,
+                    resourceVersion: "rv-\(revision)",
+                    yamlUTF8: Data(source(revision: "burst-\(revision)").utf8)
+                )
+            ))
+        }
+        // The read-only raw source is installed synchronously, so observing
+        // the last revision proves the watch loop consumed the entire burst.
+        try await waitUntil { editor.string.contains("revision: burst-64") }
+        try await Task.sleep(for: .milliseconds(30))
+
+        #expect(probe.buildCount == 1)
+        #expect(probe.maximumConcurrentBuilds == 1)
+
+        probe.releaseFirstBuild()
+        try await waitUntil { probe.completedBuildCount == 2 }
+        try await waitUntil {
+            editor.string.contains("revision: burst-64")
+                && !editor.string.contains("manager-burst-64")
+        }
+
+        #expect(probe.buildCount == 2)
+        #expect(probe.maximumConcurrentBuilds == 1)
+        #expect(probe.builtYAML == [initialYAML, finalYAML])
     }
 
     @Test("YAML scroll view installs a visible line-number ruler and explicit managed-fields control")
@@ -759,11 +877,18 @@ private final class YAMLPresentationBuilderProbe: @unchecked Sendable {
     private let firstBuildGate = DispatchSemaphore(value: 0)
     private var storedBuildCount = 0
     private var storedCompletedBuildCount = 0
+    private var storedActiveBuildCount = 0
+    private var storedMaximumConcurrentBuilds = 0
     private var storedRanOnMainThread: [Bool] = []
+    private var storedBuiltYAML: [String] = []
     private var storedFirstBuildObservedCancellation: Bool?
 
     var buildCount: Int { lock.withLock { storedBuildCount } }
     var completedBuildCount: Int { lock.withLock { storedCompletedBuildCount } }
+    var maximumConcurrentBuilds: Int {
+        lock.withLock { storedMaximumConcurrentBuilds }
+    }
+    var builtYAML: [String] { lock.withLock { storedBuiltYAML } }
     var allBuildsRanOffMain: Bool {
         lock.withLock {
             !storedRanOnMainThread.isEmpty
@@ -777,8 +902,20 @@ private final class YAMLPresentationBuilderProbe: @unchecked Sendable {
     func build(_ yamlUTF8: Data) -> YAMLManagedFieldsPresentation {
         let ordinal = lock.withLock {
             storedBuildCount += 1
+            storedActiveBuildCount += 1
+            storedMaximumConcurrentBuilds = max(
+                storedMaximumConcurrentBuilds,
+                storedActiveBuildCount
+            )
             storedRanOnMainThread.append(Thread.isMainThread)
+            storedBuiltYAML.append(String(decoding: yamlUTF8, as: UTF8.self))
             return storedBuildCount
+        }
+        defer {
+            lock.withLock {
+                storedActiveBuildCount -= 1
+                storedCompletedBuildCount += 1
+            }
         }
         if ordinal == 1 {
             firstBuildGate.wait()
@@ -786,9 +923,7 @@ private final class YAMLPresentationBuilderProbe: @unchecked Sendable {
                 storedFirstBuildObservedCancellation = Task.isCancelled
             }
         }
-        let presentation = YAMLManagedFieldsPresentation(yamlUTF8: yamlUTF8)
-        lock.withLock { storedCompletedBuildCount += 1 }
-        return presentation
+        return YAMLManagedFieldsPresentation(yamlUTF8: yamlUTF8)
     }
 
     func releaseFirstBuild() { firstBuildGate.signal() }

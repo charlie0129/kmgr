@@ -195,6 +195,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         unprocessedYAMLUTF8: Data()
     )
     private var yamlPresentationTask: Task<Void, Never>?
+    private var pendingYAMLPresentation: (yamlUTF8: Data, generation: UInt64)?
     private var yamlPresentationGeneration: UInt64 = 0
     private var yamlLineNumberRuler: LineNumberRulerView?
     private var loadTask: Task<Void, Never>?
@@ -1322,44 +1323,85 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         originalYAML = yamlUTF8
         yamlPresentationGeneration &+= 1
         let generation = yamlPresentationGeneration
-        yamlPresentationTask?.cancel()
+        pendingYAMLPresentation = (yamlUTF8, generation)
         yamlPresentation = YAMLManagedFieldsPresentation(
             unprocessedYAMLUTF8: yamlUTF8
         )
         managedFieldsButton.isHidden = true
         if !isEditingYAML { showYAMLPresentation() }
 
+        if let yamlPresentationTask {
+            // The synchronous builder cannot be interrupted once it begins.
+            // Cancel its acceptance and retain only this latest pending input;
+            // its completion will start the replacement worker.
+            yamlPresentationTask.cancel()
+        } else {
+            startYAMLPresentationPreparation()
+        }
+    }
+
+    private func startYAMLPresentationPreparation() {
+        guard yamlPresentationTask == nil,
+            let request = pendingYAMLPresentation
+        else { return }
+        pendingYAMLPresentation = nil
         let builder = yamlPresentationBuilder
         yamlPresentationTask = Task { [weak self] in
-            let presentation = await Self.prepareYAMLPresentation(
-                yamlUTF8,
-                using: builder
-            )
-            guard let self, !Task.isCancelled,
-                yamlPresentationGeneration == generation
-            else { return }
-            yamlPresentationTask = nil
-            yamlPresentation = presentation
-            if !presentation.hasManagedFields { managedFieldsButton.state = .off }
-            managedFieldsButton.isHidden = !presentation.hasManagedFields || isEditingYAML
-            if !isEditingYAML { showYAMLPresentation() }
+            do {
+                let presentation = try await Self.prepareYAMLPresentation(
+                    request.yamlUTF8,
+                    using: builder
+                )
+                guard !Task.isCancelled else {
+                    self?.finishYAMLPresentationPreparation()
+                    return
+                }
+                self?.acceptYAMLPresentation(
+                    presentation,
+                    generation: request.generation
+                )
+            } catch is CancellationError {
+                // A replacement or controller shutdown canceled this request.
+            } catch {
+                assertionFailure("Unexpected YAML presentation error: \(error)")
+            }
+            self?.finishYAMLPresentationPreparation()
         }
+    }
+
+    private func acceptYAMLPresentation(
+        _ presentation: YAMLManagedFieldsPresentation,
+        generation: UInt64
+    ) {
+        guard yamlPresentationGeneration == generation else { return }
+        yamlPresentation = presentation
+        if !presentation.hasManagedFields { managedFieldsButton.state = .off }
+        managedFieldsButton.isHidden = !presentation.hasManagedFields || isEditingYAML
+        if !isEditingYAML { showYAMLPresentation() }
+    }
+
+    private func finishYAMLPresentationPreparation() {
+        yamlPresentationTask = nil
+        startYAMLPresentationPreparation()
     }
 
     /// Nonisolated async functions execute on the generic executor. Keeping
     /// the synchronous Yams work inside this hop prevents large managedFields
     /// payloads from blocking AppKit's main actor.
-    private nonisolated static func prepareYAMLPresentation(
+    nonisolated static func prepareYAMLPresentation(
         _ yamlUTF8: Data,
         using builder: @Sendable (Data) -> YAMLManagedFieldsPresentation
-    ) async -> YAMLManagedFieldsPresentation {
-        builder(yamlUTF8)
+    ) async throws -> YAMLManagedFieldsPresentation {
+        try Task.checkCancellation()
+        let presentation = builder(yamlUTF8)
+        try Task.checkCancellation()
+        return presentation
     }
 
     private func cancelYAMLPresentationPreparation() {
         yamlPresentationGeneration &+= 1
+        pendingYAMLPresentation = nil
         yamlPresentationTask?.cancel()
-        yamlPresentationTask = nil
     }
 
     private func showYAMLPresentation() {
