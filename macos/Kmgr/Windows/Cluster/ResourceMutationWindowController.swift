@@ -27,10 +27,10 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     private let detailProvider: any ObjectDetailProviding
     private let operationProvider: any ResourceOperationProviding
     private let replicasField = NSTextField()
-    private let labelsField = NSTextField()
-    private let annotationsField = NSTextField()
-    private let removeLabelsField = NSTextField()
-    private let removeAnnotationsField = NSTextField()
+    private let labelsField = NSTextView()
+    private let annotationsField = NSTextView()
+    private let removeLabelsField = NSTextView()
+    private let removeAnnotationsField = NSTextView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let progress = NSProgressIndicator()
     private let primaryButton = NSButton(title: "Apply", target: nil, action: nil)
@@ -97,6 +97,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         case .scale:
             replicasField.placeholderString = "Non-negative integer"
             replicasField.stringValue = "1"
+            replicasField.setAccessibilityLabel("Replica count")
             form.addArrangedSubview(row("Replicas", replicasField))
         case .rolloutRestart:
             let warning = NSTextField(wrappingLabelWithString:
@@ -106,20 +107,39 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
             form.addArrangedSubview(warning)
             primaryButton.title = "Restart"
         case .metadata:
-            labelsField.placeholderString = "One key=value entry per line"
-            annotationsField.placeholderString = "One key=value entry per line"
-            removeLabelsField.placeholderString = "One key per line"
-            removeAnnotationsField.placeholderString = "One key per line"
-            form.addArrangedSubview(row("Set labels", labelsField))
-            form.addArrangedSubview(row("Set annotations", annotationsField))
-            form.addArrangedSubview(row("Remove labels", removeLabelsField))
-            form.addArrangedSubview(row("Remove annotations", removeAnnotationsField))
+            let instructions = NSTextField(wrappingLabelWithString:
+                "Enter one key=value entry per line to set metadata, and one key per line to remove it."
+            )
+            instructions.textColor = .secondaryLabelColor
+            instructions.maximumNumberOfLines = 2
+            form.addArrangedSubview(instructions)
+            form.addArrangedSubview(row(
+                "Set labels",
+                metadataEditor(labelsField, accessibilityLabel: "Labels to set")
+            ))
+            form.addArrangedSubview(row(
+                "Set annotations",
+                metadataEditor(annotationsField, accessibilityLabel: "Annotations to set")
+            ))
+            form.addArrangedSubview(row(
+                "Remove labels",
+                metadataEditor(removeLabelsField, accessibilityLabel: "Label keys to remove")
+            ))
+            form.addArrangedSubview(row(
+                "Remove annotations",
+                metadataEditor(
+                    removeAnnotationsField,
+                    accessibilityLabel: "Annotation keys to remove"
+                )
+            ))
         }
         progress.style = .spinning
         progress.controlSize = .small
         progress.isDisplayedWhenStopped = false
+        progress.setAccessibilityLabel("Resource mutation in progress")
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.maximumNumberOfLines = 3
+        statusLabel.setAccessibilityLabel("Resource mutation status")
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         cancel.keyEquivalent = "\u{1b}"
         primaryButton.target = self
@@ -149,16 +169,48 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         panel.contentView = root
     }
 
-    private func row(_ label: String, _ field: NSTextField) -> NSStackView {
+    private func row(_ label: String, _ field: NSView) -> NSStackView {
         let title = NSTextField(labelWithString: label)
         title.alignment = .right
         title.widthAnchor.constraint(equalToConstant: 130).isActive = true
         field.widthAnchor.constraint(greaterThanOrEqualToConstant: 390).isActive = true
         let row = NSStackView(views: [title, field])
         row.orientation = .horizontal
-        row.alignment = .centerY
+        row.alignment = field is NSScrollView ? .top : .centerY
         row.spacing = 8
         return row
+    }
+
+    private func metadataEditor(
+        _ textView: NSTextView,
+        accessibilityLabel: String
+    ) -> NSScrollView {
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.isRichText = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.allowsUndo = true
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainerInset = NSSize(width: 6, height: 5)
+        textView.textContainer?.widthTracksTextView = true
+        textView.setAccessibilityLabel(accessibilityLabel)
+        textView.setAccessibilityHelp(
+            accessibilityLabel.contains("remove")
+                ? "Enter one Kubernetes metadata key per line."
+                : "Enter one Kubernetes metadata key=value entry per line."
+        )
+
+        let scrollView = NSScrollView()
+        scrollView.borderType = .bezelBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = textView
+        scrollView.heightAnchor.constraint(equalToConstant: 68).isActive = true
+        return scrollView
     }
 
     @objc private func apply() {
@@ -276,10 +328,10 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
             return .restart
         case .metadata:
             return .metadata(try ResourceMetadataDraftParser.changes(
-                labels: labelsField.stringValue,
-                annotations: annotationsField.stringValue,
-                removeLabels: removeLabelsField.stringValue,
-                removeAnnotations: removeAnnotationsField.stringValue
+                labels: labelsField.string,
+                annotations: annotationsField.string,
+                removeLabels: removeLabelsField.string,
+                removeAnnotations: removeAnnotationsField.string
             ))
         }
     }
