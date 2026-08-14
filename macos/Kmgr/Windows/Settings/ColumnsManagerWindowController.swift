@@ -39,6 +39,8 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private var draft: ResourceColumnDraft
     private var lastAppliedColumns: [ColumnDefinition]
     private var persistenceAvailable: Bool
+    private var configurationReady = false
+    private var fileOperationTask: Task<Void, Never>?
     private var dirty = false
     private var didFinishDismissal = false
     private var editorController: CELColumnEditorWindowController?
@@ -46,9 +48,14 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
 
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private let addNativeButton = NSButton(title: "Add Built-in/Metric…", target: nil, action: nil)
+    private let addCELButton = NSButton(title: "Add CEL…", target: nil, action: nil)
     private let editButton = NSButton(title: "Edit…", target: nil, action: nil)
     private let moveUpButton = NSButton(title: "Move Up", target: nil, action: nil)
     private let moveDownButton = NSButton(title: "Move Down", target: nil, action: nil)
+    private let resetButton = NSButton(title: "Reset to Defaults", target: nil, action: nil)
+    private let reloadButton = NSButton(title: "Reload File", target: nil, action: nil)
+    private let openButton = NSButton(title: "Open in Editor", target: nil, action: nil)
     private let saveButton = NSButton(title: "Save", target: nil, action: nil)
 
     /// Called after every safe draft change so a resource table can preview
@@ -74,19 +81,10 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         self.windowDismissal = windowDismissal
         fileStore = ColumnConfigurationFileStore(path: configurationPath)
 
-        var loadedDocument = ColumnsConfigurationDocument()
-        var loadMessage: String?
-        do {
-            loadedDocument = try fileStore.load()
-        } catch {
-            loadMessage = error.localizedDescription
-        }
-        configurationDocument = loadedDocument
-        let existing = loadedDocument.views.first(where: { $0.match == match })?.columns
-            ?? defaultColumns
-        draft = ResourceColumnDraft(match: match, columns: existing)
-        lastAppliedColumns = existing
-        persistenceAvailable = loadMessage == nil
+        configurationDocument = ColumnsConfigurationDocument()
+        draft = ResourceColumnDraft(match: match, columns: defaultColumns)
+        lastAppliedColumns = defaultColumns
+        persistenceAvailable = false
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 880, height: 570),
@@ -103,11 +101,8 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         configureContent(in: window)
         tableView.reloadData()
         updateActionAvailability()
-        if let loadMessage {
-            showStatus(loadMessage, error: true)
-        } else {
-            showStatus(scopeDescription, error: false)
-        }
+        showStatus("Loading column configuration…", error: false)
+        loadConfiguration(statusPrefix: nil)
     }
 
     @available(*, unavailable)
@@ -178,7 +173,13 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard approveDismissal() else { return false }
+        guard !dirty else {
+            approveDismissal { [weak self, weak sender] in
+                guard let self, let sender else { return }
+                self.windowDismissal.dismiss(sender)
+            }
+            return false
+        }
         if let parent = sender.sheetParent {
             parent.endSheet(sender, returnCode: .cancel)
             return false
@@ -190,8 +191,16 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         finishDismissal()
     }
 
-    private func approveDismissal() -> Bool {
-        guard dirty else { return true }
+    private func approveDismissal(_ completion: @escaping @MainActor () -> Void) {
+        guard dirty else {
+            completion()
+            return
+        }
+        guard fileOperationTask == nil else {
+            showStatus("Wait for the current column file operation to finish before closing.", error: true)
+            NSSound.beep()
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "Save column changes?"
         alert.informativeText = "Unsaved changes for \(resourceTitle) will otherwise be discarded."
@@ -200,18 +209,21 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         alert.addButton(withTitle: "Cancel")
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            return persistDraft()
+            persistDraft(onSuccess: completion)
         case .alertSecondButtonReturn:
             onDraftChanged?(lastAppliedColumns)
-            return true
+            dirty = false
+            completion()
         default:
-            return false
+            break
         }
     }
 
     private func finishDismissal() {
         guard !didFinishDismissal else { return }
         didFinishDismissal = true
+        fileOperationTask?.cancel()
+        fileOperationTask = nil
         onClose?()
     }
 
@@ -254,23 +266,24 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        let addNativeButton = NSButton(
-            title: "Add Built-in/Metric…",
-            target: self,
-            action: #selector(addNative)
-        )
-        let addButton = NSButton(title: "Add CEL…", target: self, action: #selector(addCEL))
+        addNativeButton.target = self
+        addNativeButton.action = #selector(addNative)
+        addCELButton.target = self
+        addCELButton.action = #selector(addCEL)
         editButton.target = self
         editButton.action = #selector(editSelected)
         moveUpButton.target = self
         moveUpButton.action = #selector(moveSelectedUp)
         moveDownButton.target = self
         moveDownButton.action = #selector(moveSelectedDown)
-        let resetButton = NSButton(title: "Reset to Defaults", target: self, action: #selector(resetToDefaults))
-        let reloadButton = NSButton(title: "Reload File", target: self, action: #selector(reloadFile))
-        let openButton = NSButton(title: "Open in Editor", target: self, action: #selector(openInEditor))
+        resetButton.target = self
+        resetButton.action = #selector(resetToDefaults)
+        reloadButton.target = self
+        reloadButton.action = #selector(reloadFile)
+        openButton.target = self
+        openButton.action = #selector(openInEditor)
         let controls = NSStackView(views: [
-            addNativeButton, addButton, editButton, moveUpButton, moveDownButton, resetButton,
+            addNativeButton, addCELButton, editButton, moveUpButton, moveDownButton, resetButton,
             NSView(), reloadButton, openButton,
         ])
         controls.orientation = .horizontal
@@ -345,11 +358,18 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     }
 
     private func updateActionAvailability() {
+        let idle = configurationReady && fileOperationTask == nil
         let index = selectedIndex
-        editButton.isEnabled = index.map { draft.columns[$0].source == .cel } ?? false
-        moveUpButton.isEnabled = index.map { $0 > 0 } ?? false
-        moveDownButton.isEnabled = index.map { $0 + 1 < draft.columns.count } ?? false
-        saveButton.isEnabled = persistenceAvailable && dirty
+        tableView.isEnabled = idle
+        addNativeButton.isEnabled = idle
+        addCELButton.isEnabled = idle
+        editButton.isEnabled = idle && (index.map { draft.columns[$0].source == .cel } ?? false)
+        moveUpButton.isEnabled = idle && (index.map { $0 > 0 } ?? false)
+        moveDownButton.isEnabled = idle && (index.map { $0 + 1 < draft.columns.count } ?? false)
+        resetButton.isEnabled = idle
+        reloadButton.isEnabled = fileOperationTask == nil
+        openButton.isEnabled = fileOperationTask == nil
+        saveButton.isEnabled = idle && persistenceAvailable && dirty
     }
 
     private func markChanged(selecting index: Int? = nil) {
@@ -462,82 +482,128 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     }
 
     @objc private func reloadFile() {
-        do {
-            let loaded = try fileStore.load()
-            configurationDocument = loaded
-            let columns = loaded.views.first(where: { $0.match == match })?.columns
-                ?? defaultColumns
-            draft = ResourceColumnDraft(match: match, columns: columns)
-            lastAppliedColumns = columns
-            dirty = false
-            persistenceAvailable = true
-            tableView.reloadData()
-            tableView.deselectAll(nil)
+        loadConfiguration(statusPrefix: "Reloaded")
+    }
+
+    private func loadConfiguration(statusPrefix: String?) {
+        guard fileOperationTask == nil else { return }
+        showStatus(statusPrefix == nil ? "Loading column configuration…" : "Reloading column configuration…", error: false)
+        updateActionAvailability()
+        let fileStore = fileStore
+        fileOperationTask = Task { [weak self] in
+            do {
+                let loaded = try await fileStore.loadOffMain()
+                try Task.checkCancellation()
+                guard let self else { return }
+                configurationDocument = loaded
+                let columns = loaded.views.first(where: { $0.match == match })?.columns
+                    ?? defaultColumns
+                draft = ResourceColumnDraft(match: match, columns: columns)
+                lastAppliedColumns = columns
+                dirty = false
+                persistenceAvailable = true
+                configurationReady = true
+                tableView.reloadData()
+                tableView.deselectAll(nil)
+                onDraftChanged?(columns)
+                let prefix = statusPrefix.map { "\($0) · " } ?? ""
+                showStatus("\(prefix)\(scopeDescription)", error: false)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self else { return }
+                persistenceAvailable = false
+                configurationReady = true
+                showStatus(error.localizedDescription, error: true)
+            }
+            guard let self else { return }
+            fileOperationTask = nil
             updateActionAvailability()
-            onDraftChanged?(columns)
-            showStatus("Reloaded · \(scopeDescription)", error: false)
-        } catch {
-            persistenceAvailable = false
-            updateActionAvailability()
-            showStatus(error.localizedDescription, error: true)
         }
+        updateActionAvailability()
     }
 
     @objc private func openInEditor() {
-        do {
-            let url = try fileStore.ensureFileExists()
-            guard NSWorkspace.shared.open(url) else {
-                throw ColumnConfigurationFileIssue("No application could open \(url.path).")
+        guard fileOperationTask == nil else { return }
+        showStatus("Preparing column configuration…", error: false)
+        updateActionAvailability()
+        let fileStore = fileStore
+        fileOperationTask = Task { [weak self] in
+            do {
+                let url = try await fileStore.ensureFileExistsOffMain()
+                try Task.checkCancellation()
+                guard NSWorkspace.shared.open(url) else {
+                    throw ColumnConfigurationFileIssue("No application could open \(url.path).")
+                }
+                self?.showStatus("Opened \(url.lastPathComponent). Reload after external edits.", error: false)
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showStatus(error.localizedDescription, error: true)
             }
-            showStatus("Opened \(url.lastPathComponent). Reload after external edits.", error: false)
-        } catch {
-            showStatus(error.localizedDescription, error: true)
+            self?.fileOperationTask = nil
+            self?.updateActionAvailability()
         }
+        updateActionAvailability()
     }
 
     @objc private func save() {
-        _ = persistDraft()
+        persistDraft()
     }
 
-    private func persistDraft() -> Bool {
-        guard persistenceAvailable else {
+    private func persistDraft(onSuccess: (@MainActor () -> Void)? = nil) {
+        guard configurationReady, fileOperationTask == nil, persistenceAvailable else {
             showStatus("Reload a valid configuration before saving.", error: true)
-            return false
+            return
         }
-        do {
-            let currentOnDisk = try fileStore.load()
-            guard currentOnDisk == configurationDocument else {
-                persistenceAvailable = false
-                updateActionAvailability()
-                throw ColumnConfigurationFileIssue(
-                    "The column configuration changed outside this window. Reload it before saving so no external edit is overwritten."
-                )
-            }
-            var updated = configurationDocument
-            let view = ResourceColumnConfiguration(match: match, columns: draft.columns)
-            if let index = updated.views.firstIndex(where: { $0.match == match }) {
-                updated.views[index] = view
-            } else {
-                updated.views.append(view)
-            }
-            try fileStore.save(updated)
-            configurationDocument = updated
-            lastAppliedColumns = draft.columns
-            dirty = false
-            persistenceAvailable = true
-            updateActionAvailability()
-            showStatus("Saved \(draft.columns.count.formatted()) columns · \(scopeDescription)", error: false)
-            onSaved?(draft.columns)
-            return true
-        } catch {
-            showStatus(error.localizedDescription, error: true)
-            return false
+        let baseline = configurationDocument
+        let columns = draft.columns
+        var updated = baseline
+        let view = ResourceColumnConfiguration(match: match, columns: columns)
+        if let index = updated.views.firstIndex(where: { $0.match == match }) {
+            updated.views[index] = view
+        } else {
+            updated.views.append(view)
         }
+        showStatus("Saving column configuration…", error: false)
+        let fileStore = fileStore
+        fileOperationTask = Task { [weak self] in
+            do {
+                let currentOnDisk = try await fileStore.loadOffMain()
+                try Task.checkCancellation()
+                guard currentOnDisk == baseline else {
+                    self?.persistenceAvailable = false
+                    throw ColumnConfigurationFileIssue(
+                        "The column configuration changed outside this window. Reload it before saving so no external edit is overwritten."
+                    )
+                }
+                try await fileStore.saveOffMain(updated)
+                try Task.checkCancellation()
+                guard let self else { return }
+                configurationDocument = updated
+                lastAppliedColumns = columns
+                dirty = false
+                persistenceAvailable = true
+                showStatus("Saved \(columns.count.formatted()) columns · \(scopeDescription)", error: false)
+                onSaved?(columns)
+                onSuccess?()
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showStatus(error.localizedDescription, error: true)
+            }
+            self?.fileOperationTask = nil
+            self?.updateActionAvailability()
+        }
+        updateActionAvailability()
     }
 
     @objc private func closeWindow() {
-        guard let window, approveDismissal() else { return }
-        windowDismissal.dismiss(window)
+        guard let window else { return }
+        approveDismissal { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.windowDismissal.dismiss(window)
+        }
     }
 
     fileprivate static func resultTypeTitle(_ type: ColumnResultType) -> String {

@@ -492,13 +492,8 @@ final class Application: NSObject, NSApplicationDelegate {
         }
         columnsManagerControllers[identifier] = controller
 
-        // Keep the table and manager synchronized as soon as the sheet opens,
-        // including definitions that were persisted outside this process.
-        if let document = try? ColumnConfigurationFileStore(path: configurationPath).load() {
-            let columns = document.views.first(where: { $0.match == request.match })?.columns
-                ?? request.defaultColumns
-            request.apply(columns)
-        }
+        // The manager loads and parses the external file away from the main
+        // actor, then publishes the matching definitions through this callback.
         controller.beginSheet(for: parent)
     }
 

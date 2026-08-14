@@ -94,6 +94,76 @@ struct ResourceColumnPropagationTests {
         #expect(secondTable.selectedRowIndexes.isEmpty)
     }
 
+    @Test("a save invalidates cached definitions for other GVRs")
+    func savedEditReloadsCompleteDocumentForOtherGVRs() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let nodes = DiscoveredResource(
+            group: "", version: "v1", resource: "nodes", kind: "Node",
+            namespaced: false, verbs: ["list", "watch"]
+        )
+        let podsProvider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let nodesProvider = ColumnPropagationWorkspaceProvider(resource: nodes)
+        let podsWorkspace = makeWorkspace(
+            suffix: "saved-pods",
+            provider: podsProvider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path
+        )
+        let nodesWorkspace = makeWorkspace(
+            suffix: "reloaded-nodes",
+            provider: nodesProvider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path
+        )
+        let workspaces = [podsWorkspace, nodesWorkspace]
+        start(workspaces)
+        defer { workspaces.forEach { $0.close() } }
+
+        try await waitUntil {
+            podsProvider.streamRequests.count == 1
+                && nodesProvider.streamRequests.count == 1
+        }
+        let savedPods = sharedSavedColumnDefinitions()
+        let reloadedNodes = [ColumnDefinition(
+            id: "name",
+            title: "Node Identity From Reload",
+            source: .builtin,
+            value: "name",
+            type: .string,
+            width: 260
+        )]
+        try await ColumnConfigurationFileStore(path: fixture.path).saveOffMain(
+            ColumnsConfigurationDocument(views: [
+                ResourceColumnConfiguration(
+                    match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+                    columns: savedPods
+                ),
+                ResourceColumnConfiguration(
+                    match: ColumnResourceMatch(group: "", version: "v1", resource: "nodes"),
+                    columns: reloadedNodes
+                ),
+            ])
+        )
+
+        let appliedCount = SavedResourceColumnsChange(
+            match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+            definitions: savedPods
+        ).apply(to: workspaces)
+
+        #expect(appliedCount == 1)
+        try await waitUntil {
+            nodesProvider.streamRequests.count == 2
+                && nodesProvider.streamRequests.last?.columnIDs == ["name"]
+                && self.resourceTable(in: nodesWorkspace)?.tableColumns.map(\.title)
+                    == ["Node Identity From Reload"]
+        }
+    }
+
     @Test("each same-GVR window retains its exact optional-resource overlay")
     func savedEditPreservesPerWindowExactResources() async throws {
         let fixture = try ColumnPropagationFixture()

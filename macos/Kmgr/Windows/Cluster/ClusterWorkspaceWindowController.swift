@@ -1710,6 +1710,10 @@ private final class ResourceListViewController: NSViewController,
     private var columnIDs: [String] = []
     private var columnDefinitionsByID: [String: ColumnDefinition] = [:]
     private var columnDefinitionsByResourceID: [String: [ColumnDefinition]] = [:]
+    private var provisionalDefaultColumnResourceIDs: Set<String> = []
+    private var columnsConfigurationCache = ColumnConfigurationCacheState()
+    private var columnsConfigurationLoadTask: Task<Void, Never>?
+    private var columnsConfigurationLoadGeneration: UInt64 = 0
     private var suppressSortChanges = false
     private var snapshotUIDs: [ResourceUID] = []
     private var lastStreamResourceID: String?
@@ -1908,6 +1912,9 @@ private final class ResourceListViewController: NSViewController,
     func stop() {
         restorationCheckpointTask?.cancel()
         restorationCheckpointTask = nil
+        columnsConfigurationLoadGeneration &+= 1
+        columnsConfigurationLoadTask?.cancel()
+        columnsConfigurationLoadTask = nil
         stopFreshnessAgeUpdates()
         suspend()
         clearOptionalResourceOverlay()
@@ -2754,7 +2761,9 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func configureColumns(for resource: DiscoveredResource) {
-        if let existing = columnDefinitionsByResourceID[resource.id] {
+        if let existing = columnDefinitionsByResourceID[resource.id],
+            !provisionalDefaultColumnResourceIDs.contains(resource.id)
+        {
             installColumns(effectiveColumnDefinitions(
                 persistedDefinitions: existing,
                 resource: resource
@@ -2767,18 +2776,90 @@ private final class ResourceListViewController: NSViewController,
             version: resource.version,
             resource: resource.resource
         )
-        let definitions = (try? ColumnConfigurationFileStore(
-            path: columnsConfigurationPath
-        ).load().views.first(where: { $0.match == match })?.columns) ?? defaults
+        if let document = columnsConfigurationCache.document {
+            let definitions = document.views.first(where: { $0.match == match })?.columns
+                ?? defaults
+            provisionalDefaultColumnResourceIDs.remove(resource.id)
+            columnDefinitionsByResourceID[resource.id] = definitions
+            installColumns(effectiveColumnDefinitions(
+                persistedDefinitions: definitions,
+                resource: resource
+            ))
+            return
+        }
+        let definitions = columnDefinitionsByResourceID[resource.id] ?? defaults
         columnDefinitionsByResourceID[resource.id] = definitions
+        provisionalDefaultColumnResourceIDs.insert(resource.id)
         installColumns(effectiveColumnDefinitions(
             persistedDefinitions: definitions,
             resource: resource
         ))
+        beginColumnsConfigurationLoadIfNeeded()
+    }
+
+    private func beginColumnsConfigurationLoadIfNeeded() {
+        guard columnsConfigurationCache.document == nil,
+            columnsConfigurationLoadTask == nil
+        else { return }
+        let store = ColumnConfigurationFileStore(path: columnsConfigurationPath)
+        columnsConfigurationLoadGeneration &+= 1
+        let loadGeneration = columnsConfigurationLoadGeneration
+        columnsConfigurationLoadTask = Task { [weak self] in
+            let loaded: ColumnsConfigurationDocument
+            do {
+                loaded = try await store.loadOffMain()
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                return
+            } catch {
+                // Invalid external configuration already has a dedicated
+                // Settings/Columns error surface. Resource navigation remains
+                // usable with its typed defaults, and a later navigation may
+                // retry after the external file has been repaired.
+                guard let self,
+                    columnsConfigurationLoadGeneration == loadGeneration
+                else { return }
+                columnsConfigurationLoadTask = nil
+                return
+            }
+            guard let self,
+                columnsConfigurationLoadGeneration == loadGeneration
+            else { return }
+            let reconciled = columnsConfigurationCache.installLoaded(loaded)
+            columnsConfigurationLoadTask = nil
+            guard let resource,
+                provisionalDefaultColumnResourceIDs.contains(resource.id)
+            else { return }
+            let match = ColumnResourceMatch(
+                group: resource.group,
+                version: resource.version,
+                resource: resource.resource
+            )
+            let definitions = reconciled.views.first(where: { $0.match == match })?.columns
+                ?? defaultColumnDefinitions(for: resource)
+            let presentation = tableView.tableColumns.map { column in
+                ColumnPresentationState(
+                    columnID: column.identifier.rawValue,
+                    width: Double(column.width),
+                    isVisible: !column.isHidden
+                )
+            }
+            let previous = installedColumnDefinitions
+            provisionalDefaultColumnResourceIDs.remove(resource.id)
+            columnDefinitionsByResourceID[resource.id] = definitions
+            installEffectiveColumns(for: resource)
+            applyColumnPresentation(presentation)
+            if installedColumnDefinitions != previous {
+                openStream()
+            }
+            updateStatusLine()
+            onRestorationChanged?()
+        }
     }
 
     private func applyColumns(_ definitions: [ColumnDefinition], forResourceID resourceID: String) {
         guard resource?.id == resourceID else { return }
+        provisionalDefaultColumnResourceIDs.remove(resourceID)
         columnDefinitionsByResourceID[resourceID] = definitions
         let previousEffective = installedColumnDefinitions
         if let resource {
@@ -2796,6 +2877,22 @@ private final class ResourceListViewController: NSViewController,
         _ definitions: [ColumnDefinition],
         matching match: ColumnResourceMatch
     ) -> Bool {
+        columnsConfigurationLoadGeneration &+= 1
+        columnsConfigurationLoadTask?.cancel()
+        columnsConfigurationLoadTask = nil
+        columnsConfigurationCache.recordSaved(definitions, matching: match)
+        if let currentID = resource?.id {
+            let currentDefinitions = columnDefinitionsByResourceID[currentID]
+            columnDefinitionsByResourceID.removeAll(keepingCapacity: true)
+            if let currentDefinitions {
+                columnDefinitionsByResourceID[currentID] = currentDefinitions
+            }
+            provisionalDefaultColumnResourceIDs = [currentID]
+        } else {
+            columnDefinitionsByResourceID.removeAll(keepingCapacity: true)
+            provisionalDefaultColumnResourceIDs.removeAll(keepingCapacity: true)
+        }
+        defer { beginColumnsConfigurationLoadIfNeeded() }
         guard let resource,
             match == ColumnResourceMatch(
                 group: resource.group,

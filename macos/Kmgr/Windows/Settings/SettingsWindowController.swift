@@ -26,6 +26,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let columnsPathField = NSTextField()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let applyButton = NSButton(title: "Apply", target: nil, action: nil)
+    private let openColumnsButton = NSButton(title: "Open in Editor", target: nil, action: nil)
+    private var columnsFileTask: Task<Void, Never>?
 
     var onPreferencesChanged: ((AppPreferences, AppPreferencesDelta) -> Void)?
 
@@ -137,11 +139,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         confirmationControls.spacing = 6
         let confirmations = section(title: "Confirmations", rows: [confirmationControls])
 
-        let openColumnsButton = NSButton(
-            title: "Open in Editor",
-            target: self,
-            action: #selector(openColumnsInEditor)
-        )
+        openColumnsButton.target = self
+        openColumnsButton.action = #selector(openColumnsInEditor)
         let columnsRow = NSStackView(views: [columnsPathField, openColumnsButton])
         columnsRow.orientation = .horizontal
         columnsRow.alignment = .centerY
@@ -417,15 +416,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     }
 
     @objc private func openColumnsInEditor() {
+        guard columnsFileTask == nil else { return }
         let store = ColumnConfigurationFileStore(path: columnsPathField.stringValue)
-        do {
-            let url = try store.ensureFileExists()
-            guard NSWorkspace.shared.open(url) else {
-                throw ColumnConfigurationFileIssue("No application could open \(url.path).")
+        showStatus("Preparing column configuration…", error: false)
+        openColumnsButton.isEnabled = false
+        columnsFileTask = Task { [weak self] in
+            defer {
+                self?.columnsFileTask = nil
+                self?.openColumnsButton.isEnabled = true
             }
-            showStatus("Opened \(url.lastPathComponent) in the default editor.", error: false)
-        } catch {
-            showStatus(error.localizedDescription, error: true)
+            do {
+                let url = try await store.ensureFileExistsOffMain()
+                try Task.checkCancellation()
+                guard NSWorkspace.shared.open(url) else {
+                    throw ColumnConfigurationFileIssue("No application could open \(url.path).")
+                }
+                self?.showStatus("Opened \(url.lastPathComponent) in the default editor.", error: false)
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showStatus(error.localizedDescription, error: true)
+            }
         }
     }
 }

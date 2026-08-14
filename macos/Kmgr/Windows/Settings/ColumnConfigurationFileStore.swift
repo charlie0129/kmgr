@@ -2,11 +2,57 @@ import Foundation
 import KmgrCore
 import Yams
 
+/// Reconciles persisted definitions loaded in the background with saves that
+/// finish while that load is in flight. A late snapshot may be stale, so every
+/// successful save recorded after it began must win for its exact GVR.
+struct ColumnConfigurationCacheState {
+    private(set) var document: ColumnsConfigurationDocument?
+    private var pendingSavedDefinitions: [ColumnResourceMatch: [ColumnDefinition]] = [:]
+
+    mutating func recordSaved(
+        _ definitions: [ColumnDefinition],
+        matching match: ColumnResourceMatch
+    ) {
+        // The editor saves a complete document and may have incorporated
+        // external changes to other GVRs. Invalidate the old snapshot instead
+        // of pretending the one callback contains that whole document.
+        document = nil
+        pendingSavedDefinitions[match] = definitions
+    }
+
+    @discardableResult
+    mutating func installLoaded(
+        _ loaded: ColumnsConfigurationDocument
+    ) -> ColumnsConfigurationDocument {
+        var reconciled = loaded
+        for match in pendingSavedDefinitions.keys.sorted(by: { $0.key < $1.key }) {
+            guard let definitions = pendingSavedDefinitions[match] else { continue }
+            Self.upsert(definitions, matching: match, in: &reconciled)
+        }
+        pendingSavedDefinitions.removeAll(keepingCapacity: true)
+        document = reconciled
+        return reconciled
+    }
+
+    private static func upsert(
+        _ definitions: [ColumnDefinition],
+        matching match: ColumnResourceMatch,
+        in document: inout ColumnsConfigurationDocument
+    ) {
+        let view = ResourceColumnConfiguration(match: match, columns: definitions)
+        if let index = document.views.firstIndex(where: { $0.match == match }) {
+            document.views[index] = view
+        } else {
+            document.views.append(view)
+        }
+    }
+}
+
 /// Small, deliberately strict persistence boundary for the GUI column editor.
 /// JSON is emitted because it is a YAML 1.2 subset and is accepted by the Go
 /// engine's strict YAML loader. Loading accepts ordinary YAML, but rejects
 /// constructs whose meaning could change when the GUI rewrites the document.
-struct ColumnConfigurationFileStore {
+struct ColumnConfigurationFileStore: Sendable {
     static let maximumByteCount = 4 << 20
 
     let url: URL
@@ -111,6 +157,15 @@ struct ColumnConfigurationFileStore {
         return document
     }
 
+    /// File I/O and YAML/JSON parsing must never run on AppKit's main actor.
+    /// The synchronous primitives remain available for command-line/unit use;
+    /// UI callers use these detached boundaries.
+    func loadOffMain() async throws -> ColumnsConfigurationDocument {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try load()
+        }.value
+    }
+
     func save(_ document: ColumnsConfigurationDocument) throws {
         let issues = document.validationIssues()
         guard issues.isEmpty else {
@@ -136,6 +191,12 @@ struct ColumnConfigurationFileStore {
         try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
+    func saveOffMain(_ document: ColumnsConfigurationDocument) async throws {
+        try await Task.detached(priority: .userInitiated) { [self, document] in
+            try save(document)
+        }.value
+    }
+
     @discardableResult
     func ensureFileExists() throws -> URL {
         if FileManager.default.fileExists(atPath: url.path) {
@@ -149,6 +210,12 @@ struct ColumnConfigurationFileStore {
         }
         try save(ColumnsConfigurationDocument())
         return url
+    }
+
+    func ensureFileExistsOffMain() async throws -> URL {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try ensureFileExists()
+        }.value
     }
 
     private static func issueSummary(_ issues: [ColumnConfigurationIssue]) -> String {

@@ -1,4 +1,5 @@
 import Foundation
+import KmgrCore
 import Testing
 @testable import Kmgr
 
@@ -236,6 +237,45 @@ import Testing
     let issue = throwsIssue { _ = try fixture.store.load() }
 
     #expect(issue?.message.contains("GUI editor limit") == true)
+}
+
+@Test func columnConfigurationCacheKeepsSavesThatRaceWithBackgroundLoad() throws {
+    let pods = ColumnResourceMatch(group: "", version: "v1", resource: "pods")
+    let nodes = ColumnResourceMatch(group: "", version: "v1", resource: "nodes")
+    let stalePods = [testColumn(id: "old-pods")]
+    let savedPods = [testColumn(id: "saved-pods")]
+    let loadedNodes = [testColumn(id: "loaded-nodes")]
+    var cache = ColumnConfigurationCacheState()
+
+    // The disk snapshot was captured before this successful save completed.
+    cache.recordSaved(savedPods, matching: pods)
+    let reconciled = cache.installLoaded(ColumnsConfigurationDocument(views: [
+        ResourceColumnConfiguration(match: pods, columns: stalePods),
+        ResourceColumnConfiguration(match: nodes, columns: loadedNodes),
+    ]))
+
+    #expect(reconciled.views.first { $0.match == pods }?.columns == savedPods)
+    #expect(reconciled.views.first { $0.match == nodes }?.columns == loadedNodes)
+
+    let laterNodes = [testColumn(id: "saved-nodes")]
+    cache.recordSaved(laterNodes, matching: nodes)
+    #expect(cache.document == nil)
+    let reloaded = cache.installLoaded(ColumnsConfigurationDocument(views: [
+        ResourceColumnConfiguration(match: pods, columns: savedPods),
+        ResourceColumnConfiguration(match: nodes, columns: loadedNodes),
+    ]))
+    #expect(reloaded.views.first { $0.match == pods }?.columns == savedPods)
+    #expect(reloaded.views.first { $0.match == nodes }?.columns == laterNodes)
+}
+
+private func testColumn(id: String) -> ColumnDefinition {
+    ColumnDefinition(
+        id: id,
+        title: id,
+        source: .builtin,
+        value: "name",
+        type: .string
+    )
 }
 
 private struct ColumnFileFixture {
