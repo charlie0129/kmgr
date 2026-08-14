@@ -13,7 +13,10 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	clienttesting "k8s.io/client-go/testing"
+	metricsapi "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
 )
@@ -35,26 +38,155 @@ func TestKubernetesMetricSourceConstructsProvidersWithoutFetching(t *testing.T) 
 	}
 	authority := first.Context().ID + "/shared"
 	source := &KubernetesMetricSource{Sessions: registry, RefreshInterval: time.Hour}
-	firstProvider, err := source.OpenMetrics(first.ID(), authority, metrics.PodMetrics, "team-a")
+	firstLease, err := source.OpenMetrics(first.ID(), authority, metrics.PodMetrics, "team-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondProvider, err := source.OpenMetrics(second.ID(), authority, metrics.PodMetrics, "team-a")
+	defer firstLease.Close()
+	secondLease, err := source.OpenMetrics(second.ID(), authority, metrics.PodMetrics, "team-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if firstProvider != secondProvider {
-		t.Fatal("same authority/kind/namespace did not share metrics provider")
+	defer secondLease.Close()
+	key := metricProviderKey{authorityID: authority, kind: metrics.PodMetrics, namespace: "team-a"}
+	entry := source.providers[key]
+	if entry == nil || len(source.providers) != 1 {
+		t.Fatal("same authority/kind/namespace did not share one metrics provider")
 	}
-	if firstProvider.ConsumerCount() != 0 {
+	if entry.provider.ConsumerCount() != 0 {
 		t.Fatal("constructing a provider created a network consumer")
 	}
-	nodeProvider, err := source.OpenMetrics(first.ID(), authority, metrics.NodeMetrics, "")
+	nodeLease, err := source.OpenMetrics(first.ID(), authority, metrics.NodeMetrics, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nodeProvider == firstProvider {
+	defer nodeLease.Close()
+	if source.providers[metricProviderKey{authorityID: authority, kind: metrics.NodeMetrics}] == entry {
 		t.Fatal("Pod and Node metrics were cross-wired")
+	}
+}
+
+func TestKubernetesMetricSourceBoundsIdleProvidersWithoutDisruptingActiveSharing(t *testing.T) {
+	t.Parallel()
+	catalog := metricTestCatalog(t)
+	registry := cluster.NewSessionRegistry(metricClientFactory{
+		metrics: metricsfake.NewSimpleClientset().MetricsV1beta1(),
+	})
+	t.Cleanup(registry.CloseAll)
+	session, err := registry.Open(catalog, "metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := session.Context().ID + "/shared"
+	source := &KubernetesMetricSource{
+		Sessions: registry, RefreshInterval: time.Hour,
+		IdleProviderLimit: 1, IdleSampleLimit: 100,
+	}
+
+	activeLease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeKey := metricProviderKey{authorityID: authority, kind: metrics.PodMetrics, namespace: "active"}
+	activeProvider := source.providers[activeKey].provider
+	active := activeLease.Subscribe()
+	select {
+	case <-active.Updates():
+	case <-time.After(time.Second):
+		t.Fatal("active provider did not fetch")
+	}
+
+	firstIdleLease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "idle-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstIdleKey := metricProviderKey{authorityID: authority, kind: metrics.PodMetrics, namespace: "idle-a"}
+	firstIdleProvider := source.providers[firstIdleKey].provider
+	firstIdleLease.Close()
+	secondIdleLease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "idle-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondIdleKey := metricProviderKey{authorityID: authority, kind: metrics.PodMetrics, namespace: "idle-b"}
+	secondIdleLease.Close()
+
+	if len(source.providers) != 2 || source.providers[activeKey] == nil || source.providers[secondIdleKey] == nil ||
+		source.providers[firstIdleKey] != nil || source.idle.Len() != 1 {
+		t.Fatalf("bounded providers=%d idle=%d entries=%#v", len(source.providers), source.idle.Len(), source.providers)
+	}
+	if _, err := firstIdleProvider.Acquire(); err == nil {
+		t.Fatal("least-recent idle provider remained acquirable after eviction")
+	}
+	if released := source.ReleaseIdleProviders(); released != 1 {
+		t.Fatalf("released idle providers = %d, want 1", released)
+	}
+	if len(source.providers) != 1 || source.providers[activeKey] == nil || activeProvider.ConsumerCount() != 1 {
+		t.Fatal("idle cleanup disrupted the active provider")
+	}
+	if released := source.ReleaseIdleAuthority(authority); released != 0 {
+		t.Fatalf("authority cleanup released %d active providers", released)
+	}
+
+	sharedLease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := sharedLease.Subscribe()
+	if source.providers[activeKey].provider != activeProvider || activeProvider.ConsumerCount() != 2 {
+		t.Fatal("active provider was replaced instead of shared")
+	}
+	shared.Close()
+	active.Close()
+	if released := source.ReleaseIdleAuthority(authority); released != 1 {
+		t.Fatalf("released authority providers = %d, want 1", released)
+	}
+	if len(source.providers) != 0 || activeProvider.RetainedSampleCount() != 0 {
+		t.Fatal("authority cleanup retained the idle provider or its snapshot")
+	}
+}
+
+func TestKubernetesMetricSourceRejectsIdleSnapshotOverSampleBudget(t *testing.T) {
+	t.Parallel()
+	client := metricsfake.NewSimpleClientset()
+	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, k8sruntime.Object, error) {
+		return true, &metricsapi.PodMetricsList{Items: []metricsapi.PodMetrics{
+			{ObjectMeta: metav1.ObjectMeta{Namespace: "oversized", Name: "one"}},
+			{ObjectMeta: metav1.ObjectMeta{Namespace: "oversized", Name: "two"}},
+		}}, nil
+	})
+	registry := cluster.NewSessionRegistry(metricClientFactory{metrics: client.MetricsV1beta1()})
+	t.Cleanup(registry.CloseAll)
+	session, err := registry.Open(metricTestCatalog(t), "metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := session.Context().ID + "/shared"
+	source := &KubernetesMetricSource{
+		Sessions: registry, RefreshInterval: time.Hour,
+		IdleProviderLimit: 8, IdleSampleLimit: 1,
+	}
+	lease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "oversized")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := metricProviderKey{authorityID: authority, kind: metrics.PodMetrics, namespace: "oversized"}
+	provider := source.providers[key].provider
+	subscription := lease.Subscribe()
+	select {
+	case snapshot := <-subscription.Updates():
+		if len(snapshot.Samples) != 2 {
+			t.Fatalf("samples = %d, want 2", len(snapshot.Samples))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("metrics snapshot did not arrive")
+	}
+	subscription.Close()
+	if len(source.providers) != 0 || source.idle.Len() != 0 || source.idleSamples != 0 {
+		t.Fatalf("oversized idle snapshot retained: providers=%d idle=%d samples=%d",
+			len(source.providers), source.idle.Len(), source.idleSamples)
+	}
+	if provider.RetainedSampleCount() != 0 {
+		t.Fatal("evicted provider retained oversized sample map")
 	}
 }
 

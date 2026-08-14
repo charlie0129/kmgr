@@ -38,13 +38,26 @@ type Provider struct {
 	fetcher  Fetcher
 	interval time.Duration
 	now      func() time.Time
+	onIdle   func()
 
-	consumers map[uint64]chan Snapshot
-	nextID    uint64
-	ctx       context.Context
-	cancel    context.CancelFunc
-	running   bool
-	latest    Snapshot
+	consumers    map[uint64]chan Snapshot
+	reservations int
+	nextID       uint64
+	ctx          context.Context
+	cancel       context.CancelFunc
+	running      bool
+	activeRuns   int
+	released     bool
+	latest       Snapshot
+}
+
+// ProviderLease pins a shared provider between lookup and subscription. This
+// matters for large warm views: projecting the initial rows can take long
+// enough for an unpinned, zero-consumer provider to otherwise be evicted.
+// Subscribe consumes the lease atomically; Close releases an unused lease.
+type ProviderLease struct {
+	provider *Provider
+	once     sync.Once
 }
 
 type Subscription struct {
@@ -71,9 +84,99 @@ func NewProvider(fetcher Fetcher, refreshInterval time.Duration) (*Provider, err
 	}, nil
 }
 
+// Acquire pins the provider until the returned lease is either subscribed or
+// closed. A released provider cannot be reacquired.
+func (p *Provider) Acquire() (*ProviderLease, error) {
+	if p == nil {
+		return nil, errors.New("metrics provider must not be nil")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.released {
+		return nil, errors.New("metrics provider has been released")
+	}
+	p.reservations++
+	return &ProviderLease{provider: p}, nil
+}
+
+// SetIdleCallback installs the owner notification used by bounded provider
+// caches. The callback is invoked without Provider.mu held after the final
+// lease or consumer disappears.
+func (p *Provider) SetIdleCallback(callback func()) error {
+	if p == nil {
+		return errors.New("metrics provider must not be nil")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.released {
+		return errors.New("metrics provider has been released")
+	}
+	p.onIdle = callback
+	return nil
+}
+
+// Subscribe atomically turns this lookup lease into an active metrics
+// subscription. It returns nil if Close or another Subscribe already consumed
+// the lease.
+func (l *ProviderLease) Subscribe() *Subscription {
+	if l == nil {
+		return nil
+	}
+	var subscription *Subscription
+	l.once.Do(func() {
+		provider := l.provider
+		l.provider = nil
+		if provider == nil {
+			return
+		}
+		provider.mu.Lock()
+		if provider.reservations > 0 {
+			provider.reservations--
+		}
+		if !provider.released {
+			subscription = provider.subscribeLocked()
+		}
+		provider.mu.Unlock()
+	})
+	return subscription
+}
+
+// Close releases a lease that was not converted to a subscription.
+func (l *ProviderLease) Close() {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() {
+		provider := l.provider
+		l.provider = nil
+		if provider == nil {
+			return
+		}
+		provider.mu.Lock()
+		if provider.reservations > 0 {
+			provider.reservations--
+		}
+		idle := provider.isIdleLocked()
+		callback := provider.onIdle
+		provider.mu.Unlock()
+		if idle && callback != nil {
+			callback()
+		}
+	})
+}
+
 func (p *Provider) Subscribe() *Subscription {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.released {
+		updates := make(chan Snapshot)
+		close(updates)
+		return &Subscription{updates: updates}
+	}
+	return p.subscribeLocked()
+}
+
+func (p *Provider) subscribeLocked() *Subscription {
 	p.nextID++
 	updates := make(chan Snapshot, 1)
 	p.consumers[p.nextID] = updates
@@ -83,6 +186,7 @@ func (p *Provider) Subscribe() *Subscription {
 	if !p.running {
 		p.ctx, p.cancel = context.WithCancel(context.Background())
 		p.running = true
+		p.activeRuns++
 		go p.run(p.ctx)
 	}
 	return &Subscription{provider: p, id: p.nextID, updates: updates}
@@ -99,9 +203,9 @@ func (s *Subscription) Close() {
 
 func (p *Provider) unsubscribe(id uint64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	updates := p.consumers[id]
 	if updates == nil {
+		p.mu.Unlock()
 		return
 	}
 	delete(p.consumers, id)
@@ -111,6 +215,12 @@ func (p *Provider) unsubscribe(id uint64) {
 		p.cancel = nil
 		p.running = false
 	}
+	idle := p.isIdleLocked()
+	callback := p.onIdle
+	p.mu.Unlock()
+	if idle && callback != nil {
+		callback()
+	}
 }
 
 func (p *Provider) ConsumerCount() int {
@@ -119,11 +229,60 @@ func (p *Provider) ConsumerCount() int {
 	return len(p.consumers)
 }
 
+// RetainedSampleCount reports the size of the last warm snapshot. Owners use
+// it only for cache budgeting; it does not clone or expose sample data.
+func (p *Provider) RetainedSampleCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.latest.Samples)
+}
+
+// ReleaseIdle permanently releases an idle provider from its owner cache. It
+// drops the potentially large warm snapshot immediately. The fetcher is
+// cleared once every already-canceled run goroutine has exited, avoiding a
+// race with an in-flight Fetch call while still releasing old client graphs.
+func (p *Provider) ReleaseIdle() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.released || !p.isIdleLocked() {
+		return false
+	}
+	p.released = true
+	p.onIdle = nil
+	p.latest = Snapshot{State: MeasurementUnavailable}
+	if p.activeRuns == 0 {
+		p.fetcher = nil
+	}
+	return true
+}
+
+func (p *Provider) isIdleLocked() bool {
+	return len(p.consumers) == 0 && p.reservations == 0
+}
+
 func (p *Provider) run(ctx context.Context) {
+	defer func() {
+		p.mu.Lock()
+		p.activeRuns--
+		if p.released && p.activeRuns == 0 {
+			p.fetcher = nil
+		}
+		p.mu.Unlock()
+	}()
 	backoff := p.interval
 	for {
 		started := p.now()
-		samples, err := p.fetcher.Fetch(ctx)
+		p.mu.Lock()
+		fetcher := p.fetcher
+		released := p.released
+		p.mu.Unlock()
+		if released || fetcher == nil {
+			return
+		}
+		samples, err := fetcher.Fetch(ctx)
 		if ctx.Err() != nil {
 			return
 		}
@@ -158,6 +317,9 @@ func (p *Provider) run(ctx context.Context) {
 func (p *Provider) publish(snapshot Snapshot) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.released {
+		return
+	}
 	p.latest = cloneSnapshot(snapshot)
 	for _, consumer := range p.consumers {
 		copy := cloneSnapshot(snapshot)

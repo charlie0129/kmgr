@@ -58,7 +58,11 @@ func TestProviderCoalescesSlowConsumersToNewestSnapshot(t *testing.T) {
 	}
 	subscription := provider.Subscribe()
 	defer subscription.Close()
-	eventuallyMetrics(t, time.Second, func() bool { return fetcher.calls.Load() >= 3 })
+	eventuallyMetrics(t, time.Second, func() bool {
+		provider.mu.Lock()
+		defer provider.mu.Unlock()
+		return provider.latest.Samples["pod"].Resources["cpu"] == 3
+	})
 	select {
 	case snapshot := <-subscription.Updates():
 		if got := snapshot.Samples["pod"].Resources["cpu"]; got != 3 {
@@ -133,6 +137,49 @@ func TestProviderRetainsLastGoodValuesAsStaleAfterRefreshFailure(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no stale metrics snapshot")
+	}
+}
+
+func TestProviderLeasePinsUntilSubscriptionAndIdleReleaseDropsSnapshot(t *testing.T) {
+	t.Parallel()
+	fetcher := &sequenceFetcher{values: []map[string]Sample{
+		{"pod": {Resources: map[string]int64{"cpu": 42}}},
+	}}
+	provider, err := NewProvider(fetcher, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := provider.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.ReleaseIdle() {
+		t.Fatal("provider was released while an open lease pinned it")
+	}
+	subscription := lease.Subscribe()
+	if subscription == nil {
+		t.Fatal("lease did not convert to a subscription")
+	}
+	select {
+	case snapshot := <-subscription.Updates():
+		if snapshot.Samples["pod"].Resources["cpu"] != 42 {
+			t.Fatalf("snapshot = %#v", snapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no metrics snapshot")
+	}
+	if provider.RetainedSampleCount() != 1 || provider.ReleaseIdle() {
+		t.Fatal("active subscription was not pinned")
+	}
+	subscription.Close()
+	if !provider.ReleaseIdle() {
+		t.Fatal("idle provider was not released")
+	}
+	if provider.RetainedSampleCount() != 0 {
+		t.Fatal("released provider retained its last sample")
+	}
+	if _, err := provider.Acquire(); err == nil {
+		t.Fatal("released provider was reacquired")
 	}
 }
 

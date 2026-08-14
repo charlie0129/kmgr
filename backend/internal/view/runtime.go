@@ -712,10 +712,10 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		projector = projector.WithNodeAccounting(NodeAccountingSnapshot{Active: true})
 		subscription.projector = projector
 	}
-	var metricProvider *metrics.Provider
+	var metricProviderLease *metrics.ProviderLease
 	if r.metrics != nil && needsMetricProvider(projector) {
 		metricKind, _ := metricKindFor(projector.spec.Resource)
-		provider, metricErr := r.metrics.OpenMetrics(
+		providerLease, metricErr := r.metrics.OpenMetrics(
 			sessionID, authorityID, metricKind,
 			metricsNamespace(projector.spec.Resource, serverNamespace),
 		)
@@ -728,10 +728,11 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			})
 			subscription.projector = projector
 		} else {
-			metricProvider = provider
+			metricProviderLease = providerLease
+			defer metricProviderLease.Close()
 		}
 	}
-	if metricProvider == nil {
+	if metricProviderLease == nil {
 		projector = subscription.projector
 	}
 
@@ -875,8 +876,8 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	// Enqueue the base projection before metrics can publish. Starting this
 	// goroutine after releasing the runtime lock also keeps a very fast metrics
 	// response from contending with the base LIST/WATCH setup.
-	if metricProvider != nil {
-		subscription.attachMetrics(metricProvider.Subscribe())
+	if metricProviderLease != nil {
+		subscription.attachMetrics(metricProviderLease.Subscribe())
 	}
 	if needsNodeAccounting(projector) {
 		go r.attachNodeAccounting(subscription, sessionID, authorityID)
@@ -1757,6 +1758,9 @@ func (r *Runtime) Close() {
 	}
 	for _, subscription := range subscriptions {
 		subscription.close()
+	}
+	if releaser, ok := r.metrics.(interface{ ReleaseIdleProviders() int }); ok {
+		releaser.ReleaseIdleProviders()
 	}
 }
 

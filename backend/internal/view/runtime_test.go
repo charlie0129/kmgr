@@ -2847,9 +2847,12 @@ type fakeMetricSource struct {
 	opens    atomic.Int64
 }
 
-func (s *fakeMetricSource) OpenMetrics(string, string, metrics.APIKind, string) (*metrics.Provider, error) {
+func (s *fakeMetricSource) OpenMetrics(string, string, metrics.APIKind, string) (*metrics.ProviderLease, error) {
 	s.opens.Add(1)
-	return s.provider, s.err
+	if s.err != nil || s.provider == nil {
+		return nil, s.err
+	}
+	return s.provider.Acquire()
 }
 
 type metricFetcherFunc func(context.Context) (map[string]metrics.Sample, error)
