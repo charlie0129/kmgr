@@ -55,6 +55,50 @@ private func podIdentity(_ name: String, uid: String) -> ResourceIdentity {
     ).map(\.label) == ["team-a/api/app", "team-a/worker/app"])
 }
 
+@Test func defaultLogOpenPlansEveryContainerAndNamedContainerRowsStayExact() throws {
+    let pod = podIdentity("api", uid: "api-uid")
+    let resolution = LogSourceResolution(
+        pods: [PodLogSourceInventory(identity: pod, containers: ["sidecar", "app"])],
+        staticWorkloadSnapshot: false
+    )
+
+    let all = try LogOpenPlanner.plan(
+        request: .allContainers(for: [pod]),
+        resolution: resolution
+    )
+    #expect(all.sources.map(\.container) == ["app", "sidecar"])
+    #expect(all.availableSources == all.sources)
+
+    let app = try LogOpenPlanner.plan(
+        request: .namedContainer("app", in: pod),
+        resolution: resolution
+    )
+    #expect(app.sources.map(\.container) == ["app"])
+    #expect(app.availableSources.map(\.container) == ["app", "sidecar"])
+}
+
+@Test func defaultLogOpenRefusesAnOversizedAllContainerExpansion() {
+    let pod = podIdentity("api", uid: "api-uid")
+    let resolution = LogSourceResolution(
+        pods: [PodLogSourceInventory(
+            identity: pod,
+            containers: (0...LogOpenPlanner.maximumSources).map { "container-\($0)" }
+        )],
+        staticWorkloadSnapshot: false
+    )
+
+    #expect(throws: ClusterManagerIssue.self) {
+        try LogOpenPlanner.plan(
+            request: .allContainers(for: [pod]),
+            resolution: resolution
+        )
+    }
+    #expect(try LogOpenPlanner.plan(
+        request: .namedContainer("container-0", in: pod),
+        resolution: resolution
+    ).sources.count == 1)
+}
+
 @Test func compatibleWorkloadsIncludeUIDSafeStaticControllerFamilies() {
     let resources = [
         ("apps", "deployments"),
@@ -92,6 +136,22 @@ private func podIdentity(_ name: String, uid: String) -> ResourceIdentity {
         sources: [source]
     ) == "Context: production · Sources: team-a/api/app")
     #expect(LogSourcePresentation.titleSummary(for: [source]) == "team-a/api/app")
+}
+
+@Test func singlePodMultiContainerPrefixesUseContainerNames() {
+    let sources = [
+        LogSource(
+            identity: podIdentity("api", uid: "api-uid"), container: "app",
+            sourceID: "api-uid/app", label: "team-a/api/app"
+        ),
+        LogSource(
+            identity: podIdentity("api", uid: "api-uid"), container: "sidecar",
+            sourceID: "api-uid/sidecar", label: "team-a/api/sidecar"
+        ),
+    ]
+    #expect(LogSourcePresentation.prefixLabels(for: sources) == [
+        "api-uid/app": "app", "api-uid/sidecar": "sidecar",
+    ])
 }
 
 @Test func logStreamGateKeepsLatePreviousGenerationOutOfBufferAfterOptionsReset() {

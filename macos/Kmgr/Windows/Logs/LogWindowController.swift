@@ -98,10 +98,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         // Preferences may retain far more history than AppKit can safely lay
         // out in one main-thread NSTextView.string replacement.
         self.maximumRenderedUTF8Bytes = min(displayConfiguration.byteLimit, 32 << 20)
-        self.sourceLabels = Dictionary(
-            allSources.map { ($0.sourceID, $0.label) },
-            uniquingKeysWith: { first, _ in first }
-        )
+        self.sourceLabels = LogSourcePresentation.prefixLabels(for: allSources)
         let titleSources = LogSourcePresentation.titleSummary(for: sources)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 640),

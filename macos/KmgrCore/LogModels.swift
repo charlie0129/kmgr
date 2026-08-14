@@ -74,6 +74,136 @@ public enum PodLogContainerSelection: Hashable, Sendable {
     }
 }
 
+/// Typed launch intent for a log window. Resource and workload views request
+/// every regular container, while a virtual Container row can preserve its
+/// exact parent Pod UID and opt into one named container.
+public struct LogOpenRequest: Hashable, Sendable {
+    public var resources: [ResourceIdentity]
+    public var containerSelection: PodLogContainerSelection
+
+    public init(
+        resources: [ResourceIdentity],
+        containerSelection: PodLogContainerSelection = .all
+    ) {
+        self.resources = resources
+        self.containerSelection = containerSelection
+    }
+
+    public static func allContainers(
+        for resources: [ResourceIdentity]
+    ) -> Self {
+        Self(resources: resources, containerSelection: .all)
+    }
+
+    public static func namedContainer(
+        _ name: String,
+        in pod: ResourceIdentity
+    ) -> Self {
+        Self(resources: [pod], containerSelection: .named(name))
+    }
+}
+
+public struct ResolvedLogOpenRequest: Hashable, Sendable {
+    public var sources: [LogSource]
+    public var availableSources: [LogSource]
+    public var staticWorkloadSnapshot: Bool
+
+    public init(
+        sources: [LogSource],
+        availableSources: [LogSource],
+        staticWorkloadSnapshot: Bool
+    ) {
+        self.sources = sources
+        self.availableSources = availableSources
+        self.staticWorkloadSnapshot = staticWorkloadSnapshot
+    }
+}
+
+/// Converts one authenticated, UID-pinned resolution into a bounded stream
+/// launch. The helper independently enforces the same 128-source ceiling; this
+/// UI-side check prevents an oversized default from being presented as active.
+public enum LogOpenPlanner {
+    public static let maximumSources = 128
+
+    public static func plan(
+        request: LogOpenRequest,
+        resolution: LogSourceResolution
+    ) throws -> ResolvedLogOpenRequest {
+        guard LogResourceCompatibility.supportsSelection(request.resources),
+            let sessionID = request.resources.first?.clusterSessionID,
+            request.resources.allSatisfy({ $0.clusterSessionID == sessionID })
+        else {
+            throw ClusterManagerIssue(
+                category: .validation,
+                reason: "InvalidLogSourceSelection",
+                message: "Select between 1 and 128 compatible resources from one cluster session.",
+                operation: "open Pod logs"
+            )
+        }
+        if case .named(let name) = request.containerSelection,
+            name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            throw ClusterManagerIssue(
+                category: .validation,
+                reason: "InvalidLogContainer",
+                message: "A named log container cannot be empty.",
+                operation: "open Pod logs"
+            )
+        }
+        guard !resolution.pods.isEmpty else {
+            throw ClusterManagerIssue(
+                category: .notFound,
+                reason: "NoWorkloadPods",
+                message: "The static snapshot contains no Pods. The workload may be scaled to zero or have no current Jobs.",
+                operation: "open Pod logs"
+            )
+        }
+        guard resolution.pods.count <= maximumSources,
+            resolution.pods.allSatisfy({ inventory in
+                let identity = inventory.identity
+                return identity.clusterSessionID == sessionID
+                    && identity.group.isEmpty && identity.version == "v1"
+                    && identity.resource == "pods" && !identity.namespace.isEmpty
+                    && !identity.name.isEmpty && !identity.uid.rawValue.isEmpty
+            })
+        else {
+            throw ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "InvalidResolvedLogSources",
+                message: "The engine returned an invalid Pod log snapshot.",
+                operation: "open Pod logs"
+            )
+        }
+
+        let available = PodLogSourcePlanner.sources(for: resolution.pods, selection: .all)
+        let selected = PodLogSourcePlanner.sources(
+            for: resolution.pods,
+            selection: request.containerSelection
+        )
+        guard !selected.isEmpty else {
+            throw ClusterManagerIssue(
+                category: .notFound,
+                reason: "LogContainerNotFound",
+                message: "The selected container is not present in the resolved Pod snapshot.",
+                operation: "open Pod logs"
+            )
+        }
+        guard selected.count <= maximumSources else {
+            throw ClusterManagerIssue(
+                category: .validation,
+                reason: "TooManyLogSources",
+                message: "The selection expands to more than 128 container log streams. Narrow the resource selection or open one container.",
+                operation: "open Pod logs"
+            )
+        }
+        return ResolvedLogOpenRequest(
+            sources: selected,
+            availableSources: available,
+            staticWorkloadSnapshot: resolution.staticWorkloadSnapshot
+        )
+    }
+}
+
 /// Pure planning for the log configuration sheet. Multi-Pod selections always
 /// retain an aggregate option, even when Pods do not share a container name.
 /// A common named container remains available as a narrower convenience.
@@ -132,6 +262,19 @@ public enum LogSourcePresentation {
     ) -> String {
         let labels = sources.map { displaySafe($0.label) }.joined(separator: ", ")
         return "Context: \(displaySafe(contextName)) · Sources: \(labels)"
+    }
+
+    /// A single Pod can use the concise container name requested by the UI.
+    /// Multi-Pod streams keep the Pod-qualified label so equal container names
+    /// never become ambiguous.
+    public static func prefixLabels(for sources: [LogSource]) -> [String: String] {
+        let podUIDs = Set(sources.map(\.identity.uid))
+        return Dictionary(
+            sources.map { source in
+                (source.sourceID, podUIDs.count == 1 ? source.container : source.label)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
     private static func displaySafe(_ value: String) -> String {
