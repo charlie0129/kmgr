@@ -51,6 +51,22 @@ import Testing
     #expect(row.accessibilityValue.contains("Unsaved"))
 }
 
+@Test func dataEditorUnselectedUnsavedRowKeepsItsOwnDraftMetadata() {
+    let row = DataEditorRowPresentation(
+        key: "archive",
+        storedKind: .text,
+        storedByteSize: 4,
+        isSelected: false,
+        draftKind: .binary,
+        draftByteSize: 8_192,
+        hasUnsavedChanges: true
+    )
+
+    #expect(row.typeText == "binary")
+    #expect(row.sizeText.contains("8"))
+    #expect(row.state == .unsaved)
+}
+
 @Test func dataEditorConflictTakesPrecedenceWithoutAcceptingAValuePreview() {
     let row = DataEditorRowPresentation(
         key: "token",

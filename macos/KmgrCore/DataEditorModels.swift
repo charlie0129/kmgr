@@ -64,10 +64,14 @@ public struct DataEditorRowPresentation: Hashable, Sendable {
         hasUnsavedChanges: Bool = false,
         hasConflict: Bool = false
     ) {
-        // A conflict can remain marked after the user selects another key.
-        // Never let that row borrow metadata from the selected key's draft.
-        let effectiveKind = isSelected ? (draftKind ?? storedKind) : storedKind
-        let effectiveByteSize = isSelected ? (draftByteSize ?? storedByteSize) : storedByteSize
+        // Unsaved drafts can remain when another key is selected. Callers pass
+        // metadata for this row's draft only; a conflict without a local draft
+        // continues to use the stored metadata.
+        let usesDraftMetadata = isSelected || hasUnsavedChanges
+        let effectiveKind = usesDraftMetadata ? (draftKind ?? storedKind) : storedKind
+        let effectiveByteSize = usesDraftMetadata
+            ? (draftByteSize ?? storedByteSize)
+            : storedByteSize
         let rowState: DataEditorRowState = hasConflict
             ? .conflict
             : (hasUnsavedChanges ? .unsaved : .saved)

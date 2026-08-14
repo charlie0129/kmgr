@@ -1,0 +1,749 @@
+import AppKit
+import Foundation
+import KmgrCore
+import Testing
+@testable import Kmgr
+
+@MainActor
+@Suite("Object detail Data drafts", .serialized)
+struct ObjectDetailDataDraftTests {
+    @Test("draft store keeps independent text and binary values in memory")
+    func independentTextAndBinaryDrafts() throws {
+        let store = DataEditorDraftStore()
+        let binary = Data([0x00, 0xff, 0x10, 0x80])
+        let originalBinary = Data([0x01, 0x02])
+        let binaryHash = Data(repeating: 7, count: 32)
+        store.update(
+            key: "archive",
+            kind: .binary,
+            value: binary,
+            storedKind: .binary,
+            valueMatchesStored: false,
+            storedContentHash: binaryHash
+        )
+        store.update(
+            key: "config",
+            kind: .binary,
+            value: Data("plain text bytes".utf8),
+            storedKind: .text,
+            valueMatchesStored: true,
+            storedContentHash: Data(repeating: 3, count: 32)
+        )
+
+        var binaryDraft = try #require(store.snapshot(for: "archive"))
+        defer {
+            binaryDraft.value.resetBytes(
+                in: binaryDraft.value.startIndex..<binaryDraft.value.endIndex
+            )
+        }
+        #expect(binaryDraft.kind == .binary)
+        #expect(binaryDraft.value == binary)
+        #expect(binaryDraft.expectedContentHash == binaryHash)
+        #expect(store.metadata(for: "archive")?.kind == .binary)
+        #expect(store.metadata(for: "archive")?.byteCount == 4)
+
+        let kindOnlyDraft = try #require(store.snapshot(for: "config"))
+        #expect(kindOnlyDraft.kind == .binary)
+        #expect(kindOnlyDraft.value == Data("plain text bytes".utf8))
+
+        store.update(
+            key: "archive",
+            kind: .binary,
+            value: originalBinary,
+            storedKind: .binary,
+            valueMatchesStored: true,
+            storedContentHash: binaryHash
+        )
+        #expect(store.snapshot(for: "archive") == nil)
+        #expect(store.snapshot(for: "config") != nil)
+        store.removeAll()
+        #expect(store.isEmpty)
+    }
+
+    @Test("ConfigMap text drafts survive key switches")
+    func configMapDraftSurvivesKeySwitch() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data),
+            initialTab: .data
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let rename = try #require(dataButtons(in: controller.view).first { $0.title == "Rename" })
+        try await waitForDataRows(table, count: 2)
+
+        select(row: 0, in: table, controller: controller)
+        #expect(editor.string == "server-alpha")
+        editor.string = "draft-alpha"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        #expect(!rename.isEnabled)
+
+        select(row: 1, in: table, controller: controller)
+        #expect(editor.string == "server-beta")
+        #expect(try stateText(in: table, row: 0) == "Unsaved")
+
+        editor.string = "draft-beta"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        select(row: 0, in: table, controller: controller)
+        #expect(editor.string == "draft-alpha")
+        #expect(try stateText(in: table, row: 1) == "Unsaved")
+        #expect(!rename.isEnabled)
+    }
+
+    @Test("Secret drafts survive conceal, reveal, and key switches without previews")
+    func secretDraftSurvivesConcealAndKeySwitch() async throws {
+        let fixture = detailFixture(resource: "secrets", secret: true)
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data),
+            initialTab: .data
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let reveal = try #require(dataButtons(in: controller.view).first { $0.title == "Reveal" })
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        try await waitForDataRows(table, count: 2)
+
+        select(row: 0, in: table, controller: controller)
+        #expect(!editor.string.contains("server-alpha"))
+        #expect(!editor.isEditable)
+
+        reveal.performClick(nil)
+        #expect(reveal.title == "Conceal")
+        #expect(editor.string == "server-alpha")
+        editor.string = "draft-secret-alpha"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        #expect(save.isEnabled)
+
+        reveal.performClick(nil)
+        #expect(reveal.title == "Reveal")
+        #expect(!editor.string.contains("draft-secret-alpha"))
+        #expect(!editor.isEditable)
+        #expect(!save.isEnabled)
+        #expect(try stateText(in: table, row: 0) == "Unsaved")
+
+        reveal.performClick(nil)
+        #expect(editor.string == "draft-secret-alpha")
+        select(row: 1, in: table, controller: controller)
+        #expect(!editor.string.contains("server-beta"))
+        #expect(!editor.string.contains("draft-secret-alpha"))
+        select(row: 0, in: table, controller: controller)
+        #expect(!editor.string.contains("draft-secret-alpha"))
+        reveal.performClick(nil)
+        #expect(editor.string == "draft-secret-alpha")
+    }
+
+    @Test("binary Secret drafts survive conceal and key switches")
+    func binarySecretDraftSurvivesConcealAndKeySwitch() async throws {
+        let fixture = detailFixture(resource: "secrets", secret: true)
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data),
+            initialTab: .data
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let reveal = try #require(dataButtons(in: controller.view).first { $0.title == "Reveal" })
+        try await waitForDataRows(table, count: 2)
+
+        select(row: 0, in: table, controller: controller)
+        reveal.performClick(nil)
+        controller.replaceSelectedDataWithImportedBytes(Data([0x00, 0xff, 0x10, 0x80]))
+        #expect(editor.string == "Binary value · 4 bytes · unsaved")
+        #expect(!editor.isEditable)
+        #expect(try stateText(in: table, row: 0) == "Unsaved")
+
+        reveal.performClick(nil)
+        #expect(!editor.string.contains("Binary value"))
+        reveal.performClick(nil)
+        #expect(editor.string == "Binary value · 4 bytes · unsaved")
+
+        select(row: 1, in: table, controller: controller)
+        select(row: 0, in: table, controller: controller)
+        #expect(!editor.string.contains("Binary value"))
+        reveal.performClick(nil)
+        #expect(editor.string == "Binary value · 4 bytes · unsaved")
+    }
+
+    @Test("identical binary import remains saved")
+    func identicalBinaryImportIsNotMarkedUnsaved() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let bytes = Data([0x00, 0xff, 0x10, 0x80])
+        let data = ObjectData(
+            identity: fixture.identity,
+            resourceVersion: "rv-1",
+            entries: [ObjectDataEntry(
+                key: "archive",
+                kind: .binary,
+                value: bytes,
+                byteSize: UInt64(bytes.count),
+                contentHash: Data(repeating: 8, count: 32)
+            )],
+            secret: false
+        )
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: data),
+            initialTab: .data
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        let rename = try #require(dataButtons(in: controller.view).first { $0.title == "Rename" })
+        try await waitForDataRows(table, count: 1)
+
+        select(row: 0, in: table, controller: controller)
+        controller.replaceSelectedDataWithImportedBytes(bytes)
+
+        #expect(try stateText(in: table, row: 0) == "Saved")
+        #expect(!editor.string.contains("unsaved"))
+        #expect(!save.isEnabled)
+        #expect(rename.isEnabled)
+    }
+
+    @Test("save locks editing and a missing sibling draft remains recoverable")
+    func saveLocksAndPreservesMissingDraft() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let provider = DraftMutationObjectDetailProvider(
+            detail: fixture.detail,
+            data: fixture.data
+        )
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: provider,
+            initialTab: .data
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        let rename = try #require(dataButtons(in: controller.view).first { $0.title == "Rename" })
+        try await waitForDataRows(table, count: 2)
+
+        select(row: 1, in: table, controller: controller)
+        editor.string = "draft-beta"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        select(row: 0, in: table, controller: controller)
+        editor.string = "saved-alpha"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        save.performClick(nil)
+
+        try await waitForPendingUpdate(provider)
+        #expect(!editor.isEditable)
+        #expect(!rename.isEnabled)
+
+        let refreshed = ObjectData(
+            identity: fixture.identity,
+            resourceVersion: "rv-2",
+            entries: [dataEntry(key: "alpha", value: "saved-alpha", hashByte: 9)],
+            secret: false
+        )
+        await provider.blockNextDataFetch()
+        await provider.succeed(with: refreshed)
+        try await waitForBlockedDataFetch(provider)
+        #expect(!editor.isEditable)
+        await provider.resumeDataFetch()
+        try await waitForDataFetches(provider, count: 2)
+        try await waitForCondition {
+            guard let beta = try? row(forKey: "beta", in: table) else { return false }
+            return (try? stateText(in: table, row: beta)) == "Conflict"
+        }
+
+        let betaRow = try row(forKey: "beta", in: table)
+        #expect(try stateText(in: table, row: betaRow) == "Conflict")
+        select(row: betaRow, in: table, controller: controller)
+        #expect(editor.string == "draft-beta")
+        #expect(save.isEnabled)
+        #expect(!rename.isEnabled)
+
+        save.performClick(nil)
+        try await waitForUpdateCalls(provider, count: 2)
+        let latestMutation = await provider.latestMutation()
+        let recreation = try #require(latestMutation)
+        guard case .set(let key, let kind, let value, let expectedHash) = recreation else {
+            Issue.record("Expected a create-only set mutation for the tombstone draft")
+            return
+        }
+        #expect(key == "beta")
+        #expect(kind == .text)
+        #expect(value == Data("draft-beta".utf8))
+        #expect(expectedHash.isEmpty)
+    }
+
+    @Test("conflict sheet and retry keep the submitted editor locked")
+    func conflictRetryKeepsEditorLocked() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let provider = DraftMutationObjectDetailProvider(
+            detail: fixture.detail,
+            data: fixture.data
+        )
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: provider,
+            initialTab: .data
+        )
+        controller.loadView()
+        let window = NSWindow(contentViewController: controller)
+        controller.viewDidAppear()
+        defer {
+            controller.stop()
+            window.close()
+        }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        try await waitForDataRows(table, count: 2)
+
+        select(row: 0, in: table, controller: controller)
+        editor.string = "local-alpha"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        save.performClick(nil)
+        try await waitForPendingUpdate(provider)
+
+        let current = ObjectData(
+            identity: fixture.identity,
+            resourceVersion: "rv-2",
+            entries: [
+                dataEntry(key: "alpha", value: "server-alpha-2", hashByte: 7),
+                dataEntry(key: "beta", value: "server-beta", hashByte: 2),
+            ],
+            secret: false
+        )
+        await provider.failConflict(with: current)
+        try await waitForCondition { window.attachedSheet != nil }
+        #expect(!editor.isEditable)
+
+        let sheet = try #require(window.attachedSheet)
+        let retry = try #require(draftDescendants(of: sheet.contentView ?? NSView())
+            .compactMap { $0 as? NSButton }
+            .first { $0.title == "Retry with Current Version" })
+        #expect(retry.isEnabled)
+        retry.performClick(nil)
+        try await waitForUpdateCalls(provider, count: 2)
+        #expect(!editor.isEditable)
+
+        let saved = ObjectData(
+            identity: fixture.identity,
+            resourceVersion: "rv-3",
+            entries: [
+                dataEntry(key: "alpha", value: "local-alpha", hashByte: 9),
+                dataEntry(key: "beta", value: "server-beta", hashByte: 2),
+            ],
+            secret: false
+        )
+        await provider.succeed(with: saved)
+        try await waitForDataFetches(provider, count: 3)
+    }
+
+    private func detailFixture(
+        resource: String,
+        secret: Bool
+    ) -> (identity: ResourceIdentity, detail: ObjectDetail, data: ObjectData) {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: resource,
+            namespace: "dev",
+            name: "settings",
+            uid: ResourceUID("uid")
+        )
+        let entries = [
+            dataEntry(key: "alpha", value: "server-alpha", hashByte: 1),
+            dataEntry(key: "beta", value: "server-beta", hashByte: 2),
+        ]
+        return (
+            identity,
+            ObjectDetail(identity: identity, resourceVersion: "rv-1"),
+            ObjectData(
+                identity: identity,
+                resourceVersion: "rv-1",
+                entries: entries,
+                secret: secret
+            )
+        )
+    }
+
+    private func dataEntry(key: String, value: String, hashByte: UInt8) -> ObjectDataEntry {
+        ObjectDataEntry(
+            key: key,
+            kind: .text,
+            value: Data(value.utf8),
+            byteSize: UInt64(value.utf8.count),
+            contentHash: Data(repeating: hashByte, count: 32)
+        )
+    }
+
+    private func select(
+        row: Int,
+        in table: NSTableView,
+        controller: ObjectDetailViewController
+    ) {
+        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        controller.tableViewSelectionDidChange(Notification(
+            name: NSTableView.selectionDidChangeNotification,
+            object: table
+        ))
+    }
+
+    private func stateText(in table: NSTableView, row: Int) throws -> String {
+        let column = try #require(table.tableColumns.firstIndex {
+            $0.identifier.rawValue == "state"
+        })
+        let cell = try #require(table.view(
+            atColumn: column,
+            row: row,
+            makeIfNecessary: true
+        ) as? NSTableCellView)
+        return cell.textField?.stringValue ?? ""
+    }
+
+    private func row(forKey key: String, in table: NSTableView) throws -> Int {
+        let column = try #require(table.tableColumns.firstIndex {
+            $0.identifier.rawValue == "key"
+        })
+        for row in 0..<table.numberOfRows {
+            let cell = table.view(
+                atColumn: column,
+                row: row,
+                makeIfNecessary: true
+            ) as? NSTableCellView
+            if cell?.textField?.stringValue == key { return row }
+        }
+        throw CancellationError()
+    }
+}
+
+private actor DraftMutationObjectDetailProvider: ObjectDetailProviding {
+    private var detail: ObjectDetail
+    private var data: ObjectData
+    private var pendingUpdate: AsyncThrowingStream<OperationProgress, Error>.Continuation?
+    private var dataFetchCount = 0
+    private var updateCallCount = 0
+    private var latestMutations: [DataMutationKind] = []
+    private var shouldBlockNextDataFetch = false
+    private var blockedDataFetch: CheckedContinuation<Void, Never>?
+
+    init(detail: ObjectDetail, data: ObjectData) {
+        self.detail = detail
+        self.data = data
+    }
+
+    func getObject(identity: ResourceIdentity) async throws -> ObjectDetail { detail }
+
+    nonisolated func watchObject(
+        identity: ResourceIdentity,
+        resourceVersion: String
+    ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
+        -> [KubernetesObjectEvent]
+    {
+        []
+    }
+
+    func getRelationships(
+        identity: ResourceIdentity,
+        includeChildren: Bool
+    ) async throws -> ObjectRelationships {
+        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
+    }
+
+    nonisolated func scanRelationships(
+        identity: ResourceIdentity
+    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func cancelRelationshipScan(
+        sessionID: String,
+        scanID: String,
+        generation: UInt64
+    ) async {}
+
+    func getData(identity: ResourceIdentity) async throws -> ObjectData {
+        dataFetchCount += 1
+        if shouldBlockNextDataFetch {
+            shouldBlockNextDataFetch = false
+            await withCheckedContinuation { blockedDataFetch = $0 }
+        }
+        return data
+    }
+
+    func prepareYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> PreparedYAMLEdit {
+        throw CancellationError()
+    }
+
+    func applyYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func updateData(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String,
+        mutations: [DataMutationKind]
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        let pair = AsyncThrowingStream<OperationProgress, Error>.makeStream()
+        pendingUpdate = pair.continuation
+        updateCallCount += 1
+        latestMutations = mutations
+        return pair.stream
+    }
+
+    func hasPendingUpdate() -> Bool { pendingUpdate != nil }
+
+    func fetchCount() -> Int { dataFetchCount }
+
+    func numberOfUpdateCalls() -> Int { updateCallCount }
+
+    func latestMutation() -> DataMutationKind? { latestMutations.last }
+
+    func blockNextDataFetch() { shouldBlockNextDataFetch = true }
+
+    func hasBlockedDataFetch() -> Bool { blockedDataFetch != nil }
+
+    func resumeDataFetch() {
+        blockedDataFetch?.resume()
+        blockedDataFetch = nil
+    }
+
+    func succeed(with updatedData: ObjectData) {
+        data = updatedData
+        detail.resourceVersion = updatedData.resourceVersion
+        pendingUpdate?.yield(OperationProgress(
+            cursor: StreamCursor(generation: 1, sequence: 1),
+            operationID: "save-key",
+            state: .succeeded,
+            completedItems: 1,
+            totalItems: 1,
+            itemResults: []
+        ))
+        pendingUpdate?.finish()
+        pendingUpdate = nil
+    }
+
+    func failConflict(with currentData: ObjectData) {
+        data = currentData
+        detail.resourceVersion = currentData.resourceVersion
+        pendingUpdate?.yield(OperationProgress(
+            cursor: StreamCursor(generation: 1, sequence: 1),
+            operationID: "save-key",
+            state: .failed,
+            completedItems: 0,
+            totalItems: 1,
+            itemResults: [],
+            issue: ClusterManagerIssue(
+                category: .conflict,
+                reason: "Conflict",
+                message: "The key changed on the server.",
+                operation: "save key"
+            )
+        ))
+        pendingUpdate?.finish()
+        pendingUpdate = nil
+    }
+}
+
+private struct DraftObjectDetailProvider: ObjectDetailProviding {
+    var detail: ObjectDetail
+    var data: ObjectData
+
+    func getObject(identity: ResourceIdentity) async throws -> ObjectDetail { detail }
+
+    func watchObject(
+        identity: ResourceIdentity,
+        resourceVersion: String
+    ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
+        -> [KubernetesObjectEvent]
+    {
+        []
+    }
+
+    func getRelationships(
+        identity: ResourceIdentity,
+        includeChildren: Bool
+    ) async throws -> ObjectRelationships {
+        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
+    }
+
+    func scanRelationships(
+        identity: ResourceIdentity
+    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func cancelRelationshipScan(
+        sessionID: String,
+        scanID: String,
+        generation: UInt64
+    ) async {}
+
+    func getData(identity: ResourceIdentity) async throws -> ObjectData { data }
+
+    func prepareYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> PreparedYAMLEdit {
+        throw CancellationError()
+    }
+
+    func applyYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func updateData(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String,
+        mutations: [DataMutationKind]
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+}
+
+@MainActor
+private func draftDescendants(of root: NSView) -> [NSView] {
+    [root] + root.subviews.flatMap(draftDescendants(of:))
+}
+
+@MainActor
+private func dataKeysTable(in root: NSView) throws -> NSTableView {
+    try #require(draftDescendants(of: root).compactMap { $0 as? NSTableView }
+        .first { $0.accessibilityLabel() == "ConfigMap and Secret data keys" })
+}
+
+@MainActor
+private func dataValueEditor(in root: NSView) throws -> NSTextView {
+    let scroll = try #require(draftDescendants(of: root).compactMap { $0 as? NSScrollView }
+        .first { $0.accessibilityLabel() == "Selected data value editor" })
+    return try #require(scroll.documentView as? NSTextView)
+}
+
+@MainActor
+private func dataButtons(in root: NSView) -> [NSButton] {
+    draftDescendants(of: root).compactMap { $0 as? NSButton }
+}
+
+@MainActor
+private func waitForDataRows(
+    _ table: NSTableView,
+    count: Int,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while table.numberOfRows != count {
+        guard clock.now < deadline else { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+@MainActor
+private func waitForCondition(
+    timeout: Duration = .seconds(2),
+    _ condition: @escaping @MainActor () -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !condition() {
+        guard clock.now < deadline else { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+@MainActor
+private func waitForPendingUpdate(
+    _ provider: DraftMutationObjectDetailProvider,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !(await provider.hasPendingUpdate()) {
+        guard clock.now < deadline else { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+@MainActor
+private func waitForDataFetches(
+    _ provider: DraftMutationObjectDetailProvider,
+    count: Int,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while await provider.fetchCount() < count {
+        guard clock.now < deadline else { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+@MainActor
+private func waitForBlockedDataFetch(
+    _ provider: DraftMutationObjectDetailProvider,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !(await provider.hasBlockedDataFetch()) {
+        guard clock.now < deadline else { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+@MainActor
+private func waitForUpdateCalls(
+    _ provider: DraftMutationObjectDetailProvider,
+    count: Int,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while await provider.numberOfUpdateCalls() < count {
+        guard clock.now < deadline else { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
