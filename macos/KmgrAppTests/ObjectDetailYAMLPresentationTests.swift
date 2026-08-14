@@ -804,7 +804,7 @@ struct ObjectDetailYAMLPresentationTests {
         image.unlockFocus()
     }
 
-    @Test("Data key table exposes metadata columns without Secret previews")
+    @Test("Data key table conceals then reveals decoded Secret previews")
     func secretDataKeyTableColumnsAndConcealment() async throws {
         let sentinel = "do-not-render-this-secret-value"
         let identity = ResourceIdentity(
@@ -846,8 +846,9 @@ struct ObjectDetailYAMLPresentationTests {
         try await waitUntil { table.numberOfRows == 1 }
 
         #expect(table.headerView != nil)
-        #expect(table.tableColumns.map(\.title) == ["Key", "Type", "Size", "State"])
-        #expect(table.tableColumns.map { $0.identifier.rawValue } == ["key", "type", "size", "state"])
+        #expect(table.tableColumns.map(\.title) == ["Key", "Value", "Type", "Size", "State"])
+        #expect(table.tableColumns.map { $0.identifier.rawValue }
+            == ["key", "value", "type", "size", "state"])
         #expect(table.allowsMultipleSelection == false)
 
         var renderedValues: [String] = []
@@ -861,10 +862,57 @@ struct ObjectDetailYAMLPresentationTests {
             #expect((cell.accessibilityValue() as? String)?.contains(sentinel) != true)
         }
         #expect(renderedValues[0] == "token")
-        #expect(renderedValues[1] == "text")
-        #expect(renderedValues[2].hasSuffix("bytes"))
-        #expect(renderedValues[3] == "Saved")
+        #expect(renderedValues[1] == "Secret concealed · \(sentinel.utf8.count) bytes")
+        #expect(renderedValues[2] == "text")
+        #expect(renderedValues[3].hasSuffix("bytes"))
+        #expect(renderedValues[4] == "Saved")
         #expect(!renderedValues.joined(separator: " ").contains(sentinel))
+
+        let valueColumnIndex = try #require(table.tableColumns.firstIndex {
+            $0.identifier.rawValue == "value"
+        })
+        let valueColumn = table.tableColumns[valueColumnIndex]
+        #expect(valueColumn.resizingMask.contains(.userResizingMask))
+        let resizedWidth = valueColumn.width + 37
+        valueColumn.width = resizedWidth
+        #expect(valueColumn.width == resizedWidth)
+
+        var valueCell = try #require(table.view(
+            atColumn: valueColumnIndex,
+            row: 0,
+            makeIfNecessary: true
+        ) as? NSTableCellView)
+        #expect(valueCell.accessibilityLabel() == "Value")
+        #expect(valueCell.accessibilityValue() as? String
+            == "Secret value concealed, \(sentinel.utf8.count) bytes")
+
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        controller.tableViewSelectionDidChange(Notification(
+            name: NSTableView.selectionDidChangeNotification,
+            object: table
+        ))
+        let reveal = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Reveal" })
+        reveal.performClick(nil)
+        valueCell = try #require(table.view(
+            atColumn: valueColumnIndex,
+            row: 0,
+            makeIfNecessary: true
+        ) as? NSTableCellView)
+        #expect(valueCell.textField?.stringValue == sentinel)
+        #expect(valueCell.accessibilityValue() as? String == "Text value: \(sentinel)")
+        let revealedValue = valueCell.textField?.stringValue ?? ""
+        #expect(revealedValue.contains(Data(sentinel.utf8).base64EncodedString()) == false)
+
+        reveal.performClick(nil)
+        valueCell = try #require(table.view(
+            atColumn: valueColumnIndex,
+            row: 0,
+            makeIfNecessary: true
+        ) as? NSTableCellView)
+        let concealedValue = valueCell.textField?.stringValue ?? ""
+        #expect(concealedValue.contains(sentinel) == false)
+        #expect((valueCell.accessibilityValue() as? String)?.contains(sentinel) != true)
 
         let split = try #require(descendants(of: root).compactMap { $0 as? NSSplitView }
             .first { $0.identifier?.rawValue == "object-detail-data-split" })

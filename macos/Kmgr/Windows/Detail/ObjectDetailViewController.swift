@@ -657,6 +657,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         dataSplitView.identifier = .init("object-detail-data-split")
         let columns: [(String, String, CGFloat, CGFloat)] = [
             ("key", "Key", 175, 100),
+            ("value", "Value", 240, 120),
             ("type", "Type", 70, 58),
             ("size", "Size", 82, 68),
             ("state", "State", 84, 72),
@@ -682,7 +683,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         keyScroll.hasVerticalScroller = true
         keyScroll.hasHorizontalScroller = true
         keyScroll.autohidesScrollers = true
-        keyScroll.frame = NSRect(x: 0, y: 0, width: 430, height: 500)
+        keyScroll.frame = NSRect(x: 0, y: 0, width: 620, height: 500)
 
         dataValueTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         dataValueTextView.isRichText = false
@@ -741,7 +742,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         dataSplitView.addArrangedSubview(keyScroll)
         dataSplitView.addArrangedSubview(editor)
         dataSplitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
-        dataSplitView.setPosition(430, ofDividerAt: 0)
+        dataSplitView.setPosition(620, ofDividerAt: 0)
     }
 
     private func loadObject(
@@ -885,13 +886,14 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             } else {
                 releaseDataDrafts()
                 objectData = updatedData
+                secretRevealed = !updatedData.secret
+                revealButton.title = "Reveal"
                 keysTable.reloadData()
                 let row = updatedData.entries.indices.contains(selectedRow) ? selectedRow : -1
                 if row >= 0 {
                     keysTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
                     selectedDataKey = updatedData.entries[row].id
                     selectedDataEntry = updatedData.entries[row]
-                    secretRevealed = !updatedData.secret
                     displaySelectedData()
                 } else {
                     selectedDataKey = nil
@@ -1582,10 +1584,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         guard dataRows.indices.contains(row), let tableColumn else {
             return nil
         }
-        let presentation = dataRowPresentation(for: dataRows[row])
+        let dataRow = dataRows[row]
+        let presentation = dataRowPresentation(for: dataRow)
+        let columnIdentifier = tableColumn.identifier.rawValue
+        let valuePreview = columnIdentifier == "value"
+            ? dataValuePreview(for: dataRow)
+            : nil
         let value: String
-        switch tableColumn.identifier.rawValue {
+        switch columnIdentifier {
         case "key": value = presentation.keyText
+        case "value": value = valuePreview?.displayText ?? ""
         case "type": value = presentation.typeText
         case "size": value = presentation.sizeText
         case "state": value = presentation.state.displayText
@@ -1593,7 +1601,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
         let cell = textCell(value, table: tableView, column: tableColumn)
         cell.setAccessibilityLabel(tableColumn.title)
-        cell.setAccessibilityValue(presentation.accessibilityValue)
+        cell.setAccessibilityValue(
+            valuePreview?.accessibilityValue ?? presentation.accessibilityValue
+        )
         switch presentation.state {
         case .saved:
             cell.textField?.textColor = .labelColor
@@ -1605,6 +1615,36 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 ? .systemRed : .labelColor
         }
         return cell
+    }
+
+    /// Produces a short-lived preview from decoded bytes. Neither this helper
+    /// nor `DataValuePreviewPresentation` retains the source value; draft and
+    /// entry copies are wiped immediately after the presentation is built.
+    private func dataValuePreview(
+        for row: DataEditorKeyRow
+    ) -> DataValuePreviewPresentation? {
+        let secret = objectData?.secret ?? isSecretObject
+        let hasRevealAuthority = secretRevealed && selectedDataKey == row.key
+        if var draft = dataDrafts.snapshot(for: row.key) {
+            defer { draft.wipe() }
+            return DataValuePreviewPresentation(
+                kind: draft.kind,
+                value: draft.value,
+                secret: secret,
+                hasRevealAuthority: hasRevealAuthority
+            )
+        }
+        if let entry = row.entry {
+            var bytes = copyBytes(from: entry)
+            defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
+            return DataValuePreviewPresentation(
+                kind: entry.kind,
+                value: bytes,
+                secret: secret,
+                hasRevealAuthority: hasRevealAuthority
+            )
+        }
+        return nil
     }
 
     private func dataRowPresentation(for row: DataEditorKeyRow) -> DataEditorRowPresentation {
@@ -1672,7 +1712,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         guard !isInstallingDataEditorState else { return }
         let previouslySelectedRow = dataEditorRows.firstIndex { $0.key == selectedDataKey }
         captureSelectedDataDraft()
-        reloadDataRows([previouslySelectedRow, keysTable.selectedRow].compactMap { $0 })
         let rows = dataEditorRows
         guard let data = objectData, rows.indices.contains(keysTable.selectedRow) else {
             selectedDataKey = nil
@@ -1682,11 +1721,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             dataValueTextView.string = ""
             dataValueTextView.undoManager?.removeAllActions()
             updateDataEditorControls()
+            reloadDataRows([previouslySelectedRow].compactMap { $0 })
             return
         }
         installSelectedDataRow(rows[keysTable.selectedRow], secret: data.secret)
         updateDataEditorControls()
-        reloadSelectedDataRow()
+        reloadDataRows([previouslySelectedRow, keysTable.selectedRow].compactMap { $0 })
     }
 
     private func installSelectedDataRow(_ row: DataEditorKeyRow, secret: Bool) {
@@ -2392,6 +2432,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         isInstallingDataEditorState = true
         defer { isInstallingDataEditorState = wasInstallingDataEditorState }
         objectData = currentData
+        secretRevealed = !currentData.secret
+        revealButton.title = "Reveal"
         keysTable.reloadData()
         guard let row = currentData.entries.firstIndex(where: { $0.id == key }) else {
             selectedDataKey = nil
@@ -2405,8 +2447,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         keysTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         selectedDataKey = currentData.entries[row].id
         selectedDataEntry = currentData.entries[row]
-        secretRevealed = !currentData.secret
-        revealButton.title = "Reveal"
         displaySelectedData()
         updateDataEditorControls()
     }

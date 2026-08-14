@@ -62,6 +62,88 @@ struct ObjectDetailDataDraftTests {
         #expect(store.isEmpty)
     }
 
+    @Test("ConfigMap Value column previews stored and unsaved decoded text")
+    func configMapValueColumnUsesCurrentDraft() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data),
+            initialTab: .data
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        try await waitForDataRows(table, count: 2)
+
+        #expect(try valueText(in: table, row: 0) == "server-alpha")
+        #expect(try valueAccessibility(in: table, row: 0) == "Text value: server-alpha")
+        select(row: 0, in: table, controller: controller)
+        editor.string = "draft\nalpha"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        #expect(try valueText(in: table, row: 0) == "draft alpha")
+        #expect(try valueAccessibility(in: table, row: 0) == "Text value: draft alpha")
+
+        select(row: 1, in: table, controller: controller)
+        #expect(try valueText(in: table, row: 0) == "draft alpha")
+    }
+
+    @Test("Value column safely labels binary bytes and truncates long text")
+    func binaryAndTruncatedValueColumnPreviews() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let longText = String(
+            repeating: "v",
+            count: DataValuePreviewPresentation.maximumTextCharacterCount + 40
+        )
+        let binaryBytes = Data("must-not-render-as-text".utf8)
+        let data = ObjectData(
+            identity: fixture.identity,
+            resourceVersion: "rv-1",
+            entries: [
+                ObjectDataEntry(
+                    key: "long",
+                    kind: .text,
+                    value: Data(longText.utf8),
+                    byteSize: UInt64(longText.utf8.count),
+                    contentHash: Data(repeating: 3, count: 32)
+                ),
+                ObjectDataEntry(
+                    key: "archive",
+                    kind: .binary,
+                    value: binaryBytes,
+                    byteSize: UInt64(binaryBytes.count),
+                    contentHash: Data(repeating: 4, count: 32)
+                ),
+            ],
+            secret: false
+        )
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: data),
+            initialTab: .data
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        try await waitForDataRows(table, count: 2)
+
+        let truncated = try valueText(in: table, row: 0)
+        #expect(truncated.count == DataValuePreviewPresentation.maximumTextCharacterCount)
+        #expect(truncated.hasSuffix("…"))
+        #expect(truncated != longText)
+        #expect(try valueAccessibility(in: table, row: 0).contains("truncated preview"))
+
+        let binary = try valueText(in: table, row: 1)
+        #expect(binary == "Binary · \(binaryBytes.count) bytes")
+        #expect(!binary.contains("must-not-render-as-text"))
+        #expect(try valueAccessibility(in: table, row: 1)
+            == "Binary value, \(binaryBytes.count) bytes")
+    }
+
     @Test("ConfigMap text drafts survive key switches")
     func configMapDraftSurvivesKeySwitch() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
@@ -118,13 +200,17 @@ struct ObjectDetailDataDraftTests {
         select(row: 0, in: table, controller: controller)
         #expect(!editor.string.contains("server-alpha"))
         #expect(!editor.isEditable)
+        #expect(try valueText(in: table, row: 0) == "Secret concealed · 12 bytes")
+        #expect(!(try valueAccessibility(in: table, row: 0)).contains("server-alpha"))
 
         reveal.performClick(nil)
         #expect(reveal.title == "Conceal")
         #expect(editor.string == "server-alpha")
+        #expect(try valueText(in: table, row: 0) == "server-alpha")
         editor.string = "draft-secret-alpha"
         controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
         #expect(save.isEnabled)
+        #expect(try valueText(in: table, row: 0) == "draft-secret-alpha")
 
         reveal.performClick(nil)
         #expect(reveal.title == "Reveal")
@@ -132,6 +218,8 @@ struct ObjectDetailDataDraftTests {
         #expect(!editor.isEditable)
         #expect(!save.isEnabled)
         #expect(try stateText(in: table, row: 0) == "Unsaved")
+        #expect(!(try valueText(in: table, row: 0)).contains("draft-secret-alpha"))
+        #expect(!(try valueAccessibility(in: table, row: 0)).contains("draft-secret-alpha"))
 
         reveal.performClick(nil)
         #expect(editor.string == "draft-secret-alpha")
@@ -140,8 +228,10 @@ struct ObjectDetailDataDraftTests {
         #expect(!editor.string.contains("draft-secret-alpha"))
         select(row: 0, in: table, controller: controller)
         #expect(!editor.string.contains("draft-secret-alpha"))
+        #expect(!(try valueText(in: table, row: 0)).contains("draft-secret-alpha"))
         reveal.performClick(nil)
         #expect(editor.string == "draft-secret-alpha")
+        #expect(try valueText(in: table, row: 0) == "draft-secret-alpha")
     }
 
     @Test("binary Secret drafts survive conceal and key switches")
@@ -667,6 +757,25 @@ struct ObjectDetailDataDraftTests {
             makeIfNecessary: true
         ) as? NSTableCellView)
         return cell.textField?.stringValue ?? ""
+    }
+
+    private func valueCell(in table: NSTableView, row: Int) throws -> NSTableCellView {
+        let column = try #require(table.tableColumns.firstIndex {
+            $0.identifier.rawValue == "value"
+        })
+        return try #require(table.view(
+            atColumn: column,
+            row: row,
+            makeIfNecessary: true
+        ) as? NSTableCellView)
+    }
+
+    private func valueText(in table: NSTableView, row: Int) throws -> String {
+        try valueCell(in: table, row: row).textField?.stringValue ?? ""
+    }
+
+    private func valueAccessibility(in table: NSTableView, row: Int) throws -> String {
+        try valueCell(in: table, row: row).accessibilityValue() as? String ?? ""
     }
 
     private func row(forKey key: String, in table: NSTableView) throws -> Int {
