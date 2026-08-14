@@ -125,14 +125,15 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			projector = test.configure(projector.WithMetrics(metrics.Snapshot{
+			warmMetricState := metrics.Snapshot{
 				State:     metrics.MeasurementCurrent,
 				UpdatedAt: time.Unix(100, 0),
 				Samples: map[string]metrics.Sample{uid: {
 					MeasuredAt: time.Unix(100, 0),
 					Resources:  map[string]int64{"cpu": 250_000_000},
 				}},
-			}))
+			}
+			projector = test.configure(projector.WithMetrics(warmMetricState))
 			warmRows := projector.Project([]*unstructured.Unstructured{warmObject})
 			if len(warmRows) != 1 || !cellByID(warmRows[0], PodCPUColumn).GetUsage().GetUsageAvailable() {
 				t.Fatalf("warm fixture did not contain CPU usage: %#v", warmRows)
@@ -198,7 +199,11 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 				},
 				warmProjection: &warmProjection{
 					key: projector.cacheKey, rows: warmRows,
-					retainedBytes: projectedRowsRetainedBytes(warmRows),
+					metricSnapshot: &warmMetricState,
+					retainedBytes: saturatingProjectionBytes(
+						projectedRowsRetainedBytes(warmRows),
+						warmMetricSnapshotRetainedBytes(&warmMetricState),
+					),
 				},
 			}
 			runtime.mu.Lock()
@@ -272,28 +277,136 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 	}
 }
 
-func TestWarmMetricSnapshotPreservesRealZeroAndStaleState(t *testing.T) {
-	requested := 4.0
-	rows := []*kmgrv1.ResourceRow{{
-		Identity: &kmgrv1.ResourceIdentity{Uid: "uid-zero"},
-		Cells: []*kmgrv1.Cell{{
-			ColumnId: "cpu", Severity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
-			TypedValue: &kmgrv1.Cell_Usage{Usage: &kmgrv1.ResourceUsageValue{
-				Used: 0, Requested: &requested, UsageAvailable: true,
-				ResourceName: string(corev1.ResourceCPU),
-			}},
-		}},
-	}}
-
-	snapshot, ok := warmMetricSnapshot(rows)
-	if !ok {
-		t.Fatal("real zero was mistaken for unavailable usage")
+func TestCaptureWarmProjectionTrimsAndPreservesMetricSnapshot(t *testing.T) {
+	updatedAt := time.Unix(100, 0)
+	zeroMeasuredAt := time.Unix(90, 0)
+	fallbackMeasuredAt := time.Unix(95, 0)
+	providerErr := errors.New("sanitized provider failure")
+	metricState := metrics.Snapshot{
+		State: metrics.MeasurementStale, UpdatedAt: updatedAt,
+		Err: providerErr,
+		Samples: map[string]metrics.Sample{
+			"uid-zero": {
+				MeasuredAt: zeroMeasuredAt,
+				Resources:  map[string]int64{string(corev1.ResourceCPU): 0},
+			},
+			"ns/fallback": {
+				MeasuredAt: fallbackMeasuredAt,
+				Resources:  map[string]int64{string(corev1.ResourceMemory): 256},
+			},
+			"hidden-uid": {
+				Resources: map[string]int64{string(corev1.ResourceCPU): 1},
+			},
+		},
 	}
-	sample, found := snapshot.Samples["uid-zero"]
-	value, resourceFound := sample.Resources[string(corev1.ResourceCPU)]
-	if !found || !resourceFound || value != 0 || len(sample.Resources) != 1 ||
-		snapshot.State != metrics.MeasurementStale {
-		t.Fatalf("warm zero snapshot = %#v", snapshot)
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true},
+		ColumnIDs:      []string{PodCPUColumn},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector = projector.WithMetrics(metricState)
+	rows := map[string]*kmgrv1.ResourceRow{
+		"uid-zero": {
+			Identity: &kmgrv1.ResourceIdentity{
+				Uid: "uid-zero", Namespace: "ns", Name: "zero",
+			},
+		},
+		"uid-fallback": {
+			Identity: &kmgrv1.ResourceIdentity{
+				Uid: "uid-fallback", Namespace: "ns", Name: "fallback",
+			},
+		},
+	}
+	subscription := &Subscription{
+		resource:           &resourceRuntime{},
+		projector:          projector,
+		projectionCacheKey: projector.cacheKey,
+		rows:               rows,
+		order:              []string{"uid-zero", "uid-fallback"},
+	}
+
+	projection := subscription.captureWarmProjectionUnlocked()
+	if projection == nil || projection.metricSnapshot == nil {
+		t.Fatalf("warm metric projection = %#v, want retained snapshot", projection)
+	}
+	snapshot := projection.metricSnapshot
+	if snapshot.State != metrics.MeasurementStale || !snapshot.UpdatedAt.Equal(updatedAt) ||
+		!errors.Is(snapshot.Err, providerErr) {
+		t.Fatalf("warm snapshot metadata = %#v", snapshot)
+	}
+	if len(snapshot.Samples) != 2 {
+		t.Fatalf("warm snapshot samples = %#v, want only two visible UIDs", snapshot.Samples)
+	}
+	zero, found := snapshot.Samples["uid-zero"]
+	value, resourceFound := zero.Resources[string(corev1.ResourceCPU)]
+	if !found || !resourceFound || value != 0 ||
+		!zero.MeasuredAt.Equal(zeroMeasuredAt) {
+		t.Fatalf("warm zero sample = %#v, found = %t", zero, found)
+	}
+	fallback, found := snapshot.Samples["uid-fallback"]
+	if !found || fallback.Resources[string(corev1.ResourceMemory)] != 256 ||
+		!fallback.MeasuredAt.Equal(fallbackMeasuredAt) {
+		t.Fatalf("rekeyed fallback sample = %#v, found = %t", fallback, found)
+	}
+	if _, found := snapshot.Samples["ns/fallback"]; found {
+		t.Fatal("name-based fallback key was retained instead of rekeyed to UID")
+	}
+	if _, found := snapshot.Samples["hidden-uid"]; found {
+		t.Fatal("non-visible metrics sample was retained")
+	}
+	rowBytes := projectedRowsRetainedBytes(projection.rows)
+	if projection.retainedBytes <= rowBytes {
+		t.Fatalf("retained bytes = %d, want more than row-only %d",
+			projection.retainedBytes, rowBytes)
+	}
+}
+
+func TestCaptureWarmProjectionPreservesEmptyCurrentMetricState(t *testing.T) {
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true},
+		ColumnIDs:      []string{PodCPUColumn},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedAt := time.Unix(100, 0)
+	projector = projector.WithMetrics(metrics.Snapshot{
+		State: metrics.MeasurementCurrent, UpdatedAt: updatedAt,
+	})
+	row := &kmgrv1.ResourceRow{Identity: &kmgrv1.ResourceIdentity{
+		Uid: "uid-missing", Namespace: "ns", Name: "missing",
+	}}
+	subscription := &Subscription{
+		resource:           &resourceRuntime{},
+		projector:          projector,
+		projectionCacheKey: projector.cacheKey,
+		rows:               map[string]*kmgrv1.ResourceRow{"uid-missing": row},
+		order:              []string{"uid-missing"},
+	}
+
+	projection := subscription.captureWarmProjectionUnlocked()
+	if projection == nil || projection.metricSnapshot == nil {
+		t.Fatalf("warm projection = %#v, want empty current metrics state", projection)
+	}
+	if projection.metricSnapshot.State != metrics.MeasurementCurrent ||
+		!projection.metricSnapshot.UpdatedAt.Equal(updatedAt) ||
+		len(projection.metricSnapshot.Samples) != 0 {
+		t.Fatalf("empty current metric snapshot = %#v", projection.metricSnapshot)
+	}
+	rowBytes := projectedRowsRetainedBytes(projection.rows)
+	if projection.retainedBytes <= rowBytes {
+		t.Fatalf("retained bytes = %d, want metadata charged above row-only %d",
+			projection.retainedBytes, rowBytes)
 	}
 }
 

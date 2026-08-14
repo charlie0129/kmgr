@@ -165,9 +165,10 @@ func TestWarmProjectionOwnsOnlyImmutablePresentationData(t *testing.T) {
 	t.Parallel()
 	typeOfProjection := reflect.TypeOf(warmProjection{})
 	want := map[string]reflect.Type{
-		"key":           reflect.TypeOf(projectionCacheKey{}),
-		"rows":          reflect.TypeOf([]*kmgrv1.ResourceRow{}),
-		"retainedBytes": reflect.TypeOf(int64(0)),
+		"key":            reflect.TypeOf(projectionCacheKey{}),
+		"rows":           reflect.TypeOf([]*kmgrv1.ResourceRow{}),
+		"metricSnapshot": reflect.TypeOf((*metrics.Snapshot)(nil)),
+		"retainedBytes":  reflect.TypeOf(int64(0)),
 	}
 	if typeOfProjection.NumField() != len(want) {
 		t.Fatalf("warmProjection fields = %d, want only %d immutable presentation fields",

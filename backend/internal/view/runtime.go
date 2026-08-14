@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"reflect"
 	"runtime"
 	"slices"
@@ -794,13 +793,12 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		warmRows = cachedProjection.rows
 	}
 	if usedWarmProjection && metricProviderLease != nil {
-		// Metrics has an independent lifecycle from the raw resource store. Seed
-		// the catch-up projector from only the actual measurements in the compact
-		// warm rows, so fresh raw requests/limits/capacity and Node accounting are
-		// still recomputed immediately. The first provider result replaces this
-		// transient snapshot, including an authoritative unavailable result.
-		if warmMetrics, ok := warmMetricSnapshot(warmRows); ok {
-			subscription.projector = subscription.projector.WithMetrics(warmMetrics)
+		// Metrics has an independent lifecycle from the raw resource store. The
+		// close-time capture already trimmed this immutable snapshot to visible
+		// UIDs, so seeding the catch-up projector remains O(1) on the warm Open
+		// path. Fresh raw allocations/accounting are still recomputed normally.
+		if warmMetrics := cachedProjection.metricSnapshot; warmMetrics != nil {
+			subscription.projector = subscription.projector.WithMetrics(*warmMetrics)
 		}
 	}
 	if err := openCtx.Err(); err != nil {
@@ -2583,75 +2581,6 @@ func (s *Subscription) applyMetrics(snapshot metrics.Snapshot) {
 	s.projectionResnapshot = true
 	s.scheduleProjectionLocked()
 	s.mu.Unlock()
-}
-
-// warmMetricSnapshot recovers only provider measurements from a compact warm
-// presentation. Scheduler allocations and Node capacity deliberately stay out
-// of this snapshot: the ordinary projector recomputes them from the newest raw
-// objects/accounting revision while the replacement Metrics API request is in
-// flight. A real zero remains present and distinct from unavailable usage.
-func warmMetricSnapshot(rows []*kmgrv1.ResourceRow) (metrics.Snapshot, bool) {
-	snapshot := metrics.Snapshot{
-		State:   metrics.MeasurementCurrent,
-		Samples: make(map[string]metrics.Sample),
-	}
-	stale := false
-	for _, row := range rows {
-		uid := row.GetIdentity().GetUid()
-		if uid == "" {
-			continue
-		}
-		var sample metrics.Sample
-		for _, cell := range row.GetCells() {
-			usage := cell.GetUsage()
-			if usage == nil || !usage.GetUsageAvailable() || usage.GetResourceName() == "" {
-				continue
-			}
-			// Native usage cells mark stale provider measurements as warning;
-			// current measurements remain normal. Provider state is uniform for
-			// one snapshot, so conservatively retain stale if any recovered usage
-			// cell carries that marker.
-			stale = stale || cell.GetSeverity() == kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
-			value, ok := warmMetricProviderValue(
-				corev1.ResourceName(usage.GetResourceName()), usage.GetUsed(),
-			)
-			if !ok {
-				continue
-			}
-			if sample.Resources == nil {
-				sample.Resources = make(map[string]int64)
-			}
-			sample.Resources[usage.GetResourceName()] = value
-			measuredAt := time.UnixMilli(usage.GetMeasuredAtUnixMs())
-			if usage.GetMeasuredAtUnixMs() != 0 && measuredAt.After(sample.MeasuredAt) {
-				sample.MeasuredAt = measuredAt
-			}
-		}
-		if len(sample.Resources) == 0 {
-			continue
-		}
-		snapshot.Samples[uid] = sample
-		if sample.MeasuredAt.After(snapshot.UpdatedAt) {
-			snapshot.UpdatedAt = sample.MeasuredAt
-		}
-	}
-	if stale {
-		snapshot.State = metrics.MeasurementStale
-	}
-	return snapshot, len(snapshot.Samples) != 0
-}
-
-func warmMetricProviderValue(resourceName corev1.ResourceName, used float64) (int64, bool) {
-	if math.IsNaN(used) || math.IsInf(used, 0) || used < 0 {
-		return 0, false
-	}
-	if resourceName == corev1.ResourceCPU {
-		used *= 1_000_000_000
-	}
-	if used >= float64(math.MaxInt64) {
-		return 0, false
-	}
-	return int64(math.Round(used)), true
 }
 
 func (s *Subscription) applyNodeAccounting(result *nodeAccountingResult) {
