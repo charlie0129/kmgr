@@ -21,6 +21,8 @@ import (
 
 const (
 	EnvironmentVersion = "kmgr.cel/v1"
+	SumFunctionName    = "kmgr.sum"
+	JoinFunctionName   = "kmgr.join"
 	DefaultCostLimit   = uint64(10_000)
 	// InterruptCheckFrequency checks cancellation periodically during CEL
 	// comprehensions. The runtime cost limit already bounds total iterations,
@@ -139,6 +141,7 @@ func NewCompiler(costLimit uint64) (*Compiler, error) {
 	}
 	environment, err := cel.NewEnv(
 		cel.OptionalTypes(),
+		cel.Lib(kmgrLibrary{}),
 		cel.Variable("object", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("metrics", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("context", cel.MapType(cel.StringType, cel.DynType)),

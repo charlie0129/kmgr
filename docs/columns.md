@@ -40,6 +40,25 @@ object.?spec.?nodeName.orValue("—")
 object.?metadata.?labels[?"team"].orValue("—")
 ```
 
+`kmgr.cel/v1` also exposes two namespaced, pure helpers for common bounded
+column operations:
+
+```cel
+kmgr.sum([1, 2, 3])                         // 6
+kmgr.join(["ready", 3, true], " / ")       // "ready / 3 / true"
+```
+
+`kmgr.sum(list)` accepts one homogeneous list of `int`, `uint`, or `double`
+and returns the same numeric kind (an empty list returns integer zero).
+`kmgr.join(list, separator)` accepts string, integer, unsigned integer,
+double, and boolean elements and can be composed inside a larger expression.
+Both helpers reject more than 128 elements; `kmgr.join` also stops before its
+UTF-8 result exceeds 4 KiB. Their runtime cost grows with list traversal and,
+for join, produced bytes, so the per-evaluation cost limit applies to helper
+work as well as baseline CEL operations. The existing behavior where a string
+column directly returns a scalar list and uses that column's `listJoiner`
+remains supported independently.
+
 The supported declared types are `string`, `integer`, `number`, `boolean`, `quantity`, `timestamp`, and `duration`. Quantity expressions return one Kubernetes quantity string; the helper validates and retains its exact canonical quantity alongside display text and an approximate numeric UI hint. Authoritative sorting uses Kubernetes quantity semantics, not lexical display order or the approximate hint. Integer results remain signed 64-bit values across IPC and are not converted through a double. A string column may accept a list of scalar values, joined by its configured separator.
 
 Evaluation is deterministic and side-effect free. Each evaluation has a runtime cost limit (10,000 by default), a maximum of 128 list elements, and a 4 KiB rendered-value limit. Programs are compiled and type-checked when their definition/environment changes, then reused. Absent, null, and empty optional results render as `—` unless the definition supplies another missing value. Runtime failures belong to the individual column/cell and do not discard a row or view.

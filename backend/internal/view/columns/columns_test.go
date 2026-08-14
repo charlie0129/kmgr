@@ -8,6 +8,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/common/types/ref"
 )
 
 func TestCompileOptionalAndTypedEvaluation(t *testing.T) {
@@ -134,6 +137,164 @@ func TestScalarListJoinsWithinBounds(t *testing.T) {
 	}
 	if _, err := tooMany.Evaluate(Activation{}); err == nil || !strings.Contains(err.Error(), "maximum") {
 		t.Fatalf("oversized list error = %v", err)
+	}
+}
+
+func TestKmgrSumHelperPreservesHomogeneousNumericTypes(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	cases := []struct {
+		name       string
+		expression string
+		resultType ResultType
+		want       string
+	}{
+		{name: "int", expression: `kmgr.sum([1, 2, 3])`, resultType: ResultInteger, want: "6"},
+		{name: "uint", expression: `kmgr.sum([uint(2), uint(3)])`, resultType: ResultNumber, want: "5"},
+		{name: "double", expression: `kmgr.sum([1.25, 2.75])`, resultType: ResultNumber, want: "4"},
+		{name: "empty", expression: `kmgr.sum([])`, resultType: ResultInteger, want: "0"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			program, err := compiler.Compile(Definition{
+				ID: test.name, Expression: test.expression, ResultType: test.resultType,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, err := program.Evaluate(Activation{})
+			if err != nil || value.Display != test.want {
+				t.Fatalf("Evaluate = %#v, %v", value, err)
+			}
+		})
+	}
+}
+
+func TestKmgrSumHelperRejectsStaticAndDynamicTypeErrors(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	if _, err := compiler.Compile(Definition{
+		ID: "strings", Expression: `kmgr.sum(["1", "2"])`, ResultType: ResultNumber,
+	}); err == nil || !strings.Contains(err.Error(), "requires a list of int, uint, or double") {
+		t.Fatalf("static type error = %v", err)
+	}
+	program, err := compiler.Compile(Definition{
+		ID: "dynamic", Expression: `kmgr.sum(object.values)`, ResultType: ResultNumber,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := program.Evaluate(Activation{Object: map[string]any{
+		"values": []any{int64(1), "two"},
+	}}); err == nil || !strings.Contains(err.Error(), "expected int") {
+		t.Fatalf("dynamic mixed-type error = %v", err)
+	}
+}
+
+func TestKmgrHelperBindingsPropagateCELListErrorsWithoutPanicking(t *testing.T) {
+	t.Parallel()
+	if value := sumDynamicList(nil); !types.IsError(value) {
+		t.Fatalf("nil list result = %T %v", value, value)
+	}
+	if value := sumDynamicList(types.NewRefValList(types.DefaultTypeAdapter, []ref.Val{nil})); !types.IsError(value) {
+		t.Fatalf("nil element result = %T %v", value, value)
+	}
+	sentinel := types.NewErr("sentinel")
+	if value := joinScalarList(
+		types.NewRefValList(types.DefaultTypeAdapter, []ref.Val{sentinel}), types.String(","),
+	); value != sentinel {
+		t.Fatalf("error element result = %T %v", value, value)
+	}
+}
+
+func TestKmgrJoinHelperJoinsMixedScalarsInsideExpressions(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	program, err := compiler.Compile(Definition{
+		ID: "mixed", Expression: `"values=" + kmgr.join(["a", 2, true, 3.5], "|")`, ResultType: ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := program.Evaluate(Activation{})
+	if err != nil || value.Display != "values=a|2|true|3.5" {
+		t.Fatalf("Evaluate = %#v, %v", value, err)
+	}
+	invalid, err := compiler.Compile(Definition{
+		ID: "invalid", Expression: `kmgr.join(object.values, ",")`, ResultType: ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invalid.Evaluate(Activation{Object: map[string]any{
+		"values": []any{"ok", map[string]any{"nested": true}},
+	}}); err == nil || !strings.Contains(err.Error(), "non-scalar") {
+		t.Fatalf("non-scalar join error = %v", err)
+	}
+}
+
+func TestKmgrHelpersEnforceListAndOutputBounds(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	items := make([]string, MaxListElements+1)
+	for index := range items {
+		items[index] = "1"
+	}
+	if _, err := compiler.Compile(Definition{
+		ID: "static-many", Expression: "kmgr.sum([" + strings.Join(items, ",") + "])", ResultType: ResultInteger,
+	}); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("static list bound error = %v", err)
+	}
+	dynamic, err := compiler.Compile(Definition{
+		ID: "dynamic-many", Expression: `kmgr.sum(object.values)`, ResultType: ResultInteger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make([]any, MaxListElements+1)
+	for index := range values {
+		values[index] = int64(1)
+	}
+	if _, err := dynamic.Evaluate(Activation{Object: map[string]any{"values": values}}); err == nil || !strings.Contains(err.Error(), "maximum") {
+		t.Fatalf("dynamic list bound error = %v", err)
+	}
+	tooLong, err := compiler.Compile(Definition{
+		ID: "too-long", Expression: `kmgr.join(object.values, "")`, ResultType: ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tooLong.Evaluate(Activation{Object: map[string]any{
+		"values": []any{strings.Repeat("x", MaxDisplayBytes+1)},
+	}}); err == nil || !strings.Contains(err.Error(), "maximum") {
+		t.Fatalf("output bound error = %v", err)
+	}
+}
+
+func TestKmgrHelpersChargeRuntimeCostByWork(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, 20)
+	sum, err := compiler.Compile(Definition{
+		ID: "sum-cost", Expression: `kmgr.sum(object.values)`, ResultType: ResultInteger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make([]any, 18)
+	for index := range values {
+		values[index] = int64(1)
+	}
+	if _, err := sum.Evaluate(Activation{Object: map[string]any{"values": values}}); err == nil || !strings.Contains(err.Error(), "cost limit") {
+		t.Fatalf("sum cost error = %v", err)
+	}
+	join, err := compiler.Compile(Definition{
+		ID: "join-cost", Expression: `kmgr.join(["12345678901234567890"], "")`, ResultType: ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := join.Evaluate(Activation{}); err == nil || !strings.Contains(err.Error(), "cost limit") {
+		t.Fatalf("join cost error = %v", err)
 	}
 }
 
