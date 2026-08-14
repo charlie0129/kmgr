@@ -78,14 +78,22 @@ struct CommandPaletteWindowControllerTests {
                 category: .authentication,
                 reason: "Unauthorized",
                 message: "Authentication failed (401).",
+                httpStatusCode: 401,
+                retryable: true,
+                contextName: "palette-context",
                 operation: "search Pod"
             )
         )
         try await waitForPalette {
-            controls.status.stringValue == "Authentication failed (401)."
+            controls.status.stringValue.contains("HTTP 401")
         }
 
-        #expect(controls.status.stringValue == "Authentication failed (401).")
+        #expect(controls.status.stringValue.contains("Authentication failed (401)."))
+        #expect(controls.status.stringValue.contains("Operation: search Pod"))
+        #expect(controls.status.stringValue.contains("Context: palette-context"))
+        #expect(controls.status.stringValue.contains("Reason: Unauthorized"))
+        #expect(controls.status.stringValue.contains("Retryable"))
+        #expect(controls.status.toolTip?.contains("HTTP 401") == true)
         #expect(controls.status.textColor == .systemRed)
     }
 }

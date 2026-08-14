@@ -232,6 +232,7 @@ final class ExecConfigurationWindowController: NSWindowController,
             validateForm()
             return
         }
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Refreshing the UID-pinned Pod and discovering containers…"
         statusLabel.textColor = .secondaryLabelColor
         progressIndicator.startAnimation(nil)
@@ -387,15 +388,11 @@ final class ExecConfigurationWindowController: NSWindowController,
     }
 
     private func showIssue(_ error: Error) {
-        if let issue = error as? ClusterManagerIssue {
-            let metadata = issue.presentationMetadata
-            statusLabel.stringValue = issue.message + (metadata.isEmpty ? "" : "\n\(metadata)")
-            statusLabel.toolTip = [issue.contextName, issue.operation, metadata]
-                .filter { !$0.isEmpty }.joined(separator: " · ")
-        } else {
-            statusLabel.stringValue = error.localizedDescription
-            statusLabel.toolTip = nil
-        }
+        let presentation = UserFacingErrorPresentation(error)
+        statusLabel.stringValue = presentation.message
+            + (presentation.supplementaryText.isEmpty
+                ? "" : "\n\(presentation.supplementaryText)")
+        statusLabel.toolTip = presentation.detailedText
         statusLabel.textColor = .systemRed
     }
 

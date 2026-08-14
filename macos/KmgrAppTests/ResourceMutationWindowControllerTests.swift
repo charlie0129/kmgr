@@ -101,6 +101,36 @@ struct ResourceMutationWindowControllerTests {
             .first { $0.accessibilityLabel() == "Resource mutation status" })
         try await waitForMutationStatus(status, value: "Succeeded")
     }
+
+    @Test("structured API errors retain operation and causes in the status surface")
+    func structuredIssuePresentation() async throws {
+        let controller = mutationController(
+            mutation: .metadata,
+            operationProvider: RetryingMutationOperationProvider()
+        )
+        let root = try #require(controller.window?.contentView)
+        let views = mutationDescendants(of: root)
+        let labels = try metadataEditor("Labels to set", in: views)
+        labels.string = "team=platform"
+        let status = try #require(views.compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Resource mutation status" })
+        let apply = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.title == "Apply" })
+
+        apply.performClick(nil)
+        try await waitForMutationStatus(status, containing: "HTTP 422")
+
+        #expect(status.stringValue.contains("Operation: update metadata"))
+        #expect(status.stringValue.contains("Context: production"))
+        #expect(status.stringValue.contains("Retryable"))
+        #expect(status.stringValue.contains("Causes: Field metadata.labels.team"))
+        #expect(status.toolTip?.contains("FieldValueInvalid") == true)
+
+        try await Task.sleep(for: .milliseconds(20))
+        apply.performClick(nil)
+        try await waitForMutationStatus(status, value: "Succeeded")
+        #expect(status.toolTip == nil)
+    }
 }
 }
 
@@ -269,6 +299,75 @@ private actor CapturingMutationOperationProvider: ResourceOperationProviding {
     func capturedMetadataChanges() -> ResourceMetadataChanges? { metadataChanges }
 }
 
+private actor RetryingMutationOperationProvider: ResourceOperationProviding {
+    private var updateAttempts = 0
+
+    func deleteResources(
+        targets: [ResourceDeleteTarget],
+        options: ResourceDeleteOptions
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func scaleResource(
+        identity: ResourceIdentity,
+        replicas: Int32,
+        expectedResourceVersion: String
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func rolloutRestart(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func updateMetadata(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String,
+        changes: ResourceMetadataChanges
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        updateAttempts += 1
+        if updateAttempts == 1 {
+            throw ClusterManagerIssue(
+                category: .validation,
+                reason: "Invalid",
+                message: "The API server rejected the label.",
+                httpStatusCode: 422,
+                retryable: true,
+                contextName: "production",
+                operation: "update metadata",
+                kubernetesStatus: .init(causes: [
+                    .init(
+                        reason: "FieldValueInvalid",
+                        message: "unsupported label value",
+                        field: "metadata.labels.team"
+                    )
+                ])
+            )
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(OperationProgress(
+                cursor: StreamCursor(generation: 1, sequence: 1),
+                operationID: "metadata-retry",
+                state: .succeeded,
+                completedItems: 1,
+                totalItems: 1,
+                itemResults: []
+            ))
+            continuation.finish()
+        }
+    }
+
+    func cancelOperation(
+        sessionID: String,
+        operationID: String,
+        cancelNotStartedOnly: Bool
+    ) async throws {}
+}
+
 @MainActor
 private func waitForMetadataChanges(
     _ provider: CapturingMutationOperationProvider
@@ -287,6 +386,18 @@ private func waitForMutationStatus(
 ) async throws {
     for _ in 0..<300 {
         if status.stringValue == value { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    throw ResourceMutationWindowTestError.timedOut
+}
+
+@MainActor
+private func waitForMutationStatus(
+    _ status: NSTextField,
+    containing value: String
+) async throws {
+    for _ in 0..<300 {
+        if status.stringValue.contains(value) { return }
         try await Task.sleep(for: .milliseconds(5))
     }
     throw ResourceMutationWindowTestError.timedOut

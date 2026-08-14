@@ -453,19 +453,21 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             statusLabel.stringValue = "Cancelled"
             statusLabel.textColor = .secondaryLabelColor
         case .failed:
-            if let issue = status.issue { showIssue(issue) }
-            else {
-                statusLabel.stringValue = "Failed"
-                statusLabel.textColor = .systemRed
+            if let issue = status.issue {
+                showIssue(issue)
+                return
             }
+            statusLabel.stringValue = "Failed"
+            statusLabel.textColor = .systemRed
         }
-        statusLabel.toolTip = status.issue?.message ?? status.statusReason
+        statusLabel.toolTip = status.statusReason.isEmpty ? nil : status.statusReason
     }
 
     private func showIssue(_ issue: ClusterManagerIssue) {
-        statusLabel.stringValue = issue.presentationTitle
+        let presentation = issue.userFacingPresentation
+        statusLabel.stringValue = presentation.title
         statusLabel.textColor = .systemRed
-        statusLabel.toolTip = issue.message
+        statusLabel.toolTip = presentation.detailedText
     }
 
     private func startCommandPump(session: any ExecSession, generation attemptGeneration: UInt64) {

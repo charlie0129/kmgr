@@ -359,6 +359,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         dataConflictController?.close()
         dataConflictController = nil
         activeRelationshipScan = nil
+        statusLabel.toolTip = nil
         statusLabel.stringValue = isEditingYAML || hasAnyDataDraftChanges
             ? "Engine disconnected · local edit preserved"
             : "Engine disconnected · reopening this UID when ready"
@@ -379,6 +380,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         session = recoveredSession
         var reboundIdentity = identity
         reboundIdentity.clusterSessionID = recoveredSession.sessionID
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Reopening this UID…"
         statusLabel.textColor = .secondaryLabelColor
         recoveryTask = Task { [weak self, provider] in
@@ -401,7 +403,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 completion(.success(()))
             } catch {
                 guard !Task.isCancelled else { return }
-                statusLabel.stringValue = error.localizedDescription
+                let presentation = UserFacingErrorPresentation(error)
+                statusLabel.stringValue = presentation.inlineText
+                statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
                 completion(.failure(error))
             }
@@ -715,6 +719,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             authoritativeMutationRefreshInFlight = true
             updateDataEditorControls()
         }
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Loading…"
         statusLabel.textColor = .secondaryLabelColor
         loadTask = Task { [weak self, provider, identity] in
@@ -988,6 +993,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     switch event {
                     case .status(_, let currentVersion):
                         if !currentVersion.isEmpty {
+                            statusLabel.toolTip = nil
                             statusLabel.stringValue = "Watching · resource version \(currentVersion)"
                             statusLabel.textColor = .secondaryLabelColor
                         }
@@ -995,17 +1001,21 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                         installWatchUpdate(updated)
                     case .deleted(_, _):
                         terminalObjectState = true
+                        statusLabel.toolTip = nil
                         statusLabel.stringValue = "Deleted · this UID no longer exists"
                         statusLabel.textColor = .systemRed
                         disableEditingAfterDeletion()
                     case .failure(_, let issue):
                         if issue.reason == "ObjectRecreated" || issue.reason == "NotFound" {
                             terminalObjectState = true
+                            statusLabel.toolTip = nil
                             statusLabel.stringValue = "Unavailable · same-name objects are not substituted for this UID"
                             statusLabel.textColor = .systemRed
                             disableEditingAfterDeletion()
                         } else {
-                            statusLabel.stringValue = issue.message
+                            let presentation = issue.userFacingPresentation
+                            statusLabel.stringValue = presentation.inlineText
+                            statusLabel.toolTip = presentation.detailedText
                             statusLabel.textColor = .systemOrange
                         }
                     }
@@ -1019,6 +1029,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func installWatchUpdate(_ updated: ObjectDetail) {
+        statusLabel.toolTip = nil
         guard updated.identity.uid == identity.uid, !isEditingYAML else {
             if isEditingYAML {
                 statusLabel.stringValue = "Server object changed · local YAML edit preserved"
@@ -1048,6 +1059,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func loadEventsIfNeeded() {
         guard !eventsLoaded, eventsTask == nil else { return }
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Loading events…"
         eventsTask = Task { [weak self, provider, identity] in
             guard let self else { return }
@@ -1069,6 +1081,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func loadRelationshipsIfNeeded() {
         guard !relationshipsLoaded, relationshipsTask == nil else { return }
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Loading relationships…"
         relationshipsTask = Task { [weak self, provider, identity] in
             guard let self else { return }
@@ -1114,6 +1127,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
         scanRelationshipsButton.isHidden = true
         cancelRelationshipScanButton.isHidden = false
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Starting relationship scan…"
         statusLabel.textColor = .secondaryLabelColor
         relationshipScanTask = Task { [weak self, provider, identity] in
@@ -1209,6 +1223,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     @objc private func saveYAML() {
         guard let detail, operationTask == nil else { return }
         let edited = Data(yamlTextView.string.utf8)
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Validating…"
         operationTask = Task { [weak self, provider, identity] in
             guard let self else { return }
@@ -2024,6 +2039,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             reloadSelectedDataRow()
         }
         updateDataEditorControls()
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Saving key/value data…"
         statusLabel.textColor = .secondaryLabelColor
         operationTask = Task { [weak self, provider, identity] in
@@ -2281,7 +2297,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func show(error: Error) {
-        statusLabel.stringValue = error.localizedDescription
+        let presentation = UserFacingErrorPresentation(error)
+        statusLabel.stringValue = presentation.inlineText
+        statusLabel.toolTip = presentation.detailedText
         statusLabel.textColor = .systemRed
     }
 

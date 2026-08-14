@@ -254,6 +254,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
     private func loadDeclaredPortsIfNeeded() {
         guard !loadStarted else { return }
         loadStarted = true
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Refreshing the selected object and loading declared ports…"
         statusLabel.textColor = .secondaryLabelColor
         progressIndicator.startAnimation(nil)
@@ -455,6 +456,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         setFormEnabled(false)
         progressIndicator.startAnimation(nil)
         validationLabel.stringValue = ""
+        statusLabel.toolTip = nil
         statusLabel.textColor = .secondaryLabelColor
         let localDescription = draft.localPort == 0 ? "an automatic local port" : "local port \(draft.localPort)"
         statusLabel.stringValue = "Starting \(draft.bindAddress) on \(localDescription) → remote port \(draft.remotePort)…"
@@ -503,17 +505,11 @@ final class PortForwardConfigurationWindowController: NSWindowController,
     }
 
     private func showIssue(_ error: Error, prefix: String) {
-        if let issue = error as? ClusterManagerIssue {
-            let metadata = issue.presentationMetadata
-            statusLabel.stringValue = "\(prefix): \(issue.message)"
-                + (metadata.isEmpty ? "" : "\n\(metadata)")
-            statusLabel.toolTip = [issue.contextName, issue.operation, metadata]
-                .filter { !$0.isEmpty }
-                .joined(separator: " · ")
-        } else {
-            statusLabel.stringValue = "\(prefix): \(error.localizedDescription)"
-            statusLabel.toolTip = nil
-        }
+        let presentation = UserFacingErrorPresentation(error)
+        statusLabel.stringValue = "\(prefix): \(presentation.message)"
+            + (presentation.supplementaryText.isEmpty
+                ? "" : "\n\(presentation.supplementaryText)")
+        statusLabel.toolTip = presentation.detailedText
         statusLabel.textColor = .systemRed
     }
 

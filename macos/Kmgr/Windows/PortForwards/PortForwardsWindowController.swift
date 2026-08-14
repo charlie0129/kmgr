@@ -96,14 +96,10 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
                 label.stringValue = "Exposed beyond this Mac"
                 label.textColor = .systemOrange
             } else {
-                label.stringValue = record.lastIssue?.message ?? "—"
+                label.stringValue = record.lastIssue?.userFacingPresentation.message ?? "—"
                 if record.lastIssue != nil { label.textColor = .systemRed }
             }
-            label.toolTip = record.lastIssue.map {
-                [$0.message, $0.presentationMetadata]
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " · ")
-            }
+            label.toolTip = record.lastIssue?.userFacingPresentation.detailedText
         default:
             label.stringValue = ""
         }
@@ -207,14 +203,20 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
         var pieces = ["\(snapshot.activeCount.formatted()) active", "\(records.count.formatted()) retained"]
         if snapshot.hasFailure { pieces.append("failed forwards need attention") }
         if let issue = snapshot.connectionIssue {
-            pieces.append(issue.message)
+            let presentation = issue.userFacingPresentation
+            pieces.append(presentation.inlineText)
+            statusLabel.toolTip = presentation.detailedText
             statusLabel.textColor = .systemOrange
         } else if snapshot.isWatching {
+            statusLabel.toolTip = nil
             pieces.append("watching")
             statusLabel.textColor = snapshot.hasFailure ? .systemRed : .secondaryLabelColor
         } else if records.isEmpty {
+            statusLabel.toolTip = nil
             pieces.append("open a cluster window to connect")
             statusLabel.textColor = .secondaryLabelColor
+        } else {
+            statusLabel.toolTip = nil
         }
         statusLabel.stringValue = pieces.joined(separator: " · ")
         updateActionAvailability()
@@ -243,6 +245,7 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
     @objc private func stopSelected() {
         let selected = selectedRecords.filter { $0.state.isActive }
         guard !selected.isEmpty else { return }
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Stopping \(selected.count.formatted()) port-forward(s)…"
         Task { [weak self, coordinator] in
             for record in selected {
@@ -261,6 +264,7 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
                 && $0.lastIssue?.reason != "EngineRestarted"
         }
         guard !selected.isEmpty else { return }
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Restarting \(selected.count.formatted()) port-forward(s)…"
         Task { [weak self, coordinator] in
             for record in selected {
@@ -277,6 +281,7 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
         guard selectedRecords.count == 1, let address = selectedRecords[0].address else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(address, forType: .string)
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Copied \(address)"
     }
 
@@ -286,7 +291,9 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func showOperationError(_ error: Error) {
-        statusLabel.stringValue = error.localizedDescription
+        let presentation = UserFacingErrorPresentation(error)
+        statusLabel.stringValue = presentation.inlineText
+        statusLabel.toolTip = presentation.detailedText
         statusLabel.textColor = .systemRed
     }
 

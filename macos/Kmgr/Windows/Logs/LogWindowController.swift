@@ -303,6 +303,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     @objc private func restartFromControls() {
         guard pendingGeneration == nil else { return }
+        statusLabel.toolTip = nil
         let tailText = tailField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let sinceText = sinceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard tailText.isEmpty || (Int64(tailText).map { $0 >= -1 } ?? false),
@@ -424,6 +425,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let activeGeneration = generation
         pendingGeneration = activeGeneration
         setStreamControlsEnabled(false)
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Connecting…"
         statusLabel.textColor = .secondaryLabelColor
         let request = LogStreamRequest(
@@ -456,7 +458,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                             self?.setStreamControlsEnabled(true)
                             self?.restoreEstablishedStreamConfiguration()
                             self?.updateStatusLabel()
-                            self?.statusLabel.stringValue += " · Replacement failed: \(issue.message)"
+                            let presentation = issue.userFacingPresentation
+                            self?.statusLabel.stringValue += " · Replacement failed: \(presentation.inlineText)"
+                            self?.statusLabel.toolTip = presentation.detailedText
                             self?.statusLabel.textColor = .systemRed
                             await provider.cancelLogs(
                                 sessionID: request.sessionID,
@@ -497,7 +501,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                     setStreamControlsEnabled(true)
                 }
                 restoreEstablishedStreamConfiguration()
-                statusLabel.stringValue = error.localizedDescription
+                let presentation = UserFacingErrorPresentation(error)
+                statusLabel.stringValue = presentation.inlineText
+                statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
             }
         }
@@ -589,9 +595,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             latestStreamDrops = status.droppedRecords
             updateStatusLabel()
             statusLabel.textColor = status.state == .failed ? .systemRed : .secondaryLabelColor
-            if let issue = status.issue { statusLabel.stringValue += " · \(issue.message)" }
+            if let issue = status.issue {
+                let presentation = issue.userFacingPresentation
+                statusLabel.stringValue += " · \(presentation.inlineText)"
+                statusLabel.toolTip = presentation.detailedText
+            }
         case .failure(_, let issue):
-            statusLabel.stringValue = issue.message
+            let presentation = issue.userFacingPresentation
+            statusLabel.stringValue = presentation.inlineText
+            statusLabel.toolTip = presentation.detailedText
             statusLabel.textColor = .systemRed
         }
     }
@@ -605,6 +617,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             parts.append("\(latestRenderOmissions.formatted()) omitted from display")
         }
         statusLabel.stringValue = parts.joined(separator: " · ")
+        statusLabel.toolTip = nil
     }
 
     /// Coalesce detached formatting and incremental text installation to at
@@ -826,6 +839,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let value = textView.string
         let writer = fileWriter
         statusLabel.stringValue = "Saving \(url.lastPathComponent)…"
+        statusLabel.toolTip = nil
         statusLabel.textColor = .secondaryLabelColor
         Task { [weak self] in
             do {
@@ -834,10 +848,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 }.value
                 guard let self, !isClosing else { return }
                 statusLabel.stringValue = "Saved \(url.lastPathComponent)"
+                statusLabel.toolTip = nil
                 statusLabel.textColor = .secondaryLabelColor
             } catch {
                 guard let self, !isClosing else { return }
-                statusLabel.stringValue = "Save failed: \(error.localizedDescription)"
+                let presentation = UserFacingErrorPresentation(error)
+                statusLabel.stringValue = "Save failed: \(presentation.inlineText)"
+                statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
             }
         }

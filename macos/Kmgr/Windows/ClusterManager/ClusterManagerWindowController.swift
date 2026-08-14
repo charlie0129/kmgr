@@ -305,7 +305,8 @@ private final class ClusterManagerViewController: NSViewController,
             var suffix = context.isCurrent ? " · Current" : ""
             if !context.authentication.isSupported { suffix += " · Unsupported auth" }
             value = context.name + suffix
-            tooltip = context.authentication.issue?.message ?? context.name
+            tooltip = context.authentication.issue?.userFacingPresentation.detailedText
+                ?? context.name
         case .server:
             let pieces = [context.clusterName, context.serverHostname].filter { !$0.isEmpty }
             value = pieces.isEmpty ? "—" : pieces.joined(separator: " — ")
@@ -474,10 +475,11 @@ private final class ClusterManagerViewController: NSViewController,
         case .failed(let issue):
             shouldOverlay = model.allContexts.isEmpty
             if shouldOverlay {
+                let presentation = issue.userFacingPresentation
                 showState(
                     symbol: symbolName(for: issue.category),
                     title: issue.presentationTitle,
-                    message: issue.message,
+                    message: presentation.inlineText,
                     spinning: false,
                     retry: true
                 )
@@ -540,7 +542,9 @@ private final class ClusterManagerViewController: NSViewController,
                 issueImageView.contentTintColor = .systemOrange
                 issueTitleLabel.stringValue = initialNotice.title
                 issueMessageLabel.stringValue = initialNotice.message
+                issueMessageLabel.toolTip = nil
                 issueMetadataLabel.stringValue = ""
+                issueMetadataLabel.toolTip = nil
                 issueMetadataLabel.isHidden = true
                 return
             }
@@ -555,10 +559,13 @@ private final class ClusterManagerViewController: NSViewController,
         issueImageView.contentTintColor = issue.category == .unsupported
             ? .systemOrange
             : .systemRed
+        let presentation = issue.userFacingPresentation
         issueTitleLabel.stringValue = issue.presentationTitle
-        issueMessageLabel.stringValue = issue.message
-        issueMetadataLabel.stringValue = issue.presentationMetadata
-        issueMetadataLabel.isHidden = issue.presentationMetadata.isEmpty
+        issueMessageLabel.stringValue = presentation.message
+        issueMessageLabel.toolTip = presentation.detailedText
+        issueMetadataLabel.stringValue = presentation.supplementaryText
+        issueMetadataLabel.toolTip = presentation.detailedText
+        issueMetadataLabel.isHidden = presentation.supplementaryText.isEmpty
     }
 
     private func configureTable() {

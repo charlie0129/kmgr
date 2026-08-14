@@ -451,6 +451,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         debounceTask?.cancel()
         searchTask?.cancel()
         cancelRunningSearch()
+        statusLabel.toolTip = nil
         resultByIdentity.removeAll(keepingCapacity: true)
         latestProgress = nil
         items = []
@@ -503,7 +504,9 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
                 }
             } catch {
                 guard !Task.isCancelled, let self, revision == queryRevision else { return }
-                statusLabel.stringValue = error.localizedDescription
+                let presentation = UserFacingErrorPresentation(error)
+                statusLabel.stringValue = presentation.inlineText
+                statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
             }
         }
@@ -532,13 +535,16 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             limit: 100
         ).map(Item.result))
         if let issue = message.issue {
-            statusLabel.stringValue = issue.message
+            let presentation = issue.userFacingPresentation
+            statusLabel.stringValue = presentation.inlineText
+            statusLabel.toolTip = presentation.detailedText
             statusLabel.textColor = .systemRed
         } else {
             statusLabel.stringValue = objectSearchStatus(
                 examined: message.progress.objectsExamined,
                 complete: message.progress.complete
             )
+            statusLabel.toolTip = nil
             statusLabel.textColor = .secondaryLabelColor
         }
     }

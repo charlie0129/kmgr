@@ -138,6 +138,7 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
         guard loadTask == nil else { return }
         loadTask = Task { [weak self, logProvider, resources] in
             guard let self else { return }
+            statusLabel.toolTip = nil
             do {
                 let resolution = try await logProvider.resolveLogSources(resources: resources)
                 guard !Task.isCancelled else { return }
@@ -173,7 +174,9 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
                 openButton.isEnabled = true
             } catch {
                 guard !Task.isCancelled else { return }
-                statusLabel.stringValue = error.localizedDescription
+                let presentation = UserFacingErrorPresentation(error)
+                statusLabel.stringValue = presentation.inlineText
+                statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
                 openButton.isEnabled = false
             }

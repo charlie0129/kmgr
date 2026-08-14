@@ -76,6 +76,15 @@ struct TerminalWindowControllerTests {
         reconnect.performClick(nil)
         try await waitForExecEvent(provider) { $0.contains("failed:2") }
         try await waitForTerminalControl(reconnect) { $0.isEnabled }
+        let status = try terminalStatus(in: controller)
+        try await waitForTerminalControl(status) {
+            $0.stringValue == "Cluster unavailable"
+        }
+        #expect(status.toolTip?.contains("The replacement exec stream was rejected.") == true)
+        #expect(status.toolTip?.contains("Operation: exec Pod") == true)
+        #expect(status.toolTip?.contains("Context: production") == true)
+        #expect(status.toolTip?.contains("Reason: ReplacementRejected") == true)
+        #expect(status.toolTip?.contains("Retryable") == true)
 
         var events = provider.snapshot()
         #expect(!events.contains("cancel:1"))
@@ -101,10 +110,10 @@ struct TerminalWindowControllerTests {
         let cancelledOriginal = try #require(events.firstIndex(of: "cancel:1"))
         #expect(openedRetry < acceptedRetry)
         #expect(acceptedRetry < cancelledOriginal)
-        let status = try terminalStatus(in: controller)
         try await waitForTerminalControl(status) { $0.stringValue == "Connected" }
         try await Task.sleep(for: .milliseconds(30))
         #expect(status.stringValue == "Connected")
+        #expect(status.toolTip == "Running")
         #expect(!reconnect.isEnabled)
     }
 }

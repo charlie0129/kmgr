@@ -271,6 +271,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         guard task == nil, !terminal else { return }
         primaryButton.isEnabled = false
         progress.startAnimation(nil)
+        statusLabel.toolTip = nil
         statusLabel.stringValue = "Refreshing exact object identity…"
         task = Task { [weak self, detailProvider, operationProvider, identity] in
             guard let self else { return }
@@ -352,7 +353,9 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     }
 
     private func show(_ error: Error) {
-        statusLabel.stringValue = error.localizedDescription
+        let presentation = UserFacingErrorPresentation(error)
+        statusLabel.stringValue = presentation.inlineText
+        statusLabel.toolTip = presentation.detailedText
         statusLabel.textColor = .systemRed
         primaryButton.isEnabled = true
     }

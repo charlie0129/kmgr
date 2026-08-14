@@ -259,6 +259,7 @@ final class DeleteResourcesWindowController: NSWindowController,
 
     @objc private func beginDelete() {
         guard operationTask == nil, !terminal else { return }
+        statusLabel.toolTip = nil
         let graceText = graceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let grace: Int64?
         if graceText.isEmpty {
@@ -302,7 +303,9 @@ final class DeleteResourcesWindowController: NSWindowController,
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                statusLabel.stringValue = error.localizedDescription
+                let presentation = UserFacingErrorPresentation(error)
+                statusLabel.stringValue = presentation.inlineText
+                statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
                 terminal = true
                 setRunning(false)
@@ -318,6 +321,7 @@ final class DeleteResourcesWindowController: NSWindowController,
         setRunning(false)
         primaryButton.isHidden = true
         cancelButton.title = "Close"
+        statusLabel.toolTip = nil
         let succeeded = resultsByUID.values.lazy.filter { $0.state == .succeeded }.count
         let failed = resultsByUID.values.lazy.filter {
             $0.state == .failed || $0.state == .skipped || $0.state == .cancelled
@@ -333,8 +337,14 @@ final class DeleteResourcesWindowController: NSWindowController,
             statusLabel.stringValue = "Deletion cancelled. Already dispatched API requests may still complete."
             statusLabel.textColor = .systemOrange
         default:
-            statusLabel.stringValue = progress.issue?.message
-                ?? "Deletion failed. Review individual results."
+            if let issue = progress.issue {
+                let presentation = issue.userFacingPresentation
+                statusLabel.stringValue = presentation.inlineText
+                statusLabel.toolTip = presentation.detailedText
+            } else {
+                statusLabel.stringValue = "Deletion failed. Review individual results."
+                statusLabel.toolTip = nil
+            }
             statusLabel.textColor = .systemRed
         }
     }
@@ -368,7 +378,9 @@ final class DeleteResourcesWindowController: NSWindowController,
                     cancelNotStartedOnly: true
                 )
             } catch {
-                statusLabel.stringValue = error.localizedDescription
+                let presentation = UserFacingErrorPresentation(error)
+                statusLabel.stringValue = presentation.inlineText
+                statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
                 cancelButton.isEnabled = true
             }
@@ -397,6 +409,6 @@ final class DeleteResourcesWindowController: NSWindowController,
     }
 
     private func resultTooltip(_ result: OperationItemResult?) -> String? {
-        result?.issue?.message
+        result?.issue?.userFacingPresentation.detailedText
     }
 }

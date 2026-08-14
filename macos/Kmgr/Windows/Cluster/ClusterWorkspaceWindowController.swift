@@ -586,10 +586,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     func engineRecoveryFailed(_ error: Error) {
-        connectionActivityView.setState(.failed, detail: error.localizedDescription)
+        let presentation = UserFacingErrorPresentation(error)
+        connectionActivityView.setState(.failed, detail: presentation.detailedText)
         if !isAuthenticated {
             contentController.showDisconnected(
-                "Could not connect to this saved context. \(error.localizedDescription)"
+                "Could not connect to this saved context. \(presentation.inlineText)",
+                toolTip: presentation.detailedText
             )
         }
     }
@@ -643,7 +645,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 guard restoredShellState != nil else { return }
                 sidebarController.discardRestoredResource()
                 contentController.rejectRestoredResourceValidation(error)
-                connectionActivityView.setState(.failed, detail: error.localizedDescription)
+                connectionActivityView.setState(
+                    .failed,
+                    detail: UserFacingErrorPresentation(error).detailedText
+                )
             }
         }
         loadNamespaces()
@@ -740,7 +745,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     else { continue }
                     connectionActivityView.setState(
                         sample.state,
-                        detail: sample.issue?.localizedDescription
+                        detail: sample.issue?.userFacingPresentation.detailedText
                     )
                     connectionActivityView.update(
                         rate: connectionRateTracker.receive(sample)
@@ -748,9 +753,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 }
             } catch {
                 guard !Task.isCancelled, self?.session.sessionID == sessionID else { return }
+                let presentation = UserFacingErrorPresentation(error)
                 self?.connectionActivityView.setState(
                     .reconnecting,
-                    detail: error.localizedDescription
+                    detail: presentation.detailedText
                 )
             }
         }
@@ -1077,7 +1083,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 showObject(detail.identity, initialTab: .automatic)
             } catch {
                 guard !Task.isCancelled else { return }
-                connectionActivityView.setState(.failed, detail: error.localizedDescription)
+                let presentation = UserFacingErrorPresentation(error)
+                connectionActivityView.setState(.failed, detail: presentation.detailedText)
             }
         }
     }
@@ -1205,7 +1212,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     namespaceControl.selectItem(at: index)
                 }
             } catch {
-                connectionActivityView.setState(.reconnecting, detail: "Namespace list unavailable")
+                let presentation = UserFacingErrorPresentation(error)
+                connectionActivityView.setState(
+                    .reconnecting,
+                    detail: "Namespace list unavailable\n\(presentation.detailedText)"
+                )
             }
         }
     }
@@ -1216,9 +1227,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             forwardsButton.contentTintColor = .systemRed
             forwardsButton.toolTip = "One or more port-forwards failed. Open Port Forwards."
             forwardsButton.setAccessibilityValue("\(snapshot.activeCount) active, failures present")
-        } else if snapshot.connectionIssue != nil {
+        } else if let issue = snapshot.connectionIssue {
             forwardsButton.contentTintColor = .systemOrange
-            forwardsButton.toolTip = "Port-forward status is reconnecting."
+            forwardsButton.toolTip = issue.userFacingPresentation.detailedText
             forwardsButton.setAccessibilityValue("\(snapshot.activeCount) active, status unavailable")
         } else {
             forwardsButton.contentTintColor = nil
@@ -1344,6 +1355,9 @@ private final class ResourceSidebarViewController: NSViewController,
             }
         }
         guard task == nil else { return }
+        statusLabel.stringValue = "Discovering resource kinds…"
+        statusLabel.toolTip = nil
+        statusLabel.textColor = .secondaryLabelColor
         task = Task { [weak self, provider, session] in
             guard let self else { return }
             do {
@@ -1357,7 +1371,7 @@ private final class ResourceSidebarViewController: NSViewController,
                 rebuildSections()
                 if discovery.potentiallyIncomplete {
                     statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds • discovery incomplete"
-                    statusLabel.toolTip = discovery.warning?.localizedDescription
+                    statusLabel.toolTip = discovery.warning?.userFacingPresentation.detailedText
                         ?? "Some Kubernetes API groups could not be discovered."
                     statusLabel.textColor = .systemOrange
                 } else if let issue = pinStore.loadIssue {
@@ -1372,7 +1386,9 @@ private final class ResourceSidebarViewController: NSViewController,
                 onComplete?(.success(allResources))
             } catch {
                 guard !Task.isCancelled else { return }
-                statusLabel.stringValue = error.localizedDescription
+                let presentation = UserFacingErrorPresentation(error)
+                statusLabel.stringValue = presentation.inlineText
+                statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
                 onComplete?(.failure(error))
             }
@@ -1685,6 +1701,7 @@ private final class ResourceListViewController: NSViewController,
     private var tableTopWithoutErrorConstraint: NSLayoutConstraint?
     private var tableTopWithErrorConstraint: NSLayoutConstraint?
     private var inlineIssueState = ResourceListInlineIssueState()
+    private var inlineIssueToolTip: String?
     private var model = ResourceTableModel()
     private var generationGate = GenerationSequenceGate()
     private var resource: DiscoveredResource?
@@ -1940,7 +1957,7 @@ private final class ResourceListViewController: NSViewController,
         updateStatusLine()
     }
 
-    func showDisconnected(_ message: String) {
+    func showDisconnected(_ message: String, toolTip: String? = nil) {
         endProjectionRequest(outcome: "disconnected")
         streamTask?.cancel()
         streamTask = nil
@@ -1948,7 +1965,7 @@ private final class ResourceListViewController: NSViewController,
         model = ResourceTableModel()
         tableView.reloadData()
         installFreshnessText("Disconnected")
-        showInlineIssue(message, color: .systemOrange)
+        showInlineIssue(message, color: .systemOrange, toolTip: toolTip)
         updateStatusLine()
     }
 
@@ -2427,7 +2444,11 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func show(error: Error) {
-        showInlineIssue(error.localizedDescription)
+        let presentation = UserFacingErrorPresentation(error)
+        showInlineIssue(
+            presentation.inlineText,
+            toolTip: presentation.detailedText
+        )
         if let issue = error as? ClusterManagerIssue,
             issue.category == .validation
         {
@@ -2506,19 +2527,26 @@ private final class ResourceListViewController: NSViewController,
         freshnessAgeTask = nil
     }
 
-    private func showInlineIssue(_ message: String, color: NSColor = .systemRed) {
+    private func showInlineIssue(
+        _ message: String,
+        color: NSColor = .systemRed,
+        toolTip: String? = nil
+    ) {
         inlineIssueState.show(message)
+        inlineIssueToolTip = toolTip
         errorLabel.textColor = color
         applyInlineIssueState()
     }
 
     private func hideInlineIssue() {
         inlineIssueState.hide()
+        inlineIssueToolTip = nil
         applyInlineIssueState()
     }
 
     private func applyInlineIssueState() {
         errorLabel.stringValue = inlineIssueState.message ?? ""
+        errorLabel.toolTip = inlineIssueState.isHidden ? nil : inlineIssueToolTip
         errorLabel.isHidden = inlineIssueState.isHidden
         switch inlineIssueState.tableTopAnchor {
         case .header:
@@ -3133,9 +3161,11 @@ private final class ResourceListViewController: NSViewController,
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
+        let presentation = UserFacingErrorPresentation(error)
         showDisconnected(
             "Authenticated discovery failed before the saved resource target could be validated. "
-                + error.localizedDescription
+                + presentation.inlineText,
+            toolTip: presentation.detailedText
         )
         titleLabel.stringValue = "Resources"
     }

@@ -222,13 +222,16 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil {
             provider.streamRequestCount == 2
                 && descendants(of: root).compactMap { ($0 as? NSTextField)?.stringValue }
-                    .contains("Unknown filter term unknown")
+                    .contains { $0.contains("Unknown filter term unknown") }
         }
 
         #expect(filter.stringValue == "unknown:value")
         #expect(table.numberOfRows == 1)
         #expect(freshness.stringValue == "Invalid filter · last good rows")
         #expect(freshness.accessibilityValue() == "Invalid filter · last good rows")
+        let issueLabel = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.stringValue.contains("Unknown filter term unknown") })
+        #expect(issueLabel.toolTip?.contains("Operation: compile resource filter") == true)
     }
 
     @Test("invalid initial filter never presents as loading or disconnected")
@@ -260,7 +263,7 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil {
             freshness.stringValue == "Invalid filter"
                 && descendants(of: root).compactMap { ($0 as? NSTextField)?.stringValue }
-                    .contains("Unknown filter term unknown")
+                    .contains { $0.contains("Unknown filter term unknown") }
         }
 
         #expect(filter.stringValue == "unknown:value")
@@ -516,8 +519,10 @@ struct LazyWorkspaceRestorationTests {
         let connectionItem = originalWindow.toolbar?.items.first {
             $0.itemIdentifier.rawValue == "workspace.connection"
         }
-        #expect(connectionItem?.view?.accessibilityValue() as? String ==
-            "Connection failed, Authentication failed (401).")
+        let connectionValue = connectionItem?.view?.accessibilityValue() as? String
+        #expect(connectionValue?.contains("Authentication failed (401).") == true)
+        #expect(connectionValue?.contains("Operation: open saved context") == true)
+        #expect(connectionValue?.contains("Reason: Unauthorized") == true)
     }
 }
 }
