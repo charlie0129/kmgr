@@ -7,6 +7,26 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Log windows", .serialized)
 struct LogWindowControllerTests {
+    @Test("deferred reconciliation never restores tail after a user scroll")
+    func deferredTailIntentRequiresCurrentTailPosition() {
+        #expect(LogTailReconciliationPolicy.shouldPreserveTail(
+            requestedAtScheduleTime: true,
+            currentlyAtTail: true
+        ))
+        #expect(!LogTailReconciliationPolicy.shouldPreserveTail(
+            requestedAtScheduleTime: true,
+            currentlyAtTail: false
+        ))
+        #expect(!LogTailReconciliationPolicy.shouldPreserveTail(
+            requestedAtScheduleTime: false,
+            currentlyAtTail: true
+        ))
+        #expect(!LogTailReconciliationPolicy.shouldPreserveTail(
+            requestedAtScheduleTime: false,
+            currentlyAtTail: false
+        ))
+    }
+
     @Test("streaming log geometry requests only viewport or tail layout")
     func streamingGeometryNeverRequestsWholeContainerLayout() throws {
         let storage = NSTextStorage()

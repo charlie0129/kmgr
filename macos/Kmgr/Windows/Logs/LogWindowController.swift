@@ -2,6 +2,15 @@ import AppKit
 import KmgrCore
 import OSLog
 
+enum LogTailReconciliationPolicy {
+    static func shouldPreserveTail(
+        requestedAtScheduleTime: Bool,
+        currentlyAtTail: Bool
+    ) -> Bool {
+        requestedAtScheduleTime && currentlyAtTail
+    }
+}
+
 @MainActor
 final class LogWindowController: NSWindowController, NSWindowDelegate,
     NSSearchFieldDelegate
@@ -855,9 +864,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 !isClosing
             else { return }
             layoutMetricsTask = nil
+            // A resize may have been scheduled while Follow was at the end,
+            // but an intervening user scroll revokes that stale intent.
+            let shouldPreserveTail = LogTailReconciliationPolicy.shouldPreserveTail(
+                requestedAtScheduleTime: preservingTail,
+                currentlyAtTail: isAtTail
+            )
             textLayoutMetrics = metrics
-            updateTextDocumentGeometry(followingTail: preservingTail)
-            if preservingTail { textView.scrollToEndOfDocument(nil) }
+            updateTextDocumentGeometry(followingTail: shouldPreserveTail)
+            if shouldPreserveTail { textView.scrollToEndOfDocument(nil) }
         }
     }
 
