@@ -325,19 +325,30 @@ func (m *Manager) subscribe() (*subscription, func()) {
 }
 
 func (m *Manager) Close() {
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return
+	_ = m.CloseContext(context.Background())
+}
+
+// RequestClose rejects new forwards, stops retention work, and cancels every
+// active runner without waiting for runners to return.
+func (m *Manager) RequestClose() {
+	entries := m.requestClose()
+	for _, value := range entries {
+		value.mu.RLock()
+		cancel := value.cancel
+		value.mu.RUnlock()
+		cancel()
 	}
-	m.closed = true
-	close(m.retentionStop)
-	entries := make([]*entry, 0, len(m.entries))
-	for _, value := range m.entries {
-		entries = append(entries, value)
+}
+
+// CloseContext cancels every forward and waits for its runner and the
+// retention janitor to stop, or until ctx ends. Timed-out runners retain their
+// existing lifecycle goroutines and release their cluster sessions when they
+// eventually return; bounded shutdown does not add an abandoned waiter.
+func (m *Manager) CloseContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("port-forward manager close context must not be nil")
 	}
-	clear(m.watchers)
-	m.mu.Unlock()
+	entries := m.requestClose()
 	for _, value := range entries {
 		value.mu.RLock()
 		cancel := value.cancel
@@ -348,10 +359,65 @@ func (m *Manager) Close() {
 		value.mu.RLock()
 		done := value.runDone
 		value.mu.RUnlock()
-		<-done
+		if err := waitForForwardShutdown(ctx, done); err != nil {
+			// Entries that had already stopped before close will not revisit the
+			// worker defer that releases sessions after manager shutdown. Drain
+			// all such ready entries even when one stubborn runner used the
+			// deadline; still-running entries self-release when they return.
+			for _, remaining := range entries {
+				remaining.mu.RLock()
+				remainingDone := remaining.runDone
+				remaining.mu.RUnlock()
+				select {
+				case <-remainingDone:
+					remaining.releaseSession()
+				default:
+				}
+			}
+			return err
+		}
 		value.releaseSession()
 	}
-	<-m.retentionDone
+	select {
+	case <-m.retentionDone:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+func waitForForwardShutdown(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		select {
+		case <-done:
+			return nil
+		default:
+			return context.Cause(ctx)
+		}
+	}
+}
+
+func (m *Manager) requestClose() []*entry {
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		close(m.retentionStop)
+	}
+	entries := make([]*entry, 0, len(m.entries))
+	for _, value := range m.entries {
+		entries = append(entries, value)
+	}
+	clear(m.watchers)
+	m.mu.Unlock()
+	return entries
 }
 
 func (m *Manager) run(ctx context.Context, current *entry, revision uint64, session Session) {
@@ -362,6 +428,12 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64, sess
 		close(done)
 		m.pruneTerminalEntries(m.config.Now())
 		m.signalRetentionJanitor()
+		m.mu.RLock()
+		closed := m.closed
+		m.mu.RUnlock()
+		if closed {
+			current.releaseSession()
+		}
 	}()
 	request := current.request
 	for attempt := 0; ; attempt++ {

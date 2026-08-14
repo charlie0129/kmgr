@@ -385,6 +385,74 @@ func TestSubscriberOverflowRequestsAuthoritativeResync(t *testing.T) {
 	}
 }
 
+func TestManagerCloseContextBoundsStubbornForward(t *testing.T) {
+	running := &stubbornRunningForward{
+		release: make(chan struct{}), closeCalled: make(chan struct{}),
+	}
+	forwarder := &stubbornForwarder{running: running, started: make(chan struct{})}
+	sessions := &leaseSessionResolver{session: Session{
+		ContextName: "context",
+		Resolver:    &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}},
+		Forwarder:   forwarder,
+	}}
+	manager, err := NewManager(Config{
+		Sessions: sessions,
+		Backoff:  BackoffFunc(func(context.Context, int) error { return nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(running.release)
+		}
+		manager.Close()
+	})
+	if _, err := manager.Start(StartRequest{
+		ID: "stubborn", Target: podIdentity("pod", "uid"), RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-forwarder.started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	begin := time.Now()
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- manager.CloseContext(ctx) }()
+	select {
+	case err = <-closeResult:
+	case <-time.After(500 * time.Millisecond):
+		close(running.release)
+		released = true
+		<-closeResult
+		t.Fatal("CloseContext did not return within a bounded interval")
+	}
+	elapsed := time.Since(begin)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext error = %v, want deadline exceeded", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("CloseContext elapsed = %v, want a bounded shutdown", elapsed)
+	}
+	select {
+	case <-running.closeCalled:
+	case <-time.After(time.Second):
+		t.Fatal("CloseContext did not close the stubborn running forward")
+	}
+	if got := sessions.Counts(); got != [2]int{1, 0} {
+		t.Fatalf("timed-out forward lease counts = %v, want retained lease", got)
+	}
+
+	close(running.release)
+	released = true
+	manager.Close()
+	if got := sessions.Counts(); got != [2]int{1, 1} {
+		t.Fatalf("eventual forward lease counts = %v, want [1 1]", got)
+	}
+}
+
 func TestTerminalPortForwardsHaveBoundedAgeAndCountRetention(t *testing.T) {
 	t.Parallel()
 	clock := &portForwardTestClock{value: time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)}
@@ -925,6 +993,33 @@ type fakeForwarder struct {
 	startErrors []error
 	waitErrors  []error
 	runnings    []*fakeRunning
+}
+
+type stubbornForwarder struct {
+	running *stubbornRunningForward
+	started chan struct{}
+	once    sync.Once
+}
+
+func (f *stubbornForwarder) Start(context.Context, ForwardRequest) (RunningForward, error) {
+	f.once.Do(func() { close(f.started) })
+	return f.running, nil
+}
+
+type stubbornRunningForward struct {
+	release     chan struct{}
+	closeCalled chan struct{}
+	closeOnce   sync.Once
+}
+
+func (*stubbornRunningForward) LocalPort() uint16 { return 12345 }
+func (f *stubbornRunningForward) Wait() error {
+	<-f.release
+	return nil
+}
+func (f *stubbornRunningForward) Close() error {
+	f.closeOnce.Do(func() { close(f.closeCalled) })
+	return nil
 }
 
 func (f *fakeForwarder) Start(ctx context.Context, request ForwardRequest) (RunningForward, error) {

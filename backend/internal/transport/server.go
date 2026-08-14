@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -237,11 +238,15 @@ func (s *Server) Shutdown(timeout time.Duration) {
 		if timeout <= 0 {
 			timeout = DefaultGracefulStopTimeout
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
 		s.views.Close()
 		s.logs.Close()
 		s.exec.Close()
-		s.forwards.Close()
-		s.operations.Close()
+		s.forwards.RequestClose()
+		s.operations.RequestClose()
+		_ = s.forwards.CloseContext(ctx)
+		_ = s.operations.CloseContext(ctx)
 		stopped := make(chan struct{})
 		go func() {
 			s.grpc.GracefulStop()
@@ -249,9 +254,9 @@ func (s *Server) Shutdown(timeout time.Duration) {
 		}()
 		select {
 		case <-stopped:
-		case <-time.After(timeout):
+		case <-ctx.Done():
 			if s.logger != nil {
-				s.logger.Warn("forcing gRPC server stop after drain timeout")
+				s.logger.Warn("forcing server stop after shutdown timeout")
 			}
 			s.grpc.Stop()
 			<-stopped

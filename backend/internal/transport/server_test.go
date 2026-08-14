@@ -2,11 +2,16 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/object"
+	"github.com/charlie0129/kmgr/backend/internal/operation"
+	"github.com/charlie0129/kmgr/backend/internal/portforward"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -14,6 +19,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestServerAuthenticatesEveryRPC(t *testing.T) {
@@ -114,4 +120,174 @@ func TestServerAuthenticatesEveryRPC(t *testing.T) {
 		replacementState.GetCursor().GetSequence() != 1 {
 		t.Fatalf("replacement health event = %#v", replacementState)
 	}
+}
+
+func TestServerShutdownDeadlineIncludesStubbornManagerDrains(t *testing.T) {
+	server, err := NewServer(strings.Repeat("a", 64), ServerOptions{Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.forwards.Close()
+
+	running := &shutdownTestRunningForward{
+		release: make(chan struct{}), closeCalled: make(chan struct{}),
+	}
+	forwarder := &shutdownTestForwarder{running: running, started: make(chan struct{})}
+	forwardManager, err := portforward.NewManager(portforward.Config{
+		Sessions: shutdownTestSessionResolver{session: portforward.Session{
+			ContextName: "context",
+			Resolver:    shutdownTestTargetResolver{},
+			Forwarder:   forwarder,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.forwards = forwardManager
+
+	operationStarted := make(chan struct{})
+	operationCancelled := make(chan struct{})
+	operationRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWorkers := func() {
+		releaseOnce.Do(func() {
+			close(operationRelease)
+			close(running.release)
+		})
+	}
+	t.Cleanup(func() {
+		releaseWorkers()
+		server.operations.Close()
+		forwardManager.Close()
+	})
+	tracked, err := server.operations.StartOne(
+		context.Background(), "stubborn-operation", "delete",
+		object.Identity{
+			SessionID: "session", Version: "v1", Resource: "pods",
+			Namespace: "default", Name: "pod", UID: "pod-uid",
+		},
+		func(ctx context.Context) (string, error) {
+			close(operationStarted)
+			<-ctx.Done()
+			close(operationCancelled)
+			<-operationRelease
+			return "", context.Cause(ctx)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := forwardManager.Start(portforward.StartRequest{
+		ID: "stubborn-forward",
+		Target: portforward.Identity{
+			SessionID: "session", Version: "v1", Resource: "pods",
+			Namespace: "default", Name: "pod", UID: types.UID("pod-uid"),
+		},
+		RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-operationStarted
+	<-forwarder.started
+
+	const shutdownTimeout = 30 * time.Millisecond
+	begin := time.Now()
+	shutdownReturned := make(chan time.Duration, 1)
+	go func() {
+		server.Shutdown(shutdownTimeout)
+		shutdownReturned <- time.Since(begin)
+	}()
+	var elapsed time.Duration
+	select {
+	case elapsed = <-shutdownReturned:
+	case <-time.After(500 * time.Millisecond):
+		releaseWorkers()
+		<-shutdownReturned
+		t.Fatal("Shutdown did not return within a bounded interval")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Shutdown elapsed = %v, want the %v global deadline to bound manager drains", elapsed, shutdownTimeout)
+	}
+	select {
+	case <-operationCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not cancel the stubborn operation")
+	}
+	select {
+	case <-running.closeCalled:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not close the stubborn running forward")
+	}
+	select {
+	case <-tracked.Done():
+		t.Fatal("stubborn operation finished before its worker was released")
+	default:
+	}
+	select {
+	case <-server.Done():
+	default:
+		t.Fatal("Shutdown did not publish the engine stopping state")
+	}
+	if _, err := server.operations.StartOne(
+		context.Background(), "late-operation", "delete",
+		object.Identity{
+			SessionID: "session", Version: "v1", Resource: "pods",
+			Namespace: "default", Name: "pod", UID: "pod-uid",
+		},
+		func(context.Context) (string, error) { return "", nil },
+	); !errors.Is(err, operation.ErrManagerClosed) {
+		t.Fatalf("operation start after timed-out shutdown error = %v", err)
+	}
+
+	releaseWorkers()
+	server.operations.Close()
+	forwardManager.Close()
+}
+
+type shutdownTestSessionResolver struct {
+	session portforward.Session
+}
+
+func (r shutdownTestSessionResolver) ResolveSession(string) (portforward.Session, error) {
+	return r.session, nil
+}
+
+type shutdownTestTargetResolver struct{}
+
+func (shutdownTestTargetResolver) Resolve(
+	_ context.Context,
+	target portforward.Identity,
+	remotePort uint16,
+) (portforward.ResolvedTarget, error) {
+	return portforward.ResolvedTarget{Pod: target, RemotePort: remotePort}, nil
+}
+
+type shutdownTestForwarder struct {
+	running *shutdownTestRunningForward
+	started chan struct{}
+	once    sync.Once
+}
+
+func (f *shutdownTestForwarder) Start(
+	context.Context,
+	portforward.ForwardRequest,
+) (portforward.RunningForward, error) {
+	f.once.Do(func() { close(f.started) })
+	return f.running, nil
+}
+
+type shutdownTestRunningForward struct {
+	release     chan struct{}
+	closeCalled chan struct{}
+	closeOnce   sync.Once
+}
+
+func (*shutdownTestRunningForward) LocalPort() uint16 { return 12345 }
+func (f *shutdownTestRunningForward) Wait() error {
+	<-f.release
+	return nil
+}
+func (f *shutdownTestRunningForward) Close() error {
+	f.closeOnce.Do(func() { close(f.closeCalled) })
+	return nil
 }

@@ -240,6 +240,74 @@ func TestManagerCloseCancelsAndDrainsActiveOperations(t *testing.T) {
 	}
 }
 
+func TestManagerCloseContextBoundsStubbornOperation(t *testing.T) {
+	manager := NewManager()
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+		manager.Close()
+	})
+	operation, err := manager.StartOne(
+		context.Background(), "stubborn", "delete", operationTestIdentity("one", "uid-one"),
+		func(ctx context.Context) (string, error) {
+			close(started)
+			<-ctx.Done()
+			close(cancelled)
+			<-release
+			return "", context.Cause(ctx)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	begin := time.Now()
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- manager.CloseContext(ctx) }()
+	select {
+	case err = <-closeResult:
+	case <-time.After(500 * time.Millisecond):
+		close(release)
+		released = true
+		<-closeResult
+		t.Fatal("CloseContext did not return within a bounded interval")
+	}
+	elapsed := time.Since(begin)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext error = %v, want deadline exceeded", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("CloseContext elapsed = %v, want a bounded shutdown", elapsed)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("CloseContext did not cancel the stubborn operation")
+	}
+	select {
+	case <-operation.Done():
+		t.Fatal("stubborn operation finished before its runner was released")
+	default:
+	}
+
+	close(release)
+	released = true
+	manager.Close()
+	select {
+	case <-operation.Done():
+	default:
+		t.Fatal("operation did not finish after its stubborn runner was released")
+	}
+}
+
 func TestManagerEvictsOldestTerminalOperationsAndReusesIDs(t *testing.T) {
 	t.Parallel()
 	manager := NewManagerWithConfig(ManagerConfig{

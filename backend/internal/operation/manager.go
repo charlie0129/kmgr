@@ -511,19 +511,67 @@ func (m *Manager) Cancel(operationID string) bool {
 // Close cancels every in-flight mutation and waits until each worker has
 // released its request payload and published a terminal state.
 func (m *Manager) Close() {
+	_ = m.CloseContext(context.Background())
+}
+
+// RequestClose rejects new mutations and cancels every in-flight mutation
+// without waiting for workers to return.
+func (m *Manager) RequestClose() {
 	m.mu.Lock()
-	if !m.closed {
-		m.closed = true
-		m.cancel(ErrManagerClosed)
+	m.requestCloseLocked()
+	m.mu.Unlock()
+}
+
+// CloseContext cancels every in-flight mutation and waits until each worker
+// has released its request payload and published a terminal state, or until
+// ctx ends. A worker that ignores cancellation remains owned by its existing
+// goroutine; no detached waiter is created for a bounded shutdown.
+func (m *Manager) CloseContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("operation manager close context must not be nil")
 	}
+	m.mu.Lock()
+	m.requestCloseLocked()
 	operations := make([]*TrackedOperation, 0, len(m.operations))
 	for _, operation := range m.operations {
 		operations = append(operations, operation)
 	}
 	m.mu.Unlock()
 	for _, operation := range operations {
-		<-operation.Done()
+		if err := waitForOperationShutdown(ctx, operation.Done()); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func waitForOperationShutdown(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		// Prefer a concurrently published terminal state over reporting a
+		// timeout after the requested cleanup actually completed.
+		select {
+		case <-done:
+			return nil
+		default:
+			return context.Cause(ctx)
+		}
+	}
+}
+
+func (m *Manager) requestCloseLocked() {
+	if m.closed {
+		return
+	}
+	m.closed = true
+	m.cancel(ErrManagerClosed)
 }
 
 func (m *Manager) recordTerminal(operationID string, operation *TrackedOperation) {
