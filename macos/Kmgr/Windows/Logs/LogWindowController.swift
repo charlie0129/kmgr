@@ -36,6 +36,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var pendingRender = false
     private var renderDirty = false
     private var needsRenderWhenVisible = false
+    private var keyVisibilityWakePending = false
     private var isClosing = false
     private var latestStoreDrops: UInt64 = 0
     private var latestStreamDrops: UInt64 = 0
@@ -150,6 +151,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     func windowDidChangeOcclusionState(_ notification: Notification) {
         if canRenderNow { resumeRenderingIfVisible() }
         else { suspendRenderingWhileHidden() }
+    }
+
+    /// A stream can deliver its first records between `showWindow` and the
+    /// application making this independent window key. Treat that transition
+    /// as a rendering wake-up so an early, already-downloaded batch cannot sit
+    /// buffered until a later occlusion change.
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard needsRenderWhenVisible else { return }
+        keyVisibilityWakePending = true
+        resumeRenderingIfVisible()
     }
 
     func controlTextDidChange(_ obj: Notification) { scheduleRender() }
@@ -586,6 +597,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             guard !Task.isCancelled else { return }
             latestStoreDrops = statistics.droppedRecords
             updateStatusLabel()
+            needsRenderWhenVisible = true
             if !isPaused { scheduleRender() }
         case .status(_, let status):
             latestStreamState = status.state
@@ -753,6 +765,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         textView.setSelectedRange(result.install.remapSelection(selectedRange))
         if wasAtTail { textView.scrollToEndOfDocument(nil) }
         needsRenderWhenVisible = false
+        keyVisibilityWakePending = false
         logSignposter.endInterval(
             PerformanceSignpostCatalog.logTextInstall,
             installInterval
@@ -795,7 +808,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     private var canRenderNow: Bool {
         guard let window, window.isVisible, !window.isMiniaturized else { return false }
-        return window.occlusionState.contains(.visible)
+        return keyVisibilityWakePending || window.isKeyWindow
+            || window.occlusionState.contains(.visible)
     }
 
     private func suspendRenderingWhileHidden() {

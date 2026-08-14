@@ -155,6 +155,57 @@ struct LogWindowControllerTests {
         controller.close()
     }
 
+    @Test("records downloaded before the log window becomes key are rendered")
+    func earlyDownloadedRecordsRenderAfterVisibilityWake() async throws {
+        let provider = OrderedLogWindowProvider()
+        let app = logSource(pod: "api", uid: "api-uid", container: "app")
+        let sidecar = logSource(pod: "api", uid: "api-uid", container: "sidecar")
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [app, sidecar],
+            provider: provider,
+            displayConfiguration: LogDisplayConfiguration(renderBatchMilliseconds: 30)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let textView = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextView }.first)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+
+        window.orderOut(nil)
+        provider.emitStreaming(generation: 1, sequence: 1)
+        provider.emitRecords(
+            generation: 1,
+            sequence: 2,
+            records: [
+                LogRecord(
+                    sourceID: app.sourceID, data: Data("hello".utf8),
+                    endsWithNewline: true
+                ),
+                LogRecord(
+                    sourceID: sidecar.sourceID, data: Data("ready".utf8),
+                    endsWithNewline: true
+                ),
+            ]
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(textView.string.isEmpty)
+
+        window.makeKeyAndOrderFront(nil)
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        try await waitForLogText(textView) { value in
+            value.contains("[app] hello") && value.contains("[sidecar] ready")
+        }
+    }
+
     @Test("failed replacement restores controls without retiring established stream")
     func failedReplacementRestoresAppliedConfiguration() async throws {
         let provider = OrderedLogWindowProvider()
@@ -449,6 +500,15 @@ private final class OrderedLogWindowProvider: LogStreamProviding, @unchecked Sen
         ))
     }
 
+    func emitRecords(generation: UInt64, sequence: UInt64, records: [LogRecord]) {
+        let continuation = lock.withLock { continuations[generation] }
+        continuation?.yield(.records(
+            cursor: StreamCursor(generation: generation, sequence: sequence),
+            records: records,
+            totalBytes: UInt64(records.reduce(0) { $0 + $1.data.count })
+        ))
+    }
+
     func emitFailureMessage(generation: UInt64, message: String) {
         let continuation = lock.withLock { continuations[generation] }
         continuation?.yield(.failure(
@@ -544,6 +604,18 @@ private func waitForLogWindowControl(
         try await Task.sleep(for: .milliseconds(5))
     }
     Issue.record("Timed out waiting for log control enabled=\(enabled)")
+}
+
+@MainActor
+private func waitForLogText(
+    _ textView: NSTextView,
+    condition: (String) -> Bool
+) async throws {
+    for _ in 0..<200 {
+        if condition(textView.string) { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Timed out waiting for rendered log text; got \(textView.string)")
 }
 
 @MainActor

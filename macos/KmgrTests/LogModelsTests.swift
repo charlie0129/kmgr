@@ -77,7 +77,7 @@ private func podIdentity(_ name: String, uid: String) -> ResourceIdentity {
     #expect(app.availableSources.map(\.container) == ["app", "sidecar"])
 }
 
-@Test func defaultLogOpenRefusesAnOversizedAllContainerExpansion() {
+@Test func defaultLogOpenRefusesAnOversizedAllContainerExpansion() throws {
     let pod = podIdentity("api", uid: "api-uid")
     let resolution = LogSourceResolution(
         pods: [PodLogSourceInventory(
