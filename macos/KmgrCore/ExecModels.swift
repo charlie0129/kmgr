@@ -17,6 +17,7 @@ public struct ExecSessionRequest: Hashable, Sendable {
     public var generation: UInt64
     public var pod: ResourceIdentity
     public var contextName: String
+    public var clusterName: String
     public var container: String
     public var command: [String]
     public var tty: Bool
@@ -29,6 +30,7 @@ public struct ExecSessionRequest: Hashable, Sendable {
         generation: UInt64,
         pod: ResourceIdentity,
         contextName: String,
+        clusterName: String = "",
         container: String,
         command: [String],
         tty: Bool = true,
@@ -40,6 +42,7 @@ public struct ExecSessionRequest: Hashable, Sendable {
         self.generation = generation
         self.pod = pod
         self.contextName = contextName
+        self.clusterName = clusterName
         self.container = container
         self.command = command
         self.tty = tty

@@ -20,6 +20,8 @@ final class DataConflictWindowController: NSWindowController, NSWindowDelegate {
     private var completed = false
 
     init(
+        session: OpenedClusterSession?,
+        identity: ResourceIdentity,
         key: String,
         resourceVersion: String,
         local: DataConflictValueDisplay,
@@ -33,19 +35,27 @@ final class DataConflictWindowController: NSWindowController, NSWindowDelegate {
         self.canCopyLocal = canCopyLocal
         self.retryUnavailableReason = retryUnavailableReason
         self.completion = completion
+        let clusterPresentation = session.map(ClusterIdentityPresentation.init(session:))
+            ?? ClusterIdentityPresentation(clusterName: "", contextName: "")
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 500),
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 590),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
-        panel.title = "Resolve Key Conflict"
-        panel.minSize = NSSize(width: 620, height: 400)
+        panel.title = "\(clusterPresentation.titlePrefix) — Resolve Key Conflict"
+        panel.minSize = NSSize(width: 620, height: 500)
         panel.isReleasedWhenClosed = false
         panel.tabbingMode = .disallowed
         super.init(window: panel)
         panel.delegate = self
-        configure(panel: panel, key: key, resourceVersion: resourceVersion)
+        configure(
+            panel: panel,
+            identity: identity,
+            clusterPresentation: clusterPresentation,
+            key: key,
+            resourceVersion: resourceVersion
+        )
     }
 
     @available(*, unavailable)
@@ -66,7 +76,17 @@ final class DataConflictWindowController: NSWindowController, NSWindowDelegate {
         finish(.keepEditing)
     }
 
-    private func configure(panel: NSPanel, key: String, resourceVersion: String) {
+    private func configure(
+        panel: NSPanel,
+        identity: ResourceIdentity,
+        clusterPresentation: ClusterIdentityPresentation,
+        key: String,
+        resourceVersion: String
+    ) {
+        let target = NSTextField(wrappingLabelWithString:
+            clusterPresentation.targetDetails(identity)
+        )
+        target.lineBreakMode = .byTruncatingMiddle
         let heading = NSTextField(wrappingLabelWithString:
             "The server changed key \(key) after it was loaded. Your local draft is still in the editor."
         )
@@ -110,7 +130,7 @@ final class DataConflictWindowController: NSWindowController, NSWindowDelegate {
         buttons.alignment = .centerY
         buttons.spacing = 8
 
-        let stack = NSStackView(views: [heading, version, values, statusLabel, buttons])
+        let stack = NSStackView(views: [target, heading, version, values, statusLabel, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -123,6 +143,7 @@ final class DataConflictWindowController: NSWindowController, NSWindowDelegate {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.topAnchor.constraint(equalTo: root.topAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            target.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
             heading.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
             version.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
             values.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),

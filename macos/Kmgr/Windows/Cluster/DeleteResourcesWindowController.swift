@@ -45,7 +45,8 @@ final class DeleteResourcesWindowController: NSWindowController,
             backing: .buffered,
             defer: false
         )
-        window.title = "Delete Resources — \(session.contextName)"
+        let clusterPresentation = ClusterIdentityPresentation(session: session)
+        window.title = "\(clusterPresentation.titlePrefix) — Delete Resources"
         window.minSize = NSSize(width: 650, height: 420)
         window.tabbingMode = .disallowed
         super.init(window: window)
@@ -90,7 +91,7 @@ final class DeleteResourcesWindowController: NSWindowController,
         highImpactWarning.isHidden = summary.highImpactWarningText == nil
 
         let cluster = NSTextField(wrappingLabelWithString:
-            "CONTEXT: \(session.contextName)\nCLUSTER: \(session.clusterName) · \(session.serverHostname)"
+            "\(ClusterIdentityPresentation(session: session).labeledLines)\nServer: \(session.serverHostname)"
         )
         cluster.font = .systemFont(ofSize: 14, weight: .bold)
         cluster.textColor = .labelColor

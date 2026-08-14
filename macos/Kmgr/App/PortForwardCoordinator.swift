@@ -21,6 +21,7 @@ final class PortForwardCoordinator {
     private var anchorSessionID = ""
     private var generation: UInt64 = 0
     private var watchTask: Task<Void, Never>?
+    private var clusterPresentationsBySessionID: [String: ClusterIdentityPresentation] = [:]
     private var observers: [UUID: @MainActor (Snapshot) -> Void] = [:]
     private(set) var connectionIssue: ClusterManagerIssue?
     private(set) var isWatching = false
@@ -55,6 +56,13 @@ final class PortForwardCoordinator {
     /// List/Watch are app-wide but the protocol requires a nonempty request
     /// context. Keep the newest opened session as an authorization anchor even
     /// after its workspace closes; independent streams outlive that window.
+    func register(session: OpenedClusterSession) {
+        clusterPresentationsBySessionID[session.sessionID] = ClusterIdentityPresentation(
+            session: session
+        )
+        register(sessionID: session.sessionID)
+    }
+
     func register(sessionID: String) {
         let value = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
@@ -169,7 +177,7 @@ final class PortForwardCoordinator {
                     let previousGeneration = collection.records.filter {
                         $0.lastIssue?.reason == "EngineRestarted"
                     }
-                    collection.replace(with: listed + previousGeneration)
+                    collection.replace(with: presented(listed) + previousGeneration)
                     connectionIssue = nil
                     publish()
 
@@ -222,7 +230,8 @@ final class PortForwardCoordinator {
 
     private func receive(_ event: PortForwardWatchEvent) {
         switch event {
-        case .delta(let cursor, let delta):
+        case .delta(let cursor, var delta):
+            delta.upserts = presented(delta.upserts)
             let disposition = collection.receive(cursor: cursor, delta: delta)
             guard Self.accepted(disposition) else { return }
             connectionIssue = nil
@@ -238,6 +247,21 @@ final class PortForwardCoordinator {
     private func publish() {
         let value = snapshot
         for observer in observers.values { observer(value) }
+    }
+
+    private func presented(_ records: [PortForwardRecord]) -> [PortForwardRecord] {
+        records.map { record in
+            guard let presentation = clusterPresentationsBySessionID[record.clusterSessionID]
+            else { return record }
+            var record = record
+            if record.clusterName.isEmpty {
+                record.clusterName = presentation.clusterName
+            }
+            if record.contextName.isEmpty {
+                record.contextName = presentation.contextName
+            }
+            return record
+        }
     }
 
     private static func accepted(_ disposition: StreamMessageDisposition) -> Bool {

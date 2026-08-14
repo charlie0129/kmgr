@@ -128,6 +128,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private(set) var identity: ResourceIdentity
+    private var session: OpenedClusterSession?
     private let provider: any ObjectDetailProviding
     private let initialTab: ObjectDetailInitialTab
     private let dataFileReader: @Sendable (URL) throws -> Data
@@ -223,6 +224,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         identity: ResourceIdentity,
         provider: any ObjectDetailProviding,
         initialTab: ObjectDetailInitialTab = .automatic,
+        session: OpenedClusterSession? = nil,
         dataFileReader: @escaping @Sendable (URL) throws -> Data = {
             try DataValueFileIO.readBounded(from: $0)
         },
@@ -231,6 +233,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
     ) {
         self.identity = identity
+        self.session = session
         self.provider = provider
         self.initialTab = initialTab
         self.dataFileReader = dataFileReader
@@ -355,12 +358,13 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     /// stay local and no interrupted operation is replayed. The fresh GET also
     /// detects a same-name replacement because the identity remains UID-pinned.
     func recover(
-        sessionID: String,
+        session recoveredSession: OpenedClusterSession,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         guard recoveryTask == nil else { return }
+        session = recoveredSession
         var reboundIdentity = identity
-        reboundIdentity.clusterSessionID = sessionID
+        reboundIdentity.clusterSessionID = recoveredSession.sessionID
         statusLabel.stringValue = "Reopening this UID…"
         statusLabel.textColor = .secondaryLabelColor
         recoveryTask = Task { [weak self, provider] in
@@ -393,6 +397,19 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var breadcrumbText: String {
         let scope = identity.namespace.isEmpty ? "" : " · \(identity.namespace)"
         return "\(identity.resource)\(scope) · \(identity.name)"
+    }
+
+    var mutationConfirmationIdentityText: String {
+        clusterPresentation.targetDetails(identity)
+    }
+
+    func confirmationInformativeText(note: String) -> String {
+        "\(mutationConfirmationIdentityText)\n\n\(note)"
+    }
+
+    private var clusterPresentation: ClusterIdentityPresentation {
+        session.map(ClusterIdentityPresentation.init(session:))
+            ?? ClusterIdentityPresentation(clusterName: "", contextName: "")
     }
 
     private var supportsDataEditor: Bool {
@@ -1238,9 +1255,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         guard !diff.isEmpty else { return true }
         let alert = NSAlert()
         alert.messageText = "Apply \(diff.count) YAML change\(diff.count == 1 ? "" : "s")?"
-        alert.informativeText = diff.prefix(12).map {
+        let changes = diff.prefix(12).map {
             "\($0.path): \($0.beforeSummary) → \($0.afterSummary)"
         }.joined(separator: "\n")
+        alert.informativeText = confirmationInformativeText(
+            note: "Changes:\n\(changes)"
+        )
         alert.addButton(withTitle: "Apply")
         alert.addButton(withTitle: "Keep Editing")
         return alert.runModal() == .alertFirstButtonReturn
@@ -1684,7 +1704,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         guard objectData != nil else { return }
         let alert = NSAlert()
         alert.messageText = "Add Key"
-        alert.informativeText = "The new key is created only if it still does not exist on the server."
+        alert.informativeText = confirmationInformativeText(
+            note: "The new key is created only if it still does not exist on the server."
+        )
         let nameField = NSTextField(frame: NSRect(x: 0, y: 32, width: 340, height: 24))
         nameField.placeholderString = "Key name"
         let kindButton = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 180, height: 26))
@@ -1723,7 +1745,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         else { return }
         let alert = NSAlert()
         alert.messageText = "Rename Key"
-        alert.informativeText = "Rename \(entry.id) without changing its value or text/binary kind."
+        alert.informativeText = confirmationInformativeText(
+            note: "Rename \(entry.id) without changing its value or text/binary kind."
+        )
         let field = NSTextField(string: entry.id)
         field.frame.size = NSSize(width: 340, height: 24)
         alert.accessoryView = field
@@ -1749,7 +1773,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Delete key \(entry.id)?"
-        alert.informativeText = "The delete uses the loaded content hash and will fail if this key changed on the server."
+        alert.informativeText = confirmationInformativeText(
+            note: "The delete uses the loaded content hash and will fail if this key changed on the server."
+        )
         alert.addButton(withTitle: "Delete Key")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -2068,6 +2094,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             canCopyLocal = false
         }
         let controller = DataConflictWindowController(
+            session: session,
+            identity: identity,
             key: mutation.sourceKey,
             resourceVersion: currentData.resourceVersion,
             local: localDisplay,

@@ -48,11 +48,12 @@ struct LogWindowControllerTests {
         let label = try #require(descendants(of: root)
             .compactMap { $0 as? NSTextField }
             .first { $0.accessibilityLabel() == "Log sources" })
-        #expect(label.stringValue.contains("Context: production"))
+        #expect(label.stringValue.contains("Cluster: cluster · Context: production"))
         #expect(label.stringValue.contains("team-a/api/app"))
         #expect(label.stringValue.contains("team-a/worker/sidecar"))
         #expect(label.toolTip == label.stringValue)
         #expect(controller.window?.title.contains("2 sources") == true)
+        #expect(controller.window?.title.contains("cluster — production") == true)
     }
 
     @Test("live toolbar exposes container tail and since controls and static scope")

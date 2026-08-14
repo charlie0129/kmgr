@@ -71,7 +71,7 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
                 label.toolTip = "This listener is reachable beyond the local machine."
             }
         case .context:
-            label.stringValue = record.contextName.isEmpty ? "—" : record.contextName
+            label.stringValue = Self.clusterContextText(for: record)
         case .target:
             label.stringValue = identityText(record.target, includeUID: false)
             label.toolTip = record.target.uid.rawValue
@@ -119,7 +119,7 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
 
         let columns: [(NSUserInterfaceItemIdentifier, String, CGFloat)] = [
             (.status, "Status", 105),
-            (.context, "Context", 120),
+            (.context, "Cluster — Context", 210),
             (.target, "Target", 180),
             (.resolvedPod, "Resolved Pod", 185),
             (.address, "Bind / Local → Remote", 175),
@@ -185,6 +185,13 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
         ])
         window.contentView = root
         updateActionAvailability()
+    }
+
+    static func clusterContextText(for record: PortForwardRecord) -> String {
+        ClusterIdentityPresentation(
+            clusterName: record.clusterName,
+            contextName: record.contextName
+        ).titlePrefix
     }
 
     private func apply(_ snapshot: PortForwardCoordinator.Snapshot) {

@@ -186,7 +186,7 @@ final class Application: NSObject, NSApplicationDelegate {
                         self.workspaceControllers[identifier] === controller
                     else { return }
                     controller.recover(with: session)
-                    portForwardCoordinator.register(sessionID: session.sessionID)
+                    portForwardCoordinator.register(session: session)
                 } catch {
                     guard !Task.isCancelled,
                         self.workspaceControllers[identifier] === controller
@@ -211,7 +211,10 @@ final class Application: NSObject, NSApplicationDelegate {
             alert.alertStyle = .warning
             alert.messageText = "Stop active port-forwards and quit?"
             let descriptions = forwards.prefix(8).map { record in
-                let context = record.contextName.isEmpty ? "unknown context" : record.contextName
+                let context = ClusterIdentityPresentation(
+                    clusterName: record.clusterName,
+                    contextName: record.contextName
+                ).titlePrefix
                 let namespace = record.target.namespace.isEmpty ? "cluster" : record.target.namespace
                 return "• \(context) · \(namespace)/\(record.target.name) · \(record.address ?? "allocating") → \(record.remotePort)"
             }

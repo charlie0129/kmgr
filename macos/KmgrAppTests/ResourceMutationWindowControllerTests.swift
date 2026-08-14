@@ -14,8 +14,17 @@ struct ResourceMutationWindowControllerTests {
             mutation: .metadata,
             operationProvider: CapturingMutationOperationProvider()
         )
+        #expect(controller.window?.title ==
+            "cluster-a — production — Edit Labels / Annotations")
         let root = try #require(controller.window?.contentView)
         let views = mutationDescendants(of: root)
+        let identityText = views.compactMap { ($0 as? NSTextField)?.stringValue }
+            .joined(separator: "\n")
+        #expect(identityText.contains("Cluster: cluster-a"))
+        #expect(identityText.contains("Context: production"))
+        #expect(identityText.contains("Namespace: team-a"))
+        #expect(identityText.contains("Target: apps/v1/deployments · team-a/api"))
+        #expect(identityText.contains("UID: deployment-uid"))
         let expectedLabels = [
             "Labels to set",
             "Annotations to set",

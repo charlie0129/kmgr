@@ -78,7 +78,8 @@ final class PortForwardConfigurationWindowController: NSWindowController,
             backing: .buffered,
             defer: false
         )
-        panel.title = "Start Port Forward"
+        let clusterPresentation = ClusterIdentityPresentation(session: session)
+        panel.title = "\(clusterPresentation.titlePrefix) — Start Port Forward"
         panel.isReleasedWhenClosed = false
         panel.tabbingMode = .disallowed
         super.init(window: panel)
@@ -131,6 +132,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         uidValue.toolTip = targetIdentity.uid.rawValue
 
         let identityGrid = NSGridView(views: [
+            gridRow("Cluster", identityValue(session.clusterName)),
             gridRow("Context", contextValue),
             gridRow("Target", targetValue),
             gridRow("UID", uidValue),
@@ -416,17 +418,34 @@ final class PortForwardConfigurationWindowController: NSWindowController,
 
     private func confirmNonLoopback(_ draft: Draft) {
         guard let panel = window else { return }
-        let namespace = targetIdentity.namespace.isEmpty ? "(cluster scoped)" : targetIdentity.namespace
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Expose this port beyond localhost?"
-        alert.informativeText = "Bind \(draft.bindAddress) for \(session.contextName) · \(namespace)/\(targetIdentity.name). Other machines may be able to connect, depending on host firewall and network settings."
+        alert.informativeText = Self.nonLoopbackConfirmationInformativeText(
+            session: session,
+            target: targetIdentity,
+            bindAddress: draft.bindAddress
+        )
         alert.addButton(withTitle: "Start Non-Loopback Forward")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: panel) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
             self?.performStart(draft, allowNonLoopback: true)
         }
+    }
+
+    static func nonLoopbackConfirmationInformativeText(
+        session: OpenedClusterSession,
+        target: ResourceIdentity,
+        bindAddress: String
+    ) -> String {
+        let identity = ClusterIdentityPresentation(session: session).targetDetails(target)
+        return """
+        \(identity)
+        Bind address: \(bindAddress)
+
+        Other machines may be able to connect, depending on host firewall and network settings.
+        """
     }
 
     private func performStart(_ draft: Draft, allowNonLoopback: Bool) {

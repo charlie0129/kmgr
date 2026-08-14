@@ -42,7 +42,8 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
             backing: .buffered,
             defer: false
         )
-        window.title = "Open Logs — \(session.contextName)"
+        let clusterPresentation = ClusterIdentityPresentation(session: session)
+        window.title = "\(clusterPresentation.titlePrefix) — Open Logs"
         window.tabbingMode = .disallowed
         super.init(window: window)
         window.delegate = self
@@ -67,7 +68,7 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
 
     private func configureContent(in window: NSWindow) {
         let identity = NSTextField(wrappingLabelWithString:
-            "Context: \(session.contextName)\nResources: \(resources.map { $0.namespace + "/" + $0.name }.joined(separator: ", "))"
+            "\(ClusterIdentityPresentation(session: session).labeledLines)\nResources: \(resources.map { $0.namespace + "/" + $0.name }.joined(separator: ", "))"
         )
         identity.lineBreakMode = .byTruncatingMiddle
         identity.maximumNumberOfLines = 3

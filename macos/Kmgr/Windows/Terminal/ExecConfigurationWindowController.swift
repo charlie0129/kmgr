@@ -58,7 +58,8 @@ final class ExecConfigurationWindowController: NSWindowController,
             backing: .buffered,
             defer: false
         )
-        panel.title = "Open Terminal"
+        let clusterPresentation = ClusterIdentityPresentation(session: session)
+        panel.title = "\(clusterPresentation.titlePrefix) — Open Terminal"
         panel.isReleasedWhenClosed = false
         panel.tabbingMode = .disallowed
         super.init(window: panel)
@@ -93,6 +94,7 @@ final class ExecConfigurationWindowController: NSWindowController,
     private func configureContent(in panel: NSPanel) {
         let namespace = podIdentity.namespace.isEmpty ? "(cluster scoped)" : podIdentity.namespace
         let identityGrid = NSGridView(views: [
+            gridRow("Cluster", identityValue(session.clusterName)),
             gridRow("Context", identityValue(session.contextName)),
             gridRow("Pod", identityValue("\(namespace)/\(podIdentity.name)")),
             gridRow("UID", identityValue(podIdentity.uid.rawValue, monospaced: true)),
@@ -371,6 +373,7 @@ final class ExecConfigurationWindowController: NSWindowController,
             generation: 1,
             pod: podIdentity,
             contextName: session.contextName,
+            clusterName: session.clusterName,
             container: container.name,
             command: command
         )

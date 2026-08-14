@@ -125,6 +125,7 @@ private func execRequest(command: [String]) -> ExecSessionRequest {
             uid: ResourceUID("pod-uid")
         ),
         contextName: "production",
+        clusterName: "cluster-a",
         container: "app",
         command: command
     )

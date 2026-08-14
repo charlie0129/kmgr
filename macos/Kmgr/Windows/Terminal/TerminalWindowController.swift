@@ -8,6 +8,7 @@ import SwiftTerm
 @MainActor
 final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     private let terminalController: RemoteTerminalViewController
+    private let request: ExecSessionRequest
     var onClose: (() -> Void)?
 
     init(
@@ -15,6 +16,7 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         provider: any ExecSessionProviding,
         fallbackShellCommand: [String]? = nil
     ) {
+        self.request = request
         terminalController = RemoteTerminalViewController(
             request: request,
             provider: provider,
@@ -26,7 +28,11 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "\(request.pod.name) — \(Product.applicationName)"
+        let clusterPresentation = ClusterIdentityPresentation(
+            clusterName: request.clusterName,
+            contextName: request.contextName
+        )
+        window.title = "\(clusterPresentation.titlePrefix) — Terminal — \(request.pod.name)"
         window.subtitle = Self.subtitle(for: request)
         window.minSize = NSSize(width: 560, height: 360)
         window.tabbingMode = .disallowed
@@ -54,7 +60,7 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Close active terminal?"
-        alert.informativeText = "Closing this window will terminate the remote process in \(terminalController.podDisplayName)."
+        alert.informativeText = Self.closeConfirmationInformativeText(for: request)
         alert.addButton(withTitle: "Close Terminal")
         alert.addButton(withTitle: "Keep Open")
         return alert.runModal() == .alertFirstButtonReturn
@@ -67,7 +73,20 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
 
     private static func subtitle(for request: ExecSessionRequest) -> String {
         let namespace = request.pod.namespace.isEmpty ? "default" : request.pod.namespace
-        return "\(request.contextName) · \(namespace)/\(request.pod.name) · \(request.container)"
+        return "\(namespace)/\(request.pod.name) · \(request.container)"
+    }
+
+    static func closeConfirmationInformativeText(for request: ExecSessionRequest) -> String {
+        let clusterPresentation = ClusterIdentityPresentation(
+            clusterName: request.clusterName,
+            contextName: request.contextName
+        )
+        return """
+        \(clusterPresentation.targetDetails(request.pod))
+        Container: \(request.container)
+
+        Closing this window will terminate the remote process.
+        """
     }
 }
 
@@ -560,11 +579,15 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     ) -> NSToolbarItem? {
         switch itemIdentifier {
         case .identity:
+            let clusterPresentation = ClusterIdentityPresentation(
+                clusterName: baseRequest.clusterName,
+                contextName: baseRequest.contextName
+            )
             let label = NSTextField(
-                labelWithString: "\(baseRequest.contextName) · \(podDisplayName) · \(baseRequest.container)"
+                labelWithString: "\(clusterPresentation.titlePrefix) · \(podDisplayName) · \(baseRequest.container)"
             )
             label.lineBreakMode = .byTruncatingMiddle
-            label.toolTip = "Context \(baseRequest.contextName), Pod \(podDisplayName), container \(baseRequest.container)"
+            label.toolTip = "\(clusterPresentation.labeledInline), Pod \(podDisplayName), container \(baseRequest.container)"
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Target"
             item.view = label

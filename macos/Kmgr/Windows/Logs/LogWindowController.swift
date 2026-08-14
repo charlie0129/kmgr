@@ -109,7 +109,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             backing: .buffered,
             defer: false
         )
-        window.title = "\(session.contextName) — Logs — \(titleSources)"
+        let clusterPresentation = ClusterIdentityPresentation(session: session)
+        window.title = "\(clusterPresentation.titlePrefix) — Logs — \(titleSources)"
         window.minSize = NSSize(width: 560, height: 320)
         window.tabbingMode = .disallowed
         // A log stream is an ephemeral, independently configured surface.
@@ -403,13 +404,17 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             contextName: session.contextName,
             sources: sources
         )
+        let clusterSummary = "\(ClusterIdentityPresentation(session: session).labeledCluster) · \(summary)"
         let snapshotNote = staticWorkloadSnapshot
             ? "Static workload Pod snapshot; membership changes are not followed—reopen Logs to refresh."
             : ""
-        sourceLabel.stringValue = snapshotNote.isEmpty ? summary : "\(summary) · \(snapshotNote)"
+        sourceLabel.stringValue = snapshotNote.isEmpty
+            ? clusterSummary
+            : "\(clusterSummary) · \(snapshotNote)"
         sourceLabel.toolTip = sourceLabel.stringValue
         sourceLabel.setAccessibilityValue(sourceLabel.stringValue)
-        window?.title = "\(session.contextName) — Logs — \(LogSourcePresentation.titleSummary(for: sources))"
+        let clusterPresentation = ClusterIdentityPresentation(session: session)
+        window?.title = "\(clusterPresentation.titlePrefix) — Logs — \(LogSourcePresentation.titleSummary(for: sources))"
     }
 
     private func startStream() {

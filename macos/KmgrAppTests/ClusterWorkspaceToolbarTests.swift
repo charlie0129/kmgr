@@ -70,8 +70,12 @@ struct ClusterWorkspaceToolbarTests {
         })
         let forwards = try #require(window.toolbar?.items.compactMap { $0.view as? NSButton }
             .first { $0.accessibilityLabel() == "Open app-wide Port Forwards" })
+        let cluster = try #require(window.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.cluster"
+        }?.view as? NSButton)
 
-        #expect(window.title.contains("test-context"))
+        #expect(window.title.contains("test-cluster — test-context"))
+        #expect(cluster.title == "test-cluster — test-context")
         #expect(outline.accessibilityRole() == .outline)
         #expect(outline.accessibilityLabel() == "Kubernetes resource kinds")
         #expect(table.accessibilityRole() == .table)
@@ -349,6 +353,11 @@ struct LazyWorkspaceRestorationTests {
 
         #expect(controller.window === originalWindow)
         #expect(controller.isAuthenticated)
+        #expect(originalWindow.title.contains("production-cluster — production"))
+        let clusterButton = try #require(originalWindow.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.cluster"
+        }?.view as? NSButton)
+        #expect(clusterButton.title == "production-cluster — production")
         #expect(provider.discoverySessionIDs == ["authenticated-session"])
         #expect(provider.streamRequests.count == 1)
         let request = try #require(provider.streamRequests.first)

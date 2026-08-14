@@ -26,6 +26,13 @@ struct DeleteResourcesWindowControllerTests {
             provider: NoopDeleteResourcesProvider()
         )
         let root = try #require(controller.window?.contentView)
+        #expect(controller.window?.title ==
+            "cluster-a — production — Delete Resources")
+        let identityText = deleteDescendants(of: root)
+            .compactMap { ($0 as? NSTextField)?.stringValue }
+            .joined(separator: "\n")
+        #expect(identityText.contains("Cluster: cluster-a"))
+        #expect(identityText.contains("Context: production"))
         let table = try #require(deleteDescendants(of: root)
             .compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Resources awaiting deletion" })

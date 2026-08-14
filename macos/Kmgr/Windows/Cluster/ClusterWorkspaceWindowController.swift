@@ -103,7 +103,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             backing: .buffered,
             defer: false
         )
-        window.title = "\(session.contextName) — \(Product.applicationName)"
+        let clusterPresentation = ClusterIdentityPresentation(session: session)
+        window.title = "\(clusterPresentation.titlePrefix) — \(Product.applicationName)"
         window.subtitle = session.serverHostname
         window.toolbarStyle = .unified
         window.minSize = NSSize(width: 820, height: 520)
@@ -190,7 +191,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         dismissTransientOperationsForEngineRecovery()
         session = recoveredSession
         isAuthenticated = true
-        window?.title = "\(recoveredSession.contextName) — \(Product.applicationName)"
+        let clusterPresentation = ClusterIdentityPresentation(session: recoveredSession)
+        window?.title = "\(clusterPresentation.titlePrefix) — \(Product.applicationName)"
         window?.subtitle = recoveredSession.serverHostname
         workspaceController.recover(with: recoveredSession)
         restoration.state = workspaceController.restorationState()
@@ -648,7 +650,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         startPortForwardObservation()
         if let detailController {
             connectionActivityView.setState(.connecting, detail: "Reopening view…")
-            detailController.recover(sessionID: recoveredSession.sessionID) { [weak self] result in
+            detailController.recover(session: recoveredSession) { [weak self] result in
                 switch result {
                 case .success:
                     self?.connectionActivityView.setState(.connected)
@@ -695,7 +697,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     private func startPortForwardObservation() {
         guard isAuthenticated else { return }
-        portForwards.register(sessionID: session.sessionID)
+        portForwards.register(session: session)
         if portForwardObserver == nil {
             portForwardObserver = portForwards.observe { [weak self] snapshot in
                 self?.updatePortForwardButton(snapshot)
@@ -707,10 +709,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         guard let item = view.window?.toolbar?.items.first(where: {
             $0.itemIdentifier == .cluster
         }) else { return }
-        item.label = session.contextName
+        let clusterPresentation = ClusterIdentityPresentation(session: session)
+        item.label = clusterPresentation.titlePrefix
         if let button = item.view as? NSButton {
-            button.title = session.contextName
-            button.toolTip = "\(session.clusterName) · \(session.serverHostname)"
+            button.title = clusterPresentation.titlePrefix
+            button.toolTip = "\(clusterPresentation.labeledInline) · \(session.serverHostname)"
         }
     }
 
@@ -815,10 +818,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             return item
         case .cluster:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = session.contextName
-            let button = NSButton(title: session.contextName, target: self, action: #selector(showClusterDetails))
+            let clusterPresentation = ClusterIdentityPresentation(session: session)
+            item.label = clusterPresentation.titlePrefix
+            let button = NSButton(
+                title: clusterPresentation.titlePrefix,
+                target: self,
+                action: #selector(showClusterDetails)
+            )
             button.bezelStyle = .texturedRounded
-            button.toolTip = "\(session.clusterName) · \(session.serverHostname)"
+            button.toolTip = "\(clusterPresentation.labeledInline) · \(session.serverHostname)"
             item.isNavigational = true
             item.view = button
             return item
@@ -892,7 +900,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     @objc private func showClusterDetails() {
         let alert = NSAlert()
-        alert.messageText = session.contextName
+        alert.messageText = ClusterIdentityPresentation(session: session).titlePrefix
         alert.informativeText = [
             "Cluster: \(session.clusterName)",
             "Server: \(session.serverHostname)",
@@ -1094,7 +1102,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         let controller = ObjectDetailViewController(
             identity: identity,
             provider: objectDetailProvider,
-            initialTab: initialTab
+            initialTab: initialTab,
+            session: session
         )
         controller.onBack = { [weak self] in self?.goBack() }
         detailController = controller

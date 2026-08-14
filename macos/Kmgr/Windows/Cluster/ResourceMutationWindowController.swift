@@ -58,7 +58,8 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
             contentRect: NSRect(x: 0, y: 0, width: 640, height: mutation == .metadata ? 510 : 340),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
-        panel.title = mutation.title
+        let clusterPresentation = ClusterIdentityPresentation(session: session)
+        panel.title = "\(clusterPresentation.titlePrefix) — \(mutation.title)"
         panel.isReleasedWhenClosed = false
         panel.tabbingMode = .disallowed
         super.init(window: panel)
@@ -84,9 +85,8 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     func windowWillClose(_ notification: Notification) { onDismiss?() }
 
     private func configure(in panel: NSPanel) {
-        let namespace = identity.namespace.isEmpty ? "Cluster" : identity.namespace
         let heading = NSTextField(wrappingLabelWithString:
-            "Context: \(session.contextName)\nTarget: \(identity.resource) · \(namespace)/\(identity.name)\nUID: \(identity.uid.rawValue)"
+            ClusterIdentityPresentation(session: session).targetDetails(identity)
         )
         heading.lineBreakMode = .byTruncatingMiddle
         let form = NSStackView()
@@ -230,17 +230,24 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
 
     private func confirm(_ draft: MutationDraft) {
         guard let panel = window else { return }
-        let namespace = identity.namespace.isEmpty ? "cluster scoped" : identity.namespace
         let alert = NSAlert()
         alert.alertStyle = .warning
         switch draft {
         case .scale(let replicas):
             alert.messageText = "Scale \(identity.name) to \(replicas) replicas?"
-            alert.informativeText = "Context: \(session.contextName)\nTarget: \(identity.resource) · \(namespace)/\(identity.name)\n\nThe object identity and resource version will be refreshed before scaling."
+            alert.informativeText = Self.confirmationInformativeText(
+                session: session,
+                identity: identity,
+                note: "The object identity and resource version will be refreshed before scaling."
+            )
             alert.addButton(withTitle: "Scale")
         case .restart:
             alert.messageText = "Restart \(identity.name)?"
-            alert.informativeText = "Context: \(session.contextName)\nTarget: \(identity.resource) · \(namespace)/\(identity.name)\n\nThe Pod template will be updated after a fresh object identity and resource-version check."
+            alert.informativeText = Self.confirmationInformativeText(
+                session: session,
+                identity: identity,
+                note: "The Pod template will be updated after a fresh object identity and resource-version check."
+            )
             alert.addButton(withTitle: "Restart")
         case .metadata:
             return
@@ -250,6 +257,14 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
             guard response == .alertFirstButtonReturn else { return }
             self?.perform(draft)
         }
+    }
+
+    static func confirmationInformativeText(
+        session: OpenedClusterSession,
+        identity: ResourceIdentity,
+        note: String
+    ) -> String {
+        "\(ClusterIdentityPresentation(session: session).targetDetails(identity))\n\n\(note)"
     }
 
     private func perform(_ draft: MutationDraft) {

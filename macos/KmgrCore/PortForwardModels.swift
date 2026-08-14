@@ -31,6 +31,7 @@ public struct PortForwardRecord: Identifiable, Hashable, Sendable {
     public var id: String
     public var clusterSessionID: String
     public var contextName: String
+    public var clusterName: String
     public var target: ResourceIdentity
     public var resolvedPod: ResourceIdentity?
     public var remotePort: UInt16
@@ -47,6 +48,7 @@ public struct PortForwardRecord: Identifiable, Hashable, Sendable {
         id: String,
         clusterSessionID: String,
         contextName: String,
+        clusterName: String = "",
         target: ResourceIdentity,
         resolvedPod: ResourceIdentity? = nil,
         remotePort: UInt16,
@@ -62,6 +64,7 @@ public struct PortForwardRecord: Identifiable, Hashable, Sendable {
         self.id = id
         self.clusterSessionID = clusterSessionID
         self.contextName = contextName
+        self.clusterName = clusterName
         self.target = target
         self.resolvedPod = resolvedPod
         self.remotePort = remotePort
