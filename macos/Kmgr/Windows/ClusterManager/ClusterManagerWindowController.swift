@@ -7,9 +7,16 @@ struct ClusterManagerInitialNotice: Hashable, Sendable {
 }
 
 @MainActor
-final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate {
+final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate,
+    ContextualShortcutProviding
+{
     var onOpenSession: ((OpenedClusterSession) -> Void)?
     var onClose: (() -> Void)?
+    var contextualShortcutsDidChange: (() -> Void)?
+
+    var contextualShortcutSnapshot: ContextualShortcutSnapshot? {
+        managerViewController.contextualShortcutSnapshot
+    }
 
     private let closesAfterOpening: Bool
     private let managerViewController: ClusterManagerViewController
@@ -39,6 +46,9 @@ final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate
         super.init(window: window)
         window.delegate = self
         window.contentViewController = managerViewController
+        managerViewController.onContextualShortcutsChanged = { [weak self] in
+            self?.contextualShortcutsDidChange?()
+        }
         managerViewController.onOpenSession = { [weak self] session in
             guard let self else { return }
             onOpenSession?(session)
@@ -64,6 +74,13 @@ private final class ClusterManagerViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate
 {
     var onOpenSession: ((OpenedClusterSession) -> Void)?
+    var onContextualShortcutsChanged: (() -> Void)?
+
+    var contextualShortcutSnapshot: ContextualShortcutSnapshot {
+        ContextualShortcutCatalog.clusterChooser(
+            canOpenSelection: model.canOpenSelectedContext && openingContextName == nil
+        )
+    }
 
     private enum Column: String, CaseIterable {
         case context
@@ -521,6 +538,7 @@ private final class ClusterManagerViewController: NSViewController,
 
     private func renderControlsAndIssue() {
         guard isViewLoaded else { return }
+        defer { onContextualShortcutsChanged?() }
         let isOpening = openingContextName != nil
         reloadButton.isEnabled = !model.isLoading && !isOpening
         searchField.isEnabled = !isOpening

@@ -55,7 +55,7 @@ struct SavedResourceColumnsChange {
 
 @MainActor
 final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate,
-    NSMenuItemValidation
+    NSMenuItemValidation, ContextualShortcutProviding
 {
     private(set) var session: OpenedClusterSession
     private(set) var isAuthenticated: Bool
@@ -66,6 +66,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onOpenLogWindow: ((LogWindowController) -> Void)?
     var onOpenTerminalWindow: ((TerminalWindowController) -> Void)?
     var onRestorationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
+    var contextualShortcutsDidChange: (() -> Void)?
+
+    var contextualShortcutSnapshot: ContextualShortcutSnapshot? {
+        workspaceController.contextualShortcutSnapshot
+    }
 
     private let provider: any WorkspaceResourceProviding
     private let connectionActivityProvider: any ClusterConnectionActivityProviding
@@ -182,6 +187,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             guard let self else { return }
             self.restoration.state = state
             self.onRestorationCheckpoint?(self.restoration)
+        }
+        workspaceController.onContextualShortcutsChanged = { [weak self] in
+            self?.contextualShortcutsDidChange?()
         }
     }
 
@@ -528,6 +536,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: ((ClusterWindowRestorationState) -> Void)?
+    var onContextualShortcutsChanged: (() -> Void)?
+
+    var contextualShortcutSnapshot: ContextualShortcutSnapshot? {
+        if let subresourceController {
+            return subresourceController.contextualShortcutSnapshot
+        }
+        if detailController != nil {
+            return ContextualShortcutCatalog.objectDetails
+        }
+        return contentController.contextualShortcutSnapshot
+    }
 
     init(
         session: OpenedClusterSession,
@@ -609,6 +628,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onRestorationChanged = { [weak self] in
             self?.checkpointRestoration()
+        }
+        contentController.onContextualShortcutsChanged = { [weak self] in
+            self?.onContextualShortcutsChanged?()
         }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
         addSplitViewItem(NSSplitViewItem(viewController: contentController))
@@ -1263,9 +1285,13 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         controller.onOpenDataEditor = { [weak self] identity in
             self?.showObject(identity, initialTab: .data)
         }
+        controller.onContextualShortcutsChanged = { [weak self] in
+            self?.onContextualShortcutsChanged?()
+        }
         subresourceController = controller
         replaceMainContent(with: controller)
         view.window?.makeFirstResponder(controller.view)
+        onContextualShortcutsChanged?()
     }
 
     private func showObject(
@@ -1297,6 +1323,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         detailController = controller
         replaceMainContent(with: controller)
         view.window?.makeFirstResponder(controller.view)
+        onContextualShortcutsChanged?()
     }
 
     private func showResourceList(resume: Bool = true) {
@@ -1307,6 +1334,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         subresourceController = nil
         if resume { contentController.resume() }
         view.window?.makeFirstResponder(contentController.tableResponder)
+        onContextualShortcutsChanged?()
     }
 
     private func replaceMainContent(with controller: NSViewController) {
@@ -2007,6 +2035,8 @@ private final class ResourceListViewController: NSViewController,
     private var optionalResourceOverlayState = OptionalResourceOverlayLifetimeState()
     private var filterTask: Task<Void, Never>?
     private var filterMemory = ResourceFilterMemory()
+    private var isFilterShortcutContextActive = false
+    private var lastPublishedShortcutSnapshot: ContextualShortcutSnapshot?
     private var suppressSelectionCallbacks = false
     private var history = WorkspaceNavigationHistory()
     private var columnIDs: [String] = []
@@ -2055,6 +2085,39 @@ private final class ResourceListViewController: NSViewController,
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: (() -> Void)?
+    var onContextualShortcutsChanged: (() -> Void)?
+
+    var contextualShortcutSnapshot: ContextualShortcutSnapshot {
+        if isFilterShortcutContextActive {
+            return ContextualShortcutCatalog.resourceFilter
+        }
+        let title: String
+        if let resource, !resource.kind.isEmpty {
+            title = "\(resource.kind) List"
+        } else {
+            title = resource?.resource.capitalized ?? "Resources"
+        }
+        let selected = model.selectedIdentities
+        let networkActionsAllowed = recoveredResourceTrust.permitsNetworkActions(
+            for: selected
+        )
+        func canUse(_ command: ResourceTableCommand) -> Bool {
+            networkActionsAllowed && isCommandCompatible(command, with: selected)
+        }
+        return ContextualShortcutCatalog.resourceList(
+            title: title,
+            availability: ResourceListShortcutAvailability(
+                canEnterSubresource: canUse(.enter),
+                canOpenDetails: canUse(.open),
+                canOpenYAML: canUse(.openYAML),
+                canOpenEvents: canUse(.openEvents),
+                canOpenLogs: canUse(.openLogs),
+                canOpenTerminal: canUse(.openExec),
+                canStartPortForward: canUse(.startPortForward),
+                canDelete: canUse(.delete)
+            )
+        )
+    }
 
     init(
         session: OpenedClusterSession,
@@ -2231,6 +2294,7 @@ private final class ResourceListViewController: NSViewController,
         history.navigate(to: .resource(state))
         configureColumns(for: resource)
         openStream()
+        publishContextualShortcutsIfChanged()
     }
 
     func changeNamespaceScope(_ scope: NamespaceSelection) {
@@ -2288,6 +2352,7 @@ private final class ResourceListViewController: NSViewController,
         installFreshnessText("Disconnected")
         showInlineIssue(message, color: .systemOrange, toolTip: toolTip)
         updateStatusLine()
+        publishContextualShortcutsIfChanged()
     }
 
     func recover(
@@ -2301,6 +2366,7 @@ private final class ResourceListViewController: NSViewController,
         history.rebindClusterSessionID(session.sessionID)
         model.rebindClusterSessionID(session.sessionID)
         recoveredResourceTrust.requireValidation()
+        publishContextualShortcutsIfChanged()
         if sessionChanged {
             cancelOptionalResourceDiscovery(selecting: nil)
             clearOptionalResourceOverlay()
@@ -2361,10 +2427,15 @@ private final class ResourceListViewController: NSViewController,
 
     @discardableResult
     func handleEscape() -> Bool {
-        if view.window?.firstResponder === filterField {
+        let firstResponder = view.window?.firstResponder
+        let filterOwnsResponder = firstResponder === filterField
+            || filterField.currentEditor() === firstResponder
+            || (firstResponder as? NSView).map { $0.isDescendant(of: filterField) } == true
+        if filterOwnsResponder || isFilterShortcutContextActive {
             if !filterField.stringValue.isEmpty {
                 setFilter("")
             }
+            setFilterShortcutContextActive(false)
             view.window?.makeFirstResponder(tableView)
             return true
         }
@@ -2379,6 +2450,7 @@ private final class ResourceListViewController: NSViewController,
             tableView.deselectAll(nil)
             suppressSelectionCallbacks = false
             updateStatusLine()
+            publishContextualShortcutsIfChanged()
             return true
         }
         return false
@@ -2446,6 +2518,7 @@ private final class ResourceListViewController: NSViewController,
         rememberCurrentFilter()
         openStream()
         onRestorationChanged?()
+        setFilterShortcutContextActive(true)
         view.window?.makeFirstResponder(filterField)
     }
 
@@ -2518,6 +2591,16 @@ private final class ResourceListViewController: NSViewController,
         ))
     }
 
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        guard obj.object as? NSControl === filterField else { return }
+        setFilterShortcutContextActive(true)
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard obj.object as? NSControl === filterField else { return }
+        setFilterShortcutContextActive(false)
+    }
+
     func controlTextDidChange(_ obj: Notification) {
         filterRevision &+= 1
         filterTask?.cancel()
@@ -2554,6 +2637,7 @@ private final class ResourceListViewController: NSViewController,
         rememberCurrentFilter()
         openStream()
         onRestorationChanged?()
+        setFilterShortcutContextActive(false)
         view.window?.makeFirstResponder(tableView)
         return true
     }
@@ -2660,6 +2744,7 @@ private final class ResourceListViewController: NSViewController,
         guard cursor.generation == generation else { return }
         let disposition = generationGate.accept(cursor)
         guard disposition == .acceptedNewGeneration || disposition == .acceptedNextSequence else { return }
+        var shouldPublishContextualShortcuts = false
 
         switch message {
         case .status(_, let status):
@@ -2716,8 +2801,17 @@ private final class ResourceListViewController: NSViewController,
             if !chunk.rows.isEmpty || chunk.last {
                 markBaseViewUsableForOptionalResourceDiscovery()
             }
-            if chunk.last { endProjectionRequest(outcome: "snapshot-complete") }
+            if chunk.last {
+                endProjectionRequest(outcome: "snapshot-complete")
+                shouldPublishContextualShortcuts = true
+            }
         case .delta(_, let delta):
+            let selectedUIDs = model.selectedUIDs
+            shouldPublishContextualShortcuts = delta.removedUIDs.contains {
+                selectedUIDs.contains($0)
+            } || (recoveredResourceTrust.requiresValidation && delta.upserts.contains {
+                selectedUIDs.contains($0.identity.uid)
+            })
             let metadata = message.resourceBatchSignpostMetadata!
             let interval = tableSignposter.beginInterval(
                 PerformanceSignpostCatalog.resourceModelApply,
@@ -2752,6 +2846,9 @@ private final class ResourceListViewController: NSViewController,
             show(error: issue)
         }
         updateStatusLine()
+        if shouldPublishContextualShortcuts {
+            publishContextualShortcutsIfChanged()
+        }
     }
 
     private func restoringPendingSelection(
@@ -3156,6 +3253,19 @@ private final class ResourceListViewController: NSViewController,
             ? "\(counts.selected) selected (\(counts.hidden) hidden by filter)"
             : "\(counts.selected) selected"
         statusLine.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects · \(selection) · \(freshnessLabel.stringValue)"
+    }
+
+    private func setFilterShortcutContextActive(_ active: Bool) {
+        guard isFilterShortcutContextActive != active else { return }
+        isFilterShortcutContextActive = active
+        publishContextualShortcutsIfChanged()
+    }
+
+    private func publishContextualShortcutsIfChanged() {
+        let snapshot = contextualShortcutSnapshot
+        guard snapshot != lastPublishedShortcutSnapshot else { return }
+        lastPublishedShortcutSnapshot = snapshot
+        onContextualShortcutsChanged?()
     }
 
     private func configureColumns(for resource: DiscoveredResource) {
@@ -3849,6 +3959,7 @@ private final class ResourceListViewController: NSViewController,
             anchorIndex: tableView.selectedRow >= 0 ? tableView.selectedRow : nil
         )
         updateStatusLine()
+        publishContextualShortcutsIfChanged()
     }
 
     private func performSelectionGesture(_ gesture: ResourceTableSelectionGesture) -> Bool {
@@ -3867,6 +3978,7 @@ private final class ResourceListViewController: NSViewController,
         suppressSelectionCallbacks = false
         if let row { tableView.scrollRowToVisible(row) }
         updateStatusLine()
+        publishContextualShortcutsIfChanged()
         return true
     }
 
@@ -3959,6 +4071,7 @@ private final class ResourceListViewController: NSViewController,
         let selected = capturedIdentities ?? model.selectedIdentities
         switch command {
         case .focusFilter:
+            setFilterShortcutContextActive(true)
             view.window?.makeFirstResponder(filterField)
         case .enter:
             guard let identity = selected.only else { return }
@@ -3995,6 +4108,7 @@ private final class ResourceListViewController: NSViewController,
             tableView.installSelectAllProjection()
             suppressSelectionCallbacks = false
             updateStatusLine()
+            publishContextualShortcutsIfChanged()
         case .delete:
             let currentVisibleUIDs = Set(model.orderedVisibleUIDs)
             let hidden = hiddenSelectionUIDs ?? Set(

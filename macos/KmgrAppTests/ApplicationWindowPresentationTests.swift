@@ -84,6 +84,25 @@ struct ApplicationWindowPresentationTests {
         #expect(!policy(terminating: true, independent: true).shouldPresentAfterWorkspaceClose)
     }
 
+    @Test("passive shortcut panel does not suppress application reopen")
+    func passivePanelDoesNotCountForReopen() {
+        #expect(ApplicationReopenPresentationPolicy(
+            appKitHasVisibleWindows: true,
+            hasVisibleReopenTarget: false,
+            hasActivePortForward: false
+        ).destination == .clusterManager)
+        #expect(ApplicationReopenPresentationPolicy(
+            appKitHasVisibleWindows: true,
+            hasVisibleReopenTarget: false,
+            hasActivePortForward: true
+        ).destination == .portForwards)
+        #expect(ApplicationReopenPresentationPolicy(
+            appKitHasVisibleWindows: true,
+            hasVisibleReopenTarget: true,
+            hasActivePortForward: false
+        ).destination == .none)
+    }
+
     @Test("cluster chooser surfaces a workspace restoration load failure")
     func restorationLoadFailureNotice() throws {
         let provider = AnyClusterContextProvider(

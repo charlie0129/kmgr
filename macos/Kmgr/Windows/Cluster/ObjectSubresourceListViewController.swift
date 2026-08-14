@@ -46,6 +46,18 @@ final class ObjectSubresourceListViewController: NSViewController,
     var onBack: (() -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenDataEditor: ((ResourceIdentity) -> Void)?
+    var onContextualShortcutsChanged: (() -> Void)?
+
+    var contextualShortcutSnapshot: ContextualShortcutSnapshot {
+        switch content {
+        case .containers:
+            ContextualShortcutCatalog.containerList(
+                canOpenLogs: networkActionsEnabled && tableView.selectedRow >= 0
+            )
+        case .data:
+            ContextualShortcutCatalog.dataList(canOpenEditor: networkActionsEnabled)
+        }
+    }
 
     private let content: ObjectSubresourceContent
     private let tableView = ObjectSubresourceTableView()
@@ -144,6 +156,7 @@ final class ObjectSubresourceListViewController: NSViewController,
         }
         view.window?.makeFirstResponder(tableView)
         updateSelectionControls()
+        onContextualShortcutsChanged?()
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { content.count }
@@ -203,11 +216,13 @@ final class ObjectSubresourceListViewController: NSViewController,
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         updateSelectionControls()
+        onContextualShortcutsChanged?()
     }
 
     func setNetworkActionsEnabled(_ enabled: Bool) {
         networkActionsEnabled = enabled
         updateSelectionControls()
+        onContextualShortcutsChanged?()
     }
 
     private func configureTable() {

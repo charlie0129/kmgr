@@ -1,4 +1,5 @@
 import AppKit
+import KmgrCore
 import Testing
 @testable import Kmgr
 
@@ -6,6 +7,21 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Cluster manager table presentation")
 struct ClusterManagerWindowControllerTests {
+    @Test("cluster chooser supplies its own contextual keyboard help")
+    func contextualShortcuts() {
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in [] },
+                openContext: { _ in throw CancellationError() }
+            )
+        )
+        defer { controller.close() }
+
+        #expect(controller.contextualShortcutSnapshot?.contextID == "cluster-chooser")
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("L") == false)
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("\u{2318}N") == true)
+    }
+
     @Test("visible matching text uses folded bold ranges")
     func foldedSearchHighlighting() throws {
         let value = "Dévelopment cluster — PROD.example.test"

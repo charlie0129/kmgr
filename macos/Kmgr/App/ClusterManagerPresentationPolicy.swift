@@ -18,3 +18,24 @@ struct ClusterManagerPresentationPolicy {
         return true
     }
 }
+
+enum ApplicationReopenDestination: Equatable {
+    case none
+    case clusterManager
+    case portForwards
+}
+
+/// AppKit counts passive auxiliary panels in `hasVisibleWindows`. Reopen must
+/// instead use application-managed user windows or the always-on shortcuts
+/// panel could leave the user with no usable window.
+struct ApplicationReopenPresentationPolicy {
+    var appKitHasVisibleWindows: Bool
+    var hasVisibleReopenTarget: Bool
+    var hasActivePortForward: Bool
+
+    var destination: ApplicationReopenDestination {
+        _ = appKitHasVisibleWindows
+        guard !hasVisibleReopenTarget else { return .none }
+        return hasActivePortForward ? .portForwards : .clusterManager
+    }
+}

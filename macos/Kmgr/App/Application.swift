@@ -27,6 +27,7 @@ final class Application: NSObject, NSApplicationDelegate {
     private let settingsWindowController: SettingsWindowController
     private let portForwardCoordinator: PortForwardCoordinator
     private let portForwardsWindowController: PortForwardsWindowController
+    private let contextualShortcutsCoordinator: ContextualShortcutsCoordinator
     private let engineSupervisor: EngineSupervisor
     private var engineStateObserver: UUID?
     private var readyEngineInstanceID: String?
@@ -90,6 +91,9 @@ final class Application: NSObject, NSApplicationDelegate {
         self.portForwardsWindowController = PortForwardsWindowController(
             coordinator: portForwards
         )
+        self.contextualShortcutsCoordinator = ContextualShortcutsCoordinator(
+            application: .shared
+        )
         super.init()
         settings.onPreferencesChanged = { [weak self] preferences, delta in
             guard let self else { return }
@@ -123,6 +127,7 @@ final class Application: NSObject, NSApplicationDelegate {
         }
         engineSupervisor.start()
         restoreWorkspacesOrShowChooser()
+        contextualShortcutsCoordinator.start()
         NSApp.activate(ignoringOtherApps: true)
         logger.info("Kmgr application launched")
     }
@@ -229,6 +234,7 @@ final class Application: NSObject, NSApplicationDelegate {
             }
         }
         isTerminating = true
+        contextualShortcutsCoordinator.stop()
         if let engineStateObserver {
             engineSupervisor.removeStateObserver(engineStateObserver)
             self.engineStateObserver = nil
@@ -250,10 +256,17 @@ final class Application: NSObject, NSApplicationDelegate {
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
-        guard !flag else { return true }
-        if portForwardCoordinator.hasActiveForwards {
+        let destination = ApplicationReopenPresentationPolicy(
+            appKitHasVisibleWindows: flag,
+            hasVisibleReopenTarget: hasVisibleReopenTarget,
+            hasActivePortForward: portForwardCoordinator.hasActiveForwards
+        ).destination
+        switch destination {
+        case .none:
+            break
+        case .portForwards:
             showPortForwards(nil)
-        } else {
+        case .clusterManager:
             showClusterManager()
         }
         return true
@@ -454,6 +467,12 @@ final class Application: NSObject, NSApplicationDelegate {
         return terminalWindowControllers.values.contains {
             $0.window?.isVisible == true
         }
+    }
+
+    private var hasVisibleReopenTarget: Bool {
+        chooserControllers.values.contains { $0.window?.isVisible == true }
+            || workspaceControllers.values.contains { $0.window?.isVisible == true }
+            || hasVisibleIndependentWindow
     }
 
     @objc private func showSettings(_ sender: Any?) {

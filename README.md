@@ -132,6 +132,10 @@ resource. The scan anchors the target's exact UID before doing bulk reads.
 
 Single-letter commands apply only while the resource table is first responder,
 so they do not steal input from filters, YAML/data editors, logs, or terminals.
+Kmgr also keeps one passive **Shortcuts** panel above its windows while the app
+is active. The panel follows the active leaf view (including resource filters,
+Pod containers, object Data, and the Cluster Manager), never takes keyboard
+focus, and hides when no supported context is active.
 
 | Binding | Action |
 | --- | --- |

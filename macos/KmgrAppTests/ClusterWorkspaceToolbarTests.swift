@@ -230,6 +230,37 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
+    @Test("contextual help follows explicit filter focus begin and end")
+    func contextualHelpTracksFilterFocus() async throws {
+        let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+
+        try await waitUntil { table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+        #expect(controller.contextualShortcutSnapshot?.contextID == "resource-list")
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("L") == true)
+
+        controller.focusResourceFilter(nil)
+        #expect(controller.contextualShortcutSnapshot == ContextualShortcutCatalog.resourceFilter)
+
+        let handled = filter.delegate?.control?(
+            filter,
+            textView: NSTextView(),
+            doCommandBy: #selector(NSResponder.insertNewline(_:))
+        )
+        #expect(handled == true)
+        #expect(window.firstResponder === table)
+        #expect(controller.contextualShortcutSnapshot?.contextID == "resource-list")
+    }
+
     @Test("Return on a Pod replaces the resource table with its container list")
     func returnEntersPodContainers() async throws {
         let pod = ResourceIdentity(
@@ -275,6 +306,7 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.accessibilityLabel() == "Pod containers" })
         #expect(containerTable.numberOfRows == 1)
         #expect(containerTable.tableColumns.map(\.title) == ["Container", "Type"])
+        #expect(controller.contextualShortcutSnapshot?.contextID == "pod-containers")
     }
 
     @Test("a slower Enter cannot replace a newer explicit YAML view")
