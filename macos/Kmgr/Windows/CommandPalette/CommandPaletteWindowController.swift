@@ -333,7 +333,14 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         NSLayoutConstraint.activate([
             searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
             searchField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            searchField.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            // This panel uses a full-size transparent title bar, so the raw
+            // content top sits behind the window controls. The safe-area top
+            // keeps the Command-K field below the traffic lights at every
+            // window scale and accessibility setting.
+            searchField.topAnchor.constraint(
+                equalTo: root.safeAreaLayoutGuide.topAnchor,
+                constant: 12
+            ),
             searchField.heightAnchor.constraint(equalToConstant: 34),
             scopeLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
             scopeLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),

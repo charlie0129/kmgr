@@ -54,8 +54,13 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         self.confirmationPreferences = confirmationPreferences
         self.detailProvider = detailProvider
         self.operationProvider = operationProvider
+        let contentHeight: CGFloat = switch mutation {
+        case .scale: 240
+        case .rolloutRestart: 340
+        case .metadata: 510
+        }
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: mutation == .metadata ? 510 : 340),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: contentHeight),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
         let clusterPresentation = ClusterIdentityPresentation(session: session)

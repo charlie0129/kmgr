@@ -14,19 +14,68 @@ struct ClusterWorkspaceToolbarTests {
         let items = try #require(window.toolbar?.items)
 
         #expect(window.toolbarStyle == .unified)
-        #expect(items.prefix(5).map(\.itemIdentifier.rawValue) == [
+        #expect(items.prefix(4).map(\.itemIdentifier.rawValue) == [
             "workspace.sidebar", "workspace.back", "workspace.forward",
-            "workspace.cluster", "workspace.namespace",
+            "workspace.namespace",
         ])
-        for identifier in items.prefix(5).map(\.itemIdentifier.rawValue) {
+        for identifier in items.prefix(4).map(\.itemIdentifier.rawValue) {
             #expect(try #require(items.first {
                 $0.itemIdentifier.rawValue == identifier
             }).isNavigational)
         }
+        #expect(!items.contains { $0.itemIdentifier.rawValue == "workspace.cluster" })
         #expect(items.firstIndex { $0.itemIdentifier == .flexibleSpace }
             == items.firstIndex {
                 $0.itemIdentifier.rawValue == "workspace.namespace"
             }.map { $0 + 1 })
+    }
+
+    @Test("connection state and transfer rate keep separate toolbar geometry")
+    func connectionActivityLabelsDoNotOverlap() throws {
+        let view = ClusterConnectionActivityView()
+        view.setState(.connected)
+        view.update(rate: ClusterConnectionRate(
+            bytesReceivedPerSecond: 12 * 1_024 * 1_024,
+            bytesSentPerSecond: 3 * 1_024 * 1_024
+        ))
+        view.frame.size = view.intrinsicContentSize
+        view.layoutSubtreeIfNeeded()
+
+        let labels = descendants(of: view).compactMap { $0 as? NSTextField }
+        let state = try #require(labels.first { $0.stringValue == "Connected" })
+        let rate = try #require(labels.first { $0.stringValue.hasPrefix("↓") })
+        let stateFrame = view.convert(state.bounds, from: state)
+        let rateFrame = view.convert(rate.bounds, from: rate)
+
+        #expect(!stateFrame.intersects(rateFrame))
+        #expect(rateFrame.minX - stateFrame.maxX >= 4)
+    }
+
+    @Test("floating sidebar section rows supply a native vibrant background")
+    func sidebarSectionRowsHaveBackground() async throws {
+        let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let outline = try #require(descendants(of: root).compactMap { $0 as? NSOutlineView }
+            .first { $0.accessibilityLabel() == "Kubernetes resource kinds" })
+
+        try await waitUntil { outline.numberOfRows >= 2 }
+        let sectionRow = try #require((0..<outline.numberOfRows).first { row in
+            guard let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true)
+            else { return false }
+            return descendants(of: cell).compactMap { ($0 as? NSTextField)?.stringValue }
+                .contains("Workloads")
+        })
+        let section = try #require(outline.view(
+            atColumn: 0,
+            row: sectionRow,
+            makeIfNecessary: true
+        ) as? NSVisualEffectView)
+
+        #expect(section.material == .sidebar)
+        #expect(section.blendingMode == .withinWindow)
+        #expect(section.state == .followsWindowActiveState)
     }
 
     @Test("Port Forwards button gives its title and arrows separate geometry")
@@ -70,12 +119,12 @@ struct ClusterWorkspaceToolbarTests {
         })
         let forwards = try #require(window.toolbar?.items.compactMap { $0.view as? NSButton }
             .first { $0.accessibilityLabel() == "Open app-wide Port Forwards" })
-        let cluster = try #require(window.toolbar?.items.first {
-            $0.itemIdentifier.rawValue == "workspace.cluster"
-        }?.view as? NSButton)
 
         #expect(window.title.contains("test-cluster — test-context"))
-        #expect(cluster.title == "test-cluster — test-context")
+        #expect(window.subtitle == "example.invalid")
+        #expect(window.toolbar?.items.contains {
+            $0.itemIdentifier.rawValue == "workspace.cluster"
+        } == false)
         #expect(outline.accessibilityRole() == .outline)
         #expect(outline.accessibilityLabel() == "Kubernetes resource kinds")
         #expect(table.accessibilityRole() == .table)
@@ -357,10 +406,10 @@ struct LazyWorkspaceRestorationTests {
         #expect(controller.window === originalWindow)
         #expect(controller.isAuthenticated)
         #expect(originalWindow.title.contains("production-cluster — production"))
-        let clusterButton = try #require(originalWindow.toolbar?.items.first {
+        #expect(originalWindow.subtitle == "api.production.example")
+        #expect(originalWindow.toolbar?.items.contains {
             $0.itemIdentifier.rawValue == "workspace.cluster"
-        }?.view as? NSButton)
-        #expect(clusterButton.title == "production-cluster — production")
+        } == false)
         #expect(provider.discoverySessionIDs == ["authenticated-session"])
         #expect(provider.streamRequests.count == 1)
         let request = try #require(provider.streamRequests.first)

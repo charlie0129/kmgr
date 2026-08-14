@@ -8,6 +8,22 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Command palette window", .serialized)
 struct CommandPaletteWindowControllerTests {
+    @Test("search field stays clear of full-size-titlebar traffic lights")
+    func searchFieldAvoidsTrafficLights() throws {
+        let controller = makePaletteController(provider: ControllablePaletteSearchProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let search = try paletteControls(in: controller).search
+        let closeButton = try #require(window.standardWindowButton(.closeButton))
+        root.layoutSubtreeIfNeeded()
+
+        let searchFrame = root.convert(search.bounds, from: search)
+        let closeFrame = root.convert(closeButton.bounds, from: closeButton)
+        #expect(!searchFrame.intersects(closeFrame))
+    }
+
     @Test("root kind query includes cached objects with unrelated names")
     func rootKindQueryIncludesCachedObjects() async throws {
         let provider = ControllablePaletteSearchProvider()

@@ -80,7 +80,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let workspaceController: ClusterWorkspaceViewController
     private var restoration: ClusterWindowRestorationRecord
     private var portForwardConfigurationController: PortForwardConfigurationWindowController?
-    private var logConfigurationController: LogConfigurationWindowController?
+    private var logOpenTask: Task<Void, Never>?
+    private var logOpenRevision: UInt64 = 0
     private var execConfigurationController: ExecConfigurationWindowController?
     private var deleteResourcesController: DeleteResourcesWindowController?
     private var resourceMutationController: ResourceMutationWindowController?
@@ -164,8 +165,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onShowColumns = { [weak self] request in
             self?.onShowColumns?(request)
         }
-        workspaceController.onOpenLogs = { [weak self] identities in
-            self?.showLogConfiguration(identities)
+        workspaceController.onOpenLogs = { [weak self] request in
+            self?.openLogs(request)
         }
         workspaceController.onOpenExec = { [weak self] identity in
             self?.showExecConfiguration(identity)
@@ -239,18 +240,22 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private func dismissTransientOperationsForEngineRecovery() {
         if let sheet = window?.attachedSheet { window?.endSheet(sheet) }
         portForwardConfigurationController?.close()
-        logConfigurationController?.close()
+        logOpenRevision &+= 1
+        logOpenTask?.cancel()
+        logOpenTask = nil
         execConfigurationController?.close()
         deleteResourcesController?.close()
         resourceMutationController?.close()
         portForwardConfigurationController = nil
-        logConfigurationController = nil
         execConfigurationController = nil
         deleteResourcesController = nil
         resourceMutationController = nil
     }
 
     func windowWillClose(_ notification: Notification) {
+        logOpenRevision &+= 1
+        logOpenTask?.cancel()
+        logOpenTask = nil
         workspaceController.stop()
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
@@ -283,21 +288,78 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         controller.beginSheet(for: window)
     }
 
-    private func showLogConfiguration(_ identities: [ResourceIdentity]) {
-        guard let window, logConfigurationController == nil else { NSSound.beep(); return }
-        let controller = LogConfigurationWindowController(
-            session: session,
-            resources: identities,
-            logProvider: logProvider,
-            displayConfiguration: logDisplayConfiguration
-        )
-        controller.onOpenWindow = { [weak self] in self?.onOpenLogWindow?($0) }
-        controller.onDismiss = { [weak self, weak controller] in
-            guard self?.logConfigurationController === controller else { return }
-            self?.logConfigurationController = nil
+    /// Resolve a UID-pinned snapshot and open the live window directly. The
+    /// window itself retains editable stream controls; a setup sheet would only
+    /// delay the common all-container action.
+    func openLogs(_ request: LogOpenRequest) {
+        guard logOpenTask == nil else { NSSound.beep(); return }
+        guard LogResourceCompatibility.supportsSelection(request.resources),
+            request.resources.allSatisfy({ $0.clusterSessionID == session.sessionID })
+        else {
+            presentLogOpenFailure(ClusterManagerIssue(
+                category: .validation,
+                reason: "InvalidLogSourceSelection",
+                message: "Select compatible, UID-pinned resources from this cluster session.",
+                contextName: session.contextName,
+                operation: "open Pod logs"
+            ))
+            return
         }
-        logConfigurationController = controller
-        controller.beginSheet(for: window)
+
+        logOpenRevision &+= 1
+        let revision = logOpenRevision
+        let sessionID = session.sessionID
+        logOpenTask = Task { [weak self, logProvider, logDisplayConfiguration] in
+            defer {
+                if let self, self.logOpenRevision == revision {
+                    self.logOpenTask = nil
+                }
+            }
+            do {
+                let resolution = try await logProvider.resolveLogSources(
+                    resources: request.resources
+                )
+                guard !Task.isCancelled, let self,
+                    logOpenRevision == revision,
+                    session.sessionID == sessionID
+                else { return }
+                let plan = try LogOpenPlanner.plan(
+                    request: request,
+                    resolution: resolution
+                )
+                let controller = LogWindowController(
+                    session: session,
+                    sources: plan.sources,
+                    availableSources: plan.availableSources,
+                    provider: logProvider,
+                    options: LogOptions(),
+                    displayConfiguration: logDisplayConfiguration,
+                    staticWorkloadSnapshot: plan.staticWorkloadSnapshot
+                )
+                onOpenLogWindow?(controller)
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled, let self,
+                    logOpenRevision == revision,
+                    session.sessionID == sessionID
+                else { return }
+                presentLogOpenFailure(error)
+            }
+        }
+    }
+
+    private func presentLogOpenFailure(_ error: Error) {
+        let presentation = UserFacingErrorPresentation(error)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Unable to Open Logs"
+        alert.informativeText = presentation.detailedText
+        alert.addButton(withTitle: "OK")
+        if let window, window.attachedSheet == nil {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
     }
 
     private func showExecConfiguration(_ identity: ResourceIdentity) {
@@ -414,7 +476,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(copyResourceReference(_:)): command = .copyReference
         default: command = nil
         }
-        return command.map(workspaceController.canPerformCommand) ?? true
+        guard let command else { return true }
+        let compatible = workspaceController.isCommandCompatible(command)
+        menuItem.isHidden = !compatible
+        return compatible && workspaceController.canPerformCommand(command)
     }
 }
 
@@ -453,7 +518,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var pendingRestorationState: ClusterWindowRestorationState?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
-    var onOpenLogs: (([ResourceIdentity]) -> Void)?
+    var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((ResourceIdentity) -> Void)?
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
@@ -521,8 +586,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onShowColumns = { [weak self] request in
             self?.onShowColumns?(request)
         }
-        contentController.onOpenLogs = { [weak self] identities in
-            self?.onOpenLogs?(identities)
+        contentController.onOpenLogs = { [weak self] request in
+            self?.onOpenLogs?(request)
         }
         contentController.onOpenExec = { [weak self] identity in
             self?.onOpenExec?(identity)
@@ -634,7 +699,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         let previousSessionID = session.sessionID
         session = recoveredSession
         isAuthenticated = true
-        updateToolbarSessionPresentation()
         startConnectionActivityWatch()
         Task { [recentObjectStore] in
             await recentObjectStore.rebind(
@@ -737,18 +801,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
     }
 
-    private func updateToolbarSessionPresentation() {
-        guard let item = view.window?.toolbar?.items.first(where: {
-            $0.itemIdentifier == .cluster
-        }) else { return }
-        let clusterPresentation = ClusterIdentityPresentation(session: session)
-        item.label = clusterPresentation.titlePrefix
-        if let button = item.view as? NSButton {
-            button.title = clusterPresentation.titlePrefix
-            button.toolTip = "\(clusterPresentation.labeledInline) · \(session.serverHostname)"
-        }
-    }
-
     private func startConnectionActivityWatch() {
         connectionActivityTask?.cancel()
         connectionActivityGate.reset()
@@ -817,11 +869,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
+        [.sidebar, .back, .forward, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebar, .back, .forward, .cluster, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
+        [.sidebar, .back, .forward, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
     }
 
     func toolbar(
@@ -848,20 +900,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             item.isNavigational = true
             item.target = self
             item.action = itemIdentifier == .back ? #selector(goBack) : #selector(goForward)
-            return item
-        case .cluster:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let clusterPresentation = ClusterIdentityPresentation(session: session)
-            item.label = clusterPresentation.titlePrefix
-            let button = NSButton(
-                title: clusterPresentation.titlePrefix,
-                target: self,
-                action: #selector(showClusterDetails)
-            )
-            button.bezelStyle = .texturedRounded
-            button.toolTip = "\(clusterPresentation.labeledInline) · \(session.serverHostname)"
-            item.isNavigational = true
-            item.view = button
             return item
         case .namespace:
             namespaceControl.addItem(withTitle: "All namespaces")
@@ -931,22 +969,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         onShowPortForwards()
     }
 
-    @objc private func showClusterDetails() {
-        let alert = NSAlert()
-        alert.messageText = ClusterIdentityPresentation(session: session).titlePrefix
-        alert.informativeText = [
-            "Cluster: \(session.clusterName)",
-            "Server: \(session.serverHostname)",
-            "Default namespace: \(session.defaultNamespace.isEmpty ? "default" : session.defaultNamespace)",
-        ].joined(separator: "\n")
-        alert.addButton(withTitle: "OK")
-        if let window = view.window {
-            alert.beginSheetModal(for: window)
-        } else {
-            alert.runModal()
-        }
-    }
-
     @objc private func showCommandPalette() {
         presentCommandPalette()
     }
@@ -989,6 +1011,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
         contentController.canPerformCommand(command)
+    }
+
+    func isCommandCompatible(_ command: ResourceTableCommand) -> Bool {
+        contentController.isCommandCompatible(command)
     }
 
     func presentCommandPalette() {
@@ -1270,12 +1296,40 @@ private extension NSToolbarItem.Identifier {
     static let sidebar = Self("workspace.sidebar")
     static let back = Self("workspace.back")
     static let forward = Self("workspace.forward")
-    static let cluster = Self("workspace.cluster")
     static let namespace = Self("workspace.namespace")
     static let palette = Self("workspace.palette")
     static let connection = Self("workspace.connection")
     static let forwards = Self("workspace.forwards")
     static let actions = Self("workspace.actions")
+}
+
+@MainActor
+private final class SidebarSectionView: NSVisualEffectView {
+    let titleLabel = NSTextField(labelWithString: "")
+
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+        material = .sidebar
+        blendingMode = .withinWindow
+        state = .followsWindowActiveState
+
+        titleLabel.font = .systemFont(
+            ofSize: NSFont.smallSystemFontSize,
+            weight: .semibold
+        )
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleLabel)
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("programmatic") }
 }
 
 @MainActor
@@ -1572,7 +1626,18 @@ private final class ResourceSidebarViewController: NSViewController,
         viewFor tableColumn: NSTableColumn?,
         item: Any
     ) -> NSView? {
-        let identifier = NSUserInterfaceItemIdentifier("sidebar-cell")
+        if let section = item as? Section {
+            let identifier = NSUserInterfaceItemIdentifier("sidebar-section-cell")
+            let view = outlineView.makeView(
+                withIdentifier: identifier,
+                owner: self
+            ) as? SidebarSectionView ?? SidebarSectionView(identifier: identifier)
+            view.titleLabel.stringValue = section.title
+            return view
+        }
+
+        guard let resource = item as? DiscoveredResource else { return nil }
+        let identifier = NSUserInterfaceItemIdentifier("sidebar-resource-cell")
         let cell = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
             ?? NSTableCellView()
         cell.identifier = identifier
@@ -1587,13 +1652,8 @@ private final class ResourceSidebarViewController: NSViewController,
                 label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             ])
         }
-        if let section = item as? Section {
-            cell.textField?.stringValue = section.title
-            cell.textField?.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        } else if let resource = item as? DiscoveredResource {
-            cell.textField?.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
-            cell.textField?.font = .systemFont(ofSize: NSFont.systemFontSize)
-        }
+        cell.textField?.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
+        cell.textField?.font = .systemFont(ofSize: NSFont.systemFontSize)
         return cell
     }
 
@@ -1792,7 +1852,7 @@ private final class ResourceListViewController: NSViewController,
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
-    var onOpenLogs: (([ResourceIdentity]) -> Void)?
+    var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((ResourceIdentity) -> Void)?
     var onDelete: (([ResourceDeleteTarget]) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
@@ -2113,23 +2173,33 @@ private final class ResourceListViewController: NSViewController,
             item.isEnabled = canPerformCommand(command, requiringTableFocus: false)
             menu.addItem(item)
         }
-        add("Open Details", .open)
-        add("Open YAML", .openYAML)
-        add("Open Events", .openEvents)
-        menu.addItem(.separator())
-        add("Open Logs…", .openLogs)
-        add("Open Terminal…", .openExec)
-        add("Start Port Forward…", .startPortForward)
-        menu.addItem(.separator())
-        add("Scale…", .scale)
-        add("Rollout Restart…", .restart)
-        add("Edit Labels / Annotations…", .editMetadata)
-        menu.addItem(.separator())
-        add("Copy Name", .copyName)
-        add("Copy Namespace/Name", .copyNamespacedName)
-        add("Copy kubectl Reference", .copyReference)
-        menu.addItem(.separator())
-        add("Delete…", .delete)
+        func addGroup(_ entries: [(String, ResourceTableCommand)]) {
+            let compatible = entries.filter { isCommandCompatible($0.1) }
+            guard !compatible.isEmpty else { return }
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            for (title, command) in compatible { add(title, command) }
+        }
+        addGroup([
+            ("Open Details", .open),
+            ("Open YAML", .openYAML),
+            ("Open Events", .openEvents),
+        ])
+        addGroup([
+            ("Open Logs…", .openLogs),
+            ("Open Terminal…", .openExec),
+            ("Start Port Forward…", .startPortForward),
+        ])
+        addGroup([
+            ("Scale…", .scale),
+            ("Rollout Restart…", .restart),
+            ("Edit Labels / Annotations…", .editMetadata),
+        ])
+        addGroup([
+            ("Copy Name", .copyName),
+            ("Copy Namespace/Name", .copyNamespacedName),
+            ("Copy kubectl Reference", .copyReference),
+        ])
+        addGroup([("Delete…", .delete)])
     }
 
     @objc private func performContextMenuCommand(_ sender: NSMenuItem) {
@@ -3636,7 +3706,7 @@ private final class ResourceListViewController: NSViewController,
         case .openLogs:
             guard LogResourceCompatibility.supportsSelection(selected)
             else { NSSound.beep(); return }
-            onOpenLogs?(selected)
+            onOpenLogs?(.allContainers(for: selected))
         case .openExec:
             guard let identity = selected.only,
                 identity.group.isEmpty, identity.version == "v1", identity.resource == "pods"
@@ -3733,6 +3803,10 @@ private final class ResourceListViewController: NSViewController,
         canPerformCommand(command, requiringTableFocus: true)
     }
 
+    func isCommandCompatible(_ command: ResourceTableCommand) -> Bool {
+        isCommandCompatible(command, with: model.selectedIdentities)
+    }
+
     private func canPerformCommand(
         _ command: ResourceTableCommand,
         requiringTableFocus: Bool
@@ -3752,6 +3826,13 @@ private final class ResourceListViewController: NSViewController,
         {
             return false
         }
+        return isCommandCompatible(command, with: selected)
+    }
+
+    private func isCommandCompatible(
+        _ command: ResourceTableCommand,
+        with selected: [ResourceIdentity]
+    ) -> Bool {
         switch command {
         case .open, .openYAML, .openEvents:
             return selected.count == 1

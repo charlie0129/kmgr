@@ -8,6 +8,29 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Resource mutation window", .serialized)
 struct ResourceMutationWindowControllerTests {
+    @Test("scale sheet keeps the replica form and footer compact")
+    func scaleSheetIsCompact() throws {
+        let controller = mutationController(
+            mutation: .scale,
+            operationProvider: CapturingMutationOperationProvider()
+        )
+        let root = try #require(controller.window?.contentView)
+        root.layoutSubtreeIfNeeded()
+        let views = mutationDescendants(of: root)
+        let replicas = try #require(views.compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Replica count" })
+        let cancel = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.title == "Cancel" })
+        let replicaFrame = root.convert(replicas.bounds, from: replicas)
+        let cancelFrame = root.convert(cancel.bounds, from: cancel)
+        let formToFooterGap = replicaFrame.minY - cancelFrame.maxY
+
+        #expect(root.bounds.height <= 245)
+        #expect(formToFooterGap >= 0)
+        #expect(formToFooterGap <= 70)
+        #expect(!replicaFrame.intersects(cancelFrame))
+    }
+
     @Test("metadata inputs are accessible scrollable multiline editors")
     func metadataEditorsAreMultilineAndNamed() throws {
         let controller = mutationController(

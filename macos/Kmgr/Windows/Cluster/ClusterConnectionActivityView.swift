@@ -31,9 +31,14 @@ final class ClusterConnectionActivityView: NSView {
         lights.alignment = .centerX
         lights.spacing = 3
         let labels = NSStackView(views: [stateLabel, rateLabel])
-        labels.orientation = .vertical
-        labels.alignment = .leading
-        labels.spacing = 0
+        // A unified toolbar can compress a custom view to roughly one text
+        // line. Keeping these labels side by side prevents AppKit from
+        // squeezing two baselines into the same vertical space.
+        labels.orientation = .horizontal
+        labels.alignment = .centerY
+        labels.spacing = 8
+        stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        rateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         let stack = NSStackView(views: [lights, labels])
         stack.orientation = .horizontal
         stack.alignment = .centerY
@@ -57,10 +62,10 @@ final class ClusterConnectionActivityView: NSView {
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
     override var intrinsicContentSize: NSSize {
-        let content = subviews.first?.fittingSize ?? NSSize(width: 140, height: 26)
+        let content = subviews.first?.fittingSize ?? NSSize(width: 180, height: 24)
         return NSSize(
-            width: min(190, max(140, content.width)),
-            height: max(26, content.height)
+            width: min(270, max(180, content.width)),
+            height: max(24, content.height)
         )
     }
 
