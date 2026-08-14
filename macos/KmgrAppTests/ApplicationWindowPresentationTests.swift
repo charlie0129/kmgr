@@ -32,11 +32,11 @@ struct ApplicationWindowPresentationTests {
         #expect(!AppPreferencesStore(defaults: defaults).current.restoreOpenClusterWindows)
     }
 
-    @Test("last workspace opens chooser only when the app remains running")
+    @Test("last workspace always returns to Cluster Manager")
     func lastWorkspaceClosePolicy() {
+        #expect(policy().shouldPresentAfterWorkspaceClose)
         #expect(policy(independent: true).shouldPresentAfterWorkspaceClose)
         #expect(policy(forward: true).shouldPresentAfterWorkspaceClose)
-        #expect(!policy().shouldPresentAfterWorkspaceClose)
 
         #expect(!policy(workspaces: 1, independent: true).shouldPresentAfterWorkspaceClose)
         #expect(!policy(chooser: true, independent: true).shouldPresentAfterWorkspaceClose)
