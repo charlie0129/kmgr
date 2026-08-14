@@ -734,6 +734,73 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
+    @Test("Back preserves UID selection across warm snapshot and catch-up delta")
+    func backPreservesSelectionAcrossWarmSnapshotCatchup() async throws {
+        let provider = WarmResumeSelectionWorkspaceResourceProvider(rowCount: 993)
+        let pod = provider.firstIdentity
+        let controller = makeWorkspace(
+            provider: provider,
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: pod,
+                resourceVersion: "rv-1",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "containers",
+                    fieldID: "container:api",
+                    label: "Container",
+                    displayText: "api"
+                )]
+            ))
+        )
+        controller.showWindow(nil)
+        defer {
+            provider.finish()
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourceTable = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let freshness = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Resource freshness" })
+        let statusLine = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "resource-status-line" })
+
+        try await waitUntil {
+            provider.streamRequestCount == 1
+                && resourceTable.numberOfRows == 993
+                && freshness.stringValue == "Watching"
+        }
+        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(resourceTable))
+        controller.enterResource(nil)
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSTableView }
+                .contains { $0.accessibilityLabel() == "Pod containers" }
+        }
+
+        controller.navigateBack(nil)
+        try await waitUntil {
+            provider.streamRequestCount == 2
+                && resourceTable.numberOfRows == 993
+                && freshness.stringValue != "Loading…"
+                && statusLine.stringValue.contains("1 selected")
+        }
+        #expect(resourceTable.selectedRowIndexes == IndexSet(integer: 0))
+
+        // Runtime seals the compact warm snapshot first, then emits the full
+        // same-UID base/metrics catch-up as an ordered delta.
+        provider.releaseAuthoritativeRows()
+        try await waitUntil {
+            resourceTable.numberOfRows == 993
+                && freshness.stringValue == "Watching"
+                && statusLine.stringValue.contains("1 selected")
+        }
+        #expect(resourceTable.selectedRowIndexes == IndexSet(integer: 0))
+    }
+
     @Test("S opens automatic Pod terminal while Shift-S opens configuration")
     func podTerminalShortcutsHaveDistinctLaunchPaths() async throws {
         let pod = toolbarPodIdentity()
@@ -1772,6 +1839,144 @@ private struct HeaderStatusWorkspaceResourceProvider: WorkspaceResourceProviding
             }
             continuation.finish()
         }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResourceProviding,
+    @unchecked Sendable
+{
+    typealias StreamContinuation = AsyncThrowingStream<
+        ResourceViewMessage,
+        Error
+    >.Continuation
+
+    private let lock = NSLock()
+    private let rows: [ResourceRow]
+    private var storedStreamRequestCount = 0
+    private var resumeGeneration: UInt64?
+    private var resumeContinuation: StreamContinuation?
+
+    init(rowCount: Int) {
+        rows = (0..<rowCount).map { index in
+            let name = index == 0 ? "api" : "pod-\(index)"
+            return ResourceRow(
+                identity: ResourceIdentity(
+                    clusterSessionID: "test-session",
+                    group: "",
+                    version: "v1",
+                    resource: "pods",
+                    namespace: "default",
+                    name: name,
+                    uid: ResourceUID("pod-\(index)")
+                ),
+                cells: [Cell(
+                    columnID: "name",
+                    displayText: name,
+                    typedValue: .string(name)
+                )]
+            )
+        }
+    }
+
+    var firstIdentity: ResourceIdentity { rows[0].identity }
+    var streamRequestCount: Int { lock.withLock { storedStreamRequestCount } }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        .init(resources: [DiscoveredResource(
+            group: "",
+            version: "v1",
+            resource: "pods",
+            kind: "Pod",
+            namespaced: true,
+            verbs: ["list", "watch"]
+        )])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { [] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        let requestNumber = lock.withLock { () -> Int in
+            storedStreamRequestCount += 1
+            return storedStreamRequestCount
+        }
+        return AsyncThrowingStream { continuation in
+            if requestNumber == 1 {
+                continuation.yield(.snapshot(
+                    cursor: StreamCursor(generation: request.generation, sequence: 1),
+                    chunk: ResourceSnapshotChunk(
+                        rows: rows,
+                        first: true,
+                        last: true,
+                        index: 0,
+                        estimatedTotalRows: UInt64(rows.count)
+                    )
+                ))
+                continuation.yield(.status(
+                    cursor: StreamCursor(generation: request.generation, sequence: 2),
+                    status: ResourceViewStatus(
+                        freshness: .watching,
+                        rowsVisible: UInt64(rows.count)
+                    )
+                ))
+                continuation.finish()
+                return
+            }
+
+            lock.withLock {
+                resumeGeneration = request.generation
+                resumeContinuation = continuation
+            }
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 1),
+                status: ResourceViewStatus(
+                    freshness: .stale,
+                    rowsVisible: UInt64(rows.count),
+                    lastSynchronizedAt: Date(timeIntervalSince1970: 100),
+                    fromWarmCache: true
+                )
+            ))
+            continuation.yield(.snapshot(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                chunk: ResourceSnapshotChunk(
+                    rows: rows,
+                    first: true,
+                    last: true,
+                    index: 0,
+                    estimatedTotalRows: UInt64(rows.count)
+                )
+            ))
+        }
+    }
+
+    func releaseAuthoritativeRows() {
+        let state = lock.withLock { (resumeGeneration, resumeContinuation) }
+        guard let generation = state.0, let continuation = state.1 else { return }
+        continuation.yield(.delta(
+            cursor: StreamCursor(generation: generation, sequence: 3),
+            delta: ResourceRowDelta(
+                upserts: rows,
+                orderedUIDs: rows.map { $0.identity.uid },
+                orderIsComplete: true
+            )
+        ))
+        continuation.yield(.status(
+            cursor: StreamCursor(generation: generation, sequence: 4),
+            status: ResourceViewStatus(
+                freshness: .watching,
+                rowsVisible: UInt64(rows.count)
+            )
+        ))
+    }
+
+    func finish() {
+        lock.withLock { resumeContinuation }?.finish()
     }
 
     func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
