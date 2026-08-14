@@ -70,6 +70,19 @@ struct ClusterIdentityPresentationTests {
             #expect(values.contains { $0.contains("cluster-a") })
             #expect(values.contains { $0.contains("production/admin@corp") })
         }
+
+        let forwardRoot = try #require(forward.window?.contentView)
+        forwardRoot.layoutSubtreeIfNeeded()
+        let forwardViews = identityDescendants(of: forwardRoot)
+        let clusterLabel = try #require(forwardViews.compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "port-forward-label-cluster" })
+        let declaredLabel = try #require(forwardViews.compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "port-forward-label-declared-port" })
+        let declaredPort = try #require(forwardViews.compactMap { $0 as? NSPopUpButton }
+            .first { $0.identifier?.rawValue == "port-forward-declared-port" })
+        #expect(clusterLabel.alignment == .left)
+        #expect(declaredLabel.alignment == .left)
+        #expect(declaredPort.frame.width >= 260)
     }
 
     @Test("mutation and conflict presentations include full immutable identity")

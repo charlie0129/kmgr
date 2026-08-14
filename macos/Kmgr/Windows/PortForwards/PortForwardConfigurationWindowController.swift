@@ -142,6 +142,8 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         declaredPortButton.target = self
         declaredPortButton.action = #selector(declaredPortChanged)
         declaredPortButton.setAccessibilityLabel("Declared remote port")
+        declaredPortButton.identifier = .init("port-forward-declared-port")
+        declaredPortButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
         installDeclaredPortMenu(status: "Loading declared TCP ports…", enabled: false)
 
         for field in [remotePortField, localPortField, bindAddressField, labelField] {
@@ -221,6 +223,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            declaredPortButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 260),
             remotePortField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
         ])
         panel.contentView = root
@@ -229,15 +232,16 @@ final class PortForwardConfigurationWindowController: NSWindowController,
     private func configure(grid: NSGridView) {
         grid.rowSpacing = 9
         grid.columnSpacing = 12
-        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).xPlacement = .leading
         grid.column(at: 1).xPlacement = .fill
         grid.translatesAutoresizingMaskIntoConstraints = false
     }
 
     private func gridRow(_ title: String, _ value: NSView) -> [NSView] {
         let label = NSTextField(labelWithString: title)
-        label.alignment = .right
+        label.alignment = .left
         label.textColor = .secondaryLabelColor
+        label.identifier = .init("port-forward-label-\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
         return [label, value]
     }
 
