@@ -7,6 +7,139 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Log windows", .serialized)
 struct LogWindowControllerTests {
+    @Test("streaming log geometry requests only viewport or tail layout")
+    func streamingGeometryNeverRequestsWholeContainerLayout() throws {
+        let storage = NSTextStorage()
+        let layoutManager = LayoutRequestSpy()
+        let textContainer = NSTextContainer(size: NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        ))
+        storage.addLayoutManager(layoutManager)
+        layoutManager.addTextContainer(textContainer)
+        let textView = NSTextView(
+            frame: NSRect(x: 0, y: 0, width: 700, height: 420),
+            textContainer: textContainer
+        )
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        let scrollView = NSScrollView(
+            frame: NSRect(x: 0, y: 0, width: 700, height: 420)
+        )
+        scrollView.documentView = textView
+        TextDocumentGeometry.configureStreamingLog(textView, in: scrollView)
+
+        let chunks = (0..<8_000).map { "line-\($0) value value value\n" }
+        textView.string = chunks.joined()
+        let capacity = TextDocumentGeometry.streamingLogWrappingColumnCapacity(
+            textView,
+            in: scrollView
+        )
+        let metrics = LogTextLayoutMetrics(
+            chunks: chunks,
+            wrappingColumnCapacity: capacity
+        )
+        textView.setSelectedRange(NSRange(location: 137, length: 23))
+        let selection = textView.selectedRange()
+        let origin = scrollView.contentView.bounds.origin
+
+        layoutManager.resetRequests()
+        TextDocumentGeometry.updateStreamingLog(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false,
+            metrics: metrics,
+            followingTail: false
+        )
+
+        #expect(layoutManager.wholeContainerRequestCount == 0)
+        #expect(layoutManager.characterRangeRequests.isEmpty)
+        let viewportRequest = try #require(layoutManager.boundingRectRequests.last)
+        #expect(viewportRequest.height <= scrollView.contentSize.height * 3 + 1)
+        #expect(textView.selectedRange() == selection)
+        #expect(scrollView.contentView.bounds.origin == origin)
+        #expect(textView.frame.height > scrollView.contentSize.height)
+
+        layoutManager.resetRequests()
+        TextDocumentGeometry.updateStreamingLog(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false,
+            metrics: metrics,
+            followingTail: true
+        )
+        #expect(layoutManager.wholeContainerRequestCount == 0)
+        #expect(layoutManager.boundingRectRequests.isEmpty)
+        #expect(layoutManager.characterRangeRequests == [NSRange(
+            location: storage.length - 1,
+            length: 1
+        )])
+        #expect(textView.selectedRange() == selection)
+    }
+
+    @Test("detached log metrics handle chunked CRLF and wrapped lines")
+    func logLayoutMetricsMeasureWithoutRetainingText() {
+        let metrics = LogTextLayoutMetrics(
+            chunks: ["ab\r", "\n12345\n", ""],
+            wrappingColumnCapacity: 3
+        )
+
+        #expect(metrics.logicalLineCount == 3)
+        #expect(metrics.maximumLineWidthUnits == 5)
+        #expect(metrics.totalLineWidthUnits == 7)
+        #expect(metrics.measuredVisualLineCount == 4)
+        #expect(metrics.estimatedVisualLineCount(wrappingColumnCapacity: 3) == 4)
+        #expect(!Mirror(reflecting: metrics).children.contains { $0.value is String })
+    }
+
+    @Test("16 MiB streaming geometry remains viewport-bounded on MainActor")
+    func largeStreamingGeometryStaysWithinBudget() async {
+        let line = String(repeating: "x", count: 95) + "\n"
+        let source = String(repeating: line, count: (16 << 20) / line.utf8.count)
+        let textView = NSTextView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 520)
+        )
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        let scrollView = NSScrollView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 520)
+        )
+        scrollView.documentView = textView
+        TextDocumentGeometry.configureStreamingLog(textView, in: scrollView)
+        let capacity = TextDocumentGeometry.streamingLogWrappingColumnCapacity(
+            textView,
+            in: scrollView
+        )
+        let metrics = await Task.detached(priority: .userInitiated) {
+            LogTextLayoutMetrics(
+                chunks: [source],
+                wrappingColumnCapacity: capacity
+            )
+        }.value
+        textView.string = source
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        TextDocumentGeometry.updateStreamingLog(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false,
+            metrics: metrics,
+            followingTail: false
+        )
+        let duration = start.duration(to: clock.now)
+
+        if ProcessInfo.processInfo.environment["KMGR_PERF_DIAGNOSTICS"] == "1" {
+            let components = duration.components
+            let milliseconds = Double(components.seconds) * 1_000
+                + Double(components.attoseconds) / 1_000_000_000_000_000
+            print(String(format:
+                "kmgr log geometry diagnostic: 16 MiB viewport update %.3f ms",
+                milliseconds
+            ))
+        }
+        #expect(duration < .seconds(1))
+        #expect(textView.frame.height > scrollView.contentSize.height)
+    }
+
     @Test("log streams remain independent ephemeral windows")
     func logWindowIsIndependentAndNotRestored() throws {
         let controller = LogWindowController(
@@ -436,6 +569,33 @@ struct LogWindowControllerTests {
         #expect(status.textColor == .systemRed)
     }
 }
+}
+
+private final class LayoutRequestSpy: NSLayoutManager {
+    private(set) var wholeContainerRequestCount = 0
+    private(set) var boundingRectRequests: [NSRect] = []
+    private(set) var characterRangeRequests: [NSRange] = []
+
+    override func ensureLayout(for textContainer: NSTextContainer) {
+        wholeContainerRequestCount += 1
+    }
+
+    override func ensureLayout(
+        forBoundingRect bounds: NSRect,
+        in textContainer: NSTextContainer
+    ) {
+        boundingRectRequests.append(bounds)
+    }
+
+    override func ensureLayout(forCharacterRange charRange: NSRange) {
+        characterRangeRequests.append(charRange)
+    }
+
+    func resetRequests() {
+        wholeContainerRequestCount = 0
+        boundingRectRequests.removeAll(keepingCapacity: true)
+        characterRangeRequests.removeAll(keepingCapacity: true)
+    }
 }
 
 private func logSource(pod: String, uid: String, container: String) -> LogSource {

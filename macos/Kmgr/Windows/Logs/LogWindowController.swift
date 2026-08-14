@@ -23,6 +23,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var streamTasks: [UInt64: Task<Void, Never>] = [:]
     private var pendingGeneration: UInt64?
     private var renderTask: Task<Void, Never>?
+    private var layoutMetricsTask: Task<Void, Never>?
+    private var layoutMetricsRevision: UInt64 = 0
     private var streamGate = LogStreamGenerationGate()
     private let recordStore: LogRecordStore
     private var options: LogOptions
@@ -43,6 +45,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var latestRenderOmissions = 0
     private var latestStreamState: LogStreamState = .connecting
     private var renderedChunks: [String] = []
+    private var textLayoutMetrics = LogTextLayoutMetrics.empty
     private var appliedContainerTitle = ""
     private var establishedConfiguration: AppliedStreamConfiguration?
     private let logSignposter = OSSignposter(
@@ -154,7 +157,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func windowDidResize(_ notification: Notification) {
-        updateTextDocumentGeometry()
+        let wasAtTail = isAtTail
+        updateTextDocumentGeometry(followingTail: wasAtTail)
+        if wasAtTail { textView.scrollToEndOfDocument(nil) }
+        scheduleLayoutMetricsReconciliation(preservingTail: wasAtTail)
     }
 
     /// A stream can deliver its first records between `showWindow` and the
@@ -284,10 +290,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.identifier = NSUserInterfaceItemIdentifier("log-content-scroll")
-        TextDocumentGeometry.configure(
+        TextDocumentGeometry.configureStreamingLog(
             textView,
-            in: scrollView,
-            wrapsToViewport: false
+            in: scrollView
         )
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -574,6 +579,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     private func stopStream() {
         cancelScheduledRender()
+        cancelLayoutMetricsReconciliation()
         let activeGenerations = Array(streamTasks.keys)
         for generation in activeGenerations {
             streamTasks.removeValue(forKey: generation)?.cancel()
@@ -684,7 +690,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let labels = sourceLabels
         let byteLimit = maximumRenderedUTF8Bytes
         let previousChunks = renderedChunks
-        let result: (rendered: RenderedLogText, install: LogTextInstallPlan)
+        let wrappingColumnCapacity = TextDocumentGeometry
+            .streamingLogWrappingColumnCapacity(textView, in: scrollView)
+        let result: (
+            rendered: RenderedLogText,
+            install: LogTextInstallPlan,
+            layoutMetrics: LogTextLayoutMetrics
+        )
         let renderer = Task.detached(priority: .userInitiated) { [logSignposter] in
             let interval = logSignposter.beginInterval(
                 PerformanceSignpostCatalog.logTextFormat,
@@ -704,10 +716,14 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                     "rendered_records=\(result.renderedRecords) omitted_records=\(result.omittedRecords) output_bytes=\(result.outputUTF8Bytes)"
                 )
                 return (
-                    result,
-                    LogTextInstallPlanner.plan(
+                    rendered: result,
+                    install: LogTextInstallPlanner.plan(
                         previousChunks: previousChunks,
                         currentChunks: result.chunks
+                    ),
+                    layoutMetrics: LogTextLayoutMetrics(
+                        chunks: result.chunks,
+                        wrappingColumnCapacity: wrappingColumnCapacity
                     )
                 )
             } catch {
@@ -768,10 +784,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             }
         }
         renderedChunks = result.rendered.chunks
+        cancelLayoutMetricsReconciliation()
+        textLayoutMetrics = result.layoutMetrics
         latestRenderOmissions = result.rendered.omittedRecords
         updateStatusLabel()
         textView.setSelectedRange(result.install.remapSelection(selectedRange))
-        updateTextDocumentGeometry()
+        updateTextDocumentGeometry(followingTail: wasAtTail)
         if wasAtTail { textView.scrollToEndOfDocument(nil) }
         needsRenderWhenVisible = false
         keyVisibilityWakePending = false
@@ -793,21 +811,60 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     @objc private func toggleWrap() {
+        let wasAtTail = isAtTail
         let enabled = wrapButton.state == .on
         scrollView.hasHorizontalScroller = !enabled
-        TextDocumentGeometry.update(
+        updateTextDocumentGeometry(followingTail: wasAtTail)
+        if wasAtTail { textView.scrollToEndOfDocument(nil) }
+        scheduleLayoutMetricsReconciliation(preservingTail: wasAtTail)
+    }
+
+    private func updateTextDocumentGeometry(followingTail: Bool = false) {
+        TextDocumentGeometry.updateStreamingLog(
             textView,
             in: scrollView,
-            wrapsToViewport: enabled
+            wrapsToViewport: wrapButton.state == .on,
+            metrics: textLayoutMetrics,
+            followingTail: followingTail
         )
     }
 
-    private func updateTextDocumentGeometry() {
-        TextDocumentGeometry.update(
+    /// Resizes and Wrap can arrive in rapid bursts. Re-measure immutable
+    /// rendered chunks after a short debounce on a detached executor, then
+    /// install only the content-free arithmetic result on MainActor.
+    private func scheduleLayoutMetricsReconciliation(preservingTail: Bool) {
+        layoutMetricsRevision &+= 1
+        let revision = layoutMetricsRevision
+        layoutMetricsTask?.cancel()
+        let chunks = renderedChunks
+        let capacity = TextDocumentGeometry.streamingLogWrappingColumnCapacity(
             textView,
-            in: scrollView,
-            wrapsToViewport: wrapButton.state == .on
+            in: scrollView
         )
+        layoutMetricsTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+            let metrics = await Task.detached(priority: .utility) {
+                LogTextLayoutMetrics(
+                    chunks: chunks,
+                    wrappingColumnCapacity: capacity
+                )
+            }.value
+            guard let self, !Task.isCancelled,
+                revision == layoutMetricsRevision,
+                !isClosing
+            else { return }
+            layoutMetricsTask = nil
+            textLayoutMetrics = metrics
+            updateTextDocumentGeometry(followingTail: preservingTail)
+            if preservingTail { textView.scrollToEndOfDocument(nil) }
+        }
+    }
+
+    private func cancelLayoutMetricsReconciliation() {
+        layoutMetricsRevision &+= 1
+        layoutMetricsTask?.cancel()
+        layoutMetricsTask = nil
     }
 
     @objc private func clearVisibleBuffer() {
@@ -824,6 +881,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
         textView.string = ""
         renderedChunks.removeAll(keepingCapacity: true)
+        textLayoutMetrics = .empty
+        cancelLayoutMetricsReconciliation()
         updateTextDocumentGeometry()
     }
 
