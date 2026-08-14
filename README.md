@@ -87,6 +87,9 @@ app-wide Port Forwards window.
   and watch updates do not retarget a selection by row index.
 - Details provide Summary, YAML, Events, Relationships, Metrics where
   meaningful, and a Data editor for ConfigMaps and Secrets.
+- `Y` opens an independent, UID-pinned, read-only YAML snapshot window with an
+  exact received-byte count and explicit refresh. The YAML tab inside Details
+  remains the editable surface.
 - YAML edits are parsed in Go, identity-checked, and dry-run as an exact
   material JSON Patch before the semantic diff is shown. UID/resourceVersion
   test operations prevent retargeting or stale writes, unchanged unknown fields
@@ -101,6 +104,9 @@ app-wide Port Forwards window.
   follow, previous logs, timestamps, tail, and since remain adjustable in the
   live window toolbar alongside filtering, pause, copy, and explicit save. The
   context and exact source labels remain visible above the bounded log buffer.
+  Oversized logical lines are divided into marked, display-only 64 KiB
+  continuations so TextKit never lays out a multi-megabyte paragraph; Save
+  preserves the exact logical line without those markers or breaks.
 - Pod exec uses a SwiftTerm window and direct argv transport. `S` automatically
   chooses the annotated/default regular container and probes `/bin/bash` then
   `/bin/sh`; Shift-S opens configuration for choosing a container or running an
@@ -152,7 +158,7 @@ focus, and hides when no supported context is active.
 | Command-Return | Open details for exactly one object |
 | Command-[ / Command-] | Back / Forward |
 | Escape | Clear selection or return focus to the table |
-| `Y` | Open YAML for one object |
+| `Y` | Open a read-only YAML snapshot window for one object |
 | `E` | Open Events for one object |
 | `L` | Tail all containers for compatible selected Pods or workloads |
 | `S` | Open a terminal for one Pod using automatic container and shell defaults |
@@ -163,6 +169,11 @@ focus, and hides when no supported context is active.
 
 Standard AppKit text editing, copy, undo/redo, find, and window behavior remain
 with the focused native control.
+
+In a read-only YAML snapshot window, `/` focuses search, Return selects the
+next match, and `n` / `N` move to the next / previous match. Command-F remains
+available. In the editable YAML tab, unmodified letters always enter YAML and
+standard Command shortcuts provide find, copy, paste, undo, and redo.
 
 In a Pod's Containers subresource, `L`/Return opens the selected container's
 logs, `S` opens its terminal, Shift-S configures its terminal, and `P` starts a

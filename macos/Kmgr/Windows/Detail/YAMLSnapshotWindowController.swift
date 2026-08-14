@@ -275,12 +275,12 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         refreshButton.toolTip = "Fetch a fresh snapshot of this exact UID."
 
         searchField.identifier = .init("yaml-snapshot-search")
-        searchField.placeholderString = "Find"
+        searchField.placeholderString = "Find (/)"
         searchField.sendsSearchStringImmediately = false
         searchField.sendsWholeSearchString = true
         searchField.target = self
         searchField.action = #selector(searchSubmitted(_:))
-        searchField.toolTip = "Type a query and press Return. Use n and N for the next and previous match."
+        searchField.toolTip = "Press / to focus search. Press Return, then use n and N for the next and previous match."
         searchField.widthAnchor.constraint(equalToConstant: 190).isActive = true
 
         let spacer = NSView()
