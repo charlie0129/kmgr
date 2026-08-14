@@ -12,6 +12,7 @@ import (
 const (
 	DefaultInitialBackoff         = 250 * time.Millisecond
 	DefaultMaxBackoff             = 15 * time.Second
+	DefaultMaxActiveForwards      = 128
 	DefaultTerminalRetention      = 24 * time.Hour
 	DefaultRetainedTerminalLimit  = 256
 	DefaultSubscriberPendingLimit = 64
@@ -21,6 +22,7 @@ type Config struct {
 	Sessions               SessionResolver
 	Backoff                Backoff
 	Now                    func() time.Time
+	MaxActiveForwards      int
 	TerminalRetention      time.Duration
 	RetainedTerminalLimit  int
 	SubscriberPendingLimit int
@@ -115,6 +117,8 @@ type Manager struct {
 	mu            sync.RWMutex
 	config        Config
 	entries       map[string]*entry
+	pending       map[string]struct{}
+	active        int
 	watchers      map[uint64]*subscription
 	nextID        uint64
 	closed        bool
@@ -133,8 +137,12 @@ func NewManager(config Config) (*Manager, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	if config.TerminalRetention < 0 || config.RetainedTerminalLimit < 0 || config.SubscriberPendingLimit < 0 {
-		return nil, errors.New("port-forward retention and pending limits must not be negative")
+	if config.MaxActiveForwards < 0 || config.TerminalRetention < 0 ||
+		config.RetainedTerminalLimit < 0 || config.SubscriberPendingLimit < 0 {
+		return nil, errors.New("port-forward capacity, retention, and pending limits must not be negative")
+	}
+	if config.MaxActiveForwards == 0 {
+		config.MaxActiveForwards = DefaultMaxActiveForwards
 	}
 	if config.TerminalRetention == 0 {
 		config.TerminalRetention = DefaultTerminalRetention
@@ -146,7 +154,8 @@ func NewManager(config Config) (*Manager, error) {
 		config.SubscriberPendingLimit = DefaultSubscriberPendingLimit
 	}
 	manager := &Manager{
-		config: config, entries: make(map[string]*entry), watchers: make(map[uint64]*subscription),
+		config: config, entries: make(map[string]*entry), pending: make(map[string]struct{}),
+		watchers:      make(map[uint64]*subscription),
 		retentionWake: make(chan struct{}, 1), retentionStop: make(chan struct{}),
 		retentionDone: make(chan struct{}),
 	}
@@ -159,6 +168,15 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	m.pruneTerminalEntries(m.config.Now())
+	if err := m.reserveStart(request.ID); err != nil {
+		return Snapshot{}, err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			m.releaseStartReservation(request.ID)
+		}
+	}()
 	session, err := m.config.Sessions.ResolveSession(request.Target.SessionID)
 	if err != nil {
 		return Snapshot{}, err
@@ -184,6 +202,8 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 		},
 	}
 	m.mu.Lock()
+	delete(m.pending, request.ID)
+	reserved = false
 	if m.closed {
 		m.mu.Unlock()
 		cancel()
@@ -195,6 +215,7 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 		return Snapshot{}, ErrDuplicatePortForward
 	}
 	m.entries[request.ID] = current
+	m.active++
 	m.mu.Unlock()
 	m.publish(managerUpdate{snapshot: current.Snapshot()})
 	go m.run(ctx, current, current.revision, session)
@@ -232,7 +253,8 @@ func (m *Manager) Restart(id, sessionID string) bool {
 	m.mu.Lock()
 	current.mu.Lock()
 	if m.closed || m.entries[id] != current || current.revision != revision || !current.restarting ||
-		(current.snapshot.State != StateFailed && current.snapshot.State != StateStopped) {
+		(current.snapshot.State != StateFailed && current.snapshot.State != StateStopped) ||
+		m.active+len(m.pending) >= m.config.MaxActiveForwards {
 		current.restarting = false
 		current.mu.Unlock()
 		m.mu.Unlock()
@@ -242,6 +264,7 @@ func (m *Manager) Restart(id, sessionID string) bool {
 	current.cancel = cancel
 	current.runDone = make(chan struct{})
 	current.revision++
+	m.active++
 	revision = current.revision
 	current.restarting = false
 	current.snapshot.State = StateStarting
@@ -352,9 +375,9 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64, sess
 				m.transition(current, revision, StateStopped, nil, nil, 0)
 				return
 			}
-			// A direct Pod forward may outlive transient API and transport
-			// failures, but it must never attach to a same-name replacement.
-			if request.Target.IsPod() && errors.Is(err, ErrPodRecreated) {
+			// A UID-pinned forward may outlive transient API and transport
+			// failures, but it must never attach through a same-name replacement.
+			if isTerminalIdentityReplacement(request.Target, err) {
 				m.transition(current, revision, StateFailed, err, nil, 0)
 				return
 			}
@@ -385,10 +408,10 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64, sess
 			m.transition(current, revision, StateStopped, nil, &pod, 0)
 			return
 		}
-		// The concrete client performs a second UID check after upgrading the
-		// name-addressed Kubernetes stream but before binding locally. A direct
-		// Pod mismatch at that seam is terminal just like a resolver mismatch.
-		if request.Target.IsPod() && errors.Is(err, ErrPodRecreated) {
+		// The concrete client performs a second Pod UID check after upgrading
+		// the name-addressed Kubernetes stream but before binding locally. Any
+		// identity mismatch at this seam is terminal like a resolver mismatch.
+		if isTerminalIdentityReplacement(request.Target, err) {
 			m.transition(current, revision, StateFailed, err, &pod, 0)
 			return
 		}
@@ -400,6 +423,11 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64, sess
 	}
 }
 
+func isTerminalIdentityReplacement(target Identity, err error) bool {
+	return (target.IsPod() && errors.Is(err, ErrPodRecreated)) ||
+		(target.IsService() && errors.Is(err, ErrServiceRecreated))
+}
+
 func (m *Manager) transition(
 	current *entry,
 	revision uint64,
@@ -408,11 +436,14 @@ func (m *Manager) transition(
 	pod *Identity,
 	localPort uint16,
 ) {
+	m.mu.Lock()
 	current.mu.Lock()
 	if current.revision != revision {
 		current.mu.Unlock()
+		m.mu.Unlock()
 		return
 	}
+	wasTerminal := isTerminalState(current.snapshot.State)
 	current.snapshot.State = state
 	current.snapshot.LastError = err
 	if pod != nil {
@@ -424,8 +455,41 @@ func (m *Manager) transition(
 	}
 	current.snapshot.UpdatedAt = m.config.Now()
 	snapshot := current.snapshot
+	if !wasTerminal && isTerminalState(state) {
+		m.active--
+	}
 	current.mu.Unlock()
-	m.publish(managerUpdate{snapshot: snapshot})
+	m.publishLocked(managerUpdate{snapshot: snapshot})
+	m.mu.Unlock()
+}
+
+func (m *Manager) reserveStart(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrManagerClosed
+	}
+	if _, duplicate := m.entries[id]; duplicate {
+		return ErrDuplicatePortForward
+	}
+	if _, duplicate := m.pending[id]; duplicate {
+		return ErrDuplicatePortForward
+	}
+	if m.active+len(m.pending) >= m.config.MaxActiveForwards {
+		return ErrTooManyPortForwards
+	}
+	m.pending[id] = struct{}{}
+	return nil
+}
+
+func (m *Manager) releaseStartReservation(id string) {
+	m.mu.Lock()
+	delete(m.pending, id)
+	m.mu.Unlock()
+}
+
+func isTerminalState(state State) bool {
+	return state == StateFailed || state == StateStopped
 }
 
 func (m *Manager) publish(update managerUpdate) {

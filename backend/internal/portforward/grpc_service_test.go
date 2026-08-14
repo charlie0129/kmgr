@@ -2,6 +2,7 @@ package portforward
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -136,6 +137,44 @@ func TestGRPCWatchHonorsApplicationDeadline(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("watch did not stop at its application deadline")
+	}
+}
+
+func TestStructuredPortForwardErrorsClassifyCapacityAndIdentityReplacement(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err      error
+		category kmgrv1.ErrorCategory
+		reason   string
+	}{
+		{ErrTooManyPortForwards, kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED, "TooManyPortForwards"},
+		{ErrServiceRecreated, kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT, "ServiceRecreated"},
+	}
+	for _, test := range tests {
+		got := structuredPortForwardError(test.err, nil, "start-port-forward", "context")
+		if got.GetCategory() != test.category || got.GetReason() != test.reason {
+			t.Fatalf("structured error for %v = %#v", test.err, got)
+		}
+	}
+}
+
+func TestGRPCStopAndRestartRejectOversizedForwardIDs(t *testing.T) {
+	t.Parallel()
+	manager := testManager(t, &sequenceResolver{}, &fakeForwarder{})
+	defer manager.Close()
+	service, err := NewGRPCService(manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("i", MaxPortForwardIDBytes+1)
+	_, stopErr := service.Stop(context.Background(), &kmgrv1.StopPortForwardRequest{
+		Context: pfContext("stop-long"), PortForwardId: id,
+	})
+	_, restartErr := service.Restart(context.Background(), &kmgrv1.RestartPortForwardRequest{
+		Context: pfContext("restart-long"), PortForwardId: id,
+	})
+	if status.Code(stopErr) != codes.InvalidArgument || status.Code(restartErr) != codes.InvalidArgument {
+		t.Fatalf("oversized ID errors: Stop = %v, Restart = %v", stopErr, restartErr)
 	}
 }
 

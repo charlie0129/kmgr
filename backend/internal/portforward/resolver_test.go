@@ -27,6 +27,18 @@ func TestClientGoResolverPinsDirectPodUID(t *testing.T) {
 	}
 }
 
+func TestClientGoResolverPinsServiceUID(t *testing.T) {
+	t.Parallel()
+	client := fake.NewClientset(&corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "ns", Name: "api", UID: "new-uid",
+	}})
+	resolver := ClientGoTargetResolver{Core: client.CoreV1()}
+	_, err := resolver.Resolve(context.Background(), serviceIdentity("api", "old-uid"), 80)
+	if !errors.Is(err, ErrServiceRecreated) {
+		t.Fatalf("Resolve error = %v, want ErrServiceRecreated", err)
+	}
+}
+
 func TestClientGoResolverSelectsReadyServicePodAndNamedTargetPort(t *testing.T) {
 	t.Parallel()
 	service := &corev1.Service{

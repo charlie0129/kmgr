@@ -70,7 +70,7 @@ func (r ClientGoTargetResolver) Resolve(ctx context.Context, target Identity, re
 			return ResolvedTarget{}, err
 		}
 		if service.UID != target.UID {
-			return ResolvedTarget{}, fmt.Errorf("Service was recreated: expected UID %q, found %q", target.UID, service.UID)
+			return ResolvedTarget{}, fmt.Errorf("%w: expected UID %q, found %q", ErrServiceRecreated, target.UID, service.UID)
 		}
 		if len(service.Spec.Selector) == 0 {
 			return ResolvedTarget{}, fmt.Errorf("%w: Service has no selector", ErrNoEligiblePod)

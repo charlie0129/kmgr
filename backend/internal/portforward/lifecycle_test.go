@@ -102,6 +102,62 @@ func TestServiceLifecycleReconnectsToSameNameReplacement(t *testing.T) {
 	assertForwardedPodUIDs(t, forwarder, "old-uid", "new-uid")
 }
 
+func TestServiceLifecycleRejectsSameNameServiceReplacementOnRetry(t *testing.T) {
+	t.Parallel()
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "api", UID: "old-service-uid"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "api"},
+			Ports: []corev1.ServicePort{{
+				Port: 80, TargetPort: intstr.FromInt32(8080),
+			}},
+		},
+	}
+	client := fake.NewClientset(service, readyPod("pod", "pod-uid", 8080))
+	forwarder := &fakeForwarder{ports: []uint16{43210}}
+	backoff := &recordingBackoff{}
+	manager := lifecycleManager(t, client, forwarder, backoff)
+	defer manager.Close()
+	updates, unsubscribe := manager.subscribe()
+	defer unsubscribe()
+
+	_, err := manager.Start(StartRequest{
+		ID: "service-replaced", Target: serviceIdentity("api", "old-service-uid"), RemotePort: 80,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = forwardStatesUntil(t, updates, func(snapshot Snapshot) bool {
+		return snapshot.State == StateListening
+	})
+	services := client.CoreV1().Services("ns")
+	if err := services.Delete(context.Background(), "api", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete old Service: %v", err)
+	}
+	replacement := service.DeepCopy()
+	replacement.ResourceVersion = ""
+	replacement.UID = "new-service-uid"
+	if _, err := services.Create(context.Background(), replacement, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create replacement Service: %v", err)
+	}
+	failRunningForward(t, forwarder, 0, errors.New("connection lost"))
+	states := forwardStatesUntil(t, updates, func(snapshot Snapshot) bool {
+		return snapshot.State == StateFailed
+	})
+	assertForwardStatePresent(t, states, StateReconnecting)
+	failed := manager.List("session", true)[0]
+	if !errors.Is(failed.LastError, ErrServiceRecreated) {
+		t.Fatalf("reconnect error = %v, want ErrServiceRecreated", failed.LastError)
+	}
+	if got := coreActionCount(client, "get", "services"); got != 2 {
+		t.Fatalf("Service GET calls = %d, want initial resolution and one UID rejection", got)
+	}
+	if got := backoff.Calls(); got != 1 {
+		t.Fatalf("backoff calls = %d, want no retry after Service replacement", got)
+	}
+	assertForwardedPodUIDs(t, forwarder, "pod-uid")
+}
+
 func lifecycleManager(
 	t *testing.T,
 	client *fake.Clientset,

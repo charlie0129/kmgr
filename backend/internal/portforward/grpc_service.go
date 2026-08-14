@@ -68,8 +68,8 @@ func (s *GRPCService) Stop(
 		return nil, err
 	}
 	defer cancel()
-	if request.GetPortForwardId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "port-forward ID is required")
+	if err := validatePortForwardID(request.GetPortForwardId()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if err := operationContext.Err(); err != nil {
 		return nil, portForwardStatusError(err)
@@ -89,8 +89,8 @@ func (s *GRPCService) Restart(
 		return nil, err
 	}
 	defer cancel()
-	if request.GetPortForwardId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "port-forward ID is required")
+	if err := validatePortForwardID(request.GetPortForwardId()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if err := operationContext.Err(); err != nil {
 		return nil, portForwardStatusError(err)
@@ -342,12 +342,18 @@ func structuredPortForwardError(
 	case errors.Is(err, ErrDuplicatePortForward):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
 		result.Reason, result.Message = "DuplicatePortForwardID", "That port-forward ID is already active or retained."
+	case errors.Is(err, ErrTooManyPortForwards):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
+		result.Reason, result.Message = "TooManyPortForwards", "Too many port-forwards are active. Stop one before starting another."
 	case errors.Is(err, ErrSessionNotFound):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
 		result.Reason, result.Message = "SessionNotFound", "The cluster session is no longer open."
 	case errors.Is(err, ErrPodRecreated):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
 		result.Reason, result.Message = "PodRecreated", "The selected Pod was replaced; this UID-pinned forward will not switch automatically."
+	case errors.Is(err, ErrServiceRecreated):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		result.Reason, result.Message = "ServiceRecreated", "The selected Service was replaced; this UID-pinned forward will not switch automatically."
 	case errors.Is(err, ErrNoEligiblePod):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
 		result.Reason, result.Message, result.Retryable = "NoEligiblePod", "The Service has no eligible Ready backing Pod.", true

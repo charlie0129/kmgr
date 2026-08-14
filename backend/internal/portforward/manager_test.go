@@ -3,6 +3,7 @@ package portforward
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -455,6 +456,116 @@ func TestTerminalPortForwardsHaveBoundedAgeAndCountRetention(t *testing.T) {
 	}
 }
 
+func TestActiveForwardCapacityRecoversAfterStopAndTerminalRemoval(t *testing.T) {
+	t.Parallel()
+	sessions := &leaseSessionResolver{session: Session{
+		ContextName: "context",
+		Resolver:    &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}},
+		Forwarder:   &fakeForwarder{ports: []uint16{41001, 41002, 41003}},
+	}}
+	manager, err := NewManager(Config{
+		Sessions: sessions, Backoff: BackoffFunc(func(context.Context, int) error { return nil }),
+		MaxActiveForwards: 1, RetainedTerminalLimit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	start := func(id string) error {
+		_, err := manager.Start(StartRequest{
+			ID: id, Target: podIdentity("pod", "uid"), RemotePort: 8080,
+		})
+		return err
+	}
+	waitForState := func(id string, state State) {
+		t.Helper()
+		eventuallyForward(t, func() bool {
+			current := manager.lookup(id, "session")
+			return current != nil && current.Snapshot().State == state
+		})
+	}
+
+	if err := start("one"); err != nil {
+		t.Fatal(err)
+	}
+	waitForState("one", StateListening)
+	if err := start("two"); !errors.Is(err, ErrTooManyPortForwards) {
+		t.Fatalf("capacity Start error = %v", err)
+	}
+	if got := sessions.Counts(); got != [2]int{1, 0} {
+		t.Fatalf("capacity rejection acquired a lease: %v", got)
+	}
+
+	if !manager.Stop("one", "session") {
+		t.Fatal("Stop one rejected")
+	}
+	waitForState("one", StateStopped)
+	if err := start("two"); err != nil {
+		t.Fatalf("Start after stop: %v", err)
+	}
+	waitForState("two", StateListening)
+	if manager.lookup("one", "session") == nil {
+		t.Fatal("stopped entry was not retained as a terminal tombstone")
+	}
+	if manager.Restart("one", "session") {
+		t.Fatal("Restart exceeded the active forward capacity")
+	}
+
+	if !manager.Stop("two", "session") {
+		t.Fatal("Stop two rejected")
+	}
+	waitForState("two", StateStopped)
+	eventuallyForward(t, func() bool { return manager.lookup("one", "session") == nil })
+	if got := sessions.Counts(); got != [2]int{2, 1} {
+		t.Fatalf("terminal removal acquire/release counts = %v, want [2 1]", got)
+	}
+	if err := start("one"); err != nil {
+		t.Fatalf("same-ID Start after terminal removal: %v", err)
+	}
+}
+
+func TestStartRejectsOversizedRetainedFieldsBeforeSessionResolution(t *testing.T) {
+	t.Parallel()
+	sessions := &leaseSessionResolver{session: Session{
+		ContextName: "context", Resolver: &sequenceResolver{}, Forwarder: &fakeForwarder{},
+	}}
+	manager, err := NewManager(Config{Sessions: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	valid := StartRequest{
+		ID: "forward", Label: "label", Target: podIdentity("pod", "uid"), RemotePort: 8080,
+	}
+	tests := []struct {
+		name   string
+		mutate func(*StartRequest)
+	}{
+		{"forward ID", func(value *StartRequest) { value.ID = strings.Repeat("i", MaxPortForwardIDBytes+1) }},
+		{"label", func(value *StartRequest) { value.Label = strings.Repeat("l", MaxPortForwardLabelBytes+1) }},
+		{"session ID", func(value *StartRequest) { value.Target.SessionID = strings.Repeat("s", maxSessionIDBytes+1) }},
+		{"API group", func(value *StartRequest) { value.Target.Group = strings.Repeat("g", maxAPIGroupBytes+1) }},
+		{"API version", func(value *StartRequest) { value.Target.Version = strings.Repeat("v", maxAPIVersionBytes+1) }},
+		{"resource", func(value *StartRequest) { value.Target.Resource = strings.Repeat("r", maxResourceBytes+1) }},
+		{"namespace", func(value *StartRequest) { value.Target.Namespace = strings.Repeat("n", maxNamespaceBytes+1) }},
+		{"name", func(value *StartRequest) { value.Target.Name = strings.Repeat("n", maxNameBytes+1) }},
+		{"UID", func(value *StartRequest) { value.Target.UID = typesUID(strings.Repeat("u", maxUIDBytes+1)) }},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			request := valid
+			test.mutate(&request)
+			if _, err := manager.Start(request); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("Start error = %v, want ErrInvalidRequest", err)
+			}
+		})
+	}
+	if got := sessions.Counts(); got != [2]int{} {
+		t.Fatalf("invalid requests reached session resolution: %v", got)
+	}
+}
+
 func TestPortForwardRetainsLeaseAcrossStopAndRestart(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{
@@ -696,18 +807,20 @@ func TestPortForwardStartFailuresDoNotLeakRetainedLease(t *testing.T) {
 	}); !errors.Is(err, ErrDuplicatePortForward) {
 		t.Fatalf("duplicate Start error = %v", err)
 	}
-	eventuallyForward(t, func() bool { return sessions.Counts()[0] == 2 && sessions.Counts()[1] == 1 })
+	if got := sessions.Counts(); got != [2]int{1, 0} {
+		t.Fatalf("duplicate Start acquired a lease: %v", got)
+	}
 	if !manager.Stop("same", "session") {
 		t.Fatal("Stop rejected")
 	}
 	eventuallyForward(t, func() bool {
 		return manager.List("", true)[0].State == StateStopped
 	})
-	if got := sessions.Counts(); got != [2]int{2, 1} {
-		t.Fatalf("terminal retained lease counts = %v, want [2 1]", got)
+	if got := sessions.Counts(); got != [2]int{1, 0} {
+		t.Fatalf("terminal retained lease counts = %v, want [1 0]", got)
 	}
 	manager.Close()
-	if got := sessions.Counts(); got != [2]int{2, 2} {
+	if got := sessions.Counts(); got != [2]int{1, 1} {
 		t.Fatalf("manager close did not release retained lease exactly once: %v", got)
 	}
 }
