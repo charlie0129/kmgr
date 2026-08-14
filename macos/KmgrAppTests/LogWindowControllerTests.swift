@@ -243,6 +243,71 @@ struct LogWindowControllerTests {
         #expect(!events.contains("terminated:1"))
         controller.close()
     }
+
+    @Test("visible log saves snapshot on main and write the snapshot off main")
+    func visibleBufferSaveRunsFileIOOffMain() async throws {
+        let probe = LogFileWriterProbe()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: NoopLogWindowProvider(),
+            fileWriter: { value, url in
+                try probe.write(value, to: url, failure: nil)
+            }
+        )
+        let root = try #require(controller.window?.contentView)
+        let textView = try #require(descendants(of: root).compactMap { $0 as? NSTextView }.first)
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-status" })
+        let original = String(repeating: "multi-megabyte-log-line", count: 100_000)
+        textView.string = original
+        let destination = URL(fileURLWithPath: "/tmp/kmgr-log-snapshot-test.txt")
+
+        controller.saveVisibleBufferSnapshot(to: destination)
+        #expect(status.stringValue == "Saving kmgr-log-snapshot-test.txt…")
+        #expect(!probe.isFinished)
+        textView.string = "new text rendered while the save is running"
+
+        try await waitForLogFileWrite(probe)
+        let write = try #require(probe.snapshot)
+        #expect(write.value == original)
+        #expect(write.url == destination)
+        #expect(!write.ranOnMainThread)
+        try await waitForLogStatus(status) { $0.hasPrefix("Saved ") }
+        #expect(status.textColor == .secondaryLabelColor)
+    }
+
+    @Test("log save failures return to the main actor for status presentation")
+    func visibleBufferSaveFailureUpdatesStatus() async throws {
+        let probe = LogFileWriterProbe()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: NoopLogWindowProvider(),
+            fileWriter: { value, url in
+                try probe.write(value, to: url, failure: .rejected)
+            }
+        )
+        let root = try #require(controller.window?.contentView)
+        let textView = try #require(descendants(of: root).compactMap { $0 as? NSTextView }.first)
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-status" })
+        textView.string = "snapshot that cannot be written"
+
+        controller.saveVisibleBufferSnapshot(to: URL(fileURLWithPath: "/tmp/rejected.txt"))
+        try await waitForLogFileWrite(probe)
+        try await waitForLogStatus(status) { $0.contains("Save failed") }
+
+        #expect(probe.snapshot?.ranOnMainThread == false)
+        #expect(status.stringValue.contains("test writer rejected the save"))
+        #expect(status.textColor == .systemRed)
+    }
 }
 }
 
@@ -331,6 +396,45 @@ private enum OrderedLogWindowProviderError: Error {
     case rejected
 }
 
+private enum LogFileWriterTestError: LocalizedError {
+    case rejected
+
+    var errorDescription: String? { "The test writer rejected the save." }
+}
+
+private final class LogFileWriterProbe: @unchecked Sendable {
+    struct Snapshot {
+        var value: String
+        var url: URL
+        var ranOnMainThread: Bool
+    }
+
+    private let lock = NSLock()
+    private var recordedSnapshot: Snapshot?
+    private var finished = false
+
+    var snapshot: Snapshot? { lock.withLock { recordedSnapshot } }
+
+    var isFinished: Bool { lock.withLock { finished } }
+
+    func write(
+        _ value: String,
+        to url: URL,
+        failure: LogFileWriterTestError?
+    ) throws {
+        lock.withLock {
+            recordedSnapshot = Snapshot(
+                value: value,
+                url: url,
+                ranOnMainThread: Thread.isMainThread
+            )
+        }
+        Thread.sleep(forTimeInterval: 0.04)
+        defer { lock.withLock { finished = true } }
+        if let failure { throw failure }
+    }
+}
+
 @MainActor
 private func waitForLogWindowEvent(
     _ provider: OrderedLogWindowProvider,
@@ -353,4 +457,25 @@ private func waitForLogWindowControl(
         try await Task.sleep(for: .milliseconds(5))
     }
     Issue.record("Timed out waiting for log control enabled=\(enabled)")
+}
+
+@MainActor
+private func waitForLogFileWrite(_ probe: LogFileWriterProbe) async throws {
+    for _ in 0..<300 {
+        if probe.isFinished { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Timed out waiting for the log file writer")
+}
+
+@MainActor
+private func waitForLogStatus(
+    _ status: NSTextField,
+    condition: (String) -> Bool
+) async throws {
+    for _ in 0..<300 {
+        if condition(status.stringValue) { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Timed out waiting for log status; got \(status.stringValue)")
 }

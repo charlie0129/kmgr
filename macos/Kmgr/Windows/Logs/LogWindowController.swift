@@ -17,6 +17,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private let availableSources: [LogSource]
     private let staticWorkloadSnapshot: Bool
     private let provider: any LogStreamProviding
+    private let fileWriter: @Sendable (String, URL) throws -> Void
     private let streamID = UUID().uuidString.lowercased()
     private var generation: UInt64 = 0
     private var streamTasks: [UInt64: Task<Void, Never>] = [:]
@@ -72,7 +73,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         provider: any LogStreamProviding,
         options: LogOptions = LogOptions(),
         displayConfiguration: LogDisplayConfiguration = .default,
-        staticWorkloadSnapshot: Bool = false
+        staticWorkloadSnapshot: Bool = false,
+        fileWriter: @escaping @Sendable (String, URL) throws -> Void = { value, url in
+            try value.write(to: url, atomically: true, encoding: .utf8)
+        }
     ) {
         precondition(!sources.isEmpty)
         let allSources = availableSources ?? sources
@@ -83,6 +87,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         self.availableSources = allSources
         self.staticWorkloadSnapshot = staticWorkloadSnapshot
         self.provider = provider
+        self.fileWriter = fileWriter
         self.options = options
         self.recordStore = LogRecordStore(
             recordLimit: displayConfiguration.recordLimit,
@@ -209,6 +214,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         searchField.widthAnchor.constraint(equalToConstant: 220).isActive = true
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.identifier = NSUserInterfaceItemIdentifier("log-status")
         updateSourcePresentation()
         sourceLabel.lineBreakMode = .byTruncatingMiddle
         sourceLabel.textColor = .secondaryLabelColor
@@ -746,12 +752,31 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "kmgr-logs.txt"
         panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url, let value = self?.textView.string else { return }
+            guard response == .OK, let url = panel.url else { return }
+            self?.saveVisibleBufferSnapshot(to: url)
+        }
+    }
+
+    /// NSTextView is AppKit-owned, so capture its immutable String snapshot on
+    /// the main actor. UTF-8 encoding and atomic file I/O then run on a detached
+    /// utility task and cannot stall rendering for a multi-megabyte log line.
+    func saveVisibleBufferSnapshot(to url: URL) {
+        let value = textView.string
+        let writer = fileWriter
+        statusLabel.stringValue = "Saving \(url.lastPathComponent)…"
+        statusLabel.textColor = .secondaryLabelColor
+        Task { [weak self] in
             do {
-                try value.write(to: url, atomically: true, encoding: .utf8)
+                try await Task.detached(priority: .utility) {
+                    try writer(value, url)
+                }.value
+                guard let self, !isClosing else { return }
+                statusLabel.stringValue = "Saved \(url.lastPathComponent)"
+                statusLabel.textColor = .secondaryLabelColor
             } catch {
-                self?.statusLabel.stringValue = "Save failed: \(error.localizedDescription)"
-                self?.statusLabel.textColor = .systemRed
+                guard let self, !isClosing else { return }
+                statusLabel.stringValue = "Save failed: \(error.localizedDescription)"
+                statusLabel.textColor = .systemRed
             }
         }
     }
