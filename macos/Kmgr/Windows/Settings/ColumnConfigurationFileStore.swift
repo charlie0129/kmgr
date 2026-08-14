@@ -2,6 +2,14 @@ import Foundation
 import KmgrCore
 import Yams
 
+struct ColumnConfigurationDocumentLoader: Sendable {
+    let load: @Sendable (String) async throws -> ColumnsConfigurationDocument
+
+    static let fileSystem = Self { path in
+        try await ColumnConfigurationFileStore(path: path).loadOffMain()
+    }
+}
+
 /// Reconciles persisted definitions loaded in the background with saves that
 /// finish while that load is in flight. A late snapshot may be stale, so every
 /// successful save recorded after it began must win for its exact GVR.

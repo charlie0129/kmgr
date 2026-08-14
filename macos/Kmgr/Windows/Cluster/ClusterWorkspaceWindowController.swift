@@ -10,6 +10,29 @@ struct ResourceColumnsRequest {
     var apply: @MainActor ([ColumnDefinition]) -> Void
 }
 
+struct DeferredColumnPresentationState {
+    var columns: [ColumnPresentationState]
+    var sort: [SortDescriptorState]
+    var columnMoves: [ColumnMoveState] = []
+    var measurementOverrides: [ColumnPresentationState] = []
+
+    mutating func recordColumnMove(_ move: ColumnMoveState) {
+        var boundedMove = move
+        boundedMove.targetIndex = min(
+            max(move.targetIndex, 0),
+            ClusterWindowRestorationState.maximumColumns - 1
+        )
+        columnMoves.append(boundedMove)
+        let overflow = columnMoves.count - ClusterWindowRestorationState.maximumColumns
+        if overflow > 0 {
+            // A configuration load normally lasts milliseconds. If it remains
+            // unavailable across hundreds of gestures, retain the newest
+            // restoration-safe operations instead of invalidating checkpoints.
+            columnMoves.removeFirst(overflow)
+        }
+    }
+}
+
 /// One successfully persisted GVR-scoped definition change. Keeping fan-out
 /// explicit and main-actor-bound avoids process-global notification payloads
 /// while allowing every currently open workspace to reconcile its own view.
@@ -76,6 +99,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         execProvider: any ExecSessionProviding,
         portForwards: PortForwardCoordinator,
         columnsConfigurationPath: String,
+        columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
         logDisplayConfiguration: LogDisplayConfiguration,
         confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
         restoration: ClusterWindowRestorationRecord,
@@ -123,6 +147,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             recentObjectStore: recentObjectStore,
             portForwards: portForwards,
             columnsConfigurationPath: columnsConfigurationPath,
+            columnsConfigurationLoader: columnsConfigurationLoader,
             onShowPortForwards: onShowPortForwards
         )
         super.init(window: window)
@@ -445,6 +470,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         recentObjectStore: RecentObjectStore,
         portForwards: PortForwardCoordinator,
         columnsConfigurationPath: String,
+        columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
         self.session = session
@@ -467,7 +493,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             isAuthenticated: isAuthenticated,
             provider: provider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
-            columnsConfigurationPath: columnsConfigurationPath
+            columnsConfigurationPath: columnsConfigurationPath,
+            columnsConfigurationLoader: columnsConfigurationLoader
         )
         super.init(nibName: nil, bundle: nil)
 
@@ -1687,6 +1714,7 @@ private final class ResourceListViewController: NSViewController,
     private let provider: any WorkspaceResourceProviding
     private let optionalResourceCatalogProvider: any OptionalResourceCatalogProviding
     private let columnsConfigurationPath: String
+    private let columnsConfigurationLoader: ColumnConfigurationDocumentLoader
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let freshnessLabel = NSTextField(labelWithString: "Idle")
@@ -1731,6 +1759,9 @@ private final class ResourceListViewController: NSViewController,
     private var columnsConfigurationCache = ColumnConfigurationCacheState()
     private var columnsConfigurationLoadTask: Task<Void, Never>?
     private var columnsConfigurationLoadGeneration: UInt64 = 0
+    private var deferredColumnPresentationByResourceID: [
+        String: DeferredColumnPresentationState
+    ] = [:]
     private var suppressSortChanges = false
     private var snapshotUIDs: [ResourceUID] = []
     private var lastStreamResourceID: String?
@@ -1772,7 +1803,8 @@ private final class ResourceListViewController: NSViewController,
         isAuthenticated: Bool,
         provider: any WorkspaceResourceProviding,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
-        columnsConfigurationPath: String
+        columnsConfigurationPath: String,
+        columnsConfigurationLoader: ColumnConfigurationDocumentLoader
     ) {
         self.session = session
         self.isAuthenticated = isAuthenticated
@@ -1780,6 +1812,7 @@ private final class ResourceListViewController: NSViewController,
         self.provider = provider
         self.optionalResourceCatalogProvider = optionalResourceCatalogProvider
         self.columnsConfigurationPath = columnsConfigurationPath
+        self.columnsConfigurationLoader = columnsConfigurationLoader
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -2822,6 +2855,13 @@ private final class ResourceListViewController: NSViewController,
             persistedDefinitions: definitions,
             resource: resource
         ))
+        if deferredColumnPresentationByResourceID[resource.id] == nil {
+            deferredColumnPresentationByResourceID[resource.id] =
+                DeferredColumnPresentationState(
+                    columns: [],
+                    sort: currentSortPresentation
+                )
+        }
         beginColumnsConfigurationLoadIfNeeded()
     }
 
@@ -2829,13 +2869,14 @@ private final class ResourceListViewController: NSViewController,
         guard columnsConfigurationCache.document == nil,
             columnsConfigurationLoadTask == nil
         else { return }
-        let store = ColumnConfigurationFileStore(path: columnsConfigurationPath)
+        let loader = columnsConfigurationLoader
+        let configurationPath = columnsConfigurationPath
         columnsConfigurationLoadGeneration &+= 1
         let loadGeneration = columnsConfigurationLoadGeneration
         columnsConfigurationLoadTask = Task { [weak self] in
             let loaded: ColumnsConfigurationDocument
             do {
-                loaded = try await store.loadOffMain()
+                loaded = try await loader.load(configurationPath)
                 try Task.checkCancellation()
             } catch is CancellationError {
                 return
@@ -2855,6 +2896,12 @@ private final class ResourceListViewController: NSViewController,
             else { return }
             let reconciled = columnsConfigurationCache.installLoaded(loaded)
             columnsConfigurationLoadTask = nil
+            let deferredPresentation = resource.flatMap {
+                deferredColumnPresentationByResourceID[$0.id]
+            }
+            // Once the complete document is available, navigation history is
+            // the source of truth for resources that are no longer visible.
+            deferredColumnPresentationByResourceID.removeAll(keepingCapacity: true)
             guard let resource,
                 provisionalDefaultColumnResourceIDs.contains(resource.id)
             else { return }
@@ -2865,19 +2912,17 @@ private final class ResourceListViewController: NSViewController,
             )
             let definitions = reconciled.views.first(where: { $0.match == match })?.columns
                 ?? defaultColumnDefinitions(for: resource)
-            let presentation = tableView.tableColumns.map { column in
-                ColumnPresentationState(
-                    columnID: column.identifier.rawValue,
-                    width: Double(column.width),
-                    isVisible: !column.isHidden
-                )
-            }
             let previous = installedColumnDefinitions
+            let previousSort = currentSortPresentation
             provisionalDefaultColumnResourceIDs.remove(resource.id)
             columnDefinitionsByResourceID[resource.id] = definitions
             installEffectiveColumns(for: resource)
-            applyColumnPresentation(presentation)
-            if installedColumnDefinitions != previous {
+            if let deferredPresentation {
+                applyDeferredColumnPresentation(deferredPresentation)
+            }
+            if installedColumnDefinitions != previous
+                || currentSortPresentation != previousSort
+            {
                 openStream()
             }
             updateStatusLine()
@@ -2890,10 +2935,18 @@ private final class ResourceListViewController: NSViewController,
         provisionalDefaultColumnResourceIDs.remove(resourceID)
         columnDefinitionsByResourceID[resourceID] = definitions
         let previousEffective = installedColumnDefinitions
+        let previousSort = currentSortPresentation
+        let deferredPresentation = deferredColumnPresentationByResourceID
+            .removeValue(forKey: resourceID)
         if let resource {
             installEffectiveColumns(for: resource)
         }
-        if installedColumnDefinitions != previousEffective {
+        if let deferredPresentation {
+            applyDeferredColumnPresentation(deferredPresentation)
+        }
+        if installedColumnDefinitions != previousEffective
+            || currentSortPresentation != previousSort
+        {
             openStream()
         }
         updateStatusLine()
@@ -3018,18 +3071,21 @@ private final class ResourceListViewController: NSViewController,
 
     private func navigationState() -> ResourceNavigationState? {
         guard let resource else { return nil }
+        let deferredPresentation = deferredColumnPresentationByResourceID[resource.id]
+        let columns = deferredPresentation?.columns ?? currentColumnPresentation
+        let sort = deferredPresentation?.sort ?? currentSortPresentation
         return ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
             kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope,
             filter: filterField.stringValue,
-            sortColumnID: tableView.sortDescriptors.first?.key,
-            sortDescending: !(tableView.sortDescriptors.first?.ascending ?? true),
-            columns: tableView.tableColumns.map { column in
-                ColumnPresentationState(
-                    columnID: column.identifier.rawValue,
-                    width: Double(column.width),
-                    isVisible: !column.isHidden
-                )
+            sortColumnID: sort.first?.columnID,
+            sortDescending: !(sort.first?.ascending ?? true),
+            columns: columns,
+            columnMoveOverrides: deferredPresentation.flatMap {
+                $0.columnMoves.isEmpty ? nil : $0.columnMoves
+            },
+            columnMeasurementOverrides: deferredPresentation.flatMap {
+                $0.measurementOverrides.isEmpty ? nil : $0.measurementOverrides
             },
             selectedUIDs: model.selectedUIDs,
             scrollAnchor: captureUpdate().scrollAnchor
@@ -3042,17 +3098,11 @@ private final class ResourceListViewController: NSViewController,
         isSidebarVisible: Bool
     ) -> ClusterWindowRestorationState {
         let state = navigationState()
-        let columns = tableView.tableColumns.map { column in
-            ColumnPresentationState(
-                columnID: column.identifier.rawValue,
-                width: Double(column.width),
-                isVisible: !column.isHidden
-            )
+        let deferredPresentation = resource.flatMap {
+            deferredColumnPresentationByResourceID[$0.id]
         }
-        let sorts = tableView.sortDescriptors.compactMap { descriptor -> SortDescriptorState? in
-            guard let key = descriptor.key else { return nil }
-            return SortDescriptorState(columnID: key, ascending: descriptor.ascending)
-        }
+        let columns = deferredPresentation?.columns ?? currentColumnPresentation
+        let sorts = deferredPresentation?.sort ?? currentSortPresentation
         return ClusterWindowRestorationState(
             contextName: contextName,
             contextReference: contextReference,
@@ -3061,6 +3111,12 @@ private final class ResourceListViewController: NSViewController,
             filter: filterField.stringValue,
             sort: sorts,
             columns: columns,
+            columnMoveOverrides: deferredPresentation.flatMap {
+                $0.columnMoves.isEmpty ? nil : $0.columnMoves
+            },
+            columnMeasurementOverrides: deferredPresentation.flatMap {
+                $0.measurementOverrides.isEmpty ? nil : $0.measurementOverrides
+            },
             isSidebarVisible: isSidebarVisible,
             scrollAnchor: captureUpdate().scrollAnchor
         )
@@ -3083,31 +3139,15 @@ private final class ResourceListViewController: NSViewController,
         filterMemory.remember(restoration.filter, for: resourceGVR(for: restored))
         suppressPresentationCheckpoint = true
         defer { suppressPresentationCheckpoint = false }
+        let deferredPresentation = DeferredColumnPresentationState(
+            columns: restoration.columns,
+            sort: restoration.sort,
+            columnMoves: restoration.columnMoveOverrides ?? [],
+            measurementOverrides: restoration.columnMeasurementOverrides ?? []
+        )
+        deferColumnPresentationIfNeeded(for: restored, presentation: deferredPresentation)
         configureColumns(for: restored)
-        if !restoration.columns.isEmpty {
-            let byID = Dictionary(uniqueKeysWithValues: restoration.columns.map { ($0.columnID, $0) })
-            for column in tableView.tableColumns {
-                if let state = byID[column.identifier.rawValue] {
-                    column.width = CGFloat(state.width)
-                    column.isHidden = !state.isVisible
-                }
-            }
-            for (targetIndex, state) in restoration.columns.enumerated()
-                where targetIndex < tableView.numberOfColumns
-            {
-                guard let currentIndex = tableView.tableColumns.firstIndex(where: {
-                    $0.identifier.rawValue == state.columnID
-                }) else { continue }
-                if currentIndex != targetIndex {
-                    tableView.moveColumn(currentIndex, toColumn: targetIndex)
-                }
-            }
-        }
-        let availableColumnIDs = Set(tableView.tableColumns.map { $0.identifier.rawValue })
-        tableView.sortDescriptors = restoration.sort.compactMap {
-            guard availableColumnIDs.contains($0.columnID) else { return nil }
-            return NSSortDescriptor(key: $0.columnID, ascending: $0.ascending)
-        }
+        applyDeferredColumnPresentation(deferredPresentation)
         let nav = ResourceNavigationState(
             group: restored.group, version: restored.version, resource: restored.resource,
             kind: restored.kind, namespaced: restored.namespaced,
@@ -3115,6 +3155,8 @@ private final class ResourceListViewController: NSViewController,
             sortColumnID: restoration.sort.first?.columnID,
             sortDescending: !(restoration.sort.first?.ascending ?? true),
             columns: restoration.columns,
+            columnMoveOverrides: restoration.columnMoveOverrides,
+            columnMeasurementOverrides: restoration.columnMeasurementOverrides,
             scrollAnchor: restoration.scrollAnchor
         )
         history = WorkspaceNavigationHistory(initial: .resource(nav))
@@ -3205,16 +3247,18 @@ private final class ResourceListViewController: NSViewController,
             resourceGVR: GVR(group: state.group, version: state.version, resource: state.resource)
         )
         suppressPresentationCheckpoint = true
+        let restoredSort = state.sortColumnID.map {
+            [SortDescriptorState(columnID: $0, ascending: !state.sortDescending)]
+        } ?? []
+        let deferredPresentation = DeferredColumnPresentationState(
+            columns: state.columns,
+            sort: restoredSort,
+            columnMoves: state.columnMoveOverrides ?? [],
+            measurementOverrides: state.columnMeasurementOverrides ?? []
+        )
+        deferColumnPresentationIfNeeded(for: resource!, presentation: deferredPresentation)
         configureColumns(for: resource!)
-        applyColumnPresentation(state.columns)
-        if let columnID = state.sortColumnID {
-            tableView.sortDescriptors = [NSSortDescriptor(
-                key: columnID,
-                ascending: !state.sortDescending
-            )]
-        } else {
-            tableView.sortDescriptors = []
-        }
+        applyDeferredColumnPresentation(deferredPresentation)
         suppressPresentationCheckpoint = false
         openStream()
     }
@@ -3240,6 +3284,11 @@ private final class ResourceListViewController: NSViewController,
 
     private func applyColumnPresentation(_ states: [ColumnPresentationState]) {
         guard !states.isEmpty else { return }
+        applyColumnMeasurements(states)
+        applyColumnOrder(states.map(\.columnID))
+    }
+
+    private func applyColumnMeasurements(_ states: [ColumnPresentationState]) {
         let byID = Dictionary(uniqueKeysWithValues: states.map { ($0.columnID, $0) })
         for column in tableView.tableColumns {
             if let state = byID[column.identifier.rawValue] {
@@ -3247,12 +3296,144 @@ private final class ResourceListViewController: NSViewController,
                 column.isHidden = !state.isVisible
             }
         }
-        for (targetIndex, state) in states.enumerated() where targetIndex < tableView.numberOfColumns {
+    }
+
+    private func applyColumnOrder(_ columnIDs: [String]) {
+        let availableIDs = Set(tableView.tableColumns.map { $0.identifier.rawValue })
+        let availableOrder = columnIDs.filter(availableIDs.contains)
+        for (targetIndex, columnID) in availableOrder.enumerated() {
             guard let currentIndex = tableView.tableColumns.firstIndex(where: {
-                $0.identifier.rawValue == state.columnID
+                $0.identifier.rawValue == columnID
             }), currentIndex != targetIndex else { continue }
             tableView.moveColumn(currentIndex, toColumn: targetIndex)
         }
+    }
+
+    private func applyColumnMoves(_ moves: [ColumnMoveState]) {
+        guard tableView.numberOfColumns > 0 else { return }
+        for move in moves {
+            guard let currentIndex = tableView.tableColumns.firstIndex(where: {
+                $0.identifier.rawValue == move.columnID
+            }) else { continue }
+            let targetIndex = min(max(move.targetIndex, 0), tableView.numberOfColumns - 1)
+            if currentIndex != targetIndex {
+                tableView.moveColumn(currentIndex, toColumn: targetIndex)
+            }
+        }
+    }
+
+    private func applyDeferredColumnPresentation(
+        _ presentation: DeferredColumnPresentationState
+    ) {
+        applyColumnPresentation(presentation.columns)
+        applyColumnMoves(presentation.columnMoves)
+        applyColumnMeasurements(presentation.measurementOverrides)
+        applySortPresentation(presentation.sort)
+    }
+
+    private var currentColumnPresentation: [ColumnPresentationState] {
+        tableView.tableColumns.map { column in
+            ColumnPresentationState(
+                columnID: column.identifier.rawValue,
+                width: Double(column.width),
+                isVisible: !column.isHidden
+            )
+        }
+    }
+
+    private var currentSortPresentation: [SortDescriptorState] {
+        tableView.sortDescriptors.compactMap { descriptor in
+            guard let columnID = descriptor.key else { return nil }
+            return SortDescriptorState(columnID: columnID, ascending: descriptor.ascending)
+        }
+    }
+
+    private func applySortPresentation(_ states: [SortDescriptorState]) {
+        let availableColumnIDs = Set(tableView.tableColumns.map { $0.identifier.rawValue })
+        let descriptors = states.compactMap { state -> NSSortDescriptor? in
+            guard availableColumnIDs.contains(state.columnID) else { return nil }
+            return NSSortDescriptor(key: state.columnID, ascending: state.ascending)
+        }
+        let wasSuppressingSortChanges = suppressSortChanges
+        suppressSortChanges = true
+        tableView.sortDescriptors = descriptors
+        suppressSortChanges = wasSuppressingSortChanges
+    }
+
+    private func deferColumnPresentationIfNeeded(
+        for resource: DiscoveredResource,
+        presentation: DeferredColumnPresentationState
+    ) {
+        guard columnsConfigurationCache.document == nil else {
+            deferredColumnPresentationByResourceID.removeValue(forKey: resource.id)
+            return
+        }
+        deferredColumnPresentationByResourceID[resource.id] = presentation
+    }
+
+    /// Fold measurement changes made while persisted definitions are loading
+    /// into the pending restoration without disturbing unavailable columns.
+    private func updateDeferredColumnMeasurementsFromCurrentTable(
+        _ notification: Notification
+    ) {
+        guard !suppressPresentationCheckpoint,
+            let resource,
+            let resizedColumn = notification.userInfo?["NSTableColumn"] as? NSTableColumn,
+            let resized = currentColumnPresentation.first(where: {
+                $0.columnID == resizedColumn.identifier.rawValue
+            }),
+            var deferred = deferredPresentationForUserChange(resource)
+        else { return }
+        if let index = deferred.measurementOverrides.firstIndex(where: {
+            $0.columnID == resized.columnID
+        }) {
+            deferred.measurementOverrides[index] = resized
+        } else {
+            deferred.measurementOverrides.append(resized)
+        }
+        deferredColumnPresentationByResourceID[resource.id] = deferred
+    }
+
+    /// AppKit reports the destination index after a move. Applying that index
+    /// to the pending saved order lets a visible column cross columns that are
+    /// unavailable until the configuration document finishes loading.
+    private func updateDeferredColumnOrderFromMove(_ notification: Notification) {
+        guard !suppressPresentationCheckpoint,
+            let resource,
+            var deferred = deferredPresentationForUserChange(resource),
+            let newIndex = (notification.userInfo?["NSNewColumn"] as? NSNumber)?.intValue,
+            currentColumnPresentation.indices.contains(newIndex)
+        else { return }
+        let current = currentColumnPresentation
+        let moved = current[newIndex]
+        deferred.recordColumnMove(ColumnMoveState(
+            columnID: moved.columnID,
+            targetIndex: newIndex
+        ))
+        deferredColumnPresentationByResourceID[resource.id] = deferred
+    }
+
+    private func updateDeferredSortFromCurrentTable() {
+        guard let resource,
+            var deferred = deferredPresentationForUserChange(resource)
+        else { return }
+        deferred.sort = currentSortPresentation
+        deferredColumnPresentationByResourceID[resource.id] = deferred
+    }
+
+    private func deferredPresentationForUserChange(
+        _ resource: DiscoveredResource
+    ) -> DeferredColumnPresentationState? {
+        if let existing = deferredColumnPresentationByResourceID[resource.id] {
+            return existing
+        }
+        guard columnsConfigurationCache.document == nil,
+            provisionalDefaultColumnResourceIDs.contains(resource.id)
+        else { return nil }
+        return DeferredColumnPresentationState(
+            columns: [],
+            sort: currentSortPresentation
+        )
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { model.orderedVisibleUIDs.count }
@@ -3357,6 +3538,7 @@ private final class ResourceListViewController: NSViewController,
         sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
     ) {
         guard !suppressSortChanges else { return }
+        updateDeferredSortFromCurrentTable()
         if let key = tableView.sortDescriptors.first?.key {
             logger.debug("Requested backend table sort for \(key, privacy: .public)")
         } else {
@@ -3367,10 +3549,12 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func tableViewColumnDidMove(_ notification: Notification) {
+        updateDeferredColumnOrderFromMove(notification)
         scheduleRestorationCheckpoint()
     }
 
     func tableViewColumnDidResize(_ notification: Notification) {
+        updateDeferredColumnMeasurementsFromCurrentTable(notification)
         scheduleRestorationCheckpoint()
     }
 

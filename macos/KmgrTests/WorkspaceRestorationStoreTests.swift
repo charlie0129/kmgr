@@ -18,6 +18,14 @@ import Testing
                 ColumnPresentationState(columnID: "name", width: 280),
                 ColumnPresentationState(columnID: "restarts", width: 90, isVisible: false),
             ],
+            columnMoveOverrides: [
+                ColumnMoveState(columnID: "restarts", targetIndex: 0),
+                ColumnMoveState(columnID: "name", targetIndex: 1),
+                ColumnMoveState(columnID: "restarts", targetIndex: 1),
+            ],
+            columnMeasurementOverrides: [
+                ColumnPresentationState(columnID: "name", width: 333),
+            ],
             isSidebarVisible: false,
             scrollAnchor: ScrollAnchor(
                 uid: "deployment-uid", pixelOffsetFromTop: 7.5, priorRowIndex: 9_000
@@ -79,6 +87,8 @@ import Testing
 
     #expect(decoded.contextName == "production")
     #expect(decoded.contextReference == "production")
+    #expect(decoded.columnMoveOverrides == nil)
+    #expect(decoded.columnMeasurementOverrides == nil)
 }
 
 @Test func restorationRoundTripsOpaqueContextReferenceSeparatelyFromName() throws {
@@ -121,6 +131,23 @@ import Testing
             ClusterWindowRestorationRecord(id: "window", state: invalidState),
         ])
     }
+
+    let invalidOverrides = ClusterWindowRestorationState(
+        contextName: "local",
+        columnMoveOverrides: [
+            ColumnMoveState(columnID: "", targetIndex: 0),
+            ColumnMoveState(columnID: "name", targetIndex: 256),
+        ],
+        columnMeasurementOverrides: [
+            ColumnPresentationState(columnID: "name", width: 10),
+            ColumnPresentationState(columnID: "name", width: 120),
+        ]
+    )
+    let invalidPaths = Set(invalidOverrides.validationIssues().map(\.path))
+    #expect(invalidPaths.contains("columnMoveOverrides[0].columnID"))
+    #expect(invalidPaths.contains("columnMoveOverrides[1].targetIndex"))
+    #expect(invalidPaths.contains("columnMeasurementOverrides"))
+    #expect(invalidPaths.contains("columnMeasurementOverrides[0].width"))
 }
 
 @MainActor

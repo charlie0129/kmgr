@@ -7,6 +7,30 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Shared resource columns", .serialized)
 struct ResourceColumnPropagationTests {
+    @Test("pending column moves remain bounded for valid restoration")
+    func pendingColumnMoveHistoryIsBounded() {
+        var presentation = DeferredColumnPresentationState(columns: [], sort: [])
+        for index in 0...ClusterWindowRestorationState.maximumColumns {
+            presentation.recordColumnMove(ColumnMoveState(
+                columnID: "name",
+                targetIndex: index % 2
+            ))
+        }
+
+        #expect(presentation.columnMoves.count == ClusterWindowRestorationState.maximumColumns)
+        #expect(presentation.columnMoves.first?.targetIndex == 1)
+        #expect(presentation.columnMoves.last?.targetIndex == 0)
+
+        var oversizedTarget = DeferredColumnPresentationState(columns: [], sort: [])
+        oversizedTarget.recordColumnMove(ColumnMoveState(columnID: "name", targetIndex: 999))
+        #expect(
+            oversizedTarget.columnMoves == [ColumnMoveState(
+                columnID: "name",
+                targetIndex: ClusterWindowRestorationState.maximumColumns - 1
+            )]
+        )
+    }
+
     @Test("a saved edit reaches every exact-GVR window without changing other window state")
     func savedEditPropagatesByExactGVR() async throws {
         let fixture = try ColumnPropagationFixture()
@@ -162,6 +186,457 @@ struct ResourceColumnPropagationTests {
                 && self.resourceTable(in: nodesWorkspace)?.tableColumns.map(\.title)
                     == ["Node Identity From Reload"]
         }
+        let reloadedTable = try #require(resourceTable(in: nodesWorkspace))
+        #expect(reloadedTable.tableColumns[0].width == 260)
+    }
+
+    @Test("late persisted columns retain complete restored presentation")
+    func restoredCustomColumnSurvivesLateConfigurationLoad() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let definitions = [
+            ColumnDefinition(
+                id: "name",
+                title: "Name From File",
+                source: .builtin,
+                value: "name",
+                type: .string,
+                width: 140
+            ),
+            ColumnDefinition(
+                id: "restored-custom",
+                title: "Custom From File",
+                source: .cel,
+                expression: "object.metadata.name",
+                type: .string,
+                width: 150
+            ),
+        ]
+        try await ColumnConfigurationFileStore(path: fixture.path).saveOffMain(
+            ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+                columns: definitions
+            )])
+        )
+        let restoration = ClusterWindowRestorationState(
+            contextName: "restored-columns",
+            gvr: GVR(group: "", version: "v1", resource: "pods"),
+            sort: [SortDescriptorState(columnID: "restored-custom", ascending: false)],
+            columns: [
+                ColumnPresentationState(columnID: "restored-custom", width: 333),
+                ColumnPresentationState(columnID: "name", width: 777),
+            ]
+        )
+        let provider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let workspace = makeWorkspace(
+            suffix: "restored-custom",
+            provider: provider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            restorationState: restoration
+        )
+        start([workspace])
+        defer { workspace.close() }
+
+        try await waitUntil {
+            guard let table = self.resourceTable(in: workspace) else { return false }
+            return table.tableColumns.map { $0.identifier.rawValue }
+                == ["restored-custom", "name"]
+                && table.sortDescriptors.first?.key == "restored-custom"
+                && table.sortDescriptors.first?.ascending == false
+                && provider.streamRequests.last?.sort.first?.columnID == "restored-custom"
+                && provider.streamRequests.last?.sort.first?.direction == .descending
+        }
+        let table = try #require(resourceTable(in: workspace))
+        #expect(table.tableColumns[0].width == 333)
+        #expect(table.tableColumns[1].width == 777)
+        #expect(table.tableColumns.map(\.title) == ["Custom From File", "Name From File"])
+    }
+
+    @Test("presentation changes made during a late load win over saved restoration")
+    func presentationChangesWinDuringLateConfigurationLoad() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let loader = StagedColumnConfigurationDocumentLoader()
+        defer { loader.cancelPendingLoads() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let definitions = restoredColumnDefinitions()
+        let restoration = restoredColumnPresentationState()
+        let provider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let workspace = makeWorkspace(
+            suffix: "restored-user-change",
+            provider: provider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            configurationLoader: loader.loader,
+            restorationState: restoration
+        )
+        var checkpoint: ClusterWindowRestorationRecord?
+        workspace.onRestorationCheckpoint = { checkpoint = $0 }
+        start([workspace])
+        defer { workspace.close() }
+
+        try await waitUntil {
+            loader.requestIsPending(1)
+                && self.resourceTable(in: workspace)?.tableColumns.contains(where: {
+                    $0.identifier.rawValue == "name"
+                }) == true
+        }
+        let table = try #require(resourceTable(in: workspace))
+        let name = try #require(table.tableColumns.first(where: {
+            $0.identifier.rawValue == "name"
+        }))
+        try moveColumn(name, to: 0, in: table)
+        let oldWidth = name.width
+        name.width = 900
+        table.delegate?.tableViewColumnDidResize?(Notification(
+            name: NSTableView.columnDidResizeNotification,
+            object: table,
+            userInfo: ["NSTableColumn": name, "NSOldWidth": oldWidth]
+        ))
+        let oldSort = table.sortDescriptors
+        table.sortDescriptors = [NSSortDescriptor(key: "name", ascending: false)]
+        table.dataSource?.tableView?(table, sortDescriptorsDidChange: oldSort)
+
+        try await waitUntil {
+            checkpoint?.state.columns.first?.columnID == "restored-custom"
+                && checkpoint?.state.columnMoveOverrides?.first
+                    == ColumnMoveState(columnID: "name", targetIndex: 0)
+                && checkpoint?.state.columns.first(where: {
+                    $0.columnID == "restored-custom"
+                })?.width == 333
+                && checkpoint?.state.columnMeasurementOverrides?.first(where: {
+                    $0.columnID == "name"
+                })?.width == 900
+                && checkpoint?.state.sort.first
+                    == SortDescriptorState(columnID: "name", ascending: false)
+        }
+        loader.complete(
+            attempt: 1,
+            with: ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+                columns: definitions
+            )])
+        )
+
+        try await waitUntil {
+            table.tableColumns.map { $0.identifier.rawValue } == ["name", "restored-custom"]
+                && table.sortDescriptors.first?.key == "name"
+                && table.sortDescriptors.first?.ascending == false
+                && provider.streamRequests.last?.sort.first?.columnID == "name"
+                && provider.streamRequests.last?.sort.first?.direction == .descending
+        }
+        #expect(table.tableColumns[0].width == 900)
+        #expect(table.tableColumns[1].width == 333)
+    }
+
+    @Test("fresh navigation changes win without replacing untouched file presentation")
+    func freshPresentationChangesWinDuringLateConfigurationLoad() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let loader = StagedColumnConfigurationDocumentLoader()
+        defer { loader.cancelPendingLoads() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let saved = restoredColumnDefinitions()
+        var custom = saved[1]
+        custom.width = 777
+        let status = ColumnDefinition(
+            id: "status",
+            title: "Status From File",
+            source: .builtin,
+            value: "status",
+            type: .string,
+            width: 600
+        )
+        let definitions = [custom, saved[0], status]
+        let provider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let workspace = makeWorkspace(
+            suffix: "fresh-user-change",
+            provider: provider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            configurationLoader: loader.loader
+        )
+        var checkpoint: ClusterWindowRestorationRecord?
+        workspace.onRestorationCheckpoint = { checkpoint = $0 }
+        start([workspace])
+        defer { workspace.close() }
+
+        try await waitUntil {
+            loader.requestIsPending(1)
+                && provider.streamRequests.last?.resource.resource == "pods"
+        }
+        let table = try #require(resourceTable(in: workspace))
+        let name = try #require(table.tableColumns.first(where: {
+            $0.identifier.rawValue == "name"
+        }))
+        let statusColumn = try #require(table.tableColumns.first(where: {
+            $0.identifier.rawValue == "status"
+        }))
+        try moveColumn(statusColumn, to: 0, in: table)
+        try moveColumn(statusColumn, to: 2, in: table)
+        try moveColumn(statusColumn, to: 0, in: table)
+        let oldWidth = name.width
+        name.width = 900
+        table.delegate?.tableViewColumnDidResize?(Notification(
+            name: NSTableView.columnDidResizeNotification,
+            object: table,
+            userInfo: ["NSTableColumn": name, "NSOldWidth": oldWidth]
+        ))
+        let oldSort = table.sortDescriptors
+        table.sortDescriptors = [NSSortDescriptor(key: "name", ascending: false)]
+        table.dataSource?.tableView?(table, sortDescriptorsDidChange: oldSort)
+        try await waitUntil {
+            checkpoint?.state.columns.isEmpty == true
+                && checkpoint?.state.columnMoveOverrides == [
+                    ColumnMoveState(columnID: "status", targetIndex: 0),
+                    ColumnMoveState(columnID: "status", targetIndex: 2),
+                    ColumnMoveState(columnID: "status", targetIndex: 0),
+                ]
+                && checkpoint?.state.columnMeasurementOverrides?.first(where: {
+                    $0.columnID == "name"
+                })?.width == 900
+                && checkpoint?.state.sort.first
+                    == SortDescriptorState(columnID: "name", ascending: false)
+        }
+
+        loader.complete(
+            attempt: 1,
+            with: ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+                columns: definitions
+            )])
+        )
+        try await waitUntil {
+            table.tableColumns.map { $0.identifier.rawValue }
+                == ["status", "restored-custom", "name"]
+                && table.sortDescriptors.first?.key == "name"
+                && table.sortDescriptors.first?.ascending == false
+                && provider.streamRequests.last?.sort.first?.columnID == "name"
+        }
+        #expect(table.tableColumns[0].width == 600)
+        #expect(table.tableColumns[1].width == 777)
+        #expect(table.tableColumns[2].width == 900)
+    }
+
+    @Test("a saved definition consumes restoration while the initial load is pending")
+    func savedDefinitionConsumesDeferredRestoration() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let loader = StagedColumnConfigurationDocumentLoader()
+        defer { loader.cancelPendingLoads() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let definitions = restoredColumnDefinitions()
+        let provider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let workspace = makeWorkspace(
+            suffix: "restored-save-race",
+            provider: provider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            configurationLoader: loader.loader,
+            restorationState: restoredColumnPresentationState()
+        )
+        start([workspace])
+        defer { workspace.close() }
+
+        try await waitUntil { loader.requestIsPending(1) }
+        #expect(SavedResourceColumnsChange(
+            match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+            definitions: definitions
+        ).apply(to: [workspace]) == 1)
+
+        let table = try #require(resourceTable(in: workspace))
+        try await waitUntil {
+            table.tableColumns.map { $0.identifier.rawValue } == ["restored-custom", "name"]
+                && table.sortDescriptors.first?.key == "restored-custom"
+                && table.sortDescriptors.first?.ascending == false
+                && provider.streamRequests.last?.sort.first?.columnID == "restored-custom"
+                && loader.requestIsPending(2)
+        }
+        #expect(table.tableColumns[0].width == 333)
+        #expect(table.tableColumns[1].width == 777)
+
+        let document = ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+            match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+            columns: definitions
+        )])
+        loader.complete(attempt: 1, with: document)
+        loader.complete(attempt: 2, with: document)
+        try await waitUntil { loader.pendingRequestCount == 0 }
+        #expect(table.tableColumns.map { $0.identifier.rawValue } == ["restored-custom", "name"])
+        #expect(table.sortDescriptors.first?.key == "restored-custom")
+    }
+
+    @Test("fresh navigation before load preserves persisted order without gestures")
+    func freshNavigationPreservesPersistedPresentation() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let loader = StagedColumnConfigurationDocumentLoader()
+        defer { loader.cancelPendingLoads() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let nodes = DiscoveredResource(
+            group: "", version: "v1", resource: "nodes", kind: "Node",
+            namespaced: false, verbs: ["list", "watch"]
+        )
+        var custom = restoredColumnDefinitions()[1]
+        custom.width = 777
+        var name = restoredColumnDefinitions()[0]
+        name.width = 666
+        let provider = ColumnPropagationWorkspaceProvider(resources: [pods, nodes])
+        let workspace = makeWorkspace(
+            suffix: "fresh-navigation-race",
+            provider: provider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            configurationLoader: loader.loader
+        )
+        var checkpoint: ClusterWindowRestorationRecord?
+        workspace.onRestorationCheckpoint = { checkpoint = $0 }
+        start([workspace])
+        defer { workspace.close() }
+
+        try await waitUntil {
+            loader.requestIsPending(1)
+                && provider.streamRequests.last?.resource.resource == "pods"
+                && checkpoint?.state.gvr?.resource == "pods"
+        }
+        #expect(checkpoint?.state.columns.isEmpty == true)
+        #expect(checkpoint?.state.columnMoveOverrides == nil)
+        #expect(checkpoint?.state.columnMeasurementOverrides == nil)
+
+        let outline = try #require(resourceOutline(in: workspace))
+        let nodesRow = try #require((0..<outline.numberOfRows).first(where: {
+            (outline.item(atRow: $0) as? DiscoveredResource)?.resource == "nodes"
+        }))
+        outline.selectRowIndexes(IndexSet(integer: nodesRow), byExtendingSelection: false)
+        try await waitUntil { provider.streamRequests.last?.resource.resource == "nodes" }
+
+        loader.complete(
+            attempt: 1,
+            with: ColumnsConfigurationDocument(views: [
+                ResourceColumnConfiguration(
+                    match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+                    columns: [custom, name]
+                ),
+                ResourceColumnConfiguration(
+                    match: ColumnResourceMatch(group: "", version: "v1", resource: "nodes"),
+                    columns: [ColumnDefinition(
+                        id: "name",
+                        title: "Node From File",
+                        source: .builtin,
+                        value: "name",
+                        type: .string,
+                        width: 260
+                    )]
+                ),
+            ])
+        )
+        try await waitUntil {
+            self.resourceTable(in: workspace)?.tableColumns.map(\.title) == ["Node From File"]
+        }
+
+        workspace.navigateBack(nil)
+        try await waitUntil {
+            guard let table = self.resourceTable(in: workspace) else { return false }
+            return provider.streamRequests.last?.resource.resource == "pods"
+                && table.tableColumns.map { $0.identifier.rawValue }
+                    == ["restored-custom", "name"]
+                && table.sortDescriptors.isEmpty
+        }
+        let table = try #require(resourceTable(in: workspace))
+        #expect(table.tableColumns[0].width == 777)
+        #expect(table.tableColumns[1].width == 666)
+    }
+
+    @Test("navigation preserves pending custom presentation until definitions load")
+    func navigationPreservesDeferredRestoration() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let loader = StagedColumnConfigurationDocumentLoader()
+        defer { loader.cancelPendingLoads() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let nodes = DiscoveredResource(
+            group: "", version: "v1", resource: "nodes", kind: "Node",
+            namespaced: false, verbs: ["list", "watch"]
+        )
+        let provider = ColumnPropagationWorkspaceProvider(resources: [pods, nodes])
+        let workspace = makeWorkspace(
+            suffix: "restored-navigation-race",
+            provider: provider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            configurationLoader: loader.loader,
+            restorationState: restoredColumnPresentationState()
+        )
+        start([workspace])
+        defer { workspace.close() }
+
+        try await waitUntil {
+            loader.requestIsPending(1)
+                && provider.streamRequests.last?.resource.resource == "pods"
+        }
+        let outline = try #require(resourceOutline(in: workspace))
+        let nodesRow = try #require((0..<outline.numberOfRows).first(where: {
+            (outline.item(atRow: $0) as? DiscoveredResource)?.resource == "nodes"
+        }))
+        outline.selectRowIndexes(IndexSet(integer: nodesRow), byExtendingSelection: false)
+        try await waitUntil { provider.streamRequests.last?.resource.resource == "nodes" }
+
+        loader.complete(
+            attempt: 1,
+            with: ColumnsConfigurationDocument(views: [
+                ResourceColumnConfiguration(
+                    match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+                    columns: restoredColumnDefinitions()
+                ),
+                ResourceColumnConfiguration(
+                    match: ColumnResourceMatch(group: "", version: "v1", resource: "nodes"),
+                    columns: [ColumnDefinition(
+                        id: "name",
+                        title: "Node From File",
+                        source: .builtin,
+                        value: "name",
+                        type: .string,
+                        width: 260
+                    )]
+                ),
+            ])
+        )
+        try await waitUntil {
+            self.resourceTable(in: workspace)?.tableColumns.map(\.title) == ["Node From File"]
+        }
+
+        workspace.navigateBack(nil)
+        try await waitUntil {
+            guard let table = self.resourceTable(in: workspace) else { return false }
+            return provider.streamRequests.last?.resource.resource == "pods"
+                && table.tableColumns.map { $0.identifier.rawValue }
+                    == ["restored-custom", "name"]
+                && table.sortDescriptors.first?.key == "restored-custom"
+                && table.sortDescriptors.first?.ascending == false
+        }
+        let table = try #require(resourceTable(in: workspace))
+        #expect(table.tableColumns[0].width == 333)
+        #expect(table.tableColumns[1].width == 777)
     }
 
     @Test("each same-GVR window retains its exact optional-resource overlay")
@@ -316,7 +791,9 @@ struct ResourceColumnPropagationTests {
         suffix: String,
         provider: any WorkspaceResourceProviding,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
-        configurationPath: String
+        configurationPath: String,
+        configurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
+        restorationState: ClusterWindowRestorationState? = nil
     ) -> ClusterWorkspaceWindowController {
         makeColumnPropagationWorkspace(
             session: OpenedClusterSession(
@@ -328,7 +805,9 @@ struct ResourceColumnPropagationTests {
             ),
             provider: provider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
-            columnsConfigurationPath: configurationPath
+            columnsConfigurationPath: configurationPath,
+            columnsConfigurationLoader: configurationLoader,
+            restorationState: restorationState
         )
     }
 
@@ -348,6 +827,31 @@ struct ResourceColumnPropagationTests {
         guard let root = controller.window?.contentView else { return nil }
         return descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" }
+    }
+
+    private func resourceOutline(
+        in controller: ClusterWorkspaceWindowController
+    ) -> NSOutlineView? {
+        guard let root = controller.window?.contentView else { return nil }
+        return descendants(of: root).compactMap { $0 as? NSOutlineView }
+            .first { $0.accessibilityLabel() == "Kubernetes resource kinds" }
+    }
+
+    private func moveColumn(
+        _ column: NSTableColumn,
+        to targetIndex: Int,
+        in table: NSTableView
+    ) throws {
+        let sourceIndex = try #require(table.tableColumns.firstIndex(of: column))
+        let delegate = table.delegate
+        table.delegate = nil
+        table.moveColumn(sourceIndex, toColumn: targetIndex)
+        table.delegate = delegate
+        delegate?.tableViewColumnDidMove?(Notification(
+            name: NSTableView.columnDidMoveNotification,
+            object: table,
+            userInfo: ["NSOldColumn": sourceIndex, "NSNewColumn": targetIndex]
+        ))
     }
 
     private func resourceFilter(
@@ -438,15 +942,101 @@ private func sharedSavedColumnDefinitions() -> [ColumnDefinition] {
     ]
 }
 
+private func restoredColumnDefinitions() -> [ColumnDefinition] {
+    [
+        ColumnDefinition(
+            id: "name",
+            title: "Name From File",
+            source: .builtin,
+            value: "name",
+            type: .string,
+            width: 140
+        ),
+        ColumnDefinition(
+            id: "restored-custom",
+            title: "Custom From File",
+            source: .cel,
+            expression: "object.metadata.name",
+            type: .string,
+            width: 150
+        ),
+    ]
+}
+
+private func restoredColumnPresentationState() -> ClusterWindowRestorationState {
+    ClusterWindowRestorationState(
+        contextName: "restored-columns",
+        gvr: GVR(group: "", version: "v1", resource: "pods"),
+        sort: [SortDescriptorState(columnID: "restored-custom", ascending: false)],
+        columns: [
+            ColumnPresentationState(columnID: "restored-custom", width: 333),
+            ColumnPresentationState(columnID: "name", width: 777),
+        ]
+    )
+}
+
+private final class StagedColumnConfigurationDocumentLoader: @unchecked Sendable {
+    private typealias PendingLoad = CheckedContinuation<
+        ColumnsConfigurationDocument,
+        any Error
+    >
+
+    private let lock = NSLock()
+    private var requestCount = 0
+    private var pendingLoads: [Int: PendingLoad] = [:]
+
+    var loader: ColumnConfigurationDocumentLoader {
+        ColumnConfigurationDocumentLoader { [weak self] _ in
+            guard let self else { throw CancellationError() }
+            return try await self.load()
+        }
+    }
+
+    var pendingRequestCount: Int { lock.withLock { pendingLoads.count } }
+
+    func requestIsPending(_ attempt: Int) -> Bool {
+        lock.withLock { pendingLoads[attempt] != nil }
+    }
+
+    func complete(attempt: Int, with document: ColumnsConfigurationDocument) {
+        let continuation = lock.withLock { pendingLoads.removeValue(forKey: attempt) }
+        continuation?.resume(returning: document)
+    }
+
+    func cancelPendingLoads() {
+        let continuations = lock.withLock { () -> [PendingLoad] in
+            let result = Array(pendingLoads.values)
+            pendingLoads.removeAll(keepingCapacity: true)
+            return result
+        }
+        for continuation in continuations {
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    private func load() async throws -> ColumnsConfigurationDocument {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.withLock {
+                requestCount += 1
+                pendingLoads[requestCount] = continuation
+            }
+        }
+    }
+}
+
 private final class ColumnPropagationWorkspaceProvider: WorkspaceResourceProviding,
     @unchecked Sendable
 {
-    let resource: DiscoveredResource
+    let resources: [DiscoveredResource]
     private let lock = NSLock()
     private var storedStreamRequests: [ResourceViewRequest] = []
 
     init(resource: DiscoveredResource) {
-        self.resource = resource
+        resources = [resource]
+    }
+
+    init(resources: [DiscoveredResource]) {
+        self.resources = resources
     }
 
     var streamRequests: [ResourceViewRequest] {
@@ -455,7 +1045,7 @@ private final class ColumnPropagationWorkspaceProvider: WorkspaceResourceProvidi
 
     func discoverResources(sessionID: String, refresh: Bool) async throws
         -> ResourceDiscoveryResult {
-        .init(resources: [resource])
+        .init(resources: resources)
     }
 
     func listNamespaces(sessionID: String) async throws -> [String] {

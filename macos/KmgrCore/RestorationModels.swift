@@ -40,6 +40,16 @@ public struct ColumnPresentationState: Hashable, Codable, Sendable {
     }
 }
 
+public struct ColumnMoveState: Hashable, Codable, Sendable {
+    public var columnID: String
+    public var targetIndex: Int
+
+    public init(columnID: String, targetIndex: Int) {
+        self.columnID = columnID
+        self.targetIndex = targetIndex
+    }
+}
+
 public struct RestorationValidationIssue: Error, Hashable, Sendable {
     public var path: String
     public var message: String
@@ -81,6 +91,8 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
     public var filter: String
     public var sort: [SortDescriptorState]
     public var columns: [ColumnPresentationState]
+    public var columnMoveOverrides: [ColumnMoveState]?
+    public var columnMeasurementOverrides: [ColumnPresentationState]?
     public var isSidebarVisible: Bool
     public var scrollAnchor: ScrollAnchor?
 
@@ -93,6 +105,8 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
         case filter
         case sort
         case columns
+        case columnMoveOverrides
+        case columnMeasurementOverrides
         case isSidebarVisible
         case scrollAnchor
     }
@@ -105,6 +119,8 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
         filter: String = "",
         sort: [SortDescriptorState] = [],
         columns: [ColumnPresentationState] = [],
+        columnMoveOverrides: [ColumnMoveState]? = nil,
+        columnMeasurementOverrides: [ColumnPresentationState]? = nil,
         isSidebarVisible: Bool = true,
         scrollAnchor: ScrollAnchor? = nil
     ) {
@@ -116,6 +132,8 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
         self.filter = filter
         self.sort = sort
         self.columns = columns
+        self.columnMoveOverrides = columnMoveOverrides
+        self.columnMeasurementOverrides = columnMeasurementOverrides
         self.isSidebarVisible = isSidebarVisible
         self.scrollAnchor = scrollAnchor
     }
@@ -132,6 +150,12 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
         filter = try container.decode(String.self, forKey: .filter)
         sort = try container.decode([SortDescriptorState].self, forKey: .sort)
         columns = try container.decode([ColumnPresentationState].self, forKey: .columns)
+        columnMoveOverrides = try container.decodeIfPresent(
+            [ColumnMoveState].self, forKey: .columnMoveOverrides
+        )
+        columnMeasurementOverrides = try container.decodeIfPresent(
+            [ColumnPresentationState].self, forKey: .columnMeasurementOverrides
+        )
         isSidebarVisible = try container.decode(Bool.self, forKey: .isSidebarVisible)
         scrollAnchor = try container.decodeIfPresent(ScrollAnchor.self, forKey: .scrollAnchor)
     }
@@ -231,6 +255,56 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
                     path: "columns[\(index)].width",
                     message: "Saved column widths must be finite values from 20 through 8192 points."
                 ))
+            }
+        }
+        if let columnMoveOverrides {
+            if columnMoveOverrides.count > Self.maximumColumns {
+                issues.append(.init(
+                    path: "columnMoveOverrides",
+                    message: "At most \(Self.maximumColumns) column move overrides are allowed."
+                ))
+            }
+            for (index, move) in columnMoveOverrides.enumerated() {
+                validateToken(
+                    move.columnID, path: "columnMoveOverrides[\(index)].columnID",
+                    allowEmpty: false, issues: &issues
+                )
+                if !(0..<Self.maximumColumns).contains(move.targetIndex) {
+                    issues.append(.init(
+                        path: "columnMoveOverrides[\(index)].targetIndex",
+                        message: "Column move target indexes must be from 0 through \(Self.maximumColumns - 1)."
+                    ))
+                }
+            }
+        }
+        if let columnMeasurementOverrides {
+            if columnMeasurementOverrides.count > Self.maximumColumns {
+                issues.append(.init(
+                    path: "columnMeasurementOverrides",
+                    message: "At most \(Self.maximumColumns) column measurement overrides are allowed."
+                ))
+            }
+            if Set(columnMeasurementOverrides.map(\.columnID)).count
+                != columnMeasurementOverrides.count
+            {
+                issues.append(.init(
+                    path: "columnMeasurementOverrides",
+                    message: "Column measurement override IDs must be unique."
+                ))
+            }
+            for (index, column) in columnMeasurementOverrides.enumerated() {
+                validateToken(
+                    column.columnID,
+                    path: "columnMeasurementOverrides[\(index)].columnID",
+                    allowEmpty: false,
+                    issues: &issues
+                )
+                if !column.width.isFinite || !(20...8_192).contains(column.width) {
+                    issues.append(.init(
+                        path: "columnMeasurementOverrides[\(index)].width",
+                        message: "Saved column widths must be finite values from 20 through 8192 points."
+                    ))
+                }
             }
         }
         if let scrollAnchor {

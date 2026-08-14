@@ -572,9 +572,21 @@ func makeColumnPropagationWorkspace(
     session: OpenedClusterSession,
     provider: any WorkspaceResourceProviding,
     optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
-    columnsConfigurationPath: String
+    columnsConfigurationPath: String,
+    columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
+    restorationState: ClusterWindowRestorationState? = nil
 ) -> ClusterWorkspaceWindowController {
     let portForwards = PortForwardCoordinator(provider: NoopPortForwardProvider())
+    let restoration = restorationState.map {
+        ClusterWindowRestorationRecord(
+            id: "column-propagation-\(UUID().uuidString)",
+            state: $0
+        )
+    } ?? ClusterWindowRestorationRecord(
+        id: "column-propagation-\(UUID().uuidString)",
+        contextName: session.contextName,
+        contextReference: session.contextReference
+    )
     return ClusterWorkspaceWindowController(
         session: session,
         provider: provider,
@@ -587,13 +599,10 @@ func makeColumnPropagationWorkspace(
         execProvider: NoopExecProvider(),
         portForwards: portForwards,
         columnsConfigurationPath: columnsConfigurationPath,
+        columnsConfigurationLoader: columnsConfigurationLoader,
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },
-        restoration: ClusterWindowRestorationRecord(
-            id: "column-propagation-\(UUID().uuidString)",
-            contextName: session.contextName,
-            contextReference: session.contextReference
-        ),
+        restoration: restoration,
         onShowPortForwards: {}
     )
 }
