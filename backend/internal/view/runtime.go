@@ -277,6 +277,7 @@ type resourceRuntime struct {
 	client       watcher.ListerWatcher
 	subscribers  map[*Subscription]struct{}
 	dependents   map[*Subscription]struct{}
+	closing      map[*Subscription]struct{}
 	ctx          context.Context
 	cancel       context.CancelFunc
 	state        resourceState
@@ -297,6 +298,7 @@ type resourceRuntime struct {
 	// commits its final resourceVersion or terminates and releases ownership.
 	transientSearchList      *transientSearchList
 	transientSearchUsesStore bool
+	warmProjection           *warmProjection
 }
 
 type resourceState uint8
@@ -314,6 +316,7 @@ type openAttempt struct {
 	deliveryState *logicalViewDeliveryState
 	cancel        context.CancelFunc
 	released      bool
+	wasWarm       bool
 }
 
 type openGeneration struct {
@@ -623,27 +626,56 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	r.mu.Unlock()
 	reserved = true
 
-	if err := r.acquireOpenProjection(openCtx); err != nil {
-		r.abortOpen(attempt)
-		return nil, err
+	var entry *resourceRuntime
+	var cachedProjection *warmProjection
+	projectionAdmissionHeld := false
+	for {
+		r.mu.Lock()
+		if r.closed || r.openings[streamKey] != attempt || openCtx.Err() != nil {
+			r.mu.Unlock()
+			r.abortOpen(attempt)
+			if err := openCtx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, ErrViewClosed
+		}
+		entry = r.resources[key]
+		fromWarm := false
+		if entry != nil {
+			if cached, ok := r.getWarmLocked(key); ok && cached.Value == entry {
+				fromWarm = true
+			}
+		}
+		if entry == nil {
+			if cached, ok := r.getWarmLocked(key); ok {
+				entry = cached.Value
+				fromWarm = true
+			}
+		}
+		cachedProjection = nil
+		if entry != nil && len(entry.subscribers)+len(entry.dependents) == 0 &&
+			entry.warmProjection != nil && entry.warmProjection.key == projector.cacheKey {
+			cachedProjection = entry.warmProjection
+		}
+		// A compatible immutable presentation needs no synchronous raw-store
+		// projection. Every other path obtains bounded admission before it
+		// consumes a search handoff, creates an entry, or removes a warm entry.
+		if cachedProjection == nil && !projectionAdmissionHeld {
+			r.mu.Unlock()
+			if err := r.acquireOpenProjection(openCtx); err != nil {
+				r.abortOpen(attempt)
+				return nil, err
+			}
+			projectionAdmissionHeld = true
+			continue
+		}
+		attempt.wasWarm = fromWarm
+		break
 	}
-	defer r.releaseOpenProjection()
+	if projectionAdmissionHeld {
+		defer r.releaseOpenProjection()
+	}
 
-	r.mu.Lock()
-	if r.closed || r.openings[streamKey] != attempt || openCtx.Err() != nil {
-		r.mu.Unlock()
-		r.abortOpen(attempt)
-		if err := openCtx.Err(); err != nil {
-			return nil, err
-		}
-		return nil, ErrViewClosed
-	}
-	entry := r.resources[key]
-	if entry == nil {
-		if cached, ok := r.getWarmLocked(key); ok {
-			entry = cached.Value
-		}
-	}
 	var searchSnapshot *completedSearchSnapshot
 	var transientList *transientSearchList
 	if entry == nil {
@@ -701,6 +733,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	}
 	attempt.entry = entry
 	entry.openers++
+	usedWarmProjection := cachedProjection != nil
 	r.removeWarmLocked(key)
 	if entry.releaseTimer != nil {
 		entry.releaseTimer.Stop()
@@ -755,6 +788,11 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	}
 
 	var warmRows []*kmgrv1.ResourceRow
+	if cachedProjection != nil {
+		// Copy only the immutable slice header. Building the subscription's row
+		// index happens outside Runtime.mu below.
+		warmRows = cachedProjection.rows
+	}
 	if err := openCtx.Err(); err != nil {
 		r.abortOpen(attempt)
 		return nil, err
@@ -772,18 +810,25 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	snapshotComplete := entry.accountingReady
 	r.mu.Unlock()
 
-	// UIDStore has its own lock. Taking this potentially large deterministic
-	// snapshot outside Runtime.mu keeps all lifecycle operations responsive.
-	objects := entry.store.Snapshot()
+	var objects []*unstructured.Unstructured
+	if !usedWarmProjection {
+		// UIDStore has its own lock. Taking this potentially large deterministic
+		// snapshot outside Runtime.mu keeps all lifecycle operations responsive.
+		objects, err = entry.store.SnapshotContext(openCtx)
+		if err != nil {
+			r.abortOpen(attempt)
+			return nil, err
+		}
 
-	if r.openProjectionHook != nil {
-		r.openProjectionHook()
-	}
-	var projectErr error
-	warmRows, projectErr = projector.ProjectContext(openCtx, objects)
-	if projectErr != nil {
-		r.abortOpen(attempt)
-		return nil, projectErr
+		if r.openProjectionHook != nil {
+			r.openProjectionHook()
+		}
+		var projectErr error
+		warmRows, projectErr = projector.ProjectContext(openCtx, objects)
+		if projectErr != nil {
+			r.abortOpen(attempt)
+			return nil, projectErr
+		}
 	}
 	// Prepare all private subscription state before publication. No callback can
 	// reach this subscription yet, so these helpers intentionally take no lock.
@@ -801,12 +846,19 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		}
 		return nil, ErrViewClosed
 	}
-	if entry.store.ResourceVersion() != "" || entry.store.Len() != 0 || entry.state != resourceIdle || entry.transientSearchList != nil {
+	if usedWarmProjection {
+		initialStatus = statusForWarmEntry(entry)
+		initialStatus.Freshness = kmgrv1.ViewFreshness_VIEW_FRESHNESS_STALE
+		initialStatus.FromWarmCache = true
+	} else if entry.store.ResourceVersion() != "" || entry.store.Len() != 0 || entry.state != resourceIdle || entry.transientSearchList != nil {
 		initialStatus = statusForWarmEntry(entry)
 	} else {
 		initialStatus = &kmgrv1.ViewStatus{Freshness: kmgrv1.ViewFreshness_VIEW_FRESHNESS_LOADING}
 	}
 	previous := r.views[streamKey]
+	captureReplacedProjection := previous != nil && previous.resource != entry &&
+		len(previous.resource.dependents) == 0 &&
+		r.canRetainWarmProjectionLocked(previous.resource)
 	r.mu.Unlock()
 
 	subscription.sealInitialUnlocked(initialStatus, warmRows)
@@ -822,6 +874,10 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	// the retired subscription and cannot mutate or deliver from it.
 	if previous != nil {
 		previous.mu.Lock()
+	}
+	var replacedProjection *warmProjection
+	if captureReplacedProjection {
+		replacedProjection = previous.captureWarmProjectionUnlocked()
 	}
 	subscription.seedClientKnownUIDsUnlocked(previous)
 
@@ -843,15 +899,16 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	// Runtime.mu linearizes publication with pipeline callbacks. Work applied
 	// before this point advances revision and needs one authoritative catch-up;
 	// work applied after publication sees the new subscriber directly.
-	needsCatchup := entry.revision != revision
+	needsCatchup := usedWarmProjection || entry.revision != revision
 	// Completeness belongs to the same lifecycle revision as the off-lock
 	// object snapshot. A final LIST may update the store before its callback can
 	// advance entry.revision; using a later completeness bit with older objects
 	// could otherwise misclassify a not-yet-seen page as deletion.
 	if needsCatchup {
 		// A callback that advanced the revision before publication is no longer
-		// able to target this subscription. Its catch-up takes a fresh store
-		// snapshot, so it may use the callback's newer completeness state.
+		// able to target this subscription. A compact warm projection may also
+		// lag raw events already retained in the store. Its catch-up takes a fresh
+		// store snapshot, so it may use the callback's newer completeness state.
 		subscription.snapshotComplete = entry.accountingReady
 		subscription.markAuthoritativeResnapshotUnlocked()
 	} else {
@@ -862,8 +919,22 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	}
 	replaced := r.views[streamKey]
 	if replaced != nil {
+		if replaced.resource != entry && replacedProjection != nil {
+			if replaced.resource.closing == nil {
+				replaced.resource.closing = make(map[*Subscription]struct{})
+			}
+			replaced.resource.closing[replaced] = struct{}{}
+			if r.willDetachLastSubscriptionLocked(replaced) ||
+				r.allAttachedSubscriptionsClosingLocked(replaced.resource) {
+				r.retainWarmProjectionLocked(replaced.resource, replacedProjection)
+			}
+		}
 		r.detachLocked(replaced)
 	}
+	// The active subscription now owns the presentation. Drop the cached copy
+	// only at this publication point so an aborted Open leaves warm first paint
+	// intact.
+	entry.warmProjection = nil
 	entry.subscribers[subscription] = struct{}{}
 	r.views[streamKey] = subscription
 	r.deliveryStates[streamKey] = attempt.deliveryState
@@ -928,7 +999,10 @@ func (r *Runtime) abortOpen(attempt *openAttempt) {
 	if r.releaseOpenAttemptLocked(attempt) {
 		r.cleanupUnusedEntryLocked(entry)
 		if r.resources[entry.key] == entry {
-			r.scheduleReleaseLocked(entry)
+			restoredWarm := attempt.wasWarm && r.finalizeWarmLocked(entry)
+			if !restoredWarm && r.resources[entry.key] == entry {
+				r.scheduleReleaseLocked(entry)
+			}
 		}
 	}
 	r.trimOpenHistoryLocked()
@@ -1039,6 +1113,10 @@ func (r *Runtime) attachNodeAccounting(subscription *Subscription, sessionID, au
 		// a valid (stale-until-watch-connects) accounting basis.
 		entry.accountingReady = true
 	}
+	// A Node view keeps the Pod raw store active as a long-lived dependency.
+	// Compact rows belong only to zero-consumer warm/debounce entries and are
+	// unusable for Node accounting, so drop them before removing LRU accounting.
+	entry.warmProjection = nil
 	r.removeWarmLocked(key)
 	if entry.releaseTimer != nil {
 		entry.releaseTimer.Stop()
@@ -1457,17 +1535,31 @@ func (r *Runtime) Cancel(sessionID, viewID string, generation uint64) bool {
 		r.mu.Unlock()
 		return false
 	}
+	registeredClose, captureProjection := r.prepareSubscriptionCloseLocked(subscription)
+	if !registeredClose {
+		r.mu.Unlock()
+		return true
+	}
 	r.mu.Unlock()
 
 	// Match replacement publication's sole nested lock order. A delivery that
 	// finishes before this latch is persisted; work after retirement cannot
 	// mutate the logical view contract.
 	subscription.mu.Lock()
+	var projection *warmProjection
+	if captureProjection {
+		projection = subscription.captureWarmProjectionUnlocked()
+	}
 	r.mu.Lock()
 	if r.views[key] != subscription || subscription.generation != generation {
+		r.cancelSubscriptionCloseLocked(subscription)
 		r.mu.Unlock()
 		subscription.mu.Unlock()
 		return false
+	}
+	if projection != nil && (r.willDetachLastSubscriptionLocked(subscription) ||
+		r.allAttachedSubscriptionsClosingLocked(subscription.resource)) {
+		r.retainWarmProjectionLocked(subscription.resource, projection)
 	}
 	r.detachLocked(subscription)
 	metricSubscription := subscription.retireLocked()
@@ -1487,6 +1579,10 @@ func (r *Runtime) detachLocked(subscription *Subscription) {
 	delete(r.views, subscription.key)
 	entry := subscription.resource
 	delete(entry.subscribers, subscription)
+	delete(entry.closing, subscription)
+	if len(entry.closing) == 0 {
+		entry.closing = nil
+	}
 	r.cleanupUnusedEntryLocked(entry)
 	if dependency := subscription.nodePods; dependency != nil {
 		delete(dependency.dependents, subscription)
@@ -1495,6 +1591,90 @@ func (r *Runtime) detachLocked(subscription *Subscription) {
 		r.scheduleReleaseLocked(dependency)
 	}
 	r.scheduleReleaseLocked(entry)
+}
+
+// willDetachLastSubscriptionLocked reports whether removing subscription
+// would leave its raw resource with no subscriber or dependent. An in-flight
+// opener does not suppress provisional capture: successful same-resource
+// publication drops that candidate, while an aborted opener leaves it usable.
+// Runtime.mu must be held.
+func (r *Runtime) willDetachLastSubscriptionLocked(subscription *Subscription) bool {
+	if subscription == nil || r.views[subscription.key] != subscription || subscription.resource == nil {
+		return false
+	}
+	entry := subscription.resource
+	if len(entry.subscribers) != 1 || len(entry.dependents) != 0 {
+		return false
+	}
+	_, attached := entry.subscribers[subscription]
+	return attached
+}
+
+// prepareSubscriptionCloseLocked marks one closing stream before it releases
+// Runtime.mu. If every attached stream is now closing, exactly that caller
+// freezes a provisional candidate; it may be retained before the other closes
+// finish so concurrent final detaches cannot all miss capture.
+func (r *Runtime) prepareSubscriptionCloseLocked(subscription *Subscription) (bool, bool) {
+	if subscription == nil || r.views[subscription.key] != subscription || subscription.resource == nil {
+		return false, false
+	}
+	entry := subscription.resource
+	if entry.closing == nil {
+		entry.closing = make(map[*Subscription]struct{})
+	}
+	if _, duplicate := entry.closing[subscription]; duplicate {
+		return false, false
+	}
+	entry.closing[subscription] = struct{}{}
+	return true, len(entry.dependents) == 0 && r.allAttachedSubscriptionsClosingLocked(entry) &&
+		r.canRetainWarmProjectionLocked(entry)
+}
+
+func (r *Runtime) allAttachedSubscriptionsClosingLocked(entry *resourceRuntime) bool {
+	if entry == nil || len(entry.subscribers) == 0 || len(entry.closing) < len(entry.subscribers) {
+		return false
+	}
+	for subscription := range entry.subscribers {
+		if _, closing := entry.closing[subscription]; !closing {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Runtime) cancelSubscriptionCloseLocked(subscription *Subscription) {
+	if subscription != nil && subscription.resource != nil {
+		entry := subscription.resource
+		delete(entry.closing, subscription)
+		if len(entry.closing) == 0 {
+			entry.closing = nil
+		}
+	}
+}
+
+// canRetainWarmProjectionLocked rejects compact-row work up front when the
+// authoritative raw store already fills an individual warm-cache ceiling.
+// UIDStore maintains both values incrementally, so this remains O(1) while
+// Runtime.mu is held. Aggregate LRU pressure is still handled at admission.
+func (r *Runtime) canRetainWarmProjectionLocked(entry *resourceRuntime) bool {
+	if entry == nil || entry.store == nil || entry.store.Len() > r.warmObjectLimit ||
+		entry.store.Len() > r.warmObjectLimitPerAuthority {
+		return false
+	}
+	rawBytes := entry.store.RetainedBytes()
+	return rawBytes < r.warmByteLimit && rawBytes < r.warmByteLimitPerAuthority
+}
+
+func (r *Runtime) retainWarmProjectionLocked(entry *resourceRuntime, projection *warmProjection) {
+	if entry == nil || projection == nil || projection.retainedBytes < 0 || len(entry.dependents) != 0 {
+		return
+	}
+	retainedBytes := saturatingProjectionBytes(entry.store.RetainedBytes(), projection.retainedBytes)
+	if retainedBytes > r.warmByteLimit || retainedBytes > r.warmByteLimitPerAuthority {
+		entry.warmProjection = nil
+		return
+	}
+	entry.warmProjection = projection
 }
 
 func (r *Runtime) cleanupUnusedEntryLocked(entry *resourceRuntime) {
@@ -1682,30 +1862,45 @@ func (r *Runtime) removeEmptyAuthorityWarmLocked(authorityID string) {
 // finalizeWarmLocked publishes only quiescent stores. A running pipeline may
 // still finish a selected event after cancellation, so warm-cache object/RV
 // accounting is not stable until Run acknowledges exit.
-func (r *Runtime) finalizeWarmLocked(entry *resourceRuntime) {
+func (r *Runtime) finalizeWarmLocked(entry *resourceRuntime) bool {
 	if entry == nil || r.closed || r.resources[entry.key] != entry || entry.state != resourceIdle ||
 		entry.openers != 0 || len(entry.subscribers)+len(entry.dependents) != 0 || entry.transientSearchList != nil {
-		return
+		return false
 	}
 	key := entry.key
+	rawBytes := entry.store.RetainedBytes()
+	retainedBytes := rawBytes
+	if entry.warmProjection != nil {
+		retainedBytes = saturatingProjectionBytes(retainedBytes, entry.warmProjection.retainedBytes)
+		// Compact rows are an optimization layered over the authoritative raw
+		// store. If their combined graph is individually too large, retain the
+		// raw cache alone instead of rejecting the previously useful store.
+		if retainedBytes > r.warmByteLimit || retainedBytes > r.warmByteLimitPerAuthority {
+			entry.warmProjection = nil
+			retainedBytes = rawBytes
+		}
+	}
 	evicted, admitted := r.putWarmLocked(key, watcher.WarmEntry[*resourceRuntime]{
 		Value:            entry,
 		ObjectCount:      entry.store.Len(),
-		ByteCount:        entry.store.RetainedBytes(),
+		ByteCount:        retainedBytes,
 		ResourceVersion:  entry.store.ResourceVersion(),
 		LastSynchronized: entry.lastStatus.LastSynchronized,
 		Complete:         entry.accountingReady && entry.store.ResourceVersion() != "",
 	})
 	if !admitted && r.resources[key] == entry {
+		entry.warmProjection = nil
 		delete(r.resources, key)
 	}
 	for _, evictedKey := range evicted {
 		if evictedEntry := r.resources[evictedKey]; evictedEntry != nil &&
 			evictedEntry.openers == 0 && len(evictedEntry.subscribers)+len(evictedEntry.dependents) == 0 &&
 			evictedEntry.state == resourceIdle {
+			evictedEntry.warmProjection = nil
 			delete(r.resources, evictedKey)
 		}
 	}
+	return admitted
 }
 
 func (r *Runtime) closeSubscription(subscription *Subscription) {
@@ -1714,14 +1909,28 @@ func (r *Runtime) closeSubscription(subscription *Subscription) {
 		r.mu.Unlock()
 		return
 	}
+	registeredClose, captureProjection := r.prepareSubscriptionCloseLocked(subscription)
+	if !registeredClose {
+		r.mu.Unlock()
+		return
+	}
 	r.mu.Unlock()
 
 	subscription.mu.Lock()
+	var projection *warmProjection
+	if captureProjection {
+		projection = subscription.captureWarmProjectionUnlocked()
+	}
 	r.mu.Lock()
 	if current := r.views[subscription.key]; current != subscription {
+		r.cancelSubscriptionCloseLocked(subscription)
 		r.mu.Unlock()
 		subscription.mu.Unlock()
 		return
+	}
+	if projection != nil && (r.willDetachLastSubscriptionLocked(subscription) ||
+		r.allAttachedSubscriptionsClosingLocked(subscription.resource)) {
+		r.retainWarmProjectionLocked(subscription.resource, projection)
 	}
 	r.detachLocked(subscription)
 	metricSubscription := subscription.retireLocked()
@@ -2062,6 +2271,7 @@ type Subscription struct {
 	generation             uint64
 	sequence               uint64
 	projector              *Projector
+	projectionCacheKey     projectionCacheKey
 	nodeAccountingRevision uint64
 	rows                   map[string]*kmgrv1.ResourceRow
 	order                  []string
@@ -2083,6 +2293,8 @@ type Subscription struct {
 	projectionScheduleID   uint64
 	projectionPasses       uint64
 	projectedObjects       uint64
+	projectionContext      context.Context
+	cancelProjection       context.CancelFunc
 	// snapshotComplete permits raw-store absence to prove deletion. Cold and
 	// progressive LIST stores remain incomplete until their final page commits.
 	snapshotComplete bool
@@ -2114,20 +2326,24 @@ func newSubscription(
 	chunkSize int,
 	pendingLimit int,
 ) *Subscription {
+	projectionContext, cancelProjection := context.WithCancel(context.Background())
 	subscription := &Subscription{
-		key:            key,
-		generation:     generation,
-		projector:      projector,
-		rows:           make(map[string]*kmgrv1.ResourceRow),
-		pendingUpserts: make(map[string]*kmgrv1.ResourceRow),
-		pendingRemoved: make(map[string]struct{}),
-		knownUIDs:      make(map[string]bool),
-		pendingObjects: make(map[string]*unstructured.Unstructured),
-		notify:         make(chan struct{}, 1),
-		done:           make(chan struct{}),
-		batchDelay:     batchDelay,
-		chunkSize:      chunkSize,
-		pendingLimit:   pendingLimit,
+		key:                key,
+		generation:         generation,
+		projector:          projector,
+		projectionCacheKey: projector.cacheKey,
+		rows:               make(map[string]*kmgrv1.ResourceRow),
+		pendingUpserts:     make(map[string]*kmgrv1.ResourceRow),
+		pendingRemoved:     make(map[string]struct{}),
+		knownUIDs:          make(map[string]bool),
+		pendingObjects:     make(map[string]*unstructured.Unstructured),
+		notify:             make(chan struct{}, 1),
+		done:               make(chan struct{}),
+		batchDelay:         batchDelay,
+		chunkSize:          chunkSize,
+		pendingLimit:       pendingLimit,
+		projectionContext:  projectionContext,
+		cancelProjection:   cancelProjection,
 	}
 	subscription.scheduleProjection = func(flush func()) *time.Timer {
 		return time.AfterFunc(batchDelay, flush)
@@ -2751,19 +2967,32 @@ func (s *Subscription) runProjection() {
 		}
 		clear(s.pendingObjects)
 		var baseRows map[string]*kmgrv1.ResourceRow
-		if full {
-			baseRows = make(map[string]*kmgrv1.ResourceRow, len(s.rows))
-		}
 		if full && s.resource == nil {
+			baseRows = make(map[string]*kmgrv1.ResourceRow, len(s.rows))
 			for uid, row := range s.rows {
 				baseRows[uid] = row
 			}
 		}
 		resource := s.resource
+		projectionContext := s.projectionContext
+		if projectionContext == nil {
+			projectionContext = context.Background()
+		}
 		s.mu.Unlock()
 
+		fullAdmissionHeld := false
+		var projectionErr error
 		if full && resource != nil {
-			objects = resource.store.Snapshot()
+			if s.runtime != nil {
+				if err := s.runtime.acquireOpenProjection(projectionContext); err != nil {
+					s.mu.Lock()
+					s.projectionRunning = false
+					s.mu.Unlock()
+					return
+				}
+				fullAdmissionHeld = true
+			}
+			objects, projectionErr = resource.store.SnapshotContext(projectionContext)
 		}
 		var rawUIDs map[string]struct{}
 		if full && snapshotComplete {
@@ -2773,39 +3002,88 @@ func (s *Subscription) runProjection() {
 		if !full {
 			projectedRows = make(map[string]*kmgrv1.ResourceRow, len(objects))
 		}
-		batchProjector := projector.beginBatch()
 		projectedObjects := uint64(0)
-		for _, object := range objects {
-			if object == nil || object.GetUID() == "" {
-				continue
-			}
-			projectedObjects++
-			uid := string(object.GetUID())
-			if rawUIDs != nil {
-				rawUIDs[uid] = struct{}{}
-			}
-			row, visible := batchProjector.projectOne(object)
-			if full {
-				if visible {
-					baseRows[uid] = row
-				} else {
-					delete(baseRows, uid)
+		var ordered []*kmgrv1.ResourceRow
+		if full && resource != nil {
+			for index, object := range objects {
+				if index&255 == 0 {
+					if projectionErr = projectionContext.Err(); projectionErr != nil {
+						break
+					}
 				}
-			} else if visible {
-				projectedRows[uid] = row
-			} else {
-				// A present nil value means this UID was projected and is now
-				// filter-hidden. It is distinct from an object not in this batch.
-				projectedRows[uid] = nil
+				if object == nil || object.GetUID() == "" {
+					continue
+				}
+				projectedObjects++
+				if rawUIDs != nil {
+					rawUIDs[string(object.GetUID())] = struct{}{}
+				}
+			}
+			if projectionErr == nil {
+				ordered, projectionErr = projector.ProjectContext(projectionContext, objects)
+			}
+			if projectionErr == nil {
+				baseRows = make(map[string]*kmgrv1.ResourceRow, len(ordered))
+				for _, row := range ordered {
+					baseRows[row.GetIdentity().GetUid()] = row
+				}
+			}
+		} else {
+			batchProjector := projector.beginBatch()
+			for _, object := range objects {
+				if projectionErr != nil {
+					break
+				}
+				if object == nil || object.GetUID() == "" {
+					continue
+				}
+				projectedObjects++
+				uid := string(object.GetUID())
+				if rawUIDs != nil {
+					rawUIDs[uid] = struct{}{}
+				}
+				var row *kmgrv1.ResourceRow
+				var visible bool
+				projectionErr = runProjectionWorker(projectionContext, func() error {
+					var err error
+					row, visible, err = batchProjector.projectOneAdmitted(projectionContext, object)
+					return err
+				})
+				if projectionErr != nil {
+					break
+				}
+				if full {
+					if visible {
+						baseRows[uid] = row
+					} else {
+						delete(baseRows, uid)
+					}
+				} else if visible {
+					projectedRows[uid] = row
+				} else {
+					// A present nil value means this UID was projected and is now
+					// filter-hidden. It is distinct from an object not in this batch.
+					projectedRows[uid] = nil
+				}
+			}
+			if full {
+				ordered = make([]*kmgrv1.ResourceRow, 0, len(baseRows))
+				for _, row := range baseRows {
+					ordered = append(ordered, row)
+				}
+				if projectionErr == nil {
+					projectionErr = sortRowsContext(projectionContext, ordered, projector.compareRows)
+				}
 			}
 		}
-		var ordered []*kmgrv1.ResourceRow
-		if full {
-			ordered = make([]*kmgrv1.ResourceRow, 0, len(baseRows))
-			for _, row := range baseRows {
-				ordered = append(ordered, row)
-			}
-			slices.SortStableFunc(ordered, projector.compareRows)
+		if fullAdmissionHeld {
+			s.runtime.releaseOpenProjection()
+		}
+		if projectionErr != nil {
+			s.mu.Lock()
+			s.projectionRunning = false
+			s.mu.Unlock()
+			return
 		}
 
 		s.mu.Lock()
@@ -3263,6 +3541,10 @@ func (s *Subscription) retireLocked() *metrics.Subscription {
 	}
 	s.inFlightDelivery = nil
 	s.closed = true
+	if s.cancelProjection != nil {
+		s.cancelProjection()
+		s.cancelProjection = nil
+	}
 	if s.metricCancel != nil {
 		s.metricCancel()
 		s.metricCancel = nil
@@ -3302,9 +3584,10 @@ func projectorFromProto(
 		})
 	}
 	var resolved viewcolumns.Resolution
+	var resolvedVersion string
 	if resolver != nil {
 		var err error
-		resolved, _, err = resolver.Resolve(
+		resolved, resolvedVersion, err = resolver.Resolve(
 			resource.GetGroup(), resource.GetVersion(), resource.GetResource(),
 			spec.GetColumnIds(), spec.GetColumnConfigurationVersion(),
 		)
@@ -3318,12 +3601,14 @@ func projectorFromProto(
 			Group: resource.GetGroup(), Version: resource.GetVersion(), Resource: resource.GetResource(),
 			Kind: resource.GetKind(), Namespaced: resource.GetNamespaced(),
 		},
-		NamespaceScope:   namespaceScope,
-		ColumnIDs:        append([]string(nil), spec.GetColumnIds()...),
-		FilterExpression: spec.GetFilterExpression(),
-		Sort:             sortDescriptors,
-		CELPrograms:      resolved.Programs,
-		ColumnExtractors: resolved.Extractors,
+		NamespaceScope:                     namespaceScope,
+		ColumnIDs:                          append([]string(nil), spec.GetColumnIds()...),
+		FilterExpression:                   spec.GetFilterExpression(),
+		Sort:                               sortDescriptors,
+		ColumnConfigurationVersion:         spec.GetColumnConfigurationVersion(),
+		ResolvedColumnConfigurationVersion: resolvedVersion,
+		CELPrograms:                        resolved.Programs,
+		ColumnExtractors:                   resolved.Extractors,
 	})
 }
 

@@ -37,17 +37,19 @@ const (
 // ProjectionSpec contains only presentation choices. Server-side namespace
 // and Kubernetes selectors are applied by the caller's resource client.
 type ProjectionSpec struct {
-	ClusterSessionID string
-	Resource         ResourceType
-	NamespaceScope   NamespaceScope
-	ColumnIDs        []string
-	FilterExpression string
-	Sort             []SortDescriptor
-	CELPrograms      map[string]*viewcolumns.Program
-	ColumnExtractors map[string]viewcolumns.Extractor
-	Metrics          metrics.Snapshot
-	NodeAccounting   NodeAccountingSnapshot
-	Now              time.Time
+	ClusterSessionID                   string
+	Resource                           ResourceType
+	NamespaceScope                     NamespaceScope
+	ColumnIDs                          []string
+	FilterExpression                   string
+	Sort                               []SortDescriptor
+	ColumnConfigurationVersion         string
+	ResolvedColumnConfigurationVersion string
+	CELPrograms                        map[string]*viewcolumns.Program
+	ColumnExtractors                   map[string]viewcolumns.Extractor
+	Metrics                            metrics.Snapshot
+	NodeAccounting                     NodeAccountingSnapshot
+	Now                                time.Time
 	// WorkerLimit bounds concurrent row projection for large snapshots. Zero
 	// selects a conservative process-wide default capped below GOMAXPROCS.
 	WorkerLimit int
@@ -90,6 +92,7 @@ type Projector struct {
 	namespaces  map[string]struct{}
 	now         func() time.Time
 	workerLimit int
+	cacheKey    projectionCacheKey
 }
 
 // projectionWorkerGate bounds aggregate row work across all Projectors. A
@@ -214,7 +217,7 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 	}
 	return &Projector{
 		spec: spec, filter: compiledFilter, namespaces: namespaces,
-		now: now, workerLimit: workerLimit,
+		now: now, workerLimit: workerLimit, cacheKey: newProjectionCacheKey(spec),
 	}, nil
 }
 

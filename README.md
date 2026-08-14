@@ -250,9 +250,13 @@ are 24 views, 250,000 objects, and a conservative 512 MiB retained-size
 estimate process-wide, plus 8 views, 100,000 objects, and 192 MiB for each
 cluster authority. Crossing any ceiling evicts the least recently used store;
 one store larger than a whole ceiling is not admitted. The byte estimate covers
-the immutable unstructured object graph and UID-store indexes with safety
-overhead. It is intentionally conservative and is neither an RSS measurement
-nor a promise that the Go allocator will return the same number of bytes to the
+the immutable unstructured object graph, UID-store indexes, and any compact
+projected row graph retained for immediate stale first paint, all with safety
+overhead. If compact rows alone make an otherwise fitting entry exceed an
+individual byte ceiling, kmgr drops those optional rows and retries raw-store
+admission; a raw store that itself exceeds a ceiling is not retained. The
+estimate is intentionally conservative and is neither an RSS measurement nor a
+promise that the Go allocator will return the same number of bytes to the
 operating system immediately after eviction.
 
 The engine emits structured, redacted JSON diagnostics on stderr. The GUI

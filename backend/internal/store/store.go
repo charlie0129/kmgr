@@ -3,6 +3,8 @@ package store
 
 import (
 	"cmp"
+	"context"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -184,16 +186,99 @@ func (s *UIDStore) Snapshot() []*unstructured.Unstructured {
 	for _, object := range s.byUID {
 		objects = append(objects, object)
 	}
-	slices.SortFunc(objects, func(a, b *unstructured.Unstructured) int {
-		if result := cmp.Compare(a.GetNamespace(), b.GetNamespace()); result != 0 {
-			return result
-		}
-		if result := cmp.Compare(a.GetName(), b.GetName()); result != 0 {
-			return result
-		}
-		return cmp.Compare(a.GetUID(), b.GetUID())
-	})
+	slices.SortFunc(objects, compareSnapshotObjects)
 	return objects
+}
+
+// SnapshotContext is Snapshot with cancellation checks while both copying the
+// UID map and establishing deterministic order. This keeps a retired large
+// view from retaining a complete object-pointer slice merely because its
+// catch-up was waiting in or executing snapshot work.
+func (s *UIDStore) SnapshotContext(ctx context.Context) ([]*unstructured.Unstructured, error) {
+	if ctx == nil {
+		return nil, errors.New("store: snapshot context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	objects := make([]*unstructured.Unstructured, 0, len(s.byUID))
+	for _, object := range s.byUID {
+		objects = append(objects, object)
+		if len(objects)&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				s.mu.RUnlock()
+				return nil, err
+			}
+		}
+	}
+	s.mu.RUnlock()
+	if err := sortSnapshotContext(ctx, objects); err != nil {
+		return nil, err
+	}
+	return objects, nil
+}
+
+func sortSnapshotContext(ctx context.Context, objects []*unstructured.Unstructured) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(objects) < 2 {
+		return nil
+	}
+	buffer := make([]*unstructured.Unstructured, len(objects))
+	source, target := objects, buffer
+	sourceIsObjects := true
+	for width := 1; width < len(objects); {
+		for left := 0; left < len(objects); left += 2 * width {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			middle := min(left+width, len(objects))
+			right := min(left+2*width, len(objects))
+			first, second := left, middle
+			for output := left; output < right; output++ {
+				if output&255 == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
+				if second >= right || (first < middle && compareSnapshotObjects(source[first], source[second]) <= 0) {
+					target[output] = source[first]
+					first++
+				} else {
+					target[output] = source[second]
+					second++
+				}
+			}
+		}
+		source, target = target, source
+		sourceIsObjects = !sourceIsObjects
+		if width > len(objects)/2 {
+			width = len(objects)
+		} else {
+			width *= 2
+		}
+	}
+	if !sourceIsObjects {
+		for start := 0; start < len(objects); start += 256 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			copy(objects[start:min(start+256, len(objects))], source[start:min(start+256, len(objects))])
+		}
+	}
+	return ctx.Err()
+}
+
+func compareSnapshotObjects(a, b *unstructured.Unstructured) int {
+	if result := cmp.Compare(a.GetNamespace(), b.GetNamespace()); result != 0 {
+		return result
+	}
+	if result := cmp.Compare(a.GetName(), b.GetName()); result != 0 {
+		return result
+	}
+	return cmp.Compare(a.GetUID(), b.GetUID())
 }
 
 // SearchSnapshot returns the same deterministic identity order as Snapshot,

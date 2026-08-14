@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/store"
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -281,6 +282,11 @@ func BenchmarkBackendProjection100K(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	rawStore := store.New()
+	for _, object := range workload.objects {
+		rawStore.Upsert(object)
+	}
+	rawRetainedBytes := rawStore.RetainedBytes()
 	projector, err := newSyntheticProjectionProjector(workload.now)
 	if err != nil {
 		b.Fatal(err)
@@ -298,6 +304,13 @@ func BenchmarkBackendProjection100K(b *testing.B) {
 		}
 		b.StopTimer()
 		b.ReportMetric(syntheticProjectionRows, "rows/op")
+		projectedRetainedBytes := projectedRowsRetainedBytes(benchmarkProjectionRows)
+		b.ReportMetric(float64(rawRetainedBytes), "raw_retained_bytes/op")
+		b.ReportMetric(float64(projectedRetainedBytes), "projected_retained_bytes/op")
+		b.ReportMetric(
+			float64(saturatingProjectionBytes(rawRetainedBytes, projectedRetainedBytes)),
+			"warm_candidate_bytes/op",
+		)
 		if len(benchmarkProjectionRows) != syntheticProjectionRows {
 			b.Fatalf("projected rows = %d, want %d", len(benchmarkProjectionRows), syntheticProjectionRows)
 		}

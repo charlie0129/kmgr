@@ -1,10 +1,14 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -114,6 +118,43 @@ func TestSnapshotUsesStableIdentityOrder(t *testing.T) {
 	want := []types.UID{"uid-a", "uid-b", "uid-c"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("Snapshot UIDs = %v, want %v", got, want)
+	}
+}
+
+func TestSnapshotContextRejectsNilAndAlreadyCanceledContext(t *testing.T) {
+	t.Parallel()
+	s := New()
+	s.Upsert(object("uid", "ns", "name", ""))
+	if _, err := s.SnapshotContext(nil); err == nil {
+		t.Fatal("SnapshotContext accepted a nil context")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.SnapshotContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SnapshotContext error = %v, want canceled", err)
+	}
+}
+
+func TestSnapshotContextChecksCancellationDuringDeterministicSort(t *testing.T) {
+	t.Parallel()
+	s := New()
+	const objectCount = 1024
+	for index := range objectCount {
+		s.Upsert(object(
+			fmt.Sprintf("uid-%04d", index),
+			"ns",
+			fmt.Sprintf("name-%04d", objectCount-index),
+			"",
+		))
+	}
+	// One initial check plus four map-copy checks and the sort's initial check
+	// occur before merge work. Canceling on the tenth proves sorting also polls.
+	ctx := &cancelAfterContext{after: 10}
+	if _, err := s.SnapshotContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SnapshotContext error = %v, want canceled", err)
+	}
+	if got := ctx.checks.Load(); got < ctx.after {
+		t.Fatalf("context checks = %d, want at least %d", got, ctx.after)
 	}
 }
 
@@ -328,4 +369,20 @@ func object(uid, namespace, name, node string) *unstructured.Unstructured {
 		value.Object["spec"] = map[string]any{"nodeName": node}
 	}
 	return value
+}
+
+type cancelAfterContext struct {
+	checks atomic.Int64
+	after  int64
+}
+
+func (*cancelAfterContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*cancelAfterContext) Done() <-chan struct{}       { return nil }
+func (*cancelAfterContext) Value(any) any               { return nil }
+
+func (c *cancelAfterContext) Err() error {
+	if c.checks.Add(1) >= c.after {
+		return context.Canceled
+	}
+	return nil
 }

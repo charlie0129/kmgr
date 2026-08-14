@@ -54,12 +54,17 @@ per-cluster ceilings. The defaults are:
 | Process | 24 | 250,000 | 512 MiB |
 | Cluster authority | 8 | 100,000 | 192 MiB |
 
-An entry must fit all three ceilings at both scopes. Retained bytes are an
+An entry must fit all three ceilings at both scopes. Retained bytes combine an
 incrementally maintained, deliberately conservative estimate of immutable
-unstructured maps/slices/scalars plus UID-store index overhead. They are not
-live heap or RSS samples. This avoids serializing a whole stopped view while
-the lifecycle lock is held and ensures a low object count cannot hide a very
-large ConfigMap, Secret, or custom resource payload.
+unstructured maps/slices/scalars and UID-store index overhead with the compact
+projected row graph retained for immediate stale first paint. They are not live
+heap or RSS samples. Raw accounting avoids serializing a whole stopped view
+while the lifecycle lock is held, and final-consumer row capture is skipped
+when the raw store already fills an individual ceiling. If projected rows push
+an otherwise fitting raw entry over either individual byte ceiling, the rows
+are discarded and admission is retried raw-only. This ensures a low object
+count cannot hide a very large ConfigMap, Secret, or custom resource payload
+without letting optional first-paint rows evict the useful raw store outright.
 
 The estimate adds bounded work to the LIST/WATCH insertion path. Exercise that
 path independently from fixture construction with:
@@ -74,6 +79,19 @@ go test ./backend/internal/store \
 The benchmark inserts 100,000 prebuilt unstructured Pods and verifies final
 cardinality. It has no elapsed-time gate; compare repeated samples and allocation
 counts on the same machine when changing retained-size accounting.
+
+`BenchmarkBackendProjection100K/initial_snapshot` also reports
+`raw_retained_bytes/op`, `projected_retained_bytes/op`, and their
+`warm_candidate_bytes/op` sum after the timed projection. These are
+conservative retained-graph estimates for the same object workload, not the
+benchmark's allocated `B/op` value. Run it with:
+
+```sh
+go test ./backend/internal/view \
+  -run '^$' \
+  -bench '^BenchmarkBackendProjection100K/initial_snapshot$' \
+  -benchtime=1x -benchmem -count=5
+```
 
 When diagnostics are enabled, the harness also samples its own process with
 Mach `TASK_VM_INFO` before and after the large view. It reports resident size,
@@ -276,6 +294,23 @@ ranged from 240.257–257.031 ms for the initial projection and
 258.096–299.000 ms for the bursts. Only one comparable pre-change timing was
 recorded, so the timing values are references rather than evidence of a stable
 CPU-speed improvement.
+
+The same machine's one-shot 100,000-object Go fixtures reported these
+conservative warm-cache weights:
+
+| Warm candidate component | Retained estimate |
+| --- | ---: |
+| Raw objects and UID-store indexes | 1,001,726,336 bytes (955.32 MiB) |
+| Compact projected rows | 292,827,370 bytes (279.26 MiB) |
+| Combined candidate | 1,294,553,706 bytes (1,234.58 MiB) |
+
+All three values come from the same projection workload. Its raw store alone
+therefore exceeds both current byte defaults; the separate, lighter
+`BenchmarkUIDStoreUpsert100K` fixture reported 367,571,608 bytes (350.54 MiB)
+and must not be added to the projection workload's row estimate. These
+synthetic results are useful input when tuning defaults; they are not RSS
+measurements or evidence that a typical 100,000-object cluster has either
+object/column shape.
 
 | AppKit phase/evidence | Result |
 | --- | ---: |
