@@ -296,19 +296,30 @@ public struct ResourceSnapshotChunk: Hashable, Sendable {
     public var last: Bool
     public var index: UInt64
     public var estimatedTotalRows: UInt64
+    /// Exact scheduler resource names observed in the raw Pod/Node objects
+    /// behind this projection. They are discovery hints only; the authenticated
+    /// cache-only catalog remains authoritative for column installation.
+    public var observedOptionalResourceKeys: Set<String>
+    /// More exact names were observed than the bounded stream hint can carry.
+    /// Clients should still perform one authoritative cache-only refresh.
+    public var observedOptionalResourceKeysTruncated: Bool
 
     public init(
         rows: [ResourceRow],
         first: Bool,
         last: Bool,
         index: UInt64,
-        estimatedTotalRows: UInt64
+        estimatedTotalRows: UInt64,
+        observedOptionalResourceKeys: Set<String> = [],
+        observedOptionalResourceKeysTruncated: Bool = false
     ) {
         self.rows = rows
         self.first = first
         self.last = last
         self.index = index
         self.estimatedTotalRows = estimatedTotalRows
+        self.observedOptionalResourceKeys = observedOptionalResourceKeys
+        self.observedOptionalResourceKeysTruncated = observedOptionalResourceKeysTruncated
     }
 }
 
@@ -317,16 +328,24 @@ public struct ResourceRowDelta: Hashable, Sendable {
     public var removedUIDs: Set<ResourceUID>
     public var orderedUIDs: [ResourceUID]
     public var orderIsComplete: Bool
+    /// See `ResourceSnapshotChunk.observedOptionalResourceKeys`. A keys-only
+    /// delta may carry this hint even when filtering suppresses every row.
+    public var observedOptionalResourceKeys: Set<String>
+    public var observedOptionalResourceKeysTruncated: Bool
 
     public init(
         upserts: [ResourceRow] = [],
         removedUIDs: Set<ResourceUID> = [],
         orderedUIDs: [ResourceUID] = [],
-        orderIsComplete: Bool = false
+        orderIsComplete: Bool = false,
+        observedOptionalResourceKeys: Set<String> = [],
+        observedOptionalResourceKeysTruncated: Bool = false
     ) {
         self.upserts = upserts
         self.removedUIDs = removedUIDs
         self.orderedUIDs = orderedUIDs
         self.orderIsComplete = orderIsComplete
+        self.observedOptionalResourceKeys = observedOptionalResourceKeys
+        self.observedOptionalResourceKeysTruncated = observedOptionalResourceKeysTruncated
     }
 }

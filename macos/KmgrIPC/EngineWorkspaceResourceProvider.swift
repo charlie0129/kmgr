@@ -473,7 +473,12 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
                     first: snapshot.firstChunk,
                     last: snapshot.lastChunk,
                     index: snapshot.chunkIndex,
-                    estimatedTotalRows: snapshot.estimatedTotalRows
+                    estimatedTotalRows: snapshot.estimatedTotalRows,
+                    observedOptionalResourceKeys: Set(
+                        snapshot.observedOptionalResourceKeys
+                    ),
+                    observedOptionalResourceKeysTruncated:
+                        snapshot.observedOptionalResourceKeysTruncated
                 )
             )
         case .delta(let delta):
@@ -483,7 +488,12 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
                     upserts: delta.upserts.map(row(from:)),
                     removedUIDs: Set(delta.removedUids.map { ResourceUID($0) }),
                     orderedUIDs: delta.orderedUids.map { ResourceUID($0) },
-                    orderIsComplete: delta.orderIsComplete
+                    orderIsComplete: delta.orderIsComplete,
+                    observedOptionalResourceKeys: Set(
+                        delta.observedOptionalResourceKeys
+                    ),
+                    observedOptionalResourceKeysTruncated:
+                        delta.observedOptionalResourceKeysTruncated
                 )
             )
         case .error(let error):

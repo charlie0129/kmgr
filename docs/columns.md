@@ -136,6 +136,14 @@ configured-but-absent entries remain disabled. Ephemeral storage remains in
 the existing built-in column instead of creating a duplicate exact-resource
 column.
 
+Pod and Node stream messages carry only a bounded advisory set of exact
+scheduler resource names observed behind their compact rows. A new name, or an
+overflow marker, triggers another authenticated cache-only catalog query. The
+hint never installs a column directly, and stream delivery never waits for the
+catalog or Kubernetes API I/O; it closes the cold-empty race where the initial
+catalog query can finish just before the first huge-page or accelerator object
+arrives.
+
 The catalog is optional enrichment. Failure is silent and does not change the
 base view's rows, freshness, or error state. A transient overlay lasts only for
 the current helper session and exact GVR, survives a same-GVR stream reopen,

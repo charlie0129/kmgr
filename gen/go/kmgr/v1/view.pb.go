@@ -823,8 +823,16 @@ type SnapshotChunk struct {
 	LastChunk          bool                   `protobuf:"varint,3,opt,name=last_chunk,json=lastChunk,proto3" json:"last_chunk,omitempty"`
 	ChunkIndex         uint64                 `protobuf:"varint,4,opt,name=chunk_index,json=chunkIndex,proto3" json:"chunk_index,omitempty"`
 	EstimatedTotalRows uint64                 `protobuf:"varint,5,opt,name=estimated_total_rows,json=estimatedTotalRows,proto3" json:"estimated_total_rows,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Advisory exact Kubernetes ResourceName values newly observed in the raw
+	// core/v1 Pod or Node objects behind this snapshot. Entries are distinct and
+	// sorted. Clients may use them to decide when to repeat cache-only optional
+	// resource discovery; the catalog RPC remains authoritative for metadata.
+	ObservedOptionalResourceKeys []string `protobuf:"bytes,6,rep,name=observed_optional_resource_keys,json=observedOptionalResourceKeys,proto3" json:"observed_optional_resource_keys,omitempty"`
+	// True when the advisory key set exceeded its bounded wire budget. Clients
+	// should repeat cache-only discovery even if every retained key is known.
+	ObservedOptionalResourceKeysTruncated bool `protobuf:"varint,7,opt,name=observed_optional_resource_keys_truncated,json=observedOptionalResourceKeysTruncated,proto3" json:"observed_optional_resource_keys_truncated,omitempty"`
+	unknownFields                         protoimpl.UnknownFields
+	sizeCache                             protoimpl.SizeCache
 }
 
 func (x *SnapshotChunk) Reset() {
@@ -892,14 +900,35 @@ func (x *SnapshotChunk) GetEstimatedTotalRows() uint64 {
 	return 0
 }
 
+func (x *SnapshotChunk) GetObservedOptionalResourceKeys() []string {
+	if x != nil {
+		return x.ObservedOptionalResourceKeys
+	}
+	return nil
+}
+
+func (x *SnapshotChunk) GetObservedOptionalResourceKeysTruncated() bool {
+	if x != nil {
+		return x.ObservedOptionalResourceKeysTruncated
+	}
+	return false
+}
+
 type RowDelta struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Upserts         []*ResourceRow         `protobuf:"bytes,1,rep,name=upserts,proto3" json:"upserts,omitempty"`
 	RemovedUids     []string               `protobuf:"bytes,2,rep,name=removed_uids,json=removedUids,proto3" json:"removed_uids,omitempty"`
 	OrderedUids     []string               `protobuf:"bytes,3,rep,name=ordered_uids,json=orderedUids,proto3" json:"ordered_uids,omitempty"`
 	OrderIsComplete bool                   `protobuf:"varint,4,opt,name=order_is_complete,json=orderIsComplete,proto3" json:"order_is_complete,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Advisory exact Kubernetes ResourceName values newly observed in raw
+	// core/v1 Pod or Node upserts. This may be populated even when filtering
+	// produces no row upsert. Entries are distinct and sorted.
+	ObservedOptionalResourceKeys []string `protobuf:"bytes,5,rep,name=observed_optional_resource_keys,json=observedOptionalResourceKeys,proto3" json:"observed_optional_resource_keys,omitempty"`
+	// True when the advisory key set exceeded its bounded wire budget. Clients
+	// should repeat cache-only discovery even if every retained key is known.
+	ObservedOptionalResourceKeysTruncated bool `protobuf:"varint,6,opt,name=observed_optional_resource_keys_truncated,json=observedOptionalResourceKeysTruncated,proto3" json:"observed_optional_resource_keys_truncated,omitempty"`
+	unknownFields                         protoimpl.UnknownFields
+	sizeCache                             protoimpl.SizeCache
 }
 
 func (x *RowDelta) Reset() {
@@ -956,6 +985,20 @@ func (x *RowDelta) GetOrderedUids() []string {
 func (x *RowDelta) GetOrderIsComplete() bool {
 	if x != nil {
 		return x.OrderIsComplete
+	}
+	return false
+}
+
+func (x *RowDelta) GetObservedOptionalResourceKeys() []string {
+	if x != nil {
+		return x.ObservedOptionalResourceKeys
+	}
+	return nil
+}
+
+func (x *RowDelta) GetObservedOptionalResourceKeysTruncated() bool {
+	if x != nil {
+		return x.ObservedOptionalResourceKeysTruncated
 	}
 	return false
 }
@@ -1951,7 +1994,7 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"\frows_visible\x18\x03 \x01(\x04R\vrowsVisible\x129\n" +
 	"\x19last_synchronized_unix_ms\x18\x04 \x01(\x03R\x16lastSynchronizedUnixMs\x12&\n" +
 	"\x0ffrom_warm_cache\x18\x05 \x01(\bR\rfromWarmCache\x122\n" +
-	"\x15resource_version_hint\x18\x06 \x01(\tR\x13resourceVersionHint\"\xcc\x01\n" +
+	"\x15resource_version_hint\x18\x06 \x01(\tR\x13resourceVersionHint\"\xed\x02\n" +
 	"\rSnapshotChunk\x12(\n" +
 	"\x04rows\x18\x01 \x03(\v2\x14.kmgr.v1.ResourceRowR\x04rows\x12\x1f\n" +
 	"\vfirst_chunk\x18\x02 \x01(\bR\n" +
@@ -1960,12 +2003,16 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"last_chunk\x18\x03 \x01(\bR\tlastChunk\x12\x1f\n" +
 	"\vchunk_index\x18\x04 \x01(\x04R\n" +
 	"chunkIndex\x120\n" +
-	"\x14estimated_total_rows\x18\x05 \x01(\x04R\x12estimatedTotalRows\"\xac\x01\n" +
+	"\x14estimated_total_rows\x18\x05 \x01(\x04R\x12estimatedTotalRows\x12E\n" +
+	"\x1fobserved_optional_resource_keys\x18\x06 \x03(\tR\x1cobservedOptionalResourceKeys\x12X\n" +
+	")observed_optional_resource_keys_truncated\x18\a \x01(\bR%observedOptionalResourceKeysTruncated\"\xcd\x02\n" +
 	"\bRowDelta\x12.\n" +
 	"\aupserts\x18\x01 \x03(\v2\x14.kmgr.v1.ResourceRowR\aupserts\x12!\n" +
 	"\fremoved_uids\x18\x02 \x03(\tR\vremovedUids\x12!\n" +
 	"\fordered_uids\x18\x03 \x03(\tR\vorderedUids\x12*\n" +
-	"\x11order_is_complete\x18\x04 \x01(\bR\x0forderIsComplete\"\x87\x02\n" +
+	"\x11order_is_complete\x18\x04 \x01(\bR\x0forderIsComplete\x12E\n" +
+	"\x1fobserved_optional_resource_keys\x18\x05 \x03(\tR\x1cobservedOptionalResourceKeys\x12X\n" +
+	")observed_optional_resource_keys_truncated\x18\x06 \x01(\bR%observedOptionalResourceKeysTruncated\"\x87\x02\n" +
 	"\tViewEvent\x12-\n" +
 	"\x06cursor\x18\x01 \x01(\v2\x15.kmgr.v1.StreamCursorR\x06cursor\x124\n" +
 	"\bsnapshot\x18\x02 \x01(\v2\x16.kmgr.v1.SnapshotChunkH\x00R\bsnapshot\x12)\n" +

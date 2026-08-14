@@ -188,9 +188,13 @@ After a Pod or Node base snapshot is usable, Kmgr queries a cache-only catalog
 for exact huge-page and accelerator resources and automatically installs
 present resources as transient columns. Ephemeral storage remains represented
 by its richer built-in column rather than a duplicate exact-resource column.
-Discovery never delays or changes base-list freshness, persisted definitions
-win over transient matches, and the transient overlay is scoped to the current
-helper session and exact GVR rather than written to `columns.yaml`.
+If a later Pod or Node update introduces a previously unseen exact scheduler
+resource, a bounded stream hint repeats the authoritative cache-only query so
+a cold empty snapshot cannot permanently hide that column.
+Base-list delivery never waits for catalog or Kubernetes API I/O, discovery
+does not change base-list freshness, persisted definitions win over transient
+matches, and the transient overlay is scoped to the current helper session and
+exact GVR rather than written to `columns.yaml`.
 
 ## Architecture and security
 

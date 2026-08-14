@@ -39,6 +39,41 @@ struct OptionalResourceDiscoveryGateTests {
         #expect(gate.beginDiscovery(refresh: true) != nil)
     }
 
+    @Test("catalog reproject preserves completion but still permits hinted refresh")
+    func preservesCompletionAcrossCatalogReproject() throws {
+        var gate = OptionalResourceCatalogDiscoveryGate()
+        let firstTarget = Self.target(resource: Self.pods, generation: 20)
+        gate.select(firstTarget)
+        gate.markBaseViewUsable()
+        let startedAutomatic = gate.beginDiscovery()
+        let automatic = try #require(startedAutomatic)
+        let automaticApplied = gate.finishSuccess(automatic)
+        #expect(automaticApplied)
+
+        let reprojectedTarget = Self.target(resource: Self.pods, generation: 21)
+        gate.select(
+            reprojectedTarget,
+            preservingAutomaticDiscoveryCompletion: true
+        )
+        #expect(gate.automaticDiscoveryCompleted)
+        #expect(!gate.baseViewIsUsable)
+        gate.markBaseViewUsable()
+        #expect(gate.beginDiscovery() == nil)
+
+        let startedRefresh = gate.beginDiscovery(refresh: true)
+        let refresh = try #require(startedRefresh)
+        #expect(refresh.targetKey == reprojectedTarget.key)
+
+        // Preservation is scoped to the same helper session and exact GVR.
+        gate.select(
+            Self.target(resource: Self.nodes, generation: 22),
+            preservingAutomaticDiscoveryCompletion: true
+        )
+        #expect(!gate.automaticDiscoveryCompleted)
+        let staleRefreshApplied = gate.finishSuccess(refresh)
+        #expect(!staleRefreshApplied)
+    }
+
     @Test("stale completions cannot apply after the selected target changes")
     func ignoresStaleCompletion() throws {
         var gate = OptionalResourceCatalogDiscoveryGate()

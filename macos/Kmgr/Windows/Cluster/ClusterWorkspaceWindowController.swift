@@ -1630,6 +1630,7 @@ private final class ResourceListViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate
 {
     private static let autoWidthPolicy = TableColumnAutoWidthPolicy()
+    private static let maxPendingOptionalResourceKeys = 256
 
     private var session: OpenedClusterSession
     private var isAuthenticated: Bool
@@ -1660,6 +1661,11 @@ private final class ResourceListViewController: NSViewController,
     private var streamTask: Task<Void, Never>?
     private var optionalResourceCatalogTask: Task<Void, Never>?
     private var optionalResourceCatalogTaskTicket: OptionalResourceCatalogDiscoveryTicket?
+    private var optionalResourceCatalogTaskRefreshKeys: Set<String> = []
+    private var optionalResourceCatalogTaskHintRevision: UInt64 = 0
+    private var pendingOptionalResourceKeys: Set<String> = []
+    private var pendingOptionalResourceRefreshRequired = false
+    private var optionalResourceHintRevision: UInt64 = 0
     private var optionalResourceDiscoveryGate = OptionalResourceCatalogDiscoveryGate()
     private var optionalResourceOverlayState = OptionalResourceOverlayLifetimeState()
     private var filterTask: Task<Void, Never>?
@@ -2138,13 +2144,19 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
-    private func openStream() {
+    private func openStream(
+        preservingOptionalResourceDiscoveryState: Bool = false
+    ) {
         guard isAuthenticated, resourceCatalogValidated else { return }
         guard let resource else { return }
         endProjectionRequest(outcome: "superseded")
         cancelCurrentStream()
         generation &+= 1
-        prepareOptionalResourceDiscovery(for: resource)
+        prepareOptionalResourceDiscovery(
+            for: resource,
+            preservingOptionalResourceDiscoveryState:
+                preservingOptionalResourceDiscoveryState
+        )
         beginProjectionRequest()
         generationGate.reset()
         let reprojectsSameView = lastStreamResourceID == resource.id
@@ -2269,6 +2281,10 @@ private final class ResourceListViewController: NSViewController,
                 "visible_rows=\(self.model.orderedVisibleUIDs.count) stored_rows=\(self.model.rowByUID.count) selected_rows=\(plan.selectedRowIndexes.count)"
             )
             applyTablePlan(plan)
+            observeOptionalResourceKeys(
+                chunk.observedOptionalResourceKeys,
+                truncated: chunk.observedOptionalResourceKeysTruncated
+            )
             if !chunk.rows.isEmpty || chunk.last {
                 markBaseViewUsableForOptionalResourceDiscovery()
             }
@@ -2298,6 +2314,10 @@ private final class ResourceListViewController: NSViewController,
             recoveredResourceTrust.receiveDelta(
                 upsertedUIDs: delta.upserts.map { $0.identity.uid },
                 removedUIDs: delta.removedUIDs
+            )
+            observeOptionalResourceKeys(
+                delta.observedOptionalResourceKeys,
+                truncated: delta.observedOptionalResourceKeysTruncated
             )
         case .failure(_, let issue):
             endProjectionRequest(outcome: "failed")
@@ -2469,36 +2489,59 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
-    /// Gives each stream generation fresh discovery authority. The installed
-    /// overlay survives same-session/same-GVR reopens to avoid flicker and an
-    /// add/remove reopen loop; changing either part of its scope removes it.
-    private func prepareOptionalResourceDiscovery(for resource: DiscoveredResource) {
-        if optionalResourceOverlayState.clearIfScopeChanged(
+    /// Gives each stream generation distinct completion authority. The
+    /// catalog-driven column reproject may inherit only the completed automatic
+    /// scan bit and bounded pending-hint mailbox. This avoids a redundant query
+    /// without losing a hint that raced the response which caused the reopen.
+    /// Changing session or GVR still clears the overlay and pending hints.
+    private func prepareOptionalResourceDiscovery(
+        for resource: DiscoveredResource,
+        preservingOptionalResourceDiscoveryState: Bool
+    ) {
+        let overlayScopeChanged = optionalResourceOverlayState.clearIfScopeChanged(
             sessionID: session.sessionID,
             gvr: resourceGVR(for: resource)
-        ) {
+        )
+        if !preservingOptionalResourceDiscoveryState || overlayScopeChanged {
+            pendingOptionalResourceKeys.removeAll(keepingCapacity: true)
+            pendingOptionalResourceRefreshRequired = false
+            optionalResourceHintRevision = 0
+        }
+        if overlayScopeChanged {
             installEffectiveColumns(for: resource)
         }
-        cancelOptionalResourceDiscovery(selecting:
-            OptionalResourceCatalogDiscoveryTarget(
+        cancelOptionalResourceDiscovery(
+            selecting: OptionalResourceCatalogDiscoveryTarget(
                 sessionID: session.sessionID,
                 applicableResource: resource,
                 viewGeneration: generation
-            )
+            ),
+            preservingOptionalResourceDiscoveryState:
+                preservingOptionalResourceDiscoveryState
         )
     }
 
     private func cancelOptionalResourceDiscovery(
-        selecting target: OptionalResourceCatalogDiscoveryTarget?
+        selecting target: OptionalResourceCatalogDiscoveryTarget?,
+        preservingOptionalResourceDiscoveryState: Bool = false
     ) {
         optionalResourceCatalogTask?.cancel()
         optionalResourceCatalogTask = nil
         optionalResourceCatalogTaskTicket = nil
-        optionalResourceDiscoveryGate.select(target)
+        optionalResourceCatalogTaskRefreshKeys.removeAll(keepingCapacity: true)
+        optionalResourceCatalogTaskHintRevision = 0
+        optionalResourceDiscoveryGate.select(
+            target,
+            preservingAutomaticDiscoveryCompletion:
+                preservingOptionalResourceDiscoveryState
+        )
     }
 
     private func clearOptionalResourceOverlay() {
         optionalResourceOverlayState.clear()
+        pendingOptionalResourceKeys.removeAll(keepingCapacity: true)
+        pendingOptionalResourceRefreshRequired = false
+        optionalResourceHintRevision = 0
     }
 
     private func markBaseViewUsableForOptionalResourceDiscovery() {
@@ -2507,11 +2550,17 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func beginOptionalResourceDiscoveryIfAuthorized() {
+        let refreshKeys = pendingOptionalResourceKeys
+        let refreshRequired = pendingOptionalResourceRefreshRequired
         guard optionalResourceCatalogTask == nil,
-            let ticket = optionalResourceDiscoveryGate.beginDiscovery()
+            let ticket = optionalResourceDiscoveryGate.beginDiscovery(
+                refresh: !refreshKeys.isEmpty || refreshRequired
+            )
         else { return }
         let provider = optionalResourceCatalogProvider
         optionalResourceCatalogTaskTicket = ticket
+        optionalResourceCatalogTaskRefreshKeys = refreshKeys
+        optionalResourceCatalogTaskHintRevision = optionalResourceHintRevision
         optionalResourceCatalogTask = Task { [weak self, provider] in
             do {
                 let catalog = try await provider.discoverOptionalResources(ticket.request)
@@ -2529,8 +2578,13 @@ private final class ResourceListViewController: NSViewController,
     private func finishOptionalResourceDiscoveryWithoutResult(
         _ ticket: OptionalResourceCatalogDiscoveryTicket
     ) {
-        _ = optionalResourceDiscoveryGate.finishWithoutResult(ticket)
+        let attemptedHintRevision = optionalResourceCatalogTaskTicket == ticket
+            ? optionalResourceCatalogTaskHintRevision : optionalResourceHintRevision
+        let resultIsCurrent = optionalResourceDiscoveryGate.finishWithoutResult(ticket)
         releaseOptionalResourceCatalogTask(ticket)
+        if resultIsCurrent, optionalResourceHintRevision != attemptedHintRevision {
+            beginOptionalResourceDiscoveryIfAuthorized()
+        }
         // Catalog failures are deliberately silent and never alter the base
         // resource stream's freshness or inline error presentation.
     }
@@ -2541,12 +2595,18 @@ private final class ResourceListViewController: NSViewController,
         guard optionalResourceCatalogTaskTicket == ticket else { return }
         optionalResourceCatalogTask = nil
         optionalResourceCatalogTaskTicket = nil
+        optionalResourceCatalogTaskRefreshKeys.removeAll(keepingCapacity: true)
+        optionalResourceCatalogTaskHintRevision = 0
     }
 
     private func finishOptionalResourceDiscovery(
         _ ticket: OptionalResourceCatalogDiscoveryTicket,
         catalog: OptionalResourceCatalog
     ) {
+        let attemptedRefreshKeys = optionalResourceCatalogTaskTicket == ticket
+            ? optionalResourceCatalogTaskRefreshKeys : []
+        let attemptedHintRevision = optionalResourceCatalogTaskTicket == ticket
+            ? optionalResourceCatalogTaskHintRevision : optionalResourceHintRevision
         let resultIsCurrent = optionalResourceDiscoveryGate.finishSuccess(ticket)
         releaseOptionalResourceCatalogTask(ticket)
         guard resultIsCurrent,
@@ -2559,6 +2619,16 @@ private final class ResourceListViewController: NSViewController,
         else {
             return
         }
+
+        pendingOptionalResourceKeys.subtract(
+            catalog.resources.lazy.filter(\.isPresent).map(\.exactKey)
+        )
+        // A successful catalog request consumed the hints visible when it
+        // began. Hints arriving during that request remain pending and cause
+        // exactly one follow-up refresh if the response did not include them.
+        pendingOptionalResourceKeys.subtract(attemptedRefreshKeys)
+        pendingOptionalResourceRefreshRequired =
+            optionalResourceHintRevision != attemptedHintRevision
 
         let persisted = persistedColumnDefinitions(for: resource)
         let previousEnabled = enabledColumnDefinitions(in: effectiveColumnDefinitions(
@@ -2586,10 +2656,51 @@ private final class ResourceListViewController: NSViewController,
         )
         let enabled = enabledColumnDefinitions(in: effective)
         installColumns(effective)
-        guard enabled != previousEnabled else { return }
-        openStream()
-        updateStatusLine()
-        onRestorationChanged?()
+        if enabled != previousEnabled {
+            openStream(preservingOptionalResourceDiscoveryState: true)
+            updateStatusLine()
+            onRestorationChanged?()
+        } else {
+            beginOptionalResourceDiscoveryIfAuthorized()
+        }
+    }
+
+    /// Stream hints carry only exact non-sensitive resource names observed in
+    /// raw Pod/Node objects. They never install columns directly: the
+    /// authenticated cache-only catalog must confirm presence and presentation
+    /// metadata first. Keeping hints pending closes the cold-empty race where
+    /// the one automatic query finishes just before the first live object.
+    private func observeOptionalResourceKeys(
+        _ observed: Set<String>,
+        truncated: Bool
+    ) {
+        guard !observed.isEmpty || truncated else { return }
+        let presentCatalogKeys = Set(
+            (optionalResourceOverlayState.overlay.catalog?.resources ?? []).lazy
+                .filter(\.isPresent)
+                .map(\.exactKey)
+        )
+        var refreshRequired = truncated
+        var observedUnconfirmedKey = false
+        for key in observed.sorted() where key != "ephemeral-storage"
+            && !presentCatalogKeys.contains(key)
+        {
+            observedUnconfirmedKey = true
+            guard !pendingOptionalResourceKeys.contains(key) else { continue }
+            if pendingOptionalResourceKeys.count < Self.maxPendingOptionalResourceKeys {
+                pendingOptionalResourceKeys.insert(key)
+            } else {
+                refreshRequired = true
+            }
+        }
+        guard observedUnconfirmedKey || refreshRequired else { return }
+        optionalResourceHintRevision &+= 1
+        pendingOptionalResourceRefreshRequired =
+            pendingOptionalResourceRefreshRequired || refreshRequired
+        guard !pendingOptionalResourceKeys.isEmpty
+            || pendingOptionalResourceRefreshRequired
+        else { return }
+        beginOptionalResourceDiscoveryIfAuthorized()
     }
 
     private func updateStatusLine() {

@@ -1,9 +1,9 @@
 import KmgrCore
 
 /// Owns the transient overlay and its helper-session/GVR lifetime. Stream
-/// generation is intentionally absent: each generation gets fresh discovery
-/// authority from `OptionalResourceCatalogDiscoveryGate`, while an already
-/// installed overlay remains visible across a same-target stream reopen.
+/// generation is intentionally absent. The discovery gate still gives every
+/// generation distinct completion authority, while an already installed
+/// overlay remains visible across a same-target stream reopen.
 struct OptionalResourceOverlayLifetimeState: Hashable, Sendable {
     private struct Scope: Hashable, Sendable {
         var sessionID: String

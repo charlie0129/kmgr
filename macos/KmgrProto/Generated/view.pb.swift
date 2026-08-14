@@ -461,6 +461,16 @@ public struct Kmgr_V1_SnapshotChunk: Sendable {
 
   public var estimatedTotalRows: UInt64 = 0
 
+  /// Advisory exact Kubernetes ResourceName values newly observed in the raw
+  /// core/v1 Pod or Node objects behind this snapshot. Entries are distinct and
+  /// sorted. Clients may use them to decide when to repeat cache-only optional
+  /// resource discovery; the catalog RPC remains authoritative for metadata.
+  public var observedOptionalResourceKeys: [String] = []
+
+  /// True when the advisory key set exceeded its bounded wire budget. Clients
+  /// should repeat cache-only discovery even if every retained key is known.
+  public var observedOptionalResourceKeysTruncated: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -478,6 +488,15 @@ public struct Kmgr_V1_RowDelta: Sendable {
   public var orderedUids: [String] = []
 
   public var orderIsComplete: Bool = false
+
+  /// Advisory exact Kubernetes ResourceName values newly observed in raw
+  /// core/v1 Pod or Node upserts. This may be populated even when filtering
+  /// produces no row upsert. Entries are distinct and sorted.
+  public var observedOptionalResourceKeys: [String] = []
+
+  /// True when the advisory key set exceeded its bounded wire budget. Clients
+  /// should repeat cache-only discovery even if every retained key is known.
+  public var observedOptionalResourceKeysTruncated: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1475,7 +1494,7 @@ extension Kmgr_V1_ViewStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
 
 extension Kmgr_V1_SnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SnapshotChunk"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}rows\0\u{3}first_chunk\0\u{3}last_chunk\0\u{3}chunk_index\0\u{3}estimated_total_rows\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}rows\0\u{3}first_chunk\0\u{3}last_chunk\0\u{3}chunk_index\0\u{3}estimated_total_rows\0\u{3}observed_optional_resource_keys\0\u{3}observed_optional_resource_keys_truncated\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1488,6 +1507,8 @@ extension Kmgr_V1_SnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
       case 3: try { try decoder.decodeSingularBoolField(value: &self.lastChunk) }()
       case 4: try { try decoder.decodeSingularUInt64Field(value: &self.chunkIndex) }()
       case 5: try { try decoder.decodeSingularUInt64Field(value: &self.estimatedTotalRows) }()
+      case 6: try { try decoder.decodeRepeatedStringField(value: &self.observedOptionalResourceKeys) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.observedOptionalResourceKeysTruncated) }()
       default: break
       }
     }
@@ -1509,6 +1530,12 @@ extension Kmgr_V1_SnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
     if self.estimatedTotalRows != 0 {
       try visitor.visitSingularUInt64Field(value: self.estimatedTotalRows, fieldNumber: 5)
     }
+    if !self.observedOptionalResourceKeys.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.observedOptionalResourceKeys, fieldNumber: 6)
+    }
+    if self.observedOptionalResourceKeysTruncated != false {
+      try visitor.visitSingularBoolField(value: self.observedOptionalResourceKeysTruncated, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1518,6 +1545,8 @@ extension Kmgr_V1_SnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
     if lhs.lastChunk != rhs.lastChunk {return false}
     if lhs.chunkIndex != rhs.chunkIndex {return false}
     if lhs.estimatedTotalRows != rhs.estimatedTotalRows {return false}
+    if lhs.observedOptionalResourceKeys != rhs.observedOptionalResourceKeys {return false}
+    if lhs.observedOptionalResourceKeysTruncated != rhs.observedOptionalResourceKeysTruncated {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1525,7 +1554,7 @@ extension Kmgr_V1_SnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Kmgr_V1_RowDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RowDelta"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}upserts\0\u{3}removed_uids\0\u{3}ordered_uids\0\u{3}order_is_complete\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}upserts\0\u{3}removed_uids\0\u{3}ordered_uids\0\u{3}order_is_complete\0\u{3}observed_optional_resource_keys\0\u{3}observed_optional_resource_keys_truncated\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1537,6 +1566,8 @@ extension Kmgr_V1_RowDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
       case 2: try { try decoder.decodeRepeatedStringField(value: &self.removedUids) }()
       case 3: try { try decoder.decodeRepeatedStringField(value: &self.orderedUids) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.orderIsComplete) }()
+      case 5: try { try decoder.decodeRepeatedStringField(value: &self.observedOptionalResourceKeys) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.observedOptionalResourceKeysTruncated) }()
       default: break
       }
     }
@@ -1555,6 +1586,12 @@ extension Kmgr_V1_RowDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if self.orderIsComplete != false {
       try visitor.visitSingularBoolField(value: self.orderIsComplete, fieldNumber: 4)
     }
+    if !self.observedOptionalResourceKeys.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.observedOptionalResourceKeys, fieldNumber: 5)
+    }
+    if self.observedOptionalResourceKeysTruncated != false {
+      try visitor.visitSingularBoolField(value: self.observedOptionalResourceKeysTruncated, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1563,6 +1600,8 @@ extension Kmgr_V1_RowDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if lhs.removedUids != rhs.removedUids {return false}
     if lhs.orderedUids != rhs.orderedUids {return false}
     if lhs.orderIsComplete != rhs.orderIsComplete {return false}
+    if lhs.observedOptionalResourceKeys != rhs.observedOptionalResourceKeys {return false}
+    if lhs.observedOptionalResourceKeysTruncated != rhs.observedOptionalResourceKeysTruncated {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

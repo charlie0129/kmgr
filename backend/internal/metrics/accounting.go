@@ -292,6 +292,27 @@ func DiscoverResources(nodes []*corev1.Node, pods []*corev1.Pod, acceleratorConf
 	return discovered
 }
 
+// IsOptionalSchedulerResource reports whether an observed exact Kubernetes
+// resource name represents a huge-page size or an accelerator under the same
+// configured exact-key and suffix rules used by DiscoverResources. It excludes
+// base resources such as CPU, memory, and ephemeral-storage.
+func IsOptionalSchedulerResource(name corev1.ResourceName, acceleratorConfig AcceleratorConfig) bool {
+	if name == "" {
+		return false
+	}
+	if isHugePageResource(name) {
+		return true
+	}
+	if _, configured := acceleratorConfig.Resources[string(name)]; configured {
+		return true
+	}
+	suffixes := acceleratorConfig.AutoDetectSuffixes
+	if suffixes == nil {
+		suffixes = defaultAcceleratorSuffixes[:]
+	}
+	return hasAnySuffix(string(name), suffixes)
+}
+
 func isHugePageResource(name corev1.ResourceName) bool {
 	value := string(name)
 	return strings.HasPrefix(value, corev1.ResourceHugePagesPrefix) && value != corev1.ResourceHugePagesPrefix

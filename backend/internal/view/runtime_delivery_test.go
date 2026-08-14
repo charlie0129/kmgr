@@ -11,9 +11,118 @@ import (
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	k8swatch "k8s.io/apimachinery/pkg/watch"
 
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
 )
+
+func TestRuntimeColdEmptyPodStreamHintsLiveOptionalResource(t *testing.T) {
+	tests := []struct {
+		name       string
+		filter     string
+		wantUpsert bool
+	}{
+		{name: "visible Pod", wantUpsert: true},
+		{name: "filter-hidden Pod", filter: "name:no-match"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newScriptedResource()
+			client.listPages = []*unstructured.UnstructuredList{listPage("rv-1", "")}
+			runtime, err := NewRuntime(RuntimeConfig{
+				Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+				ReleaseDelay: time.Hour, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+
+			request := openView("session", "view", 1)
+			request.Spec.FilterExpression = test.filter
+			subscription, err := runtime.Open(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer subscription.Close()
+			initial := drainSubscription(t, subscription)
+			var sawEmptySnapshot bool
+			for _, event := range initial {
+				if snapshot := event.GetSnapshot(); snapshot != nil {
+					sawEmptySnapshot = snapshot.GetFirstChunk() && snapshot.GetLastChunk() && len(snapshot.GetRows()) == 0
+					if len(snapshot.GetObservedOptionalResourceKeys()) != 0 ||
+						snapshot.GetObservedOptionalResourceKeysTruncated() {
+						t.Fatalf("cold-empty snapshot invented optional hints: %#v", snapshot)
+					}
+				}
+			}
+			if !sawEmptySnapshot {
+				t.Fatalf("initial delivery omitted empty snapshot: %#v", initial)
+			}
+			eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+
+			live := pod("uid-live", "ns", "live", "Running", 0, nil, time.Time{})
+			live.SetResourceVersion("2")
+			if err := unstructured.SetNestedSlice(live.Object, []any{map[string]any{
+				"name": "main",
+				"resources": map[string]any{
+					"requests": map[string]any{"hugepages-2Mi": "4Mi"},
+				},
+			}}, "spec", "containers"); err != nil {
+				t.Fatal(err)
+			}
+			client.lastWatch().channel <- k8swatch.Event{Type: k8swatch.Added, Object: live}
+			first := waitForOptionalResourceHint(t, subscription, "hugepages-2Mi")
+			if got := containsUpsertUID(first, "uid-live"); got != test.wantUpsert {
+				t.Fatalf("hint delivery upsert presence = %t, want %t: %#v", got, test.wantUpsert, first)
+			}
+
+			// Hints are event-local rather than permanently suppressed. A later
+			// raw update can therefore retry a catalog refresh that previously
+			// failed or observed the configured key as absent.
+			updated := live.DeepCopy()
+			updated.SetResourceVersion("3")
+			client.lastWatch().channel <- k8swatch.Event{Type: k8swatch.Modified, Object: updated}
+			waitForOptionalResourceHint(t, subscription, "hugepages-2Mi")
+		})
+	}
+}
+
+func waitForOptionalResourceHint(t *testing.T, subscription *Subscription, key string) []*kmgrv1.ViewEvent {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		events, err := subscription.Next(ctx)
+		cancel()
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				continue
+			}
+			t.Fatal(err)
+		}
+		if err := subscription.AcknowledgeDelivery(events); err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			var keys []string
+			if snapshot := event.GetSnapshot(); snapshot != nil {
+				keys = snapshot.GetObservedOptionalResourceKeys()
+			}
+			if delta := event.GetDelta(); delta != nil {
+				keys = delta.GetObservedOptionalResourceKeys()
+			}
+			if slices.Contains(keys, key) {
+				if !slices.IsSorted(keys) {
+					t.Fatalf("optional resource hints are not sorted: %q", keys)
+				}
+				return events
+			}
+		}
+	}
+	t.Fatalf("never observed optional resource hint %q", key)
+	return nil
+}
 
 func TestRuntimeCompatibleReopenAfterCancelRetainsAcknowledgedIdentity(t *testing.T) {
 	client := newScriptedResource()

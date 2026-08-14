@@ -110,6 +110,14 @@ message SnapshotChunk {
   bool last_chunk = 3;
   uint64 chunk_index = 4;
   uint64 estimated_total_rows = 5;
+  // Advisory exact Kubernetes ResourceName values newly observed in the raw
+  // core/v1 Pod or Node objects behind this snapshot. Entries are distinct and
+  // sorted. Clients may use them to decide when to repeat cache-only optional
+  // resource discovery; the catalog RPC remains authoritative for metadata.
+  repeated string observed_optional_resource_keys = 6;
+  // True when the advisory key set exceeded its bounded wire budget. Clients
+  // should repeat cache-only discovery even if every retained key is known.
+  bool observed_optional_resource_keys_truncated = 7;
 }
 
 message RowDelta {
@@ -117,6 +125,13 @@ message RowDelta {
   repeated string removed_uids = 2;
   repeated string ordered_uids = 3;
   bool order_is_complete = 4;
+  // Advisory exact Kubernetes ResourceName values newly observed in raw
+  // core/v1 Pod or Node upserts. This may be populated even when filtering
+  // produces no row upsert. Entries are distinct and sorted.
+  repeated string observed_optional_resource_keys = 5;
+  // True when the advisory key set exceeded its bounded wire budget. Clients
+  // should repeat cache-only discovery even if every retained key is known.
+  bool observed_optional_resource_keys_truncated = 6;
 }
 
 message ViewEvent {

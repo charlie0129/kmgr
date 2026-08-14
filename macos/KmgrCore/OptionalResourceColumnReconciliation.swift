@@ -213,18 +213,26 @@ public struct OptionalResourceCatalogDiscoveryGate: Sendable {
 
     /// Changes the target and invalidates applicability of prior completions.
     /// Outstanding requests remain accounted for until their caller reports a
-    /// success, failure, or cancellation.
+    /// success, failure, or cancellation. A catalog-driven column reproject
+    /// may preserve completed automatic discovery for the same session/GVR;
+    /// generation identity and explicit refresh authority remain unchanged.
     public mutating func select(
-        _ target: OptionalResourceCatalogDiscoveryTarget?
+        _ target: OptionalResourceCatalogDiscoveryTarget?,
+        preservingAutomaticDiscoveryCompletion: Bool = false
     ) {
         guard activeTarget?.key != target?.key else {
             activeTarget = target
             return
         }
+        let preservesCompletedDiscovery =
+            preservingAutomaticDiscoveryCompletion
+            && automaticDiscoveryCompleted
+            && activeTarget?.key.sessionID == target?.key.sessionID
+            && activeTarget?.key.gvr == target?.key.gvr
         selectionRevision &+= 1
         activeTarget = target
         baseViewIsUsable = false
-        automaticDiscoveryCompleted = false
+        automaticDiscoveryCompleted = preservesCompletedDiscovery
     }
 
     /// Call only after a base snapshot/chunk has been applied and is usable,

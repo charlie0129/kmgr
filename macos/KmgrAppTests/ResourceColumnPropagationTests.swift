@@ -154,6 +154,94 @@ struct ResourceColumnPropagationTests {
         #expect(!secondIDs.contains(hugePagesID))
     }
 
+    @Test("cold empty snapshot refreshes when a live exact resource appears")
+    func coldEmptySnapshotThenLiveHugePages() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let streamProvider = ColdOptionalResourceWorkspaceProvider(resource: pods)
+        let catalogProvider = StagedOptionalResourceCatalogProvider()
+        defer { catalogProvider.cancelPendingCatalogs() }
+        let workspace = makeWorkspace(
+            suffix: "cold-optional-resource",
+            provider: streamProvider,
+            optionalResourceCatalogProvider: catalogProvider,
+            configurationPath: fixture.path
+        )
+        start([workspace])
+        defer { workspace.close() }
+
+        let hugePagesID = "resource:hugepages-2Mi"
+        let acceleratorID = "resource:nvidia.com/gpu"
+        try await waitUntil {
+            catalogProvider.requestCount == 1
+                && catalogProvider.firstRequestIsPending
+                && self.resourceTable(in: workspace)?.numberOfRows == 0
+        }
+        let table = try #require(resourceTable(in: workspace))
+        #expect(!table.tableColumns.contains { $0.identifier.rawValue == hugePagesID })
+        #expect(streamProvider.streamRequests.count == 1)
+
+        streamProvider.emitLivePod()
+        try await waitUntil {
+            table.numberOfRows == 1
+                && catalogProvider.requestCount == 1
+                && catalogProvider.firstRequestIsPending
+        }
+
+        // Repeated and truncated hints consumed during the same request still
+        // coalesce into one authoritative follow-up.
+        streamProvider.emitOptionalResourceHintOnly()
+        streamProvider.emitOptionalResourceHintOnly(truncated: true)
+        streamProvider.emitLivePod(observedOptionalResourceKeys: [])
+        try await waitUntil {
+            table.numberOfRows == 2
+                && catalogProvider.requestCount == 1
+                && catalogProvider.firstRequestIsPending
+        }
+        catalogProvider.completeColdCatalog()
+
+        try await waitUntil {
+            catalogProvider.requestCount == 2
+                && catalogProvider.secondRequestIsPending
+                && streamProvider.streamRequests.count == 1
+        }
+
+        // A different exact key arrives during request 2. Its pending hint
+        // must survive the column reproject caused when that response confirms
+        // only huge pages; the gen-2 warm snapshot does not repeat this key.
+        streamProvider.emitOptionalResourceHintOnly(["nvidia.com/gpu"])
+        streamProvider.emitLivePod(observedOptionalResourceKeys: [])
+        try await waitUntil {
+            table.numberOfRows == 3
+                && catalogProvider.requestCount == 2
+                && catalogProvider.secondRequestIsPending
+        }
+        catalogProvider.completeHugePageCatalog()
+
+        try await waitUntil {
+            catalogProvider.requestCount == 3
+                && table.tableColumns.contains {
+                    $0.identifier.rawValue == hugePagesID
+                }
+                && table.tableColumns.contains {
+                    $0.identifier.rawValue == acceleratorID
+                }
+                && streamProvider.streamRequests.last?.columnIDs
+                    .contains(hugePagesID) == true
+                && streamProvider.streamRequests.last?.columnIDs
+                    .contains(acceleratorID) == true
+                && streamProvider.streamRequests.count == 3
+                && table.numberOfRows == 3
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(catalogProvider.requestCount == 3)
+        #expect(table.numberOfRows == 3)
+    }
+
     private func makeWorkspace(
         suffix: String,
         provider: any WorkspaceResourceProviding,
@@ -368,6 +456,264 @@ private struct ExactResourceCatalogProvider: OptionalResourceCatalogProviding {
             nodesSnapshotComplete: true,
             podsSnapshotComplete: true,
             potentiallyIncomplete: false
+        )
+    }
+}
+
+private final class ColdOptionalResourceWorkspaceProvider: WorkspaceResourceProviding,
+    @unchecked Sendable
+{
+    let resource: DiscoveredResource
+    private let lock = NSLock()
+    private var storedStreamRequests: [ResourceViewRequest] = []
+    private var continuations: [
+        UInt64: AsyncThrowingStream<ResourceViewMessage, Error>.Continuation
+    ] = [:]
+    private var nextSequence: UInt64 = 2
+    private var emittedUIDs: [ResourceUID] = []
+
+    init(resource: DiscoveredResource) {
+        self.resource = resource
+    }
+
+    var streamRequests: [ResourceViewRequest] {
+        lock.withLock { storedStreamRequests }
+    }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        .init(resources: [resource])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { ["default"] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        let rows = lock.withLock { () -> [ResourceRow] in
+            storedStreamRequests.append(request)
+            return emittedUIDs.map { Self.row(request: request, uid: $0) }
+        }
+        return AsyncThrowingStream { [weak self] continuation in
+            self?.lock.withLock {
+                self?.continuations[request.generation] = continuation
+            }
+            continuation.onTermination = { [weak self] _ in
+                _ = self?.lock.withLock {
+                    self?.continuations.removeValue(forKey: request.generation)
+                }
+            }
+            continuation.yield(.snapshot(
+                cursor: StreamCursor(generation: request.generation, sequence: 1),
+                chunk: ResourceSnapshotChunk(
+                    rows: rows,
+                    first: true,
+                    last: true,
+                    index: 0,
+                    estimatedTotalRows: UInt64(rows.count),
+                    observedOptionalResourceKeys:
+                        rows.isEmpty ? [] : ["hugepages-2Mi"]
+                )
+            ))
+        }
+    }
+
+    func emitLivePod(
+        observedOptionalResourceKeys: Set<String> = ["hugepages-2Mi"],
+        truncated: Bool = false
+    ) {
+        let state = lock.withLock { () -> (
+            ResourceViewRequest,
+            AsyncThrowingStream<ResourceViewMessage, Error>.Continuation,
+            UInt64,
+            ResourceUID,
+            [ResourceUID]
+        )? in
+            guard let request = storedStreamRequests.first,
+                let continuation = continuations[request.generation]
+            else { return nil }
+            let sequence = nextSequence
+            nextSequence += 1
+            let uid = ResourceUID("uid-live-huge-page-\(sequence)")
+            emittedUIDs.append(uid)
+            return (request, continuation, sequence, uid, emittedUIDs)
+        }
+        guard let (request, continuation, sequence, uid, order) = state else { return }
+        continuation.yield(.delta(
+            cursor: StreamCursor(generation: request.generation, sequence: sequence),
+            delta: ResourceRowDelta(
+                upserts: [Self.row(request: request, uid: uid)],
+                orderedUIDs: order,
+                orderIsComplete: true,
+                observedOptionalResourceKeys: observedOptionalResourceKeys,
+                observedOptionalResourceKeysTruncated: truncated
+            )
+        ))
+    }
+
+    func emitOptionalResourceHintOnly(
+        _ keys: Set<String> = ["hugepages-2Mi"],
+        truncated: Bool = false
+    ) {
+        let state = lock.withLock { () -> (
+            ResourceViewRequest,
+            AsyncThrowingStream<ResourceViewMessage, Error>.Continuation,
+            UInt64
+        )? in
+            guard let request = storedStreamRequests.first,
+                let continuation = continuations[request.generation]
+            else { return nil }
+            let sequence = nextSequence
+            nextSequence += 1
+            return (request, continuation, sequence)
+        }
+        guard let (request, continuation, sequence) = state else { return }
+        continuation.yield(.delta(
+            cursor: StreamCursor(generation: request.generation, sequence: sequence),
+            delta: ResourceRowDelta(
+                observedOptionalResourceKeys: keys,
+                observedOptionalResourceKeysTruncated: truncated
+            )
+        ))
+    }
+
+    private static func row(
+        request: ResourceViewRequest,
+        uid: ResourceUID
+    ) -> ResourceRow {
+        ResourceRow(
+            identity: ResourceIdentity(
+                clusterSessionID: request.sessionID,
+                group: "",
+                version: "v1",
+                resource: "pods",
+                namespace: "default",
+                name: "live-pod-\(uid.rawValue)",
+                uid: uid
+            ),
+            cells: request.columnIDs.map {
+                Cell(columnID: $0, displayText: "value")
+            }
+        )
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+private final class StagedOptionalResourceCatalogProvider: OptionalResourceCatalogProviding,
+    @unchecked Sendable
+{
+    private typealias PendingRequest = (
+        OptionalResourceCatalogRequest,
+        CheckedContinuation<OptionalResourceCatalog, any Error>
+    )
+
+    private let lock = NSLock()
+    private var storedRequestCount = 0
+    private var pendingRequests: [Int: PendingRequest] = [:]
+
+    var requestCount: Int { lock.withLock { storedRequestCount } }
+    var firstRequestIsPending: Bool { requestIsPending(1) }
+    var secondRequestIsPending: Bool { requestIsPending(2) }
+
+    func discoverOptionalResources(_ request: OptionalResourceCatalogRequest) async throws
+        -> OptionalResourceCatalog
+    {
+        let attempt = lock.withLock { () -> Int in
+            storedRequestCount += 1
+            return storedRequestCount
+        }
+        if attempt <= 2 {
+            return try await withCheckedThrowingContinuation { continuation in
+                lock.withLock {
+                    pendingRequests[attempt] = (request, continuation)
+                }
+            }
+        }
+        return Self.catalog(
+            request: request,
+            attempt: attempt,
+            resources: [Self.hugePage(request), Self.accelerator(request)]
+        )
+    }
+
+    func completeColdCatalog() {
+        completeRequest(1, resources: { _ in [] })
+    }
+
+    func completeHugePageCatalog() {
+        completeRequest(2, resources: { request in [Self.hugePage(request)] })
+    }
+
+    func cancelPendingCatalogs() {
+        let continuations = lock.withLock { () -> [
+            CheckedContinuation<OptionalResourceCatalog, any Error>
+        ] in
+            let result = pendingRequests.values.map { $0.1 }
+            pendingRequests.removeAll(keepingCapacity: true)
+            return result
+        }
+        for continuation in continuations {
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    private func requestIsPending(_ attempt: Int) -> Bool {
+        lock.withLock { pendingRequests[attempt] != nil }
+    }
+
+    private func completeRequest(
+        _ attempt: Int,
+        resources: (OptionalResourceCatalogRequest) -> [OptionalResourceCatalogEntry]
+    ) {
+        let pending = lock.withLock { pendingRequests.removeValue(forKey: attempt) }
+        guard let (request, continuation) = pending else { return }
+        continuation.resume(returning: Self.catalog(
+            request: request,
+            attempt: attempt,
+            resources: resources(request)
+        ))
+    }
+
+    private static func hugePage(
+        _ request: OptionalResourceCatalogRequest
+    ) -> OptionalResourceCatalogEntry {
+        OptionalResourceCatalogEntry(
+            exactKey: "hugepages-2Mi",
+            category: .hugePage,
+            isPresent: true,
+            displayName: "Huge Pages (2Mi)",
+            applicableResource: request.applicableResource
+        )
+    }
+
+    private static func accelerator(
+        _ request: OptionalResourceCatalogRequest
+    ) -> OptionalResourceCatalogEntry {
+        OptionalResourceCatalogEntry(
+            exactKey: "nvidia.com/gpu",
+            category: .accelerator,
+            isPresent: true,
+            displayName: "NVIDIA GPU",
+            applicableResource: request.applicableResource
+        )
+    }
+
+    private static func catalog(
+        request: OptionalResourceCatalogRequest,
+        attempt: Int,
+        resources: [OptionalResourceCatalogEntry]
+    ) -> OptionalResourceCatalog {
+        OptionalResourceCatalog(
+            requestID: "cold-catalog-\(attempt)",
+            resources: resources,
+            nodesCacheAvailable: false,
+            podsCacheAvailable: true,
+            nodesSnapshotComplete: false,
+            podsSnapshotComplete: attempt > 2,
+            potentiallyIncomplete: attempt <= 2
         )
     }
 }

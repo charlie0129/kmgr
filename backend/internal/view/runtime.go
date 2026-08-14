@@ -688,6 +688,11 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	subscription.resource = entry
 	subscription.scopeKey = deliveryIdentity.namespaceScope
 	subscription.deliveryState = attempt.deliveryState
+	acceleratorConfig := metrics.AcceleratorConfig{}
+	if provider, ok := r.columns.(AcceleratorConfigProvider); ok {
+		acceleratorConfig = provider.AcceleratorConfig()
+	}
+	subscription.optionalResourceHints = newOptionalResourceStreamHints(entry.key, acceleratorConfig)
 	if needsNodeAccounting(projector) {
 		projector = projector.WithNodeAccounting(NodeAccountingSnapshot{Active: true})
 		subscription.projector = projector
@@ -746,9 +751,11 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		r.abortOpen(attempt)
 		return nil, projectErr
 	}
-
 	// Prepare all private subscription state before publication. No callback can
 	// reach this subscription yet, so these helpers intentionally take no lock.
+	// Do not traverse the full warm object cache for advisory keys here: the
+	// automatic catalog query follows the usable snapshot and reads that cache,
+	// while later LIST/WATCH upserts supply race-closing stream hints.
 	subscription.initializeSealedRows(warmRows)
 	var initialStatus *kmgrv1.ViewStatus
 	r.mu.Lock()
@@ -2021,6 +2028,7 @@ type Subscription struct {
 	pendingStatuses        []*kmgrv1.ViewStatus
 	pendingError           *kmgrv1.StructuredError
 	sealedInitial          []*kmgrv1.ViewEvent
+	optionalResourceHints  optionalResourceStreamHints
 	knownUIDs              map[string]bool
 	inFlightDelivery       *subscriptionDelivery
 	pendingObjects         map[string]*unstructured.Unstructured
@@ -2402,10 +2410,13 @@ func (s *Subscription) sealInitialUnlocked(status *kmgrv1.ViewStatus, rows []*km
 			Payload: &kmgrv1.ViewEvent_Status{Status: copy},
 		})
 	}
+	observedOptionalResources := s.optionalResourceHints.takePendingLocked()
 	if len(rows) == 0 {
 		s.sealedInitial = append(s.sealedInitial, &kmgrv1.ViewEvent{
 			Payload: &kmgrv1.ViewEvent_Snapshot{Snapshot: &kmgrv1.SnapshotChunk{
 				FirstChunk: true, LastChunk: true,
+				ObservedOptionalResourceKeys:          observedOptionalResources.keys,
+				ObservedOptionalResourceKeysTruncated: observedOptionalResources.truncated,
 			}},
 		})
 	} else {
@@ -2416,6 +2427,13 @@ func (s *Subscription) sealInitialUnlocked(status *kmgrv1.ViewStatus, rows []*km
 					Rows:       append([]*kmgrv1.ResourceRow(nil), rows[start:end]...),
 					FirstChunk: start == 0, LastChunk: end == len(rows),
 					ChunkIndex: index, EstimatedTotalRows: uint64(len(rows)),
+					ObservedOptionalResourceKeys: func() []string {
+						if start == 0 {
+							return observedOptionalResources.keys
+						}
+						return nil
+					}(),
+					ObservedOptionalResourceKeysTruncated: start == 0 && observedOptionalResources.truncated,
 				}},
 			})
 		}
@@ -2452,6 +2470,7 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 		s.enqueueWatchBatch(batch)
 		return
 	}
+	observedOptionalResourceKeys := s.optionalResourceHints.extract(batch.Upserts)
 	s.flushProjection()
 	var completeObjects []*unstructured.Unstructured
 	if batch.SnapshotComplete && s.resource != nil {
@@ -2462,6 +2481,7 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 	if s.closed {
 		return
 	}
+	s.optionalResourceHints.observeLocked(observedOptionalResourceKeys)
 	// LIST pages and snapshot-complete batches are projection barriers. An
 	// older WATCH projection may still be running when flushProjection returns;
 	// advancing the revision before touching rows prevents that work from
@@ -2531,11 +2551,13 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 // applied and signaled immediately so deleted rows never linger behind CEL or
 // a full-table sort.
 func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
+	observedOptionalResourceKeys := s.optionalResourceHints.extract(batch.Upserts)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
+	s.optionalResourceHints.observeLocked(observedOptionalResourceKeys)
 	removed := false
 	for _, uid := range batch.RemovedUIDs {
 		key := string(uid)
@@ -3006,9 +3028,12 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 		// a concurrent metrics/overflow full projection cannot turn a delete
 		// into a hidden ghost row or retained selection.
 		events = s.appendRemovalEventsLocked(events)
+		observedOptionalResources := s.optionalResourceHints.takePendingLocked()
 		if len(s.order) == 0 {
 			events = append(events, s.snapshotEventLocked(&kmgrv1.SnapshotChunk{
 				FirstChunk: true, LastChunk: true,
+				ObservedOptionalResourceKeys:          observedOptionalResources.keys,
+				ObservedOptionalResourceKeysTruncated: observedOptionalResources.truncated,
 			}))
 		} else {
 			for start, index := 0, uint64(0); start < len(s.order); start, index = start+s.chunkSize, index+1 {
@@ -3020,6 +3045,13 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 				events = append(events, s.snapshotEventLocked(&kmgrv1.SnapshotChunk{
 					Rows: rows, FirstChunk: start == 0, LastChunk: end == len(s.order),
 					ChunkIndex: index, EstimatedTotalRows: uint64(len(s.order)),
+					ObservedOptionalResourceKeys: func() []string {
+						if start == 0 {
+							return observedOptionalResources.keys
+						}
+						return nil
+					}(),
+					ObservedOptionalResourceKeysTruncated: start == 0 && observedOptionalResources.truncated,
 				}))
 			}
 		}
@@ -3027,19 +3059,26 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 		s.orderDirty = false
 		clear(s.pendingUpserts)
 		clear(s.pendingRemoved)
-	} else if len(s.pendingUpserts) != 0 || len(s.pendingRemoved) != 0 || s.removalOverflow || s.orderDirty {
+	} else if len(s.pendingUpserts) != 0 || len(s.pendingRemoved) != 0 || s.removalOverflow || s.orderDirty ||
+		s.optionalResourceHints.hasPendingLocked() {
 		upserts := make([]*kmgrv1.ResourceRow, 0, len(s.pendingUpserts))
 		for _, uid := range s.order {
 			if row := s.pendingUpserts[uid]; row != nil {
 				upserts = append(upserts, row)
 			}
 		}
-		delta := &kmgrv1.RowDelta{Upserts: upserts}
+		observedOptionalResources := s.optionalResourceHints.takePendingLocked()
+		delta := &kmgrv1.RowDelta{
+			Upserts:                               upserts,
+			ObservedOptionalResourceKeys:          observedOptionalResources.keys,
+			ObservedOptionalResourceKeysTruncated: observedOptionalResources.truncated,
+		}
 		if s.orderDirty {
 			delta.OrderedUids = append([]string(nil), s.order...)
 			delta.OrderIsComplete = true
 		}
-		if len(delta.Upserts) != 0 || delta.OrderIsComplete {
+		if len(delta.Upserts) != 0 || delta.OrderIsComplete || len(delta.ObservedOptionalResourceKeys) != 0 ||
+			delta.ObservedOptionalResourceKeysTruncated {
 			events = append(events, s.deltaEventLocked(delta))
 		}
 		events = s.appendRemovalEventsLocked(events)
@@ -3057,7 +3096,8 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 
 func (s *Subscription) hasPendingDeliveryLocked() bool {
 	return len(s.pendingStatuses) != 0 || s.resnapshot || len(s.pendingUpserts) != 0 ||
-		len(s.pendingRemoved) != 0 || s.removalOverflow || s.orderDirty || s.pendingError != nil
+		len(s.pendingRemoved) != 0 || s.removalOverflow || s.orderDirty || s.pendingError != nil ||
+		s.optionalResourceHints.hasPendingLocked()
 }
 
 func (s *Subscription) pendingRemovalUIDsLocked() []string {

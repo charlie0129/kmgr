@@ -152,6 +152,8 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(snapshot.first && snapshot.last)
         #expect(snapshot.index == 0)
         #expect(snapshot.estimatedTotalRows == 1)
+        #expect(snapshot.observedOptionalResourceKeys == ["hugepages-2Mi"])
+        #expect(!snapshot.observedOptionalResourceKeysTruncated)
         #expect(row.identity == ResourceIdentity(
             clusterSessionID: "session-one",
             group: "",
@@ -193,6 +195,8 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(delta.removedUIDs == ["uid-old"])
         #expect(delta.orderedUIDs == ["uid-api"])
         #expect(delta.orderIsComplete)
+        #expect(delta.observedOptionalResourceKeys == ["aliyun.com/ppu"])
+        #expect(delta.observedOptionalResourceKeysTruncated)
 
         guard case .failure(_, let issue) = messages[3] else {
             Issue.record("Expected structured stream failure")
@@ -345,6 +349,7 @@ struct EngineWorkspaceResourceProviderTests {
         snapshot.snapshot.lastChunk = true
         snapshot.snapshot.chunkIndex = 0
         snapshot.snapshot.estimatedTotalRows = 1
+        snapshot.snapshot.observedOptionalResourceKeys = ["hugepages-2Mi"]
         snapshot.snapshot.rows = [resourceRow()]
 
         var delta = Kmgr_V1_ViewEvent()
@@ -352,6 +357,8 @@ struct EngineWorkspaceResourceProviderTests {
         delta.delta.removedUids = ["uid-old"]
         delta.delta.orderedUids = ["uid-api"]
         delta.delta.orderIsComplete = true
+        delta.delta.observedOptionalResourceKeys = ["aliyun.com/ppu"]
+        delta.delta.observedOptionalResourceKeysTruncated = true
 
         var failure = Kmgr_V1_ViewEvent()
         failure.cursor = cursor(sequence: 4)
