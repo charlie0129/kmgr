@@ -674,9 +674,14 @@ struct ResourceColumnPropagationTests {
         defer { workspaces.forEach { $0.close() } }
 
         try await waitUntil {
-            resourceTable(in: first)?.tableColumns.contains {
-                $0.identifier.rawValue == hugePagesID
-            } == true && resourceTable(in: second)?.tableColumns.contains {
+            guard let firstRequest = resourceColumnsRequest(in: first),
+                let secondRequest = resourceColumnsRequest(in: second)
+            else { return false }
+            return firstRequest.discoveredColumns.contains {
+                $0.id == hugePagesID && !$0.isEnabled
+            } && secondRequest.discoveredColumns.contains {
+                $0.id == acceleratorID && $0.isEnabled
+            } && resourceTable(in: second)?.tableColumns.contains {
                 $0.identifier.rawValue == acceleratorID
             } == true
         }
@@ -693,8 +698,16 @@ struct ResourceColumnPropagationTests {
         let secondIDs = try #require(resourceTable(in: second)).tableColumns.map {
             $0.identifier.rawValue
         }
-        #expect(firstIDs == definitions.map(\.id) + [hugePagesID])
+        #expect(firstIDs == definitions.map(\.id))
         #expect(secondIDs == definitions.map(\.id) + [acceleratorID])
+        let firstDiscovered = try #require(resourceColumnsRequest(in: first))
+            .discoveredColumns
+        let secondDiscovered = try #require(resourceColumnsRequest(in: second))
+            .discoveredColumns
+        #expect(firstDiscovered.map(\.id) == [hugePagesID])
+        #expect(firstDiscovered.allSatisfy { !$0.isEnabled })
+        #expect(secondDiscovered.map(\.id) == [acceleratorID])
+        #expect(secondDiscovered.allSatisfy { $0.isEnabled })
         #expect(!firstIDs.contains(acceleratorID))
         #expect(!secondIDs.contains(hugePagesID))
     }
@@ -770,21 +783,50 @@ struct ResourceColumnPropagationTests {
         try await waitUntil {
             catalogProvider.requestCount == 3
                 && table.tableColumns.contains {
-                    $0.identifier.rawValue == hugePagesID
-                }
-                && table.tableColumns.contains {
                     $0.identifier.rawValue == acceleratorID
                 }
+                && !table.tableColumns.contains {
+                    $0.identifier.rawValue == hugePagesID
+                }
                 && streamProvider.streamRequests.last?.columnIDs
-                    .contains(hugePagesID) == true
+                    .contains(acceleratorID) == true
+                && streamProvider.streamRequests.last?.columnIDs
+                    .contains(hugePagesID) == false
+                && streamProvider.streamRequests.count == 2
+                && table.numberOfRows == 3
+                && resourceColumnsRequest(in: workspace)?.discoveredColumns
+                    .contains(where: {
+                        $0.id == hugePagesID && !$0.isEnabled
+                    }) == true
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(catalogProvider.requestCount == 3)
+        #expect(streamProvider.streamRequests.count == 2)
+        #expect(table.numberOfRows == 3)
+
+        // Huge-page sizes are discovered but intentionally start disabled.
+        // Enabling the definition through the same request used by Columns…
+        // must still project the exact resource alongside the accelerator.
+        let columnsRequest = try #require(resourceColumnsRequest(in: workspace))
+        var hugePages = try #require(columnsRequest.discoveredColumns.first {
+            $0.id == hugePagesID
+        })
+        #expect(!hugePages.isEnabled)
+        hugePages.enabled = true
+        columnsRequest.apply(columnsRequest.defaultColumns + [hugePages])
+
+        try await waitUntil {
+            table.tableColumns.contains {
+                $0.identifier.rawValue == hugePagesID
+            } && table.tableColumns.contains {
+                $0.identifier.rawValue == acceleratorID
+            } && streamProvider.streamRequests.last?.columnIDs
+                .contains(hugePagesID) == true
                 && streamProvider.streamRequests.last?.columnIDs
                     .contains(acceleratorID) == true
                 && streamProvider.streamRequests.count == 3
                 && table.numberOfRows == 3
         }
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(catalogProvider.requestCount == 3)
-        #expect(table.numberOfRows == 3)
     }
 
     private func makeWorkspace(
@@ -827,6 +869,19 @@ struct ResourceColumnPropagationTests {
         guard let root = controller.window?.contentView else { return nil }
         return descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" }
+    }
+
+    private func resourceColumnsRequest(
+        in controller: ClusterWorkspaceWindowController
+    ) -> ResourceColumnsRequest? {
+        guard let root = controller.window?.contentView,
+            let button = descendants(of: root).compactMap({ $0 as? NSButton })
+                .first(where: { $0.title == "Columns…" })
+        else { return nil }
+        var request: ResourceColumnsRequest?
+        controller.onShowColumns = { request = $0 }
+        button.performClick(nil)
+        return request
     }
 
     private func resourceOutline(
