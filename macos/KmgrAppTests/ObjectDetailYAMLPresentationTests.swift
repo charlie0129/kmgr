@@ -598,6 +598,111 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(dataEditor.frame.height > 0)
     }
 
+    @Test("YAML loaded behind Summary becomes visible when attached in a split window")
+    func detachedYAMLBecomesVisibleAfterTabSwitch() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let yaml = """
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: api
+          namespace: dev
+        spec:
+          replicas: 3
+
+        """
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: LoadedObjectDetailProvider(
+                detail: ObjectDetail(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    yamlUTF8: Data(yaml.utf8)
+                ),
+                data: ObjectData(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    entries: [],
+                    secret: false
+                )
+            ),
+            initialTab: .summary
+        )
+        let sidebar = NSViewController()
+        sidebar.view = NSView(frame: NSRect(x: 0, y: 0, width: 190, height: 640))
+        let split = NSSplitViewController()
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        sidebarItem.minimumThickness = 160
+        split.addSplitViewItem(sidebarItem)
+        split.addSplitViewItem(NSSplitViewItem(viewController: controller))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 640),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentViewController = split
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            controller.stop()
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        let segmented = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSSegmentedControl }.first)
+        try await waitUntil {
+            descendants(of: controller.view).contains {
+                ($0 as? NSTextField)?.stringValue == "Resource version rv-1"
+            }
+        }
+        #expect(segmented.selectedSegment == 0)
+
+        segmented.selectedSegment = 1
+        _ = segmented.sendAction(segmented.action, to: segmented.target)
+        let yamlScroll = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "object-detail-yaml-scroll" })
+        let yamlEditor = try #require(yamlScroll.documentView as? NSTextView)
+
+        // The attach action itself owns this contract. Do not grant the test
+        // an external window-layout pass that could accidentally repair the
+        // old zero-sized detached document after `show` returns.
+        #expect(yamlScroll.window === window)
+        #expect(yamlEditor.string.contains("kind: Deployment"))
+        #expect(yamlScroll.contentSize.width > 100)
+        let attachedGlyphRect = try #require(firstVisibleGlyphRect(in: yamlEditor))
+        #expect(attachedGlyphRect.intersects(yamlEditor.visibleRect))
+        #expect(yamlScroll.contentView.bounds.intersects(
+            yamlEditor.convert(attachedGlyphRect, to: yamlScroll.contentView)
+        ))
+
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        try await waitUntil {
+            yamlScroll.window === window
+                && firstVisibleGlyphRect(in: yamlEditor) != nil
+        }
+        let glyphRect = try #require(firstVisibleGlyphRect(in: yamlEditor))
+        #expect(!yamlEditor.string.isEmpty)
+        #expect(glyphRect.width > 0)
+        #expect(glyphRect.height > 0)
+        #expect(glyphRect.intersects(yamlEditor.visibleRect))
+        #expect(yamlScroll.contentView.bounds.intersects(
+            yamlEditor.convert(glyphRect, to: yamlScroll.contentView)
+        ))
+    }
+
     @Test("Secret YAML clearly labels Kubernetes base64 encoding")
     func secretYAMLEncodingNotice() throws {
         let identity = ResourceIdentity(
@@ -1326,6 +1431,32 @@ private func laidOutTextRect(in textView: NSTextView) -> NSRect? {
     else { return nil }
     layoutManager.ensureLayout(for: textContainer)
     return layoutManager.usedRect(for: textContainer).offsetBy(
+        dx: textView.textContainerOrigin.x,
+        dy: textView.textContainerOrigin.y
+    )
+}
+
+@MainActor
+private func firstVisibleGlyphRect(in textView: NSTextView) -> NSRect? {
+    guard let layoutManager = textView.layoutManager,
+        let textContainer = textView.textContainer,
+        (textView.textStorage?.length ?? 0) > 0
+    else { return nil }
+    let characterRange = NSRange(
+        location: 0,
+        length: min(64, textView.textStorage?.length ?? 0)
+    )
+    layoutManager.ensureLayout(forCharacterRange: characterRange)
+    var actualCharacterRange = NSRange()
+    let glyphRange = layoutManager.glyphRange(
+        forCharacterRange: characterRange,
+        actualCharacterRange: &actualCharacterRange
+    )
+    guard glyphRange.length > 0 else { return nil }
+    return layoutManager.boundingRect(
+        forGlyphRange: glyphRange,
+        in: textContainer
+    ).offsetBy(
         dx: textView.textContainerOrigin.x,
         dy: textView.textContainerOrigin.y
     )

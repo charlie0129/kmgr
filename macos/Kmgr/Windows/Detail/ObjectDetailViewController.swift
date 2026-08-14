@@ -316,11 +316,19 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        view.layoutSubtreeIfNeeded()
+        updateVisibleTextDocumentGeometry()
         loadObject()
     }
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        updateVisibleTextDocumentGeometry()
+        resizeStackDocument(summaryStack, in: summaryScrollView)
+        resizeStackDocument(metricsStack, in: metricsScrollView)
+    }
+
+    private func updateVisibleTextDocumentGeometry() {
         TextDocumentGeometry.update(
             yamlTextView,
             in: yamlScrollView,
@@ -331,8 +339,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             in: dataValueScroll,
             wrapsToViewport: true
         )
-        resizeStackDocument(summaryStack, in: summaryScrollView)
-        resizeStackDocument(metricsStack, in: metricsScrollView)
     }
 
     func stop() {
@@ -1253,6 +1259,22 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             child.topAnchor.constraint(equalTo: contentContainer.topAnchor),
             child.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
         ])
+        // YAML is commonly populated while Summary is visible and its scroll
+        // view is detached. Reconcile only after attachment, when the native
+        // split/tab window supplies a real viewport, instead of relying on a
+        // later incidental window resize to make glyphs visible.
+        if child === yamlContainerView {
+            contentContainer.layoutSubtreeIfNeeded()
+            child.layoutSubtreeIfNeeded()
+            yamlScrollView.layoutSubtreeIfNeeded()
+            TextDocumentGeometry.update(
+                yamlTextView,
+                in: yamlScrollView,
+                wrapsToViewport: false
+            )
+            yamlTextView.needsDisplay = true
+            yamlScrollView.contentView.needsDisplay = true
+        }
     }
 
     @objc private func beginYAMLEdit() {
