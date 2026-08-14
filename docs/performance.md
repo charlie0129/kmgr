@@ -60,7 +60,7 @@ text, cell values, log content, credentials, or IPC metadata.
 | `resource-table` | `ResourceTableReload` | `NSTableView` reload plus UID-based selection and scroll restoration on the main actor |
 | `logs` | `LogStoreAppend` | appending a received batch to the bounded off-main-actor log ring |
 | `logs` | `LogTextFormat` | detached log filtering/formatting into a bounded string |
-| `logs` | `LogTextInstall` | visible `NSTextView` string replacement and selection/tail restoration on the main actor |
+| `logs` | `LogTextInstall` | incremental visible `NSTextStorage` prefix eviction/suffix append and selection/tail restoration on the main actor |
 
 To record interactively:
 

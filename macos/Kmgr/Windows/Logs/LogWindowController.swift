@@ -31,6 +31,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var latestStreamDrops: UInt64 = 0
     private var latestRenderOmissions = 0
     private var latestStreamState: LogStreamState = .connecting
+    private var renderedChunks: [String] = []
     private let logSignposter = OSSignposter(
         subsystem: PerformanceSignpostCatalog.subsystem,
         category: PerformanceSignpostCatalog.logsCategory
@@ -330,7 +331,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         statusLabel.stringValue = parts.joined(separator: " · ")
     }
 
-    /// Coalesce main-thread text rebuilding to at most one pass per 40 ms.
+    /// Coalesce detached formatting and incremental text installation to at
+    /// most one pass per configured render interval.
     private func scheduleRender() {
         guard !isPaused, !isClosing else { return }
         guard canRenderNow else {
@@ -375,7 +377,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let records = snapshot.records
         let labels = sourceLabels
         let byteLimit = maximumRenderedUTF8Bytes
-        let rendered: RenderedLogText
+        let previousChunks = renderedChunks
+        let result: (rendered: RenderedLogText, install: LogTextInstallPlan)
         let renderer = Task.detached(priority: .userInitiated) { [logSignposter] in
             let interval = logSignposter.beginInterval(
                 PerformanceSignpostCatalog.logTextFormat,
@@ -394,7 +397,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                     interval,
                     "rendered_records=\(result.renderedRecords) omitted_records=\(result.omittedRecords) output_bytes=\(result.outputUTF8Bytes)"
                 )
-                return result
+                return (
+                    result,
+                    LogTextInstallPlanner.plan(
+                        previousChunks: previousChunks,
+                        currentChunks: result.chunks
+                    )
+                )
             } catch {
                 logSignposter.endInterval(
                     PerformanceSignpostCatalog.logTextFormat,
@@ -405,7 +414,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             }
         }
         do {
-            rendered = try await withTaskCancellationHandler {
+            result = try await withTaskCancellationHandler {
                 try await renderer.value
             } onCancel: {
                 renderer.cancel()
@@ -419,18 +428,43 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
         let installInterval = logSignposter.beginInterval(
             PerformanceSignpostCatalog.logTextInstall,
-            "output_bytes=\(rendered.outputUTF8Bytes) rendered_records=\(rendered.renderedRecords)"
+            "output_bytes=\(result.rendered.outputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendText.utf8.count)"
         )
-        textView.string = rendered.text
-        latestRenderOmissions = rendered.omittedRecords
-        updateStatusLabel()
-        let length = (textView.string as NSString).length
-        if selectedRange.location <= length {
-            textView.setSelectedRange(NSRange(
-                location: selectedRange.location,
-                length: min(selectedRange.length, length - selectedRange.location)
-            ))
+        let storage = textView.textStorage!
+        if storage.length == result.install.previousUTF16Length {
+            storage.beginEditing()
+            if result.install.removePrefixUTF16Length > 0 {
+                storage.replaceCharacters(
+                    in: NSRange(location: 0, length: result.install.removePrefixUTF16Length),
+                    with: ""
+                )
+            }
+            if !result.install.appendText.isEmpty {
+                storage.append(NSAttributedString(
+                    string: result.install.appendText,
+                    attributes: [.font: textView.font!]
+                ))
+            }
+            storage.endEditing()
+        } else {
+            // Defensive recovery for an unexpected NSTextStorage mutation;
+            // normal streaming updates always take the incremental path.
+            storage.replaceCharacters(
+                in: NSRange(location: 0, length: storage.length),
+                with: result.rendered.text
+            )
+            if storage.length > 0, let font = textView.font {
+                storage.addAttribute(
+                    .font,
+                    value: font,
+                    range: NSRange(location: 0, length: storage.length)
+                )
+            }
         }
+        renderedChunks = result.rendered.chunks
+        latestRenderOmissions = result.rendered.omittedRecords
+        updateStatusLabel()
+        textView.setSelectedRange(result.install.remapSelection(selectedRange))
         if wasAtTail { textView.scrollToEndOfDocument(nil) }
         needsRenderWhenVisible = false
         logSignposter.endInterval(
@@ -470,6 +504,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             updateStatusLabel()
         }
         textView.string = ""
+        renderedChunks.removeAll(keepingCapacity: true)
     }
 
     private var canRenderNow: Bool {

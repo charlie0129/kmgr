@@ -248,6 +248,52 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     #expect(rendered.renderedRecords == 1)
 }
 
+@Test func logInstallPlanDropsOnlyEvictedPrefixAndAppendsNewSuffix() {
+    let previous = ["old\n", "keep\n"]
+    let current = ["keep\n", "new 🐈\n"]
+    let plan = LogTextInstallPlanner.plan(
+        previousChunks: previous,
+        currentChunks: current
+    )
+
+    #expect(plan.removePrefixUTF16Length == "old\n".utf16.count)
+    #expect(plan.appendText == "new 🐈\n")
+    #expect(plan.applying(to: previous.joined()) == current.joined())
+    #expect(plan.resultUTF16Length == current.joined().utf16.count)
+    let selection = NSRange(
+        location: "old\n".utf16.count + 1,
+        length: 3
+    )
+    #expect(plan.remapSelection(selection) == NSRange(location: 1, length: 3))
+}
+
+@Test func logInstallPlanUsesAppendOnlyForStreamingGrowth() {
+    let previous = ["one\n", "two\n"]
+    let current = previous + ["three\n"]
+    let plan = LogTextInstallPlanner.plan(
+        previousChunks: previous,
+        currentChunks: current
+    )
+
+    #expect(plan.removePrefixUTF16Length == 0)
+    #expect(plan.appendText == "three\n")
+    #expect(plan.applying(to: previous.joined()) == current.joined())
+}
+
+@Test func logInstallPlanFallsBackToBoundedReplaceWhenFilterChanges() {
+    let previous = ["alpha\n", "beta\n"]
+    let current = ["selected\n"]
+    let plan = LogTextInstallPlanner.plan(
+        previousChunks: previous,
+        currentChunks: current
+    )
+
+    #expect(plan.removePrefixUTF16Length == previous.joined().utf16.count)
+    #expect(plan.appendText == current.joined())
+    #expect(plan.applying(to: previous.joined()) == current.joined())
+    #expect(plan.remapSelection(NSRange(location: 2, length: 3)) == NSRange(location: 0, length: 0))
+}
+
 @Test func logDisplayConfigurationUsesValidatedPreferences() {
     let configuration = LogDisplayConfiguration(preferences: LogDisplayPreferences(
         recordLimit: 75_000,

@@ -476,24 +476,111 @@ public actor LogRecordStore {
 }
 
 public struct RenderedLogText: Hashable, Sendable {
-    public var text: String
+    public var chunks: [String]
     public var renderedRecords: Int
     public var omittedRecords: Int
     public var omittedSourceBytes: UInt64
     public var outputUTF8Bytes: Int
 
     public init(
-        text: String,
+        chunks: [String],
         renderedRecords: Int,
         omittedRecords: Int,
         omittedSourceBytes: UInt64,
         outputUTF8Bytes: Int
     ) {
-        self.text = text
+        self.chunks = chunks
         self.renderedRecords = renderedRecords
         self.omittedRecords = omittedRecords
         self.omittedSourceBytes = omittedSourceBytes
         self.outputUTF8Bytes = outputUTF8Bytes
+    }
+
+    public var text: String { chunks.joined() }
+}
+
+/// A minimal streaming edit from one rendered log snapshot to the next. Log
+/// rings evolve by dropping an old prefix and appending a new suffix, so the
+/// AppKit layer can normally retain the shared middle without replacing the
+/// full text storage. A filter change simply degenerates to a bounded replace.
+public struct LogTextInstallPlan: Hashable, Sendable {
+    public var previousUTF16Length: Int
+    public var removePrefixUTF16Length: Int
+    public var appendText: String
+    public var resultUTF16Length: Int
+
+    public init(
+        previousUTF16Length: Int,
+        removePrefixUTF16Length: Int,
+        appendText: String,
+        resultUTF16Length: Int
+    ) {
+        self.previousUTF16Length = previousUTF16Length
+        self.removePrefixUTF16Length = removePrefixUTF16Length
+        self.appendText = appendText
+        self.resultUTF16Length = resultUTF16Length
+    }
+
+    public func applying(to previous: String) -> String {
+        let value = previous as NSString
+        let remove = min(max(0, removePrefixUTF16Length), value.length)
+        return value.substring(from: remove) + appendText
+    }
+
+    public func remapSelection(_ selection: NSRange) -> NSRange {
+        let oldEnd = selection.location.addingReportingOverflow(selection.length)
+        let safeOldEnd = oldEnd.overflow ? Int.max : oldEnd.partialValue
+        let location = max(0, selection.location - removePrefixUTF16Length)
+        let end = max(0, safeOldEnd - removePrefixUTF16Length)
+        let clampedLocation = min(location, resultUTF16Length)
+        let clampedEnd = min(max(clampedLocation, end), resultUTF16Length)
+        return NSRange(location: clampedLocation, length: clampedEnd - clampedLocation)
+    }
+}
+
+public enum LogTextInstallPlanner {
+    public static func plan(
+        previousChunks: [String],
+        currentChunks: [String]
+    ) -> LogTextInstallPlan {
+        let overlap = suffixPrefixOverlap(previousChunks, currentChunks)
+        let removed = previousChunks.dropLast(overlap).reduce(into: 0) {
+            $0 += $1.utf16.count
+        }
+        let retained = previousChunks.suffix(overlap).reduce(into: 0) {
+            $0 += $1.utf16.count
+        }
+        let append = currentChunks.dropFirst(overlap).joined()
+        return LogTextInstallPlan(
+            previousUTF16Length: removed + retained,
+            removePrefixUTF16Length: removed,
+            appendText: append,
+            resultUTF16Length: retained + append.utf16.count
+        )
+    }
+
+    /// KMP finds the longest suffix(previous) == prefix(current) in linear
+    /// chunk comparisons, avoiding an O(n²) scan for large retained buffers.
+    private static func suffixPrefixOverlap(
+        _ previous: [String],
+        _ current: [String]
+    ) -> Int {
+        guard !previous.isEmpty, !current.isEmpty else { return 0 }
+        enum Token: Equatable {
+            case chunk(String)
+            case separator
+        }
+        let sequence = current.map(Token.chunk) + [.separator] + previous.map(Token.chunk)
+        var prefix = Array(repeating: 0, count: sequence.count)
+        for index in 1..<sequence.count {
+            var candidate = prefix[index - 1]
+            while candidate > 0, sequence[index] != sequence[candidate] {
+                candidate = prefix[candidate - 1]
+            }
+            if sequence[index] == sequence[candidate] { candidate += 1 }
+            prefix[index] = candidate
+        }
+        return min(prefix.last ?? 0, previous.count, current.count)
     }
 }
 
@@ -539,9 +626,11 @@ public enum LogTextRenderer {
             outputBytes += chunkBytes
         }
         try Task.checkCancellation()
+        let orderedChunks = chunks.reversed()
+        let resultChunks = Array(orderedChunks)
         return RenderedLogText(
-            text: chunks.reversed().joined(),
-            renderedRecords: chunks.count,
+            chunks: resultChunks,
+            renderedRecords: resultChunks.count,
             omittedRecords: omittedRecords,
             omittedSourceBytes: omittedBytes,
             outputUTF8Bytes: outputBytes
