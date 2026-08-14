@@ -75,6 +75,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.contextualShortcutSnapshot
     }
 
+    var openYAMLSnapshotWindows: [YAMLSnapshotWindowController] {
+        Array(yamlSnapshotWindowControllers.values)
+    }
+
     private let provider: any WorkspaceResourceProviding
     private let connectionActivityProvider: any ClusterConnectionActivityProviding
     private let objectDetailProvider: any ObjectDetailProviding
@@ -96,6 +100,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var execConfigurationController: ExecConfigurationWindowController?
     private var deleteResourcesController: DeleteResourcesWindowController?
     private var resourceMutationController: ResourceMutationWindowController?
+    private var yamlSnapshotWindowControllers: [ResourceUID: YAMLSnapshotWindowController] = [:]
     private var didStartWorkspace = false
 
     init(
@@ -187,6 +192,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onOpenLogs = { [weak self] request in
             self?.openLogs(request)
         }
+        workspaceController.onOpenYAML = { [weak self] identity in
+            self?.showYAMLSnapshot(identity)
+        }
         workspaceController.onOpenExec = { [weak self] target in
             self?.openAutomaticExec(target)
         }
@@ -227,6 +235,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     /// Keep the last rendered view visible while the shared helper is down.
     /// No operation is replayed from this transition.
     func engineDidDisconnect(message: String) {
+        yamlSnapshotWindowControllers.values.forEach { $0.engineDidDisconnect() }
         workspaceController.engineDidDisconnect(message: message)
     }
 
@@ -245,6 +254,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         let clusterPresentation = ClusterIdentityPresentation(session: recoveredSession)
         window?.title = "\(clusterPresentation.titlePrefix) — \(Product.applicationName)"
         window?.subtitle = recoveredSession.serverHostname
+        yamlSnapshotWindowControllers.values.forEach { $0.recover(with: recoveredSession) }
         workspaceController.recover(with: recoveredSession)
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
@@ -287,6 +297,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         automaticExecOpenRevision &+= 1
         automaticExecOpenTask?.cancel()
         automaticExecOpenTask = nil
+        let yamlWindows = Array(yamlSnapshotWindowControllers.values)
+        yamlSnapshotWindowControllers.removeAll()
+        yamlWindows.forEach { $0.close() }
         workspaceController.stop()
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
@@ -296,6 +309,30 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             }
         }
         onClose?()
+    }
+
+    private func showYAMLSnapshot(_ identity: ResourceIdentity) {
+        guard isAuthenticated, identity.clusterSessionID == session.sessionID else {
+            NSSound.beep()
+            return
+        }
+        if let current = yamlSnapshotWindowControllers[identity.uid] {
+            current.showWindow(nil)
+            current.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        let controller = YAMLSnapshotWindowController(
+            session: session,
+            identity: identity,
+            provider: objectDetailProvider
+        )
+        controller.onClose = { [weak self, weak controller] in
+            guard self?.yamlSnapshotWindowControllers[identity.uid] === controller else { return }
+            self?.yamlSnapshotWindowControllers.removeValue(forKey: identity.uid)
+        }
+        yamlSnapshotWindowControllers[identity.uid] = controller
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
     }
 
     func showPortForwardConfiguration(_ identity: ResourceIdentity) {
@@ -619,6 +656,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var pendingRestorationState: ClusterWindowRestorationState?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
+    var onOpenYAML: ((ResourceIdentity) -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((PodExecTarget) -> Void)?
     var onConfigureExec: ((PodExecTarget) -> Void)?
@@ -700,6 +738,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onOpenObject = { [weak self] identity, tab in
             self?.showObject(identity, initialTab: tab)
+        }
+        contentController.onOpenYAML = { [weak self] identity in
+            guard let self else { return }
+            invalidateObjectOpenTask()
+            Task { [recentObjectStore] in await recentObjectStore.record(identity) }
+            onOpenYAML?(identity)
         }
         contentController.onEnterObject = { [weak self] identity in
             self?.enterObject(identity)
@@ -2283,6 +2327,7 @@ private final class ResourceListViewController: NSViewController,
     var onShowCommandPalette: (() -> Void)?
     var onEnterObject: ((ResourceIdentity) -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
+    var onOpenYAML: ((ResourceIdentity) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
@@ -4605,7 +4650,8 @@ private final class ResourceListViewController: NSViewController,
                 openSelectedObject(initialTab: .automatic, identities: selected)
             }
         case .openYAML:
-            openSelectedObject(initialTab: .yaml, identities: selected)
+            guard let identity = selected.only else { return }
+            onOpenYAML?(identity)
         case .openEvents:
             openSelectedObject(initialTab: .events, identities: selected)
         case .startPortForward:

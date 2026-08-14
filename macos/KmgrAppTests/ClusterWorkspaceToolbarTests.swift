@@ -909,7 +909,7 @@ struct ClusterWorkspaceToolbarTests {
         #expect(window.attachedSheet?.title == "test-cluster — test-context — Configure Terminal")
     }
 
-    @Test("a slower Enter cannot replace a newer explicit YAML view")
+    @Test("a slower Enter cannot replace a newer dedicated YAML window")
     func explicitDetailSupersedesPendingDrillDown() async throws {
         let pod = toolbarPodIdentity()
         let gate = DelayedDetailGate(blockedRequests: [1, 2])
@@ -941,13 +941,15 @@ struct ClusterWorkspaceToolbarTests {
         await gate.releaseAll()
 
         try await waitUntil {
-            descendants(of: root).compactMap { $0 as? NSTextView }
-                .contains {
-                    $0.accessibilityLabel() == "Kubernetes object YAML"
-                        && $0.string.contains("kind: Pod")
-                }
+            guard let yamlRoot = controller.openYAMLSnapshotWindows.first?
+                .window?.contentView
+            else { return false }
+            return descendants(of: yamlRoot).compactMap { $0 as? NSTextView }
+                .contains { $0.accessibilityLabel() == "Kubernetes YAML snapshot"
+                    && $0.string.contains("kind: Pod") }
         }
         try await Task.sleep(for: .milliseconds(40))
+        #expect(controller.openYAMLSnapshotWindows.count == 1)
         #expect(descendants(of: root).compactMap { $0 as? NSTableView }
             .contains { $0.accessibilityLabel() == "Pod containers" } == false)
     }

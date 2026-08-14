@@ -95,11 +95,17 @@ enum ObjectDetailWatchPresentation {
     /// a watch update therefore means "not carried by this stream", not that
     /// the Metrics API retracted the values fetched by GetObject.
     static func merging(_ update: ObjectDetail, previous: ObjectDetail?) -> ObjectDetail {
-        guard update.metrics.isEmpty, let previous, !previous.metrics.isEmpty else {
-            return update
-        }
+        guard let previous else { return update }
         var merged = update
-        merged.metrics = previous.metrics
+        // A watch payload with no YAML is not an authoritative deletion of the
+        // object's serialization. Retain the last non-empty snapshot so a
+        // transient helper/watch omission cannot blank either YAML renderer.
+        if update.yamlUTF8.isEmpty, !previous.yamlUTF8.isEmpty {
+            merged.yamlUTF8 = previous.yamlUTF8
+        }
+        if update.metrics.isEmpty, !previous.metrics.isEmpty {
+            merged.metrics = previous.metrics
+        }
         return merged
     }
 }
@@ -161,8 +167,13 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     )
     private let metricsStack = NSStackView()
     private let metricsScrollView = NSScrollView()
-    private let yamlTextView = NSTextView()
-    private let yamlScrollView = NSScrollView()
+    private lazy var yamlScrollView = NSTextView.scrollablePlainDocumentContentTextView()
+    private lazy var yamlTextView: NSTextView = {
+        guard let textView = yamlScrollView.documentView as? NSTextView else {
+            preconditionFailure("AppKit did not create a YAML document text view")
+        }
+        return textView
+    }()
     private let yamlContainerView = NSView()
     private let secretYAMLEncodingNotice = NSTextField(labelWithString:
         "Secret data values in YAML use Kubernetes base64 encoding. Use Data to edit decoded values."
@@ -197,7 +208,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var yamlPresentationTask: Task<Void, Never>?
     private var pendingYAMLPresentation: (yamlUTF8: Data, generation: UInt64)?
     private var yamlPresentationGeneration: UInt64 = 0
-    private var yamlLineNumberRuler: LineNumberRulerView?
     private var loadTask: Task<Void, Never>?
     private var watchTask: Task<Void, Never>?
     private var eventsTask: Task<Void, Never>?
@@ -209,6 +219,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var dataFileTask: Task<Void, Never>?
     private var dataFileGeneration: UInt64 = 0
     private var authoritativeMutationRefreshInFlight = false
+    /// True when the YAML GET succeeded but the independent ConfigMap/Secret
+    /// Data GET did not. Existing drafts may remain visible, but no value may
+    /// be edited or submitted against an unverified resource version.
+    private var dataAuthorityUnavailable = false
     private var dataConflictController: DataConflictWindowController?
     private var conflictedDataKey: String?
     private let dataDrafts = DataEditorDraftStore()
@@ -330,11 +344,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func updateVisibleTextDocumentGeometry() {
         TextDocumentGeometry.update(
-            yamlTextView,
-            in: yamlScrollView,
-            wrapsToViewport: false
-        )
-        TextDocumentGeometry.update(
             dataValueTextView,
             in: dataValueScroll,
             wrapsToViewport: true
@@ -414,10 +423,20 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     let detailIdentity = reboundIdentity
                     let dataIdentity = reboundIdentity
                     async let fetchedDetail = provider.getObject(identity: detailIdentity)
-                    async let fetchedData = provider.getData(identity: dataIdentity)
-                    let (updatedDetail, updatedData) = try await (fetchedDetail, fetchedData)
+                    async let fetchedData: ObjectData? = try? await provider.getData(
+                        identity: dataIdentity
+                    )
+                    let updatedDetail = try await fetchedDetail
+                    let updatedData = await fetchedData
                     guard !Task.isCancelled else { return }
+                    dataAuthorityUnavailable = updatedData == nil
                     try installRecovery(detail: updatedDetail, data: updatedData)
+                    if updatedData == nil {
+                        statusLabel.stringValue = hasAnyDataDraftChanges
+                            ? "Reconnected · YAML refreshed · local Data draft preserved and locked"
+                            : "Reconnected · YAML refreshed · key/value data unavailable"
+                        statusLabel.textColor = .systemOrange
+                    }
                 } else {
                     let updatedDetail = try await provider.getObject(identity: reboundIdentity)
                     guard !Task.isCancelled else { return }
@@ -576,23 +595,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         yamlTextView.delegate = self
         yamlTextView.setAccessibilityLabel("Kubernetes object YAML")
         yamlTextView.textContainerInset = NSSize(width: 10, height: 10)
-        yamlScrollView.documentView = yamlTextView
         yamlScrollView.hasVerticalScroller = true
         yamlScrollView.hasHorizontalScroller = true
         yamlScrollView.identifier = .init("object-detail-yaml-scroll")
-        TextDocumentGeometry.configure(
-            yamlTextView,
-            in: yamlScrollView,
-            wrapsToViewport: false
-        )
-        let lineNumberRuler = LineNumberRulerView(
-            textView: yamlTextView,
-            scrollView: yamlScrollView
-        )
-        yamlLineNumberRuler = lineNumberRuler
-        yamlScrollView.verticalRulerView = lineNumberRuler
-        yamlScrollView.hasVerticalRuler = true
-        yamlScrollView.rulersVisible = true
+        yamlScrollView.autohidesScrollers = true
 
         editButton.target = self
         editButton.action = #selector(beginYAMLEdit)
@@ -768,15 +774,29 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             do {
                 async let fetchedDetail = provider.getObject(identity: identity)
                 if supportsDataEditor {
-                    async let fetchedData = provider.getData(identity: identity)
-                    let (detail, data) = try await (fetchedDetail, fetchedData)
+                    async let fetchedData: ObjectData? = try? await provider.getData(
+                        identity: identity
+                    )
+                    let detail = try await fetchedDetail
+                    let data = await fetchedData
+                    guard !Task.isCancelled else { return }
                     install(
                         detail: detail,
-                        data: data,
+                        data: data ?? (preservingDataDrafts ? objectData : nil),
                         preservingDataDrafts: preservingDataDrafts
                     )
+                    if data == nil {
+                        dataAuthorityUnavailable = true
+                        statusLabel.stringValue = hasAnyDataDraftChanges
+                            ? "YAML loaded · local Data draft preserved and locked"
+                            : "YAML loaded · key/value data unavailable"
+                        statusLabel.textColor = .systemOrange
+                        updateDataEditorControls()
+                    }
                 } else {
-                    install(detail: try await fetchedDetail, data: nil)
+                    let detail = try await fetchedDetail
+                    guard !Task.isCancelled else { return }
+                    install(detail: detail, data: nil)
                 }
             } catch {
                 show(error: error)
@@ -804,6 +824,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         identity = detail.identity
         self.detail = detail
         objectData = data
+        if data != nil { dataAuthorityUnavailable = false }
         selectedDataKey = nil
         selectedDataEntry = nil
         conflictedDataKey = nil
@@ -908,6 +929,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     dataValueTextView.string = ""
                 }
             }
+            dataAuthorityUnavailable = false
+        } else if !preserveData {
+            releaseDataDrafts()
+            objectData = nil
+            selectedDataKey = nil
+            selectedDataEntry = nil
+            selectedDataCanEditText = false
+            keysTable.reloadData()
+            keysTable.deselectAll(nil)
+            dataValueTextView.string = ""
         }
         watchTask?.cancel()
         watchTask = nil
@@ -1259,21 +1290,14 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             child.topAnchor.constraint(equalTo: contentContainer.topAnchor),
             child.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
         ])
-        // YAML is commonly populated while Summary is visible and its scroll
-        // view is detached. Reconcile only after attachment, when the native
-        // split/tab window supplies a real viewport, instead of relying on a
-        // later incidental window resize to make glyphs visible.
         if child === yamlContainerView {
+            // The factory-created scroll view still needs its new constraints
+            // resolved at the moment a previously detached tab is installed.
+            // AppKit then owns all document sizing; no custom TextKit geometry
+            // or ruler reconciliation participates in this path.
             contentContainer.layoutSubtreeIfNeeded()
-            child.layoutSubtreeIfNeeded()
+            yamlContainerView.layoutSubtreeIfNeeded()
             yamlScrollView.layoutSubtreeIfNeeded()
-            TextDocumentGeometry.update(
-                yamlTextView,
-                in: yamlScrollView,
-                wrapsToViewport: false
-            )
-            yamlTextView.needsDisplay = true
-            yamlScrollView.contentView.needsDisplay = true
         }
     }
 
@@ -1488,22 +1512,22 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func replaceYAMLText(with text: String) {
-        guard yamlTextView.string != text else {
-            yamlLineNumberRuler?.textDidChange()
-            return
-        }
-        let viewport = TextDocumentGeometry.ViewportState.capture(
-            textView: yamlTextView,
-            scrollView: yamlScrollView
-        )
+        guard yamlTextView.string != text else { return }
+        let selectedRanges = yamlTextView.selectedRanges
+        let visibleOrigin = yamlScrollView.contentView.bounds.origin
         yamlTextView.string = text
-        TextDocumentGeometry.update(
-            yamlTextView,
-            in: yamlScrollView,
-            wrapsToViewport: false
-        )
-        viewport.restore(textView: yamlTextView, scrollView: yamlScrollView)
-        yamlLineNumberRuler?.textDidChange()
+        let textLength = (text as NSString).length
+        let restoredRanges = selectedRanges.compactMap { value -> NSValue? in
+            let range = value.rangeValue
+            guard range.location <= textLength else { return nil }
+            return NSValue(range: NSRange(
+                location: range.location,
+                length: min(range.length, textLength - range.location)
+            ))
+        }
+        if !restoredRanges.isEmpty { yamlTextView.selectedRanges = restoredRanges }
+        yamlScrollView.contentView.scroll(to: visibleOrigin)
+        yamlScrollView.reflectScrolledClipView(yamlScrollView.contentView)
     }
 
     override func cancelOperation(_ sender: Any?) {
@@ -1841,6 +1865,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         let hasStoredSelection = selectedDataEntry != nil && !terminalObjectState
         let idle = operationTask == nil && dataConflictController == nil
             && dataFileTask == nil && !authoritativeMutationRefreshInFlight
+            && !dataAuthorityUnavailable
         addKeyButton.isEnabled = objectData != nil && !terminalObjectState && idle
         renameKeyButton.isEnabled = hasStoredSelection && idle && !hasDataDraftChanges
         deleteKeyButton.isEnabled = hasStoredSelection && idle && !hasDataDraftChanges
@@ -2454,6 +2479,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         isInstallingDataEditorState = true
         defer { isInstallingDataEditorState = wasInstallingDataEditorState }
         objectData = currentData
+        dataAuthorityUnavailable = false
         secretRevealed = !currentData.secret
         revealButton.title = "Reveal"
         keysTable.reloadData()

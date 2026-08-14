@@ -465,7 +465,7 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(editor.selectedRange() == selection)
     }
 
-    @Test("YAML scroll view installs a visible line-number ruler and explicit managed-fields control")
+    @Test("YAML tab uses AppKit's plain document without custom ruler geometry")
     func detailYAMLControls() throws {
         let identity = ResourceIdentity(
             clusterSessionID: "session",
@@ -486,11 +486,12 @@ struct ObjectDetailYAMLPresentationTests {
         let root = controller.view
         let scroll = try #require(descendants(of: root).compactMap { $0 as? NSScrollView }
             .first { $0.identifier?.rawValue == "object-detail-yaml-scroll" })
-        let ruler = try #require(scroll.verticalRulerView as? LineNumberRulerView)
-        #expect(scroll.hasVerticalRuler)
-        #expect(scroll.rulersVisible)
-        #expect(ruler.clientView is NSTextView)
-        #expect(ruler.ruleThickness > 0)
+        let textView = try #require(scroll.documentView as? NSTextView)
+        #expect(scroll.hasVerticalRuler == false)
+        #expect(scroll.rulersVisible == false)
+        #expect(scroll.verticalRulerView == nil)
+        #expect(textView.isRichText == false)
+        #expect(textView.usesFindBar)
 
         let toggle = try #require(descendants(of: root).compactMap { $0 as? NSButton }
             .first { $0.title == "Show Managed Fields" })
