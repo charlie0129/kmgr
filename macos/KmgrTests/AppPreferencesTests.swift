@@ -87,6 +87,9 @@ import Testing
     #expect(ConfirmationPreferences.alwaysConfirmNonLoopbackPortForward)
     #expect(ConfirmationPreferences.alwaysShowClusterAndNamespaceIdentity)
     #expect(KeyboardShortcutReference.defaults.contains { $0.keys == "S" })
+    #expect(KeyboardShortcutReference.defaults.contains {
+        $0.keys == "⇧⌘N" && $0.action.contains("namespace")
+    })
     #expect(AppPreferences().restoreOpenClusterWindows)
 }
 

@@ -118,6 +118,7 @@ public enum ContextualShortcutCatalog {
         if availability.canDelete {
             items.append(item("resource.delete", "\u{2318}\u{232B}", "Delete selection"))
         }
+        items.append(namespaceItem)
         items.append(item("workspace.history", "\u{2318}[ / \u{2318}]", "Back / Forward"))
         items.append(item("workspace.palette", "\u{2318}K", "Open Command Palette"))
 
@@ -135,6 +136,7 @@ public enum ContextualShortcutCatalog {
         items: [
             item("filter.apply", "Return", "Apply filter and return to the list"),
             item("filter.cancel", "Escape", "Clear filter or return to the list"),
+            namespaceItem,
         ]
     )
 
@@ -147,6 +149,7 @@ public enum ContextualShortcutCatalog {
                 "Open selected container logs"
             ))
         }
+        items.append(namespaceItem)
         items.append(item("subresource.back", "Escape", "Back to resource list"))
         return ContextualShortcutSnapshot(
             contextID: "pod-containers",
@@ -160,6 +163,7 @@ public enum ContextualShortcutCatalog {
         if canOpenEditor {
             items.append(item("data.open", "Return", "Open Data editor"))
         }
+        items.append(namespaceItem)
         items.append(item("subresource.back", "Escape", "Back to resource list"))
         return ContextualShortcutSnapshot(
             contextID: "object-data",
@@ -172,6 +176,7 @@ public enum ContextualShortcutCatalog {
         contextID: "object-details",
         title: "Object Details",
         items: [
+            namespaceItem,
             item("workspace.history", "\u{2318}[ / \u{2318}]", "Back / Forward"),
             item("workspace.palette", "\u{2318}K", "Open Command Palette"),
             item("window.close", "\u{2318}W", "Close window"),
@@ -196,4 +201,10 @@ public enum ContextualShortcutCatalog {
     ) -> ContextualShortcutItem {
         ContextualShortcutItem(id: id, keys: keys, action: action)
     }
+
+    private static let namespaceItem = item(
+        "workspace.namespace",
+        "\u{21E7}\u{2318}N",
+        "Choose workspace namespace"
+    )
 }

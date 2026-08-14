@@ -49,7 +49,7 @@ struct ContextualShortcutsCoordinatorTests {
             == "resource-filter")
         #expect(coordinator.shortcutsWindowController.window?.isVisible == true)
         #expect(shortcutKeys(in: coordinator.shortcutsWindowController.window) == [
-            "Return", "Escape",
+            "Return", "Escape", "\u{21E7}\u{2318}N",
         ])
 
         // Reusing the one application-owned panel must replace the old rows

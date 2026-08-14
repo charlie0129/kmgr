@@ -25,7 +25,7 @@ struct ObjectSubresourceListViewControllerTests {
             .first { $0.accessibilityLabel() == "Pod containers" })
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         #expect(controller.contextualShortcutSnapshot.items.map(\.keys)
-            == ["L / Return", "Escape"])
+            == ["L / Return", "\u{21E7}\u{2318}N", "Escape"])
         let button = try #require(subresourceDescendants(of: controller.view)
             .compactMap { $0 as? NSButton }
             .first { $0.title == "Open Selected Container Logs" })
@@ -37,7 +37,8 @@ struct ObjectSubresourceListViewControllerTests {
         opened = nil
         controller.setNetworkActionsEnabled(false)
         #expect(!button.isEnabled)
-        #expect(controller.contextualShortcutSnapshot.items.map(\.keys) == ["Escape"])
+        #expect(controller.contextualShortcutSnapshot.items.map(\.keys)
+            == ["\u{21E7}\u{2318}N", "Escape"])
         button.performClick(nil)
         let returnEvent = try #require(NSEvent.keyEvent(
             with: .keyDown,
@@ -86,7 +87,7 @@ struct ObjectSubresourceListViewControllerTests {
             .compactMap { $0 as? NSButton }
             .first { $0.title == "Open Data Editor" })
         #expect(controller.contextualShortcutSnapshot.items.map(\.keys)
-            == ["Return", "Escape"])
+            == ["Return", "\u{21E7}\u{2318}N", "Escape"])
         button.performClick(nil)
         #expect(edited == object)
     }

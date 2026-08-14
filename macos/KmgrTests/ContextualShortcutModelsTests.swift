@@ -25,6 +25,7 @@ struct ContextualShortcutModelsTests {
         #expect(snapshot.items.map(\.keys).contains("S"))
         #expect(snapshot.items.map(\.keys).contains("P"))
         #expect(snapshot.items.map(\.keys).contains("\u{2318}\u{232B}"))
+        #expect(snapshot.items.map(\.keys).contains("\u{21E7}\u{2318}N"))
 
         let incompatible = ContextualShortcutCatalog.resourceList(
             title: "ConfigMaps",
@@ -43,18 +44,18 @@ struct ContextualShortcutModelsTests {
     @Test("focused filter help replaces table letters")
     func filterContext() {
         #expect(ContextualShortcutCatalog.resourceFilter.items.map(\.keys) == [
-            "Return", "Escape",
+            "Return", "Escape", "\u{21E7}\u{2318}N",
         ])
     }
 
     @Test("subresource help follows its exact action availability")
     func subresources() {
         #expect(ContextualShortcutCatalog.containerList(canOpenLogs: true)
-            .items.map(\.keys) == ["L / Return", "Escape"])
+            .items.map(\.keys) == ["L / Return", "\u{21E7}\u{2318}N", "Escape"])
         #expect(ContextualShortcutCatalog.containerList(canOpenLogs: false)
-            .items.map(\.keys) == ["Escape"])
+            .items.map(\.keys) == ["\u{21E7}\u{2318}N", "Escape"])
         #expect(ContextualShortcutCatalog.dataList(canOpenEditor: true)
-            .items.map(\.keys) == ["Return", "Escape"])
+            .items.map(\.keys) == ["Return", "\u{21E7}\u{2318}N", "Escape"])
     }
 
     @Test("unknown dialogs never advertise resource table letters")

@@ -127,6 +127,12 @@ struct NativeMainMenuBuilderTests {
                 NSEvent.ModifierFlags()
             ),
             (
+                "Choose Namespace…",
+                #selector(ClusterWorkspaceWindowController.chooseNamespace(_:)),
+                "n",
+                NSEvent.ModifierFlags([.command, .shift])
+            ),
+            (
                 "Move Selection Up",
                 #selector(ClusterWorkspaceWindowController.moveResourceSelectionUp(_:)),
                 "k",

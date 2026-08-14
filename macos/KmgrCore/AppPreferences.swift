@@ -414,6 +414,7 @@ public struct KeyboardShortcutReference: Hashable, Sendable {
     public static let defaults: [Self] = [
         Self(keys: "⌘N", action: "New Cluster Window"),
         Self(keys: "⌘K", action: "Command Palette"),
+        Self(keys: "⇧⌘N", action: "Choose workspace namespace"),
         Self(keys: "/", action: "Filter current resource list"),
         Self(keys: "↑ / ↓ or K / J", action: "Move table selection"),
         Self(keys: "⇧↑ / ⇧↓ or ⇧-click", action: "Extend selection"),

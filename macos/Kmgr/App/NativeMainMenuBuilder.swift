@@ -167,6 +167,13 @@ enum NativeMainMenuBuilder {
             keyEquivalent: "/",
             modifiers: []
         )
+        addResponderItem(
+            to: menu,
+            title: "Choose Namespace…",
+            action: #selector(ClusterWorkspaceWindowController.chooseNamespace(_:)),
+            keyEquivalent: "n",
+            modifiers: [.command, .shift]
+        )
         menu.addItem(.separator())
         addResponderItem(
             to: menu,

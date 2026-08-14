@@ -434,6 +434,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func focusResourceFilter(_ sender: Any?) {
         workspaceController.focusResourceFilter(sender)
     }
+    @objc func chooseNamespace(_ sender: Any?) {
+        workspaceController.chooseNamespace(sender)
+    }
     @objc func moveResourceSelectionUp(_ sender: Any?) {
         workspaceController.moveResourceSelectionUp(sender)
     }
@@ -940,7 +943,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             namespaceControl.addItem(withTitle: "All namespaces")
             namespaceControl.target = self
             namespaceControl.action = #selector(namespaceChanged)
-            namespaceControl.toolTip = "Namespace scope"
+            namespaceControl.toolTip = "Namespace scope (⇧⌘N)"
             namespaceControl.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Namespace"
@@ -998,6 +1001,18 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             view.window?.makeFirstResponder(contentController.tableResponder)
         }
         checkpointRestoration()
+    }
+
+    /// Opens the existing native popup rather than maintaining a second
+    /// namespace picker. Once open, AppKit supplies type-to-select, arrows,
+    /// Return, and Escape entirely from the keyboard.
+    @objc func chooseNamespace(_ sender: Any?) {
+        guard namespaceControl.numberOfItems > 0 else {
+            NSSound.beep()
+            return
+        }
+        view.window?.makeFirstResponder(namespaceControl)
+        namespaceControl.performClick(sender)
     }
 
     @objc private func showPortForwards() {
