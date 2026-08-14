@@ -44,6 +44,56 @@ redacted `WorkspaceStreamBufferExceeded` error instead of allowing unbounded
 queue growth. This is an enforcement limit, not evidence that 256 queued
 messages deliver acceptable UI latency.
 
+When diagnostics are enabled, the harness also samples its own process with
+Mach `TASK_VM_INFO` before and after the large view. It reports resident size,
+physical footprint, and peak physical-footprint growth without including the
+SwiftPM driver process. The opt-in budget limits peak physical-footprint growth
+to 384 MiB. This is deliberately generous and catches copy-amplification
+regressions; one finite run is not a long-duration plateau measurement.
+
+## Synthetic AppKit table harness
+
+`KmgrAppTests` drives a real view-based `NSTableView` through the same
+`ResourceTableAppKitProjection` capture/apply seam used by the workspace. It
+installs 100,000 compact rows, projects four selected UIDs, scrolls to a clipped
+UID anchor, and performs eight 500-row reorder-producing batches. It verifies
+that selection and the pixel scroll offset remain attached to those UIDs and
+that AppKit asks for only a viewport-sized number of reusable cells.
+
+Run the Release harness with diagnostics:
+
+```sh
+KMGR_PERF_DIAGNOSTICS=1 \
+  swift test --package-path macos -c release --no-parallel \
+  --filter ResourceTableAppKitPerformanceTests
+```
+
+An explicit local budget checks that selection and the typical table
+reload/scroll restoration fit within one 60 Hz display frame, with a
+three-frame ceiling for the slowest of the eight synthetic reloads:
+
+```sh
+KMGR_PERF_BUDGETS=1 \
+  swift test --package-path macos -c release --no-parallel \
+  --filter ResourceTableAppKitPerformanceTests
+```
+
+These timings isolate AppKit projection after the compact model update. The
+harness prints model-apply timing separately and does not classify it as table
+reload latency.
+
+## Native accessibility contracts
+
+Targeted AppKit tests assert that the workspace resource outline and table
+retain native accessibility roles, and that the resource table, filter,
+freshness/progress state, and app-wide Port Forwards control expose text
+labels. Resource-usage cells separately verify their spoken quantity value and
+non-color marker semantics. The Relationships detail test also pins the visible
+`potentially incomplete` default and explicit `Scan All Resources…` action.
+
+These checks catch programmatic accessibility regressions, but they do not
+replace a manual VoiceOver navigation/read-order pass in the packaged app.
+
 ## Instruments signposts
 
 Release builds contain local `OSSignposter` intervals under subsystem
@@ -124,33 +174,51 @@ sharing and remove them when the investigation is complete.
 
 ## Current reference evidence
 
-On 2026-08-13, the diagnostic Release harness passed on an Apple M1 Max with
+On 2026-08-14, the diagnostic Release harnesses passed on an Apple M1 Max with
 64 GiB RAM, macOS 15.6.1, and Swift 6.1.2. The measured phases were:
 
 | Phase | Time |
 | --- | ---: |
-| Progressive 100,000-row model snapshot | 5.591 s |
-| 4,000 updates across eight reorder batches | 0.746 s |
-| Identity and cardinality assertions | 0.024 s |
+| Progressive 100,000-row model snapshot | 4.610 s |
+| 4,000 updates across eight reorder batches | 0.602 s |
+| Identity and cardinality assertions | 0.020 s |
 
-The complete Swift Testing case passed in 6.397 seconds. These are a
-single-machine reference, not a product performance guarantee.
+The complete model case passed in 5.265 seconds. Its in-process physical
+footprint grew by 111.5 MiB and its peak physical footprint grew by 125.6 MiB,
+to 132.8 MiB. Resident size at the final sample was 289.8 MiB; these metrics
+have different accounting rules and should not be conflated.
+
+| AppKit phase/evidence | Result |
+| --- | ---: |
+| Initial 100,000-row `NSTableView` reload/layout | 2.388 ms |
+| Four-UID selection projection | 0.291 ms |
+| Typical reorder reload/selection/scroll restoration | 0.990 ms |
+| Slowest reorder reload/selection/scroll restoration | 1.110 ms |
+| Slowest compact-model apply (reported separately) | 63.138 ms |
+| Cell-view requests across initial render plus eight reloads | 208 |
+| Maximum simultaneously installed table row views | 21 |
+
+The complete AppKit case passed in 0.863 seconds. These are single-machine
+references, not cross-machine or end-to-end product guarantees.
 
 ## What remains unproven
 
-The pure harness does not render an `NSTableView`, traverse gRPC, run the Go
-LIST/WATCH pipeline, or contact Kubernetes. Its cardinality assertions do not
-measure resident memory, allocations, or copy amplification. The signposts
-make real Release UI/IPC phases measurable but do not by themselves prove a
-latency target.
+The AppKit harness proves bounded cell construction and fast programmatic table
+projection in isolation. It does not traverse gRPC, run the Go LIST/WATCH
+pipeline, contact Kubernetes, or measure input-event-to-screen-paint latency.
+The finite Mach samples do not prove a long-duration process-memory plateau or
+attribute every allocation/copy. The signposts make real Release UI/IPC phases
+measurable but do not by themselves prove an end-to-end latency target.
 
-No recorded trace currently proves one-frame selection/navigation feedback,
-scrolling responsiveness at 100,000 rows, end-to-end IPC throughput under a
-sustained watch, process-memory plateaus, or near-zero GUI/helper idle CPU.
+No recorded trace currently proves one-frame end-to-end selection/navigation
+feedback while streams are active, continuous scrolling responsiveness,
+end-to-end IPC throughput under a sustained watch, long-duration memory
+plateaus, or near-zero GUI/helper idle CPU.
 Metrics-failure isolation is functionally tested but has not been shown to have
 "no measurable" base-list effect under a profiler. Hidden log rendering is
 suppressed and its storage/output are bounded, but its long-duration memory and
-CPU behavior still needs an Instruments recording.
+CPU behavior still needs an Instruments recording. Full packaged-app VoiceOver
+navigation and read-order testing also remains manual.
 
 For any end-to-end claim, capture Instruments plus Go CPU/heap profiles and
 record the app configuration, row/column counts, update rate, machine, OS, and

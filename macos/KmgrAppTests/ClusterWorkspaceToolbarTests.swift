@@ -45,6 +45,44 @@ struct ClusterWorkspaceToolbarTests {
         #expect(button.frame.width >= button.intrinsicContentSize.width)
     }
 
+    @Test("resource navigation exposes native accessibility roles and text alternatives")
+    func resourceNavigationAccessibility() throws {
+        let controller = makeWorkspace()
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let views = descendants(of: root)
+        let outline = try #require(views.compactMap { $0 as? NSOutlineView }.first)
+        let table = try #require(views.compactMap { $0 as? NSTableView }.first {
+            $0.accessibilityLabel() == "Kubernetes resources"
+        })
+        let filter = try #require(views.compactMap { $0 as? NSSearchField }.first {
+            $0.accessibilityLabel() == "Filter Kubernetes resources"
+        })
+        let freshness = try #require(views.compactMap { $0 as? NSTextField }.first {
+            $0.accessibilityLabel() == "Resource freshness"
+        })
+        let progress = try #require(views.compactMap { $0 as? NSProgressIndicator }.first {
+            $0.accessibilityLabel() == "Resource view update in progress"
+        })
+        let columns = try #require(views.compactMap { $0 as? NSButton }.first {
+            $0.title == "Columns…"
+        })
+        let forwards = try #require(window.toolbar?.items.compactMap { $0.view as? NSButton }
+            .first { $0.accessibilityLabel() == "Open app-wide Port Forwards" })
+
+        #expect(window.title.contains("test-context"))
+        #expect(outline.accessibilityRole() == .outline)
+        #expect(outline.accessibilityLabel() == "Kubernetes resource kinds")
+        #expect(table.accessibilityRole() == .table)
+        #expect(table.allowsMultipleSelection)
+        #expect(filter.accessibilityLabel() == "Filter Kubernetes resources")
+        #expect(freshness.accessibilityLabel() == "Resource freshness")
+        #expect(progress.accessibilityRole() == .busyIndicator)
+        #expect(columns.title == "Columns…")
+        #expect(forwards.title.contains("Forwards"))
+    }
+
     @Test("resource freshness header shows cached age and background progress")
     func resourceFreshnessHeader() async throws {
         let synchronizedAt = Date(timeIntervalSinceNow: -18)

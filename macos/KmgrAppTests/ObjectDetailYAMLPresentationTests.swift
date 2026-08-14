@@ -24,6 +24,51 @@ struct ObjectDetailYAMLPresentationTests {
         ) == 0)
     }
 
+    @Test("Relationships default to potentially incomplete with an explicit expensive scan")
+    func relationshipCoverageAndScanAction() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: LoadedObjectDetailProvider(
+                detail: ObjectDetail(identity: identity, resourceVersion: "rv-1"),
+                data: ObjectData(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    entries: [],
+                    secret: false
+                )
+            ),
+            initialTab: .relationships
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        try await waitUntil {
+            descendants(of: controller.view).contains {
+                ($0 as? NSTextField)?.stringValue
+                    == "Cached children · potentially incomplete"
+            }
+        }
+        let buttons = descendants(of: controller.view).compactMap { $0 as? NSButton }
+        let scan = try #require(buttons.first { $0.title == "Scan All Resources…" })
+        let cancel = try #require(buttons.first { $0.title == "Cancel Scan" })
+
+        #expect(!scan.isHidden)
+        #expect(scan.isEnabled)
+        #expect(scan.target === controller)
+        #expect(scan.action != nil)
+        #expect(cancel.isHidden)
+    }
+
     @Test("managed fields are hidden by default without changing complete YAML")
     func managedFieldsPresentation() throws {
         let source = #"""

@@ -255,7 +255,10 @@ and endpoint cleanup without reading kubeconfigs or contacting a cluster. This
 includes LIST/WATCH continuity, 410 relists, cache
 retention/eviction, UID replacement safety, Secret sanitization, CEL limits,
 resource accounting, bounded streams, port-forward reconnects, and a 100,000
-row synthetic view harness.
+row synthetic model plus native `NSTableView` harness. Targeted AppKit tests
+also pin the resource workspace's accessibility roles/text alternatives and
+the Relationships view's potentially-incomplete default with its explicit
+expensive-scan action.
 
 For a manual smoke test, provide the exact disposable context name and
 explicitly authorize the test scope first. Merely making a context available

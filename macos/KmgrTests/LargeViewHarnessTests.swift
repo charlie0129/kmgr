@@ -1,3 +1,4 @@
+import Darwin.Mach
 import Foundation
 import Testing
 @testable import KmgrCore
@@ -35,6 +36,12 @@ struct LargeViewHarnessTests {
             phaseStartedAt = now
         }
 
+        let initialMemory: ProcessMemorySnapshot?
+        if diagnosticsEnabled || budgetsEnabled {
+            initialMemory = try ProcessMemorySnapshot.capture()
+        } else {
+            initialMemory = nil
+        }
         let allUIDs = (0..<rowCount).map { ResourceUID("large-view-\($0)") }
         var model = ResourceTableModel()
 
@@ -134,6 +141,12 @@ struct LargeViewHarnessTests {
         #expect(Set(model.orderedVisibleUIDs).count == rowCount)
         #expect(model.rowByUID.values.allSatisfy { $0.cells.count == 2 })
         recordTiming("identity and bounded-state verification")
+        let finalMemory: ProcessMemorySnapshot?
+        if diagnosticsEnabled || budgetsEnabled {
+            finalMemory = try ProcessMemorySnapshot.capture()
+        } else {
+            finalMemory = nil
+        }
 
         if diagnosticsEnabled || budgetsEnabled {
             for (phase, elapsed) in phaseTimings {
@@ -144,6 +157,27 @@ struct LargeViewHarnessTests {
                     #expect(
                         elapsed <= budget,
                         "Release diagnostic phase '\(phase)' exceeded its opt-in \(budget)s budget."
+                    )
+                }
+            }
+            if let initialMemory, let finalMemory {
+                let physicalGrowth = finalMemory.physicalFootprintBytes
+                    .subtractingWithoutUnderflow(initialMemory.physicalFootprintBytes)
+                let peakPhysicalGrowth = finalMemory.peakPhysicalFootprintBytes
+                    .subtractingWithoutUnderflow(initialMemory.peakPhysicalFootprintBytes)
+                print(String(format:
+                    "kmgr large-view memory: resident %.1f MiB; physical footprint %.1f MiB (delta %.1f MiB); peak physical footprint %.1f MiB (delta %.1f MiB)",
+                    finalMemory.residentBytes.mebibytes,
+                    finalMemory.physicalFootprintBytes.mebibytes,
+                    physicalGrowth.mebibytes,
+                    finalMemory.peakPhysicalFootprintBytes.mebibytes,
+                    peakPhysicalGrowth.mebibytes
+                ))
+                if budgetsEnabled {
+                    let maximumPeakPhysicalGrowth = UInt64(384 * 1_024 * 1_024)
+                    #expect(
+                        peakPhysicalGrowth <= maximumPeakPhysicalGrowth,
+                        "The 100,000-row model increased peak physical footprint by more than 384 MiB."
                     )
                 }
             }
@@ -177,5 +211,51 @@ struct LargeViewHarnessTests {
                 ),
             ]
         )
+    }
+}
+
+private struct ProcessMemorySnapshot {
+    var residentBytes: UInt64
+    var physicalFootprintBytes: UInt64
+    var peakPhysicalFootprintBytes: UInt64
+
+    static func capture() throws -> Self {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size
+        )
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(
+                to: integer_t.self,
+                capacity: Int(count)
+            ) { rebound in
+                task_info(
+                    mach_task_self_,
+                    task_flavor_t(TASK_VM_INFO),
+                    rebound,
+                    &count
+                )
+            }
+        }
+        guard result == KERN_SUCCESS else {
+            throw ProcessMemorySnapshotError.taskInfo(result)
+        }
+        return Self(
+            residentBytes: UInt64(info.resident_size),
+            physicalFootprintBytes: UInt64(info.phys_footprint),
+            peakPhysicalFootprintBytes: UInt64(max(0, info.ledger_phys_footprint_peak))
+        )
+    }
+}
+
+private enum ProcessMemorySnapshotError: Error {
+    case taskInfo(kern_return_t)
+}
+
+private extension UInt64 {
+    var mebibytes: Double { Double(self) / Double(1_024 * 1_024) }
+
+    func subtractingWithoutUnderflow(_ other: UInt64) -> UInt64 {
+        self >= other ? self - other : 0
     }
 }

@@ -2323,13 +2323,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func captureUpdate() -> ResourceTableUpdateCapture {
-        let firstRow = tableView.rows(in: tableView.visibleRect).location
-        let uid = model.orderedVisibleUIDs.indices.contains(firstRow)
-            ? model.orderedVisibleUIDs[firstRow] : nil
-        let pixelOffset = uid.map { _ in
-            Double(tableView.rect(ofRow: firstRow).minY - tableView.visibleRect.minY)
-        } ?? 0
-        return model.captureUpdate(topVisibleUID: uid, pixelOffsetFromTop: pixelOffset)
+        ResourceTableAppKitProjection.capture(model: model, from: tableView)
     }
 
     private func applyTablePlan(_ plan: ResourceTableUpdatePlan) {
@@ -2337,30 +2331,14 @@ private final class ResourceListViewController: NSViewController,
             PerformanceSignpostCatalog.resourceTableReload,
             "visible_rows=\(self.model.orderedVisibleUIDs.count) selected_rows=\(plan.selectedRowIndexes.count) restores_scroll=\(plan.scrollRestoration != nil)"
         )
+        let wasSuppressingSelectionCallbacks = suppressSelectionCallbacks
         suppressSelectionCallbacks = true
-        switch plan.contentUpdate {
-        case .reloadAll:
-            tableView.reloadData()
-        case .reloadRows(let rows):
-            let rowIndexes = IndexSet(rows.filter(model.orderedVisibleUIDs.indices.contains))
-            let columnIndexes = IndexSet(integersIn: tableView.tableColumns.indices)
-            if !rowIndexes.isEmpty, !columnIndexes.isEmpty {
-                tableView.reloadData(
-                    forRowIndexes: rowIndexes,
-                    columnIndexes: columnIndexes
-                )
-            }
-        }
-        tableView.selectRowIndexes(IndexSet(plan.selectedRowIndexes), byExtendingSelection: false)
-        suppressSelectionCallbacks = false
-        if let restoration = plan.scrollRestoration,
-            model.orderedVisibleUIDs.indices.contains(restoration.rowIndex)
-        {
-            let rowRect = tableView.rect(ofRow: restoration.rowIndex)
-            let targetY = max(0, rowRect.minY - CGFloat(restoration.pixelOffsetFromTop))
-            tableView.scroll(NSPoint(x: tableView.visibleRect.minX, y: targetY))
-            scrollView.reflectScrolledClipView(scrollView.contentView)
-        }
+        ResourceTableAppKitProjection.apply(
+            plan,
+            visibleRowCount: model.orderedVisibleUIDs.count,
+            to: tableView
+        )
+        suppressSelectionCallbacks = wasSuppressingSelectionCallbacks
         tableSignposter.endInterval(
             PerformanceSignpostCatalog.resourceTableReload,
             interval
