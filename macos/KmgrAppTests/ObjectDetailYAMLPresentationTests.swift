@@ -24,6 +24,45 @@ struct ObjectDetailYAMLPresentationTests {
         ) == 0)
     }
 
+    @Test("Events and Relationships tables expose distinct accessibility labels")
+    func eventAndRelationshipTableAccessibilityLabels() throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let eventsController = ObjectDetailViewController(
+            identity: identity,
+            provider: NoopObjectDetailProvider(),
+            initialTab: .events
+        )
+        eventsController.loadView()
+        let eventsTable = try #require(descendants(of: eventsController.view)
+            .compactMap { $0 as? NSTableView }
+            .first)
+
+        #expect(eventsTable.accessibilityRole() == .table)
+        #expect(eventsTable.accessibilityLabel() == "Kubernetes object events")
+
+        let relationshipsController = ObjectDetailViewController(
+            identity: identity,
+            provider: NoopObjectDetailProvider(),
+            initialTab: .relationships
+        )
+        relationshipsController.loadView()
+        let relationshipsTable = try #require(descendants(of: relationshipsController.view)
+            .compactMap { $0 as? NSTableView }
+            .first)
+
+        #expect(relationshipsTable.accessibilityRole() == .table)
+        #expect(relationshipsTable.accessibilityLabel()
+            == "Kubernetes object relationships")
+    }
+
     @Test("Relationships default to potentially incomplete with an explicit expensive scan")
     func relationshipCoverageAndScanAction() async throws {
         let identity = ResourceIdentity(

@@ -7,6 +7,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
 {
     private let preferencesStore: AppPreferencesStore
     private var loadedPreferences: AppPreferences
+    private let shouldCenterOnFirstPresentation: Bool
+    private var hasPresentedWindow = false
 
     private let appearanceButton = NSPopUpButton()
     private let namespaceButton = NSPopUpButton()
@@ -27,7 +29,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
 
     var onPreferencesChanged: ((AppPreferences, AppPreferencesDelta) -> Void)?
 
-    init(preferencesStore: AppPreferencesStore) {
+    init(
+        preferencesStore: AppPreferencesStore,
+        frameAutosaveName: String = "Settings"
+    ) {
         self.preferencesStore = preferencesStore
         loadedPreferences = preferencesStore.current
         let window = NSWindow(
@@ -40,7 +45,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         window.minSize = NSSize(width: 610, height: 500)
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
-        window.setFrameAutosaveName("Settings")
+        let restoredSavedFrame = window.setFrameUsingName(frameAutosaveName)
+        window.setFrameAutosaveName(frameAutosaveName)
+        shouldCenterOnFirstPresentation = !restoredSavedFrame
         super.init(window: window)
         window.delegate = self
         configureContent(in: window)
@@ -54,8 +61,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
     override func showWindow(_ sender: Any?) {
+        if !hasPresentedWindow {
+            hasPresentedWindow = true
+            if shouldCenterOnFirstPresentation { window?.center() }
+        }
         super.showWindow(sender)
-        window?.centerIfNeeded()
         window?.makeKeyAndOrderFront(sender)
     }
 
@@ -417,13 +427,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         } catch {
             showStatus(error.localizedDescription, error: true)
         }
-    }
-}
-
-private extension NSWindow {
-    func centerIfNeeded() {
-        guard !isVisible else { return }
-        center()
     }
 }
 

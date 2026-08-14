@@ -32,6 +32,47 @@ struct ApplicationWindowPresentationTests {
         #expect(!AppPreferencesStore(defaults: defaults).current.restoreOpenClusterWindows)
     }
 
+    @Test("Settings preserves its frame when reopened and when restored")
+    func settingsFrameAutosaveIsNotOverriddenByCentering() throws {
+        let preferencesSuite = "kmgr-app-settings-frame-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: preferencesSuite))
+        defer { defaults.removePersistentDomain(forName: preferencesSuite) }
+        let frameName = "Settings-test-\(UUID().uuidString)"
+        NSWindow.removeFrame(usingName: frameName)
+        defer { NSWindow.removeFrame(usingName: frameName) }
+
+        let first = SettingsWindowController(
+            preferencesStore: AppPreferencesStore(defaults: defaults),
+            frameAutosaveName: frameName
+        )
+        let firstWindow = try #require(first.window)
+        first.showWindow(nil)
+        let movedFrame = firstWindow.frame.offsetBy(dx: 37, dy: -29)
+        firstWindow.setFrame(movedFrame, display: false)
+        firstWindow.orderOut(nil)
+
+        first.showWindow(nil)
+        #expect(firstWindow.frame == movedFrame)
+
+        firstWindow.saveFrame(usingName: frameName)
+        firstWindow.setFrameAutosaveName("")
+        first.close()
+
+        let restored = SettingsWindowController(
+            preferencesStore: AppPreferencesStore(defaults: defaults),
+            frameAutosaveName: frameName
+        )
+        let restoredWindow = try #require(restored.window)
+        let frameBeforeFirstPresentation = restoredWindow.frame
+        restored.showWindow(nil)
+        defer {
+            restoredWindow.setFrameAutosaveName("")
+            restored.close()
+        }
+
+        #expect(restoredWindow.frame == frameBeforeFirstPresentation)
+    }
+
     @Test("last workspace always returns to Cluster Manager")
     func lastWorkspaceClosePolicy() {
         #expect(policy().shouldPresentAfterWorkspaceClose)

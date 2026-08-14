@@ -445,6 +445,26 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                         guard activeGeneration == self?.generation,
                             activeGeneration == self?.pendingGeneration
                         else { continue }
+                        guard message.cursor.generation == activeGeneration,
+                            message.cursor.sequence > 0
+                        else { continue }
+                        if let issue = Self.replacementRejectionIssue(
+                            for: message,
+                            contextName: self?.session.contextName ?? ""
+                        ) {
+                            self?.pendingGeneration = nil
+                            self?.setStreamControlsEnabled(true)
+                            self?.restoreEstablishedStreamConfiguration()
+                            self?.updateStatusLabel()
+                            self?.statusLabel.stringValue += " · Replacement failed: \(issue.message)"
+                            self?.statusLabel.textColor = .systemRed
+                            await provider.cancelLogs(
+                                sessionID: request.sessionID,
+                                streamID: request.streamID,
+                                generation: activeGeneration
+                            )
+                            return
+                        }
                         replacementEstablished = true
                         self?.establishedConfiguration = AppliedStreamConfiguration(
                             sources: request.sources,
@@ -482,6 +502,38 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             }
         }
         streamTasks[activeGeneration] = task
+    }
+
+    /// A replacement is not usable when its first accepted server message is
+    /// terminal failure. Keep the established generation and its presentation
+    /// alive so a rejected option change cannot interrupt healthy log output.
+    private static func replacementRejectionIssue(
+        for message: LogStreamMessage,
+        contextName: String
+    ) -> ClusterManagerIssue? {
+        switch message {
+        case .failure(_, let issue):
+            return issue
+        case .status(_, let status) where status.state == .failed:
+            return status.issue ?? ClusterManagerIssue(
+                category: .unavailable,
+                reason: "LogReplacementFailed",
+                message: "The replacement log stream failed before it connected.",
+                retryable: true,
+                contextName: contextName,
+                operation: "stream Pod logs"
+            )
+        case .status(_, let status) where status.state == .cancelled:
+            return status.issue ?? ClusterManagerIssue(
+                category: .cancelled,
+                reason: "LogReplacementCancelled",
+                message: "The replacement log stream was cancelled before it connected.",
+                contextName: contextName,
+                operation: "stream Pod logs"
+            )
+        case .records, .status:
+            return nil
+        }
     }
 
     private func retireGenerations(before replacement: UInt64) {

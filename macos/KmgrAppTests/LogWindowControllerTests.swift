@@ -133,7 +133,7 @@ struct LogWindowControllerTests {
         )
         controller.showWindow(nil)
         try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
-        provider.emitConnecting(generation: 1)
+        provider.emitStreaming(generation: 1, sequence: 1)
 
         let root = try #require(controller.window?.contentView)
         let apply = try #require(descendants(of: root).compactMap { $0 as? NSButton }
@@ -189,6 +189,50 @@ struct LogWindowControllerTests {
         #expect(!events.contains("cancel:1"))
         #expect(!events.contains("terminated:1"))
         controller.close()
+    }
+
+    @Test("first failure message does not retire the established stream")
+    func firstFailureMessagePreservesEstablishedGeneration() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitStreaming(generation: 1, sequence: 1)
+
+        let root = try #require(controller.window?.contentView)
+        let follow = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Follow" })
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-status" })
+        try await waitForLogWindowControl(follow, enabled: true)
+        #expect(follow.state == .on)
+
+        follow.performClick(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        provider.emitFailureMessage(generation: 2, message: "new options rejected")
+        try await waitForLogWindowControl(follow, enabled: true)
+        try await waitForLogStatus(status) { $0.contains("new options rejected") }
+
+        #expect(follow.state == .on)
+        var events = provider.snapshot()
+        #expect(!events.contains("cancel:1"))
+        #expect(!events.contains("terminated:1"))
+        #expect(events.contains("cancel:2"))
+
+        // The prior generation remains admitted by the unchanged stream gate.
+        provider.emitStreaming(generation: 1, sequence: 2)
+        try await waitForLogStatus(status) { $0 == "Streaming" }
+        events = provider.snapshot()
+        #expect(!events.contains("cancel:1"))
+        #expect(!events.contains("terminated:1"))
     }
 
     @Test("rapid Apply clicks serialize replacement generations")
@@ -394,6 +438,29 @@ private final class OrderedLogWindowProvider: LogStreamProviding, @unchecked Sen
         continuation?.yield(.status(
             cursor: StreamCursor(generation: generation, sequence: 1),
             status: LogStatus(state: .connecting)
+        ))
+    }
+
+    func emitStreaming(generation: UInt64, sequence: UInt64) {
+        let continuation = lock.withLock { continuations[generation] }
+        continuation?.yield(.status(
+            cursor: StreamCursor(generation: generation, sequence: sequence),
+            status: LogStatus(state: .streaming)
+        ))
+    }
+
+    func emitFailureMessage(generation: UInt64, message: String) {
+        let continuation = lock.withLock { continuations[generation] }
+        continuation?.yield(.failure(
+            cursor: StreamCursor(generation: generation, sequence: 1),
+            issue: ClusterManagerIssue(
+                category: .unavailable,
+                reason: "ReplacementRejected",
+                message: message,
+                retryable: true,
+                contextName: "production",
+                operation: "stream Pod logs"
+            )
         ))
     }
 

@@ -444,6 +444,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 ("count", "Count", 70),
             ]
         )
+        eventsTable.setAccessibilityLabel("Kubernetes object events")
         eventsScrollView.documentView = eventsTable
         eventsScrollView.hasVerticalScroller = true
         eventsScrollView.hasHorizontalScroller = true
@@ -458,6 +459,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 ("state", "State", 110),
             ]
         )
+        relationshipsTable.setAccessibilityLabel("Kubernetes object relationships")
         relationshipsScrollView.documentView = relationshipsTable
         relationshipsScrollView.hasVerticalScroller = true
         relationshipsScrollView.hasHorizontalScroller = true
