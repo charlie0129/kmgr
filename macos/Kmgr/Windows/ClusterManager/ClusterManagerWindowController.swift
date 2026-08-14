@@ -136,6 +136,8 @@ private final class ClusterManagerViewController: NSViewController,
     private let countLabel = NSTextField(labelWithString: "")
     private let openProgress = NSProgressIndicator()
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
+    private var separatorBelowIssueConstraint: NSLayoutConstraint?
+    private var separatorBelowTableConstraint: NSLayoutConstraint?
 
     init(
         provider: any ClusterContextProviding,
@@ -240,6 +242,17 @@ private final class ClusterManagerViewController: NSViewController,
             subview.translatesAutoresizingMaskIntoConstraints = false
         }
 
+        let separatorBelowIssueConstraint = separator.topAnchor.constraint(
+            equalTo: issueView.bottomAnchor,
+            constant: 8
+        )
+        let separatorBelowTableConstraint = separator.topAnchor.constraint(
+            equalTo: tableContainer.bottomAnchor,
+            constant: 8
+        )
+        self.separatorBelowIssueConstraint = separatorBelowIssueConstraint
+        self.separatorBelowTableConstraint = separatorBelowTableConstraint
+
         NSLayoutConstraint.activate([
             titleLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -20),
@@ -264,7 +277,7 @@ private final class ClusterManagerViewController: NSViewController,
 
             separator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            separator.topAnchor.constraint(equalTo: issueView.bottomAnchor, constant: 8),
+            separatorBelowTableConstraint,
 
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
@@ -559,7 +572,7 @@ private final class ClusterManagerViewController: NSViewController,
 
         guard let issue else {
             if let initialNotice {
-                issueView.isHidden = false
+                setIssueVisible(true)
                 issueImageView.image = NSImage(
                     systemSymbolName: "exclamationmark.triangle",
                     accessibilityDescription: initialNotice.title
@@ -573,10 +586,10 @@ private final class ClusterManagerViewController: NSViewController,
                 issueMetadataLabel.isHidden = true
                 return
             }
-            issueView.isHidden = true
+            setIssueVisible(false)
             return
         }
-        issueView.isHidden = false
+        setIssueVisible(true)
         issueImageView.image = NSImage(
             systemSymbolName: symbolName(for: issue.category),
             accessibilityDescription: issue.presentationTitle
@@ -591,6 +604,20 @@ private final class ClusterManagerViewController: NSViewController,
         issueMetadataLabel.stringValue = presentation.supplementaryText
         issueMetadataLabel.toolTip = presentation.detailedText
         issueMetadataLabel.isHidden = presentation.supplementaryText.isEmpty
+    }
+
+    private func setIssueVisible(_ visible: Bool) {
+        // AppKit does not remove a hidden plain NSView from an Auto Layout
+        // chain. Bypass its label-derived height while hidden so the context
+        // table receives the space; restore the full banner chain when shown.
+        if visible {
+            separatorBelowTableConstraint?.isActive = false
+            separatorBelowIssueConstraint?.isActive = true
+        } else {
+            separatorBelowIssueConstraint?.isActive = false
+            separatorBelowTableConstraint?.isActive = true
+        }
+        issueView.isHidden = !visible
     }
 
     private func configureTable() {

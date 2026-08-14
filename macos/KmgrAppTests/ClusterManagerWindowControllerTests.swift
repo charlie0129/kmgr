@@ -7,6 +7,115 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Cluster manager table presentation")
 struct ClusterManagerWindowControllerTests {
+    @Test("loaded context list collapses the hidden issue region")
+    func loadedListCollapsesHiddenIssueRegion() async throws {
+        let context = ClusterContextSummary(
+            name: "local",
+            clusterName: "local-cluster",
+            serverHostname: "127.0.0.1",
+            defaultNamespace: "default",
+            sourcePaths: ["/tmp/kubeconfig"]
+        )
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in [context] },
+                openContext: { _ in throw CancellationError() }
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let root = try #require(controller.window?.contentView)
+        let layout = try clusterManagerVerticalLayout(in: root)
+        try await waitForClusterManagerTable(layout.tableView)
+        root.layoutSubtreeIfNeeded()
+
+        #expect(layout.issueView.isHidden)
+        #expect(abs(layout.tableToSeparatorGap(in: root) - 8) < 0.5)
+    }
+
+    @Test("visible initial notice stays between the table and separator")
+    func visibleInitialNoticeKeepsIssueRegion() async throws {
+        let context = ClusterContextSummary(
+            name: "local",
+            clusterName: "local-cluster",
+            serverHostname: "127.0.0.1",
+            defaultNamespace: "default",
+            sourcePaths: ["/tmp/kubeconfig"]
+        )
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in [context] },
+                openContext: { _ in throw CancellationError() }
+            ),
+            initialNotice: ClusterManagerInitialNotice(
+                title: "Previous session closed",
+                message: "Choose another context to continue."
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let root = try #require(controller.window?.contentView)
+        let layout = try clusterManagerVerticalLayout(in: root)
+        try await waitForClusterManagerTable(layout.tableView)
+        root.layoutSubtreeIfNeeded()
+
+        #expect(!layout.issueView.isHidden)
+        #expect(layout.issueTitleLabel.stringValue == "Previous session closed")
+        let gaps = layout.visibleIssueGaps(in: root)
+        #expect(abs(gaps.tableToIssue - 8) < 0.5)
+        #expect(abs(gaps.issueToSeparator - 8) < 0.5)
+        #expect(layout.issueFrame(in: root).height > 0)
+    }
+
+    @Test("visible open error stays between the table and separator")
+    func visibleOpenErrorKeepsIssueRegion() async throws {
+        let context = ClusterContextSummary(
+            name: "remote",
+            clusterName: "production",
+            serverHostname: "api.example.test",
+            defaultNamespace: "default",
+            sourcePaths: ["/tmp/kubeconfig"]
+        )
+        let issue = ClusterManagerIssue(
+            category: .authentication,
+            reason: "Unauthorized",
+            message: "The cluster rejected the configured credentials.",
+            httpStatusCode: 401,
+            contextName: context.name,
+            operation: "open cluster session"
+        )
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in [context] },
+                openContext: { _ in throw issue }
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let root = try #require(controller.window?.contentView)
+        let layout = try clusterManagerVerticalLayout(in: root)
+        try await waitForClusterManagerTable(layout.tableView)
+        let openButton = try #require(clusterManagerDescendants(of: root)
+            .compactMap { $0 as? NSButton }
+            .first { $0.accessibilityLabel() == "Open selected cluster context" })
+        #expect(openButton.isEnabled)
+        openButton.performClick(nil)
+        try await waitForClusterManagerIssue(
+            layout,
+            title: "Authentication failed"
+        )
+        root.layoutSubtreeIfNeeded()
+
+        #expect(!layout.issueView.isHidden)
+        let gaps = layout.visibleIssueGaps(in: root)
+        #expect(abs(gaps.tableToIssue - 8) < 0.5)
+        #expect(abs(gaps.issueToSeparator - 8) < 0.5)
+        #expect(layout.issueFrame(in: root).height > 0)
+    }
+
     @Test("context rows stay on one line and columns support user resizing")
     func singleLineResizableContextTable() async throws {
         let context = ClusterContextSummary(
@@ -152,6 +261,70 @@ struct ClusterManagerWindowControllerTests {
 }
 
 @MainActor
+private struct ClusterManagerVerticalLayout {
+    var tableView: NSTableView
+    var tableContainer: NSView
+    var issueView: NSView
+    var issueTitleLabel: NSTextField
+    var separator: NSBox
+
+    func tableToSeparatorGap(in root: NSView) -> CGFloat {
+        let tableFrame = alignmentFrame(of: tableContainer, in: root)
+        let separatorFrame = alignmentFrame(of: separator, in: root)
+        return tableFrame.minY - separatorFrame.maxY
+    }
+
+    func issueFrame(in root: NSView) -> NSRect {
+        issueView.convert(issueView.bounds, to: root)
+    }
+
+    func visibleIssueGaps(in root: NSView) -> (
+        tableToIssue: CGFloat,
+        issueToSeparator: CGFloat
+    ) {
+        let tableFrame = alignmentFrame(of: tableContainer, in: root)
+        let issueFrame = alignmentFrame(of: issueView, in: root)
+        let separatorFrame = alignmentFrame(of: separator, in: root)
+        return (
+            tableToIssue: tableFrame.minY - issueFrame.maxY,
+            issueToSeparator: issueFrame.minY - separatorFrame.maxY
+        )
+    }
+
+    private func alignmentFrame(of view: NSView, in root: NSView) -> NSRect {
+        guard let superview = view.superview else {
+            return view.convert(view.bounds, to: root)
+        }
+        return superview.convert(view.alignmentRect(forFrame: view.frame), to: root)
+    }
+}
+
+@MainActor
+private func clusterManagerVerticalLayout(
+    in root: NSView
+) throws -> ClusterManagerVerticalLayout {
+    let descendants = clusterManagerDescendants(of: root)
+    let table = try #require(descendants
+        .compactMap { $0 as? NSTableView }
+        .first { $0.accessibilityLabel() == "Kubeconfig contexts" })
+    let tableContainer = try #require(table.enclosingScrollView?.superview)
+    let issueTitle = try #require(descendants.first {
+        $0.identifier?.rawValue == "cluster-manager-issue-title"
+    } as? NSTextField)
+    let issueView = try #require(issueTitle.superview?.superview)
+    let separator = try #require(descendants
+        .compactMap { $0 as? NSBox }
+        .first { $0.boxType == .separator })
+    return ClusterManagerVerticalLayout(
+        tableView: table,
+        tableContainer: tableContainer,
+        issueView: issueView,
+        issueTitleLabel: issueTitle,
+        separator: separator
+    )
+}
+
+@MainActor
 private func clusterManagerDescendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(clusterManagerDescendants(of:))
 }
@@ -170,6 +343,27 @@ private func waitForClusterManagerTable(
                 reason: "AppKitTestTimeout",
                 message: "Timed out waiting for the context table row.",
                 operation: "test Cluster Manager table presentation"
+            )
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+@MainActor
+private func waitForClusterManagerIssue(
+    _ layout: ClusterManagerVerticalLayout,
+    title: String,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while layout.issueView.isHidden || layout.issueTitleLabel.stringValue != title {
+        guard clock.now < deadline else {
+            throw ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "AppKitTestTimeout",
+                message: "Timed out waiting for the Cluster Manager issue banner.",
+                operation: "test Cluster Manager issue presentation"
             )
         }
         try await Task.sleep(for: .milliseconds(10))
