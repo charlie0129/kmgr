@@ -108,6 +108,7 @@ func TestNewFilterRevisionCancelsStaleProjectionAndPublishesOnlyNewestFilter(t *
 
 	staleRequest := openView("session", "pods", 1)
 	staleRequest.Spec.FilterExpression = "name:alpha"
+	staleRequest.Spec.FilterRevision = 1
 	staleResult := open(staleRequest)
 	select {
 	case <-firstProjectionStarted:
@@ -117,6 +118,7 @@ func TestNewFilterRevisionCancelsStaleProjectionAndPublishesOnlyNewestFilter(t *
 
 	newestRequest := openView("session", "pods", 2)
 	newestRequest.Spec.FilterExpression = "name:beta"
+	newestRequest.Spec.FilterRevision = 2
 	newestResult := open(newestRequest)
 
 	select {
@@ -151,4 +153,53 @@ func TestNewFilterRevisionCancelsStaleProjectionAndPublishesOnlyNewestFilter(t *
 	if !slices.Equal(snapshotUIDs, []string{"uid-beta"}) {
 		t.Fatalf("newest filter snapshot UIDs = %v, want only uid-beta", snapshotUIDs)
 	}
+}
+
+func TestRuntimeRejectsBackwardFilterRevisionWithoutReplacingActiveView(t *testing.T) {
+	t.Parallel()
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: newScriptedResource()},
+		ReleaseDelay: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	currentRequest := openView("session", "pods", 1)
+	currentRequest.Spec.FilterExpression = "name:alpha"
+	currentRequest.Spec.FilterRevision = 3
+	current, err := runtime.Open(currentRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	staleRequest := openView("session", "pods", 2)
+	staleRequest.Spec.FilterExpression = "name:beta"
+	staleRequest.Spec.FilterRevision = 2
+	if _, err := runtime.Open(staleRequest); !errors.Is(err, ErrStaleFilter) {
+		t.Fatalf("backward filter revision error = %v, want stale filter", err)
+	}
+	runtime.mu.Lock()
+	active := runtime.views[viewKey{sessionID: "session", viewID: "pods"}]
+	latestGeneration := runtime.latestOpen[viewKey{sessionID: "session", viewID: "pods"}]
+	latestFilter := runtime.latestFilter[viewKey{sessionID: "session", viewID: "pods"}]
+	runtime.mu.Unlock()
+	if active != current || latestGeneration != 1 || latestFilter != 3 {
+		t.Fatalf(
+			"backward revision changed lifecycle: active=%p current=%p generation=%d filter=%d",
+			active, current, latestGeneration, latestFilter,
+		)
+	}
+
+	// Sort and column changes legitimately open a newer stream generation while
+	// retaining the same filter revision.
+	sameFilterRequest := openView("session", "pods", 2)
+	sameFilterRequest.Spec.FilterExpression = "name:alpha"
+	sameFilterRequest.Spec.FilterRevision = 3
+	replacement, err := runtime.Open(sameFilterRequest)
+	if err != nil {
+		t.Fatalf("same filter revision with newer generation: %v", err)
+	}
+	defer replacement.Close()
 }

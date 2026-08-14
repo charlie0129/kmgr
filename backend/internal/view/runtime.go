@@ -50,6 +50,7 @@ var (
 	ErrViewClosed      = errors.New("resource view is closed")
 	ErrSessionNotFound = errors.New("cluster session was not found")
 	ErrStaleViewOpen   = errors.New("resource view generation is stale")
+	ErrStaleFilter     = errors.New("resource view filter revision is stale")
 	ErrInvalidView     = errors.New("invalid resource view")
 	ErrDeliveryPending = errors.New("resource view delivery acknowledgement is pending")
 )
@@ -199,6 +200,7 @@ type Runtime struct {
 	pipelineRunHook    func(context.Context, func(context.Context) error) error
 	openings           map[viewKey]*openAttempt
 	latestOpen         map[viewKey]uint64
+	latestFilter       map[viewKey]uint64
 	openHistory        []openGeneration
 	openHistoryLimit   int
 	deliveryStates     map[viewKey]*logicalViewDeliveryState
@@ -309,8 +311,9 @@ type openAttempt struct {
 }
 
 type openGeneration struct {
-	key        viewKey
-	generation uint64
+	key            viewKey
+	generation     uint64
+	filterRevision uint64
 }
 
 // deliverySignature identifies the raw Kubernetes identity universe behind a
@@ -468,6 +471,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		pipelineRunHook:             config.pipelineRunHook,
 		openings:                    make(map[viewKey]*openAttempt),
 		latestOpen:                  make(map[viewKey]uint64),
+		latestFilter:                make(map[viewKey]uint64),
 		openHistoryLimit:            openHistoryLimit,
 		deliveryStates:              make(map[viewKey]*logicalViewDeliveryState),
 		nodeAccounting:              make(map[nodeAccountingKey]*nodeAccountingWork),
@@ -572,6 +576,14 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		r.mu.Unlock()
 		return nil, fmt.Errorf("%w: generation %d is not newer than %d", ErrStaleViewOpen, request.GetGeneration(), latest)
 	}
+	filterRevision := request.GetSpec().GetFilterRevision()
+	if latestFilter := r.latestFilter[streamKey]; filterRevision < latestFilter {
+		r.mu.Unlock()
+		return nil, fmt.Errorf(
+			"%w: revision %d is older than %d",
+			ErrStaleFilter, filterRevision, latestFilter,
+		)
+	}
 	deliveryState := r.deliveryStates[streamKey]
 	if deliveryState == nil || deliveryState.signature != deliveryIdentity {
 		deliveryState = &logicalViewDeliveryState{
@@ -581,7 +593,10 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	}
 	attempt.deliveryState = deliveryState
 	r.latestOpen[streamKey] = request.GetGeneration()
-	r.openHistory = append(r.openHistory, openGeneration{key: streamKey, generation: request.GetGeneration()})
+	r.latestFilter[streamKey] = filterRevision
+	r.openHistory = append(r.openHistory, openGeneration{
+		key: streamKey, generation: request.GetGeneration(), filterRevision: filterRevision,
+	})
 	if previousAttempt := r.openings[streamKey]; previousAttempt != nil {
 		previousAttempt.cancel()
 	}
@@ -936,9 +951,11 @@ func (r *Runtime) trimOpenHistoryLocked() {
 			r.openHistory = append(r.openHistory[:index], r.openHistory[index+1:]...)
 			if r.latestOpen[generation.key] == generation.generation {
 				delete(r.latestOpen, generation.key)
+				delete(r.latestFilter, generation.key)
 				for _, retained := range r.openHistory {
-					if retained.key == generation.key {
-						r.latestOpen[generation.key] = max(r.latestOpen[generation.key], retained.generation)
+					if retained.key == generation.key && retained.generation > r.latestOpen[generation.key] {
+						r.latestOpen[generation.key] = retained.generation
+						r.latestFilter[generation.key] = retained.filterRevision
 					}
 				}
 			}
@@ -1708,6 +1725,7 @@ func (r *Runtime) Close() {
 	}
 	clear(r.openings)
 	clear(r.latestOpen)
+	clear(r.latestFilter)
 	clear(r.deliveryStates)
 	r.openHistory = nil
 	subscriptions := make([]*Subscription, 0, len(r.views))

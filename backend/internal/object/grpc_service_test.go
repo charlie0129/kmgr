@@ -123,6 +123,62 @@ func TestGRPCRelationshipScanCursorAndExplicitCancellation(t *testing.T) {
 	}
 }
 
+func TestGRPCCancelRelationshipScanHonorsTransportAndRequestDeadlines(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		callCtx    func() context.Context
+		requestCtx func() *kmgrv1.RequestContext
+		wantCode   codes.Code
+	}{
+		{
+			name: "transport canceled",
+			callCtx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			requestCtx: relationshipRequestContext,
+			wantCode:   codes.Canceled,
+		},
+		{
+			name:    "application deadline expired",
+			callCtx: context.Background,
+			requestCtx: func() *kmgrv1.RequestContext {
+				value := relationshipRequestContext()
+				value.DeadlineUnixMs = time.Now().Add(-time.Second).UnixMilli()
+				return value
+			},
+			wantCode: codes.DeadlineExceeded,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reader := testReader(t, kubernetesObject("v1", "Pod", "pods", "ns", "api", "owner-uid"))
+			service, err := NewGRPCService(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := relationshipScanKey{sessionID: "session", scanID: "scan", generation: 2}
+			cancelled := false
+			service.scans[key] = func() { cancelled = true }
+
+			ack, err := service.CancelRelationshipScan(test.callCtx(), &kmgrv1.CancelRelationshipScanRequest{
+				Context: test.requestCtx(), ScanId: "scan", Generation: 2,
+			})
+			if status.Code(err) != test.wantCode || ack != nil {
+				t.Fatalf("cancel response = %#v, error = %v; want nil/%v", ack, err, test.wantCode)
+			}
+			if cancelled {
+				t.Fatal("invalid cancellation request canceled the active relationship scan")
+			}
+			if service.scans[key] == nil {
+				t.Fatal("invalid cancellation request removed the active relationship scan")
+			}
+		})
+	}
+}
+
 func TestGRPCRelationshipScanRejectsStaleGeneration(t *testing.T) {
 	reader := testReader(t, kubernetesObject("v1", "Pod", "pods", "ns", "api", "owner-uid"))
 	service, _ := NewGRPCService(reader)

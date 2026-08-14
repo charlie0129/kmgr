@@ -335,12 +335,21 @@ func (s *GRPCService) ScanRelationships(
 }
 
 func (s *GRPCService) CancelRelationshipScan(
-	_ context.Context,
+	ctx context.Context,
 	request *kmgrv1.CancelRelationshipScanRequest,
 ) (*kmgrv1.Acknowledgement, error) {
-	if request == nil || request.GetContext() == nil || request.GetContext().GetRequestId() == "" ||
-		request.GetContext().GetClusterSessionId() == "" || request.GetScanId() == "" ||
-		request.GetGeneration() == 0 {
+	if request == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	requestID, operationContext, cancelContext, err := objectRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancelContext()
+	if err := operationContext.Err(); err != nil {
+		return nil, objectStatusError(err)
+	}
+	if request.GetScanId() == "" || request.GetGeneration() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "request, session, scan ID, and generation are required")
 	}
 	key := relationshipScanKey{
@@ -357,7 +366,7 @@ func (s *GRPCService) CancelRelationshipScan(
 		cancel()
 	}
 	return &kmgrv1.Acknowledgement{
-		RequestId: request.GetContext().GetRequestId(), Accepted: cancel != nil,
+		RequestId: requestID, Accepted: cancel != nil,
 	}, nil
 }
 

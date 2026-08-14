@@ -30,7 +30,7 @@ type GRPCService struct {
 	runtime  *Runtime
 	compiler *viewcolumns.Compiler
 	searchMu sync.Mutex
-	searches map[searchStreamKey]context.CancelFunc
+	searches map[searchStreamKey]*searchRegistration
 }
 
 type searchStreamKey struct {
@@ -38,6 +38,10 @@ type searchStreamKey struct {
 	searchID   string
 	generation uint64
 	revision   uint64
+}
+
+type searchRegistration struct {
+	cancel context.CancelFunc
 }
 
 func NewGRPCService(runtime *Runtime, compilers ...*viewcolumns.Compiler) (*GRPCService, error) {
@@ -57,7 +61,7 @@ func NewGRPCService(runtime *Runtime, compilers ...*viewcolumns.Compiler) (*GRPC
 	}
 	return &GRPCService{
 		runtime: runtime, compiler: compiler,
-		searches: make(map[searchStreamKey]context.CancelFunc),
+		searches: make(map[searchStreamKey]*searchRegistration),
 	}, nil
 }
 
@@ -394,21 +398,14 @@ func (s *GRPCService) SearchObjects(
 		sessionID: request.GetContext().GetClusterSessionId(), searchID: request.GetSearchId(),
 		generation: request.GetGeneration(), revision: request.GetQueryRevision(),
 	}
-	s.searchMu.Lock()
-	for existing, existingCancel := range s.searches {
-		if existing.sessionID == key.sessionID && existing.searchID == key.searchID &&
-			(existing.generation < key.generation || existing.revision < key.revision) {
-			existingCancel()
-			delete(s.searches, existing)
-		}
+	registration, err := s.registerSearch(key, cancel)
+	if err != nil {
+		cancel()
+		return err
 	}
-	s.searches[key] = cancel
-	s.searchMu.Unlock()
 	defer func() {
 		cancel()
-		s.searchMu.Lock()
-		delete(s.searches, key)
-		s.searchMu.Unlock()
+		s.unregisterSearch(key, registration)
 	}()
 
 	resource := request.GetResource()
@@ -481,15 +478,85 @@ func (s *GRPCService) CancelSearch(
 		generation: request.GetGeneration(), revision: request.GetQueryRevision(),
 	}
 	s.searchMu.Lock()
-	cancel := s.searches[key]
-	if cancel != nil {
+	registration := s.searches[key]
+	if registration != nil {
 		delete(s.searches, key)
 	}
 	s.searchMu.Unlock()
-	if cancel != nil {
-		cancel()
+	if registration != nil {
+		registration.cancel()
 	}
-	return &kmgrv1.Acknowledgement{RequestId: requestID, Accepted: cancel != nil}, nil
+	return &kmgrv1.Acknowledgement{RequestId: requestID, Accepted: registration != nil}, nil
+}
+
+// registerSearch admits one active query revision for a logical palette search.
+// Generations are compared before query revisions because the client resets its
+// revision counter when it enters a new search generation. Registration uses a
+// distinct owner so a canceled handler's delayed defer cannot unregister a
+// replacement that later reuses the same exact cursor.
+func (s *GRPCService) registerSearch(
+	key searchStreamKey,
+	cancel context.CancelFunc,
+) (*searchRegistration, error) {
+	registration := &searchRegistration{cancel: cancel}
+	s.searchMu.Lock()
+	defer s.searchMu.Unlock()
+
+	// Reject before canceling anything. This keeps a crossed stale request from
+	// partially disturbing an authoritative registration even if an invariant
+	// violation ever leaves more than one entry for the logical search.
+	for existing := range s.searches {
+		if !sameLogicalSearch(existing, key) {
+			continue
+		}
+		switch compareSearchVersion(existing, key) {
+		case 1:
+			return nil, status.Error(codes.FailedPrecondition, "search generation or query revision is stale")
+		case 0:
+			return nil, status.Error(codes.AlreadyExists, "search generation and query revision are already active")
+		}
+	}
+	for existing, current := range s.searches {
+		if !sameLogicalSearch(existing, key) {
+			continue
+		}
+		current.cancel()
+		delete(s.searches, existing)
+	}
+	if s.searches == nil {
+		s.searches = make(map[searchStreamKey]*searchRegistration)
+	}
+	s.searches[key] = registration
+	return registration, nil
+}
+
+func (s *GRPCService) unregisterSearch(key searchStreamKey, owner *searchRegistration) {
+	s.searchMu.Lock()
+	if s.searches[key] == owner {
+		delete(s.searches, key)
+	}
+	s.searchMu.Unlock()
+}
+
+func sameLogicalSearch(left, right searchStreamKey) bool {
+	return left.sessionID == right.sessionID && left.searchID == right.searchID
+}
+
+// compareSearchVersion returns -1, 0, or 1 when left is older, equal,
+// or newer than right. Query revisions are meaningful only within a generation.
+func compareSearchVersion(left, right searchStreamKey) int {
+	switch {
+	case left.generation < right.generation:
+		return -1
+	case left.generation > right.generation:
+		return 1
+	case left.revision < right.revision:
+		return -1
+	case left.revision > right.revision:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func (s *GRPCService) StreamView(
@@ -571,7 +638,7 @@ func viewStatusError(err error) error {
 		return status.Error(codes.NotFound, "cluster session was not found")
 	case errors.Is(err, ErrInvalidView):
 		return status.Error(codes.InvalidArgument, err.Error())
-	case errors.Is(err, ErrStaleViewOpen):
+	case errors.Is(err, ErrStaleViewOpen), errors.Is(err, ErrStaleFilter):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrViewClosed):
 		return status.Error(codes.Canceled, "resource view closed")

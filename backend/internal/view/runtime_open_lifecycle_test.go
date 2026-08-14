@@ -133,11 +133,12 @@ func TestRuntimeOpenHistoryEvictionDropsInactiveDeliveryState(t *testing.T) {
 	runtime.mu.Lock()
 	_, retainedAfterEviction := runtime.deliveryStates[firstKey]
 	_, generationRetained := runtime.latestOpen[firstKey]
+	_, filterRetained := runtime.latestFilter[firstKey]
 	runtime.mu.Unlock()
-	if retainedAfterEviction || generationRetained {
+	if retainedAfterEviction || generationRetained || filterRetained {
 		t.Fatalf(
-			"evicted logical view retained delivery=%t generation=%t",
-			retainedAfterEviction, generationRetained,
+			"evicted logical view retained delivery=%t generation=%t filter=%t",
+			retainedAfterEviction, generationRetained, filterRetained,
 		)
 	}
 }
@@ -261,8 +262,10 @@ func assertRuntimeHasNoOpenLifecycleState(t *testing.T, runtime *Runtime) {
 	for _, entry := range runtime.resources {
 		totalOpeners += entry.openers
 	}
-	if len(runtime.openings) != 0 || totalOpeners != 0 || len(runtime.resources) != 0 || len(runtime.views) != 0 {
-		t.Fatalf("runtime leaked openings=%d openers=%d resources=%d views=%d",
-			len(runtime.openings), totalOpeners, len(runtime.resources), len(runtime.views))
+	if len(runtime.openings) != 0 || len(runtime.latestOpen) != 0 || len(runtime.latestFilter) != 0 ||
+		totalOpeners != 0 || len(runtime.resources) != 0 || len(runtime.views) != 0 {
+		t.Fatalf("runtime leaked openings=%d generations=%d filters=%d openers=%d resources=%d views=%d",
+			len(runtime.openings), len(runtime.latestOpen), len(runtime.latestFilter),
+			totalOpeners, len(runtime.resources), len(runtime.views))
 	}
 }
