@@ -362,6 +362,109 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(probe.builtYAML == [initialYAML, finalYAML])
     }
 
+    @Test("WATCH and managed-fields refreshes preserve the YAML viewport and selection")
+    func yamlRefreshPreservesViewport() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        func source(revision: String, manager: String) -> String {
+            let values = (0..<180).map { index in
+                "  key\(String(format: "%03d", index)): value-\(index)"
+            }.joined(separator: "\n")
+            return """
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: api
+              annotations:
+                revision: \(revision)
+              managedFields:
+                - manager: \(manager)
+                  operation: Update
+            data:
+            \(values)
+
+            """
+        }
+        let initialYAML = source(revision: "first1", manager: "manager-one")
+        let latestYAML = source(revision: "second", manager: "manager-two")
+        let watch = AsyncThrowingStream<ObjectWatchEvent, Error>.makeStream()
+        let provider = LoadedObjectDetailProvider(
+            detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-1",
+                yamlUTF8: Data(initialYAML.utf8)
+            ),
+            data: ObjectData(
+                identity: identity,
+                resourceVersion: "rv-1",
+                entries: [],
+                secret: false
+            ),
+            objectWatch: watch.stream
+        )
+        let probe = YAMLPresentationBuilderProbe()
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: provider,
+            initialTab: .yaml,
+            yamlPresentationBuilder: { probe.build($0) }
+        )
+        controller.loadView()
+        controller.view.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+        controller.viewDidAppear()
+        defer {
+            probe.releaseFirstBuild()
+            watch.continuation.finish()
+            controller.stop()
+        }
+
+        let scroll = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "object-detail-yaml-scroll" })
+        let editor = try #require(scroll.documentView as? NSTextView)
+        try await waitUntil {
+            probe.buildCount == 1 && editor.string.contains("revision: first1")
+        }
+        controller.view.layoutSubtreeIfNeeded()
+        #expect(editor.frame.height > scroll.contentSize.height)
+
+        let clipView = scroll.contentView
+        clipView.scroll(to: NSPoint(x: 0, y: 620))
+        scroll.reflectScrolledClipView(clipView)
+        let stringRange = try #require(editor.string.range(of: "key080"))
+        let selection = NSRange(stringRange, in: editor.string)
+        editor.setSelectedRange(selection)
+        let preservedOrigin = clipView.bounds.origin
+
+        watch.continuation.yield(.updated(
+            cursor: StreamCursor(generation: 7, sequence: 1),
+            detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-2",
+                yamlUTF8: Data(latestYAML.utf8)
+            )
+        ))
+        try await waitUntil { editor.string.contains("revision: second") }
+        #expect(abs(clipView.bounds.origin.y - preservedOrigin.y) <= 1)
+        #expect(editor.selectedRange() == selection)
+
+        probe.releaseFirstBuild()
+        try await waitUntil { probe.completedBuildCount == 2 }
+        try await waitUntil {
+            editor.string.contains("revision: second")
+                && !editor.string.contains("manager-two")
+        }
+        #expect(abs(clipView.bounds.origin.y - preservedOrigin.y) <= 1)
+        #expect(editor.selectedRange() == selection)
+    }
+
     @Test("YAML scroll view installs a visible line-number ruler and explicit managed-fields control")
     func detailYAMLControls() throws {
         let identity = ResourceIdentity(
@@ -455,7 +558,12 @@ struct ObjectDetailYAMLPresentationTests {
         controller.view.layoutSubtreeIfNeeded()
         #expect(yamlScroll.contentSize.width > 100)
         #expect(yamlEditor.frame.width > 100)
-        #expect(yamlEditor.frame.height > 0)
+        #expect(yamlEditor.frame.height >= yamlScroll.contentSize.height)
+        let yamlTextRect = try #require(laidOutTextRect(in: yamlEditor))
+        #expect(yamlTextRect.width > 0)
+        #expect(yamlTextRect.height > 0)
+        #expect(yamlTextRect.intersects(yamlEditor.visibleRect))
+        #expect(yamlEditor.frame.intersects(yamlScroll.contentView.bounds))
 
         segmented.selectedSegment = 0
         _ = segmented.sendAction(segmented.action, to: segmented.target)
@@ -1161,6 +1269,18 @@ private struct LoadedObjectDetailProvider: ObjectDetailProviding {
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
+}
+
+@MainActor
+private func laidOutTextRect(in textView: NSTextView) -> NSRect? {
+    guard let layoutManager = textView.layoutManager,
+        let textContainer = textView.textContainer
+    else { return nil }
+    layoutManager.ensureLayout(for: textContainer)
+    return layoutManager.usedRect(for: textContainer).offsetBy(
+        dx: textView.textContainerOrigin.x,
+        dy: textView.textContainerOrigin.y
+    )
 }
 
 @MainActor

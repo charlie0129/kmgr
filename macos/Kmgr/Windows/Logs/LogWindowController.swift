@@ -153,6 +153,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         else { suspendRenderingWhileHidden() }
     }
 
+    func windowDidResize(_ notification: Notification) {
+        updateTextDocumentGeometry()
+    }
+
     /// A stream can deliver its first records between `showWindow` and the
     /// application making this independent window key. Treat that transition
     /// as a rendering wake-up so an early, already-downloaded batch cannot sit
@@ -273,16 +277,18 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.textContainerInset = NSSize(width: 8, height: 8)
-        textView.textContainer?.widthTracksTextView = false
-        textView.maxSize = NSSize(
-            width: CGFloat.greatestFiniteMagnitude,
-            height: CGFloat.greatestFiniteMagnitude
-        )
+        textView.setAccessibilityLabel("Pod logs")
 
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.identifier = NSUserInterfaceItemIdentifier("log-content-scroll")
+        TextDocumentGeometry.configure(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false
+        )
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         sourceLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -307,6 +313,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             statusLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -5),
         ])
         window.contentView = root
+        root.layoutSubtreeIfNeeded()
+        updateTextDocumentGeometry()
     }
 
     @objc private func restartFromControls() {
@@ -763,6 +771,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         latestRenderOmissions = result.rendered.omittedRecords
         updateStatusLabel()
         textView.setSelectedRange(result.install.remapSelection(selectedRange))
+        updateTextDocumentGeometry()
         if wasAtTail { textView.scrollToEndOfDocument(nil) }
         needsRenderWhenVisible = false
         keyVisibilityWakePending = false
@@ -785,9 +794,20 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     @objc private func toggleWrap() {
         let enabled = wrapButton.state == .on
-        textView.textContainer?.widthTracksTextView = enabled
-        textView.isHorizontallyResizable = !enabled
         scrollView.hasHorizontalScroller = !enabled
+        TextDocumentGeometry.update(
+            textView,
+            in: scrollView,
+            wrapsToViewport: enabled
+        )
+    }
+
+    private func updateTextDocumentGeometry() {
+        TextDocumentGeometry.update(
+            textView,
+            in: scrollView,
+            wrapsToViewport: wrapButton.state == .on
+        )
     }
 
     @objc private func clearVisibleBuffer() {
@@ -804,6 +824,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
         textView.string = ""
         renderedChunks.removeAll(keepingCapacity: true)
+        updateTextDocumentGeometry()
     }
 
     private var canRenderNow: Bool {

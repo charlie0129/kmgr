@@ -321,6 +321,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        TextDocumentGeometry.update(
+            yamlTextView,
+            in: yamlScrollView,
+            wrapsToViewport: false
+        )
+        TextDocumentGeometry.update(
+            dataValueTextView,
+            in: dataValueScroll,
+            wrapsToViewport: true
+        )
         resizeStackDocument(summaryStack, in: summaryScrollView)
         resizeStackDocument(metricsStack, in: metricsScrollView)
     }
@@ -560,11 +570,15 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         yamlTextView.delegate = self
         yamlTextView.setAccessibilityLabel("Kubernetes object YAML")
         yamlTextView.textContainerInset = NSSize(width: 10, height: 10)
-        configureTextDocument(yamlTextView, wrapsToViewport: false)
         yamlScrollView.documentView = yamlTextView
         yamlScrollView.hasVerticalScroller = true
         yamlScrollView.hasHorizontalScroller = true
         yamlScrollView.identifier = .init("object-detail-yaml-scroll")
+        TextDocumentGeometry.configure(
+            yamlTextView,
+            in: yamlScrollView,
+            wrapsToViewport: false
+        )
         let lineNumberRuler = LineNumberRulerView(
             textView: yamlTextView,
             scrollView: yamlScrollView
@@ -676,11 +690,15 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         dataValueTextView.isSelectable = true
         dataValueTextView.allowsUndo = true
         dataValueTextView.delegate = self
-        configureTextDocument(dataValueTextView, wrapsToViewport: true)
         dataValueScroll.documentView = dataValueTextView
         dataValueScroll.hasVerticalScroller = true
         dataValueScroll.identifier = .init("object-detail-data-value-scroll")
         dataValueScroll.setAccessibilityLabel("Selected data value editor")
+        TextDocumentGeometry.configure(
+            dataValueTextView,
+            in: dataValueScroll,
+            wrapsToViewport: true
+        )
         addKeyButton.target = self
         addKeyButton.action = #selector(addDataKey)
         renameKeyButton.target = self
@@ -956,30 +974,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             metricsStack.addArrangedSubview(label)
         }
         resizeStackDocument(metricsStack, in: metricsScrollView)
-    }
-
-    /// `NSScrollView` does not size a programmatically-created `NSTextView`
-    /// whose initial frame is zero. The ruler can still draw in that state,
-    /// which makes the YAML surface look like it contains only line numbers.
-    /// Install the standard AppKit text-document resizing contract explicitly.
-    private func configureTextDocument(
-        _ textView: NSTextView,
-        wrapsToViewport: Bool
-    ) {
-        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 1)
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(
-            width: CGFloat.greatestFiniteMagnitude,
-            height: CGFloat.greatestFiniteMagnitude
-        )
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = !wrapsToViewport
-        textView.autoresizingMask = wrapsToViewport ? [.width] : []
-        textView.textContainer?.containerSize = NSSize(
-            width: wrapsToViewport ? 640 : CGFloat.greatestFiniteMagnitude,
-            height: CGFloat.greatestFiniteMagnitude
-        )
-        textView.textContainer?.widthTracksTextView = wrapsToViewport
     }
 
     /// Stack views also arrive with a zero document frame. Keep their width
@@ -1264,7 +1258,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         // Editing always starts from the complete authoritative YAML even when
         // managedFields were hidden in the read-only presentation. The backend
         // protects them from apply along with the other server-owned fields.
-        yamlTextView.string = yamlPresentation.completeYAML
+        replaceYAMLText(with: yamlPresentation.completeYAML)
         isEditingYAML = true
         editButton.isHidden = true
         managedFieldsButton.isHidden = true
@@ -1463,9 +1457,28 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func showYAMLPresentation() {
-        yamlTextView.string = yamlPresentation.text(
+        let text = yamlPresentation.text(
             showingManagedFields: managedFieldsButton.state == .on
         )
+        replaceYAMLText(with: text)
+    }
+
+    private func replaceYAMLText(with text: String) {
+        guard yamlTextView.string != text else {
+            yamlLineNumberRuler?.textDidChange()
+            return
+        }
+        let viewport = TextDocumentGeometry.ViewportState.capture(
+            textView: yamlTextView,
+            scrollView: yamlScrollView
+        )
+        yamlTextView.string = text
+        TextDocumentGeometry.update(
+            yamlTextView,
+            in: yamlScrollView,
+            wrapsToViewport: false
+        )
+        viewport.restore(textView: yamlTextView, scrollView: yamlScrollView)
         yamlLineNumberRuler?.textDidChange()
     }
 

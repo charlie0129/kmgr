@@ -174,7 +174,11 @@ struct LogWindowControllerTests {
         let window = try #require(controller.window)
         let root = try #require(window.contentView)
         let textView = try #require(descendants(of: root)
-            .compactMap { $0 as? NSTextView }.first)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Pod logs" })
+        let scrollView = try #require(descendants(of: root)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "log-content-scroll" })
         try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
 
         window.orderOut(nil)
@@ -204,6 +208,14 @@ struct LogWindowControllerTests {
         try await waitForLogText(textView) { value in
             value.contains("[app] hello") && value.contains("[sidecar] ready")
         }
+        root.layoutSubtreeIfNeeded()
+        let laidOutText = try #require(laidOutLogTextRect(in: textView))
+        #expect(textView.frame.width >= scrollView.contentSize.width)
+        #expect(textView.frame.height >= scrollView.contentSize.height)
+        #expect(textView.frame.intersects(scrollView.contentView.bounds))
+        #expect(laidOutText.width > 0)
+        #expect(laidOutText.height > 0)
+        #expect(laidOutText.intersects(textView.visibleRect))
     }
 
     @Test("failed replacement restores controls without retiring established stream")
@@ -447,6 +459,18 @@ private func logSource(pod: String, uid: String, container: String) -> LogSource
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
+}
+
+@MainActor
+private func laidOutLogTextRect(in textView: NSTextView) -> NSRect? {
+    guard let layoutManager = textView.layoutManager,
+        let textContainer = textView.textContainer
+    else { return nil }
+    layoutManager.ensureLayout(for: textContainer)
+    return layoutManager.usedRect(for: textContainer).offsetBy(
+        dx: textView.textContainerOrigin.x,
+        dy: textView.textContainerOrigin.y
+    )
 }
 
 private struct NoopLogWindowProvider: LogStreamProviding {
