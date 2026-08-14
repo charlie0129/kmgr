@@ -24,8 +24,9 @@ The app verifier does not launch the GUI. It checks the product and bundle
 names, identifier, declared and Mach-O minimum macOS version, package type and
 principal class; requires exactly one main executable and the `kmgr-engine`
 helper; verifies both are executable macOS Mach-O files; performs strict nested
-code-signature verification; rejects an App Sandbox entitlement; and executes
-only `kmgr-engine --version`.
+code-signature verification; rejects host/build-tree dynamic-library and search
+paths plus an App Sandbox entitlement; and executes only
+`kmgr-engine --version`.
 
 Before treating an optimized bundle as a distribution candidate, repeat the
 artifact gate in Release configuration:

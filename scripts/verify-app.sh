@@ -21,6 +21,31 @@ plist_value() {
   print -r -- "$value"
 }
 
+verify_load_paths() {
+  local executable=$1
+  local dependency
+  local rpath
+  local dependencies=("${(@f)$(/usr/bin/otool -L "$executable" |
+    /usr/bin/awk 'NR > 1 { print $1 }')}")
+  local rpaths=("${(@f)$(/usr/bin/otool -l "$executable" |
+    /usr/bin/awk '$1 == "cmd" && $2 == "LC_RPATH" { getline; getline; print $2 }')}")
+
+  for dependency in "${dependencies[@]}"; do
+    [[ -n "$dependency" ]] || continue
+    case "$dependency" in
+      /System/Library/*|/usr/lib/*|@rpath/*|@loader_path/*|@executable_path/*) ;;
+      *) fail "non-portable dynamic library path in $executable: $dependency" ;;
+    esac
+  done
+  for rpath in "${rpaths[@]}"; do
+    [[ -n "$rpath" ]] || continue
+    case "$rpath" in
+      @loader_path*|@executable_path*) ;;
+      *) fail "non-portable runtime search path in $executable: $rpath" ;;
+    esac
+  done
+}
+
 [[ -d "$app_dir" && ! -L "$app_dir" ]] ||
   fail "bundle is missing or is not a real directory: $app_dir"
 [[ -f "$info_plist" && ! -L "$info_plist" ]] ||
@@ -65,6 +90,7 @@ for executable in "$main_executable" "$helper_executable"; do
     fail "missing regular executable: $executable"
   /usr/bin/file -b "$executable" | /usr/bin/grep -Fq "Mach-O" ||
     fail "not a Mach-O executable: $executable"
+  verify_load_paths "$executable"
 done
 
 main_build=$(/usr/bin/xcrun vtool -show-build "$main_executable") ||
