@@ -73,18 +73,21 @@ Standard Go benchmark profiling flags can be added when investigating a
 regression:
 
 ```sh
+KMGR_PROFILE_DIR="$(mktemp -d /tmp/kmgr-view-profile.XXXXXX)"
 go test ./backend/internal/view \
   -run '^$' \
   -bench '^BenchmarkBackendProjection100K$' \
   -benchtime=1x -benchmem -count=1 \
+  -outputdir "$KMGR_PROFILE_DIR" \
   -cpuprofile cpu.pprof -memprofile mem.pprof
 ```
 
-Profiles can contain local process data and should not be committed. This
-benchmark deliberately has no elapsed-time pass/fail threshold: single-run Go
-benchmark timings are sensitive to machine load and profiling overhead. Use
-repeated unprofiled samples for timing comparisons and the allocation counts
-to detect copy amplification.
+The command writes both profiles beneath the displayed temporary directory.
+Profiles can contain local process data and should not be committed; inspect
+and remove that directory when finished. This benchmark deliberately has no
+elapsed-time pass/fail threshold: single-run Go benchmark timings are sensitive
+to machine load and profiling overhead. Use repeated unprofiled samples for
+timing comparisons and the allocation counts to detect copy amplification.
 
 ## Synthetic AppKit table harness
 
@@ -253,6 +256,14 @@ CPU-speed improvement.
 The complete AppKit case passed in 0.863 seconds. These are single-machine
 references, not cross-machine or end-to-end product guarantees.
 
+A standalone final Release helper was also held idle for 49.58 seconds with its
+local RPC endpoint running and no Kubernetes session open. It consumed 0.00
+seconds of user CPU and 0.00 seconds of system CPU; a process sample reported
+0.0% CPU. Maximum resident size was 28,737,536 bytes (27.4 MiB), with no swaps
+or filesystem I/O reported. This finite, disconnected helper sample is a useful
+baseline, but it does not establish authenticated/connected helper idle cost,
+GUI idle cost, or a long-duration memory plateau.
+
 ## What remains unproven
 
 The AppKit harness proves bounded cell construction and fast programmatic table
@@ -265,7 +276,7 @@ measurable but do not by themselves prove an end-to-end latency target.
 No recorded trace currently proves one-frame end-to-end selection/navigation
 feedback while streams are active, continuous scrolling responsiveness,
 end-to-end IPC throughput under a sustained watch, long-duration memory
-plateaus, or near-zero GUI/helper idle CPU.
+plateaus, or near-zero GUI and authenticated/connected helper idle CPU.
 Metrics-failure isolation is functionally tested but has not been shown to have
 "no measurable" base-list effect under a profiler. Hidden log rendering is
 suppressed and its storage/output are bounded, but its long-duration memory and
