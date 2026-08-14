@@ -252,6 +252,37 @@ import Testing
     #expect(model.selectionCounts.hidden == 0)
 }
 
+@Test func malformedReplacementStillDropsUnknownAndDuplicateUIDs() {
+    let a: ResourceUID = "a"
+    let b: ResourceUID = "b"
+    let c: ResourceUID = "c"
+    let inserted: ResourceUID = "inserted"
+    let unknown: ResourceUID = "unknown"
+    var model = ResourceTableModel(rows: [row(a), row(b), row(c)])
+    model.selectExclusively(b)
+    let capture = model.captureUpdate(topVisibleUID: b, pixelOffsetFromTop: 3.5)
+
+    let plan = model.apply(
+        ResourceRowBatch(
+            upserts: [row(inserted)],
+            visibleOrder: .replace([c, c, unknown, inserted, a])
+        ),
+        capture: capture
+    )
+
+    #expect(model.orderedVisibleUIDs == [c, inserted, a])
+    #expect(model.selectedUIDs == [b])
+    #expect(model.selectionCounts == SelectionCounts(selected: 1, visible: 0, hidden: 1))
+    #expect(plan.selectedRowIndexes.isEmpty)
+    #expect(plan.scrollRestoration == ScrollRestorationPlan(
+        uid: c,
+        rowIndex: 0,
+        pixelOffsetFromTop: 3.5,
+        precision: .nearestSurvivingIdentity
+    ))
+    #expect(plan.contentUpdate == .reloadAll)
+}
+
 @Test func updateCaptureProtectsSelectionFromTransientTableFeedback() {
     let a: ResourceUID = "a"
     let b: ResourceUID = "b"

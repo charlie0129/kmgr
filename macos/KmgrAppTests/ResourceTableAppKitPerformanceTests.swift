@@ -169,16 +169,18 @@ struct ResourceTableAppKitPerformanceTests {
         #expect(maximumLiveRowViews < 200)
 
         if diagnosticsEnabled || budgetsEnabled {
+            let typicalModelDuration = median(modelDurations)
+            let maximumModelDuration = modelDurations.max() ?? 0
             let typicalAppKitDuration = median(appKitDurations)
             let maximumAppKitDuration = appKitDurations.max() ?? 0
-            let maximumModelDuration = modelDurations.max() ?? 0
             print(String(format:
-                "kmgr AppKit diagnostic: initial reload %.3f ms; selection %.3f ms; typical reorder reload %.3f ms; maximum reorder reload %.3f ms; maximum model apply %.3f ms; %d cell requests; %d live row views",
+                "kmgr AppKit diagnostic: initial reload %.3f ms; selection %.3f ms; typical model apply %.3f ms; maximum model apply %.3f ms; typical reorder reload %.3f ms; maximum reorder reload %.3f ms; %d cell requests; %d live row views",
                 initialReloadDuration * 1_000,
                 selectionDuration * 1_000,
+                typicalModelDuration * 1_000,
+                maximumModelDuration * 1_000,
                 typicalAppKitDuration * 1_000,
                 maximumAppKitDuration * 1_000,
-                maximumModelDuration * 1_000,
                 dataSource.requestedCellCount,
                 maximumLiveRowViews
             ))
@@ -187,6 +189,14 @@ struct ResourceTableAppKitPerformanceTests {
                 #expect(
                     selectionDuration <= displayFrame,
                     "Synthetic table selection exceeded one 60 Hz display frame."
+                )
+                #expect(
+                    typicalModelDuration <= displayFrame,
+                    "Typical compact-model reorder exceeded one 60 Hz display frame."
+                )
+                #expect(
+                    maximumModelDuration <= displayFrame * 3,
+                    "A compact-model reorder exceeded three 60 Hz display frames."
                 )
                 #expect(
                     typicalAppKitDuration <= displayFrame,

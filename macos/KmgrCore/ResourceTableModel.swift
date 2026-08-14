@@ -47,9 +47,30 @@ public enum ScrollRestorationPlanner {
         previousOrder: [ResourceUID],
         newOrder: [ResourceUID]
     ) -> ScrollRestorationPlan? {
+        guard anchor != nil, !newOrder.isEmpty else { return nil }
+        var newIndexes: [ResourceUID: Int] = [:]
+        newIndexes.reserveCapacity(newOrder.count)
+        for (index, uid) in newOrder.enumerated() {
+            newIndexes[uid] = index
+        }
+        return plan(
+            anchor: anchor,
+            previousOrder: previousOrder,
+            newOrder: newOrder,
+            newIndexes: newIndexes
+        )
+    }
+
+    /// The table model already maintains this index. Accepting it here avoids
+    /// rebuilding a second full-size dictionary for every reordered batch.
+    static func plan(
+        anchor: ScrollAnchor?,
+        previousOrder: [ResourceUID],
+        newOrder: [ResourceUID],
+        newIndexes: [ResourceUID: Int]
+    ) -> ScrollRestorationPlan? {
         guard let anchor, !newOrder.isEmpty else { return nil }
 
-        let newIndexes = Dictionary(uniqueKeysWithValues: newOrder.enumerated().map { ($1, $0) })
         if let rowIndex = newIndexes[anchor.uid] {
             return ScrollRestorationPlan(
                 uid: anchor.uid,
@@ -207,12 +228,12 @@ public struct ResourceTableModel: Hashable, Sendable {
             rowByUID[uid] = row
         }
         self.rowByUID = rowByUID
-        let order = Self.validatedOrder(
+        let projection = Self.validatedProjection(
             orderedVisibleUIDs ?? insertionOrder,
             rowByUID: rowByUID
         )
-        self.orderedVisibleUIDs = order
-        self.visibleIndexByUID = Self.indexes(for: order)
+        self.orderedVisibleUIDs = projection.order
+        self.visibleIndexByUID = projection.indexByUID
         self.selectedUIDs = selectedUIDs.filter { rowByUID[$0] != nil }
         if let selectionAnchorUID, rowByUID[selectionAnchorUID] != nil {
             self.selectionAnchorUID = selectionAnchorUID
@@ -278,6 +299,7 @@ public struct ResourceTableModel: Hashable, Sendable {
         }
 
         var orderChanged = false
+        var installedUpdatedIndex = false
         switch batch.visibleOrder {
         case .unchanged:
             if batch.removedUIDs.contains(where: { visibleIndexByUID[$0] != nil }) {
@@ -285,19 +307,35 @@ public struct ResourceTableModel: Hashable, Sendable {
                 orderChanged = true
             }
         case .replace(let uids):
-            let replacement = Self.validatedOrder(uids, rowByUID: rowByUID)
-            orderChanged = replacement != orderedVisibleUIDs
-            orderedVisibleUIDs = replacement
+            if batch.removedUIDs.isEmpty, uids == orderedVisibleUIDs {
+                break
+            }
+            if batch.removedUIDs.isEmpty, installPermutation(uids) {
+                orderChanged = true
+                installedUpdatedIndex = true
+                break
+            }
+            let replacement = Self.validatedProjection(uids, rowByUID: rowByUID)
+            orderChanged = replacement.order != orderedVisibleUIDs
+            if orderChanged {
+                orderedVisibleUIDs = replacement.order
+                visibleIndexByUID = replacement.indexByUID
+                installedUpdatedIndex = true
+            }
         case .append(let uids):
             var surviving = orderedVisibleUIDs
             if batch.removedUIDs.contains(where: { visibleIndexByUID[$0] != nil }) {
                 surviving.removeAll { batch.removedUIDs.contains($0) }
             }
-            let appended = Self.validatedOrder(surviving + uids, rowByUID: rowByUID)
-            orderChanged = appended != orderedVisibleUIDs
-            orderedVisibleUIDs = appended
+            let appended = Self.validatedProjection(surviving + uids, rowByUID: rowByUID)
+            orderChanged = appended.order != orderedVisibleUIDs
+            if orderChanged {
+                orderedVisibleUIDs = appended.order
+                visibleIndexByUID = appended.indexByUID
+                installedUpdatedIndex = true
+            }
         }
-        if orderChanged {
+        if orderChanged, !installedUpdatedIndex {
             visibleIndexByUID = Self.indexes(for: orderedVisibleUIDs)
         }
 
@@ -497,7 +535,8 @@ public struct ResourceTableModel: Hashable, Sendable {
             scrollRestoration = ScrollRestorationPlanner.plan(
                 anchor: capture.scrollAnchor,
                 previousOrder: capture.previousOrder,
-                newOrder: orderedVisibleUIDs
+                newOrder: orderedVisibleUIDs,
+                newIndexes: visibleIndexByUID
             )
         }
         let contentUpdate: ResourceTableContentUpdate = orderChanged
@@ -511,17 +550,62 @@ public struct ResourceTableModel: Hashable, Sendable {
     }
 
     private static func indexes(for order: [ResourceUID]) -> [ResourceUID: Int] {
-        Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
+        var result: [ResourceUID: Int] = [:]
+        result.reserveCapacity(order.count)
+        for (index, uid) in order.enumerated() {
+            result[uid] = index
+        }
+        return result
     }
 
-    private static func validatedOrder(
+    /// Most complete backend projections only reorder the current visible
+    /// membership. Validate that common case against the existing index, then
+    /// update its integer values in place instead of allocating and hashing a
+    /// second 100,000-entry dictionary. A malformed or membership-changing
+    /// proposal falls back to the fully validating projection below.
+    private mutating func installPermutation(_ proposed: [ResourceUID]) -> Bool {
+        guard proposed.count == orderedVisibleUIDs.count else { return false }
+
+        var seenPriorIndexes = [Bool](repeating: false, count: proposed.count)
+        for uid in proposed {
+            guard
+                let priorIndex = visibleIndexByUID[uid],
+                seenPriorIndexes.indices.contains(priorIndex),
+                !seenPriorIndexes[priorIndex]
+            else {
+                return false
+            }
+            seenPriorIndexes[priorIndex] = true
+        }
+
+        for (newIndex, uid) in proposed.enumerated() {
+            visibleIndexByUID[uid] = newIndex
+        }
+        orderedVisibleUIDs = proposed
+        return true
+    }
+
+    private static func validatedProjection(
         _ proposed: [ResourceUID],
         rowByUID: [ResourceUID: ResourceRow]
-    ) -> [ResourceUID] {
-        var seen: Set<ResourceUID> = []
-        return proposed.filter { uid in
-            rowByUID[uid] != nil && seen.insert(uid).inserted
+    ) -> (order: [ResourceUID], indexByUID: [ResourceUID: Int]) {
+        let capacity = min(proposed.count, rowByUID.count)
+        var order: [ResourceUID] = []
+        order.reserveCapacity(capacity)
+        var indexByUID: [ResourceUID: Int] = [:]
+        indexByUID.reserveCapacity(capacity)
+        for uid in proposed where rowByUID[uid] != nil {
+            let proposedIndex = order.count
+            if let existingIndex = indexByUID.updateValue(proposedIndex, forKey: uid) {
+                // `updateValue` performs one hash-table lookup on the common
+                // unique-UID path. Restore the original index only for an
+                // invalid duplicate, which is deliberately omitted.
+                indexByUID[uid] = existingIndex
+                continue
+            }
+            order.append(uid)
         }
+        return (order, indexByUID)
     }
 }
 
