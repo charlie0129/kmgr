@@ -220,6 +220,42 @@ struct ObjectDetailDataDraftTests {
         #expect(rename.isEnabled)
     }
 
+    @Test("file replacement preserves existing ConfigMap text membership")
+    func fileReplacementPreservesConfigMapTextKind() async throws {
+        try await assertImportedReplacement(
+            resource: "configmaps",
+            secret: false,
+            storedKind: .text,
+            originalBytes: Data("server text".utf8),
+            importedBytes: Data("replacement text".utf8),
+            expectedKind: .text
+        )
+    }
+
+    @Test("file replacement preserves existing ConfigMap binary membership")
+    func fileReplacementPreservesConfigMapBinaryKind() async throws {
+        try await assertImportedReplacement(
+            resource: "configmaps",
+            secret: false,
+            storedKind: .binary,
+            originalBytes: Data([0x00, 0x01, 0x02]),
+            importedBytes: Data([0xff, 0x80, 0x10]),
+            expectedKind: .binary
+        )
+    }
+
+    @Test("file replacement keeps Secret imports as raw binary bytes")
+    func fileReplacementKeepsSecretBinaryImport() async throws {
+        try await assertImportedReplacement(
+            resource: "secrets",
+            secret: true,
+            storedKind: .text,
+            originalBytes: Data("server secret".utf8),
+            importedBytes: Data([0x00, 0xff, 0x10, 0x80]),
+            expectedKind: .binary
+        )
+    }
+
     @Test("data value file I/O runs off main and keeps its captured key")
     func dataValueFileIORunsOffMainAndKeepsTargetKey() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
@@ -488,6 +524,68 @@ struct ObjectDetailDataDraftTests {
                 secret: secret
             )
         )
+    }
+
+    private func assertImportedReplacement(
+        resource: String,
+        secret: Bool,
+        storedKind: DataValueKind,
+        originalBytes: Data,
+        importedBytes: Data,
+        expectedKind: DataValueKind
+    ) async throws {
+        let fixture = detailFixture(resource: resource, secret: secret)
+        let expectedHash = Data(repeating: 6, count: 32)
+        let data = ObjectData(
+            identity: fixture.identity,
+            resourceVersion: "rv-1",
+            entries: [ObjectDataEntry(
+                key: "payload",
+                kind: storedKind,
+                value: originalBytes,
+                byteSize: UInt64(originalBytes.count),
+                contentHash: expectedHash
+            )],
+            secret: secret
+        )
+        let provider = DraftMutationObjectDetailProvider(
+            detail: fixture.detail,
+            data: data
+        )
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: provider,
+            initialTab: .data
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let buttons = dataButtons(in: controller.view)
+        let save = try #require(buttons.first { $0.title == "Save Key" })
+        try await waitForDataRows(table, count: 1)
+        select(row: 0, in: table, controller: controller)
+        if secret {
+            let reveal = try #require(buttons.first { $0.title == "Reveal" })
+            reveal.performClick(nil)
+        }
+
+        controller.replaceSelectedDataWithImportedBytes(importedBytes)
+        #expect(try stateText(in: table, row: 0) == "Unsaved")
+        #expect(save.isEnabled)
+        save.performClick(nil)
+        try await waitForPendingUpdate(provider)
+
+        let mutation = try #require(await provider.latestMutation())
+        guard case .set(let key, let kind, let value, let expectedContentHash) = mutation else {
+            Issue.record("Expected imported bytes to submit a set mutation")
+            return
+        }
+        #expect(key == "payload")
+        #expect(kind == expectedKind)
+        #expect(value == importedBytes)
+        #expect(expectedContentHash == expectedHash)
     }
 
     @Test("Escape leaves Data value editing before navigating Back")

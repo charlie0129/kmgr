@@ -1905,20 +1905,33 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func replaceDataWithImportedBytes(_ bytes: Data, forKey key: String) {
         let entry = objectData?.entries.first { $0.id == key }
+        let replacementKind: DataValueKind
+        if objectData?.secret == true {
+            // Secret values all belong to `.data`; their text/binary kind is a
+            // presentation hint, so a file import continues to be raw bytes.
+            replacementKind = .binary
+        } else {
+            // Replacing a ConfigMap value must not silently move its key between
+            // `.data` and `.binaryData`. Prefer an existing draft's explicit
+            // kind, then the kind loaded from the server.
+            replacementKind = dataDrafts.metadata(for: key)?.kind
+                ?? entry?.kind
+                ?? .binary
+        }
         if let entry {
             dataDrafts.update(
                 key: key,
-                kind: .binary,
+                kind: replacementKind,
                 value: bytes,
                 storedKind: entry.kind,
                 valueMatchesStored: valueMatchesEntry(bytes, entry: entry),
                 storedContentHash: entry.contentHash
             )
         } else {
-            dataDrafts.replaceExisting(key: key, kind: .binary, value: bytes)
+            dataDrafts.replaceExisting(key: key, kind: replacementKind, value: bytes)
         }
         if selectedDataKey == key {
-            selectedDataDraftKind = .binary
+            selectedDataDraftKind = replacementKind
             selectedDataEntry = entry
             displaySelectedData()
         }
