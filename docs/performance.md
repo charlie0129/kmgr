@@ -51,6 +51,41 @@ SwiftPM driver process. The opt-in budget limits peak physical-footprint growth
 to 384 MiB. This is deliberately generous and catches copy-amplification
 regressions; one finite run is not a long-duration plateau measurement.
 
+## Synthetic Go projection harness
+
+`backend/internal/view` also has a cluster-independent benchmark for the hot
+path that converts immutable Kubernetes objects into compact protobuf rows. It
+projects 100,000 synthetic Pods, then applies 4,000 reorder-producing updates
+in eight bursts through the real incremental subscription path. The benchmark
+checks row cardinality and projection-pass accounting in addition to reporting
+time and allocations.
+
+Run one complete workload from the repository root:
+
+```sh
+go test ./backend/internal/view \
+  -run '^$' \
+  -bench '^BenchmarkBackendProjection100K$' \
+  -benchtime=1x -benchmem -count=1
+```
+
+Standard Go benchmark profiling flags can be added when investigating a
+regression:
+
+```sh
+go test ./backend/internal/view \
+  -run '^$' \
+  -bench '^BenchmarkBackendProjection100K$' \
+  -benchtime=1x -benchmem -count=1 \
+  -cpuprofile cpu.pprof -memprofile mem.pprof
+```
+
+Profiles can contain local process data and should not be committed. This
+benchmark deliberately has no elapsed-time pass/fail threshold: single-run Go
+benchmark timings are sensitive to machine load and profiling overhead. Use
+repeated unprofiled samples for timing comparisons and the allocation counts
+to detect copy amplification.
+
 ## Synthetic AppKit table harness
 
 `KmgrAppTests` drives a real view-based `NSTableView` through the same
@@ -187,6 +222,23 @@ The complete model case passed in 5.265 seconds. Its in-process physical
 footprint grew by 111.5 MiB and its peak physical footprint grew by 125.6 MiB,
 to 132.8 MiB. Resident size at the final sample was 289.8 MiB; these metrics
 have different accounting rules and should not be conflated.
+
+The Go projection benchmark on the same machine and Go 1.26.5 produced this
+one-shot, profile-enabled reference after removing recursive nested-slice
+copies from the immutable projection path:
+
+| Backend phase | Time | Bytes/op | Allocations/op |
+| --- | ---: | ---: | ---: |
+| Initial 100,000-row projection | 231.588 ms | 177,309,272 | 2,861,144 |
+| 4,000 updates across eight reorder bursts | 254.485 ms | 8,191,384 | 116,170 |
+
+Against the immediately preceding profiled revision, allocated bytes fell
+45.1% for the initial projection and 41.6% for the update bursts; allocation
+counts fell 29.5% and 29.2%, respectively. Five unprofiled post-change samples
+ranged from 240.257–257.031 ms for the initial projection and
+258.096–299.000 ms for the bursts. Only one comparable pre-change timing was
+recorded, so the timing values are references rather than evidence of a stable
+CPU-speed improvement.
 
 | AppKit phase/evidence | Result |
 | --- | ---: |

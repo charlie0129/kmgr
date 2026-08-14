@@ -51,6 +51,21 @@ KMGR_PERF_BUDGETS=1 \
 It proves the documented model budgets and identity/cardinality invariants; it
 does not prove interactive AppKit or end-to-end Kubernetes performance.
 
+Exercise the backend's matching cluster-independent 100,000-row projection
+workload and record allocation counts with:
+
+```sh
+go test ./backend/internal/view \
+  -run '^$' \
+  -bench '^BenchmarkBackendProjection100K$' \
+  -benchtime=1x -benchmem -count=1
+```
+
+This benchmark validates cardinality and incremental projection accounting but
+has no elapsed-time gate. Its timings are machine-load-sensitive; the reference
+evidence and optional profiling commands are documented in
+`docs/performance.md`.
+
 ## Runtime-only evidence
 
 The following completion evidence cannot be produced by the deterministic
