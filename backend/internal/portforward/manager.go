@@ -29,15 +29,16 @@ type Config struct {
 }
 
 type entry struct {
-	mu         sync.RWMutex
-	request    StartRequest
-	snapshot   Snapshot
-	session    Session
-	release    sync.Once
-	cancel     context.CancelFunc
-	runDone    chan struct{}
-	revision   uint64
-	restarting bool
+	mu          sync.RWMutex
+	request     StartRequest
+	snapshot    Snapshot
+	session     Session
+	release     sync.Once
+	releaseDone chan struct{}
+	cancel      context.CancelFunc
+	runDone     chan struct{}
+	revision    uint64
+	restarting  bool
 }
 
 func (e *entry) Snapshot() Snapshot {
@@ -49,17 +50,6 @@ func (e *entry) Snapshot() Snapshot {
 		result.ResolvedPod = &copy
 	}
 	return result
-}
-
-func (e *entry) releaseSession() {
-	if e == nil {
-		return
-	}
-	e.release.Do(func() {
-		if e.session.Release != nil {
-			e.session.Release()
-		}
-	})
 }
 
 type subscription struct {
@@ -114,17 +104,18 @@ func (s *subscription) drain() updateBatch {
 }
 
 type Manager struct {
-	mu            sync.RWMutex
-	config        Config
-	entries       map[string]*entry
-	pending       map[string]struct{}
-	active        int
-	watchers      map[uint64]*subscription
-	nextID        uint64
-	closed        bool
-	retentionWake chan struct{}
-	retentionStop chan struct{}
-	retentionDone chan struct{}
+	mu               sync.RWMutex
+	config           Config
+	entries          map[string]*entry
+	retainedSessions map[*entry]struct{}
+	pending          map[string]struct{}
+	active           int
+	watchers         map[uint64]*subscription
+	nextID           uint64
+	closed           bool
+	retentionWake    chan struct{}
+	retentionStop    chan struct{}
+	retentionDone    chan struct{}
 }
 
 func NewManager(config Config) (*Manager, error) {
@@ -154,10 +145,14 @@ func NewManager(config Config) (*Manager, error) {
 		config.SubscriberPendingLimit = DefaultSubscriberPendingLimit
 	}
 	manager := &Manager{
-		config: config, entries: make(map[string]*entry), pending: make(map[string]struct{}),
-		watchers:      make(map[uint64]*subscription),
-		retentionWake: make(chan struct{}, 1), retentionStop: make(chan struct{}),
-		retentionDone: make(chan struct{}),
+		config:           config,
+		entries:          make(map[string]*entry),
+		retainedSessions: make(map[*entry]struct{}),
+		pending:          make(map[string]struct{}),
+		watchers:         make(map[uint64]*subscription),
+		retentionWake:    make(chan struct{}, 1),
+		retentionStop:    make(chan struct{}),
+		retentionDone:    make(chan struct{}),
 	}
 	go manager.runRetentionJanitor()
 	return manager, nil
@@ -193,7 +188,8 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	now := m.config.Now()
 	current := &entry{
-		request: request, session: session, cancel: cancel, runDone: make(chan struct{}), revision: 1,
+		request: request, session: session, releaseDone: make(chan struct{}), cancel: cancel,
+		runDone: make(chan struct{}), revision: 1,
 		snapshot: Snapshot{
 			ID: request.ID, ContextName: session.ContextName, Target: request.Target,
 			RemotePort: request.RemotePort, LocalPort: request.LocalPort, BindAddress: request.BindAddress,
@@ -215,6 +211,7 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 		return Snapshot{}, ErrDuplicatePortForward
 	}
 	m.entries[request.ID] = current
+	m.retainedSessions[current] = struct{}{}
 	m.active++
 	m.mu.Unlock()
 	m.publish(managerUpdate{snapshot: current.Snapshot()})
@@ -340,10 +337,12 @@ func (m *Manager) RequestClose() {
 	}
 }
 
-// CloseContext cancels every forward and waits for its runner and the
-// retention janitor to stop, or until ctx ends. Timed-out runners retain their
-// existing lifecycle goroutines and release their cluster sessions when they
-// eventually return; bounded shutdown does not add an abandoned waiter.
+// CloseContext cancels every forward and waits for its runner, retained
+// session release, and the retention janitor to stop, or until ctx ends.
+// Timed-out runners retain their existing lifecycle goroutines and start
+// their session release when they eventually return. A release callback runs
+// in its own one-shot task so an arbitrary callback cannot hold CloseContext
+// past its deadline; Close still waits for that task without a deadline.
 func (m *Manager) CloseContext(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("port-forward manager close context must not be nil")
@@ -355,28 +354,19 @@ func (m *Manager) CloseContext(ctx context.Context) error {
 		value.mu.RUnlock()
 		cancel()
 	}
+	m.startReadySessionReleases(entries)
 	for _, value := range entries {
 		value.mu.RLock()
 		done := value.runDone
 		value.mu.RUnlock()
 		if err := waitForForwardShutdown(ctx, done); err != nil {
-			// Entries that had already stopped before close will not revisit the
-			// worker defer that releases sessions after manager shutdown. Drain
-			// all such ready entries even when one stubborn runner used the
-			// deadline; still-running entries self-release when they return.
-			for _, remaining := range entries {
-				remaining.mu.RLock()
-				remainingDone := remaining.runDone
-				remaining.mu.RUnlock()
-				select {
-				case <-remainingDone:
-					remaining.releaseSession()
-				default:
-				}
-			}
+			m.startReadySessionReleases(entries)
 			return err
 		}
-		value.releaseSession()
+		if err := waitForForwardShutdown(ctx, m.startSessionRelease(value)); err != nil {
+			m.startReadySessionReleases(entries)
+			return err
+		}
 	}
 	select {
 	case <-m.retentionDone:
@@ -384,6 +374,56 @@ func (m *Manager) CloseContext(ctx context.Context) error {
 	case <-ctx.Done():
 		return context.Cause(ctx)
 	}
+}
+
+// startReadySessionReleases covers entries whose runners completed before a
+// timed-out close reached them. Entries still running start their own release
+// from run's existing lifecycle goroutine after observing Manager.closed.
+func (m *Manager) startReadySessionReleases(entries []*entry) {
+	for _, current := range entries {
+		current.mu.RLock()
+		done := current.runDone
+		current.mu.RUnlock()
+		select {
+		case <-done:
+			m.startSessionRelease(current)
+		default:
+		}
+	}
+}
+
+// startSessionRelease starts the arbitrary external release callback exactly
+// once and returns a stable completion signal. sync.Once protects only the
+// bounded goroutine launch, so concurrent shutdown and worker callers never
+// wait inside Once.Do.
+func (m *Manager) startSessionRelease(current *entry) <-chan struct{} {
+	current.mu.Lock()
+	if current.releaseDone == nil {
+		current.releaseDone = make(chan struct{})
+	}
+	done := current.releaseDone
+	current.mu.Unlock()
+	current.release.Do(func() {
+		go func() {
+			defer func() {
+				m.mu.Lock()
+				delete(m.retainedSessions, current)
+				close(done)
+				m.mu.Unlock()
+			}()
+			if current.session.Release != nil {
+				current.session.Release()
+			}
+		}()
+	})
+	return done
+}
+
+// releaseSession preserves the synchronous release semantics used by normal
+// terminal pruning. Shutdown uses startSessionRelease plus a context-aware
+// wait instead.
+func (m *Manager) releaseSession(current *entry) {
+	<-m.startSessionRelease(current)
 }
 
 func waitForForwardShutdown(ctx context.Context, done <-chan struct{}) error {
@@ -411,8 +451,8 @@ func (m *Manager) requestClose() []*entry {
 		m.closed = true
 		close(m.retentionStop)
 	}
-	entries := make([]*entry, 0, len(m.entries))
-	for _, value := range m.entries {
+	entries := make([]*entry, 0, len(m.retainedSessions))
+	for value := range m.retainedSessions {
 		entries = append(entries, value)
 	}
 	clear(m.watchers)
@@ -432,7 +472,7 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64, sess
 		closed := m.closed
 		m.mu.RUnlock()
 		if closed {
-			current.releaseSession()
+			m.startSessionRelease(current)
 		}
 	}()
 	request := current.request
@@ -628,7 +668,7 @@ func (m *Manager) pruneTerminalEntries(now time.Time) {
 	}
 	m.mu.Unlock()
 	for _, current := range releases {
-		current.releaseSession()
+		m.releaseSession(current)
 	}
 	if len(removed) > 0 {
 		m.signalRetentionJanitor()

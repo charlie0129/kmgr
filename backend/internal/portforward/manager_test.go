@@ -453,6 +453,104 @@ func TestManagerCloseContextBoundsStubbornForward(t *testing.T) {
 	}
 }
 
+func TestManagerCloseContextBoundsBlockingSessionRelease(t *testing.T) {
+	releaseStarted := make(chan struct{})
+	releaseUnblock := make(chan struct{})
+	releaseFinished := make(chan struct{})
+	var releaseGate sync.Once
+	var releaseMu sync.Mutex
+	releaseCalls := 0
+	manager, err := NewManager(Config{
+		Sessions: staticSessionResolver{session: Session{
+			ContextName: "context",
+			Resolver:    &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}},
+			Forwarder:   &fakeForwarder{ports: []uint16{12345}},
+			Release: func() {
+				releaseMu.Lock()
+				releaseCalls++
+				releaseMu.Unlock()
+				close(releaseStarted)
+				<-releaseUnblock
+				close(releaseFinished)
+			},
+		}},
+		Backoff: BackoffFunc(func(context.Context, int) error { return nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		releaseGate.Do(func() { close(releaseUnblock) })
+		manager.Close()
+	})
+	if _, err := manager.Start(StartRequest{
+		ID: "blocking-release", Target: podIdentity("pod", "uid"), RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyForward(t, func() bool {
+		values := manager.List("", false)
+		return len(values) == 1 && values[0].State == StateListening
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- manager.CloseContext(ctx) }()
+	select {
+	case <-releaseStarted:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not start the retained session release")
+	}
+	cancel()
+	select {
+	case err = <-closeResult:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("CloseContext blocked on the session Release callback")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CloseContext error = %v, want context canceled", err)
+	}
+	select {
+	case <-releaseFinished:
+		t.Fatal("session Release returned while its deterministic gate was closed")
+	default:
+	}
+
+	// The deadline-bounded call may return while release is still owned by its
+	// one-shot task, but the original Close contract remains an unbounded drain.
+	normalClose := make(chan struct{})
+	go func() {
+		manager.Close()
+		close(normalClose)
+	}()
+	select {
+	case <-normalClose:
+		t.Fatal("Close returned before the retained session release completed")
+	case <-time.After(25 * time.Millisecond):
+	}
+	releaseGate.Do(func() { close(releaseUnblock) })
+	select {
+	case <-releaseFinished:
+	case <-time.After(time.Second):
+		t.Fatal("retained session release did not finish after unblocking")
+	}
+	select {
+	case <-normalClose:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after the retained session release returned")
+	}
+	releaseMu.Lock()
+	defer releaseMu.Unlock()
+	if releaseCalls != 1 {
+		t.Fatalf("session Release calls = %d, want 1", releaseCalls)
+	}
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	if len(manager.retainedSessions) != 0 {
+		t.Fatalf("retained sessions after Release returned = %d, want 0", len(manager.retainedSessions))
+	}
+}
+
 func TestTerminalPortForwardsHaveBoundedAgeAndCountRetention(t *testing.T) {
 	t.Parallel()
 	clock := &portForwardTestClock{value: time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)}
