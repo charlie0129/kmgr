@@ -387,12 +387,13 @@ func TestSubscriberOverflowRequestsAuthoritativeResync(t *testing.T) {
 func TestTerminalPortForwardsHaveBoundedAgeAndCountRetention(t *testing.T) {
 	t.Parallel()
 	clock := &portForwardTestClock{value: time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)}
+	sessions := &leaseSessionResolver{session: Session{
+		ContextName: "context",
+		Resolver:    &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}},
+		Forwarder:   &fakeForwarder{ports: []uint16{41001, 41002, 41003}},
+	}}
 	manager, err := NewManager(Config{
-		Sessions: staticSessionResolver{session: Session{
-			ContextName: "context",
-			Resolver:    &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}},
-			Forwarder:   &fakeForwarder{ports: []uint16{41001, 41002, 41003}},
-		}},
+		Sessions:              sessions,
 		Backoff:               BackoffFunc(func(context.Context, int) error { return nil }),
 		Now:                   clock.Now,
 		TerminalRetention:     time.Hour,
@@ -438,13 +439,23 @@ func TestTerminalPortForwardsHaveBoundedAgeAndCountRetention(t *testing.T) {
 	if len(retained) != 2 || retained[0].ID != "two" || retained[1].ID != "three" {
 		t.Fatalf("count-bounded retained forwards = %#v", retained)
 	}
+	if got := sessions.Counts(); got != [2]int{3, 1} {
+		t.Fatalf("count-pruned acquire/release counts = %v, want [3 1]", got)
+	}
 	clock.Advance(2 * time.Hour)
 	if retained = manager.List("", true); len(retained) != 0 {
 		t.Fatalf("expired retained forwards = %#v", retained)
 	}
+	if got := sessions.Counts(); got != [2]int{3, 3} {
+		t.Fatalf("age-pruned acquire/release counts = %v, want [3 3]", got)
+	}
+	manager.Close()
+	if got := sessions.Counts(); got != [2]int{3, 3} {
+		t.Fatalf("manager close released pruned leases again: %v", got)
+	}
 }
 
-func TestPortForwardLeaseSpansRunAndRestartReacquires(t *testing.T) {
+func TestPortForwardRetainsLeaseAcrossStopAndRestart(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{
 		{target: podIdentity("pod", "uid")}, {target: podIdentity("pod", "uid")},
@@ -473,21 +484,101 @@ func TestPortForwardLeaseSpansRunAndRestartReacquires(t *testing.T) {
 		t.Fatal("Stop rejected")
 	}
 	eventuallyForward(t, func() bool {
-		return manager.List("", true)[0].State == StateStopped && sessions.Counts()[1] == 1
+		return manager.List("", true)[0].State == StateStopped
 	})
+	if got := sessions.Counts(); got != [2]int{1, 0} {
+		t.Fatalf("stopped acquire/release counts = %v, want retained lease", got)
+	}
+	// Simulate the originating workspace closing: the registry would reject a
+	// new lease, but this app-wide forward still owns its original authority.
+	sessions.mu.Lock()
+	sessions.err = ErrSessionNotFound
+	sessions.mu.Unlock()
 	if !manager.Restart("leased", "session") {
-		t.Fatal("Restart rejected")
+		t.Fatal("Restart rejected after originating workspace closed")
 	}
 	eventuallyForward(t, func() bool {
-		return manager.List("", true)[0].State == StateListening && sessions.Counts()[0] == 2
+		return manager.List("", true)[0].State == StateListening
 	})
 	manager.Close()
-	if got := sessions.Counts(); got != [2]int{2, 2} {
-		t.Fatalf("final acquire/release counts = %v, want [2 2]", got)
+	if got := sessions.Counts(); got != [2]int{1, 1} {
+		t.Fatalf("final acquire/release counts = %v, want [1 1]", got)
 	}
 }
 
-func TestPortForwardStartFailuresAndFailedRestartDoNotLeakLease(t *testing.T) {
+func TestTerminalRetentionJanitorRemovesEntryAndReleasesLease(t *testing.T) {
+	t.Parallel()
+	sessions := &leaseSessionResolver{session: Session{
+		ContextName: "context",
+		Resolver:    &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}},
+		Forwarder:   &fakeForwarder{ports: []uint16{12345}},
+	}}
+	manager, err := NewManager(Config{
+		Sessions: sessions, Backoff: BackoffFunc(func(context.Context, int) error { return nil }),
+		TerminalRetention: 25 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	updates, unsubscribe := manager.subscribe()
+	defer unsubscribe()
+	if _, err := manager.Start(StartRequest{
+		ID: "expires", Target: podIdentity("pod", "uid"), RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyForward(t, func() bool {
+		current := manager.lookup("expires", "session")
+		return current != nil && current.Snapshot().State == StateListening
+	})
+	if !manager.Stop("expires", "session") {
+		t.Fatal("Stop rejected")
+	}
+	eventuallyForward(t, func() bool {
+		current := manager.lookup("expires", "session")
+		if current == nil || current.Snapshot().State != StateStopped {
+			return false
+		}
+		current.mu.RLock()
+		done := current.runDone
+		current.mu.RUnlock()
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+	if got := sessions.Counts(); got != [2]int{1, 0} {
+		t.Fatalf("pre-expiry acquire/release counts = %v", got)
+	}
+
+	removed := false
+	deadline := time.After(2 * time.Second)
+	for !removed {
+		select {
+		case <-updates.ready:
+			for _, update := range updates.drain().updates {
+				removed = removed || update.removedID == "expires"
+			}
+		case <-deadline:
+			t.Fatal("retention janitor did not publish terminal removal")
+		}
+	}
+	if current := manager.lookup("expires", "session"); current != nil {
+		t.Fatalf("expired terminal entry was retained: %#v", current.Snapshot())
+	}
+	if got := sessions.Counts(); got != [2]int{1, 1} {
+		t.Fatalf("post-expiry acquire/release counts = %v, want [1 1]", got)
+	}
+	manager.Close()
+	if got := sessions.Counts(); got != [2]int{1, 1} {
+		t.Fatalf("manager close released pruned lease again: %v", got)
+	}
+}
+
+func TestPortForwardStartFailuresDoNotLeakRetainedLease(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}}
 	forwarder := &fakeForwarder{ports: []uint16{12345}}
@@ -516,20 +607,14 @@ func TestPortForwardStartFailuresAndFailedRestartDoNotLeakLease(t *testing.T) {
 		t.Fatal("Stop rejected")
 	}
 	eventuallyForward(t, func() bool {
-		return manager.List("", true)[0].State == StateStopped && sessions.Counts()[1] == 2
+		return manager.List("", true)[0].State == StateStopped
 	})
-	sessions.mu.Lock()
-	sessions.err = ErrSessionNotFound
-	sessions.mu.Unlock()
-	if manager.Restart("same", "session") {
-		t.Fatal("Restart succeeded after session disappeared")
-	}
-	if got := sessions.Counts(); got != [2]int{2, 2} {
-		t.Fatalf("failed restart changed lease counts = %v", got)
+	if got := sessions.Counts(); got != [2]int{2, 1} {
+		t.Fatalf("terminal retained lease counts = %v, want [2 1]", got)
 	}
 	manager.Close()
 	if got := sessions.Counts(); got != [2]int{2, 2} {
-		t.Fatalf("manager close released terminal lease again: %v", got)
+		t.Fatalf("manager close did not release retained lease exactly once: %v", got)
 	}
 }
 

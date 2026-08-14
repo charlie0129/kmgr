@@ -30,6 +30,8 @@ type entry struct {
 	mu         sync.RWMutex
 	request    StartRequest
 	snapshot   Snapshot
+	session    Session
+	release    sync.Once
 	cancel     context.CancelFunc
 	runDone    chan struct{}
 	revision   uint64
@@ -45,6 +47,17 @@ func (e *entry) Snapshot() Snapshot {
 		result.ResolvedPod = &copy
 	}
 	return result
+}
+
+func (e *entry) releaseSession() {
+	if e == nil {
+		return
+	}
+	e.release.Do(func() {
+		if e.session.Release != nil {
+			e.session.Release()
+		}
+	})
 }
 
 type subscription struct {
@@ -99,12 +112,15 @@ func (s *subscription) drain() updateBatch {
 }
 
 type Manager struct {
-	mu       sync.RWMutex
-	config   Config
-	entries  map[string]*entry
-	watchers map[uint64]*subscription
-	nextID   uint64
-	closed   bool
+	mu            sync.RWMutex
+	config        Config
+	entries       map[string]*entry
+	watchers      map[uint64]*subscription
+	nextID        uint64
+	closed        bool
+	retentionWake chan struct{}
+	retentionStop chan struct{}
+	retentionDone chan struct{}
 }
 
 func NewManager(config Config) (*Manager, error) {
@@ -129,9 +145,13 @@ func NewManager(config Config) (*Manager, error) {
 	if config.SubscriberPendingLimit == 0 {
 		config.SubscriberPendingLimit = DefaultSubscriberPendingLimit
 	}
-	return &Manager{
+	manager := &Manager{
 		config: config, entries: make(map[string]*entry), watchers: make(map[uint64]*subscription),
-	}, nil
+		retentionWake: make(chan struct{}, 1), retentionStop: make(chan struct{}),
+		retentionDone: make(chan struct{}),
+	}
+	go manager.runRetentionJanitor()
+	return manager, nil
 }
 
 func (m *Manager) Start(request StartRequest) (Snapshot, error) {
@@ -155,7 +175,7 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	now := m.config.Now()
 	current := &entry{
-		request: request, cancel: cancel, runDone: make(chan struct{}), revision: 1,
+		request: request, session: session, cancel: cancel, runDone: make(chan struct{}), revision: 1,
 		snapshot: Snapshot{
 			ID: request.ID, ContextName: session.ContextName, Target: request.Target,
 			RemotePort: request.RemotePort, LocalPort: request.LocalPort, BindAddress: request.BindAddress,
@@ -208,19 +228,6 @@ func (m *Manager) Restart(id, sessionID string) bool {
 	revision := current.revision
 	current.mu.Unlock()
 
-	session, err := m.config.Sessions.ResolveSession(current.request.Target.SessionID)
-	if err != nil || session.Resolver == nil || session.Forwarder == nil {
-		if err == nil && session.Release != nil {
-			session.Release()
-		}
-		current.mu.Lock()
-		if current.revision == revision {
-			current.restarting = false
-		}
-		current.mu.Unlock()
-		return false
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	m.mu.Lock()
 	current.mu.Lock()
@@ -230,9 +237,6 @@ func (m *Manager) Restart(id, sessionID string) bool {
 		current.mu.Unlock()
 		m.mu.Unlock()
 		cancel()
-		if session.Release != nil {
-			session.Release()
-		}
 		return false
 	}
 	current.cancel = cancel
@@ -246,7 +250,7 @@ func (m *Manager) Restart(id, sessionID string) bool {
 	current.mu.Unlock()
 	m.mu.Unlock()
 	m.publish(managerUpdate{snapshot: current.Snapshot()})
-	go m.run(ctx, current, revision, session)
+	go m.run(ctx, current, revision, current.session)
 	return true
 }
 
@@ -304,6 +308,7 @@ func (m *Manager) Close() {
 		return
 	}
 	m.closed = true
+	close(m.retentionStop)
 	entries := make([]*entry, 0, len(m.entries))
 	for _, value := range m.entries {
 		entries = append(entries, value)
@@ -321,7 +326,9 @@ func (m *Manager) Close() {
 		done := value.runDone
 		value.mu.RUnlock()
 		<-done
+		value.releaseSession()
 	}
+	<-m.retentionDone
 }
 
 func (m *Manager) run(ctx context.Context, current *entry, revision uint64, session Session) {
@@ -329,11 +336,9 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64, sess
 	done := current.runDone
 	current.mu.RUnlock()
 	defer func() {
-		if session.Release != nil {
-			session.Release()
-		}
 		close(done)
 		m.pruneTerminalEntries(m.config.Now())
+		m.signalRetentionJanitor()
 	}()
 	request := current.request
 	for attempt := 0; ; attempt++ {
@@ -467,6 +472,7 @@ func (m *Manager) pruneTerminalEntries(now time.Time) {
 	})
 	removeCount := max(0, len(candidates)-m.config.RetainedTerminalLimit)
 	removed := make([]string, 0, removeCount)
+	releases := make([]*entry, 0, removeCount)
 	for index, value := range candidates {
 		if !value.expired && index >= removeCount {
 			continue
@@ -474,12 +480,85 @@ func (m *Manager) pruneTerminalEntries(now time.Time) {
 		if current := m.entries[value.id]; current != nil {
 			delete(m.entries, value.id)
 			removed = append(removed, value.id)
+			releases = append(releases, current)
 		}
 	}
 	m.mu.Unlock()
+	for _, current := range releases {
+		current.releaseSession()
+	}
 	for _, id := range removed {
 		m.publish(managerUpdate{removedID: id})
 	}
+	if len(removed) > 0 {
+		m.signalRetentionJanitor()
+	}
+}
+
+func (m *Manager) signalRetentionJanitor() {
+	select {
+	case m.retentionWake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) runRetentionJanitor() {
+	defer close(m.retentionDone)
+	for {
+		delay, scheduled := m.nextTerminalExpiry(m.config.Now())
+		if !scheduled {
+			select {
+			case <-m.retentionStop:
+				return
+			case <-m.retentionWake:
+				continue
+			}
+		}
+		if delay <= 0 {
+			m.pruneTerminalEntries(m.config.Now())
+			continue
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-m.retentionStop:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-m.retentionWake:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			m.pruneTerminalEntries(m.config.Now())
+		}
+	}
+}
+
+func (m *Manager) nextTerminalExpiry(now time.Time) (time.Duration, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var earliest time.Time
+	for _, current := range m.entries {
+		current.mu.RLock()
+		snapshot, done := current.snapshot, current.runDone
+		current.mu.RUnlock()
+		if snapshot.State != StateFailed && snapshot.State != StateStopped {
+			continue
+		}
+		select {
+		case <-done:
+			expires := snapshot.UpdatedAt.Add(m.config.TerminalRetention)
+			if earliest.IsZero() || expires.Before(earliest) {
+				earliest = expires
+			}
+		default:
+		}
+	}
+	if earliest.IsZero() {
+		return 0, false
+	}
+	return earliest.Sub(now), true
 }
 
 func (m *Manager) lookup(id, sessionID string) *entry {
