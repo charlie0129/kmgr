@@ -2,12 +2,149 @@
 
 Column definitions are stored at `~/Library/Application Support/kmgr/columns.yaml`. The file schema starts at `kmgr.charlie0129.dev/v1alpha1`; the independently versioned CEL environment is `kmgr.cel/v1`. A definition must declare its result type. Changing expression semantics requires a new environment version and an explicit migration error rather than silent reinterpretation.
 
+## File schema and complete example
+
+The file is one strict YAML mapping. Unknown fields, duplicate exact view
+matches, duplicate column IDs within a view, unsupported version strings, and
+invalid source/type combinations reject the new configuration as a whole. An
+invalid external edit does not partially replace the last valid compiled
+configuration. The native editor accepts ordinary JSON-compatible YAML and
+writes formatted JSON, which is itself valid YAML; it deliberately refuses to
+rewrite anchors, aliases, merge keys, custom tags, and non-string mapping keys.
+
+This example exercises every supported top-level and per-column field:
+
+```yaml
+apiVersion: kmgr.charlie0129.dev/v1alpha1
+celEnvironment: kmgr.cel/v1
+
+accelerators:
+  # Omit this field to use /gpu, /ppu, and /dcu. An explicit [] disables
+  # suffix-based accelerator discovery.
+  autoDetectSuffixes:
+    - /gpu
+    - /ppu
+    - /dcu
+  resources:
+    # Exact keys listed here remain distinct and are offered even when absent
+    # from the currently retained Pod/Node objects.
+    aliyun.com/ppu:
+      displayName: PPU
+    example.com/fpga-card:
+      displayName: FPGA
+
+views:
+  - match:
+      group: ""       # the core API group
+      version: v1
+      resource: pods  # plural REST resource name, not Kind
+    columns:
+      - id: namespace
+        title: Namespace
+        source: builtin
+        value: namespace
+        type: string
+        alignment: leading
+        width: 140
+        enabled: true
+
+      - id: name
+        title: Name
+        source: builtin
+        value: name
+        type: string
+        width: 280
+
+      - id: cpu
+        title: CPU use / request / limit
+        source: metric
+        value: cpu
+        type: resourceUsage
+        alignment: trailing
+        width: 230
+
+      - id: finalizers
+        title: Finalizers
+        source: cel
+        expression: object.?metadata.?finalizers.orValue([])
+        type: string
+        alignment: leading
+        missing: "—"
+        width: 220
+        listJoiner: " · "
+        enabled: true
+
+      - id: ppu
+        title: PPU request / limit
+        source: metric
+        value: resource:aliyun.com/ppu
+        type: resourceUsage
+        alignment: trailing
+        width: 210
+        enabled: false
+```
+
+The top-level fields are:
+
+| Field | Required | Contract |
+| --- | --- | --- |
+| `apiVersion` | yes | Must be exactly `kmgr.charlie0129.dev/v1alpha1`. |
+| `celEnvironment` | yes | Must be exactly `kmgr.cel/v1`. It versions CEL syntax, activation, helpers, and coercion independently from the file shape. |
+| `views` | no | Ordered exact-GVR layouts. An omitted or unmatched GVR uses Kmgr's built-in layout. |
+| `accelerators` | no | Exact-resource and suffix rules for optional accelerator discovery; omission uses the default suffixes. |
+
+Each `views[].match` compares the exact `group`, `version`, and `resource`.
+There are no wildcards or Kind-name matches. `group` may be omitted for the
+core API group; `version` and the plural REST `resource` are required. At most
+one view may match a given triple. The order of `columns` is its normal table
+order.
+
+Each column supports:
+
+| Field | Required | Contract |
+| --- | --- | --- |
+| `id` | yes | Stable, case-sensitive table/protocol identity; non-empty and unique within this view. It need not equal a native extractor's `value`. |
+| `title` | yes | Non-empty native table heading. |
+| `source` | yes | Exactly `cel`, `builtin`, or `metric`. |
+| `expression` | for `cel` | CEL source. It is forbidden for `builtin` and `metric`. |
+| `value` | for `builtin`/`metric` | Validated native extractor. It is forbidden for `cel`. |
+| `type` | yes | Declared typed value. CEL supports `string`, `integer`, `number`, `boolean`, `quantity`, `timestamp`, or `duration`; native metric extractors require `resourceUsage`; built-ins require their documented native type. |
+| `alignment` | no | `leading`, `center`, or `trailing`; omission uses leading alignment. |
+| `missing` | no | CEL-only missing/null/empty-optional text; omission or an empty value uses `—`. |
+| `width` | no | Initial width in points; omit for the extractor/default width. If present, it must be finite and non-negative. Per-window width restoration may override it. |
+| `listJoiner` | no | CEL-only separator when a `string` column directly returns a scalar list; omission or an empty value uses `, `. |
+| `enabled` | no | Whether the definition is normally visible. Omission means `true`; a disabled definition remains available to the Columns window. |
+
+`accelerators.autoDetectSuffixes` performs an exact, case-sensitive suffix
+test on Kubernetes resource names. Omitting it uses `[/gpu, /ppu, /dcu]`; an
+explicit empty list disables suffix detection. Each key in
+`accelerators.resources` is an independently tracked exact extended-resource
+name. Its optional `displayName` changes only the label, never the resource
+identity. Listing a resource here makes it available to optional-resource
+discovery even when it is not currently present. It does not create a persisted
+table definition by itself: add a `metric` column with
+`value: resource:<exact-name>` when a specific persisted layout is desired.
+
 ## `kmgr.cel/v1` activation
 
 - `object`: dynamic Kubernetes object. For Secrets, the engine constructs a sanitized copy with top-level `data` and `stringData` removed before CEL receives it.
 - `metrics`: dynamic, non-sensitive computed metrics/accounting values. Exact huge-page and accelerator resource names remain separate map keys.
-- `context`: dynamic non-sensitive GVR, namespace-scope, and view metadata.
+- `context`: the stable non-sensitive GVR and namespace-scope map enumerated
+  below.
 - `now`: one CEL timestamp captured once for an entire projection batch.
+
+The `context` map has exactly these stable keys in `kmgr.cel/v1`:
+
+| Key | CEL type | Meaning |
+| --- | --- | --- |
+| `clusterSessionID` | `string` | Opaque identity of the current engine cluster session. |
+| `group` | `string` | Kubernetes API group; empty for the core group. |
+| `version` | `string` | Kubernetes API version. |
+| `resource` | `string` | Plural REST resource name. |
+| `kind` | `string` | Discovered Kubernetes Kind. |
+| `namespaced` | `bool` | Whether the resource itself is namespace-scoped. |
+| `allNamespaces` | `bool` | Whether this view requests all namespaces. |
+| `namespaces` | `list<string>` | The explicitly selected namespaces; empty when none are explicitly selected. |
 
 For Pod and Node views, `metrics` has this stable dynamic shape:
 
@@ -59,7 +196,7 @@ work as well as baseline CEL operations. The existing behavior where a string
 column directly returns a scalar list and uses that column's `listJoiner`
 remains supported independently.
 
-The supported declared types are `string`, `integer`, `number`, `boolean`, `quantity`, `timestamp`, and `duration`. Quantity expressions return one Kubernetes quantity string; the helper validates and retains its exact canonical quantity alongside display text and an approximate numeric UI hint. Authoritative sorting uses Kubernetes quantity semantics, not lexical display order or the approximate hint. Integer results remain signed 64-bit values across IPC and are not converted through a double. A string column may accept a list of scalar values, joined by its configured separator.
+The supported CEL-declared types are `string`, `integer`, `number`, `boolean`, `quantity`, `timestamp`, and `duration`. Quantity expressions return one Kubernetes quantity string; the helper validates and retains its exact canonical quantity alongside display text and an approximate numeric UI hint. Authoritative sorting uses Kubernetes quantity semantics, not lexical display order or the approximate hint. Integer results remain signed 64-bit values across IPC and are not converted through a double. A string column may accept a list of scalar values, joined by its configured separator. `resourceUsage` is reserved for native metric/accounting extractors and is not a valid CEL result type.
 
 Evaluation is deterministic and side-effect free. Each evaluation has a runtime cost limit (10,000 by default), a maximum of 128 list elements, and a 4 KiB rendered-value limit. Programs are compiled and type-checked when their definition/environment changes, then reused. Absent, null, and empty optional results render as `—` unless the definition supplies another missing value. Runtime failures belong to the individual column/cell and do not discard a row or view.
 

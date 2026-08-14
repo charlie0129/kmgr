@@ -173,10 +173,11 @@ Programmers can edit the same YAML file outside the app. The engine loads the
 configured path when it starts, so after external edits relaunch Kmgr to reload
 the engine configuration.
 
-The full activation, optional-field syntax, types, cost/output limits, Secret
-sanitization boundary, exact huge-page/accelerator resource handling, and
-examples are documented in [docs/columns.md](docs/columns.md). The table filter
-grammar and structured terms are documented in
+The complete external file schema and example, CEL activation, optional-field
+syntax, types, cost/output limits, Secret sanitization boundary, and exact
+huge-page/accelerator resource handling are documented in
+[docs/columns.md](docs/columns.md). The table filter grammar and structured
+terms are documented in
 [docs/filtering.md](docs/filtering.md).
 
 Metrics are optional enrichment. Pod and Node CPU/memory usage is fetched
