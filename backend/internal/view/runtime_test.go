@@ -876,6 +876,57 @@ func TestSubscriptionCoalescesReorderBurstToOneFinalOrder(t *testing.T) {
 	}
 }
 
+func TestSubscriptionNonSortUpdateDoesNotRebuildOrResendCompleteOrder(t *testing.T) {
+	projector := newRuntimeTestProjector(
+		t, "", []SortDescriptor{{ColumnID: "restarts", Descending: true}},
+	)
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "a", "Pending", 1, nil, time.Time{}),
+		pod("uid-b", "ns", "b", "Running", 2, nil, time.Time{}),
+		pod("uid-c", "ns", "c", "Running", 3, nil, time.Time{}),
+	}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+	drainSubscription(t, subscription)
+	drainNotify(subscription)
+
+	// Status is rendered in the row but is not a sort key. Updating it should
+	// upsert exactly that row without rebuilding or retransmitting the complete
+	// UID order for the unchanged table.
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
+		pod("uid-a", "ns", "a", "Running", 1, nil, time.Time{}),
+	}})
+	flushCapturedProjection(t, scheduled)
+	subscription.mu.Lock()
+	subscription.signalLocked(true)
+	subscription.mu.Unlock()
+
+	events := drainSubscription(t, subscription)
+	var delta *kmgrv1.RowDelta
+	for _, event := range events {
+		if event.GetDelta() != nil {
+			delta = event.GetDelta()
+		}
+	}
+	if delta == nil || len(delta.GetUpserts()) != 1 ||
+		delta.GetUpserts()[0].GetIdentity().GetUid() != "uid-a" {
+		t.Fatalf("non-sort update delta = %#v", delta)
+	}
+	if delta.GetOrderIsComplete() || len(delta.GetOrderedUids()) != 0 {
+		t.Fatalf("non-sort update unnecessarily resent complete order = %#v", delta)
+	}
+	subscription.mu.Lock()
+	order := append([]string(nil), subscription.order...)
+	subscription.mu.Unlock()
+	if !slices.Equal(order, []string{"uid-c", "uid-b", "uid-a"}) {
+		t.Fatalf("stable order after non-sort update = %v", order)
+	}
+}
+
 func TestSubscriptionDeleteInvalidatesInFlightUncommittedProjection(t *testing.T) {
 	projector := newRuntimeTestProjector(t, "", nil)
 	subscription, scheduled := newControlledProjectionSubscription(projector)

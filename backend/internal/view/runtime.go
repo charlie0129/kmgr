@@ -2570,8 +2570,11 @@ func (s *Subscription) runProjection() {
 			objects = append(objects, object)
 		}
 		clear(s.pendingObjects)
-		baseRows := make(map[string]*kmgrv1.ResourceRow, len(s.rows))
-		if !full || s.resource == nil {
+		var baseRows map[string]*kmgrv1.ResourceRow
+		if full {
+			baseRows = make(map[string]*kmgrv1.ResourceRow, len(s.rows))
+		}
+		if full && s.resource == nil {
 			for uid, row := range s.rows {
 				baseRows[uid] = row
 			}
@@ -2586,6 +2589,10 @@ func (s *Subscription) runProjection() {
 		if full && snapshotComplete {
 			rawUIDs = make(map[string]struct{}, len(objects))
 		}
+		var projectedRows map[string]*kmgrv1.ResourceRow
+		if !full {
+			projectedRows = make(map[string]*kmgrv1.ResourceRow, len(objects))
+		}
 		batchProjector := projector.beginBatch()
 		projectedObjects := uint64(0)
 		for _, object := range objects {
@@ -2598,17 +2605,28 @@ func (s *Subscription) runProjection() {
 				rawUIDs[uid] = struct{}{}
 			}
 			row, visible := batchProjector.projectOne(object)
-			if visible {
-				baseRows[uid] = row
+			if full {
+				if visible {
+					baseRows[uid] = row
+				} else {
+					delete(baseRows, uid)
+				}
+			} else if visible {
+				projectedRows[uid] = row
 			} else {
-				delete(baseRows, uid)
+				// A present nil value means this UID was projected and is now
+				// filter-hidden. It is distinct from an object not in this batch.
+				projectedRows[uid] = nil
 			}
 		}
-		ordered := make([]*kmgrv1.ResourceRow, 0, len(baseRows))
-		for _, row := range baseRows {
-			ordered = append(ordered, row)
+		var ordered []*kmgrv1.ResourceRow
+		if full {
+			ordered = make([]*kmgrv1.ResourceRow, 0, len(baseRows))
+			for _, row := range baseRows {
+				ordered = append(ordered, row)
+			}
+			slices.SortStableFunc(ordered, projector.compareRows)
 		}
-		slices.SortStableFunc(ordered, projector.compareRows)
 
 		s.mu.Lock()
 		s.projectionPasses++
@@ -2627,12 +2645,12 @@ func (s *Subscription) runProjection() {
 			s.mu.Unlock()
 			return
 		}
-		s.rows = baseRows
-		s.order = s.order[:0]
-		for _, row := range ordered {
-			s.order = append(s.order, row.GetIdentity().GetUid())
-		}
 		if full {
+			s.rows = baseRows
+			s.order = s.order[:0]
+			for _, row := range ordered {
+				s.order = append(s.order, row.GetIdentity().GetUid())
+			}
 			clear(s.pendingUpserts)
 			if s.knownUIDs != nil {
 				for uid, pendingRemoval := range s.knownUIDs {
@@ -2653,18 +2671,38 @@ func (s *Subscription) runProjection() {
 			s.resnapshot = true
 			s.orderDirty = false
 		} else {
+			orderChanged := false
 			for _, object := range objects {
 				if object == nil || object.GetUID() == "" {
 					continue
 				}
 				uid := string(object.GetUID())
-				row := s.rows[uid]
+				previous := s.rows[uid]
+				row := projectedRows[uid]
 				if row == nil {
 					// Filter invisibility is represented by the complete order, not
 					// RemovedUids: clients retain hidden-row selection and only a
 					// confirmed Kubernetes deletion may remove the identity.
+					if previous != nil {
+						s.order, _ = removeOrderedRow(
+							s.order, s.rows, uid, previous, projector.compareRows,
+						)
+						delete(s.rows, uid)
+						orderChanged = true
+					}
 					delete(s.pendingUpserts, uid)
 					continue
+				}
+				rowMoved := previous == nil || projector.compareRows(previous, row) != 0
+				if rowMoved && previous != nil {
+					s.order, _ = removeOrderedRow(
+						s.order, s.rows, uid, previous, projector.compareRows,
+					)
+				}
+				s.rows[uid] = row
+				if rowMoved {
+					s.order = insertOrderedRow(s.order, s.rows, uid, row, projector.compareRows)
+					orderChanged = true
 				}
 				delete(s.pendingRemoved, uid)
 				if s.knownUIDs != nil {
@@ -2672,7 +2710,7 @@ func (s *Subscription) runProjection() {
 				}
 				s.pendingUpserts[uid] = row
 			}
-			s.orderDirty = true
+			s.orderDirty = s.orderDirty || orderChanged
 		}
 		// Rows and their complete order changed as one atomic projection
 		// commit. Advance the revision so a concurrent LIST projection that
@@ -2690,6 +2728,51 @@ func (s *Subscription) runProjection() {
 		}
 		s.mu.Unlock()
 	}
+}
+
+// removeOrderedRow removes one affected row from an already sorted UID slice.
+// compareRows includes UID as its final tie-breaker, so binary search finds a
+// unique position without comparing or sorting the rest of the table. The
+// linear fallback is defensive against a corrupted intermediate order and is
+// not used during ordinary projection.
+func removeOrderedRow(
+	order []string,
+	rows map[string]*kmgrv1.ResourceRow,
+	uid string,
+	row *kmgrv1.ResourceRow,
+	compare func(*kmgrv1.ResourceRow, *kmgrv1.ResourceRow) int,
+) ([]string, bool) {
+	index := sort.Search(len(order), func(index int) bool {
+		return compare(rows[order[index]], row) >= 0
+	})
+	if index >= len(order) || order[index] != uid {
+		index = slices.Index(order, uid)
+		if index < 0 {
+			return order, false
+		}
+	}
+	copy(order[index:], order[index+1:])
+	clear(order[len(order)-1:])
+	return order[:len(order)-1], true
+}
+
+// insertOrderedRow applies one affected ordering change with logarithmic row
+// comparisons. Moving slice storage is cheaper than reconstructing a row map
+// and full-sorting every retained row for each coalesced WATCH batch.
+func insertOrderedRow(
+	order []string,
+	rows map[string]*kmgrv1.ResourceRow,
+	uid string,
+	row *kmgrv1.ResourceRow,
+	compare func(*kmgrv1.ResourceRow, *kmgrv1.ResourceRow) int,
+) []string {
+	index := sort.Search(len(order), func(index int) bool {
+		return compare(rows[order[index]], row) >= 0
+	})
+	order = append(order, "")
+	copy(order[index+1:], order[index:])
+	order[index] = uid
+	return order
 }
 
 func (s *Subscription) rebuildOrderLocked() {
