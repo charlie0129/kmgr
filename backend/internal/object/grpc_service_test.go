@@ -54,7 +54,13 @@ func TestGRPCGetDataCarriesDecodedSecretBytes(t *testing.T) {
 
 func TestGRPCGetObjectReturnsStructuredRecreationConflict(t *testing.T) {
 	t.Parallel()
-	reader := testReader(t, kubernetesObject("v1", "Pod", "pods", "ns", "pod", "new-uid"))
+	client := dynamicfake.NewSimpleDynamicClient(
+		runtime.NewScheme(), kubernetesObject("v1", "Pod", "pods", "ns", "pod", "new-uid"),
+	)
+	reader, err := NewReader(fakeResolver{client: client, contextName: "production"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	service, err := NewGRPCService(reader)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +76,9 @@ func TestGRPCGetObjectReturnsStructuredRecreationConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT ||
-		response.GetError().GetReason() != "ObjectRecreated" {
+		response.GetError().GetReason() != "ObjectRecreated" ||
+		response.GetError().GetContextName() != "production" ||
+		response.GetError().GetOperation() != "get-object" {
 		t.Fatalf("structured error = %#v", response.GetError())
 	}
 }

@@ -3,9 +3,11 @@ package object
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -328,7 +330,7 @@ func TestWatchObjectRejectsSameNameRecreationInStream(t *testing.T) {
 	client.PrependWatchReactor("pods", func(clienttesting.Action) (bool, watch.Interface, error) {
 		return true, fakeWatch, nil
 	})
-	reader, _ := NewReader(fakeResolver{client: client})
+	reader, _ := NewReader(fakeResolver{client: client, contextName: "production"})
 	service, _ := NewGRPCService(reader)
 	stream := newObjectTestStream(context.Background())
 	done := make(chan error, 1)
@@ -342,7 +344,8 @@ func TestWatchObjectRejectsSameNameRecreationInStream(t *testing.T) {
 	}
 	events := stream.snapshot()
 	if len(events) != 2 || events[1].GetError().GetReason() != "ObjectRecreated" ||
-		events[1].GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT {
+		events[1].GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT ||
+		events[1].GetError().GetContextName() != "production" {
 		t.Fatalf("recreation event = %#v", events)
 	}
 }
@@ -398,6 +401,35 @@ func TestGetEventsFiltersMapsSortsAndClampsLimit(t *testing.T) {
 	}
 	if listActions != 1 {
 		t.Fatalf("list event actions = %d", listActions)
+	}
+}
+
+func TestKubernetesEventBoundsUntrustedDisplayTextByUTF8Bytes(t *testing.T) {
+	t.Parallel()
+	value := corev1.Event{
+		Reason:  string([]byte{0xff}) + strings.Repeat("界\n", maximumEventReasonBytes),
+		Message: string([]byte{0xfe}) + strings.Repeat("failure detail \x00🙂\n", maximumEventMessageBytes),
+	}
+	mapped := kubernetesEvent("session", value)
+	for field, test := range map[string]struct {
+		value   string
+		maximum int
+	}{
+		"reason":  {mapped.Reason, maximumEventReasonBytes},
+		"message": {mapped.Message, maximumEventMessageBytes},
+	} {
+		if !utf8.ValidString(test.value) {
+			t.Errorf("%s is not valid UTF-8: %q", field, test.value)
+		}
+		if len(test.value) > test.maximum {
+			t.Errorf("%s uses %d bytes, maximum %d", field, len(test.value), test.maximum)
+		}
+		if !strings.HasSuffix(test.value, "…") {
+			t.Errorf("%s was not visibly truncated: %q", field, test.value)
+		}
+		if strings.ContainsAny(test.value, "\n\x00") {
+			t.Errorf("%s retained control text: %q", field, test.value)
+		}
 	}
 }
 

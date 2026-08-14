@@ -77,6 +77,14 @@ type Resolver interface {
 	Resource(sessionID string, gvr schema.GroupVersionResource, namespace string) (dynamic.ResourceInterface, error)
 }
 
+// ContextNameResolver is an optional Resolver capability used only to enrich
+// display-safe structured errors with the human kubeconfig context name. The
+// cluster session ID remains the authority boundary; callers must not treat
+// the context name as an identifier.
+type ContextNameResolver interface {
+	ContextName(sessionID string) (string, bool)
+}
+
 type ClusterResolver struct {
 	Sessions *cluster.SessionRegistry
 }
@@ -106,6 +114,17 @@ func (r ClusterResolver) Resource(
 		return resource, nil
 	}
 	return resource.Namespace(namespace), nil
+}
+
+func (r ClusterResolver) ContextName(sessionID string) (string, bool) {
+	if r.Sessions == nil {
+		return "", false
+	}
+	session, ok := r.Sessions.Get(sessionID)
+	if !ok || session.Context().Name == "" {
+		return "", false
+	}
+	return session.Context().Name, true
 }
 
 // ResourceForKind resolves an owner reference through the session's discovery-
@@ -174,6 +193,20 @@ func NewReader(resolver Resolver) (*Reader, error) {
 
 func (r *Reader) SetCachedChildSource(source CachedChildSource) {
 	r.cachedChildren = source
+}
+
+// ContextName returns display context for a currently live cluster session
+// when the configured resolver can provide it. Test and alternate resolvers
+// are not required to implement this optional presentation capability.
+func (r *Reader) ContextName(sessionID string) (string, bool) {
+	if r == nil || r.resolver == nil {
+		return "", false
+	}
+	resolver, ok := r.resolver.(ContextNameResolver)
+	if !ok {
+		return "", false
+	}
+	return resolver.ContextName(sessionID)
 }
 
 // Resource resolves the exact namespaced or cluster-scoped dynamic resource

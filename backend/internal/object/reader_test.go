@@ -513,7 +513,10 @@ func TestUpdateDataCreateOnlySetRejectsAnExistingKey(t *testing.T) {
 	}
 }
 
-type fakeResolver struct{ client dynamic.Interface }
+type fakeResolver struct {
+	client      dynamic.Interface
+	contextName string
+}
 
 func (r fakeResolver) Resource(_ string, gvr schema.GroupVersionResource, namespace string) (dynamic.ResourceInterface, error) {
 	resource := r.client.Resource(gvr)
@@ -521,6 +524,10 @@ func (r fakeResolver) Resource(_ string, gvr schema.GroupVersionResource, namesp
 		return resource.Namespace(namespace), nil
 	}
 	return resource, nil
+}
+
+func (r fakeResolver) ContextName(string) (string, bool) {
+	return r.contextName, r.contextName != ""
 }
 
 type recordingResolver struct {

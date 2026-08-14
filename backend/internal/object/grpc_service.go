@@ -81,7 +81,9 @@ func (s *GRPCService) GetObject(
 	if err != nil {
 		return &kmgrv1.GetObjectResponse{
 			RequestId: requestID, Identity: request.GetIdentity(),
-			Error: structuredObjectError(err, request.GetIdentity(), "get-object"),
+			Error: structuredObjectError(
+				err, request.GetIdentity(), "get-object", s.contextName(request.GetContext()),
+			),
 		}, nil
 	}
 	response := detailResponse(requestID, request.GetIdentity(), detail)
@@ -326,7 +328,9 @@ func (s *GRPCService) GetEvents(
 	values, err := s.reader.Events(operationContext, identity, request.GetLimit())
 	response := &kmgrv1.GetEventsResponse{RequestId: requestID}
 	if err != nil {
-		response.Error = structuredObjectError(err, request.GetIdentity(), "get-events")
+		response.Error = structuredObjectError(
+			err, request.GetIdentity(), "get-events", s.contextName(request.GetContext()),
+		)
 		return response, nil
 	}
 	response.Events = make([]*kmgrv1.KubernetesEvent, 0, len(values))
@@ -361,7 +365,9 @@ func (s *GRPCService) GetRelationships(
 		RequestId: requestID, ChildrenPotentiallyIncomplete: childrenIncomplete,
 	}
 	if err != nil {
-		response.Error = structuredObjectError(err, request.GetIdentity(), "get-relationships")
+		response.Error = structuredObjectError(
+			err, request.GetIdentity(), "get-relationships", s.contextName(request.GetContext()),
+		)
 		return response, nil
 	}
 	response.Relationships = make([]*kmgrv1.ResourceRelationship, 0, len(values))
@@ -388,6 +394,7 @@ func (s *GRPCService) ScanRelationships(
 	if err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
+	contextName := s.contextName(request.GetContext())
 	ctx, cancel := context.WithCancel(operationContext)
 	key := relationshipScanKey{
 		sessionID: request.GetContext().GetClusterSessionId(), scanID: request.GetScanId(),
@@ -437,7 +444,9 @@ func (s *GRPCService) ScanRelationships(
 			event.Relationships = append(event.Relationships, relationshipToProto(relationship))
 		}
 		if update.Warning != nil {
-			event.Warning = structuredObjectError(update.Warning, request.GetIdentity(), "scan-relationships")
+			event.Warning = structuredObjectError(
+				update.Warning, request.GetIdentity(), "scan-relationships", contextName,
+			)
 		}
 		return stream.Send(event)
 	})
@@ -452,7 +461,9 @@ func (s *GRPCService) ScanRelationships(
 		Cursor: &kmgrv1.StreamCursor{
 			StreamId: request.GetScanId(), Generation: request.GetGeneration(), Sequence: sequence,
 		},
-		Error: structuredObjectError(err, request.GetIdentity(), "scan-relationships"),
+		Error: structuredObjectError(
+			err, request.GetIdentity(), "scan-relationships", contextName,
+		),
 	}); sendErr != nil {
 		return sendErr
 	}
@@ -512,7 +523,9 @@ func (s *GRPCService) GetData(
 	if err != nil {
 		return &kmgrv1.GetDataResponse{
 			RequestId: requestID, Identity: request.GetIdentity(),
-			Error: structuredObjectError(err, request.GetIdentity(), "get-data"),
+			Error: structuredObjectError(
+				err, request.GetIdentity(), "get-data", s.contextName(request.GetContext()),
+			),
 		}, nil
 	}
 	response := &kmgrv1.GetDataResponse{
@@ -653,8 +666,18 @@ func (s *GRPCService) sendObjectFailure(
 ) error {
 	return stream.Send(&kmgrv1.ObjectEvent{
 		Cursor: objectCursor(request, sequence), Type: kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_STATUS,
-		Error: structuredObjectError(err, request.GetIdentity(), operation),
+		Error: structuredObjectError(
+			err, request.GetIdentity(), operation, s.contextName(request.GetContext()),
+		),
 	})
+}
+
+func (s *GRPCService) contextName(request *kmgrv1.RequestContext) string {
+	if s == nil || s.reader == nil || request == nil {
+		return ""
+	}
+	value, _ := s.reader.ContextName(request.GetClusterSessionId())
+	return value
 }
 
 func unstructuredObject(value runtime.Object) (*unstructured.Unstructured, error) {
@@ -682,11 +705,15 @@ func objectStatusError(err error) error {
 	}
 }
 
-func structuredObjectError(err error, identity *kmgrv1.ResourceIdentity, operation string) *kmgrv1.StructuredError {
+func structuredObjectError(
+	err error,
+	identity *kmgrv1.ResourceIdentity,
+	operation, contextName string,
+) *kmgrv1.StructuredError {
 	result := &kmgrv1.StructuredError{
 		Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL,
 		Reason:   "ObjectRequestFailed", Message: "The Kubernetes object request failed.",
-		Operation: operation, Resource: identity,
+		ContextName: contextName, Operation: operation, Resource: identity,
 	}
 	kubeerrors.Enrich(result, err)
 	var changed *IdentityChangedError

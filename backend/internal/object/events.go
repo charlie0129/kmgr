@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	DefaultEventLimit uint32 = 100
-	MaximumEventLimit uint32 = 500
+	DefaultEventLimit        uint32 = 100
+	MaximumEventLimit        uint32 = 500
+	maximumEventReasonBytes         = 128
+	maximumEventMessageBytes        = 4 * 1024
 )
 
 type KubernetesEvent struct {
@@ -129,7 +131,12 @@ func kubernetesEvent(sessionID string, value corev1.Event) KubernetesEvent {
 			SessionID: sessionID, Version: "v1", Resource: "events",
 			Namespace: value.Namespace, Name: value.Name, UID: string(value.UID),
 		},
-		Type: value.Type, Reason: value.Reason, Message: value.Message,
+		Type: value.Type,
+		// Legacy core/v1 Events do not consistently enforce the newer Events
+		// API's display-string limits. Normalize and byte-bound untrusted text
+		// before it reaches protobuf or AppKit table/tool-tip storage.
+		Reason:        boundedNormalizedText(value.Reason, maximumEventReasonBytes),
+		Message:       boundedNormalizedText(value.Message, maximumEventMessageBytes),
 		FirstObserved: first, LastObserved: last, Count: count,
 		ReportingController: reporter,
 	}
