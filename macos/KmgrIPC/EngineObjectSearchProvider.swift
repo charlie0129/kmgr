@@ -200,12 +200,19 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
 
     private static func message(_ value: Kmgr_V1_SearchObjectsEvent) -> ObjectSearchMessage {
         let progress = value.progress
+        // Backend terminal error events carry their revision in the envelope
+        // and intentionally omit an otherwise meaningless progress payload.
+        // Preserve that revision so the UI's stale-revision gate can admit and
+        // present the structured error instead of leaving "Searching…" stuck.
+        let progressRevision = progress.queryRevision == 0 && value.hasError
+            ? value.queryRevision
+            : progress.queryRevision
         return ObjectSearchMessage(
             cursor: StreamCursor(generation: value.cursor.generation, sequence: value.cursor.sequence),
             queryRevision: value.queryRevision,
             results: value.results.map(Self.result),
             progress: ObjectSearchProgress(
-                queryRevision: progress.queryRevision,
+                queryRevision: progressRevision,
                 objectsExamined: progress.objectsExamined,
                 complete: progress.complete,
                 usedDirectGet: progress.usedDirectGet,

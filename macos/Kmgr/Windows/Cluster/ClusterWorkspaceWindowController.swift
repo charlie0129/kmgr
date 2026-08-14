@@ -1672,6 +1672,7 @@ private final class ResourceListViewController: NSViewController,
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private let statusLine = NSTextField(labelWithString: "0 objects · 0 selected · Idle")
     private var tableTopWithoutErrorConstraint: NSLayoutConstraint?
     private var tableTopWithErrorConstraint: NSLayoutConstraint?
     private var inlineIssueState = ResourceListInlineIssueState()
@@ -1820,7 +1821,6 @@ private final class ResourceListViewController: NSViewController,
         errorLabel.drawsBackground = true
         errorLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let statusLine = NSTextField(labelWithString: "0 objects · 0 selected · Idle")
         statusLine.identifier = .init("resource-status-line")
         statusLine.textColor = .secondaryLabelColor
         statusLine.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -2737,13 +2737,11 @@ private final class ResourceListViewController: NSViewController,
         } else {
             sortLabel.stringValue = "Unsorted"
         }
-        if let status = view.viewWithTag(0)?.subviews.compactMap({ $0 as? NSTextField }).first(where: { $0.identifier?.rawValue == "resource-status-line" }) {
-            let counts = model.selectionCounts
-            let selection = counts.hidden > 0
-                ? "\(counts.selected) selected (\(counts.hidden) hidden by filter)"
-                : "\(counts.selected) selected"
-            status.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects · \(selection) · \(freshnessLabel.stringValue)"
-        }
+        let counts = model.selectionCounts
+        let selection = counts.hidden > 0
+            ? "\(counts.selected) selected (\(counts.hidden) hidden by filter)"
+            : "\(counts.selected) selected"
+        statusLine.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects · \(selection) · \(freshnessLabel.stringValue)"
     }
 
     private func configureColumns(for resource: DiscoveredResource) {
@@ -3327,7 +3325,7 @@ private final class ResourceListViewController: NSViewController,
         case .selectAll:
             model.selectAllVisible()
             suppressSelectionCallbacks = true
-            tableView.selectAll(nil)
+            tableView.installSelectAllProjection()
             suppressSelectionCallbacks = false
             updateStatusLine()
         case .delete:
@@ -3500,6 +3498,23 @@ private final class ResourceTableCommandBox {
 private final class ResourceTableView: NSTableView {
     var onCommand: ((ResourceTableCommand) -> Void)?
     var onSelectionGesture: ((ResourceTableSelectionGesture) -> Bool)?
+
+    /// A nil-targeted Edit > Select All command resolves to NSTableView before
+    /// `keyDown(with:)` gets a chance to translate Command-A. Route that
+    /// responder action through the UID-owned model so selected rows hidden by
+    /// the current filter are retained. Model-to-AppKit projection uses the
+    /// explicit `super` seam below to avoid recursively dispatching the command.
+    override func selectAll(_ sender: Any?) {
+        guard currentEditor() == nil, let onCommand else {
+            super.selectAll(sender)
+            return
+        }
+        onCommand(.selectAll)
+    }
+
+    func installSelectAllProjection() {
+        super.selectAll(nil)
+    }
 
     override func mouseDown(with event: NSEvent) {
         let row = self.row(at: convert(event.locationInWindow, from: nil))

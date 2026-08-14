@@ -119,6 +119,34 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
+    @Test("Edit Select All retains selection hidden by the active filter")
+    func responderSelectAllRetainsHiddenSelection() async throws {
+        let controller = makeWorkspace(provider: SelectAllFilterWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "resource-status-line" })
+
+        try await waitUntil { table.numberOfRows == 2 }
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        try await waitUntil { status.stringValue.contains("1 selected") }
+
+        try triggerResourceFilterChange(in: window, value: "name:api")
+        try await waitUntil {
+            table.numberOfRows == 1
+                && status.stringValue.contains("1 selected (1 hidden by filter)")
+        }
+
+        #expect(window.makeFirstResponder(table))
+        #expect(table.tryToPerform(#selector(NSResponder.selectAll(_:)), with: nil))
+        #expect(status.stringValue.contains("2 selected (1 hidden by filter)"))
+        #expect(table.selectedRowIndexes == IndexSet(integer: 0))
+    }
+
     @Test("resource freshness header shows cached age and background progress")
     func resourceFreshnessHeader() async throws {
         let synchronizedAt = Date(timeIntervalSinceNow: -18)
@@ -811,6 +839,63 @@ private final class FilterValidationWorkspaceResourceProvider: WorkspaceResource
         lock.withLock { storedCancelRequestCount += 1 }
     }
     func closeSession(sessionID: String) async {}
+}
+
+private struct SelectAllFilterWorkspaceResourceProvider: WorkspaceResourceProviding {
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult {
+        .init(resources: [DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { [] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error> {
+        let api = row(name: "api", uid: "pod-api", sessionID: request.sessionID)
+        let worker = row(name: "worker", uid: "pod-worker", sessionID: request.sessionID)
+        let rows = request.filterExpression.isEmpty ? [api, worker] : [api]
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.snapshot(
+                cursor: StreamCursor(generation: request.generation, sequence: 1),
+                chunk: ResourceSnapshotChunk(
+                    rows: rows,
+                    first: true,
+                    last: true,
+                    index: 0,
+                    estimatedTotalRows: UInt64(rows.count)
+                )
+            ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                status: ResourceViewStatus(
+                    freshness: .watching,
+                    rowsVisible: UInt64(rows.count)
+                )
+            ))
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+
+    private func row(name: String, uid: ResourceUID, sessionID: String) -> ResourceRow {
+        ResourceRow(
+            identity: ResourceIdentity(
+                clusterSessionID: sessionID,
+                group: "", version: "v1", resource: "pods",
+                namespace: "default", name: name, uid: uid
+            ),
+            cells: [Cell(
+                columnID: "name",
+                displayText: name,
+                typedValue: .string(name)
+            )]
+        )
+    }
 }
 
 @MainActor

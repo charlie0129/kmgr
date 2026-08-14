@@ -20,8 +20,37 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     }
 
     private enum Item: Hashable {
+        fileprivate enum StableIdentity: Hashable {
+            case operation(PaletteOperation)
+            case resource(String)
+            case searchResource(String)
+            case namespace(String)
+            case object(String, String, String, ResourceUID)
+        }
+
         case operation(PaletteOperation)
         case result(PaletteResult)
+
+        fileprivate var stableIdentity: StableIdentity {
+            switch self {
+            case .operation(let operation):
+                return .operation(operation)
+            case .result(.resource(let resource)):
+                return .resource(resource.id)
+            case .result(.searchResource(let resource)):
+                return .searchResource(resource.id)
+            case .result(.namespace(let namespace)):
+                return .namespace(namespace)
+            case .result(.object(let result)):
+                let identity = result.identity
+                return .object(
+                    identity.group,
+                    identity.version,
+                    identity.resource,
+                    identity.uid
+                )
+            }
+        }
 
         var title: String {
             switch self {
@@ -295,6 +324,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.setAccessibilityLabel("Command palette status")
 
         root.addSubview(searchField)
         root.addSubview(scopeLabel)
@@ -384,13 +414,12 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
                     cached: response.results,
                     limit: 30
                 ).map(Item.result)
-                items = Array((baseItems.filter {
+                replaceItemsPreservingSelection(Array((baseItems.filter {
                     if case .result(.object) = $0 { return false }
                     return true
-                } + objects).prefix(50))
+                } + objects).prefix(50)))
                 let qualifier = response.examinationTruncated ? " · cache scan bounded" : ""
                 statusLabel.stringValue = "\(items.count.formatted()) results · \(response.objectsExamined.formatted()) cached examined\(qualifier)"
-                reloadPreservingSelection()
             } catch {
                 guard !Task.isCancelled else { return }
                 // Recent/kind/namespace results remain useful when the helper's
@@ -494,25 +523,24 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         guard disposition == .acceptedNewGeneration || disposition == .acceptedNextSequence else {
             return
         }
-        if let issue = message.issue {
-            statusLabel.stringValue = issue.message
-            statusLabel.textColor = .systemRed
-        } else {
-            statusLabel.textColor = .secondaryLabelColor
-        }
         for result in message.results {
             resultByIdentity[objectIdentityKey(result.identity)] = result
         }
         latestProgress = message.progress
-        items = PaletteRanking.objects(
+        replaceItemsPreservingSelection(PaletteRanking.objects(
             Array(resultByIdentity.values),
             limit: 100
-        ).map(Item.result)
-        statusLabel.stringValue = objectSearchStatus(
-            examined: message.progress.objectsExamined,
-            complete: message.progress.complete
-        )
-        reloadPreservingSelection()
+        ).map(Item.result))
+        if let issue = message.issue {
+            statusLabel.stringValue = issue.message
+            statusLabel.textColor = .systemRed
+        } else {
+            statusLabel.stringValue = objectSearchStatus(
+                examined: message.progress.objectsExamined,
+                complete: message.progress.complete
+            )
+            statusLabel.textColor = .secondaryLabelColor
+        }
     }
 
     private func objectSearchStatus(examined: UInt64, complete: Bool) -> String {
@@ -603,15 +631,18 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         }
     }
 
-    private func reloadPreservingSelection() {
-        let priorItem = items.indices.contains(tableView.selectedRow)
-            ? items[tableView.selectedRow] : nil
+    private func replaceItemsPreservingSelection(_ updatedItems: [Item]) {
+        let priorIdentity = items.indices.contains(tableView.selectedRow)
+            ? items[tableView.selectedRow].stableIdentity : nil
+        items = updatedItems
         tableView.reloadData()
-        let selected = priorItem.flatMap { item in
-            items.firstIndex(of: item)
+        let selected = priorIdentity.flatMap { identity in
+            items.firstIndex { $0.stableIdentity == identity }
         } ?? (items.isEmpty ? nil : 0)
         if let selected {
             tableView.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
+        } else {
+            tableView.deselectAll(nil)
         }
     }
 

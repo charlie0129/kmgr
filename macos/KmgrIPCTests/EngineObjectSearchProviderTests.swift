@@ -6,7 +6,9 @@ import Testing
 
 private actor ObjectSearchRPCCapture: ObjectSearchRPC {
     var response = Kmgr_V1_SearchCachedObjectsResponse()
+    var searchEvents: [Kmgr_V1_SearchObjectsEvent] = []
     var cachedRequest: Kmgr_V1_SearchCachedObjectsRequest?
+    var streamedRequest: Kmgr_V1_SearchObjectsRequest?
     var overrideResponseRequestID: String?
 
     func searchCached(
@@ -23,7 +25,10 @@ private actor ObjectSearchRPCCapture: ObjectSearchRPC {
         _ request: Kmgr_V1_SearchObjectsRequest,
         timeout: Duration,
         receive: @escaping @Sendable (Kmgr_V1_SearchObjectsEvent) throws -> Void
-    ) async throws {}
+    ) async throws {
+        streamedRequest = request
+        for event in searchEvents { try receive(event) }
+    }
 
     func cancel(
         _ request: Kmgr_V1_CancelSearchRequest,
@@ -31,8 +36,53 @@ private actor ObjectSearchRPCCapture: ObjectSearchRPC {
     ) async throws -> Kmgr_V1_Acknowledgement { .init() }
 
     func install(_ value: Kmgr_V1_SearchCachedObjectsResponse) { response = value }
+    func install(_ values: [Kmgr_V1_SearchObjectsEvent]) { searchEvents = values }
     func useResponseRequestID(_ value: String?) { overrideResponseRequestID = value }
     func request() -> Kmgr_V1_SearchCachedObjectsRequest? { cachedRequest }
+    func searchRequest() -> Kmgr_V1_SearchObjectsRequest? { streamedRequest }
+}
+
+@Test func streamedObjectSearchErrorInheritsEnvelopeRevisionWhenProgressIsOmitted() async throws {
+    let rpc = ObjectSearchRPCCapture()
+    var event = Kmgr_V1_SearchObjectsEvent()
+    event.cursor.streamID = "palette-search"
+    event.cursor.generation = 4
+    event.cursor.sequence = 1
+    event.queryRevision = 9
+    event.error.category = .authentication
+    event.error.reason = "Unauthorized"
+    event.error.message = "Authentication failed (401)."
+    await rpc.install([event])
+    let provider = EngineObjectSearchProvider(rpc: rpc)
+    let request = ObjectSearchRequest(
+        sessionID: "session",
+        searchID: "palette-search",
+        generation: 4,
+        queryRevision: 9,
+        resource: DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list"]
+        ),
+        namespaceScope: .namespace("team"),
+        query: "api"
+    )
+
+    var messages: [ObjectSearchMessage] = []
+    for try await message in provider.searchObjects(request: request) {
+        messages.append(message)
+    }
+
+    #expect(messages.count == 1)
+    let message = try #require(messages.first)
+    #expect(!event.hasProgress)
+    #expect(message.queryRevision == 9)
+    #expect(message.progress.queryRevision == 9)
+    #expect(message.issue?.category == .authentication)
+    #expect(message.issue?.reason == "Unauthorized")
+    #expect(message.issue?.message == "Authentication failed (401).")
+    let captured = await rpc.searchRequest()
+    #expect(captured?.searchID == "palette-search")
+    #expect(captured?.queryRevision == 9)
 }
 
 @Test func cachedObjectSearchProviderMapsBoundedLocalQuery() async throws {
