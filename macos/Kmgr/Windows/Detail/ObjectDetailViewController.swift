@@ -1821,13 +1821,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func readImportedBytes(
         from url: URL,
-        completion: @escaping @MainActor (Data) -> Void
+        completion: @escaping @MainActor @Sendable (Data) -> Void
     ) {
         let reader = dataFileReader
         startDataFileOperation(status: "Importing \(url.lastPathComponent)…") {
-            try await Task.detached(priority: .utility) {
-                try reader(url)
-            }.value
+            try reader(url)
         } completion: { value in
             completion(value)
         }
@@ -1850,15 +1848,13 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     func exportDataFile(_ bytes: Data, key: String, to url: URL) {
         let writer = dataFileWriter
         startDataFileOperation(status: "Exporting \(url.lastPathComponent)…") {
-            try await Task.detached(priority: .utility) {
-                var protectedBytes = bytes
-                defer {
-                    protectedBytes.resetBytes(
-                        in: protectedBytes.startIndex..<protectedBytes.endIndex
-                    )
-                }
-                try writer(protectedBytes, url)
-            }.value
+            var protectedBytes = bytes
+            defer {
+                protectedBytes.resetBytes(
+                    in: protectedBytes.startIndex..<protectedBytes.endIndex
+                )
+            }
+            try writer(protectedBytes, url)
         } completion: { [weak self] _ in
             self?.statusLabel.stringValue = "Exported \(key)"
             self?.statusLabel.textColor = .secondaryLabelColor
@@ -1867,8 +1863,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func startDataFileOperation<Value: Sendable>(
         status: String,
-        operation: @escaping @Sendable () async throws -> Value,
-        completion: @escaping @MainActor (Value) -> Void
+        operation: @escaping @Sendable () throws -> Value,
+        completion: @escaping @MainActor @Sendable (Value) -> Void
     ) {
         guard dataFileTask == nil else { return }
         dataFileGeneration &+= 1
@@ -1877,7 +1873,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         statusLabel.textColor = .secondaryLabelColor
         dataFileTask = Task { [weak self] in
             do {
-                let value = try await operation()
+                // This nonisolated async call moves the same stored Task onto
+                // the generic executor. Cancellation reaches the task doing
+                // POSIX I/O instead of only an awaiting shell.
+                let value = try await Self.performDataFileOperation(operation)
                 guard let self, !Task.isCancelled,
                     dataFileGeneration == generation
                 else { return }
@@ -1894,6 +1893,15 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             }
         }
         updateDataEditorControls()
+    }
+
+    private nonisolated static func performDataFileOperation<Value: Sendable>(
+        _ operation: @escaping @Sendable () throws -> Value
+    ) async throws -> Value {
+        try Task.checkCancellation()
+        let value = try operation()
+        try Task.checkCancellation()
+        return value
     }
 
     private func cancelDataFileOperation() {

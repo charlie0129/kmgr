@@ -318,6 +318,7 @@ struct ObjectDetailDataDraftTests {
         try await waitForCondition { probe.readFinished }
         try await Task.sleep(for: .milliseconds(30))
 
+        #expect(probe.readObservedCancellation == true)
         #expect(editor.string == "server-alpha")
         #expect(try stateText(in: table, row: alphaRow) == "Saved")
     }
@@ -595,6 +596,7 @@ private final class DataValueFileOperationProbe: @unchecked Sendable {
     private var storedReadStarted = false
     private var storedReadFinished = false
     private var storedReadRanOnMainThread: Bool?
+    private var storedReadObservedCancellation: Bool?
     private var storedWriteStarted = false
     private var storedWriteFinished = false
     private var storedWriteRanOnMainThread: Bool?
@@ -607,6 +609,9 @@ private final class DataValueFileOperationProbe: @unchecked Sendable {
     var readStarted: Bool { lock.withLock { storedReadStarted } }
     var readFinished: Bool { lock.withLock { storedReadFinished } }
     var readRanOnMainThread: Bool? { lock.withLock { storedReadRanOnMainThread } }
+    var readObservedCancellation: Bool? {
+        lock.withLock { storedReadObservedCancellation }
+    }
     var writeStarted: Bool { lock.withLock { storedWriteStarted } }
     var writeFinished: Bool { lock.withLock { storedWriteFinished } }
     var writeRanOnMainThread: Bool? { lock.withLock { storedWriteRanOnMainThread } }
@@ -618,7 +623,10 @@ private final class DataValueFileOperationProbe: @unchecked Sendable {
             storedReadRanOnMainThread = Thread.isMainThread
         }
         readGate.wait()
-        lock.withLock { storedReadFinished = true }
+        lock.withLock {
+            storedReadObservedCancellation = Task.isCancelled
+            storedReadFinished = true
+        }
         return importedBytes
     }
 
