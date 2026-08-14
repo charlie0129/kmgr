@@ -1,0 +1,154 @@
+package view
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/charlie0129/kmgr/backend/internal/store"
+	"github.com/charlie0129/kmgr/backend/internal/watcher"
+	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+)
+
+func TestNewFilterRevisionCancelsStaleProjectionAndPublishesOnlyNewestFilter(t *testing.T) {
+	// This test intentionally remains sequential because it occupies the
+	// process-wide projection gate to make an in-flight row projection wait at
+	// a deterministic, context-cancellable boundary.
+	blockedWorkers := cap(projectionWorkerGate)
+	releaseBlockedWorkers := make(chan struct{})
+	blockedWorkerStarted := make(chan struct{}, blockedWorkers)
+	var blockedWorkerDone sync.WaitGroup
+	blockedWorkerDone.Add(blockedWorkers)
+	workersBlocked := true
+	var releaseBlockedWorkersOnce sync.Once
+	releaseWorkers := func() {
+		if !workersBlocked {
+			return
+		}
+		releaseBlockedWorkersOnce.Do(func() { close(releaseBlockedWorkers) })
+		blockedWorkerDone.Wait()
+		workersBlocked = false
+	}
+	defer releaseWorkers()
+
+	for range blockedWorkers {
+		go func() {
+			defer blockedWorkerDone.Done()
+			_ = runProjectionWorker(context.Background(), func() error {
+				blockedWorkerStarted <- struct{}{}
+				<-releaseBlockedWorkers
+				return nil
+			})
+		}()
+	}
+	for range blockedWorkers {
+		select {
+		case <-blockedWorkerStarted:
+		case <-time.After(time.Second):
+			t.Fatal("could not occupy the projection worker gate")
+		}
+	}
+
+	client := newScriptedResource()
+	firstProjectionStarted := make(chan struct{})
+	var projectionCalls atomic.Int64
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:              &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay:        time.Hour,
+		OpenProjectionLimit: 2,
+		openProjectionHook: func() {
+			if projectionCalls.Add(1) == 1 {
+				close(firstProjectionStarted)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	entry := &resourceRuntime{
+		key: resourceKey{
+			authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns",
+		},
+		store:       store.New(),
+		client:      client,
+		state:       resourceRunning,
+		runNumber:   1,
+		subscribers: make(map[*Subscription]struct{}),
+		dependents:  make(map[*Subscription]struct{}),
+		lastStatus: watcher.Status{
+			Phase: watcher.PhaseWatching, ResourceVersion: "rv-filter",
+		},
+		accountingReady: true,
+	}
+	entry.store.Upsert(pod("uid-alpha", "ns", "alpha", "Running", 0, nil, time.Time{}))
+	entry.store.Upsert(pod("uid-beta", "ns", "beta", "Running", 0, nil, time.Time{}))
+	entry.store.SetResourceVersion("rv-filter")
+	runtime.mu.Lock()
+	runtime.resources[entry.key] = entry
+	runtime.mu.Unlock()
+
+	type openResult struct {
+		subscription *Subscription
+		err          error
+	}
+	open := func(request *kmgrv1.OpenViewRequest) <-chan openResult {
+		result := make(chan openResult, 1)
+		go func() {
+			subscription, openErr := runtime.OpenContext(context.Background(), request)
+			result <- openResult{subscription: subscription, err: openErr}
+		}()
+		return result
+	}
+
+	staleRequest := openView("session", "pods", 1)
+	staleRequest.Spec.FilterExpression = "name:alpha"
+	staleResult := open(staleRequest)
+	select {
+	case <-firstProjectionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("stale filter projection did not start")
+	}
+
+	newestRequest := openView("session", "pods", 2)
+	newestRequest.Spec.FilterExpression = "name:beta"
+	newestResult := open(newestRequest)
+
+	select {
+	case result := <-staleResult:
+		if result.subscription != nil || !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("superseded filter projection = subscription %#v, error %v; want context cancellation", result.subscription, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("new filter revision did not cancel the stale projection")
+	}
+
+	releaseWorkers()
+	var newest *Subscription
+	select {
+	case result := <-newestResult:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		newest = result.subscription
+	case <-time.After(time.Second):
+		t.Fatal("newest filter projection did not finish")
+	}
+	defer newest.Close()
+
+	events := drainSubscription(t, newest)
+	var snapshotUIDs []string
+	for _, event := range events {
+		for _, row := range event.GetSnapshot().GetRows() {
+			snapshotUIDs = append(snapshotUIDs, row.GetIdentity().GetUid())
+		}
+	}
+	if !slices.Equal(snapshotUIDs, []string{"uid-beta"}) {
+		t.Fatalf("newest filter snapshot UIDs = %v, want only uid-beta", snapshotUIDs)
+	}
+}
