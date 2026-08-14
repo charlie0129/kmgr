@@ -310,8 +310,8 @@ func TestManagerReleasesResolvedSessionOnFailureAndTermination(t *testing.T) {
 		t.Fatalf("capacity Start error = %v", err)
 	}
 	mu.Lock()
-	if acquired != 3 || released != 2 {
-		t.Fatalf("before termination acquired/released = %d/%d, want 3/2", acquired, released)
+	if acquired != 1 || released != 0 {
+		t.Fatalf("before termination acquired/released = %d/%d, want 1/0", acquired, released)
 	}
 	mu.Unlock()
 	manager.Close()
@@ -321,14 +321,87 @@ func TestManagerReleasesResolvedSessionOnFailureAndTermination(t *testing.T) {
 	waitFor(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return released == 3
+		return released == 1
 	}, "active session lease release")
 	first.Close()
 	mu.Lock()
 	defer mu.Unlock()
-	if released != 3 {
+	if released != 1 {
 		t.Fatalf("session close released lease again: %d", released)
 	}
+}
+
+func TestManagerRetainsAuthorityForReconnectAfterWorkspaceClose(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	workspaceOpen := true
+	resolveCalls := 0
+	releases := 0
+	runner := runnerFunc(func(_ context.Context, _ StartRequest, options RunOptions) error {
+		if options.Started != nil {
+			options.Started()
+		}
+		return nil
+	})
+	resolver := ResolverFunc(func(string) (ResolvedSession, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		resolveCalls++
+		if !workspaceOpen {
+			return ResolvedSession{}, ErrSessionNotFound
+		}
+		return ResolvedSession{
+			ContextName: "local",
+			Runner:      runner,
+			Release: func() {
+				mu.Lock()
+				releases++
+				mu.Unlock()
+			},
+		}, nil
+	})
+	manager, err := NewManager(Config{Resolver: resolver, MaxSessions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	first, err := manager.Start(context.Background(), testStart(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal := lastTerminal(t, first); terminal.State != StateExited {
+		t.Fatalf("first terminal = %#v", terminal)
+	}
+	mu.Lock()
+	workspaceOpen = false
+	mu.Unlock()
+
+	second, err := manager.Start(context.Background(), testStart(2))
+	if err != nil {
+		t.Fatalf("replacement after workspace close: %v", err)
+	}
+	if terminal := lastTerminal(t, second); terminal.State != StateExited {
+		t.Fatalf("second terminal = %#v", terminal)
+	}
+	mu.Lock()
+	if resolveCalls != 1 || releases != 0 {
+		t.Fatalf("before close resolve/release calls = %d/%d, want 1/0", resolveCalls, releases)
+	}
+	mu.Unlock()
+
+	first.Close()
+	mu.Lock()
+	if releases != 0 {
+		t.Fatalf("first close released authority still used by replacement: %d", releases)
+	}
+	mu.Unlock()
+	second.Close()
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return releases == 1
+	}, "shared retained exec authority release")
 }
 
 func TestExitCodeIsPreserved(t *testing.T) {

@@ -44,18 +44,42 @@ type generationEntry struct {
 	generation uint64
 }
 
+// retainedExecSession shares one independently acquired cluster-session lease
+// across overlapping generations of the same logical terminal window. The
+// old generation remains subscribed after its remote process exits, allowing
+// a replacement to start before the originating workspace's authority is
+// released.
+type retainedExecSession struct {
+	contextName string
+	runner      Runner
+	release     func()
+	releaseOnce sync.Once
+	refs        int
+}
+
+func (s *retainedExecSession) releaseUnderlying() {
+	if s == nil {
+		return
+	}
+	s.releaseOnce.Do(func() {
+		if s.release != nil {
+			s.release()
+		}
+	})
+}
+
 type operation struct {
 	key                sessionKey
 	generation         uint64
-	contextName        string
+	context            context.Context
 	pod                Identity
 	tty                bool
 	cancel             context.CancelFunc
 	input              *inputPipe
 	resizes            *resizeQueue
 	output             *outputQueue
-	releaseSession     func()
-	releaseSessionOnce sync.Once
+	session            *retainedExecSession
+	sessionReleased    bool
 	producerDone       bool
 	subscriptionClosed bool
 }
@@ -121,6 +145,27 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Session, er
 	if err := validateStart(request, m.config.MaxCommandArguments, m.config.MaxCommandBytes); err != nil {
 		return nil, err
 	}
+	key := sessionKey{clusterSessionID: request.SessionID, execSessionID: request.ExecSessionID}
+
+	// Prefer the prior generation's retained authority. SessionRegistry refuses
+	// brand-new independent leases after a workspace closes, while an existing
+	// terminal window is explicitly allowed to reconnect to a new process.
+	m.mu.Lock()
+	previous, err := m.checkStartLocked(key, request.Generation)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	if previous != nil && previous.session != nil && !previous.sessionReleased {
+		previous.session.refs++
+		op := m.newOperation(ctx, key, request.Generation, previous.session, request)
+		m.installLocked(op)
+		m.mu.Unlock()
+		previous.cancel()
+		return m.begin(op, request), nil
+	}
+	m.mu.Unlock()
+
 	resolved, err := m.config.Resolver.Resolve(request.SessionID)
 	if err != nil {
 		return nil, err
@@ -134,56 +179,82 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Session, er
 	if resolved.Runner == nil {
 		return nil, ErrExecutorUnavailable
 	}
+	retained := &retainedExecSession{
+		contextName: resolved.ContextName,
+		runner:      resolved.Runner,
+		release:     resolved.Release,
+		refs:        1,
+	}
+	op := m.newOperation(ctx, key, request.Generation, retained, request)
 
-	key := sessionKey{clusterSessionID: request.SessionID, execSessionID: request.ExecSessionID}
+	m.mu.Lock()
+	previous, err = m.checkStartLocked(key, request.Generation)
+	if err != nil {
+		m.mu.Unlock()
+		op.cancel()
+		return nil, err
+	}
+	m.installLocked(op)
+	m.mu.Unlock()
+	if previous != nil {
+		previous.cancel()
+	}
+	releaseResolved = false
+	return m.begin(op, request), nil
+}
+
+func (m *Manager) checkStartLocked(key sessionKey, generation uint64) (*operation, error) {
+	if m.closed {
+		return nil, ErrSessionClosed
+	}
+	if latest := m.latest[key]; generation <= latest {
+		return nil, fmt.Errorf("%w: generation %d is not newer than %d", ErrStaleGeneration, generation, latest)
+	}
+	previous := m.current[key]
+	if previous == nil && len(m.current) >= m.config.MaxSessions {
+		return nil, ErrTooManySessions
+	}
+	if len(m.operations) >= 2*m.config.MaxSessions {
+		return nil, ErrTooManySessions
+	}
+	return previous, nil
+}
+
+func (m *Manager) newOperation(
+	ctx context.Context,
+	key sessionKey,
+	generation uint64,
+	session *retainedExecSession,
+	request StartRequest,
+) *operation {
 	execContext, cancel := context.WithCancel(ctx)
 	input := newInputPipe(m.config.InputChunks, m.config.InputBytes)
 	if !request.Stdin {
 		input.Close()
 	}
-	op := &operation{
-		key: key, generation: request.Generation, contextName: resolved.ContextName,
-		pod: request.Pod, tty: request.TTY, cancel: cancel, input: input,
-		releaseSession: resolved.Release,
-		resizes:        newResizeQueue(request.InitialSize),
-		output:         newOutputQueue(m.config.OutputItems, m.config.OutputBytes, m.config.OutputChunkBytes),
+	return &operation{
+		key: key, generation: generation, context: execContext, pod: request.Pod, tty: request.TTY,
+		cancel: cancel, input: input, session: session,
+		resizes: newResizeQueue(request.InitialSize),
+		output:  newOutputQueue(m.config.OutputItems, m.config.OutputBytes, m.config.OutputChunkBytes),
 	}
+}
 
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		cancel()
-		return nil, ErrSessionClosed
-	}
-	if latest := m.latest[key]; request.Generation <= latest {
-		m.mu.Unlock()
-		cancel()
-		return nil, fmt.Errorf("%w: generation %d is not newer than %d", ErrStaleGeneration, request.Generation, latest)
-	}
-	if len(m.operations) >= m.config.MaxSessions {
-		m.mu.Unlock()
-		cancel()
-		return nil, ErrTooManySessions
-	}
-	previous := m.current[key]
-	m.current[key] = op
+func (m *Manager) installLocked(op *operation) {
+	m.current[op.key] = op
 	m.operations[op] = struct{}{}
-	m.latest[key] = request.Generation
-	m.history = append(m.history, generationEntry{key: key, generation: request.Generation})
+	m.latest[op.key] = op.generation
+	m.history = append(m.history, generationEntry{key: op.key, generation: op.generation})
 	m.trimHistoryLocked()
-	m.mu.Unlock()
-	if previous != nil {
-		previous.cancel()
-	}
+}
 
+func (m *Manager) begin(op *operation, request StartRequest) *Session {
 	op.output.setStatus(Status{State: StateConnecting})
-	go m.run(execContext, op, resolved.Runner, request)
-	releaseResolved = false
-	return &Session{manager: m, operation: op}, nil
+	go m.run(op.context, op, op.session.runner, request)
+	return &Session{manager: m, operation: op}
 }
 
 func (m *Manager) run(ctx context.Context, op *operation, runner Runner, request StartRequest) {
-	defer op.releaseLease()
 	stopInput := op.input.CloseOnContext(ctx)
 	defer func() {
 		stopInput()
@@ -207,16 +278,6 @@ func (m *Manager) run(ctx context.Context, op *operation, runner Runner, request
 	status := terminalStatus(ctx, err)
 	op.output.finish(status)
 	m.detach(op)
-}
-
-func (op *operation) releaseLease() {
-	if op != nil {
-		op.releaseSessionOnce.Do(func() {
-			if op.releaseSession != nil {
-				op.releaseSession()
-			}
-		})
-	}
 }
 
 func terminalStatus(ctx context.Context, err error) Status {
@@ -251,29 +312,53 @@ func (m *Manager) Cancel(clusterSessionID, execSessionID string, generation uint
 }
 
 func (m *Manager) detach(op *operation) {
+	var release *retainedExecSession
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	op.producerDone = true
-	if m.current[op.key] == op {
-		delete(m.current, op.key)
-	}
 	if op.subscriptionClosed {
 		delete(m.operations, op)
+		if m.current[op.key] == op {
+			delete(m.current, op.key)
+		}
+		release = m.releaseSessionRefLocked(op)
 	}
 	m.trimHistoryLocked()
+	m.mu.Unlock()
+	release.releaseUnderlying()
 }
 
 func (m *Manager) release(op *operation) {
+	var release *retainedExecSession
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if op.subscriptionClosed {
+		m.mu.Unlock()
+		return
+	}
 	op.subscriptionClosed = true
 	if op.producerDone {
 		delete(m.operations, op)
-	}
-	if m.current[op.key] == op {
-		delete(m.current, op.key)
+		if m.current[op.key] == op {
+			delete(m.current, op.key)
+		}
+		release = m.releaseSessionRefLocked(op)
 	}
 	m.trimHistoryLocked()
+	m.mu.Unlock()
+	release.releaseUnderlying()
+}
+
+func (m *Manager) releaseSessionRefLocked(op *operation) *retainedExecSession {
+	if op == nil || op.session == nil || op.sessionReleased {
+		return nil
+	}
+	op.sessionReleased = true
+	if op.session.refs > 0 {
+		op.session.refs--
+	}
+	if op.session.refs == 0 {
+		return op.session
+	}
+	return nil
 }
 
 func (m *Manager) trimHistoryLocked() {
@@ -313,12 +398,25 @@ func (m *Manager) Close() {
 	}
 	m.closed = true
 	operations := make([]*operation, 0, len(m.operations))
+	releases := make([]*retainedExecSession, 0, len(m.operations))
 	for operation := range m.operations {
 		operations = append(operations, operation)
+		operation.subscriptionClosed = true
+		if operation.producerDone {
+			delete(m.operations, operation)
+			if release := m.releaseSessionRefLocked(operation); release != nil {
+				releases = append(releases, release)
+			}
+		}
 	}
+	clear(m.current)
+	m.trimHistoryLocked()
 	m.mu.Unlock()
 	for _, operation := range operations {
 		operation.cancel()
+	}
+	for _, release := range releases {
+		release.releaseUnderlying()
 	}
 }
 
@@ -377,11 +475,21 @@ func (s *Session) Stats() OutputStats {
 	return s.operation.output.stats()
 }
 
+// Done closes when this generation is cancelled by its window, by manager
+// shutdown, or by a newer accepted generation. Consumers arm it after sending
+// terminal process status so replacement cleanup cannot suppress that status.
+func (s *Session) Done() <-chan struct{} {
+	if s == nil || s.operation == nil || s.operation.context == nil {
+		return nil
+	}
+	return s.operation.context.Done()
+}
+
 func (s *Session) ContextName() string {
-	if s == nil || s.operation == nil {
+	if s == nil || s.operation == nil || s.operation.session == nil {
 		return ""
 	}
-	return s.operation.contextName
+	return s.operation.session.contextName
 }
 
 func (s *Session) Pod() Identity {

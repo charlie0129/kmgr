@@ -100,8 +100,20 @@ func (s *GRPCService) Exec(stream grpc.BidiStreamingServer[kmgrv1.ExecClientMess
 	go deliverExecMessages(rpcContext, session, deliveries)
 
 	var serverSequence uint64
+	terminalDelivered := false
+	var sessionDone <-chan struct{}
 	for {
 		select {
+		case <-rpcContext.Done():
+			return execStatusError(rpcContext.Err())
+		case <-sessionDone:
+			// A newer generation has accepted the retained authority and
+			// cancelled this completed operation. Retire the old RPC even if a
+			// client cleanup message is delayed or lost.
+			if rpcContext.Err() != nil {
+				return execStatusError(rpcContext.Err())
+			}
+			return nil
 		case result := <-receiveResults:
 			if result.err != nil {
 				session.Cancel()
@@ -112,6 +124,9 @@ func (s *GRPCService) Exec(stream grpc.BidiStreamingServer[kmgrv1.ExecClientMess
 			}
 			if result.done {
 				receiveResults = nil
+				if terminalDelivered {
+					return nil
+				}
 			}
 		case result := <-deliveries:
 			if result.err != nil {
@@ -129,7 +144,16 @@ func (s *GRPCService) Exec(stream grpc.BidiStreamingServer[kmgrv1.ExecClientMess
 				return err
 			}
 			if result.delivery.Status != nil && isTerminal(result.delivery.Status.State) {
-				return nil
+				terminalDelivered = true
+				sessionDone = session.Done()
+				// Keep the generation RPC open after process exit. Its retained
+				// session lease is the authority a higher generation reuses when
+				// the originating workspace has already closed. The terminal
+				// window explicitly cancels this stream after its replacement has
+				// started, or when the window itself closes.
+				if receiveResults == nil {
+					return nil
+				}
 			}
 		}
 	}
