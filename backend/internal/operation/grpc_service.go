@@ -1081,6 +1081,11 @@ func structuredOperationError(
 	case errors.Is(err, object.ErrInvalidYAML):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION
 		result.Reason, result.Message = "InvalidYAML", err.Error()
+	case errors.Is(err, object.ErrYAMLForceOwnershipUnsupported):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED
+		result.Reason = "YAMLForceOwnershipUnsupported"
+		result.Message = "Force field ownership is unavailable for YAML edits. Save without forcing ownership."
+		result.FieldPath = "force_field_ownership"
 	case errors.As(err, &uidMismatch):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
 		result.Reason, result.Message = "ObjectRecreated", uidMismatch.Error()

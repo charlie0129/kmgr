@@ -3,6 +3,7 @@ package operation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -571,6 +572,23 @@ func TestStructuredOperationErrorReportsManagerCapacityAndShutdown(t *testing.T)
 		oversized.GetReason() != "OperationErrorDetailsOmitted" ||
 		oversized.GetContextName() != "production-context" || oversized.GetResource().GetUid() != "uid" {
 		t.Fatalf("bounded structured error = %#v (size %d)", oversized, proto.Size(oversized))
+	}
+}
+
+func TestStructuredOperationErrorRejectsYAMLForceOwnership(t *testing.T) {
+	t.Parallel()
+	value := structuredOperationError(
+		fmt.Errorf("prepare YAML: %w", object.ErrYAMLForceOwnershipUnsupported),
+		operationIdentity(),
+		"prepare-yaml",
+		"production-context",
+	)
+	if value.GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED ||
+		value.GetReason() != "YAMLForceOwnershipUnsupported" ||
+		value.GetFieldPath() != "force_field_ownership" ||
+		value.GetContextName() != "production-context" ||
+		value.GetOperation() != "prepare-yaml" {
+		t.Fatalf("force-ownership error = %#v", value)
 	}
 }
 
