@@ -31,17 +31,19 @@ import (
 )
 
 const (
-	DefaultViewReleaseDelay          = 3 * time.Second
-	DefaultViewBatchDelay            = 35 * time.Millisecond
-	DefaultSnapshotChunk             = 500
-	DefaultPendingRowLimit           = 4096
-	DefaultWarmViewLimit             = 24
-	DefaultWarmObjectLimit           = 250_000
-	DefaultSearchSnapshotLimit       = 4
-	DefaultSearchSnapshotObjectLimit = 250_000
-	DefaultSearchSnapshotTTL         = 30 * time.Second
-	DefaultOpenGenerationHistory     = 1024
-	defaultOpenProjectionLimit       = 4
+	DefaultViewReleaseDelay            = 3 * time.Second
+	DefaultViewBatchDelay              = 35 * time.Millisecond
+	DefaultSnapshotChunk               = 500
+	DefaultPendingRowLimit             = 4096
+	DefaultWarmViewLimit               = 24
+	DefaultWarmObjectLimit             = 250_000
+	DefaultWarmViewLimitPerAuthority   = 8
+	DefaultWarmObjectLimitPerAuthority = 100_000
+	DefaultSearchSnapshotLimit         = 4
+	DefaultSearchSnapshotObjectLimit   = 250_000
+	DefaultSearchSnapshotTTL           = 30 * time.Second
+	DefaultOpenGenerationHistory       = 1024
+	defaultOpenProjectionLimit         = 4
 )
 
 var (
@@ -120,25 +122,27 @@ func pointerIdentity(value any) string {
 }
 
 type RuntimeConfig struct {
-	Source                    ResourceSource
-	Metrics                   MetricSource
-	Columns                   ColumnProgramResolver
-	ReleaseDelay              time.Duration
-	BatchDelay                time.Duration
-	SnapshotChunkSize         int
-	PendingRowLimit           int
-	WarmViewLimit             int
-	WarmObjectLimit           int
-	PipelinePageSize          int64
-	PipelineTimeout           time.Duration
-	SearchSnapshotLimit       int
-	SearchSnapshotObjectLimit int
-	SearchSnapshotTTL         time.Duration
-	OpenProjectionLimit       int
-	OpenGenerationHistory     int
-	openProjectionHook        func()
-	openHandoffHook           func()
-	pipelineRunHook           func(context.Context, func(context.Context) error) error
+	Source                      ResourceSource
+	Metrics                     MetricSource
+	Columns                     ColumnProgramResolver
+	ReleaseDelay                time.Duration
+	BatchDelay                  time.Duration
+	SnapshotChunkSize           int
+	PendingRowLimit             int
+	WarmViewLimit               int
+	WarmObjectLimit             int
+	WarmViewLimitPerAuthority   int
+	WarmObjectLimitPerAuthority int
+	PipelinePageSize            int64
+	PipelineTimeout             time.Duration
+	SearchSnapshotLimit         int
+	SearchSnapshotObjectLimit   int
+	SearchSnapshotTTL           time.Duration
+	OpenProjectionLimit         int
+	OpenGenerationHistory       int
+	openProjectionHook          func()
+	openHandoffHook             func()
+	pipelineRunHook             func(context.Context, func(context.Context) error) error
 }
 
 // ColumnProgramResolver resolves programs once per opened view. Projection
@@ -173,9 +177,13 @@ type Runtime struct {
 	pageSize          int64
 	watchTimeout      time.Duration
 
-	resources map[resourceKey]*resourceRuntime
-	views     map[viewKey]*Subscription
-	warm      *watcher.WarmCache[resourceKey, *resourceRuntime]
+	resources                   map[resourceKey]*resourceRuntime
+	views                       map[viewKey]*Subscription
+	warm                        *watcher.WarmCache[resourceKey, *resourceRuntime]
+	warmByAuthority             map[string]*watcher.WarmCache[resourceKey, *resourceRuntime]
+	warmObjectLimit             int
+	warmViewLimitPerAuthority   int
+	warmObjectLimitPerAuthority int
 
 	searchSnapshots           map[searchSnapshotKey]*completedSearchSnapshot
 	searchSnapshotLimit       int
@@ -394,7 +402,16 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if warmObjects == 0 {
 		warmObjects = DefaultWarmObjectLimit
 	}
-	if chunkSize <= 0 || pendingLimit <= 0 || warmViews <= 0 || warmObjects <= 0 {
+	warmViewsPerAuthority := config.WarmViewLimitPerAuthority
+	if warmViewsPerAuthority == 0 {
+		warmViewsPerAuthority = DefaultWarmViewLimitPerAuthority
+	}
+	warmObjectsPerAuthority := config.WarmObjectLimitPerAuthority
+	if warmObjectsPerAuthority == 0 {
+		warmObjectsPerAuthority = DefaultWarmObjectLimitPerAuthority
+	}
+	if chunkSize <= 0 || pendingLimit <= 0 || warmViews <= 0 || warmObjects <= 0 ||
+		warmViewsPerAuthority <= 0 || warmObjectsPerAuthority <= 0 {
 		return nil, errors.New("view runtime limits must be positive")
 	}
 	searchSnapshotLimit := config.SearchSnapshotLimit
@@ -424,33 +441,37 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		return nil, errors.New("open projection limits must be positive")
 	}
 	return &Runtime{
-		source:                    config.Source,
-		metrics:                   config.Metrics,
-		columns:                   config.Columns,
-		releaseDelay:              releaseDelay,
-		batchDelay:                batchDelay,
-		snapshotChunkSize:         chunkSize,
-		pendingRowLimit:           pendingLimit,
-		pageSize:                  config.PipelinePageSize,
-		watchTimeout:              config.PipelineTimeout,
-		resources:                 make(map[resourceKey]*resourceRuntime),
-		views:                     make(map[viewKey]*Subscription),
-		warm:                      watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects),
-		searchSnapshots:           make(map[searchSnapshotKey]*completedSearchSnapshot),
-		searchSnapshotLimit:       searchSnapshotLimit,
-		searchSnapshotObjectLimit: searchSnapshotObjectLimit,
-		searchSnapshotTTL:         searchSnapshotTTL,
-		transientSearchLists:      make(map[searchSnapshotKey]*transientSearchList),
-		openProjectionGate:        make(chan struct{}, openProjectionLimit),
-		openProjectionHook:        config.openProjectionHook,
-		openHandoffHook:           config.openHandoffHook,
-		pipelineRunHook:           config.pipelineRunHook,
-		openings:                  make(map[viewKey]*openAttempt),
-		latestOpen:                make(map[viewKey]uint64),
-		openHistoryLimit:          openHistoryLimit,
-		deliveryStates:            make(map[viewKey]*logicalViewDeliveryState),
-		nodeAccounting:            make(map[nodeAccountingKey]*nodeAccountingWork),
-		nodeAccountingComputer:    computeNodeAccounting,
+		source:                      config.Source,
+		metrics:                     config.Metrics,
+		columns:                     config.Columns,
+		releaseDelay:                releaseDelay,
+		batchDelay:                  batchDelay,
+		snapshotChunkSize:           chunkSize,
+		pendingRowLimit:             pendingLimit,
+		pageSize:                    config.PipelinePageSize,
+		watchTimeout:                config.PipelineTimeout,
+		resources:                   make(map[resourceKey]*resourceRuntime),
+		views:                       make(map[viewKey]*Subscription),
+		warm:                        watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects),
+		warmByAuthority:             make(map[string]*watcher.WarmCache[resourceKey, *resourceRuntime]),
+		warmObjectLimit:             warmObjects,
+		warmViewLimitPerAuthority:   warmViewsPerAuthority,
+		warmObjectLimitPerAuthority: warmObjectsPerAuthority,
+		searchSnapshots:             make(map[searchSnapshotKey]*completedSearchSnapshot),
+		searchSnapshotLimit:         searchSnapshotLimit,
+		searchSnapshotObjectLimit:   searchSnapshotObjectLimit,
+		searchSnapshotTTL:           searchSnapshotTTL,
+		transientSearchLists:        make(map[searchSnapshotKey]*transientSearchList),
+		openProjectionGate:          make(chan struct{}, openProjectionLimit),
+		openProjectionHook:          config.openProjectionHook,
+		openHandoffHook:             config.openHandoffHook,
+		pipelineRunHook:             config.pipelineRunHook,
+		openings:                    make(map[viewKey]*openAttempt),
+		latestOpen:                  make(map[viewKey]uint64),
+		openHistoryLimit:            openHistoryLimit,
+		deliveryStates:              make(map[viewKey]*logicalViewDeliveryState),
+		nodeAccounting:              make(map[nodeAccountingKey]*nodeAccountingWork),
+		nodeAccountingComputer:      computeNodeAccounting,
 	}, nil
 }
 
@@ -586,7 +607,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	}
 	entry := r.resources[key]
 	if entry == nil {
-		if cached, ok := r.warm.Get(key); ok {
+		if cached, ok := r.getWarmLocked(key); ok {
 			entry = cached.Value
 		}
 	}
@@ -647,7 +668,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	}
 	attempt.entry = entry
 	entry.openers++
-	r.warm.Remove(key)
+	r.removeWarmLocked(key)
 	if entry.releaseTimer != nil {
 		entry.releaseTimer.Stop()
 		entry.releaseTimer = nil
@@ -954,7 +975,7 @@ func (r *Runtime) attachNodeAccounting(subscription *Subscription, sessionID, au
 	}
 	entry := r.resources[key]
 	if entry == nil {
-		if cached, ok := r.warm.Get(key); ok {
+		if cached, ok := r.getWarmLocked(key); ok {
 			entry = cached.Value
 		}
 	}
@@ -975,7 +996,7 @@ func (r *Runtime) attachNodeAccounting(subscription *Subscription, sessionID, au
 		// a valid (stale-until-watch-connects) accounting basis.
 		entry.accountingReady = true
 	}
-	r.warm.Remove(key)
+	r.removeWarmLocked(key)
 	if entry.releaseTimer != nil {
 		entry.releaseTimer.Stop()
 		entry.releaseTimer = nil
@@ -1519,6 +1540,101 @@ func (r *Runtime) releaseResource(key resourceKey, entry *resourceRuntime, runNu
 	}
 }
 
+// getWarmLocked touches both the process-wide and per-authority LRUs. Warm
+// entries are admitted to both budgets as one logical cache; repairing a
+// one-sided entry defensively avoids bypassing either limit after test fixture
+// injection or future recovery code.
+func (r *Runtime) getWarmLocked(
+	key resourceKey,
+) (watcher.WarmEntry[*resourceRuntime], bool) {
+	global, inGlobal := r.warm.Get(key)
+	authorityCache := r.warmByAuthority[key.authorityID]
+	var authority watcher.WarmEntry[*resourceRuntime]
+	inAuthority := false
+	if authorityCache != nil {
+		authority, inAuthority = authorityCache.Get(key)
+	}
+	if inGlobal && inAuthority {
+		return global, true
+	}
+	if inGlobal {
+		r.warm.Remove(key)
+	}
+	if inAuthority {
+		authorityCache.Remove(key)
+	}
+	r.removeEmptyAuthorityWarmLocked(key.authorityID)
+	return authority, false
+}
+
+// putWarmLocked admits an inactive resource only when it fits both the
+// per-authority and process-wide budgets. Eviction from either LRU is mirrored
+// into the other so a busy cluster cannot retain ghost entries or consume the
+// budget reserved for other open authorities.
+func (r *Runtime) putWarmLocked(
+	key resourceKey,
+	entry watcher.WarmEntry[*resourceRuntime],
+) ([]resourceKey, bool) {
+	if entry.ObjectCount > r.warmObjectLimit || entry.ObjectCount > r.warmObjectLimitPerAuthority {
+		return nil, false
+	}
+	authorityCache := r.warmByAuthority[key.authorityID]
+	if authorityCache == nil {
+		authorityCache = watcher.NewWarmCache[resourceKey, *resourceRuntime](
+			r.warmViewLimitPerAuthority, r.warmObjectLimitPerAuthority,
+		)
+		r.warmByAuthority[key.authorityID] = authorityCache
+	}
+	authorityEvicted, admitted := authorityCache.Put(key, entry)
+	if !admitted {
+		r.removeEmptyAuthorityWarmLocked(key.authorityID)
+		return nil, false
+	}
+	evicted := make([]resourceKey, 0, len(authorityEvicted)+1)
+	seen := make(map[resourceKey]struct{}, cap(evicted))
+	appendEvicted := func(evictedKey resourceKey) {
+		if _, exists := seen[evictedKey]; exists {
+			return
+		}
+		seen[evictedKey] = struct{}{}
+		evicted = append(evicted, evictedKey)
+	}
+	for _, evictedKey := range authorityEvicted {
+		r.warm.Remove(evictedKey)
+		appendEvicted(evictedKey)
+	}
+	globalEvicted, admitted := r.warm.Put(key, entry)
+	if !admitted {
+		authorityCache.Remove(key)
+		r.removeEmptyAuthorityWarmLocked(key.authorityID)
+		return evicted, false
+	}
+	for _, evictedKey := range globalEvicted {
+		if cache := r.warmByAuthority[evictedKey.authorityID]; cache != nil {
+			cache.Remove(evictedKey)
+			r.removeEmptyAuthorityWarmLocked(evictedKey.authorityID)
+		}
+		appendEvicted(evictedKey)
+	}
+	r.removeEmptyAuthorityWarmLocked(key.authorityID)
+	return evicted, true
+}
+
+func (r *Runtime) removeWarmLocked(key resourceKey) bool {
+	removed := r.warm.Remove(key)
+	if cache := r.warmByAuthority[key.authorityID]; cache != nil {
+		removed = cache.Remove(key) || removed
+		r.removeEmptyAuthorityWarmLocked(key.authorityID)
+	}
+	return removed
+}
+
+func (r *Runtime) removeEmptyAuthorityWarmLocked(authorityID string) {
+	if cache := r.warmByAuthority[authorityID]; cache != nil && cache.Len() == 0 {
+		delete(r.warmByAuthority, authorityID)
+	}
+}
+
 // finalizeWarmLocked publishes only quiescent stores. A running pipeline may
 // still finish a selected event after cancellation, so warm-cache object/RV
 // accounting is not stable until Run acknowledges exit.
@@ -1528,7 +1644,7 @@ func (r *Runtime) finalizeWarmLocked(entry *resourceRuntime) {
 		return
 	}
 	key := entry.key
-	evicted, admitted := r.warm.Put(key, watcher.WarmEntry[*resourceRuntime]{
+	evicted, admitted := r.putWarmLocked(key, watcher.WarmEntry[*resourceRuntime]{
 		Value:            entry,
 		ObjectCount:      entry.store.Len(),
 		ResourceVersion:  entry.store.ResourceVersion(),
@@ -1600,7 +1716,7 @@ func (r *Runtime) Close() {
 			entry.cancel()
 		}
 		entry.state = resourceIdle
-		r.warm.Remove(key)
+		r.removeWarmLocked(key)
 		delete(r.resources, key)
 	}
 	for key, snapshot := range r.searchSnapshots {
