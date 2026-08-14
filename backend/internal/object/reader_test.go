@@ -362,7 +362,7 @@ func TestPodSummaryBoundsUntrustedContainerAndPortCounts(t *testing.T) {
 	}
 }
 
-func TestSecretDataDecodesRawBytesAndNeverFormatsValues(t *testing.T) {
+func TestSecretDataDecodesRawBytes(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Secret", "secrets", "ns", "credentials", "uid")
 	value.Object["data"] = map[string]any{
@@ -384,9 +384,6 @@ func TestSecretDataDecodesRawBytesAndNeverFormatsValues(t *testing.T) {
 	}
 	if data.Entries[1].Key != "token" || data.Entries[1].Kind != DataText || string(data.Entries[1].Value) != "super-secret-token" {
 		t.Fatalf("token entry metadata mismatch")
-	}
-	if strings.Contains(strings.ToLower(errors.New("redacted").Error()), "super-secret") {
-		t.Fatal("test sentinel unexpectedly leaked")
 	}
 }
 
