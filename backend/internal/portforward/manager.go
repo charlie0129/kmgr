@@ -380,6 +380,13 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64, sess
 			m.transition(current, revision, StateStopped, nil, &pod, 0)
 			return
 		}
+		// The concrete client performs a second UID check after upgrading the
+		// name-addressed Kubernetes stream but before binding locally. A direct
+		// Pod mismatch at that seam is terminal just like a resolver mismatch.
+		if request.Target.IsPod() && errors.Is(err, ErrPodRecreated) {
+			m.transition(current, revision, StateFailed, err, &pod, 0)
+			return
+		}
 		m.transition(current, revision, StateReconnecting, err, &pod, 0)
 		if m.config.Backoff.Wait(ctx, attempt) != nil {
 			m.transition(current, revision, StateStopped, nil, &pod, 0)

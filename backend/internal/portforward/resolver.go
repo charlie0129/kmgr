@@ -36,7 +36,7 @@ func (r ClusterSessions) ResolveSession(sessionID string) (Session, error) {
 		ContextName: session.Context().Name,
 		Resolver:    resolver,
 		Forwarder: ClientGoForwarder{
-			Config: session.RESTConfig(), RESTClient: session.Core().RESTClient(),
+			Config: session.RESTConfig(), RESTClient: session.Core().RESTClient(), Core: session.Core(),
 		},
 		Release: lease.Release,
 	}, nil

@@ -110,6 +110,47 @@ func TestDirectPodReconnectsAfterTransportFailureButNeverSwitchesUID(t *testing.
 	}
 }
 
+func TestDirectPodReplacementAtUpgradeSeamFailsWithoutRetry(t *testing.T) {
+	t.Parallel()
+	resolver := &sequenceResolver{results: []resolveResult{
+		{target: podIdentity("pod", "old-uid")},
+	}}
+	forwarder := &fakeForwarder{startErrors: []error{ErrPodRecreated}}
+	backoff := &recordingBackoff{}
+	manager, err := NewManager(Config{
+		Sessions: staticSessionResolver{session: Session{
+			ContextName: "context", Resolver: resolver, Forwarder: forwarder,
+		}},
+		Backoff: backoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := manager.Start(StartRequest{
+		ID: "upgrade-race", Target: podIdentity("pod", "old-uid"), RemotePort: 8080,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyForward(t, func() bool {
+		values := manager.List("", true)
+		return len(values) == 1 && values[0].State == StateFailed
+	})
+	failed := manager.List("", true)[0]
+	if !errors.Is(failed.LastError, ErrPodRecreated) {
+		t.Fatalf("terminal error = %v, want ErrPodRecreated", failed.LastError)
+	}
+	if got := backoff.Calls(); got != 0 {
+		t.Fatalf("backoff calls = %d, want no retry after upgrade-seam UID mismatch", got)
+	}
+	resolver.mu.Lock()
+	resolveCalls := resolver.calls
+	resolver.mu.Unlock()
+	if resolveCalls != 1 {
+		t.Fatalf("resolver calls = %d, want 1", resolveCalls)
+	}
+}
+
 func TestDirectPodTransportFailureReconnectsSameUID(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{
@@ -560,11 +601,12 @@ func (r *sequenceResolver) Resolve(_ context.Context, _ Identity, remotePort uin
 }
 
 type fakeForwarder struct {
-	mu         sync.Mutex
-	requests   []ForwardRequest
-	ports      []uint16
-	waitErrors []error
-	runnings   []*fakeRunning
+	mu          sync.Mutex
+	requests    []ForwardRequest
+	ports       []uint16
+	startErrors []error
+	waitErrors  []error
+	runnings    []*fakeRunning
 }
 
 func (f *fakeForwarder) Start(ctx context.Context, request ForwardRequest) (RunningForward, error) {
@@ -575,9 +617,17 @@ func (f *fakeForwarder) Start(ctx context.Context, request ForwardRequest) (Runn
 	if index < len(f.ports) {
 		port = f.ports[index]
 	}
+	var startError error
+	if index < len(f.startErrors) {
+		startError = f.startErrors[index]
+	}
 	var waitError error
 	if index < len(f.waitErrors) {
 		waitError = f.waitErrors[index]
+	}
+	if startError != nil {
+		f.mu.Unlock()
+		return nil, startError
 	}
 	running := &fakeRunning{ctx: ctx, port: port, result: make(chan error, 1)}
 	f.runnings = append(f.runnings, running)

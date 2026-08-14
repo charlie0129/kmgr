@@ -9,7 +9,9 @@ import (
 	"strconv"
 	"sync"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/httpstream"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	clientportforward "k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
@@ -18,10 +20,11 @@ import (
 type ClientGoForwarder struct {
 	Config     *rest.Config
 	RESTClient rest.Interface
+	Core       corev1client.CoreV1Interface
 }
 
 func (f ClientGoForwarder) Start(ctx context.Context, request ForwardRequest) (RunningForward, error) {
-	if f.Config == nil || f.RESTClient == nil {
+	if f.Config == nil || f.RESTClient == nil || f.Core == nil {
 		return nil, errors.New("Kubernetes port-forward transport is unavailable")
 	}
 	if !request.Pod.IsPod() || request.Pod.Namespace == "" || request.Pod.Name == "" || request.RemotePort == 0 {
@@ -42,7 +45,74 @@ func (f ClientGoForwarder) Start(ctx context.Context, request ForwardRequest) (R
 	dialer := clientportforward.NewFallbackDialer(tunnelDialer, spdyDialer, func(err error) bool {
 		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
 	})
-	return startClientGoForward(ctx, dialer, request)
+	return startUIDPinnedClientGoForward(ctx, dialer, f.Core, request)
+}
+
+// startUIDPinnedClientGoForward performs the final identity check after the
+// Kubernetes streaming upgrade succeeds and before client-go binds a local
+// listener. The API's port-forward URL contains only namespace/name, so the
+// earlier resolver GET alone cannot prevent a same-name replacement from
+// winning the race between resolution and transport upgrade.
+func startUIDPinnedClientGoForward(
+	ctx context.Context,
+	dialer httpstream.Dialer,
+	core corev1client.CoreV1Interface,
+	request ForwardRequest,
+) (RunningForward, error) {
+	pinned := &podUIDValidatingDialer{
+		delegate: dialer,
+		validate: func() error {
+			pod, err := core.Pods(request.Pod.Namespace).Get(ctx, request.Pod.Name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("verify upgraded port-forward Pod identity: %w", err)
+			}
+			if pod.UID != request.Pod.UID {
+				return fmt.Errorf(
+					"%w: expected UID %q, found %q after transport upgrade",
+					ErrPodRecreated, request.Pod.UID, pod.UID,
+				)
+			}
+			return nil
+		},
+	}
+	running, err := startClientGoForward(ctx, pinned, request)
+	if err != nil {
+		// client-go stringifies Dial errors. Restore the original typed error so
+		// the manager can make a direct-Pod UID mismatch terminal immediately.
+		if validationErr := pinned.validationError(); validationErr != nil {
+			return nil, validationErr
+		}
+	}
+	return running, err
+}
+
+type podUIDValidatingDialer struct {
+	delegate httpstream.Dialer
+	validate func() error
+
+	mu  sync.Mutex
+	err error
+}
+
+func (d *podUIDValidatingDialer) Dial(protocols ...string) (httpstream.Connection, string, error) {
+	connection, protocol, err := d.delegate.Dial(protocols...)
+	if err != nil {
+		return nil, protocol, err
+	}
+	if err := d.validate(); err != nil {
+		_ = connection.Close()
+		d.mu.Lock()
+		d.err = err
+		d.mu.Unlock()
+		return nil, protocol, err
+	}
+	return connection, protocol, nil
+}
+
+func (d *podUIDValidatingDialer) validationError() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.err
 }
 
 func startClientGoForward(

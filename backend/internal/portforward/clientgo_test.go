@@ -2,13 +2,18 @@ package portforward
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/httpstream"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestClientGoForwarderAllocatesPortZeroInsideListener(t *testing.T) {
@@ -36,6 +41,46 @@ func TestClientGoForwarderAllocatesPortZeroInsideListener(t *testing.T) {
 	}
 }
 
+func TestUIDPinnedForwardRejectsReplacementAfterUpgradeBeforeLocalListener(t *testing.T) {
+	t.Parallel()
+	oldPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "ns", Name: "pod", UID: types.UID("old-uid"),
+	}}
+	replacement := oldPod.DeepCopy()
+	replacement.UID = types.UID("new-uid")
+	client := fake.NewSimpleClientset(oldPod)
+	connection := &blockingConnection{closed: make(chan bool)}
+	dialer := callbackDialer{dial: func() (httpstream.Connection, string, error) {
+		pods := client.CoreV1().Pods(oldPod.Namespace)
+		if err := pods.Delete(context.Background(), oldPod.Name, metav1.DeleteOptions{}); err != nil {
+			return nil, "", err
+		}
+		if _, err := pods.Create(context.Background(), replacement, metav1.CreateOptions{}); err != nil {
+			return nil, "", err
+		}
+		return connection, "portforward.k8s.io", nil
+	}}
+
+	running, err := startUIDPinnedClientGoForward(
+		context.Background(), dialer, client.CoreV1(),
+		ForwardRequest{
+			Pod: podIdentity("pod", "old-uid"), RemotePort: 8080,
+			LocalPort: 0, BindAddress: "127.0.0.1",
+		},
+	)
+	if running != nil {
+		t.Fatal("same-name replacement unexpectedly received a running forward")
+	}
+	if !errors.Is(err, ErrPodRecreated) {
+		t.Fatalf("Start error = %v, want ErrPodRecreated", err)
+	}
+	select {
+	case <-connection.closed:
+	case <-time.After(time.Second):
+		t.Fatal("upgraded connection to replacement Pod was not closed")
+	}
+}
+
 func waitForward(running RunningForward) <-chan error {
 	result := make(chan error, 1)
 	go func() { result <- running.Wait() }()
@@ -46,6 +91,14 @@ type fakeDialer struct{ connection httpstream.Connection }
 
 func (d fakeDialer) Dial(...string) (httpstream.Connection, string, error) {
 	return d.connection, "portforward.k8s.io", nil
+}
+
+type callbackDialer struct {
+	dial func() (httpstream.Connection, string, error)
+}
+
+func (d callbackDialer) Dial(...string) (httpstream.Connection, string, error) {
+	return d.dial()
 }
 
 type blockingConnection struct {
