@@ -108,6 +108,11 @@ func (t *activityRoundTripper) RoundTrip(request *http.Request) (*http.Response,
 		}
 	}
 	response, err := t.base.RoundTrip(request)
+	statusCode := 0
+	if response != nil {
+		statusCode = response.StatusCode
+	}
+	t.activity.ObserveRoundTrip(statusCode, err)
 	if response != nil && response.Body != nil {
 		response.Body = &activityReadCloser{ReadCloser: response.Body, activity: t.activity}
 	}
@@ -167,8 +172,9 @@ type sharedBackend struct {
 	// refs counts live session entries, not individual workspace or stream
 	// leases. A session entry remains live after its workspace closes only
 	// while an independent operation still owns it.
-	refs     int
-	activity *APIActivity
+	refs      int
+	activity  *APIActivity
+	discovery discoveryResultCache
 }
 
 // SessionLease keeps one session and its shared Kubernetes backend alive for

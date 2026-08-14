@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,6 +269,62 @@ func TestWatchConnectionEmitsInitialAndCoalescedMonotonicTotals(t *testing.T) {
 	}
 	secondCancel()
 	<-secondResult
+}
+
+func TestWatchConnectionEmitsObservedTransportAndAuthenticationStates(t *testing.T) {
+	t.Parallel()
+	catalog := serviceCatalog(t)
+	sessions := cluster.NewSessionRegistry(&serviceFactory{})
+	t.Cleanup(sessions.CloseAll)
+	session, err := sessions.Open(catalog, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewClusterService(ClusterServiceOptions{Sessions: sessions})
+	streamContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := newConnectionTestStream(streamContext)
+	result := make(chan error, 1)
+	go func() {
+		result <- service.WatchConnection(&kmgrv1.WatchConnectionRequest{
+			Context: &kmgrv1.RequestContext{
+				RequestId: "health", ClusterSessionId: session.ID(),
+			},
+			StreamId: "connection-health",
+		}, stream)
+	}()
+	stream.waitForCount(t, 1)
+
+	activity := session.APIActivity()
+	activity.ObserveRoundTrip(0, errors.New("do not expose this transport detail"))
+	stream.waitForCount(t, 2)
+	reconnecting := stream.snapshot()[1]
+	if reconnecting.GetState() != kmgrv1.ConnectionState_CONNECTION_STATE_RECONNECTING ||
+		reconnecting.GetError().GetReason() != "APITransportInterrupted" ||
+		!reconnecting.GetError().GetRetryable() ||
+		strings.Contains(reconnecting.GetError().GetMessage(), "do not expose") {
+		t.Fatalf("reconnecting event = %#v", reconnecting)
+	}
+
+	activity.ObserveRoundTrip(http.StatusUnauthorized, nil)
+	stream.waitForCount(t, 3)
+	authentication := stream.snapshot()[2]
+	if authentication.GetState() != kmgrv1.ConnectionState_CONNECTION_STATE_FAILED ||
+		authentication.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION ||
+		authentication.GetError().GetReason() != "AuthenticationRejected" {
+		t.Fatalf("authentication event = %#v", authentication)
+	}
+
+	activity.ObserveRoundTrip(http.StatusOK, nil)
+	stream.waitForCount(t, 4)
+	recovered := stream.snapshot()[3]
+	if recovered.GetState() != kmgrv1.ConnectionState_CONNECTION_STATE_CONNECTED || recovered.GetError() != nil {
+		t.Fatalf("recovered event = %#v", recovered)
+	}
+	cancel()
+	if err := <-result; status.Code(err) != codes.Canceled {
+		t.Fatalf("WatchConnection cancellation = %v", err)
+	}
 }
 
 func TestWatchConnectionLeaseSurvivesPreservingWorkspaceClose(t *testing.T) {

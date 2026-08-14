@@ -1,8 +1,21 @@
 package cluster
 
 import (
+	"net/http"
 	"sync"
 	"sync/atomic"
+)
+
+// APIConnectionHealth is a payload-free observation of the shared HTTP
+// transport. It deliberately does not retain response bodies, URLs, headers,
+// or raw error strings.
+type APIConnectionHealth uint32
+
+const (
+	APIConnectionUnknown APIConnectionHealth = iota
+	APIConnectionConnected
+	APIConnectionReconnecting
+	APIConnectionAuthenticationFailed
 )
 
 // APIActivity is a process-local byte counter for one shared Kubernetes
@@ -12,14 +25,16 @@ import (
 type APIActivity struct {
 	received atomic.Uint64
 	sent     atomic.Uint64
+	health   atomic.Uint32
 
 	mu        sync.Mutex
 	listeners map[chan struct{}]struct{}
 }
 
 type APIActivitySnapshot struct {
-	BytesReceived uint64
-	BytesSent     uint64
+	BytesReceived    uint64
+	BytesSent        uint64
+	ConnectionHealth APIConnectionHealth
 }
 
 func (a *APIActivity) Snapshot() APIActivitySnapshot {
@@ -27,8 +42,29 @@ func (a *APIActivity) Snapshot() APIActivitySnapshot {
 		return APIActivitySnapshot{}
 	}
 	return APIActivitySnapshot{
-		BytesReceived: a.received.Load(),
-		BytesSent:     a.sent.Load(),
+		BytesReceived:    a.received.Load(),
+		BytesSent:        a.sent.Load(),
+		ConnectionHealth: APIConnectionHealth(a.health.Load()),
+	}
+}
+
+// ObserveRoundTrip records only a coarse connection outcome. Authorization
+// failures other than 401 are resource-specific and still prove the API server
+// is reachable; 5xx responses and transport failures indicate reconnecting.
+func (a *APIActivity) ObserveRoundTrip(statusCode int, roundTripErr error) {
+	if a == nil {
+		return
+	}
+	next := APIConnectionConnected
+	switch {
+	case roundTripErr != nil || statusCode == 0 || statusCode >= http.StatusInternalServerError:
+		next = APIConnectionReconnecting
+	case statusCode == http.StatusUnauthorized:
+		next = APIConnectionAuthenticationFailed
+	}
+	previous := APIConnectionHealth(a.health.Swap(uint32(next)))
+	if previous != next {
+		a.notify()
 	}
 }
 

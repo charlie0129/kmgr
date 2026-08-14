@@ -116,14 +116,18 @@ func (s *ClusterService) WatchConnection(
 			return nil
 		}
 		sequence++
+		connectionState, connectionError := connectionEventState(
+			totals.ConnectionHealth, session.Context().Name,
+		)
 		if err := stream.Send(&kmgrv1.ConnectionEvent{
 			Cursor: &kmgrv1.StreamCursor{
 				StreamId: request.GetStreamId(), Generation: generation, Sequence: sequence,
 			},
-			State:            kmgrv1.ConnectionState_CONNECTION_STATE_CONNECTED,
+			State:            connectionState,
 			ObservedAtUnixMs: time.Now().UnixMilli(),
 			ApiBytesReceived: totals.BytesReceived,
 			ApiBytesSent:     totals.BytesSent,
+			Error:            connectionError,
 		}); err != nil {
 			return err
 		}
@@ -154,6 +158,36 @@ func (s *ClusterService) WatchConnection(
 				return err
 			}
 		}
+	}
+}
+
+func connectionEventState(
+	health cluster.APIConnectionHealth,
+	contextName string,
+) (kmgrv1.ConnectionState, *kmgrv1.StructuredError) {
+	switch health {
+	case cluster.APIConnectionReconnecting:
+		return kmgrv1.ConnectionState_CONNECTION_STATE_RECONNECTING, &kmgrv1.StructuredError{
+			Category:    kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE,
+			Reason:      "APITransportInterrupted",
+			Message:     "The Kubernetes API transport was interrupted and may reconnect.",
+			Retryable:   true,
+			ContextName: contextName,
+			Operation:   "watch-connection",
+		}
+	case cluster.APIConnectionAuthenticationFailed:
+		return kmgrv1.ConnectionState_CONNECTION_STATE_FAILED, &kmgrv1.StructuredError{
+			Category:    kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION,
+			Reason:      "AuthenticationRejected",
+			Message:     "The Kubernetes API server rejected the configured credentials.",
+			ContextName: contextName,
+			Operation:   "watch-connection",
+		}
+	default:
+		// OpenSession performs an authenticated probe before this stream can
+		// start. A zero health value therefore means no post-probe request has
+		// completed yet, not that the session is unauthenticated.
+		return kmgrv1.ConnectionState_CONNECTION_STATE_CONNECTED, nil
 	}
 }
 
@@ -320,7 +354,7 @@ func (s *ClusterService) Discover(
 			mapper.Reset()
 		}
 	}
-	discoveryResult, err := cluster.DiscoverResources(requestContext, session)
+	discoveryResult, err := session.DiscoverResourcesCached(requestContext, request.GetRefresh())
 	if err != nil {
 		response.Error = connectionError(err, session.Context().Name, session.Context().ServerHostname)
 		response.Error.Operation = "discover-resources"

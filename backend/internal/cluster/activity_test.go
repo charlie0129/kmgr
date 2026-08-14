@@ -45,6 +45,38 @@ func TestAPIActivityTracksMonotonicTotalsAndCoalescesHints(t *testing.T) {
 	}
 }
 
+func TestAPIActivityTracksConnectionHealthWithoutRetainingErrors(t *testing.T) {
+	t.Parallel()
+	activity := &APIActivity{}
+	updates, unsubscribe := activity.Subscribe()
+	defer unsubscribe()
+
+	assertHealth := func(statusCode int, roundTripErr error, want APIConnectionHealth) {
+		t.Helper()
+		activity.ObserveRoundTrip(statusCode, roundTripErr)
+		select {
+		case <-updates:
+		case <-time.After(time.Second):
+			t.Fatalf("no connection-health update for %d / %v", statusCode, roundTripErr)
+		}
+		if got := activity.Snapshot().ConnectionHealth; got != want {
+			t.Fatalf("connection health = %v, want %v", got, want)
+		}
+	}
+
+	assertHealth(http.StatusOK, nil, APIConnectionConnected)
+	// Forbidden is resource authorization, not a broken cluster connection.
+	activity.ObserveRoundTrip(http.StatusForbidden, nil)
+	select {
+	case <-updates:
+		t.Fatal("unchanged connected state emitted a redundant hint")
+	default:
+	}
+	assertHealth(0, errors.New("sensitive transport detail"), APIConnectionReconnecting)
+	assertHealth(http.StatusUnauthorized, nil, APIConnectionAuthenticationFailed)
+	assertHealth(http.StatusNoContent, nil, APIConnectionConnected)
+}
+
 func TestActivityRoundTripperCountsOnlyBytesActuallyRead(t *testing.T) {
 	t.Parallel()
 	activity := &APIActivity{}

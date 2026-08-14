@@ -48,6 +48,106 @@ type ResourceDiscovery struct {
 	Revision              string
 	PotentiallyIncomplete bool
 	Failures              []DiscoveryFailure
+	// MetricsAPIAvailable reports whether discovery returned at least one
+	// listable resource in metrics.k8s.io. It stays backend-internal so callers
+	// can gate optional metrics traffic without changing the wire protocol.
+	MetricsAPIAvailable bool
+}
+
+// discoveryResultCache belongs to one sharedBackend. It intentionally stores
+// only the API catalog and redacted failure structure, never REST configs,
+// response bodies, or authentication material. Sessions that share an
+// authority therefore reuse discovery while independently loaded catalog
+// snapshots remain isolated.
+type discoveryResultCache struct {
+	mu         sync.RWMutex
+	generation uint64
+	result     *ResourceDiscovery
+}
+
+func (c *discoveryResultCache) begin(refresh bool) (ResourceDiscovery, bool, uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if refresh {
+		c.generation++
+		c.result = nil
+	}
+	if c.result == nil {
+		return ResourceDiscovery{}, false, c.generation
+	}
+	return cloneResourceDiscovery(*c.result), true, c.generation
+}
+
+func (c *discoveryResultCache) store(generation uint64, result ResourceDiscovery, replace bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// A refresh that started after this request invalidates its result. Among
+	// ordinary concurrent misses, retain the first complete result. A refresh
+	// owns its generation and replaces any ordinary request that raced it.
+	if generation != c.generation || (c.result != nil && !replace) {
+		return
+	}
+	cloned := cloneResourceDiscovery(result)
+	c.result = &cloned
+}
+
+func (c *discoveryResultCache) metricsAPIAvailability() (available, known bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.result == nil {
+		return false, false
+	}
+	if c.result.MetricsAPIAvailable {
+		return true, true
+	}
+	for _, failure := range c.result.Failures {
+		// Failure of the aggregate group catalog can hide metrics.k8s.io
+		// entirely. Failure of one of its advertised versions likewise makes
+		// absence uncertain. Failures in core or unrelated API groups do not.
+		if failure.Target == "/apis" || failure.Target == "metrics.k8s.io" ||
+			strings.HasPrefix(failure.Target, "metrics.k8s.io/") {
+			return false, false
+		}
+	}
+	return false, true
+}
+
+func cloneResourceDiscovery(source ResourceDiscovery) ResourceDiscovery {
+	result := source
+	result.Resources = make([]APIResource, len(source.Resources))
+	for index := range source.Resources {
+		result.Resources[index] = source.Resources[index]
+		result.Resources[index].Verbs = append([]string(nil), source.Resources[index].Verbs...)
+		result.Resources[index].ShortNames = append([]string(nil), source.Resources[index].ShortNames...)
+		result.Resources[index].Categories = append([]string(nil), source.Resources[index].Categories...)
+	}
+	result.Failures = make([]DiscoveryFailure, len(source.Failures))
+	for index := range source.Failures {
+		result.Failures[index] = DiscoveryFailure{
+			Target: source.Failures[index].Target,
+			Err:    redactedDiscoveryError(source.Failures[index].Err),
+		}
+	}
+	return result
+}
+
+func redactedDiscoveryError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var apiStatus apierrors.APIStatus
+	if !errors.As(err, &apiStatus) {
+		return errors.New("Kubernetes discovery endpoint failed")
+	}
+	statusValue := apiStatus.Status()
+	status := statusValue.DeepCopy()
+	status.Message = ""
+	if status.Details != nil {
+		for index := range status.Details.Causes {
+			status.Details.Causes[index].Message = ""
+		}
+	}
+	return &apierrors.StatusError{ErrStatus: *status}
 }
 
 type discoveryTarget struct {
@@ -79,6 +179,44 @@ func DiscoverResources(ctx context.Context, session *Session) (ResourceDiscovery
 		return ResourceDiscovery{}, errors.New("cluster session discovery client is unavailable")
 	}
 	return DiscoverResourcesWithClient(ctx, session.Discovery())
+}
+
+// DiscoverResourcesCached returns the discovery catalog shared by every
+// session using the same Kubernetes backend. refresh invalidates the cached
+// value before starting a new request. Failed or canceled discoveries are not
+// cached, and a request started before a refresh can never repopulate the
+// invalidated generation.
+func (s *Session) DiscoverResourcesCached(ctx context.Context, refresh bool) (ResourceDiscovery, error) {
+	if s == nil || s.backend == nil || s.Discovery() == nil {
+		return ResourceDiscovery{}, errors.New("cluster session discovery client is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return ResourceDiscovery{}, err
+	}
+	if cached, ok, generation := s.backend.discovery.begin(refresh); ok {
+		if err := ctx.Err(); err != nil {
+			return ResourceDiscovery{}, err
+		}
+		return cached, nil
+	} else {
+		result, err := DiscoverResourcesWithClient(ctx, s.Discovery())
+		if err != nil {
+			return ResourceDiscovery{}, err
+		}
+		s.backend.discovery.store(generation, result, refresh)
+		return cloneResourceDiscovery(result), nil
+	}
+}
+
+// CachedMetricsAPIAvailability reports only what a prior discovery established
+// and never contacts Kubernetes. known is false before discovery and when a
+// partial result could have hidden metrics.k8s.io. An observed metrics resource
+// is known available even if an unrelated API group failed discovery.
+func (s *Session) CachedMetricsAPIAvailability() (available, known bool) {
+	if s == nil || s.backend == nil {
+		return false, false
+	}
+	return s.backend.discovery.metricsAPIAvailability()
 }
 
 // DiscoverResourcesWithClient is the context-aware discovery path for callers
@@ -121,6 +259,7 @@ func DiscoverResourcesWithClient(
 	}
 
 	resources := make([]APIResource, 0)
+	metricsAPIAvailable := false
 	for _, list := range resourceLists {
 		if list == nil {
 			continue
@@ -132,6 +271,9 @@ func DiscoverResourcesWithClient(
 		for _, resource := range list.APIResources {
 			if strings.Contains(resource.Name, "/") || !slices.Contains(resource.Verbs, "list") {
 				continue
+			}
+			if groupVersion.Group == "metrics.k8s.io" {
+				metricsAPIAvailable = true
 			}
 			resources = append(resources, APIResource{
 				Group:            groupVersion.Group,
@@ -156,6 +298,7 @@ func DiscoverResourcesWithClient(
 		Revision:              discoveryRevision(resources),
 		PotentiallyIncomplete: len(failures) != 0,
 		Failures:              failures,
+		MetricsAPIAvailable:   metricsAPIAvailable,
 	}, nil
 }
 
