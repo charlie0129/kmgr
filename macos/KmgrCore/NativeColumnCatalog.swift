@@ -302,6 +302,16 @@ public enum KubernetesQualifiedName {
         }
     }
 
+    /// Mirrors Kubernetes' `IsExtendedResourceName`: unqualified and
+    /// kubernetes.io names are native resources, `requests.` is reserved for
+    /// quota names, and the quota form must itself remain a qualified name.
+    public static func isValidExtendedResource(_ value: String) -> Bool {
+        value.contains("/") &&
+            !value.contains("kubernetes.io/") &&
+            !value.hasPrefix("requests.") &&
+            isValid("requests." + value)
+    }
+
     private static func validName(_ value: String) -> Bool {
         let bytes = Array(value.utf8)
         return !bytes.isEmpty && bytes.count <= 63 && isAlphaNumeric(bytes[0]) &&

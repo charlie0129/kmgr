@@ -149,6 +149,13 @@ public struct ColumnsConfigurationDocument: Codable, Hashable, Sendable {
                 message: "Unsupported CEL environment \(celEnvironment); expected \(ColumnConfigurationSchema.celEnvironment)."
             ))
         }
+        for resourceName in accelerators.resources.keys.sorted()
+        where !KubernetesQualifiedName.isValidExtendedResource(resourceName) {
+            issues.append(.init(
+                path: "accelerators.resources.\(resourceName)",
+                message: "Accelerator keys must be valid Kubernetes extended-resource names."
+            ))
+        }
         var matches: Set<String> = []
         for (viewIndex, view) in views.enumerated() {
             let base = "views[\(viewIndex)]"

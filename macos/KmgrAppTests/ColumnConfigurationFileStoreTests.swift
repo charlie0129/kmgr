@@ -51,6 +51,72 @@ import Testing
     #expect(document.accelerators.resources["aliyun.com/ppu"]?.displayName == "PPU")
 }
 
+@Test func columnConfigurationFileStorePreservesAcceleratorSuffixDefaultAndDisableSentinels() throws {
+    let omitted = try ColumnFileFixture(yaml: #"""
+        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        celEnvironment: kmgr.cel/v1
+        """#)
+    #expect(
+        try omitted.store.load().accelerators.autoDetectSuffixes ==
+            ["/gpu", "/ppu", "/dcu"]
+    )
+
+    let disabled = try ColumnFileFixture(yaml: #"""
+        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        celEnvironment: kmgr.cel/v1
+        accelerators:
+          autoDetectSuffixes: []
+        """#)
+    #expect(try disabled.store.load().accelerators.autoDetectSuffixes.isEmpty)
+}
+
+@Test func columnConfigurationFileStoreReportsDocumentedSchemaErrors() throws {
+    let blankTitle = try ColumnFileFixture(yaml: #"""
+        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        celEnvironment: kmgr.cel/v1
+        views:
+          - match: {version: v1, resource: pods}
+            columns:
+              - {id: name, title: "  ", source: builtin, value: name, type: string}
+        """#)
+    #expect(throwsIssue { _ = try blankTitle.store.load() }?.message.contains(".title") == true)
+
+    let negativeWidth = try ColumnFileFixture(yaml: #"""
+        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        celEnvironment: kmgr.cel/v1
+        views:
+          - match: {version: v1, resource: pods}
+            columns:
+              - {id: name, title: Name, source: builtin, value: name, type: string, width: -1}
+        """#)
+    #expect(throwsIssue { _ = try negativeWidth.store.load() }?.message.contains(".width") == true)
+
+    let nonFiniteWidth = try ColumnFileFixture(yaml: #"""
+        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        celEnvironment: kmgr.cel/v1
+        views:
+          - match: {version: v1, resource: pods}
+            columns:
+              - {id: name, title: Name, source: builtin, value: name, type: string, width: .inf}
+        """#)
+    #expect(
+        throwsIssue { _ = try nonFiniteWidth.store.load() }?.message.contains("non-finite numbers") == true
+    )
+
+    let invalidAccelerator = try ColumnFileFixture(yaml: #"""
+        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        celEnvironment: kmgr.cel/v1
+        accelerators:
+          resources:
+            gpu: {displayName: GPU}
+        """#)
+    #expect(
+        throwsIssue { _ = try invalidAccelerator.store.load() }?.message.contains(
+            "accelerators.resources.gpu"
+        ) == true
+    )
+}
+
 @Test func columnConfigurationFileStoreRejectsAnchorsAndAliases() throws {
     let fixture = try ColumnFileFixture(yaml: #"""
         apiVersion: kmgr.charlie0129.dev/v1alpha1

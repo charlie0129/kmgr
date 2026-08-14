@@ -52,6 +52,30 @@ import Testing
     #expect(document.accelerators.autoDetectSuffixes == ["/gpu", "/ppu", "/dcu"])
 }
 
+@Test func acceleratorMappingRequiresKubernetesExtendedResourceNames() {
+    let maximumQualifiedPrefix = [
+        String(repeating: "a", count: 63), String(repeating: "b", count: 63),
+        String(repeating: "c", count: 63), String(repeating: "d", count: 61),
+    ].joined(separator: ".")
+    for value in ["nvidia.com/gpu", "aliyun.com/ppu", "example.com/fpga-card"] {
+        #expect(KubernetesQualifiedName.isValidExtendedResource(value), "Expected valid: \(value)")
+    }
+    for value in [
+        "gpu", "kubernetes.io/gpu", "requests.example.com/gpu", "bad/resource/name",
+        "\(maximumQualifiedPrefix)/gpu",
+    ] {
+        #expect(!KubernetesQualifiedName.isValidExtendedResource(value), "Expected invalid: \(value)")
+        let document = ColumnsConfigurationDocument(
+            accelerators: AcceleratorColumnConfiguration(resources: [
+                value: AcceleratorResourceConfiguration(),
+            ])
+        )
+        #expect(document.validationIssues().contains {
+            $0.path == "accelerators.resources.\(value)"
+        })
+    }
+}
+
 @Test func columnConfigurationRejectsVersionDriftAndStructuralAmbiguity() {
     let badColumn = ColumnDefinition(
         id: "duplicate",

@@ -382,7 +382,7 @@ func isExtendedResourceName(name string) bool {
 	return strings.Contains(name, "/") &&
 		!strings.Contains(name, corev1.ResourceDefaultNamespacePrefix) &&
 		!strings.HasPrefix(name, corev1.DefaultResourceRequestsPrefix) &&
-		len(k8svalidation.IsQualifiedName(name)) == 0
+		len(k8svalidation.IsQualifiedName(corev1.DefaultResourceRequestsPrefix+name)) == 0
 }
 
 // normalizeLegacyNativeColumnTypes accepts the two incorrect declared types

@@ -221,6 +221,10 @@ func TestParseColumnsRejectsInvalidPresentationAndAcceleratorSchema(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	maximumQualifiedPrefix := strings.Join([]string{
+		strings.Repeat("a", 63), strings.Repeat("b", 63),
+		strings.Repeat("c", 63), strings.Repeat("d", 61),
+	}, ".")
 	cases := map[string]string{
 		"missing title": `views:
 - match: {version: v1, resource: pods}
@@ -248,6 +252,7 @@ func TestParseColumnsRejectsInvalidPresentationAndAcceleratorSchema(t *testing.T
   resources:
     bad/resource/name: {}
 `,
+		"quota-form-too-long accelerator": "accelerators:\n  resources:\n    " + maximumQualifiedPrefix + "/gpu: {}\n",
 	}
 	for name, body := range cases {
 		name, body := name, body
