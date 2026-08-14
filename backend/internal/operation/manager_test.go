@@ -3,11 +3,14 @@ package operation
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/object"
 )
+
+const highCardinalityOperationItems = 100_000
 
 func TestManagerReportsMultiItemProgressAndPartialSuccess(t *testing.T) {
 	t.Parallel()
@@ -328,6 +331,62 @@ func TestManagerBoundsConcurrentOperationsWhenNoneAreEvictable(t *testing.T) {
 	}
 	first.Cancel()
 	<-first.Done()
+}
+
+func TestManagerHighCardinalityProgressIsLinearAndExactlyReplayable(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Close)
+	identities := make([]object.Identity, highCardinalityOperationItems)
+	for index := range identities {
+		value := strconv.Itoa(index)
+		identities[index] = operationTestIdentity("pod-"+value, "uid-"+value)
+	}
+	operation, err := manager.StartMany(
+		context.Background(), "large-bulk", "delete", identities,
+		func(_ context.Context, report Reporter) error {
+			for index := range identities {
+				if !report(index, ItemUpdate{State: ItemStateSucceeded}) {
+					return errors.New("terminal item report was rejected")
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-operation.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("100k-item operation exceeded the linear progress budget")
+	}
+
+	offset := 0
+	seen := make(map[string]struct{}, highCardinalityOperationItems)
+	for offset < highCardinalityOperationItems {
+		summary, items, next, _ := operation.Progress(offset, 257)
+		if summary.Items != nil {
+			t.Fatal("compact progress summary retained the complete item slice")
+		}
+		if next <= offset || len(items) > 257 {
+			t.Fatalf("progress page offset=%d next=%d items=%d", offset, next, len(items))
+		}
+		for _, item := range items {
+			if item.State != ItemStateSucceeded {
+				t.Fatalf("item %q state = %v", item.Identity.UID, item.State)
+			}
+			if _, duplicate := seen[item.Identity.UID]; duplicate {
+				t.Fatalf("item %q was replayed twice", item.Identity.UID)
+			}
+			seen[item.Identity.UID] = struct{}{}
+		}
+		offset = next
+	}
+	status := operation.Status()
+	if status.State != StateSucceeded || status.CompletedItems != highCardinalityOperationItems ||
+		len(status.Items) != highCardinalityOperationItems || len(seen) != highCardinalityOperationItems {
+		t.Fatalf("large terminal status state=%v completed=%d items=%d seen=%d", status.State, status.CompletedItems, len(status.Items), len(seen))
+	}
 }
 
 func operationTestIdentity(name, uid string) object.Identity {

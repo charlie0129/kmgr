@@ -13,6 +13,10 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     var watchRequest: Kmgr_V1_WatchObjectRequest?
     var relationshipScanRequest: Kmgr_V1_ScanRelationshipsRequest?
     var relationshipCancelRequest: Kmgr_V1_CancelRelationshipScanRequest?
+    var operationCancelRequest: Kmgr_V1_CancelOperationRequest?
+    var operationWatchRequest: Kmgr_V1_WatchOperationRequest?
+    var operationEvents: [Kmgr_V1_OperationEvent] = []
+    var blockOperationWatch = false
 
     func getObject(
         _ request: Kmgr_V1_GetObjectRequest,
@@ -80,7 +84,13 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     func applyYAML(
         _ request: Kmgr_V1_ApplyYamlRequest,
         timeout: Duration
-    ) async throws -> Kmgr_V1_StartOperationResponse { .init() }
+    ) async throws -> Kmgr_V1_StartOperationResponse {
+        var response = Kmgr_V1_StartOperationResponse()
+        response.requestID = request.context.requestID
+        response.operationID = request.operationID
+        response.accepted = true
+        return response
+    }
 
     func updateData(
         _ request: Kmgr_V1_UpdateDataRequest,
@@ -91,7 +101,29 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
         _ request: Kmgr_V1_WatchOperationRequest,
         timeout: Duration,
         receive: @escaping @Sendable (Kmgr_V1_OperationEvent) throws -> Void
-    ) async throws {}
+    ) async throws {
+        operationWatchRequest = request
+        for var event in operationEvents {
+            event.cursor.streamID = request.streamID
+            event.cursor.generation = request.generation
+            event.operationID = request.operationID
+            try receive(event)
+        }
+        if blockOperationWatch {
+            try await Task.sleep(for: .seconds(60))
+        }
+    }
+
+    func cancelOperation(
+        _ request: Kmgr_V1_CancelOperationRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_Acknowledgement {
+        operationCancelRequest = request
+        var response = Kmgr_V1_Acknowledgement()
+        response.requestID = request.context.requestID
+        response.accepted = true
+        return response
+    }
 
     func installWatch(_ values: [Kmgr_V1_ObjectEvent]) { watched = values }
     func installObject(_ value: Kmgr_V1_GetObjectResponse) { object = value }
@@ -108,6 +140,19 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     }
     func capturedRelationshipCancel() -> Kmgr_V1_CancelRelationshipScanRequest? {
         relationshipCancelRequest
+    }
+    func capturedOperationCancel() -> Kmgr_V1_CancelOperationRequest? {
+        operationCancelRequest
+    }
+    func capturedOperationWatch() -> Kmgr_V1_WatchOperationRequest? {
+        operationWatchRequest
+    }
+    func configureOperationWatch(
+        events: [Kmgr_V1_OperationEvent] = [],
+        block: Bool = false
+    ) {
+        operationEvents = events
+        blockOperationWatch = block
     }
 }
 
@@ -165,6 +210,61 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(request?.identity.uid == "uid-api")
     #expect(request?.resourceVersion == "rv-1")
     #expect(request?.context.clusterSessionID == "session")
+}
+
+@Test func objectDetailOperationStreamCancellationCancelsAcceptedMutation() async throws {
+    let rpc = ObjectDetailRPCCapture()
+    await rpc.configureOperationWatch(block: true)
+    let provider = EngineObjectDetailProvider(
+        rpc: rpc,
+        controlTimeout: .seconds(1),
+        now: { Date(timeIntervalSince1970: 1_000) },
+        identifier: { "operation-token" }
+    )
+    let stream = try await provider.applyYAML(
+        identity: identity(name: "api", uid: "uid-api"),
+        yamlUTF8: Data("kind: Pod".utf8),
+        expectedResourceVersion: "rv-1",
+        forceFieldOwnership: false
+    )
+    let consumer = Task {
+        for try await _ in stream {}
+    }
+    try await waitForObjectDetailCondition {
+        await rpc.capturedOperationWatch() != nil
+    }
+    consumer.cancel()
+    _ = await consumer.result
+    try await waitForObjectDetailCondition {
+        await rpc.capturedOperationCancel() != nil
+    }
+    let cancellation = try #require(await rpc.capturedOperationCancel())
+    #expect(cancellation.context.clusterSessionID == "session")
+    #expect(cancellation.operationID == "operation-token")
+    #expect(!cancellation.cancelNotStartedOnly)
+}
+
+@Test func objectDetailTerminalOperationDoesNotSendCancellation() async throws {
+    let rpc = ObjectDetailRPCCapture()
+    var terminal = Kmgr_V1_OperationEvent()
+    terminal.cursor.sequence = 1
+    terminal.state = .succeeded
+    terminal.completedItems = 1
+    terminal.totalItems = 1
+    await rpc.configureOperationWatch(events: [terminal])
+    let provider = EngineObjectDetailProvider(
+        rpc: rpc,
+        identifier: { "terminal-token" }
+    )
+    let stream = try await provider.applyYAML(
+        identity: identity(name: "api", uid: "uid-api"),
+        yamlUTF8: Data("kind: Pod".utf8),
+        expectedResourceVersion: "rv-1",
+        forceFieldOwnership: false
+    )
+    for try await _ in stream {}
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(await rpc.capturedOperationCancel() == nil)
 }
 
 @Test func objectDetailProviderMapsEventsAndAuthoritativeOwners() async throws {
@@ -295,6 +395,16 @@ private func identity(name: String, uid: ResourceUID) -> ResourceIdentity {
         clusterSessionID: "session", group: "", version: "v1",
         resource: "pods", namespace: "apps", name: name, uid: uid
     )
+}
+
+private func waitForObjectDetailCondition(
+    _ condition: @escaping @Sendable () async -> Bool
+) async throws {
+    for _ in 0..<100 {
+        if await condition() { return }
+        try await Task.sleep(for: .milliseconds(2))
+    }
+    Issue.record("Timed out waiting for object-detail operation lifecycle")
 }
 
 private func protoIdentity(

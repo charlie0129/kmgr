@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"time"
@@ -12,10 +13,25 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	maxUnaryDeleteTargets       = 512
+	maxStreamDeleteTargets      = 250_000
+	maxDeleteTargetChunkItems   = 256
+	maxResourceIdentityBytes    = 8 << 10
+	maxDeleteTargetChunkBytes   = 256 << 10
+	maxDeleteStreamPayloadBytes = 64 << 20
+	maxOperationEventItems      = 1_024
+	maxOperationEventBytes      = 512 << 10
+	maxStructuredOperationError = 32 << 10
+	operationProgressCoalesce   = 20 * time.Millisecond
 )
 
 var _ kmgrv1.OperationServiceServer = (*GRPCService)(nil)
@@ -27,19 +43,47 @@ type YAMLEditor interface {
 
 type GRPCService struct {
 	kmgrv1.UnimplementedOperationServiceServer
-	backend MutationBackend
-	manager *Manager
-	now     func() time.Time
+	backend  MutationBackend
+	acquirer MutationBackendAcquirer
+	manager  *Manager
+	now      func() time.Time
 }
 
-func NewGRPCService(backend MutationBackend, manager *Manager) (*GRPCService, error) {
+func NewGRPCService(
+	backend MutationBackend,
+	manager *Manager,
+	acquirers ...MutationBackendAcquirer,
+) (*GRPCService, error) {
 	if backend == nil {
 		return nil, errors.New("operation backend must not be nil")
+	}
+	if len(acquirers) > 1 {
+		return nil, errors.New("at most one mutation backend acquirer may be configured")
+	}
+	var acquirer MutationBackendAcquirer = staticMutationBackendAcquirer{backend: backend}
+	if len(acquirers) == 1 {
+		if acquirers[0] == nil {
+			return nil, errors.New("mutation backend acquirer must not be nil")
+		}
+		acquirer = acquirers[0]
 	}
 	if manager == nil {
 		manager = NewManager()
 	}
-	return &GRPCService{backend: backend, manager: manager, now: time.Now}, nil
+	return &GRPCService{backend: backend, acquirer: acquirer, manager: manager, now: time.Now}, nil
+}
+
+func (s *GRPCService) structuredError(
+	err error,
+	identity *kmgrv1.ResourceIdentity,
+	operation string,
+	sessionID string,
+) *kmgrv1.StructuredError {
+	contextName := ""
+	if provider, ok := s.backend.(mutationContextNameProvider); ok {
+		contextName, _ = provider.ContextName(sessionID)
+	}
+	return structuredOperationError(err, identity, operation, contextName)
 }
 
 func (s *GRPCService) PrepareYamlEdit(
@@ -61,7 +105,9 @@ func (s *GRPCService) PrepareYamlEdit(
 		request.GetForceFieldOwnership(),
 	)
 	if err != nil {
-		structured := structuredOperationError(err, request.GetIdentity(), "prepare-yaml")
+		structured := s.structuredError(
+			err, request.GetIdentity(), "prepare-yaml", request.GetContext().GetClusterSessionId(),
+		)
 		if structured.GetCategory() == kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION {
 			response.ValidationErrors = []*kmgrv1.StructuredError{structured}
 		} else {
@@ -99,9 +145,9 @@ func (s *GRPCService) ApplyYaml(
 	}
 	fieldManager := strings.TrimSpace(request.GetFieldManager())
 	if fieldManager != "" && fieldManager != object.YAMLFieldManager {
-		response.Error = structuredOperationError(
+		response.Error = s.structuredError(
 			&ValidationError{Field: "field_manager", Message: fmt.Sprintf("field manager must be %q", object.YAMLFieldManager)},
-			request.GetIdentity(), "apply-yaml",
+			request.GetIdentity(), "apply-yaml", request.GetContext().GetClusterSessionId(),
 		)
 		return response, nil
 	}
@@ -111,16 +157,20 @@ func (s *GRPCService) ApplyYaml(
 	yamlCopy := append([]byte(nil), request.GetYamlUtf8()...)
 	expectedResourceVersion := request.GetExpectedResourceVersion()
 	forceFieldOwnership := request.GetForceFieldOwnership()
-	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "apply-yaml", identity, func(ctx context.Context) (string, error) {
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "apply-yaml", identity, func(
+		ctx context.Context, backend MutationBackend,
+	) (string, error) {
 		defer clear(yamlCopy)
-		applied, err := s.backend.ApplyYAML(
+		applied, err := backend.ApplyYAML(
 			ctx, identity, yamlCopy, expectedResourceVersion, forceFieldOwnership,
 		)
 		return applied.NewResourceVersion, err
 	})
 	if err != nil {
 		clear(yamlCopy)
-		response.Error = structuredOperationError(err, request.GetIdentity(), "apply-yaml")
+		response.Error = s.structuredError(
+			err, request.GetIdentity(), "apply-yaml", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	response.Accepted = true
@@ -139,26 +189,32 @@ func (s *GRPCService) UpdateData(
 	response.RequestId = requestID
 	mutations, err := dataMutationsFromProto(request.GetMutations())
 	if err != nil {
-		response.Error = structuredOperationError(err, request.GetIdentity(), "update-data")
+		response.Error = s.structuredError(
+			err, request.GetIdentity(), "update-data", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	expectedResourceVersion := request.GetExpectedResourceVersion()
 	if expectedResourceVersion == "" {
 		clearDataMutations(mutations)
-		response.Error = structuredOperationError(
+		response.Error = s.structuredError(
 			&ValidationError{Field: "expected_resource_version", Message: "expected resource version is required"},
-			request.GetIdentity(), "update-data",
+			request.GetIdentity(), "update-data", request.GetContext().GetClusterSessionId(),
 		)
 		return response, nil
 	}
-	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "update-data", identity, func(ctx context.Context) (string, error) {
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "update-data", identity, func(
+		ctx context.Context, backend MutationBackend,
+	) (string, error) {
 		defer clearDataMutations(mutations)
-		updated, err := s.backend.UpdateData(ctx, identity, expectedResourceVersion, mutations)
+		updated, err := backend.UpdateData(ctx, identity, expectedResourceVersion, mutations)
 		return updated.ResourceVersion, err
 	})
 	if err != nil {
 		clearDataMutations(mutations)
-		response.Error = structuredOperationError(err, request.GetIdentity(), "update-data")
+		response.Error = s.structuredError(
+			err, request.GetIdentity(), "update-data", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	response.Accepted = true
@@ -178,28 +234,164 @@ func (s *GRPCService) Delete(
 	if request.GetOperationId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "operation ID is required")
 	}
+	if len(request.GetTargets()) > maxUnaryDeleteTargets {
+		response.Error = s.structuredError(&ValidationError{
+			Field: "targets",
+			Message: fmt.Sprintf(
+				"unary delete accepts at most %d targets; use the chunked DeleteMany RPC",
+				maxUnaryDeleteTargets,
+			),
+		}, nil, "delete", request.GetContext().GetClusterSessionId())
+		return response, nil
+	}
 	targets, identities, err := deleteTargetsFromProto(request.GetTargets(), request.GetContext().GetClusterSessionId())
 	if err != nil {
-		response.Error = structuredOperationError(err, nil, "delete")
+		response.Error = s.structuredError(
+			err, nil, "delete", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	options, err := deleteOptionsFromProto(request)
 	if err != nil {
-		response.Error = structuredOperationError(err, nil, "delete")
+		response.Error = s.structuredError(
+			err, nil, "delete", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
-	_, err = s.startAcceptedMany(request.GetContext(), request.GetOperationId(), "delete", identities, func(ctx context.Context, report Reporter) error {
-		DeleteManyWithProgress(ctx, s.backend, targets, options, func(index int, state ItemState, result DeleteResult) bool {
+	_, err = s.startAcceptedMany(request.GetContext(), request.GetOperationId(), "delete", identities, func(
+		ctx context.Context, backend MutationBackend, report Reporter,
+	) error {
+		DeleteManyWithProgress(ctx, backend, targets, options, func(index int, state ItemState, result DeleteResult) bool {
 			return report(index, ItemUpdate{State: state, Err: result.Err})
 		})
 		return nil
 	})
 	if err != nil {
-		response.Error = structuredOperationError(err, nil, "delete")
+		response.Error = s.structuredError(
+			err, nil, "delete", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	response.Accepted = true
 	return response, nil
+}
+
+// DeleteMany receives one bounded start envelope followed by contiguous,
+// bounded target chunks. Work is accepted only after the complete selection
+// has been validated, so a broken upload can never execute a partial delete.
+func (s *GRPCService) DeleteMany(
+	stream grpc.ClientStreamingServer[kmgrv1.DeleteManyRequest, kmgrv1.StartOperationResponse],
+) error {
+	if stream == nil {
+		return status.Error(codes.InvalidArgument, "delete stream is required")
+	}
+	first, err := stream.Recv()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return status.Error(codes.InvalidArgument, "delete start message is required")
+		}
+		return err
+	}
+	start := first.GetStart()
+	if first.GetSequence() != 1 || start == nil {
+		return status.Error(codes.InvalidArgument, "delete stream must begin with sequence 1 and a start message")
+	}
+	requestID, _, cancel, err := operationRequestContext(stream.Context(), start.GetContext())
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	response := &kmgrv1.StartOperationResponse{
+		RequestId: requestID, OperationId: start.GetOperationId(),
+	}
+	respondError := func(err error) error {
+		response.Error = s.structuredError(
+			err, nil, "delete", start.GetContext().GetClusterSessionId(),
+		)
+		return stream.SendAndClose(response)
+	}
+	if start.GetOperationId() == "" {
+		return respondError(&ValidationError{Field: "operation_id", Message: "operation ID is required"})
+	}
+	total := int(start.GetTotalTargets())
+	if total < 1 || total > maxStreamDeleteTargets {
+		return respondError(&ValidationError{
+			Field:   "total_targets",
+			Message: fmt.Sprintf("target count must be between 1 and %d", maxStreamDeleteTargets),
+		})
+	}
+	options, err := deleteManyOptionsFromProto(start)
+	if err != nil {
+		return respondError(err)
+	}
+	targets := make([]DeleteTarget, 0, total)
+	identities := make([]object.Identity, 0, total)
+	seen := make(map[string]struct{}, total)
+	payloadBytes := proto.Size(first)
+	expectedSequence := uint64(2)
+
+	for len(targets) < total {
+		message, receiveErr := stream.Recv()
+		if receiveErr != nil {
+			if errors.Is(receiveErr, io.EOF) {
+				return respondError(&ValidationError{
+					Field:   "targets",
+					Message: fmt.Sprintf("delete stream ended after %d of %d targets", len(targets), total),
+				})
+			}
+			return receiveErr
+		}
+		chunk := message.GetTargets()
+		if message.GetSequence() != expectedSequence || chunk == nil {
+			return respondError(&ValidationError{
+				Field: "sequence", Message: "delete target chunks must have contiguous sequence numbers",
+			})
+		}
+		expectedSequence++
+		encodedBytes := proto.Size(message)
+		payloadBytes += encodedBytes
+		if encodedBytes > maxDeleteTargetChunkBytes || payloadBytes > maxDeleteStreamPayloadBytes {
+			return respondError(&ValidationError{
+				Field: "targets", Message: fmt.Sprintf("delete target payload exceeds the %d-byte budget", maxDeleteStreamPayloadBytes),
+			})
+		}
+		values := chunk.GetTargets()
+		if len(values) < 1 || len(values) > maxDeleteTargetChunkItems {
+			return respondError(&ValidationError{
+				Field: "targets", Message: fmt.Sprintf("each delete chunk must contain between 1 and %d targets", maxDeleteTargetChunkItems),
+			})
+		}
+		if int(chunk.GetStartIndex()) != len(targets) || len(targets)+len(values) > total {
+			return respondError(&ValidationError{
+				Field: "targets", Message: "delete target chunks must be contiguous and match total_targets",
+			})
+		}
+		if err := appendDeleteTargets(
+			&targets, &identities, seen, values, start.GetContext().GetClusterSessionId(), len(targets),
+		); err != nil {
+			return respondError(err)
+		}
+	}
+	if extra, receiveErr := stream.Recv(); receiveErr == nil {
+		_ = extra
+		return respondError(&ValidationError{Field: "targets", Message: "delete stream contains more targets than total_targets"})
+	} else if !errors.Is(receiveErr, io.EOF) {
+		return receiveErr
+	}
+
+	_, err = s.startAcceptedMany(start.GetContext(), start.GetOperationId(), "delete", identities, func(
+		ctx context.Context, backend MutationBackend, report Reporter,
+	) error {
+		DeleteManyWithProgress(ctx, backend, targets, options, func(index int, state ItemState, result DeleteResult) bool {
+			return report(index, ItemUpdate{State: state, Err: result.Err})
+		})
+		return nil
+	})
+	if err != nil {
+		return respondError(err)
+	}
+	response.Accepted = true
+	return stream.SendAndClose(response)
 }
 
 func (s *GRPCService) Scale(
@@ -213,23 +405,30 @@ func (s *GRPCService) Scale(
 	defer cancel()
 	response.RequestId = requestID
 	if request.GetReplicas() < 0 {
-		response.Error = structuredOperationError(&ValidationError{Field: "replicas", Message: "replica count must not be negative"}, request.GetIdentity(), "scale")
+		response.Error = s.structuredError(
+			&ValidationError{Field: "replicas", Message: "replica count must not be negative"},
+			request.GetIdentity(), "scale", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	expectedResourceVersion := request.GetExpectedResourceVersion()
 	if expectedResourceVersion == "" {
-		response.Error = structuredOperationError(
+		response.Error = s.structuredError(
 			&ValidationError{Field: "expected_resource_version", Message: "expected resource version is required"},
-			request.GetIdentity(), "scale",
+			request.GetIdentity(), "scale", request.GetContext().GetClusterSessionId(),
 		)
 		return response, nil
 	}
 	replicas := request.GetReplicas()
-	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "scale", identity, func(ctx context.Context) (string, error) {
-		return ScaleResource(ctx, s.backend, identity, expectedResourceVersion, replicas)
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "scale", identity, func(
+		ctx context.Context, backend MutationBackend,
+	) (string, error) {
+		return ScaleResource(ctx, backend, identity, expectedResourceVersion, replicas)
 	})
 	if err != nil {
-		response.Error = structuredOperationError(err, request.GetIdentity(), "scale")
+		response.Error = s.structuredError(
+			err, request.GetIdentity(), "scale", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	response.Accepted = true
@@ -247,22 +446,28 @@ func (s *GRPCService) RolloutRestart(
 	defer cancel()
 	response.RequestId = requestID
 	if err := validateRestartIdentity(identity); err != nil {
-		response.Error = structuredOperationError(err, request.GetIdentity(), "rollout-restart")
+		response.Error = s.structuredError(
+			err, request.GetIdentity(), "rollout-restart", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	expectedResourceVersion := request.GetExpectedResourceVersion()
 	if expectedResourceVersion == "" {
-		response.Error = structuredOperationError(
+		response.Error = s.structuredError(
 			&ValidationError{Field: "expected_resource_version", Message: "expected resource version is required"},
-			request.GetIdentity(), "rollout-restart",
+			request.GetIdentity(), "rollout-restart", request.GetContext().GetClusterSessionId(),
 		)
 		return response, nil
 	}
-	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "rollout-restart", identity, func(ctx context.Context) (string, error) {
-		return RestartResource(ctx, s.backend, identity, expectedResourceVersion, s.now())
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "rollout-restart", identity, func(
+		ctx context.Context, backend MutationBackend,
+	) (string, error) {
+		return RestartResource(ctx, backend, identity, expectedResourceVersion, s.now())
 	})
 	if err != nil {
-		response.Error = structuredOperationError(err, request.GetIdentity(), "rollout-restart")
+		response.Error = s.structuredError(
+			err, request.GetIdentity(), "rollout-restart", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	response.Accepted = true
@@ -281,22 +486,28 @@ func (s *GRPCService) UpdateMetadata(
 	response.RequestId = requestID
 	changes, err := metadataChangesFromProto(request)
 	if err != nil {
-		response.Error = structuredOperationError(err, request.GetIdentity(), "update-metadata")
+		response.Error = s.structuredError(
+			err, request.GetIdentity(), "update-metadata", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	expectedResourceVersion := request.GetExpectedResourceVersion()
 	if expectedResourceVersion == "" {
-		response.Error = structuredOperationError(
+		response.Error = s.structuredError(
 			&ValidationError{Field: "expected_resource_version", Message: "expected resource version is required"},
-			request.GetIdentity(), "update-metadata",
+			request.GetIdentity(), "update-metadata", request.GetContext().GetClusterSessionId(),
 		)
 		return response, nil
 	}
-	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "update-metadata", identity, func(ctx context.Context) (string, error) {
-		return UpdateResourceMetadata(ctx, s.backend, identity, expectedResourceVersion, changes)
+	_, err = s.startAcceptedOne(request.GetContext(), request.GetOperationId(), "update-metadata", identity, func(
+		ctx context.Context, backend MutationBackend,
+	) (string, error) {
+		return UpdateResourceMetadata(ctx, backend, identity, expectedResourceVersion, changes)
 	})
 	if err != nil {
-		response.Error = structuredOperationError(err, request.GetIdentity(), "update-metadata")
+		response.Error = s.structuredError(
+			err, request.GetIdentity(), "update-metadata", request.GetContext().GetClusterSessionId(),
+		)
 		return response, nil
 	}
 	response.Accepted = true
@@ -325,17 +536,32 @@ func (s *GRPCService) WatchOperation(
 		return status.Error(codes.NotFound, "operation was not found")
 	}
 	var sequence uint64
-	var lastRevision uint64
+	var lastState State
+	completedOffset := 0
 	for {
-		current, changed := operation.Snapshot()
-		if current.Revision != lastRevision {
+		current, candidates, _, changed := operation.Progress(completedOffset, maxOperationEventItems)
+		if len(candidates) > 0 {
+			items, consumed := operationItemResults(candidates, current.Operation, current.ContextName)
+			completedOffset += consumed
+			eventState := current.State
+			if terminalState(eventState) && completedOffset < int(current.CompletedItems) {
+				eventState = StateRunning
+			}
 			sequence++
-			if err := stream.Send(operationEvent(request, sequence, current)); err != nil {
+			if err := stream.Send(operationEvent(request, sequence, current, eventState, items)); err != nil {
 				return err
 			}
-			lastRevision = current.Revision
+			lastState = eventState
+			continue
 		}
-		if terminalState(current.State) {
+		if sequence == 0 || current.State != lastState {
+			sequence++
+			if err := stream.Send(operationEvent(request, sequence, current, current.State, nil)); err != nil {
+				return err
+			}
+			lastState = current.State
+		}
+		if terminalState(current.State) && completedOffset == int(current.CompletedItems) {
 			return nil
 		}
 		select {
@@ -343,7 +569,26 @@ func (s *GRPCService) WatchOperation(
 			return operationWatchStatusError(watchContext.Err())
 		case <-operation.Done():
 		case <-changed:
+			timer := time.NewTimer(operationProgressCoalesce)
+			select {
+			case <-watchContext.Done():
+				stopTimer(timer)
+				return operationWatchStatusError(watchContext.Err())
+			case <-operation.Done():
+				stopTimer(timer)
+			case <-timer.C:
+			}
 		}
+	}
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer == nil || timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
 	}
 }
 
@@ -380,28 +625,61 @@ func (s *GRPCService) CancelOperation(
 	return &kmgrv1.Acknowledgement{RequestId: requestID, Accepted: true}, nil
 }
 
-func operationEvent(request *kmgrv1.WatchOperationRequest, sequence uint64, value Status) *kmgrv1.OperationEvent {
-	state := protoOperationState(value.State)
-	items := make([]*kmgrv1.OperationItemResult, 0, len(value.Items))
-	for _, current := range value.Items {
+func operationItemResults(
+	values []ItemStatus,
+	operation string,
+	contextName string,
+) ([]*kmgrv1.OperationItemResult, int) {
+	items := make([]*kmgrv1.OperationItemResult, 0, len(values))
+	encodedBytes := 0
+	for _, current := range values {
 		identity := identityToProto(current.Identity)
 		item := &kmgrv1.OperationItemResult{
 			Identity: identity, State: protoItemState(current.State), NewResourceVersion: current.NewResourceVersion,
 		}
 		if current.Err != nil {
-			item.Error = structuredOperationError(current.Err, identity, value.Operation)
+			item.Error = structuredOperationError(current.Err, identity, operation, contextName)
+		}
+		itemBytes := proto.Size(item)
+		if itemBytes > maxOperationEventBytes/4 {
+			item.NewResourceVersion = ""
+			if item.Error != nil {
+				item.Error = &kmgrv1.StructuredError{
+					Category:    kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL,
+					Reason:      "OperationResultTooLarge",
+					Message:     "The per-resource result exceeded the safe display budget; details were omitted.",
+					Operation:   operation,
+					ContextName: contextName,
+					Resource:    identity,
+				}
+			}
+			itemBytes = proto.Size(item)
+		}
+		if len(items) > 0 && encodedBytes+itemBytes > maxOperationEventBytes-(16<<10) {
+			break
 		}
 		items = append(items, item)
+		encodedBytes += itemBytes
 	}
+	return items, len(items)
+}
+
+func operationEvent(
+	request *kmgrv1.WatchOperationRequest,
+	sequence uint64,
+	value Status,
+	state State,
+	items []*kmgrv1.OperationItemResult,
+) *kmgrv1.OperationEvent {
 	var operationError *kmgrv1.StructuredError
-	if value.Err != nil {
-		operationError = structuredOperationError(value.Err, nil, value.Operation)
+	if value.Err != nil && state == value.State {
+		operationError = structuredOperationError(value.Err, nil, value.Operation, value.ContextName)
 	}
 	return &kmgrv1.OperationEvent{
 		Cursor: &kmgrv1.StreamCursor{
 			StreamId: request.GetStreamId(), Generation: request.GetGeneration(), Sequence: sequence,
 		},
-		OperationId: value.OperationID, State: state, CompletedItems: value.CompletedItems,
+		OperationId: value.OperationID, State: protoOperationState(state), CompletedItems: value.CompletedItems,
 		TotalItems: value.TotalItems, ItemResults: items, Error: operationError,
 	}
 }
@@ -428,23 +706,38 @@ func (s *GRPCService) startRequest(
 	return requestID, operationContext, cancel, identity, &kmgrv1.StartOperationResponse{OperationId: operationID}, nil
 }
 
+type acceptedRunner func(context.Context, MutationBackend) (string, error)
+type acceptedMultiRunner func(context.Context, MutationBackend, Reporter) error
+
 func (s *GRPCService) startAcceptedOne(
 	requestContext *kmgrv1.RequestContext,
 	operationID string,
 	operationName string,
 	identity object.Identity,
-	run Runner,
+	run acceptedRunner,
 ) (*TrackedOperation, error) {
+	if run == nil {
+		return nil, errors.New("accepted operation runner must not be nil")
+	}
 	parent, cancel, err := acceptedMutationContext(requestContext)
 	if err != nil {
 		return nil, err
 	}
-	operation, err := s.manager.StartOne(parent, operationID, operationName, identity, run)
+	acquired, err := s.acquireMutationBackend(requestContext.GetClusterSessionId())
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	releaseAcceptedMutationContext(operation, cancel)
+	operation, err := s.manager.StartOne(parent, operationID, operationName, identity, func(ctx context.Context) (string, error) {
+		return run(ctx, acquired.Backend)
+	})
+	if err != nil {
+		cancel()
+		acquired.Release()
+		return nil, err
+	}
+	operation.SetContextName(acquired.ContextName)
+	releaseAcceptedMutationContext(operation, cancel, acquired.Release)
 	return operation, nil
 }
 
@@ -453,19 +746,53 @@ func (s *GRPCService) startAcceptedMany(
 	operationID string,
 	operationName string,
 	identities []object.Identity,
-	run MultiRunner,
+	run acceptedMultiRunner,
 ) (*TrackedOperation, error) {
+	if run == nil {
+		return nil, errors.New("accepted multi-operation runner must not be nil")
+	}
 	parent, cancel, err := acceptedMutationContext(requestContext)
 	if err != nil {
 		return nil, err
 	}
-	operation, err := s.manager.StartMany(parent, operationID, operationName, identities, run)
+	acquired, err := s.acquireMutationBackend(requestContext.GetClusterSessionId())
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	releaseAcceptedMutationContext(operation, cancel)
+	operation, err := s.manager.StartMany(parent, operationID, operationName, identities, func(
+		ctx context.Context, report Reporter,
+	) error {
+		return run(ctx, acquired.Backend, report)
+	})
+	if err != nil {
+		cancel()
+		acquired.Release()
+		return nil, err
+	}
+	operation.SetContextName(acquired.ContextName)
+	releaseAcceptedMutationContext(operation, cancel, acquired.Release)
 	return operation, nil
+}
+
+func (s *GRPCService) acquireMutationBackend(sessionID string) (AcquiredMutationBackend, error) {
+	if s == nil || s.acquirer == nil {
+		return AcquiredMutationBackend{}, errors.New("mutation backend acquirer is unavailable")
+	}
+	acquired, err := s.acquirer.AcquireMutationBackend(sessionID)
+	if err != nil {
+		return AcquiredMutationBackend{}, err
+	}
+	if acquired.Backend == nil {
+		if acquired.Release != nil {
+			acquired.Release()
+		}
+		return AcquiredMutationBackend{}, errors.New("acquired mutation backend is unavailable")
+	}
+	if acquired.Release == nil {
+		acquired.Release = func() {}
+	}
+	return acquired, nil
 }
 
 // acceptedMutationContext deliberately detaches accepted work from the unary
@@ -487,10 +814,15 @@ func acceptedMutationContext(request *kmgrv1.RequestContext) (context.Context, c
 	return ctx, cancel, nil
 }
 
-func releaseAcceptedMutationContext(operation *TrackedOperation, cancel context.CancelFunc) {
+func releaseAcceptedMutationContext(
+	operation *TrackedOperation,
+	cancel context.CancelFunc,
+	release func(),
+) {
 	go func() {
 		<-operation.Done()
 		cancel()
+		release()
 	}()
 }
 
@@ -548,26 +880,47 @@ func deleteTargetsFromProto(values []*kmgrv1.DeleteTarget, sessionID string) ([]
 	if len(values) == 0 {
 		return nil, nil, &ValidationError{Field: "targets", Message: "at least one delete target is required"}
 	}
-	targets := make([]DeleteTarget, len(values))
-	identities := make([]object.Identity, len(values))
+	targets := make([]DeleteTarget, 0, len(values))
+	identities := make([]object.Identity, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
+	if err := appendDeleteTargets(&targets, &identities, seen, values, sessionID, 0); err != nil {
+		return nil, nil, err
+	}
+	return targets, identities, nil
+}
+
+func appendDeleteTargets(
+	targets *[]DeleteTarget,
+	identities *[]object.Identity,
+	seen map[string]struct{},
+	values []*kmgrv1.DeleteTarget,
+	sessionID string,
+	baseIndex int,
+) error {
 	for index, value := range values {
+		absoluteIndex := baseIndex + index
 		if value == nil {
-			return nil, nil, &ValidationError{Field: fmt.Sprintf("targets[%d]", index), Message: "delete target is required"}
+			return &ValidationError{Field: fmt.Sprintf("targets[%d]", absoluteIndex), Message: "delete target is required"}
+		}
+		if proto.Size(value) > maxResourceIdentityBytes {
+			return &ValidationError{
+				Field:   fmt.Sprintf("targets[%d]", absoluteIndex),
+				Message: fmt.Sprintf("delete target exceeds the %d-byte identity budget", maxResourceIdentityBytes),
+			}
 		}
 		identity, err := identityFromProto(value.GetIdentity(), sessionID)
 		if err != nil {
-			return nil, nil, &ValidationError{Field: fmt.Sprintf("targets[%d].identity", index), Message: err.Error()}
+			return &ValidationError{Field: fmt.Sprintf("targets[%d].identity", absoluteIndex), Message: err.Error()}
 		}
 		key := strings.Join([]string{identity.Group, identity.Version, identity.Resource, identity.Namespace, identity.Name, identity.UID}, "\x00")
 		if _, duplicate := seen[key]; duplicate {
-			return nil, nil, &ValidationError{Field: fmt.Sprintf("targets[%d]", index), Message: "delete target is duplicated"}
+			return &ValidationError{Field: fmt.Sprintf("targets[%d]", absoluteIndex), Message: "delete target is duplicated"}
 		}
 		seen[key] = struct{}{}
-		targets[index] = DeleteTarget{Identity: identity}
-		identities[index] = identity
+		*targets = append(*targets, DeleteTarget{Identity: identity})
+		*identities = append(*identities, identity)
 	}
-	return targets, identities, nil
+	return nil
 }
 
 func deleteOptionsFromProto(request *kmgrv1.DeleteRequest) (DeleteOptions, error) {
@@ -588,6 +941,33 @@ func deleteOptionsFromProto(request *kmgrv1.DeleteRequest) (DeleteOptions, error
 			return DeleteOptions{}, &ValidationError{Field: "grace_period_seconds", Message: "grace period must not be negative"}
 		}
 		options.GracePeriodSeconds = &grace
+	}
+	return options, nil
+}
+
+func deleteManyOptionsFromProto(request *kmgrv1.DeleteManyStart) (DeleteOptions, error) {
+	options := DeleteOptions{MaxConcurrency: int(request.GetMaxConcurrency())}
+	switch request.GetPropagationPolicy() {
+	case kmgrv1.PropagationPolicy_PROPAGATION_POLICY_BACKGROUND:
+		options.PropagationPolicy = metav1.DeletePropagationBackground
+	case kmgrv1.PropagationPolicy_PROPAGATION_POLICY_FOREGROUND:
+		options.PropagationPolicy = metav1.DeletePropagationForeground
+	case kmgrv1.PropagationPolicy_PROPAGATION_POLICY_ORPHAN:
+		options.PropagationPolicy = metav1.DeletePropagationOrphan
+	default:
+		return DeleteOptions{}, &ValidationError{Field: "propagation_policy", Message: "delete propagation policy is required"}
+	}
+	if request.GracePeriodSeconds != nil {
+		grace := request.GetGracePeriodSeconds()
+		if grace < 0 {
+			return DeleteOptions{}, &ValidationError{Field: "grace_period_seconds", Message: "grace period must not be negative"}
+		}
+		options.GracePeriodSeconds = &grace
+	}
+	if options.MaxConcurrency < 0 || options.MaxConcurrency > MaxDeleteConcurrency {
+		return DeleteOptions{}, &ValidationError{
+			Field: "max_concurrency", Message: fmt.Sprintf("delete concurrency must be between 0 and %d", MaxDeleteConcurrency),
+		}
 	}
 	return options, nil
 }
@@ -635,6 +1015,9 @@ func identityFromProto(value *kmgrv1.ResourceIdentity, sessionID string) (object
 	if value == nil {
 		return object.Identity{}, object.ErrInvalidIdentity
 	}
+	if proto.Size(value) > maxResourceIdentityBytes {
+		return object.Identity{}, fmt.Errorf("resource identity exceeds the %d-byte budget", maxResourceIdentityBytes)
+	}
 	if value.GetClusterSessionId() != "" && value.GetClusterSessionId() != sessionID {
 		return object.Identity{}, errors.New("resource identity belongs to another cluster session")
 	}
@@ -671,10 +1054,18 @@ func operationRequestContext(
 	return request.GetRequestId(), derived, cancel, nil
 }
 
-func structuredOperationError(err error, identity *kmgrv1.ResourceIdentity, operation string) *kmgrv1.StructuredError {
+func structuredOperationError(
+	err error,
+	identity *kmgrv1.ResourceIdentity,
+	operation string,
+	contextNames ...string,
+) *kmgrv1.StructuredError {
 	result := &kmgrv1.StructuredError{
 		Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL, Reason: "OperationFailed",
 		Message: "The Kubernetes operation failed.", Operation: operation, Resource: identity,
+	}
+	if len(contextNames) > 0 {
+		result.ContextName = contextNames[0]
 	}
 	kubeerrors.Enrich(result, err)
 	var identityMismatch *object.YAMLIdentityMismatchError
@@ -749,6 +1140,14 @@ func structuredOperationError(err error, identity *kmgrv1.ResourceIdentity, oper
 		value := apiStatus.Status()
 		result.HttpStatusCode, result.Reason = value.Code, string(value.Reason)
 		result.Retryable = value.Code == 408 || value.Code == 429 || value.Code >= 500
+	}
+	if proto.Size(result) > maxStructuredOperationError {
+		return &kmgrv1.StructuredError{
+			Category: result.GetCategory(), Reason: "OperationErrorDetailsOmitted",
+			Message:   "The Kubernetes error exceeded the safe display budget; oversized details were omitted.",
+			Retryable: result.GetRetryable(), HttpStatusCode: result.GetHttpStatusCode(),
+			ContextName: result.GetContextName(), Operation: result.GetOperation(), Resource: result.GetResource(),
+		}
 	}
 	return result
 }

@@ -72,6 +72,19 @@ public enum Kmgr_V1_OperationService: Sendable {
                 type: .unary
             )
         }
+        /// Namespace for "DeleteMany" metadata.
+        public enum DeleteMany: Sendable {
+            /// Request type for "DeleteMany".
+            public typealias Input = Kmgr_V1_DeleteManyRequest
+            /// Response type for "DeleteMany".
+            public typealias Output = Kmgr_V1_StartOperationResponse
+            /// Descriptor for "DeleteMany".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.OperationService"),
+                method: "DeleteMany",
+                type: .clientStreaming
+            )
+        }
         /// Namespace for "Scale" metadata.
         public enum Scale: Sendable {
             /// Request type for "Scale".
@@ -143,6 +156,7 @@ public enum Kmgr_V1_OperationService: Sendable {
             ApplyYaml.descriptor,
             UpdateData.descriptor,
             Delete.descriptor,
+            DeleteMany.descriptor,
             Scale.descriptor,
             RolloutRestart.descriptor,
             UpdateMetadata.descriptor,
@@ -238,6 +252,25 @@ extension Kmgr_V1_OperationService {
         func delete<Result>(
             request: GRPCCore.ClientRequest<Kmgr_V1_DeleteRequest>,
             serializer: some GRPCCore.MessageSerializer<Kmgr_V1_DeleteRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_StartOperationResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "DeleteMany" method.
+        ///
+        /// - Parameters:
+        ///   - request: A streaming request producing `Kmgr_V1_DeleteManyRequest` messages.
+        ///   - serializer: A serializer for `Kmgr_V1_DeleteManyRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_StartOperationResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func deleteMany<Result>(
+            request: GRPCCore.StreamingClientRequest<Kmgr_V1_DeleteManyRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_DeleteManyRequest>,
             deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_StartOperationResponse>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result
@@ -468,6 +501,36 @@ extension Kmgr_V1_OperationService {
             try await self.client.unary(
                 request: request,
                 descriptor: Kmgr_V1_OperationService.Method.Delete.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "DeleteMany" method.
+        ///
+        /// - Parameters:
+        ///   - request: A streaming request producing `Kmgr_V1_DeleteManyRequest` messages.
+        ///   - serializer: A serializer for `Kmgr_V1_DeleteManyRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_StartOperationResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func deleteMany<Result>(
+            request: GRPCCore.StreamingClientRequest<Kmgr_V1_DeleteManyRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_DeleteManyRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_StartOperationResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.clientStreaming(
+                request: request,
+                descriptor: Kmgr_V1_OperationService.Method.DeleteMany.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -728,6 +791,31 @@ extension Kmgr_V1_OperationService.ClientProtocol {
         )
     }
 
+    /// Call the "DeleteMany" method.
+    ///
+    /// - Parameters:
+    ///   - request: A streaming request producing `Kmgr_V1_DeleteManyRequest` messages.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func deleteMany<Result>(
+        request: GRPCCore.StreamingClientRequest<Kmgr_V1_DeleteManyRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.deleteMany(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_DeleteManyRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_StartOperationResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "Scale" method.
     ///
     /// - Parameters:
@@ -965,6 +1053,36 @@ extension Kmgr_V1_OperationService.ClientProtocol {
             metadata: metadata
         )
         return try await self.delete(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "DeleteMany" method.
+    ///
+    /// - Parameters:
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - producer: A closure producing request messages to send to the server. The request
+    ///       stream is closed when the closure returns.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func deleteMany<Result>(
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        requestProducer producer: @Sendable @escaping (GRPCCore.RPCWriter<Kmgr_V1_DeleteManyRequest>) async throws -> Void,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.StreamingClientRequest<Kmgr_V1_DeleteManyRequest>(
+            metadata: metadata,
+            producer: producer
+        )
+        return try await self.deleteMany(
             request: request,
             options: options,
             onResponse: handleResponse

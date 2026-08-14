@@ -3,6 +3,9 @@ package operation
 import (
 	"context"
 	"errors"
+	"io"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 )
@@ -263,6 +267,127 @@ func TestCancelOperationNotStartedOnlyCancelsQueuedDeleteItems(t *testing.T) {
 	}
 }
 
+func TestDeleteManyStreamsLargeSelectionAndReplaysBoundedExactResults(t *testing.T) {
+	const targetCount = 10_000
+	provider := &recordingProvider{}
+	editor := &fakeYAMLEditor{resource: &recordingResource{provider: provider, namespace: "ns"}}
+	service := testOperationService(t, editor)
+	requests := make([]*kmgrv1.DeleteManyRequest, 0, 2+targetCount/maxDeleteTargetChunkItems)
+	requests = append(requests, &kmgrv1.DeleteManyRequest{
+		Sequence: 1,
+		Payload: &kmgrv1.DeleteManyRequest_Start{Start: &kmgrv1.DeleteManyStart{
+			Context: operationContext("large-delete"), OperationId: "large-delete-operation",
+			TotalTargets: targetCount, PropagationPolicy: kmgrv1.PropagationPolicy_PROPAGATION_POLICY_BACKGROUND,
+			MaxConcurrency: MaxDeleteConcurrency,
+		}},
+	})
+	for offset := 0; offset < targetCount; offset += maxDeleteTargetChunkItems {
+		count := min(maxDeleteTargetChunkItems, targetCount-offset)
+		targets := make([]*kmgrv1.DeleteTarget, count)
+		for index := range targets {
+			value := strconv.Itoa(offset + index)
+			identity := operationIdentity()
+			identity.Resource = "pods"
+			identity.Name = "pod-" + value
+			identity.Uid = "uid-" + value
+			targets[index] = &kmgrv1.DeleteTarget{Identity: identity}
+		}
+		requests = append(requests, &kmgrv1.DeleteManyRequest{
+			Sequence: uint64(len(requests) + 1),
+			Payload: &kmgrv1.DeleteManyRequest_Targets{Targets: &kmgrv1.DeleteTargetChunk{
+				StartIndex: uint32(offset), Targets: targets,
+			}},
+		})
+	}
+	stream := &recordingDeleteManyStream{ctx: context.Background(), requests: requests}
+	if err := service.DeleteMany(stream); err != nil {
+		t.Fatal(err)
+	}
+	if stream.response == nil || !stream.response.GetAccepted() {
+		t.Fatalf("start response = %#v", stream.response)
+	}
+	operation, found := service.manager.Get("large-delete-operation")
+	if !found {
+		t.Fatal("large streamed delete was not tracked")
+	}
+	select {
+	case <-operation.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("large streamed delete did not complete")
+	}
+
+	eventStream := &recordingOperationStream{ctx: context.Background()}
+	if err := service.WatchOperation(&kmgrv1.WatchOperationRequest{
+		Context: operationContext("large-watch"), StreamId: "large-stream", Generation: 1,
+		OperationId: "large-delete-operation",
+	}, eventStream); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]struct{}, targetCount)
+	for _, event := range eventStream.events {
+		if size := proto.Size(event); size > maxOperationEventBytes {
+			t.Fatalf("operation event encoded size = %d, maximum = %d", size, maxOperationEventBytes)
+		}
+		for _, result := range event.GetItemResults() {
+			uid := result.GetIdentity().GetUid()
+			if result.GetState() != kmgrv1.OperationItemState_OPERATION_ITEM_STATE_SUCCEEDED {
+				t.Fatalf("result %q state = %v", uid, result.GetState())
+			}
+			if _, duplicate := seen[uid]; duplicate {
+				t.Fatalf("result %q was streamed twice", uid)
+			}
+			seen[uid] = struct{}{}
+		}
+	}
+	last := eventStream.events[len(eventStream.events)-1]
+	if len(seen) != targetCount || last.GetCompletedItems() != targetCount ||
+		last.GetTotalItems() != targetCount || last.GetState() != kmgrv1.OperationState_OPERATION_STATE_SUCCEEDED {
+		t.Fatalf("results=%d last=%#v", len(seen), last)
+	}
+}
+
+func TestDeleteManyRejectsIncompleteUploadWithoutExecutingPartialSelection(t *testing.T) {
+	service := testOperationService(t, &fakeYAMLEditor{})
+	identity := operationIdentity()
+	identity.Resource = "pods"
+	stream := &recordingDeleteManyStream{ctx: context.Background(), requests: []*kmgrv1.DeleteManyRequest{
+		{
+			Sequence: 1,
+			Payload: &kmgrv1.DeleteManyRequest_Start{Start: &kmgrv1.DeleteManyStart{
+				Context: operationContext("partial"), OperationId: "partial-delete", TotalTargets: 2,
+				PropagationPolicy: kmgrv1.PropagationPolicy_PROPAGATION_POLICY_BACKGROUND,
+			}},
+		},
+		{
+			Sequence: 2,
+			Payload: &kmgrv1.DeleteManyRequest_Targets{Targets: &kmgrv1.DeleteTargetChunk{
+				Targets: []*kmgrv1.DeleteTarget{{Identity: identity}},
+			}},
+		},
+	}}
+	if err := service.DeleteMany(stream); err != nil {
+		t.Fatal(err)
+	}
+	if stream.response.GetAccepted() || stream.response.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION {
+		t.Fatalf("partial response = %#v", stream.response)
+	}
+	if _, found := service.manager.Get("partial-delete"); found {
+		t.Fatal("partial upload created an operation")
+	}
+}
+
+func TestUnaryDeleteRejectsSelectionsThatRequireChunking(t *testing.T) {
+	service := testOperationService(t, &fakeYAMLEditor{})
+	targets := make([]*kmgrv1.DeleteTarget, maxUnaryDeleteTargets+1)
+	response, err := service.Delete(context.Background(), &kmgrv1.DeleteRequest{
+		Context: operationContext("oversized-unary"), OperationId: "oversized-unary",
+		Targets: targets, PropagationPolicy: kmgrv1.PropagationPolicy_PROPAGATION_POLICY_BACKGROUND,
+	})
+	if err != nil || response.GetAccepted() || response.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION {
+		t.Fatalf("response = %#v, error = %v", response, err)
+	}
+}
+
 func TestApplyYamlRejectsArbitraryFieldManagerAndDuplicateID(t *testing.T) {
 	t.Parallel()
 	editor := &fakeYAMLEditor{block: make(chan struct{})}
@@ -304,6 +429,11 @@ type fakeYAMLEditor struct {
 	dataErr      error
 	mutations    []object.DataMutation
 	applyContext chan context.Context
+	contextName  string
+}
+
+func (e *fakeYAMLEditor) ContextName(string) (string, bool) {
+	return e.contextName, e.contextName != ""
 }
 
 func (e *fakeYAMLEditor) PrepareYAML(
@@ -377,6 +507,28 @@ type recordingOperationStream struct {
 	events []*kmgrv1.OperationEvent
 }
 
+type recordingDeleteManyStream struct {
+	grpc.ServerStream
+	ctx      context.Context
+	requests []*kmgrv1.DeleteManyRequest
+	next     int
+	response *kmgrv1.StartOperationResponse
+}
+
+func (s *recordingDeleteManyStream) Context() context.Context { return s.ctx }
+func (s *recordingDeleteManyStream) Recv() (*kmgrv1.DeleteManyRequest, error) {
+	if s.next >= len(s.requests) {
+		return nil, io.EOF
+	}
+	value := s.requests[s.next]
+	s.next++
+	return value, nil
+}
+func (s *recordingDeleteManyStream) SendAndClose(value *kmgrv1.StartOperationResponse) error {
+	s.response = value
+	return nil
+}
+
 func (s *recordingOperationStream) Context() context.Context { return s.ctx }
 func (s *recordingOperationStream) Send(value *kmgrv1.OperationEvent) error {
 	s.mu.Lock()
@@ -410,6 +562,54 @@ func TestStructuredOperationErrorReportsManagerCapacityAndShutdown(t *testing.T)
 		if value.GetCategory() != test.category || value.GetReason() != test.reason {
 			t.Fatalf("structured error for %v = %#v", test.err, value)
 		}
+	}
+	oversized := structuredOperationError(
+		&ValidationError{Field: "payload", Message: strings.Repeat("x", maxStructuredOperationError*2)},
+		operationIdentity(), "apply-yaml", "production-context",
+	)
+	if proto.Size(oversized) > maxStructuredOperationError ||
+		oversized.GetReason() != "OperationErrorDetailsOmitted" ||
+		oversized.GetContextName() != "production-context" || oversized.GetResource().GetUid() != "uid" {
+		t.Fatalf("bounded structured error = %#v (size %d)", oversized, proto.Size(oversized))
+	}
+}
+
+func TestOperationErrorsRetainHumanContextForValidationAndProgress(t *testing.T) {
+	editor := &fakeYAMLEditor{contextName: "production-context", err: errors.New("backend failed")}
+	service := testOperationService(t, editor)
+	invalid, err := service.Scale(context.Background(), &kmgrv1.ScaleRequest{
+		Context: operationContext("invalid-scale"), OperationId: "invalid-scale",
+		Identity: operationIdentity(), Replicas: -1, ExpectedResourceVersion: "rv-1",
+	})
+	if err != nil || invalid.GetError().GetContextName() != "production-context" ||
+		invalid.GetError().GetOperation() != "scale" {
+		t.Fatalf("validation response = %#v, error = %v", invalid, err)
+	}
+
+	started, err := service.ApplyYaml(context.Background(), &kmgrv1.ApplyYamlRequest{
+		Context: operationContext("failed-apply"), OperationId: "failed-apply",
+		Identity: operationIdentity(), YamlUtf8: []byte("kind: ConfigMap"),
+		ExpectedResourceVersion: "rv-1", FieldManager: object.YAMLFieldManager,
+	})
+	if err != nil || !started.GetAccepted() {
+		t.Fatalf("start response = %#v, error = %v", started, err)
+	}
+	operation, found := service.manager.Get("failed-apply")
+	if !found {
+		t.Fatal("failed apply was not tracked")
+	}
+	<-operation.Done()
+	events := &recordingOperationStream{ctx: context.Background()}
+	if err := service.WatchOperation(&kmgrv1.WatchOperationRequest{
+		Context: operationContext("failed-watch"), StreamId: "failed-stream", Generation: 1,
+		OperationId: "failed-apply",
+	}, events); err != nil {
+		t.Fatal(err)
+	}
+	last := events.events[len(events.events)-1]
+	if last.GetError().GetContextName() != "production-context" ||
+		last.GetItemResults()[0].GetError().GetContextName() != "production-context" {
+		t.Fatalf("terminal event = %#v", last)
 	}
 }
 

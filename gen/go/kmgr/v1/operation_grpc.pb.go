@@ -23,6 +23,7 @@ const (
 	OperationService_ApplyYaml_FullMethodName       = "/kmgr.v1.OperationService/ApplyYaml"
 	OperationService_UpdateData_FullMethodName      = "/kmgr.v1.OperationService/UpdateData"
 	OperationService_Delete_FullMethodName          = "/kmgr.v1.OperationService/Delete"
+	OperationService_DeleteMany_FullMethodName      = "/kmgr.v1.OperationService/DeleteMany"
 	OperationService_Scale_FullMethodName           = "/kmgr.v1.OperationService/Scale"
 	OperationService_RolloutRestart_FullMethodName  = "/kmgr.v1.OperationService/RolloutRestart"
 	OperationService_UpdateMetadata_FullMethodName  = "/kmgr.v1.OperationService/UpdateMetadata"
@@ -38,6 +39,7 @@ type OperationServiceClient interface {
 	ApplyYaml(ctx context.Context, in *ApplyYamlRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
 	UpdateData(ctx context.Context, in *UpdateDataRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
+	DeleteMany(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[DeleteManyRequest, StartOperationResponse], error)
 	Scale(ctx context.Context, in *ScaleRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
 	RolloutRestart(ctx context.Context, in *RolloutRestartRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
 	UpdateMetadata(ctx context.Context, in *UpdateMetadataRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
@@ -93,6 +95,19 @@ func (c *operationServiceClient) Delete(ctx context.Context, in *DeleteRequest, 
 	return out, nil
 }
 
+func (c *operationServiceClient) DeleteMany(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[DeleteManyRequest, StartOperationResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &OperationService_ServiceDesc.Streams[0], OperationService_DeleteMany_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[DeleteManyRequest, StartOperationResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type OperationService_DeleteManyClient = grpc.ClientStreamingClient[DeleteManyRequest, StartOperationResponse]
+
 func (c *operationServiceClient) Scale(ctx context.Context, in *ScaleRequest, opts ...grpc.CallOption) (*StartOperationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StartOperationResponse)
@@ -125,7 +140,7 @@ func (c *operationServiceClient) UpdateMetadata(ctx context.Context, in *UpdateM
 
 func (c *operationServiceClient) WatchOperation(ctx context.Context, in *WatchOperationRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OperationEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &OperationService_ServiceDesc.Streams[0], OperationService_WatchOperation_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &OperationService_ServiceDesc.Streams[1], OperationService_WatchOperation_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +175,7 @@ type OperationServiceServer interface {
 	ApplyYaml(context.Context, *ApplyYamlRequest) (*StartOperationResponse, error)
 	UpdateData(context.Context, *UpdateDataRequest) (*StartOperationResponse, error)
 	Delete(context.Context, *DeleteRequest) (*StartOperationResponse, error)
+	DeleteMany(grpc.ClientStreamingServer[DeleteManyRequest, StartOperationResponse]) error
 	Scale(context.Context, *ScaleRequest) (*StartOperationResponse, error)
 	RolloutRestart(context.Context, *RolloutRestartRequest) (*StartOperationResponse, error)
 	UpdateMetadata(context.Context, *UpdateMetadataRequest) (*StartOperationResponse, error)
@@ -186,6 +202,9 @@ func (UnimplementedOperationServiceServer) UpdateData(context.Context, *UpdateDa
 }
 func (UnimplementedOperationServiceServer) Delete(context.Context, *DeleteRequest) (*StartOperationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Delete not implemented")
+}
+func (UnimplementedOperationServiceServer) DeleteMany(grpc.ClientStreamingServer[DeleteManyRequest, StartOperationResponse]) error {
+	return status.Error(codes.Unimplemented, "method DeleteMany not implemented")
 }
 func (UnimplementedOperationServiceServer) Scale(context.Context, *ScaleRequest) (*StartOperationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Scale not implemented")
@@ -294,6 +313,13 @@ func _OperationService_Delete_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _OperationService_DeleteMany_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(OperationServiceServer).DeleteMany(&grpc.GenericServerStream[DeleteManyRequest, StartOperationResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type OperationService_DeleteManyServer = grpc.ClientStreamingServer[DeleteManyRequest, StartOperationResponse]
 
 func _OperationService_Scale_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ScaleRequest)
@@ -419,6 +445,11 @@ var OperationService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "DeleteMany",
+			Handler:       _OperationService_DeleteMany_Handler,
+			ClientStreams: true,
+		},
 		{
 			StreamName:    "WatchOperation",
 			Handler:       _OperationService_WatchOperation_Handler,

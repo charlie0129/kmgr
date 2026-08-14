@@ -39,6 +39,10 @@ public protocol ObjectDetailRPC: Sendable {
         timeout: Duration,
         receive: @escaping @Sendable (Kmgr_V1_OperationEvent) throws -> Void
     ) async throws
+    func cancelOperation(
+        _ request: Kmgr_V1_CancelOperationRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_Acknowledgement
 }
 
 public struct EngineObjectDetailRPC: ObjectDetailRPC {
@@ -143,6 +147,16 @@ public struct EngineObjectDetailRPC: ObjectDetailRPC {
         }
     }
 
+    public func cancelOperation(
+        _ request: Kmgr_V1_CancelOperationRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_Acknowledgement {
+        try await connection.operationClient().cancelOperation(
+            request,
+            options: callOptions(timeout)
+        )
+    }
+
     private func callOptions(_ timeout: Duration) -> CallOptions {
         var result = CallOptions.defaults
         result.timeout = timeout
@@ -155,6 +169,7 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
     private let rpc: any ObjectDetailRPC
     private let unaryTimeout: Duration
     private let streamTimeout: Duration
+    private let controlTimeout: Duration
     private let maximumBufferedMessages: Int
     private let now: @Sendable () -> Date
     private let identifier: @Sendable () -> String
@@ -163,12 +178,14 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
         connection: EngineConnection,
         unaryTimeout: Duration = .seconds(30),
         streamTimeout: Duration = .seconds(300),
+        controlTimeout: Duration = .seconds(5),
         maximumBufferedMessages: Int = 64
     ) {
         self.init(
             rpc: EngineObjectDetailRPC(connection: connection),
             unaryTimeout: unaryTimeout,
             streamTimeout: streamTimeout,
+            controlTimeout: controlTimeout,
             maximumBufferedMessages: maximumBufferedMessages
         )
     }
@@ -177,6 +194,7 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
         rpc: any ObjectDetailRPC,
         unaryTimeout: Duration = .seconds(30),
         streamTimeout: Duration = .seconds(300),
+        controlTimeout: Duration = .seconds(5),
         maximumBufferedMessages: Int = 64,
         now: @escaping @Sendable () -> Date = Date.init,
         identifier: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() }
@@ -185,6 +203,7 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
         self.rpc = rpc
         self.unaryTimeout = unaryTimeout
         self.streamTimeout = streamTimeout
+        self.controlTimeout = controlTimeout
         self.maximumBufferedMessages = maximumBufferedMessages
         self.now = now
         self.identifier = identifier
@@ -490,15 +509,27 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
         let immutableRequest = rpcRequest
         let rpc = self.rpc
         let timeout = streamTimeout
+        let cancellationTimeout = controlTimeout
         let limit = maximumBufferedMessages
+        let now = self.now
+        let identifier = self.identifier
+        let lifetime = DetailOperationWatchLifetime()
         return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(limit)) { continuation in
             let task = Task.detached(priority: .userInitiated) {
                 do {
                     try await rpc.watchOperation(immutableRequest, timeout: timeout) { event in
-                        guard event.cursor.streamID == streamID, event.operationID == operationID else {
+                        guard event.cursor.streamID == streamID,
+                            event.cursor.generation == immutableRequest.generation,
+                            lifetime.accept(sequence: event.cursor.sequence),
+                            event.operationID == operationID
+                        else {
                             throw ObjectDetailBridgeError.operationEnvelopeMismatch
                         }
-                        switch continuation.yield(Self.progress(event)) {
+                        let progress = Self.progress(event)
+                        if progress.state.isTerminal {
+                            lifetime.markTerminal()
+                        }
+                        switch continuation.yield(progress) {
                         case .enqueued: break
                         case .dropped: throw ObjectDetailBridgeError.operationBufferExceeded(limit)
                         case .terminated: throw CancellationError()
@@ -514,7 +545,20 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                     }
                 }
             }
-            continuation.onTermination = { @Sendable _ in task.cancel() }
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
+                guard lifetime.claimPrematureCancellation() else { return }
+                Task.detached {
+                    var request = Kmgr_V1_CancelOperationRequest()
+                    request.context.requestID = identifier()
+                    request.context.clusterSessionID = sessionID
+                    request.context.deadlineUnixMs = Int64(
+                        (now().timeIntervalSince1970 + Self.seconds(cancellationTimeout)) * 1_000
+                    )
+                    request.operationID = operationID
+                    _ = try? await rpc.cancelOperation(request, timeout: cancellationTimeout)
+                }
+            }
         }
     }
 
@@ -854,5 +898,34 @@ private final class RelationshipScanCursorValidator: @unchecked Sendable {
             throw ObjectDetailBridgeError.relationshipScanEnvelopeMismatch
         }
         lastSequence = cursor.sequence
+    }
+}
+
+private final class DetailOperationWatchLifetime: @unchecked Sendable {
+    private let lock = NSLock()
+    private var terminal = false
+    private var cancellationClaimed = false
+    private var lastSequence: UInt64 = 0
+
+    func accept(sequence: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard sequence > lastSequence else { return false }
+        lastSequence = sequence
+        return true
+    }
+
+    func markTerminal() {
+        lock.lock()
+        terminal = true
+        lock.unlock()
+    }
+
+    func claimPrematureCancellation() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !terminal, !cancellationClaimed else { return false }
+        cancellationClaimed = true
+        return true
     }
 }

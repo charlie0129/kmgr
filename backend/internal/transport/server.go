@@ -117,7 +117,11 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		return nil, err
 	}
 	operationManager := operation.NewManager()
-	operationService, err := operation.NewGRPCService(objectReader, operationManager)
+	operationService, err := operation.NewGRPCService(
+		objectReader,
+		operationManager,
+		operation.ClusterMutationBackendAcquirer{Sessions: sessions},
+	)
 	if err != nil {
 		operationManager.Close()
 		viewRuntime.Close()

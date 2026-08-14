@@ -30,7 +30,7 @@ struct EngineOperationProviderTests {
         let request = try #require(await rpc.capturedDelete())
         #expect(request.context.requestID == "operation-token")
         #expect(request.context.clusterSessionID == "session-one")
-        #expect(request.context.deadlineUnixMs == 1_010_000)
+        #expect(request.context.deadlineUnixMs == 87_400_000)
         #expect(request.operationID == "operation-token")
         #expect(request.propagationPolicy == .foreground)
         #expect(request.hasGracePeriodSeconds)
@@ -57,6 +57,93 @@ struct EngineOperationProviderTests {
         #expect(progress[0].itemResults[1].state == .skipped)
         #expect(progress[0].itemResults[1].issue?.reason == "DeleteSkipped")
         #expect(progress[0].issue?.category == .conflict)
+    }
+
+    @Test("uploads large delete selections through bounded streaming RPC")
+    func streamsLargeDeleteSelection() async throws {
+        let rpc = FakeOperationRPC()
+        let provider = deterministicProvider(rpc: rpc)
+        let targets = (0..<513).map { index in
+            ResourceDeleteTarget(identity: Self.identity(
+                name: "api-\(index)",
+                uid: ResourceUID("uid-\(index)")
+            ))
+        }
+
+        let stream = try await provider.deleteResources(
+            targets: targets,
+            options: ResourceDeleteOptions(maxConcurrency: 4)
+        )
+        for try await _ in stream {}
+
+        #expect(await rpc.capturedDelete() == nil)
+        let start = try #require(await rpc.capturedDeleteManyStart())
+        #expect(start.context.clusterSessionID == "session-one")
+        #expect(start.operationID == "operation-token")
+        #expect(start.totalTargets == 513)
+        #expect(start.propagationPolicy == .background)
+        #expect(start.maxConcurrency == 4)
+        #expect(await rpc.capturedDeleteManyChunkSize() == 128)
+        #expect(
+            await rpc.capturedDeleteManyTargets().map { $0.identity.uid }
+                == targets.map { $0.identity.uid.rawValue }
+        )
+    }
+
+    @Test("backpressures bounded progress without dropping terminal item deltas")
+    func backpressuresProgressWithoutDropping() async throws {
+        let events = (1...40).map { sequence in
+            var event = Self.progressEvent()
+            event.cursor.sequence = UInt64(sequence)
+            return event
+        }
+        let rpc = FakeOperationRPC(events: events)
+        let provider = EngineOperationProvider(
+            rpc: rpc,
+            unaryTimeout: .seconds(10),
+            streamTimeout: .seconds(86_400),
+            controlTimeout: .seconds(5),
+            maximumBufferedMessages: 1,
+            now: { Date(timeIntervalSince1970: 1_000) },
+            requestID: { "operation-token" }
+        )
+        let stream = try await provider.deleteResources(
+            targets: [
+                ResourceDeleteTarget(identity: Self.identity(name: "api-a", uid: "uid-a")),
+                ResourceDeleteTarget(identity: Self.identity(name: "api-b", uid: "uid-b")),
+            ],
+            options: ResourceDeleteOptions()
+        )
+
+        try await Task.sleep(for: .milliseconds(20))
+        var sequences: [UInt64] = []
+        for try await value in stream {
+            sequences.append(value.cursor.sequence)
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(sequences == Array(1...40).map(UInt64.init))
+    }
+
+    @Test("cancels accepted work when its progress owner disappears early")
+    func cancelsUnobservedAcceptedOperation() async throws {
+        let rpc = FakeOperationRPC()
+        let provider = deterministicProvider(rpc: rpc)
+        let stream = try await provider.scaleResource(
+            identity: Self.identity(),
+            replicas: 2,
+            expectedResourceVersion: "rv-current"
+        )
+        for try await _ in stream {}
+
+        var attempts = 0
+        while await rpc.capturedCancel() == nil, attempts < 100 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let cancellation = try #require(await rpc.capturedCancel())
+        #expect(cancellation.context.clusterSessionID == "session-one")
+        #expect(cancellation.operationID == "operation-token")
+        #expect(!cancellation.cancelNotStartedOnly)
     }
 
     @Test("maps scale, rollout restart, and deterministic metadata entries")
@@ -223,6 +310,33 @@ struct EngineOperationProviderTests {
         }
     }
 
+    @Test("progress rejects zero, duplicate, and out-of-order sequences")
+    func rejectsNonMonotonicProgress() async throws {
+        for sequences in [[0], [1, 1], [2, 1]] {
+            let events = sequences.map { sequence in
+                var event = Kmgr_V1_OperationEvent()
+                event.cursor.sequence = UInt64(sequence)
+                event.state = .running
+                event.totalItems = 1
+                return event
+            }
+            let rpc = FakeOperationRPC(events: events)
+            let provider = deterministicProvider(rpc: rpc)
+            let stream = try await provider.scaleResource(
+                identity: Self.identity(),
+                replicas: 2,
+                expectedResourceVersion: "rv"
+            )
+            do {
+                for try await _ in stream {}
+                Issue.record("Expected invalid progress sequence for \(sequences)")
+            } catch let issue as ClusterManagerIssue {
+                #expect(issue.category == .internalFailure)
+                #expect(issue.reason == "OperationProgressEnvelopeMismatch")
+            }
+        }
+    }
+
     @Test("cancel maps scoped request and rejected acknowledgement")
     func mapsCancellation() async throws {
         let acceptedRPC = FakeOperationRPC()
@@ -355,6 +469,9 @@ private actor FakeOperationRPC: OperationRPC {
     private let watchMode: WatchMode
     private let cancelAccepted: Bool
     private var deleteRequest: Kmgr_V1_DeleteRequest?
+    private var deleteManyStart: Kmgr_V1_DeleteManyStart?
+    private var deleteManyTargets: [Kmgr_V1_DeleteTarget] = []
+    private var deleteManyChunkSize = 0
     private var scaleRequest: Kmgr_V1_ScaleRequest?
     private var restartRequest: Kmgr_V1_RolloutRestartRequest?
     private var metadataRequest: Kmgr_V1_UpdateMetadataRequest?
@@ -374,6 +491,9 @@ private actor FakeOperationRPC: OperationRPC {
     }
 
     func capturedDelete() -> Kmgr_V1_DeleteRequest? { deleteRequest }
+    func capturedDeleteManyStart() -> Kmgr_V1_DeleteManyStart? { deleteManyStart }
+    func capturedDeleteManyTargets() -> [Kmgr_V1_DeleteTarget] { deleteManyTargets }
+    func capturedDeleteManyChunkSize() -> Int { deleteManyChunkSize }
     func capturedScale() -> Kmgr_V1_ScaleRequest? { scaleRequest }
     func capturedRestart() -> Kmgr_V1_RolloutRestartRequest? { restartRequest }
     func capturedMetadata() -> Kmgr_V1_UpdateMetadataRequest? { metadataRequest }
@@ -381,7 +501,7 @@ private actor FakeOperationRPC: OperationRPC {
     func capturedCancel() -> Kmgr_V1_CancelOperationRequest? { cancelRequest }
 
     func mutationCallCount() -> Int {
-        [deleteRequest != nil, scaleRequest != nil, restartRequest != nil, metadataRequest != nil]
+        [deleteRequest != nil, deleteManyStart != nil, scaleRequest != nil, restartRequest != nil, metadataRequest != nil]
             .filter { $0 }.count
     }
 
@@ -391,6 +511,18 @@ private actor FakeOperationRPC: OperationRPC {
     ) async throws -> Kmgr_V1_StartOperationResponse {
         deleteRequest = request
         return startResponse(requestID: request.context.requestID, operationID: request.operationID)
+    }
+
+    func deleteMany(
+        start: Kmgr_V1_DeleteManyStart,
+        targets: [Kmgr_V1_DeleteTarget],
+        chunkSize: Int,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_StartOperationResponse {
+        deleteManyStart = start
+        deleteManyTargets = targets
+        deleteManyChunkSize = chunkSize
+        return startResponse(requestID: start.context.requestID, operationID: start.operationID)
     }
 
     func scale(
@@ -420,7 +552,7 @@ private actor FakeOperationRPC: OperationRPC {
     func watch(
         request: Kmgr_V1_WatchOperationRequest,
         timeout: Duration,
-        receive: @escaping @Sendable (Kmgr_V1_OperationEvent) throws -> Void
+        receive: @escaping @Sendable (Kmgr_V1_OperationEvent) async throws -> Void
     ) async throws {
         watchRequest = request
         for original in events {
@@ -432,7 +564,7 @@ private actor FakeOperationRPC: OperationRPC {
             if watchMode == .crossSessionItem, !event.itemResults.isEmpty {
                 event.itemResults[0].identity.clusterSessionID = "session-two"
             }
-            try receive(event)
+            try await receive(event)
         }
     }
 

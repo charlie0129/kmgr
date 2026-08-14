@@ -43,6 +43,7 @@ type Status struct {
 	OperationID    string
 	Operation      string
 	SessionID      string
+	ContextName    string
 	Identity       object.Identity
 	State          State
 	CompletedItems uint32
@@ -59,11 +60,12 @@ type Status struct {
 // TrackedOperation retains only progress, identity, and safe errors. Mutation
 // payloads stay on worker stacks and are released when their workers exit.
 type TrackedOperation struct {
-	mu      sync.RWMutex
-	status  Status
-	done    chan struct{}
-	changed chan struct{}
-	cancel  context.CancelFunc
+	mu             sync.RWMutex
+	status         Status
+	completedOrder []int
+	done           chan struct{}
+	changed        chan struct{}
+	cancel         context.CancelFunc
 }
 
 func (o *TrackedOperation) Status() Status {
@@ -81,6 +83,30 @@ func (o *TrackedOperation) Snapshot() (Status, <-chan struct{}) {
 	return cloneStatus(o.status), o.changed
 }
 
+// Progress returns a compact summary plus a bounded, ordered slice of item
+// results that became terminal at or after offset. Terminal items are retained
+// exactly once in completion order, so an operation watcher can reconnect and
+// replay every result without cloning or serializing all items on each state
+// transition.
+func (o *TrackedOperation) Progress(offset, maxItems int) (Status, []ItemStatus, int, <-chan struct{}) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if offset < 0 || offset > len(o.completedOrder) {
+		offset = 0
+	}
+	if maxItems < 1 {
+		maxItems = 1
+	}
+	end := min(offset+maxItems, len(o.completedOrder))
+	items := make([]ItemStatus, 0, end-offset)
+	for _, index := range o.completedOrder[offset:end] {
+		items = append(items, o.status.Items[index])
+	}
+	summary := o.status
+	summary.Items = nil
+	return summary, items, end, o.changed
+}
+
 func cloneStatus(value Status) Status {
 	value.Items = append([]ItemStatus(nil), value.Items...)
 	return value
@@ -88,6 +114,19 @@ func cloneStatus(value Status) Status {
 
 func (o *TrackedOperation) Done() <-chan struct{} { return o.done }
 func (o *TrackedOperation) Cancel()               { o.cancel() }
+
+func (o *TrackedOperation) SetContextName(value string) {
+	if value == "" {
+		return
+	}
+	o.update(func(status *Status) bool {
+		if status.ContextName == value {
+			return false
+		}
+		status.ContextName = value
+		return true
+	})
+}
 
 // CancelNotStarted atomically cancels every item that has not claimed its
 // running state yet. Running items keep their operation context and are
@@ -102,12 +141,13 @@ func (o *TrackedOperation) CancelNotStarted() bool {
 			}
 			status.Items[index].State = ItemStateCancelled
 			status.Items[index].Err = context.Canceled
+			status.CompletedItems++
+			o.completedOrder = append(o.completedOrder, index)
 			accepted = true
 		}
 		if !accepted {
 			return false
 		}
-		status.CompletedItems = completedItemCount(status.Items)
 		if status.CompletedItems == status.TotalItems {
 			status.State = aggregateState(status.Items, nil)
 			if status.State == StateFailed || status.State == StateCancelled {
@@ -355,7 +395,10 @@ func (m *Manager) StartMany(
 				status.Items[index].State = update.State
 				status.Items[index].NewResourceVersion = update.NewResourceVersion
 				status.Items[index].Err = update.Err
-				status.CompletedItems = completedItemCount(status.Items)
+				if itemTerminal(update.State) {
+					status.CompletedItems++
+					operation.completedOrder = append(operation.completedOrder, index)
+				}
 				if index == 0 {
 					status.NewResourceVersion = update.NewResourceVersion
 				}
@@ -380,8 +423,9 @@ func (m *Manager) StartMany(
 					status.Items[index].State = ItemStateFailed
 					status.Items[index].Err = errors.New("operation worker exited without reporting a result")
 				}
+				status.CompletedItems++
+				operation.completedOrder = append(operation.completedOrder, index)
 			}
-			status.CompletedItems = completedItemCount(status.Items)
 			status.State = aggregateState(status.Items, cause)
 			if status.State == StateFailed || status.State == StateCancelled {
 				status.Err = firstOperationError(status.Items, runnerErr, cause)
@@ -405,16 +449,6 @@ func validItemTransition(current, next ItemState) bool {
 
 func itemTerminal(value ItemState) bool {
 	return value == ItemStateSucceeded || value == ItemStateFailed || value == ItemStateSkipped || value == ItemStateCancelled
-}
-
-func completedItemCount(items []ItemStatus) uint32 {
-	var result uint32
-	for _, item := range items {
-		if itemTerminal(item.State) {
-			result++
-		}
-	}
-	return result
 }
 
 func aggregateState(items []ItemStatus, cause error) State {

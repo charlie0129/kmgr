@@ -429,6 +429,98 @@ public struct Kmgr_V1_DeleteRequest: Sendable {
   fileprivate var _gracePeriodSeconds: Int64? = nil
 }
 
+/// Large delete selections are uploaded as bounded chunks. The first message
+/// must contain start, all later messages contain contiguous target chunks,
+/// and sequence starts at one and increases by one for every message.
+public struct Kmgr_V1_DeleteManyRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sequence: UInt64 = 0
+
+  public var payload: Kmgr_V1_DeleteManyRequest.OneOf_Payload? = nil
+
+  public var start: Kmgr_V1_DeleteManyStart {
+    get {
+      if case .start(let v)? = payload {return v}
+      return Kmgr_V1_DeleteManyStart()
+    }
+    set {payload = .start(newValue)}
+  }
+
+  public var targets: Kmgr_V1_DeleteTargetChunk {
+    get {
+      if case .targets(let v)? = payload {return v}
+      return Kmgr_V1_DeleteTargetChunk()
+    }
+    set {payload = .targets(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public enum OneOf_Payload: Equatable, Sendable {
+    case start(Kmgr_V1_DeleteManyStart)
+    case targets(Kmgr_V1_DeleteTargetChunk)
+
+  }
+
+  public init() {}
+}
+
+public struct Kmgr_V1_DeleteManyStart: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var operationID: String = String()
+
+  public var totalTargets: UInt32 = 0
+
+  public var propagationPolicy: Kmgr_V1_PropagationPolicy = .unspecified
+
+  public var gracePeriodSeconds: Int64 {
+    get {return _gracePeriodSeconds ?? 0}
+    set {_gracePeriodSeconds = newValue}
+  }
+  /// Returns true if `gracePeriodSeconds` has been explicitly set.
+  public var hasGracePeriodSeconds: Bool {return self._gracePeriodSeconds != nil}
+  /// Clears the value of `gracePeriodSeconds`. Subsequent reads from it will return its default value.
+  public mutating func clearGracePeriodSeconds() {self._gracePeriodSeconds = nil}
+
+  public var maxConcurrency: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+  fileprivate var _gracePeriodSeconds: Int64? = nil
+}
+
+public struct Kmgr_V1_DeleteTargetChunk: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var startIndex: UInt32 = 0
+
+  public var targets: [Kmgr_V1_DeleteTarget] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Kmgr_V1_ScaleRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1144,6 +1236,172 @@ extension Kmgr_V1_DeleteRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
     if lhs.propagationPolicy != rhs.propagationPolicy {return false}
     if lhs._gracePeriodSeconds != rhs._gracePeriodSeconds {return false}
     if lhs.maxConcurrency != rhs.maxConcurrency {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_DeleteManyRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeleteManyRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}sequence\0\u{1}start\0\u{1}targets\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.sequence) }()
+      case 2: try {
+        var v: Kmgr_V1_DeleteManyStart?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .start(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .start(v)
+        }
+      }()
+      case 3: try {
+        var v: Kmgr_V1_DeleteTargetChunk?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .targets(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .targets(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.sequence != 0 {
+      try visitor.visitSingularUInt64Field(value: self.sequence, fieldNumber: 1)
+    }
+    switch self.payload {
+    case .start?: try {
+      guard case .start(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    }()
+    case .targets?: try {
+      guard case .targets(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_DeleteManyRequest, rhs: Kmgr_V1_DeleteManyRequest) -> Bool {
+    if lhs.sequence != rhs.sequence {return false}
+    if lhs.payload != rhs.payload {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_DeleteManyStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeleteManyStart"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}operation_id\0\u{3}total_targets\0\u{3}propagation_policy\0\u{3}grace_period_seconds\0\u{3}max_concurrency\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.totalTargets) }()
+      case 4: try { try decoder.decodeSingularEnumField(value: &self.propagationPolicy) }()
+      case 5: try { try decoder.decodeSingularInt64Field(value: &self._gracePeriodSeconds) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.maxConcurrency) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.operationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
+    }
+    if self.totalTargets != 0 {
+      try visitor.visitSingularUInt32Field(value: self.totalTargets, fieldNumber: 3)
+    }
+    if self.propagationPolicy != .unspecified {
+      try visitor.visitSingularEnumField(value: self.propagationPolicy, fieldNumber: 4)
+    }
+    try { if let v = self._gracePeriodSeconds {
+      try visitor.visitSingularInt64Field(value: v, fieldNumber: 5)
+    } }()
+    if self.maxConcurrency != 0 {
+      try visitor.visitSingularUInt32Field(value: self.maxConcurrency, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_DeleteManyStart, rhs: Kmgr_V1_DeleteManyStart) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.operationID != rhs.operationID {return false}
+    if lhs.totalTargets != rhs.totalTargets {return false}
+    if lhs.propagationPolicy != rhs.propagationPolicy {return false}
+    if lhs._gracePeriodSeconds != rhs._gracePeriodSeconds {return false}
+    if lhs.maxConcurrency != rhs.maxConcurrency {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_DeleteTargetChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeleteTargetChunk"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}start_index\0\u{1}targets\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.startIndex) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.targets) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.startIndex != 0 {
+      try visitor.visitSingularUInt32Field(value: self.startIndex, fieldNumber: 1)
+    }
+    if !self.targets.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.targets, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_DeleteTargetChunk, rhs: Kmgr_V1_DeleteTargetChunk) -> Bool {
+    if lhs.startIndex != rhs.startIndex {return false}
+    if lhs.targets != rhs.targets {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

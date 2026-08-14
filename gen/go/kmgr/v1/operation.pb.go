@@ -819,6 +819,235 @@ func (x *DeleteRequest) GetMaxConcurrency() uint32 {
 	return 0
 }
 
+// Large delete selections are uploaded as bounded chunks. The first message
+// must contain start, all later messages contain contiguous target chunks,
+// and sequence starts at one and increases by one for every message.
+type DeleteManyRequest struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Sequence uint64                 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*DeleteManyRequest_Start
+	//	*DeleteManyRequest_Targets
+	Payload       isDeleteManyRequest_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteManyRequest) Reset() {
+	*x = DeleteManyRequest{}
+	mi := &file_kmgr_v1_operation_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteManyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteManyRequest) ProtoMessage() {}
+
+func (x *DeleteManyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_operation_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteManyRequest.ProtoReflect.Descriptor instead.
+func (*DeleteManyRequest) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *DeleteManyRequest) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *DeleteManyRequest) GetPayload() isDeleteManyRequest_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *DeleteManyRequest) GetStart() *DeleteManyStart {
+	if x != nil {
+		if x, ok := x.Payload.(*DeleteManyRequest_Start); ok {
+			return x.Start
+		}
+	}
+	return nil
+}
+
+func (x *DeleteManyRequest) GetTargets() *DeleteTargetChunk {
+	if x != nil {
+		if x, ok := x.Payload.(*DeleteManyRequest_Targets); ok {
+			return x.Targets
+		}
+	}
+	return nil
+}
+
+type isDeleteManyRequest_Payload interface {
+	isDeleteManyRequest_Payload()
+}
+
+type DeleteManyRequest_Start struct {
+	Start *DeleteManyStart `protobuf:"bytes,2,opt,name=start,proto3,oneof"`
+}
+
+type DeleteManyRequest_Targets struct {
+	Targets *DeleteTargetChunk `protobuf:"bytes,3,opt,name=targets,proto3,oneof"`
+}
+
+func (*DeleteManyRequest_Start) isDeleteManyRequest_Payload() {}
+
+func (*DeleteManyRequest_Targets) isDeleteManyRequest_Payload() {}
+
+type DeleteManyStart struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Context            *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	OperationId        string                 `protobuf:"bytes,2,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	TotalTargets       uint32                 `protobuf:"varint,3,opt,name=total_targets,json=totalTargets,proto3" json:"total_targets,omitempty"`
+	PropagationPolicy  PropagationPolicy      `protobuf:"varint,4,opt,name=propagation_policy,json=propagationPolicy,proto3,enum=kmgr.v1.PropagationPolicy" json:"propagation_policy,omitempty"`
+	GracePeriodSeconds *int64                 `protobuf:"varint,5,opt,name=grace_period_seconds,json=gracePeriodSeconds,proto3,oneof" json:"grace_period_seconds,omitempty"`
+	MaxConcurrency     uint32                 `protobuf:"varint,6,opt,name=max_concurrency,json=maxConcurrency,proto3" json:"max_concurrency,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *DeleteManyStart) Reset() {
+	*x = DeleteManyStart{}
+	mi := &file_kmgr_v1_operation_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteManyStart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteManyStart) ProtoMessage() {}
+
+func (x *DeleteManyStart) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_operation_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteManyStart.ProtoReflect.Descriptor instead.
+func (*DeleteManyStart) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *DeleteManyStart) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *DeleteManyStart) GetOperationId() string {
+	if x != nil {
+		return x.OperationId
+	}
+	return ""
+}
+
+func (x *DeleteManyStart) GetTotalTargets() uint32 {
+	if x != nil {
+		return x.TotalTargets
+	}
+	return 0
+}
+
+func (x *DeleteManyStart) GetPropagationPolicy() PropagationPolicy {
+	if x != nil {
+		return x.PropagationPolicy
+	}
+	return PropagationPolicy_PROPAGATION_POLICY_UNSPECIFIED
+}
+
+func (x *DeleteManyStart) GetGracePeriodSeconds() int64 {
+	if x != nil && x.GracePeriodSeconds != nil {
+		return *x.GracePeriodSeconds
+	}
+	return 0
+}
+
+func (x *DeleteManyStart) GetMaxConcurrency() uint32 {
+	if x != nil {
+		return x.MaxConcurrency
+	}
+	return 0
+}
+
+type DeleteTargetChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StartIndex    uint32                 `protobuf:"varint,1,opt,name=start_index,json=startIndex,proto3" json:"start_index,omitempty"`
+	Targets       []*DeleteTarget        `protobuf:"bytes,2,rep,name=targets,proto3" json:"targets,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteTargetChunk) Reset() {
+	*x = DeleteTargetChunk{}
+	mi := &file_kmgr_v1_operation_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteTargetChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteTargetChunk) ProtoMessage() {}
+
+func (x *DeleteTargetChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_operation_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteTargetChunk.ProtoReflect.Descriptor instead.
+func (*DeleteTargetChunk) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *DeleteTargetChunk) GetStartIndex() uint32 {
+	if x != nil {
+		return x.StartIndex
+	}
+	return 0
+}
+
+func (x *DeleteTargetChunk) GetTargets() []*DeleteTarget {
+	if x != nil {
+		return x.Targets
+	}
+	return nil
+}
+
 type ScaleRequest struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
 	Context                 *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
@@ -832,7 +1061,7 @@ type ScaleRequest struct {
 
 func (x *ScaleRequest) Reset() {
 	*x = ScaleRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[8]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -844,7 +1073,7 @@ func (x *ScaleRequest) String() string {
 func (*ScaleRequest) ProtoMessage() {}
 
 func (x *ScaleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[8]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -857,7 +1086,7 @@ func (x *ScaleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScaleRequest.ProtoReflect.Descriptor instead.
 func (*ScaleRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{8}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ScaleRequest) GetContext() *RequestContext {
@@ -907,7 +1136,7 @@ type RolloutRestartRequest struct {
 
 func (x *RolloutRestartRequest) Reset() {
 	*x = RolloutRestartRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[9]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -919,7 +1148,7 @@ func (x *RolloutRestartRequest) String() string {
 func (*RolloutRestartRequest) ProtoMessage() {}
 
 func (x *RolloutRestartRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[9]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -932,7 +1161,7 @@ func (x *RolloutRestartRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RolloutRestartRequest.ProtoReflect.Descriptor instead.
 func (*RolloutRestartRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{9}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *RolloutRestartRequest) GetContext() *RequestContext {
@@ -979,7 +1208,7 @@ type UpdateMetadataRequest struct {
 
 func (x *UpdateMetadataRequest) Reset() {
 	*x = UpdateMetadataRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[10]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -991,7 +1220,7 @@ func (x *UpdateMetadataRequest) String() string {
 func (*UpdateMetadataRequest) ProtoMessage() {}
 
 func (x *UpdateMetadataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[10]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1004,7 +1233,7 @@ func (x *UpdateMetadataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateMetadataRequest.ProtoReflect.Descriptor instead.
 func (*UpdateMetadataRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{10}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UpdateMetadataRequest) GetContext() *RequestContext {
@@ -1075,7 +1304,7 @@ type StartOperationResponse struct {
 
 func (x *StartOperationResponse) Reset() {
 	*x = StartOperationResponse{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[11]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1087,7 +1316,7 @@ func (x *StartOperationResponse) String() string {
 func (*StartOperationResponse) ProtoMessage() {}
 
 func (x *StartOperationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[11]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1100,7 +1329,7 @@ func (x *StartOperationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartOperationResponse.ProtoReflect.Descriptor instead.
 func (*StartOperationResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{11}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *StartOperationResponse) GetRequestId() string {
@@ -1143,7 +1372,7 @@ type WatchOperationRequest struct {
 
 func (x *WatchOperationRequest) Reset() {
 	*x = WatchOperationRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[12]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1155,7 +1384,7 @@ func (x *WatchOperationRequest) String() string {
 func (*WatchOperationRequest) ProtoMessage() {}
 
 func (x *WatchOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[12]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1168,7 +1397,7 @@ func (x *WatchOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchOperationRequest.ProtoReflect.Descriptor instead.
 func (*WatchOperationRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{12}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *WatchOperationRequest) GetContext() *RequestContext {
@@ -1211,7 +1440,7 @@ type OperationItemResult struct {
 
 func (x *OperationItemResult) Reset() {
 	*x = OperationItemResult{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[13]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1223,7 +1452,7 @@ func (x *OperationItemResult) String() string {
 func (*OperationItemResult) ProtoMessage() {}
 
 func (x *OperationItemResult) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[13]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1236,7 +1465,7 @@ func (x *OperationItemResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationItemResult.ProtoReflect.Descriptor instead.
 func (*OperationItemResult) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{13}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *OperationItemResult) GetIdentity() *ResourceIdentity {
@@ -1282,7 +1511,7 @@ type OperationEvent struct {
 
 func (x *OperationEvent) Reset() {
 	*x = OperationEvent{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[14]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1294,7 +1523,7 @@ func (x *OperationEvent) String() string {
 func (*OperationEvent) ProtoMessage() {}
 
 func (x *OperationEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[14]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1307,7 +1536,7 @@ func (x *OperationEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationEvent.ProtoReflect.Descriptor instead.
 func (*OperationEvent) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{14}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *OperationEvent) GetCursor() *StreamCursor {
@@ -1370,7 +1599,7 @@ type CancelOperationRequest struct {
 
 func (x *CancelOperationRequest) Reset() {
 	*x = CancelOperationRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[15]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1382,7 +1611,7 @@ func (x *CancelOperationRequest) String() string {
 func (*CancelOperationRequest) ProtoMessage() {}
 
 func (x *CancelOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[15]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1395,7 +1624,7 @@ func (x *CancelOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelOperationRequest.ProtoReflect.Descriptor instead.
 func (*CancelOperationRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{15}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CancelOperationRequest) GetContext() *RequestContext {
@@ -1476,7 +1705,24 @@ const file_kmgr_v1_operation_proto_rawDesc = "" +
 	"\x12propagation_policy\x18\x04 \x01(\x0e2\x1a.kmgr.v1.PropagationPolicyR\x11propagationPolicy\x125\n" +
 	"\x14grace_period_seconds\x18\x05 \x01(\x03H\x00R\x12gracePeriodSeconds\x88\x01\x01\x12'\n" +
 	"\x0fmax_concurrency\x18\x06 \x01(\rR\x0emaxConcurrencyB\x17\n" +
-	"\x15_grace_period_seconds\"\xf3\x01\n" +
+	"\x15_grace_period_seconds\"\xa4\x01\n" +
+	"\x11DeleteManyRequest\x12\x1a\n" +
+	"\bsequence\x18\x01 \x01(\x04R\bsequence\x120\n" +
+	"\x05start\x18\x02 \x01(\v2\x18.kmgr.v1.DeleteManyStartH\x00R\x05start\x126\n" +
+	"\atargets\x18\x03 \x01(\v2\x1a.kmgr.v1.DeleteTargetChunkH\x00R\atargetsB\t\n" +
+	"\apayload\"\xd0\x02\n" +
+	"\x0fDeleteManyStart\x121\n" +
+	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12!\n" +
+	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12#\n" +
+	"\rtotal_targets\x18\x03 \x01(\rR\ftotalTargets\x12I\n" +
+	"\x12propagation_policy\x18\x04 \x01(\x0e2\x1a.kmgr.v1.PropagationPolicyR\x11propagationPolicy\x125\n" +
+	"\x14grace_period_seconds\x18\x05 \x01(\x03H\x00R\x12gracePeriodSeconds\x88\x01\x01\x12'\n" +
+	"\x0fmax_concurrency\x18\x06 \x01(\rR\x0emaxConcurrencyB\x17\n" +
+	"\x15_grace_period_seconds\"e\n" +
+	"\x11DeleteTargetChunk\x12\x1f\n" +
+	"\vstart_index\x18\x01 \x01(\rR\n" +
+	"startIndex\x12/\n" +
+	"\atargets\x18\x02 \x03(\v2\x15.kmgr.v1.DeleteTargetR\atargets\"\xf3\x01\n" +
 	"\fScaleRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x125\n" +
@@ -1548,13 +1794,15 @@ const file_kmgr_v1_operation_proto_rawDesc = "" +
 	"\x1eOPERATION_ITEM_STATE_SUCCEEDED\x10\x03\x12\x1f\n" +
 	"\x1bOPERATION_ITEM_STATE_FAILED\x10\x04\x12 \n" +
 	"\x1cOPERATION_ITEM_STATE_SKIPPED\x10\x05\x12\"\n" +
-	"\x1eOPERATION_ITEM_STATE_CANCELLED\x10\x062\xc1\x05\n" +
+	"\x1eOPERATION_ITEM_STATE_CANCELLED\x10\x062\x8e\x06\n" +
 	"\x10OperationService\x12T\n" +
 	"\x0fPrepareYamlEdit\x12\x1f.kmgr.v1.PrepareYamlEditRequest\x1a .kmgr.v1.PrepareYamlEditResponse\x12G\n" +
 	"\tApplyYaml\x12\x19.kmgr.v1.ApplyYamlRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12I\n" +
 	"\n" +
 	"UpdateData\x12\x1a.kmgr.v1.UpdateDataRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12A\n" +
-	"\x06Delete\x12\x16.kmgr.v1.DeleteRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12?\n" +
+	"\x06Delete\x12\x16.kmgr.v1.DeleteRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12K\n" +
+	"\n" +
+	"DeleteMany\x12\x1a.kmgr.v1.DeleteManyRequest\x1a\x1f.kmgr.v1.StartOperationResponse(\x01\x12?\n" +
 	"\x05Scale\x12\x15.kmgr.v1.ScaleRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12Q\n" +
 	"\x0eRolloutRestart\x12\x1e.kmgr.v1.RolloutRestartRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12Q\n" +
 	"\x0eUpdateMetadata\x12\x1e.kmgr.v1.UpdateMetadataRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12K\n" +
@@ -1574,7 +1822,7 @@ func file_kmgr_v1_operation_proto_rawDescGZIP() []byte {
 }
 
 var file_kmgr_v1_operation_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_kmgr_v1_operation_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_kmgr_v1_operation_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_kmgr_v1_operation_proto_goTypes = []any{
 	(DataMutationType)(0),           // 0: kmgr.v1.DataMutationType
 	(OperationState)(0),             // 1: kmgr.v1.OperationState
@@ -1587,84 +1835,94 @@ var file_kmgr_v1_operation_proto_goTypes = []any{
 	(*UpdateDataRequest)(nil),       // 8: kmgr.v1.UpdateDataRequest
 	(*DeleteTarget)(nil),            // 9: kmgr.v1.DeleteTarget
 	(*DeleteRequest)(nil),           // 10: kmgr.v1.DeleteRequest
-	(*ScaleRequest)(nil),            // 11: kmgr.v1.ScaleRequest
-	(*RolloutRestartRequest)(nil),   // 12: kmgr.v1.RolloutRestartRequest
-	(*UpdateMetadataRequest)(nil),   // 13: kmgr.v1.UpdateMetadataRequest
-	(*StartOperationResponse)(nil),  // 14: kmgr.v1.StartOperationResponse
-	(*WatchOperationRequest)(nil),   // 15: kmgr.v1.WatchOperationRequest
-	(*OperationItemResult)(nil),     // 16: kmgr.v1.OperationItemResult
-	(*OperationEvent)(nil),          // 17: kmgr.v1.OperationEvent
-	(*CancelOperationRequest)(nil),  // 18: kmgr.v1.CancelOperationRequest
-	(*RequestContext)(nil),          // 19: kmgr.v1.RequestContext
-	(*ResourceIdentity)(nil),        // 20: kmgr.v1.ResourceIdentity
-	(CellSeverity)(0),               // 21: kmgr.v1.CellSeverity
-	(*StructuredError)(nil),         // 22: kmgr.v1.StructuredError
-	(DataEntryKind)(0),              // 23: kmgr.v1.DataEntryKind
-	(PropagationPolicy)(0),          // 24: kmgr.v1.PropagationPolicy
-	(*StringMapEntry)(nil),          // 25: kmgr.v1.StringMapEntry
-	(*StreamCursor)(nil),            // 26: kmgr.v1.StreamCursor
-	(*Acknowledgement)(nil),         // 27: kmgr.v1.Acknowledgement
+	(*DeleteManyRequest)(nil),       // 11: kmgr.v1.DeleteManyRequest
+	(*DeleteManyStart)(nil),         // 12: kmgr.v1.DeleteManyStart
+	(*DeleteTargetChunk)(nil),       // 13: kmgr.v1.DeleteTargetChunk
+	(*ScaleRequest)(nil),            // 14: kmgr.v1.ScaleRequest
+	(*RolloutRestartRequest)(nil),   // 15: kmgr.v1.RolloutRestartRequest
+	(*UpdateMetadataRequest)(nil),   // 16: kmgr.v1.UpdateMetadataRequest
+	(*StartOperationResponse)(nil),  // 17: kmgr.v1.StartOperationResponse
+	(*WatchOperationRequest)(nil),   // 18: kmgr.v1.WatchOperationRequest
+	(*OperationItemResult)(nil),     // 19: kmgr.v1.OperationItemResult
+	(*OperationEvent)(nil),          // 20: kmgr.v1.OperationEvent
+	(*CancelOperationRequest)(nil),  // 21: kmgr.v1.CancelOperationRequest
+	(*RequestContext)(nil),          // 22: kmgr.v1.RequestContext
+	(*ResourceIdentity)(nil),        // 23: kmgr.v1.ResourceIdentity
+	(CellSeverity)(0),               // 24: kmgr.v1.CellSeverity
+	(*StructuredError)(nil),         // 25: kmgr.v1.StructuredError
+	(DataEntryKind)(0),              // 26: kmgr.v1.DataEntryKind
+	(PropagationPolicy)(0),          // 27: kmgr.v1.PropagationPolicy
+	(*StringMapEntry)(nil),          // 28: kmgr.v1.StringMapEntry
+	(*StreamCursor)(nil),            // 29: kmgr.v1.StreamCursor
+	(*Acknowledgement)(nil),         // 30: kmgr.v1.Acknowledgement
 }
 var file_kmgr_v1_operation_proto_depIdxs = []int32{
-	19, // 0: kmgr.v1.PrepareYamlEditRequest.context:type_name -> kmgr.v1.RequestContext
-	20, // 1: kmgr.v1.PrepareYamlEditRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	21, // 2: kmgr.v1.SemanticDiffEntry.severity:type_name -> kmgr.v1.CellSeverity
-	20, // 3: kmgr.v1.PrepareYamlEditResponse.identity:type_name -> kmgr.v1.ResourceIdentity
+	22, // 0: kmgr.v1.PrepareYamlEditRequest.context:type_name -> kmgr.v1.RequestContext
+	23, // 1: kmgr.v1.PrepareYamlEditRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	24, // 2: kmgr.v1.SemanticDiffEntry.severity:type_name -> kmgr.v1.CellSeverity
+	23, // 3: kmgr.v1.PrepareYamlEditResponse.identity:type_name -> kmgr.v1.ResourceIdentity
 	4,  // 4: kmgr.v1.PrepareYamlEditResponse.diff:type_name -> kmgr.v1.SemanticDiffEntry
-	22, // 5: kmgr.v1.PrepareYamlEditResponse.validation_errors:type_name -> kmgr.v1.StructuredError
-	22, // 6: kmgr.v1.PrepareYamlEditResponse.error:type_name -> kmgr.v1.StructuredError
-	19, // 7: kmgr.v1.ApplyYamlRequest.context:type_name -> kmgr.v1.RequestContext
-	20, // 8: kmgr.v1.ApplyYamlRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	25, // 5: kmgr.v1.PrepareYamlEditResponse.validation_errors:type_name -> kmgr.v1.StructuredError
+	25, // 6: kmgr.v1.PrepareYamlEditResponse.error:type_name -> kmgr.v1.StructuredError
+	22, // 7: kmgr.v1.ApplyYamlRequest.context:type_name -> kmgr.v1.RequestContext
+	23, // 8: kmgr.v1.ApplyYamlRequest.identity:type_name -> kmgr.v1.ResourceIdentity
 	0,  // 9: kmgr.v1.DataMutation.type:type_name -> kmgr.v1.DataMutationType
-	23, // 10: kmgr.v1.DataMutation.entry_kind:type_name -> kmgr.v1.DataEntryKind
-	19, // 11: kmgr.v1.UpdateDataRequest.context:type_name -> kmgr.v1.RequestContext
-	20, // 12: kmgr.v1.UpdateDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	26, // 10: kmgr.v1.DataMutation.entry_kind:type_name -> kmgr.v1.DataEntryKind
+	22, // 11: kmgr.v1.UpdateDataRequest.context:type_name -> kmgr.v1.RequestContext
+	23, // 12: kmgr.v1.UpdateDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
 	7,  // 13: kmgr.v1.UpdateDataRequest.mutations:type_name -> kmgr.v1.DataMutation
-	20, // 14: kmgr.v1.DeleteTarget.identity:type_name -> kmgr.v1.ResourceIdentity
-	19, // 15: kmgr.v1.DeleteRequest.context:type_name -> kmgr.v1.RequestContext
+	23, // 14: kmgr.v1.DeleteTarget.identity:type_name -> kmgr.v1.ResourceIdentity
+	22, // 15: kmgr.v1.DeleteRequest.context:type_name -> kmgr.v1.RequestContext
 	9,  // 16: kmgr.v1.DeleteRequest.targets:type_name -> kmgr.v1.DeleteTarget
-	24, // 17: kmgr.v1.DeleteRequest.propagation_policy:type_name -> kmgr.v1.PropagationPolicy
-	19, // 18: kmgr.v1.ScaleRequest.context:type_name -> kmgr.v1.RequestContext
-	20, // 19: kmgr.v1.ScaleRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	19, // 20: kmgr.v1.RolloutRestartRequest.context:type_name -> kmgr.v1.RequestContext
-	20, // 21: kmgr.v1.RolloutRestartRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	19, // 22: kmgr.v1.UpdateMetadataRequest.context:type_name -> kmgr.v1.RequestContext
-	20, // 23: kmgr.v1.UpdateMetadataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	25, // 24: kmgr.v1.UpdateMetadataRequest.labels:type_name -> kmgr.v1.StringMapEntry
-	25, // 25: kmgr.v1.UpdateMetadataRequest.annotations:type_name -> kmgr.v1.StringMapEntry
-	22, // 26: kmgr.v1.StartOperationResponse.error:type_name -> kmgr.v1.StructuredError
-	19, // 27: kmgr.v1.WatchOperationRequest.context:type_name -> kmgr.v1.RequestContext
-	20, // 28: kmgr.v1.OperationItemResult.identity:type_name -> kmgr.v1.ResourceIdentity
-	2,  // 29: kmgr.v1.OperationItemResult.state:type_name -> kmgr.v1.OperationItemState
-	22, // 30: kmgr.v1.OperationItemResult.error:type_name -> kmgr.v1.StructuredError
-	26, // 31: kmgr.v1.OperationEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	1,  // 32: kmgr.v1.OperationEvent.state:type_name -> kmgr.v1.OperationState
-	16, // 33: kmgr.v1.OperationEvent.item_results:type_name -> kmgr.v1.OperationItemResult
-	22, // 34: kmgr.v1.OperationEvent.error:type_name -> kmgr.v1.StructuredError
-	19, // 35: kmgr.v1.CancelOperationRequest.context:type_name -> kmgr.v1.RequestContext
-	3,  // 36: kmgr.v1.OperationService.PrepareYamlEdit:input_type -> kmgr.v1.PrepareYamlEditRequest
-	6,  // 37: kmgr.v1.OperationService.ApplyYaml:input_type -> kmgr.v1.ApplyYamlRequest
-	8,  // 38: kmgr.v1.OperationService.UpdateData:input_type -> kmgr.v1.UpdateDataRequest
-	10, // 39: kmgr.v1.OperationService.Delete:input_type -> kmgr.v1.DeleteRequest
-	11, // 40: kmgr.v1.OperationService.Scale:input_type -> kmgr.v1.ScaleRequest
-	12, // 41: kmgr.v1.OperationService.RolloutRestart:input_type -> kmgr.v1.RolloutRestartRequest
-	13, // 42: kmgr.v1.OperationService.UpdateMetadata:input_type -> kmgr.v1.UpdateMetadataRequest
-	15, // 43: kmgr.v1.OperationService.WatchOperation:input_type -> kmgr.v1.WatchOperationRequest
-	18, // 44: kmgr.v1.OperationService.CancelOperation:input_type -> kmgr.v1.CancelOperationRequest
-	5,  // 45: kmgr.v1.OperationService.PrepareYamlEdit:output_type -> kmgr.v1.PrepareYamlEditResponse
-	14, // 46: kmgr.v1.OperationService.ApplyYaml:output_type -> kmgr.v1.StartOperationResponse
-	14, // 47: kmgr.v1.OperationService.UpdateData:output_type -> kmgr.v1.StartOperationResponse
-	14, // 48: kmgr.v1.OperationService.Delete:output_type -> kmgr.v1.StartOperationResponse
-	14, // 49: kmgr.v1.OperationService.Scale:output_type -> kmgr.v1.StartOperationResponse
-	14, // 50: kmgr.v1.OperationService.RolloutRestart:output_type -> kmgr.v1.StartOperationResponse
-	14, // 51: kmgr.v1.OperationService.UpdateMetadata:output_type -> kmgr.v1.StartOperationResponse
-	17, // 52: kmgr.v1.OperationService.WatchOperation:output_type -> kmgr.v1.OperationEvent
-	27, // 53: kmgr.v1.OperationService.CancelOperation:output_type -> kmgr.v1.Acknowledgement
-	45, // [45:54] is the sub-list for method output_type
-	36, // [36:45] is the sub-list for method input_type
-	36, // [36:36] is the sub-list for extension type_name
-	36, // [36:36] is the sub-list for extension extendee
-	0,  // [0:36] is the sub-list for field type_name
+	27, // 17: kmgr.v1.DeleteRequest.propagation_policy:type_name -> kmgr.v1.PropagationPolicy
+	12, // 18: kmgr.v1.DeleteManyRequest.start:type_name -> kmgr.v1.DeleteManyStart
+	13, // 19: kmgr.v1.DeleteManyRequest.targets:type_name -> kmgr.v1.DeleteTargetChunk
+	22, // 20: kmgr.v1.DeleteManyStart.context:type_name -> kmgr.v1.RequestContext
+	27, // 21: kmgr.v1.DeleteManyStart.propagation_policy:type_name -> kmgr.v1.PropagationPolicy
+	9,  // 22: kmgr.v1.DeleteTargetChunk.targets:type_name -> kmgr.v1.DeleteTarget
+	22, // 23: kmgr.v1.ScaleRequest.context:type_name -> kmgr.v1.RequestContext
+	23, // 24: kmgr.v1.ScaleRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	22, // 25: kmgr.v1.RolloutRestartRequest.context:type_name -> kmgr.v1.RequestContext
+	23, // 26: kmgr.v1.RolloutRestartRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	22, // 27: kmgr.v1.UpdateMetadataRequest.context:type_name -> kmgr.v1.RequestContext
+	23, // 28: kmgr.v1.UpdateMetadataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	28, // 29: kmgr.v1.UpdateMetadataRequest.labels:type_name -> kmgr.v1.StringMapEntry
+	28, // 30: kmgr.v1.UpdateMetadataRequest.annotations:type_name -> kmgr.v1.StringMapEntry
+	25, // 31: kmgr.v1.StartOperationResponse.error:type_name -> kmgr.v1.StructuredError
+	22, // 32: kmgr.v1.WatchOperationRequest.context:type_name -> kmgr.v1.RequestContext
+	23, // 33: kmgr.v1.OperationItemResult.identity:type_name -> kmgr.v1.ResourceIdentity
+	2,  // 34: kmgr.v1.OperationItemResult.state:type_name -> kmgr.v1.OperationItemState
+	25, // 35: kmgr.v1.OperationItemResult.error:type_name -> kmgr.v1.StructuredError
+	29, // 36: kmgr.v1.OperationEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	1,  // 37: kmgr.v1.OperationEvent.state:type_name -> kmgr.v1.OperationState
+	19, // 38: kmgr.v1.OperationEvent.item_results:type_name -> kmgr.v1.OperationItemResult
+	25, // 39: kmgr.v1.OperationEvent.error:type_name -> kmgr.v1.StructuredError
+	22, // 40: kmgr.v1.CancelOperationRequest.context:type_name -> kmgr.v1.RequestContext
+	3,  // 41: kmgr.v1.OperationService.PrepareYamlEdit:input_type -> kmgr.v1.PrepareYamlEditRequest
+	6,  // 42: kmgr.v1.OperationService.ApplyYaml:input_type -> kmgr.v1.ApplyYamlRequest
+	8,  // 43: kmgr.v1.OperationService.UpdateData:input_type -> kmgr.v1.UpdateDataRequest
+	10, // 44: kmgr.v1.OperationService.Delete:input_type -> kmgr.v1.DeleteRequest
+	11, // 45: kmgr.v1.OperationService.DeleteMany:input_type -> kmgr.v1.DeleteManyRequest
+	14, // 46: kmgr.v1.OperationService.Scale:input_type -> kmgr.v1.ScaleRequest
+	15, // 47: kmgr.v1.OperationService.RolloutRestart:input_type -> kmgr.v1.RolloutRestartRequest
+	16, // 48: kmgr.v1.OperationService.UpdateMetadata:input_type -> kmgr.v1.UpdateMetadataRequest
+	18, // 49: kmgr.v1.OperationService.WatchOperation:input_type -> kmgr.v1.WatchOperationRequest
+	21, // 50: kmgr.v1.OperationService.CancelOperation:input_type -> kmgr.v1.CancelOperationRequest
+	5,  // 51: kmgr.v1.OperationService.PrepareYamlEdit:output_type -> kmgr.v1.PrepareYamlEditResponse
+	17, // 52: kmgr.v1.OperationService.ApplyYaml:output_type -> kmgr.v1.StartOperationResponse
+	17, // 53: kmgr.v1.OperationService.UpdateData:output_type -> kmgr.v1.StartOperationResponse
+	17, // 54: kmgr.v1.OperationService.Delete:output_type -> kmgr.v1.StartOperationResponse
+	17, // 55: kmgr.v1.OperationService.DeleteMany:output_type -> kmgr.v1.StartOperationResponse
+	17, // 56: kmgr.v1.OperationService.Scale:output_type -> kmgr.v1.StartOperationResponse
+	17, // 57: kmgr.v1.OperationService.RolloutRestart:output_type -> kmgr.v1.StartOperationResponse
+	17, // 58: kmgr.v1.OperationService.UpdateMetadata:output_type -> kmgr.v1.StartOperationResponse
+	20, // 59: kmgr.v1.OperationService.WatchOperation:output_type -> kmgr.v1.OperationEvent
+	30, // 60: kmgr.v1.OperationService.CancelOperation:output_type -> kmgr.v1.Acknowledgement
+	51, // [51:61] is the sub-list for method output_type
+	41, // [41:51] is the sub-list for method input_type
+	41, // [41:41] is the sub-list for extension type_name
+	41, // [41:41] is the sub-list for extension extendee
+	0,  // [0:41] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_operation_proto_init() }
@@ -1675,13 +1933,18 @@ func file_kmgr_v1_operation_proto_init() {
 	file_kmgr_v1_common_proto_init()
 	file_kmgr_v1_object_proto_init()
 	file_kmgr_v1_operation_proto_msgTypes[7].OneofWrappers = []any{}
+	file_kmgr_v1_operation_proto_msgTypes[8].OneofWrappers = []any{
+		(*DeleteManyRequest_Start)(nil),
+		(*DeleteManyRequest_Targets)(nil),
+	}
+	file_kmgr_v1_operation_proto_msgTypes[9].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_operation_proto_rawDesc), len(file_kmgr_v1_operation_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   16,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

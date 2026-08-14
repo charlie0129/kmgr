@@ -11,6 +11,13 @@ public protocol OperationRPC: Sendable {
         timeout: Duration
     ) async throws -> Kmgr_V1_StartOperationResponse
 
+    func deleteMany(
+        start: Kmgr_V1_DeleteManyStart,
+        targets: [Kmgr_V1_DeleteTarget],
+        chunkSize: Int,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_StartOperationResponse
+
     func scale(
         request: Kmgr_V1_ScaleRequest,
         timeout: Duration
@@ -29,7 +36,7 @@ public protocol OperationRPC: Sendable {
     func watch(
         request: Kmgr_V1_WatchOperationRequest,
         timeout: Duration,
-        receive: @escaping @Sendable (Kmgr_V1_OperationEvent) throws -> Void
+        receive: @escaping @Sendable (Kmgr_V1_OperationEvent) async throws -> Void
     ) async throws
 
     func cancel(
@@ -52,6 +59,41 @@ public struct EngineOperationRPC: OperationRPC {
         try await connection.operationClient().delete(
             request,
             options: callOptions(timeout)
+        )
+    }
+
+    public func deleteMany(
+        start: Kmgr_V1_DeleteManyStart,
+        targets: [Kmgr_V1_DeleteTarget],
+        chunkSize: Int,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_StartOperationResponse {
+        precondition(chunkSize > 0)
+        var options = callOptions(timeout)
+        options.waitForReady = false
+        return try await connection.operationClient().deleteMany(
+            options: options,
+            requestProducer: { writer in
+                var startMessage = Kmgr_V1_DeleteManyRequest()
+                startMessage.sequence = 1
+                startMessage.start = start
+                try await writer.write(startMessage)
+
+                var sequence: UInt64 = 2
+                var startIndex = 0
+                while startIndex < targets.count {
+                    let endIndex = min(startIndex + chunkSize, targets.count)
+                    var chunk = Kmgr_V1_DeleteTargetChunk()
+                    chunk.startIndex = UInt32(startIndex)
+                    chunk.targets = Array(targets[startIndex..<endIndex])
+                    var message = Kmgr_V1_DeleteManyRequest()
+                    message.sequence = sequence
+                    message.targets = chunk
+                    try await writer.write(message)
+                    sequence += 1
+                    startIndex = endIndex
+                }
+            }
         )
     }
 
@@ -88,14 +130,14 @@ public struct EngineOperationRPC: OperationRPC {
     public func watch(
         request: Kmgr_V1_WatchOperationRequest,
         timeout: Duration,
-        receive: @escaping @Sendable (Kmgr_V1_OperationEvent) throws -> Void
+        receive: @escaping @Sendable (Kmgr_V1_OperationEvent) async throws -> Void
     ) async throws {
         try await connection.operationClient().watchOperation(
             request,
             options: callOptions(timeout)
         ) { response in
             for try await event in response.messages {
-                try receive(event)
+                try await receive(event)
             }
         }
     }
@@ -120,6 +162,9 @@ public struct EngineOperationRPC: OperationRPC {
 
 public struct EngineOperationProvider: ResourceOperationProviding {
     private static let maximumDeleteConcurrency: UInt32 = 16
+    private static let maximumUnaryDeleteTargets = 512
+    private static let maximumDeleteTargets = 250_000
+    private static let deleteTargetChunkSize = 128
 
     private let rpc: any OperationRPC
     private let unaryTimeout: Duration
@@ -199,6 +244,13 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                     )
                 }
             }
+            guard targets.count <= Self.maximumDeleteTargets else {
+                throw Self.validationIssue(
+                    reason: "TooManyDeleteTargets",
+                    message: "A delete operation supports at most \(Self.maximumDeleteTargets) resources.",
+                    operation: operation
+                )
+            }
             if let grace = options.gracePeriodSeconds, grace < 0 {
                 throw Self.validationIssue(
                     reason: "InvalidGracePeriod",
@@ -215,24 +267,48 @@ public struct EngineOperationProvider: ResourceOperationProviding {
             }
 
             let operationID = requestID()
-            var request = Kmgr_V1_DeleteRequest()
-            request.context = makeContext(sessionID: sessionID, timeout: unaryTimeout)
-            request.operationID = operationID
-            request.targets = targets.map { target in
+            // A large, bounded selection can legitimately take much longer
+            // than the submission RPC. The accepted operation keeps this
+            // application deadline after the client-stream upload completes.
+            let context = makeContext(sessionID: sessionID, timeout: streamTimeout)
+            let protoTargets = targets.map { target in
                 var result = Kmgr_V1_DeleteTarget()
                 result.identity = Self.protoIdentity(target.identity)
                 result.hiddenByFilter = target.hiddenByFilter
                 return result
             }
-            request.propagationPolicy = Self.propagation(options.propagationPolicy)
-            if let grace = options.gracePeriodSeconds {
-                request.gracePeriodSeconds = grace
+            let response: Kmgr_V1_StartOperationResponse
+            if protoTargets.count <= Self.maximumUnaryDeleteTargets {
+                var request = Kmgr_V1_DeleteRequest()
+                request.context = context
+                request.operationID = operationID
+                request.targets = protoTargets
+                request.propagationPolicy = Self.propagation(options.propagationPolicy)
+                if let grace = options.gracePeriodSeconds {
+                    request.gracePeriodSeconds = grace
+                }
+                request.maxConcurrency = options.maxConcurrency
+                response = try await rpc.delete(request: request, timeout: unaryTimeout)
+            } else {
+                var start = Kmgr_V1_DeleteManyStart()
+                start.context = context
+                start.operationID = operationID
+                start.totalTargets = UInt32(protoTargets.count)
+                start.propagationPolicy = Self.propagation(options.propagationPolicy)
+                if let grace = options.gracePeriodSeconds {
+                    start.gracePeriodSeconds = grace
+                }
+                start.maxConcurrency = options.maxConcurrency
+                response = try await rpc.deleteMany(
+                    start: start,
+                    targets: protoTargets,
+                    chunkSize: Self.deleteTargetChunkSize,
+                    timeout: unaryTimeout
+                )
             }
-            request.maxConcurrency = options.maxConcurrency
-            let response = try await rpc.delete(request: request, timeout: unaryTimeout)
             try Self.validateStart(
                 response,
-                requestID: request.context.requestID,
+                requestID: context.requestID,
                 operationID: operationID,
                 operation: operation
             )
@@ -437,7 +513,11 @@ public struct EngineOperationProvider: ResourceOperationProviding {
         let requestValue = request
         let rpc = self.rpc
         let timeout = streamTimeout
+        let cancellationTimeout = controlTimeout
         let limit = maximumBufferedMessages
+        let now = self.now
+        let requestID = self.requestID
+        let lifetime = OperationWatchLifetime()
 
         return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(limit)) { continuation in
             let task = Task.detached(priority: .userInitiated) {
@@ -445,7 +525,7 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                     try await rpc.watch(request: requestValue, timeout: timeout) { event in
                         guard event.cursor.streamID == streamID,
                             event.cursor.generation == requestValue.generation,
-                            event.cursor.sequence > 0,
+                            lifetime.accept(sequence: event.cursor.sequence),
                             event.operationID == operationID,
                             event.itemResults.allSatisfy({ result in
                                 result.hasIdentity && expectedIdentities.contains(
@@ -455,16 +535,15 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                         else {
                             throw OperationBridgeError.progressEnvelopeMismatch
                         }
-                        switch continuation.yield(Self.progress(event)) {
-                        case .enqueued:
-                            break
-                        case .dropped:
-                            throw OperationBridgeError.bufferExceeded(limit)
-                        case .terminated:
-                            throw CancellationError()
-                        @unknown default:
-                            throw OperationBridgeError.bufferExceeded(limit)
+                        let progress = Self.progress(event)
+                        if progress.state.isTerminal {
+                            lifetime.markTerminal()
                         }
+                        try await Self.yieldWithBackpressure(
+                            progress,
+                            to: continuation,
+                            limit: limit
+                        )
                     }
                     continuation.finish()
                 } catch {
@@ -478,7 +557,42 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                     }
                 }
             }
-            continuation.onTermination = { @Sendable _ in task.cancel() }
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
+                guard lifetime.claimPrematureCancellation() else { return }
+                Task.detached {
+                    var request = Kmgr_V1_CancelOperationRequest()
+                    request.context.requestID = requestID()
+                    request.context.clusterSessionID = sessionID
+                    request.context.deadlineUnixMs = Int64(
+                        (now().timeIntervalSince1970 + Self.seconds(cancellationTimeout)) * 1_000
+                    )
+                    request.operationID = operationID
+                    _ = try? await rpc.cancel(request: request, timeout: cancellationTimeout)
+                }
+            }
+        }
+    }
+
+    private static func yieldWithBackpressure(
+        _ value: OperationProgress,
+        to continuation: AsyncThrowingStream<OperationProgress, Error>.Continuation,
+        limit: Int
+    ) async throws {
+        while true {
+            switch continuation.yield(value) {
+            case .enqueued:
+                return
+            case .dropped:
+                // AsyncThrowingStream has no producer suspension primitive.
+                // Retrying a dropped newest value provides bounded backpressure
+                // while preserving every exact per-item terminal result.
+                try await Task.sleep(for: .milliseconds(1))
+            case .terminated:
+                throw CancellationError()
+            @unknown default:
+                throw OperationBridgeError.bufferExceeded(limit)
+            }
         }
     }
 
@@ -767,4 +881,33 @@ public struct EngineOperationProvider: ResourceOperationProviding {
 private enum OperationBridgeError: Error {
     case progressEnvelopeMismatch
     case bufferExceeded(Int)
+}
+
+private final class OperationWatchLifetime: @unchecked Sendable {
+    private let lock = NSLock()
+    private var terminal = false
+    private var cancellationClaimed = false
+    private var lastSequence: UInt64 = 0
+
+    func accept(sequence: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard sequence > lastSequence else { return false }
+        lastSequence = sequence
+        return true
+    }
+
+    func markTerminal() {
+        lock.lock()
+        terminal = true
+        lock.unlock()
+    }
+
+    func claimPrematureCancellation() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !terminal, !cancellationClaimed else { return false }
+        cancellationClaimed = true
+        return true
+    }
 }

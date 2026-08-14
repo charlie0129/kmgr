@@ -13,6 +13,7 @@ service OperationService {
   rpc ApplyYaml(ApplyYamlRequest) returns (StartOperationResponse);
   rpc UpdateData(UpdateDataRequest) returns (StartOperationResponse);
   rpc Delete(DeleteRequest) returns (StartOperationResponse);
+  rpc DeleteMany(stream DeleteManyRequest) returns (StartOperationResponse);
   rpc Scale(ScaleRequest) returns (StartOperationResponse);
   rpc RolloutRestart(RolloutRestartRequest) returns (StartOperationResponse);
   rpc UpdateMetadata(UpdateMetadataRequest) returns (StartOperationResponse);
@@ -93,6 +94,31 @@ message DeleteRequest {
   uint32 max_concurrency = 6;
 }
 
+// Large delete selections are uploaded as bounded chunks. The first message
+// must contain start, all later messages contain contiguous target chunks,
+// and sequence starts at one and increases by one for every message.
+message DeleteManyRequest {
+  uint64 sequence = 1;
+  oneof payload {
+    DeleteManyStart start = 2;
+    DeleteTargetChunk targets = 3;
+  }
+}
+
+message DeleteManyStart {
+  RequestContext context = 1;
+  string operation_id = 2;
+  uint32 total_targets = 3;
+  PropagationPolicy propagation_policy = 4;
+  optional int64 grace_period_seconds = 5;
+  uint32 max_concurrency = 6;
+}
+
+message DeleteTargetChunk {
+  uint32 start_index = 1;
+  repeated DeleteTarget targets = 2;
+}
+
 message ScaleRequest {
   RequestContext context = 1;
   string operation_id = 2;
@@ -166,6 +192,9 @@ message OperationEvent {
   OperationState state = 3;
   uint32 completed_items = 4;
   uint32 total_items = 5;
+  // A bounded delta. Each terminal item is emitted exactly once per watch;
+  // clients merge results by ResourceIdentity.uid. A newly attached watch
+  // replays terminal results from the beginning in bounded chunks.
   repeated OperationItemResult item_results = 6;
   StructuredError error = 7;
 }
