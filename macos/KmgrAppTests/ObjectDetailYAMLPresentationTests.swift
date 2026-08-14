@@ -158,6 +158,79 @@ struct ObjectDetailYAMLPresentationTests {
         ruler.drawHashMarksAndLabels(in: ruler.bounds)
         image.unlockFocus()
     }
+
+    @Test("Data key table exposes metadata columns without Secret previews")
+    func secretDataKeyTableColumnsAndConcealment() async throws {
+        let sentinel = "do-not-render-this-secret-value"
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: "secrets",
+            namespace: "dev",
+            name: "credentials",
+            uid: ResourceUID("uid")
+        )
+        let provider = LoadedObjectDetailProvider(
+            detail: ObjectDetail(identity: identity, resourceVersion: "rv-1"),
+            data: ObjectData(
+                identity: identity,
+                resourceVersion: "rv-1",
+                entries: [ObjectDataEntry(
+                    key: "token",
+                    kind: .text,
+                    value: Data(sentinel.utf8),
+                    byteSize: UInt64(sentinel.utf8.count),
+                    contentHash: Data(repeating: 7, count: 32)
+                )],
+                secret: true
+            )
+        )
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: provider,
+            initialTab: .data
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let root = controller.view
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "ConfigMap and Secret data keys" })
+        try await waitUntil { table.numberOfRows == 1 }
+
+        #expect(table.headerView != nil)
+        #expect(table.tableColumns.map(\.title) == ["Key", "Type", "Size", "State"])
+        #expect(table.tableColumns.map { $0.identifier.rawValue } == ["key", "type", "size", "state"])
+        #expect(table.allowsMultipleSelection == false)
+
+        var renderedValues: [String] = []
+        for columnIndex in table.tableColumns.indices {
+            let cell = try #require(table.view(
+                atColumn: columnIndex,
+                row: 0,
+                makeIfNecessary: true
+            ) as? NSTableCellView)
+            renderedValues.append(cell.textField?.stringValue ?? "")
+            #expect((cell.accessibilityValue() as? String)?.contains(sentinel) != true)
+        }
+        #expect(renderedValues[0] == "token")
+        #expect(renderedValues[1] == "text")
+        #expect(renderedValues[2].hasSuffix("bytes"))
+        #expect(renderedValues[3] == "Saved")
+        #expect(!renderedValues.joined(separator: " ").contains(sentinel))
+
+        let split = try #require(descendants(of: root).compactMap { $0 as? NSSplitView }
+            .first { $0.identifier?.rawValue == "object-detail-data-split" })
+        let keyScroll = try #require(descendants(of: root).compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "object-detail-data-keys-scroll" })
+        #expect(split.isVertical)
+        #expect(split.arrangedSubviews.count == 2)
+        #expect(split.arrangedSubviews[0] === keyScroll)
+        #expect(split.holdingPriorityForSubview(at: 0) == .defaultHigh)
+        #expect(keyScroll.hasHorizontalScroller)
+    }
 }
 
 private struct NoopObjectDetailProvider: ObjectDetailProviding {
@@ -228,7 +301,89 @@ private struct NoopObjectDetailProvider: ObjectDetailProviding {
     }
 }
 
+private struct LoadedObjectDetailProvider: ObjectDetailProviding {
+    var detail: ObjectDetail
+    var data: ObjectData
+
+    func getObject(identity: ResourceIdentity) async throws -> ObjectDetail { detail }
+
+    func watchObject(
+        identity: ResourceIdentity,
+        resourceVersion: String
+    ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
+        -> [KubernetesObjectEvent]
+    {
+        []
+    }
+
+    func getRelationships(
+        identity: ResourceIdentity,
+        includeChildren: Bool
+    ) async throws -> ObjectRelationships {
+        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
+    }
+
+    func scanRelationships(
+        identity: ResourceIdentity
+    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func cancelRelationshipScan(
+        sessionID: String,
+        scanID: String,
+        generation: UInt64
+    ) async {}
+
+    func getData(identity: ResourceIdentity) async throws -> ObjectData { data }
+
+    func prepareYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> PreparedYAMLEdit {
+        throw CancellationError()
+    }
+
+    func applyYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func updateData(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String,
+        mutations: [DataMutationKind]
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+}
+
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
+}
+
+@MainActor
+private func waitUntil(
+    timeout: Duration = .seconds(2),
+    condition: @escaping @MainActor () -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !condition() {
+        guard clock.now < deadline else {
+            throw CancellationError()
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
 }

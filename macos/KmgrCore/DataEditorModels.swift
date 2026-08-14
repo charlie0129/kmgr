@@ -30,6 +30,60 @@ public enum KubernetesDataKeyValidator {
     }
 }
 
+public enum DataEditorRowState: String, Hashable, Sendable {
+    case saved
+    case unsaved
+    case conflict
+
+    public var displayText: String {
+        switch self {
+        case .saved: "Saved"
+        case .unsaved: "Unsaved"
+        case .conflict: "Conflict"
+        }
+    }
+}
+
+/// Metadata-only presentation for the Data editor's key list. It deliberately
+/// has no value or preview input, so the same presentation is safe for Secrets
+/// whether or not the selected value is currently revealed in the editor.
+public struct DataEditorRowPresentation: Hashable, Sendable {
+    public var keyText: String
+    public var typeText: String
+    public var sizeText: String
+    public var state: DataEditorRowState
+    public var accessibilityValue: String
+
+    public init(
+        key: String,
+        storedKind: DataValueKind,
+        storedByteSize: UInt64,
+        isSelected: Bool,
+        draftKind: DataValueKind? = nil,
+        draftByteSize: UInt64? = nil,
+        hasUnsavedChanges: Bool = false,
+        hasConflict: Bool = false
+    ) {
+        // A conflict can remain marked after the user selects another key.
+        // Never let that row borrow metadata from the selected key's draft.
+        let effectiveKind = isSelected ? (draftKind ?? storedKind) : storedKind
+        let effectiveByteSize = isSelected ? (draftByteSize ?? storedByteSize) : storedByteSize
+        let rowState: DataEditorRowState = hasConflict
+            ? .conflict
+            : (hasUnsavedChanges ? .unsaved : .saved)
+        let countText = effectiveByteSize == 1
+            ? "1 byte"
+            : "\(effectiveByteSize.formatted()) bytes"
+
+        keyText = key
+        typeText = effectiveKind.rawValue
+        sizeText = countText
+        state = rowState
+        accessibilityValue = [key, effectiveKind.rawValue, countText, rowState.displayText]
+            .joined(separator: ", ")
+    }
+}
+
 /// A display-only description used by the key conflict sheet. Callers may
 /// provide decoded text for ConfigMaps, but Secret text is discarded by the
 /// initializer so a Secret can only be represented by kind, byte count, and

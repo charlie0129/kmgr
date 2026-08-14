@@ -102,6 +102,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var operationTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
     private var dataConflictController: DataConflictWindowController?
+    private var conflictedDataKey: String?
     private var secretRevealed = false
     private var selectedDataOriginalBytes: Data?
     private var selectedDataBinaryDraft: Data?
@@ -438,18 +439,35 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private func configureDataEditor() {
         dataSplitView.isVertical = true
         dataSplitView.dividerStyle = .thin
-        let column = NSTableColumn(identifier: .init("key"))
-        column.title = "Key"
-        column.width = 240
-        keysTable.addTableColumn(column)
+        dataSplitView.identifier = .init("object-detail-data-split")
+        let columns: [(String, String, CGFloat, CGFloat)] = [
+            ("key", "Key", 175, 100),
+            ("type", "Type", 70, 58),
+            ("size", "Size", 82, 68),
+            ("state", "State", 84, 72),
+        ]
+        for (identifier, title, width, minimumWidth) in columns {
+            let column = NSTableColumn(identifier: .init(identifier))
+            column.title = title
+            column.width = width
+            column.minWidth = minimumWidth
+            column.resizingMask = .userResizingMask
+            keysTable.addTableColumn(column)
+        }
         keysTable.delegate = self
         keysTable.dataSource = self
-        keysTable.headerView = nil
         keysTable.usesAlternatingRowBackgroundColors = true
+        keysTable.allowsEmptySelection = true
+        keysTable.allowsMultipleSelection = false
+        keysTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        keysTable.setAccessibilityLabel("ConfigMap and Secret data keys")
         let keyScroll = NSScrollView()
+        keyScroll.identifier = .init("object-detail-data-keys-scroll")
         keyScroll.documentView = keysTable
         keyScroll.hasVerticalScroller = true
-        keyScroll.frame = NSRect(x: 0, y: 0, width: 260, height: 500)
+        keyScroll.hasHorizontalScroller = true
+        keyScroll.autohidesScrollers = true
+        keyScroll.frame = NSRect(x: 0, y: 0, width: 430, height: 500)
 
         dataValueTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         dataValueTextView.isRichText = false
@@ -459,6 +477,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         dataValueTextView.delegate = self
         dataValueScroll.documentView = dataValueTextView
         dataValueScroll.hasVerticalScroller = true
+        dataValueScroll.setAccessibilityLabel("Selected data value editor")
         addKeyButton.target = self
         addKeyButton.action = #selector(addDataKey)
         renameKeyButton.target = self
@@ -500,7 +519,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         ])
         dataSplitView.addArrangedSubview(keyScroll)
         dataSplitView.addArrangedSubview(editor)
-        dataSplitView.setPosition(260, ofDividerAt: 0)
+        dataSplitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
+        dataSplitView.setPosition(430, ofDividerAt: 0)
     }
 
     private func loadObject() {
@@ -530,6 +550,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         identity = detail.identity
         self.detail = detail
         objectData = data
+        conflictedDataKey = nil
         installYAML(detail.yamlUTF8)
         renderSummary(detail.summaryFields)
         keysTable.reloadData()
@@ -1098,20 +1119,51 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             cell.textField?.textColor = relationship.stale ? .systemOrange : .labelColor
             return cell
         }
-        guard let entries = objectData?.entries, entries.indices.contains(row) else { return nil }
-        let cell = NSTableCellView()
-        let entry = entries[row]
-        let label = NSTextField(labelWithString: "\(entry.id)   \(entry.kind.rawValue) · \(entry.byteSize) B")
-        label.lineBreakMode = .byTruncatingMiddle
-        label.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(label)
-        cell.textField = label
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
+        guard let entries = objectData?.entries, entries.indices.contains(row), let tableColumn else {
+            return nil
+        }
+        let presentation = dataRowPresentation(for: entries[row])
+        let value: String
+        switch tableColumn.identifier.rawValue {
+        case "key": value = presentation.keyText
+        case "type": value = presentation.typeText
+        case "size": value = presentation.sizeText
+        case "state": value = presentation.state.displayText
+        default: value = ""
+        }
+        let cell = textCell(value, table: tableView, column: tableColumn)
+        cell.setAccessibilityLabel(tableColumn.title)
+        cell.setAccessibilityValue(presentation.accessibilityValue)
+        switch presentation.state {
+        case .saved:
+            cell.textField?.textColor = .labelColor
+        case .unsaved:
+            cell.textField?.textColor = tableColumn.identifier.rawValue == "state"
+                ? .systemOrange : .labelColor
+        case .conflict:
+            cell.textField?.textColor = tableColumn.identifier.rawValue == "state"
+                ? .systemRed : .labelColor
+        }
         return cell
+    }
+
+    private func dataRowPresentation(for entry: ObjectDataEntry) -> DataEditorRowPresentation {
+        let selected = selectedDataEntry?.id == entry.id
+        let draft = selected ? currentDraftBytes : nil
+        let changed = selected && hasDataDraftChanges
+        let hasConflict = conflictedDataKey == entry.id
+        return DataEditorRowPresentation(
+            key: entry.id,
+            storedKind: entry.kind,
+            storedByteSize: entry.byteSize,
+            isSelected: selected,
+            draftKind: changed || hasConflict ? selectedDataDraftKind : nil,
+            draftByteSize: changed || hasConflict
+                ? draft.map { UInt64($0.count) }
+                : nil,
+            hasUnsavedChanges: changed,
+            hasConflict: hasConflict
+        )
     }
 
     private func textCell(
@@ -1143,7 +1195,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard notification.object as? NSTableView === keysTable else { return }
+        let previouslySelectedKey = selectedDataEntry?.id
+        let previouslySelectedRow = objectData?.entries.firstIndex {
+            $0.id == previouslySelectedKey
+        }
         releaseDataDrafts()
+        reloadDataRows([previouslySelectedRow, keysTable.selectedRow].compactMap { $0 })
         guard let data = objectData, data.entries.indices.contains(keysTable.selectedRow) else {
             selectedDataEntry = nil
             dataValueTextView.string = ""
@@ -1156,6 +1213,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         revealButton.title = "Reveal"
         displaySelectedData()
         updateDataEditorControls()
+        reloadSelectedDataRow()
     }
 
     @objc private func toggleSecretReveal() {
@@ -1164,6 +1222,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         if !secretRevealed { releaseDataDrafts() }
         displaySelectedData()
         updateDataEditorControls()
+        reloadSelectedDataRow()
     }
 
     private func displaySelectedData() {
@@ -1193,6 +1252,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     func textDidChange(_ notification: Notification) {
         guard notification.object as? NSTextView === dataValueTextView else { return }
         updateDataEditorControls()
+        reloadSelectedDataRow()
     }
 
     private var currentDraftBytes: Data? {
@@ -1220,6 +1280,19 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         saveKeyButton.isEnabled = hasSelection && idle && hasDataDraftChanges
     }
 
+    private func reloadSelectedDataRow() {
+        reloadDataRows([keysTable.selectedRow])
+    }
+
+    private func reloadDataRows(_ rows: [Int]) {
+        let validRows = IndexSet(rows.filter { $0 >= 0 && $0 < keysTable.numberOfRows })
+        guard !validRows.isEmpty else { return }
+        keysTable.reloadData(
+            forRowIndexes: validRows,
+            columnIndexes: IndexSet(integersIn: 0..<keysTable.numberOfColumns)
+        )
+    }
+
     private func releaseDataDrafts() {
         if var value = selectedDataOriginalBytes {
             value.resetBytes(in: value.startIndex..<value.endIndex)
@@ -1245,6 +1318,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     @objc private func revertCurrentKey() {
         releaseDataDrafts()
         displaySelectedData()
+        reloadSelectedDataRow()
         statusLabel.stringValue = "Local key changes reverted"
         statusLabel.textColor = .secondaryLabelColor
     }
@@ -1338,6 +1412,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 dataValueTextView.isEditable = false
             }
             updateDataEditorControls()
+            reloadSelectedDataRow()
             statusLabel.stringValue = "Loaded \(bytes.count.formatted()) bytes locally for \(entry.id)"
             statusLabel.textColor = .secondaryLabelColor
         }
@@ -1403,6 +1478,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         recoverConflicts: Bool
     ) {
         guard operationTask == nil else { return }
+        if conflictedDataKey != mutation.sourceKey {
+            conflictedDataKey = nil
+            reloadSelectedDataRow()
+        }
         updateDataEditorControls()
         statusLabel.stringValue = "Saving key/value data…"
         statusLabel.textColor = .secondaryLabelColor
@@ -1465,6 +1544,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 )
             }
             let currentEntry = currentData.entries.first { $0.id == mutation.sourceKey }
+            conflictedDataKey = mutation.sourceKey
+            reloadSelectedDataRow()
             let destinationExists = mutation.destinationKey.map { destination in
                 currentData.entries.contains { $0.id == destination }
             } ?? false
@@ -1480,6 +1561,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 retryPlan: retryPlan
             )
         } catch {
+            conflictedDataKey = mutation.sourceKey
+            reloadSelectedDataRow()
             statusLabel.stringValue = "Conflict · current server data could not be loaded · local edit preserved"
             statusLabel.textColor = .systemRed
         }
@@ -1527,6 +1610,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             dataConflictController = nil
             switch choice {
             case .reload:
+                conflictedDataKey = nil
                 installCurrentDataAfterConflict(currentData, selecting: mutation.sourceKey)
                 statusLabel.stringValue = "Reloaded current server data"
                 statusLabel.textColor = .secondaryLabelColor
@@ -1536,6 +1620,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 statusLabel.textColor = .secondaryLabelColor
             case .retry:
                 guard case .retry(let retryMutation) = retryPlan else { return }
+                conflictedDataKey = nil
                 submitDataMutation(
                     retryMutation,
                     expectedResourceVersion: currentData.resourceVersion,
@@ -1611,6 +1696,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         selecting key: String
     ) {
         releaseDataDrafts()
+        conflictedDataKey = nil
         objectData = currentData
         keysTable.reloadData()
         guard let row = currentData.entries.firstIndex(where: { $0.id == key }) else {

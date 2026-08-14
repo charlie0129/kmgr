@@ -18,6 +18,90 @@ import Testing
     ) == nil)
 }
 
+@Test func dataEditorSavedRowUsesOnlyStoredMetadata() {
+    let row = DataEditorRowPresentation(
+        key: "settings.yaml",
+        storedKind: .text,
+        storedByteSize: 1,
+        isSelected: false
+    )
+
+    #expect(row.keyText == "settings.yaml")
+    #expect(row.typeText == "text")
+    #expect(row.sizeText == "1 byte")
+    #expect(row.state == .saved)
+    #expect(row.accessibilityValue == "settings.yaml, text, 1 byte, Saved")
+}
+
+@Test func dataEditorUnsavedRowUsesDraftTypeAndByteCount() {
+    let row = DataEditorRowPresentation(
+        key: "archive",
+        storedKind: .text,
+        storedByteSize: 4,
+        isSelected: true,
+        draftKind: .binary,
+        draftByteSize: 8_192,
+        hasUnsavedChanges: true
+    )
+
+    #expect(row.typeText == "binary")
+    #expect(row.sizeText.contains("8"))
+    #expect(row.sizeText.hasSuffix("bytes"))
+    #expect(row.state == .unsaved)
+    #expect(row.accessibilityValue.contains("Unsaved"))
+}
+
+@Test func dataEditorConflictTakesPrecedenceWithoutAcceptingAValuePreview() {
+    let row = DataEditorRowPresentation(
+        key: "token",
+        storedKind: .text,
+        storedByteSize: 24,
+        isSelected: true,
+        draftKind: .text,
+        draftByteSize: 30,
+        hasUnsavedChanges: true,
+        hasConflict: true
+    )
+
+    #expect(row.state == .conflict)
+    #expect(row.typeText == "text")
+    #expect(row.sizeText == "30 bytes")
+    #expect(row.accessibilityValue == "token, text, 30 bytes, Conflict")
+}
+
+@Test func dataEditorConflictCanDescribeAnUnchangedLocalDraft() {
+    let row = DataEditorRowPresentation(
+        key: "token",
+        storedKind: .text,
+        storedByteSize: 24,
+        isSelected: true,
+        draftKind: .binary,
+        draftByteSize: 30,
+        hasConflict: true
+    )
+
+    #expect(row.state == .conflict)
+    #expect(row.typeText == "binary")
+    #expect(row.sizeText == "30 bytes")
+}
+
+@Test func dataEditorUnselectedConflictDoesNotBorrowSelectedDraftMetadata() {
+    let row = DataEditorRowPresentation(
+        key: "old-conflict",
+        storedKind: .text,
+        storedByteSize: 24,
+        isSelected: false,
+        draftKind: .binary,
+        draftByteSize: 30,
+        hasConflict: true
+    )
+
+    #expect(row.state == .conflict)
+    #expect(row.typeText == "text")
+    #expect(row.sizeText == "24 bytes")
+    #expect(row.accessibilityValue == "old-conflict, text, 24 bytes, Conflict")
+}
+
 @Test func configMapConflictDisplayShowsTextAndDecodedByteHash() {
     let value = Data("local value".utf8)
     let display = DataConflictValueDisplay(
