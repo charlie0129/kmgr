@@ -846,9 +846,12 @@ func TestTerminalRetentionJanitorRemovesEntryAndReleasesLease(t *testing.T) {
 	if current := manager.lookup("expires", "session"); current != nil {
 		t.Fatalf("expired terminal entry was retained: %#v", current.Snapshot())
 	}
-	if got := sessions.Counts(); got != [2]int{1, 1} {
-		t.Fatalf("post-expiry acquire/release counts = %v, want [1 1]", got)
-	}
+	// Removal is published while Manager.mu still protects its ordering against
+	// a same-ID replacement. The external release runs immediately afterward,
+	// so observers may receive the removal before that callback completes.
+	eventuallyForward(t, func() bool {
+		return sessions.Counts() == [2]int{1, 1}
+	})
 	manager.Close()
 	if got := sessions.Counts(); got != [2]int{1, 1} {
 		t.Fatalf("manager close released pruned lease again: %v", got)
