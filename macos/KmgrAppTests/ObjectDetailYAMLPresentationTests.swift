@@ -397,6 +397,99 @@ struct ObjectDetailYAMLPresentationTests {
         })
     }
 
+    @Test("detail scroll documents receive visible geometry instead of remaining zero-sized")
+    func detailDocumentGeometry() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: "configmaps",
+            namespace: "dev",
+            name: "settings",
+            uid: ResourceUID("uid")
+        )
+        let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: settings\n"
+        let value = "visible-value"
+        let provider = LoadedObjectDetailProvider(
+            detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-1",
+                yamlUTF8: Data(yaml.utf8),
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "metadata",
+                    fieldID: "name",
+                    label: "Name",
+                    displayText: "settings"
+                )]
+            ),
+            data: ObjectData(
+                identity: identity,
+                resourceVersion: "rv-1",
+                entries: [ObjectDataEntry(
+                    key: "config",
+                    kind: .text,
+                    value: Data(value.utf8),
+                    byteSize: UInt64(value.utf8.count),
+                    contentHash: Data(repeating: 3, count: 32)
+                )],
+                secret: false
+            )
+        )
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: provider,
+            initialTab: .yaml
+        )
+        controller.loadView()
+        controller.view.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let segmented = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSSegmentedControl }.first)
+        let yamlScroll = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "object-detail-yaml-scroll" })
+        let yamlEditor = try #require(yamlScroll.documentView as? NSTextView)
+        try await waitUntil { yamlEditor.string.contains("kind: ConfigMap") }
+        controller.view.layoutSubtreeIfNeeded()
+        #expect(yamlScroll.contentSize.width > 100)
+        #expect(yamlEditor.frame.width > 100)
+        #expect(yamlEditor.frame.height > 0)
+
+        segmented.selectedSegment = 0
+        _ = segmented.sendAction(segmented.action, to: segmented.target)
+        controller.view.layoutSubtreeIfNeeded()
+        let summaryScroll = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "object-detail-summary-scroll" })
+        let summaryDocument = try #require(summaryScroll.documentView)
+        #expect(summaryScroll.contentSize.width > 100)
+        #expect(summaryDocument.frame.width > 100)
+        #expect(summaryDocument.frame.height > 0)
+        #expect(descendants(of: summaryDocument).contains {
+            ($0 as? NSTextField)?.stringValue == "Name:  settings"
+        })
+
+        segmented.selectedSegment = 5
+        _ = segmented.sendAction(segmented.action, to: segmented.target)
+        controller.view.layoutSubtreeIfNeeded()
+        let keysTable = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "ConfigMap and Secret data keys" })
+        try await waitUntil { keysTable.numberOfRows == 1 }
+        keysTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        let dataScroll = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "object-detail-data-value-scroll" })
+        let dataEditor = try #require(dataScroll.documentView as? NSTextView)
+        try await waitUntil { dataEditor.string == value }
+        controller.view.layoutSubtreeIfNeeded()
+        #expect(dataScroll.contentSize.width > 100)
+        #expect(dataEditor.frame.width > 100)
+        #expect(dataEditor.frame.height > 0)
+    }
+
     @Test("Secret YAML clearly labels Kubernetes base64 encoding")
     func secretYAMLEncodingNotice() throws {
         let identity = ResourceIdentity(

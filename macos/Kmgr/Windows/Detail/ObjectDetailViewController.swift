@@ -319,6 +319,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         loadObject()
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        resizeStackDocument(summaryStack, in: summaryScrollView)
+        resizeStackDocument(metricsStack, in: metricsScrollView)
+    }
+
     func stop() {
         loadTask?.cancel()
         watchTask?.cancel()
@@ -450,8 +456,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         summaryStack.alignment = .leading
         summaryStack.spacing = 7
         summaryStack.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
+        summaryStack.frame = NSRect(x: 0, y: 0, width: 640, height: 1)
+        summaryStack.autoresizingMask = [.width]
         summaryScrollView.documentView = summaryStack
         summaryScrollView.hasVerticalScroller = true
+        summaryScrollView.identifier = .init("object-detail-summary-scroll")
     }
 
     private func configureEvents() {
@@ -516,8 +525,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         metricsStack.alignment = .leading
         metricsStack.spacing = 8
         metricsStack.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
+        metricsStack.frame = NSRect(x: 0, y: 0, width: 640, height: 1)
+        metricsStack.autoresizingMask = [.width]
         metricsScrollView.documentView = metricsStack
         metricsScrollView.hasVerticalScroller = true
+        metricsScrollView.identifier = .init("object-detail-metrics-scroll")
     }
 
     private func configureTable(
@@ -548,6 +560,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         yamlTextView.delegate = self
         yamlTextView.setAccessibilityLabel("Kubernetes object YAML")
         yamlTextView.textContainerInset = NSSize(width: 10, height: 10)
+        configureTextDocument(yamlTextView, wrapsToViewport: false)
         yamlScrollView.documentView = yamlTextView
         yamlScrollView.hasVerticalScroller = true
         yamlScrollView.hasHorizontalScroller = true
@@ -663,8 +676,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         dataValueTextView.isSelectable = true
         dataValueTextView.allowsUndo = true
         dataValueTextView.delegate = self
+        configureTextDocument(dataValueTextView, wrapsToViewport: true)
         dataValueScroll.documentView = dataValueTextView
         dataValueScroll.hasVerticalScroller = true
+        dataValueScroll.identifier = .init("object-detail-data-value-scroll")
         dataValueScroll.setAccessibilityLabel("Selected data value editor")
         addKeyButton.target = self
         addKeyButton.action = #selector(addDataKey)
@@ -907,6 +922,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             label.textColor = .secondaryLabelColor
             summaryStack.addArrangedSubview(label)
         }
+        resizeStackDocument(summaryStack, in: summaryScrollView)
     }
 
     private func renderMetrics(_ metrics: [ResourceUsageValue]) {
@@ -915,6 +931,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             let label = NSTextField(labelWithString: "Metrics unavailable or not yet reported.")
             label.textColor = .secondaryLabelColor
             metricsStack.addArrangedSubview(label)
+            resizeStackDocument(metricsStack, in: metricsScrollView)
             return
         }
         for value in metrics {
@@ -937,6 +954,47 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 label.toolTip = "Measured \(Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(measured) / 1_000))) · \(value.provider)"
             }
             metricsStack.addArrangedSubview(label)
+        }
+        resizeStackDocument(metricsStack, in: metricsScrollView)
+    }
+
+    /// `NSScrollView` does not size a programmatically-created `NSTextView`
+    /// whose initial frame is zero. The ruler can still draw in that state,
+    /// which makes the YAML surface look like it contains only line numbers.
+    /// Install the standard AppKit text-document resizing contract explicitly.
+    private func configureTextDocument(
+        _ textView: NSTextView,
+        wrapsToViewport: Bool
+    ) {
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 1)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = !wrapsToViewport
+        textView.autoresizingMask = wrapsToViewport ? [.width] : []
+        textView.textContainer?.containerSize = NSSize(
+            width: wrapsToViewport ? 640 : CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = wrapsToViewport
+    }
+
+    /// Stack views also arrive with a zero document frame. Keep their width
+    /// attached to the clip view and grow the document to its intrinsic
+    /// content height after each render and window resize.
+    private func resizeStackDocument(_ stack: NSStackView, in scrollView: NSScrollView) {
+        let viewport = scrollView.contentSize
+        let width = max(1, viewport.width)
+        if stack.frame.width != width {
+            stack.setFrameSize(NSSize(width: width, height: max(1, stack.frame.height)))
+        }
+        stack.layoutSubtreeIfNeeded()
+        let height = max(viewport.height, stack.fittingSize.height, 1)
+        if stack.frame.height != height {
+            stack.setFrameSize(NSSize(width: width, height: height))
         }
     }
 
