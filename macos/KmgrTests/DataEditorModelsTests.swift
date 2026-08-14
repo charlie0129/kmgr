@@ -147,6 +147,82 @@ import Testing
     #expect(preview.displayText.hasSuffix("…"))
     #expect(preview.isTruncated)
     #expect(preview.accessibilityValue.contains("truncated preview"))
+    #expect(preview.displayText.utf8.count
+        <= DataValuePreviewPresentation.maximumTextUTF8ByteCount)
+    #expect(preview.accessibilityValue.utf8.count
+        <= DataValuePreviewPresentation.maximumAccessibilityValueUTF8ByteCount)
+    #expect(preview.accessibilityValue.count
+        <= DataValuePreviewPresentation.maximumAccessibilityValueCharacterCount)
+}
+
+@Test func textValuePreviewRejectsAnOversizedCombiningMarkClusterWhole() {
+    // One valid extended grapheme can occupy essentially the entire Kubernetes
+    // object-size budget while still reporting a character count of one.
+    let value = "a" + String(repeating: "\u{0301}", count: 524_287)
+    #expect(value.count == 1)
+    #expect(value.utf8.count == (1 << 20) - 1)
+
+    let preview = DataValuePreviewPresentation(
+        kind: .text,
+        value: Data(value.utf8),
+        secret: false
+    )
+
+    #expect(preview.displayText == "…")
+    #expect(preview.isTruncated)
+    #expect(preview.displayText.utf8.count
+        <= DataValuePreviewPresentation.maximumTextUTF8ByteCount)
+    #expect(preview.accessibilityValue.utf8.count
+        <= DataValuePreviewPresentation.maximumAccessibilityValueUTF8ByteCount)
+    #expect(preview.accessibilityValue.count
+        <= DataValuePreviewPresentation.maximumAccessibilityValueCharacterCount)
+    #expect(String(data: Data(preview.displayText.utf8), encoding: .utf8)
+        == preview.displayText)
+}
+
+@Test func textValuePreviewStopsAtAnOversizedTrailingWhitespaceRun() {
+    let value = "visible" + String(repeating: " ", count: 1 << 20)
+    let preview = DataValuePreviewPresentation(
+        kind: .text,
+        value: Data(value.utf8),
+        secret: false
+    )
+
+    #expect(preview.displayText == "visible…")
+    #expect(preview.accessibilityValue
+        == "Text value: visible…, truncated preview")
+    #expect(preview.isTruncated)
+}
+
+@Test func textValuePreviewUTF8LimitIncludesWholeMultibyteCharactersAndEllipsis() {
+    let limit = DataValuePreviewPresentation.maximumTextCharacterCount
+    let exactValue = String(repeating: "😀", count: limit)
+    #expect(exactValue.utf8.count
+        == DataValuePreviewPresentation.maximumTextUTF8ByteCount)
+    let exact = DataValuePreviewPresentation(
+        kind: .text,
+        value: Data(exactValue.utf8),
+        secret: false
+    )
+    #expect(exact.displayText == exactValue)
+    #expect(!exact.isTruncated)
+
+    let overflow = DataValuePreviewPresentation(
+        kind: .text,
+        value: Data((exactValue + "😀").utf8),
+        secret: false
+    )
+    #expect(overflow.displayText.count == limit)
+    #expect(overflow.displayText.hasSuffix("…"))
+    #expect(overflow.displayText.utf8.count
+        <= DataValuePreviewPresentation.maximumTextUTF8ByteCount)
+    #expect(overflow.accessibilityValue.utf8.count
+        <= DataValuePreviewPresentation.maximumAccessibilityValueUTF8ByteCount)
+    #expect(overflow.accessibilityValue.count
+        <= DataValuePreviewPresentation.maximumAccessibilityValueCharacterCount)
+    #expect(String(data: Data(overflow.displayText.utf8), encoding: .utf8)
+        == overflow.displayText)
+    #expect(overflow.isTruncated)
 }
 
 @Test func emptyTextValueHasAUsefulAccessiblePlaceholder() {

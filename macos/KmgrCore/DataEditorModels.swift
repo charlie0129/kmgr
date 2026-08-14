@@ -55,7 +55,26 @@ public enum DataValuePreviewState: Hashable, Sendable {
 /// explicit reveal authority. The source `Data` is consumed during
 /// initialization and is never retained by this value.
 public struct DataValuePreviewPresentation: Hashable, Sendable {
+    private static let textAccessibilityPrefix = "Text value: "
+    private static let truncatedAccessibilitySuffix = ", truncated preview"
+
+    /// The visible preview is bounded in two dimensions. This character limit
+    /// counts extended grapheme clusters, including a trailing ellipsis.
     public static let maximumTextCharacterCount = 160
+    /// Four UTF-8 bytes per visible character preserves the full character
+    /// allowance for ordinary Unicode scalars while preventing one pathological
+    /// combining-mark cluster from making a nominally short preview unbounded.
+    /// The trailing ellipsis, when present, is included in this limit.
+    public static let maximumTextUTF8ByteCount = maximumTextCharacterCount * 4
+    /// Accessibility adds fixed ASCII context around the same bounded preview.
+    public static let maximumAccessibilityValueUTF8ByteCount =
+        maximumTextUTF8ByteCount
+        + textAccessibilityPrefix.utf8.count
+        + truncatedAccessibilitySuffix.utf8.count
+    public static let maximumAccessibilityValueCharacterCount =
+        maximumTextCharacterCount
+        + textAccessibilityPrefix.count
+        + truncatedAccessibilitySuffix.count
 
     public let displayText: String
     public let accessibilityValue: String
@@ -85,42 +104,171 @@ public struct DataValuePreviewPresentation: Hashable, Sendable {
             return
         }
 
-        let normalized = Self.singleLine(decoded)
-        let bounded = Self.bounded(normalized)
+        let bounded = Self.boundedSingleLine(decoded)
         displayText = bounded.text.isEmpty ? "(empty)" : bounded.text
         accessibilityValue = bounded.text.isEmpty
             ? "Empty text value"
-            : "Text value: \(bounded.text)" + (bounded.truncated ? ", truncated preview" : "")
+            : Self.textAccessibilityPrefix + bounded.text
+                + (bounded.truncated ? Self.truncatedAccessibilitySuffix : "")
         state = .text
         isTruncated = bounded.truncated
     }
 
-    private static func singleLine(_ value: String) -> String {
+    /// Normalizes and bounds in one pass. The output buffer can exceed the
+    /// public byte limit by at most one Unicode scalar (four bytes), which lets
+    /// us identify and discard the complete grapheme that crossed the limit.
+    /// Pending whitespace is retained separately and only committed when a
+    /// later non-whitespace scalar proves it is not trailing trim.
+    private static func boundedSingleLine(
+        _ value: String
+    ) -> (text: String, truncated: Bool) {
         var result = String.UnicodeScalarView()
-        result.reserveCapacity(min(value.unicodeScalars.count, maximumTextCharacterCount + 1))
+        result.reserveCapacity(maximumTextUTF8ByteCount + 4)
+        var resultUTF8ByteCount = 0
+        var pendingWhitespace = String.UnicodeScalarView()
+        pendingWhitespace.reserveCapacity(maximumTextUTF8ByteCount + 4)
+        var pendingWhitespaceUTF8ByteCount = 0
         var previousWasNormalizedControl = false
 
         for scalar in value.unicodeScalars {
             let isControl = CharacterSet.controlCharacters.contains(scalar)
                 || CharacterSet.newlines.contains(scalar)
             if isControl {
-                if !previousWasNormalizedControl {
-                    result.append(" ")
-                }
+                guard !previousWasNormalizedControl else { continue }
                 previousWasNormalizedControl = true
-            } else {
-                result.append(scalar)
-                previousWasNormalizedControl = false
+                if Self.appendPendingWhitespace(
+                    " ",
+                    resultIsEmpty: result.isEmpty,
+                    resultUTF8ByteCount: resultUTF8ByteCount,
+                    pending: &pendingWhitespace,
+                    pendingUTF8ByteCount: &pendingWhitespaceUTF8ByteCount
+                ) {
+                    return Self.bounded(String(result), forcingTruncation: true)
+                }
+                continue
+            }
+
+            previousWasNormalizedControl = false
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                if Self.appendPendingWhitespace(
+                    scalar,
+                    resultIsEmpty: result.isEmpty,
+                    resultUTF8ByteCount: resultUTF8ByteCount,
+                    pending: &pendingWhitespace,
+                    pendingUTF8ByteCount: &pendingWhitespaceUTF8ByteCount
+                ) {
+                    return Self.bounded(String(result), forcingTruncation: true)
+                }
+                continue
+            }
+
+            for pendingScalar in pendingWhitespace {
+                if Self.append(
+                    pendingScalar,
+                    to: &result,
+                    utf8ByteCount: &resultUTF8ByteCount
+                ) {
+                    return Self.truncatedBeforeLastCharacter(result)
+                }
+            }
+            pendingWhitespace.removeAll(keepingCapacity: true)
+            pendingWhitespaceUTF8ByteCount = 0
+
+            if Self.append(
+                scalar,
+                to: &result,
+                utf8ByteCount: &resultUTF8ByteCount
+            ) {
+                return Self.truncatedBeforeLastCharacter(result)
             }
         }
-        return String(result).trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.bounded(String(result), forcingTruncation: false)
     }
 
-    private static func bounded(_ value: String) -> (text: String, truncated: Bool) {
-        guard value.count > maximumTextCharacterCount else {
+    private static func appendPendingWhitespace(
+        _ scalar: UnicodeScalar,
+        resultIsEmpty: Bool,
+        resultUTF8ByteCount: Int,
+        pending: inout String.UnicodeScalarView,
+        pendingUTF8ByteCount: inout Int
+    ) -> Bool {
+        // Ordinary leading and trailing whitespace remain presentation-only
+        // trim. An oversized interior or trailing run is itself meaningful
+        // omitted input, so stop immediately and present a concise ellipsis
+        // instead of retaining or scanning the entire run.
+        guard !resultIsEmpty else { return false }
+        pending.append(scalar)
+        pendingUTF8ByteCount += utf8ByteCount(of: scalar)
+        return resultUTF8ByteCount + pendingUTF8ByteCount
+            > maximumTextUTF8ByteCount
+    }
+
+    /// Returns true after appending the first scalar that crosses the byte
+    /// budget. Keeping that one scalar lets Swift's grapheme segmenter tell us
+    /// whether it joined the preceding character.
+    private static func append(
+        _ scalar: UnicodeScalar,
+        to result: inout String.UnicodeScalarView,
+        utf8ByteCount: inout Int
+    ) -> Bool {
+        result.append(scalar)
+        utf8ByteCount += Self.utf8ByteCount(of: scalar)
+        return utf8ByteCount > maximumTextUTF8ByteCount
+    }
+
+    private static func truncatedBeforeLastCharacter(
+        _ scalars: String.UnicodeScalarView
+    ) -> (text: String, truncated: Bool) {
+        let value = String(scalars)
+        return bounded(String(value.dropLast()), forcingTruncation: true)
+    }
+
+    private static func utf8ByteCount(of scalar: UnicodeScalar) -> Int {
+        switch scalar.value {
+        case 0...0x7f: 1
+        case 0x80...0x7ff: 2
+        case 0x800...0xffff: 3
+        default: 4
+        }
+    }
+
+    private static func bounded(
+        _ value: String,
+        forcingTruncation: Bool
+    ) -> (text: String, truncated: Bool) {
+        let characters = Array(value)
+        let valueUTF8ByteCount = value.utf8.count
+        guard forcingTruncation
+            || characters.count > maximumTextCharacterCount
+            || valueUTF8ByteCount > maximumTextUTF8ByteCount
+        else {
             return (value, false)
         }
-        return (String(value.prefix(maximumTextCharacterCount - 1)) + "…", true)
+
+        let ellipsis = "…"
+        let ellipsisUTF8ByteCount = ellipsis.utf8.count
+        var result = String()
+        result.reserveCapacity(min(valueUTF8ByteCount, maximumTextUTF8ByteCount))
+        var resultCharacterCount = 0
+        var resultUTF8ByteCount = 0
+        for character in characters {
+            let characterUTF8ByteCount = Self.utf8ByteCount(of: character)
+            guard resultCharacterCount + 1 < maximumTextCharacterCount,
+                resultUTF8ByteCount + characterUTF8ByteCount + ellipsisUTF8ByteCount
+                    <= maximumTextUTF8ByteCount
+            else { break }
+            result.append(character)
+            resultCharacterCount += 1
+            resultUTF8ByteCount += characterUTF8ByteCount
+        }
+        result.append(ellipsis)
+        return (result, true)
+    }
+
+    private static func utf8ByteCount(of character: Character) -> Int {
+        character.unicodeScalars.reduce(into: 0) {
+            $0 += utf8ByteCount(of: $1)
+        }
     }
 
     private static func countText(_ count: Int) -> String {
