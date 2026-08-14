@@ -747,6 +747,9 @@ public struct Kmgr_V1_OperationEvent: Sendable {
 
   public var totalItems: UInt32 = 0
 
+  /// A bounded delta. Each terminal item is emitted exactly once per watch;
+  /// clients merge results by ResourceIdentity.uid. A newly attached watch
+  /// replays terminal results from the beginning in bounded chunks.
   public var itemResults: [Kmgr_V1_OperationItemResult] = []
 
   public var error: Kmgr_V1_StructuredError {

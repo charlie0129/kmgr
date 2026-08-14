@@ -1503,10 +1503,13 @@ type OperationEvent struct {
 	State          OperationState         `protobuf:"varint,3,opt,name=state,proto3,enum=kmgr.v1.OperationState" json:"state,omitempty"`
 	CompletedItems uint32                 `protobuf:"varint,4,opt,name=completed_items,json=completedItems,proto3" json:"completed_items,omitempty"`
 	TotalItems     uint32                 `protobuf:"varint,5,opt,name=total_items,json=totalItems,proto3" json:"total_items,omitempty"`
-	ItemResults    []*OperationItemResult `protobuf:"bytes,6,rep,name=item_results,json=itemResults,proto3" json:"item_results,omitempty"`
-	Error          *StructuredError       `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// A bounded delta. Each terminal item is emitted exactly once per watch;
+	// clients merge results by ResourceIdentity.uid. A newly attached watch
+	// replays terminal results from the beginning in bounded chunks.
+	ItemResults   []*OperationItemResult `protobuf:"bytes,6,rep,name=item_results,json=itemResults,proto3" json:"item_results,omitempty"`
+	Error         *StructuredError       `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OperationEvent) Reset() {
