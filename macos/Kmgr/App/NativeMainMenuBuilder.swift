@@ -162,6 +162,43 @@ enum NativeMainMenuBuilder {
         let menu = NSMenu(title: "Resource")
         addResponderItem(
             to: menu,
+            title: "Focus Resource Filter",
+            action: #selector(ClusterWorkspaceWindowController.focusResourceFilter(_:)),
+            keyEquivalent: "/",
+            modifiers: []
+        )
+        menu.addItem(.separator())
+        addResponderItem(
+            to: menu,
+            title: "Move Selection Up",
+            action: #selector(ClusterWorkspaceWindowController.moveResourceSelectionUp(_:)),
+            keyEquivalent: "k",
+            modifiers: []
+        )
+        addResponderItem(
+            to: menu,
+            title: "Move Selection Down",
+            action: #selector(ClusterWorkspaceWindowController.moveResourceSelectionDown(_:)),
+            keyEquivalent: "j",
+            modifiers: []
+        )
+        addResponderItem(
+            to: menu,
+            title: "Extend Selection Up",
+            action: #selector(ClusterWorkspaceWindowController.extendResourceSelectionUp(_:)),
+            keyEquivalent: String(UnicodeScalar(NSUpArrowFunctionKey)!),
+            modifiers: [.shift]
+        )
+        addResponderItem(
+            to: menu,
+            title: "Extend Selection Down",
+            action: #selector(ClusterWorkspaceWindowController.extendResourceSelectionDown(_:)),
+            keyEquivalent: String(UnicodeScalar(NSDownArrowFunctionKey)!),
+            modifiers: [.shift]
+        )
+        menu.addItem(.separator())
+        addResponderItem(
+            to: menu,
             title: "Open Details",
             action: #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
             keyEquivalent: "\r",

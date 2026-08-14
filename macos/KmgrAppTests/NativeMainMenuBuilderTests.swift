@@ -102,6 +102,53 @@ struct NativeMainMenuBuilderTests {
         #expect(window.item(withTitle: "Port Forwards") != nil)
     }
 
+    @Test("resource table navigation is discoverable through responder-chain commands")
+    func resourceTableNavigationCommands() throws {
+        let built = makeMenu()
+        let resource = try #require(submenu("Resource", in: built.main))
+
+        for (title, selector, key, modifiers) in [
+            (
+                "Focus Resource Filter",
+                #selector(ClusterWorkspaceWindowController.focusResourceFilter(_:)),
+                "/",
+                NSEvent.ModifierFlags()
+            ),
+            (
+                "Move Selection Up",
+                #selector(ClusterWorkspaceWindowController.moveResourceSelectionUp(_:)),
+                "k",
+                NSEvent.ModifierFlags()
+            ),
+            (
+                "Move Selection Down",
+                #selector(ClusterWorkspaceWindowController.moveResourceSelectionDown(_:)),
+                "j",
+                NSEvent.ModifierFlags()
+            ),
+            (
+                "Extend Selection Up",
+                #selector(ClusterWorkspaceWindowController.extendResourceSelectionUp(_:)),
+                String(UnicodeScalar(NSUpArrowFunctionKey)!),
+                NSEvent.ModifierFlags.shift
+            ),
+            (
+                "Extend Selection Down",
+                #selector(ClusterWorkspaceWindowController.extendResourceSelectionDown(_:)),
+                String(UnicodeScalar(NSDownArrowFunctionKey)!),
+                NSEvent.ModifierFlags.shift
+            ),
+        ] {
+            let item = try #require(resource.item(withTitle: title))
+            expectResponderItem(
+                item,
+                action: selector,
+                keyEquivalent: key,
+                modifiers: modifiers
+            )
+        }
+    }
+
     private func makeMenu(target: MenuTarget = MenuTarget()) -> NativeMainMenu {
         NativeMainMenuBuilder.make(actions: NativeMainMenuActions(
             target: target,

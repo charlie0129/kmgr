@@ -333,6 +333,21 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func navigateBack(_ sender: Any?) { workspaceController.navigateBack() }
     @objc func navigateForward(_ sender: Any?) { workspaceController.navigateForward() }
 
+    @objc func focusResourceFilter(_ sender: Any?) {
+        workspaceController.focusResourceFilter(sender)
+    }
+    @objc func moveResourceSelectionUp(_ sender: Any?) {
+        workspaceController.moveResourceSelectionUp(sender)
+    }
+    @objc func moveResourceSelectionDown(_ sender: Any?) {
+        workspaceController.moveResourceSelectionDown(sender)
+    }
+    @objc func extendResourceSelectionUp(_ sender: Any?) {
+        workspaceController.extendResourceSelectionUp(sender)
+    }
+    @objc func extendResourceSelectionDown(_ sender: Any?) {
+        workspaceController.extendResourceSelectionDown(sender)
+    }
     @objc func openResourceDetails(_ sender: Any?) { workspaceController.openResourceDetails(sender) }
     @objc func openResourceYAML(_ sender: Any?) { workspaceController.openResourceYAML(sender) }
     @objc func openResourceEvents(_ sender: Any?) { workspaceController.openResourceEvents(sender) }
@@ -352,6 +367,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let command: ResourceTableCommand?
         switch menuItem.action {
+        case #selector(focusResourceFilter(_:)): command = .focusFilter
+        case #selector(moveResourceSelectionUp(_:)): command = .moveUp
+        case #selector(moveResourceSelectionDown(_:)): command = .moveDown
+        case #selector(extendResourceSelectionUp(_:)): command = .extendUp
+        case #selector(extendResourceSelectionDown(_:)): command = .extendDown
         case #selector(openResourceDetails(_:)): command = .open
         case #selector(openResourceYAML(_:)): command = .openYAML
         case #selector(openResourceEvents(_:)): command = .openEvents
@@ -905,6 +925,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         view.window?.makeFirstResponder(contentController.tableResponder)
     }
 
+    @objc func focusResourceFilter(_ sender: Any?) { contentController.performCommand(.focusFilter) }
+    @objc func moveResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.moveUp) }
+    @objc func moveResourceSelectionDown(_ sender: Any?) { contentController.performCommand(.moveDown) }
+    @objc func extendResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.extendUp) }
+    @objc func extendResourceSelectionDown(_ sender: Any?) { contentController.performCommand(.extendDown) }
     @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
     @objc func openResourceYAML(_ sender: Any?) { contentController.performCommand(.openYAML) }
     @objc func openResourceEvents(_ sender: Any?) { contentController.performCommand(.openEvents) }
@@ -3346,6 +3371,12 @@ private final class ResourceListViewController: NSViewController,
             let next = min(max(tableView.selectedRow + delta, 0), max(0, tableView.numberOfRows - 1))
             tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
             tableView.scrollRowToVisible(next)
+        case .extendDown, .extendUp:
+            _ = performSelectionGesture(ResourceTableSelectionGesture(
+                row: nil,
+                modifiers: [.shift],
+                keyboardDirection: command == .extendDown ? .down : .up
+            ))
         }
     }
 
@@ -3393,7 +3424,7 @@ private final class ResourceListViewController: NSViewController,
         let isLocalOnly: Bool
         switch command {
         case .copyName, .copyNamespacedName, .copyReference,
-            .focusFilter, .selectAll, .moveDown, .moveUp:
+            .focusFilter, .selectAll, .moveDown, .moveUp, .extendDown, .extendUp:
             isLocalOnly = true
         default:
             isLocalOnly = false
@@ -3428,7 +3459,7 @@ private final class ResourceListViewController: NSViewController,
             return selected.count == 1
         case .copyName, .copyNamespacedName, .copyReference:
             return !selected.isEmpty
-        case .focusFilter, .selectAll, .moveDown, .moveUp:
+        case .focusFilter, .selectAll, .moveDown, .moveUp, .extendDown, .extendUp:
             return true
         }
     }
@@ -3437,7 +3468,7 @@ private final class ResourceListViewController: NSViewController,
 private enum ResourceTableCommand: Equatable {
     case focusFilter, open, openYAML, openEvents, openLogs, openExec
     case startPortForward, selectAll, delete, scale, restart, editMetadata
-    case copyName, copyNamespacedName, copyReference, moveUp, moveDown
+    case copyName, copyNamespacedName, copyReference, moveUp, moveDown, extendUp, extendDown
 }
 
 private extension PaletteOperation {

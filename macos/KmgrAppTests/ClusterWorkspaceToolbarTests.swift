@@ -83,6 +83,42 @@ struct ClusterWorkspaceToolbarTests {
         #expect(forwards.title.contains("Forwards"))
     }
 
+    @Test("unmodified table shortcuts are disabled while editing filter text")
+    func tableMenuCommandsRespectTextInputFocus() async throws {
+        let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+        let actions = [
+            #selector(ClusterWorkspaceWindowController.focusResourceFilter(_:)),
+            #selector(ClusterWorkspaceWindowController.moveResourceSelectionUp(_:)),
+            #selector(ClusterWorkspaceWindowController.moveResourceSelectionDown(_:)),
+            #selector(ClusterWorkspaceWindowController.extendResourceSelectionUp(_:)),
+            #selector(ClusterWorkspaceWindowController.extendResourceSelectionDown(_:)),
+        ]
+
+        try await waitUntil { table.numberOfRows == 1 }
+        #expect(window.makeFirstResponder(table))
+        #expect(window.firstResponder === table)
+        for action in actions {
+            let item = NSMenuItem(title: "test", action: action, keyEquivalent: "")
+            #expect(controller.validateMenuItem(item))
+        }
+
+        controller.focusResourceFilter(nil)
+        #expect(window.firstResponder !== table)
+        #expect(window.firstResponder === filter || filter.currentEditor() != nil)
+        for action in actions {
+            let item = NSMenuItem(title: "test", action: action, keyEquivalent: "")
+            #expect(!controller.validateMenuItem(item))
+        }
+    }
+
     @Test("resource freshness header shows cached age and background progress")
     func resourceFreshnessHeader() async throws {
         let synchronizedAt = Date(timeIntervalSinceNow: -18)
