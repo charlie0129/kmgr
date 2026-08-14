@@ -7,6 +7,26 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Resource table text effects")
 struct ResourceTableCellViewTests {
+    @Test("long resource values are constrained to one truncated line")
+    func longValuesStayOnOneLine() throws {
+        let cell = ResourceTextTableCellView(
+            frame: NSRect(x: 0, y: 0, width: 120, height: 24)
+        )
+        cell.configure(
+            cell: Cell(
+                columnID: "name",
+                displayText: "controller-with-a-very-long-generated-pod-name-7b9d6f8c7d-x4k2p"
+            ),
+            alignment: .left
+        )
+
+        let textField = try #require(cell.textField)
+        #expect(textField.maximumNumberOfLines == 1)
+        #expect(textField.lineBreakMode == .byTruncatingTail)
+        #expect(textField.cell?.usesSingleLineMode == true)
+        #expect(textField.cell?.wraps == false)
+    }
+
     @Test("simple filter emphasis bolds every case-insensitive literal range")
     func boldsCaseInsensitiveRanges() throws {
         let cell = ResourceTextTableCellView(

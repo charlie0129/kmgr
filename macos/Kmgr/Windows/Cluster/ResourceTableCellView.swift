@@ -75,6 +75,9 @@ class HighlightableResourceTableCellView: NSTableCellView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         valueLabel.lineBreakMode = .byTruncatingTail
+        valueLabel.maximumNumberOfLines = 1
+        valueLabel.cell?.usesSingleLineMode = true
+        valueLabel.cell?.wraps = false
         valueLabel.translatesAutoresizingMaskIntoConstraints = false
         valueLabel.setAccessibilityElement(false)
         addSubview(valueLabel)

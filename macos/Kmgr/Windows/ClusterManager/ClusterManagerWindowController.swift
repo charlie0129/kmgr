@@ -597,6 +597,7 @@ private final class ClusterManagerViewController: NSViewController,
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsMultipleSelection = false
         tableView.allowsEmptySelection = true
+        tableView.allowsColumnResizing = true
         tableView.rowHeight = 28
         tableView.intercellSpacing = NSSize(width: 8, height: 2)
         tableView.headerView = NSTableHeaderView()
@@ -612,7 +613,7 @@ private final class ClusterManagerViewController: NSViewController,
             tableColumn.title = column.title
             tableColumn.width = column.width
             tableColumn.minWidth = column == .namespace ? 90 : 120
-            tableColumn.resizingMask = .autoresizingMask
+            tableColumn.resizingMask = [.autoresizingMask, .userResizingMask]
             tableView.addTableColumn(tableColumn)
         }
 
@@ -721,6 +722,9 @@ private final class ClusterManagerViewController: NSViewController,
         cell.identifier = identifier
         let label = NSTextField(labelWithString: "")
         label.lineBreakMode = .byTruncatingMiddle
+        label.maximumNumberOfLines = 1
+        label.cell?.usesSingleLineMode = true
+        label.cell?.wraps = false
         label.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(label)
         cell.textField = label
