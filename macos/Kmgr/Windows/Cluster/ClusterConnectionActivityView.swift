@@ -3,44 +3,35 @@ import KmgrCore
 
 @MainActor
 final class ClusterConnectionActivityView: NSView {
-    private let receiveLight = NSView()
-    private let sendLight = NSView()
     private let stateLabel = NSTextField(labelWithString: "Connected")
     private let rateLabel = NSTextField(labelWithString: "↓ 0 B/s  ↑ 0 B/s")
     private var receiveFadeTask: Task<Void, Never>?
     private var sendFadeTask: Task<Void, Never>?
     private var rateResetTask: Task<Void, Never>?
+    private var displayedRate = ClusterConnectionRate()
+    private var receiveArrowIsActive = false
+    private var sendArrowIsActive = false
     private var stateAccessibilityValue = "Connected"
     private var rateAccessibilityValue = "Download 0 B/s, upload 0 B/s"
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        for light in [receiveLight, sendLight] {
-            light.wantsLayer = true
-            light.layer?.cornerRadius = 3
-            light.layer?.backgroundColor = NSColor.tertiaryLabelColor.cgColor
-            light.translatesAutoresizingMaskIntoConstraints = false
-            light.widthAnchor.constraint(equalToConstant: 6).isActive = true
-            light.heightAnchor.constraint(equalToConstant: 6).isActive = true
-        }
-        receiveLight.identifier = .init("connection-receive-indicator")
-        sendLight.identifier = .init("connection-send-indicator")
         stateLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        stateLabel.maximumNumberOfLines = 1
+        stateLabel.lineBreakMode = .byClipping
         rateLabel.font = .monospacedDigitSystemFont(
             ofSize: NSFont.smallSystemFontSize - 1,
             weight: .regular
         )
         rateLabel.textColor = .secondaryLabelColor
-        let lights = NSStackView(views: [receiveLight, sendLight])
-        lights.orientation = .horizontal
-        lights.alignment = .centerY
-        lights.spacing = 3
+        rateLabel.maximumNumberOfLines = 1
+        rateLabel.lineBreakMode = .byClipping
         stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         rateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let stack = NSStackView(views: [stateLabel, lights, rateLabel])
+        let stack = NSStackView(views: [stateLabel, rateLabel])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 7
+        stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -89,22 +80,58 @@ final class ClusterConnectionActivityView: NSView {
     }
 
     func update(rate: ClusterConnectionRate) {
-        setRateLabel(rate)
-        if rate.receivedActive { blink(receiveLight, color: .systemGreen, task: &receiveFadeTask) }
-        if rate.sentActive { blink(sendLight, color: .systemBlue, task: &sendFadeTask) }
+        displayedRate = rate
+        if rate.receivedActive { activateReceiveArrow() }
+        if rate.sentActive { activateSendArrow() }
+        renderRateLabel()
         rateResetTask?.cancel()
         if rate.receivedActive || rate.sentActive {
             rateResetTask = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(400))
                 guard !Task.isCancelled else { return }
-                self?.setRateLabel(ClusterConnectionRate())
+                self?.resetRatePresentation()
             }
         }
     }
 
-    private func setRateLabel(_ rate: ClusterConnectionRate) {
-        rateLabel.stringValue = "↓ \(Self.rate(rate.bytesReceivedPerSecond))  ↑ \(Self.rate(rate.bytesSentPerSecond))"
-        let value = "Download \(Self.rate(rate.bytesReceivedPerSecond)), upload \(Self.rate(rate.bytesSentPerSecond))"
+    private func renderRateLabel() {
+        let receivedRate = Self.rate(displayedRate.bytesReceivedPerSecond)
+        let sentRate = Self.rate(displayedRate.bytesSentPerSecond)
+        let font = rateLabel.font ?? .monospacedDigitSystemFont(
+            ofSize: NSFont.smallSystemFontSize - 1,
+            weight: .regular
+        )
+        let baseAttributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let presentation = NSMutableAttributedString()
+        presentation.append(NSAttributedString(
+            string: "↓",
+            attributes: baseAttributes.merging([
+                .foregroundColor: receiveArrowIsActive
+                    ? NSColor.systemGreen
+                    : NSColor.secondaryLabelColor,
+            ]) { _, active in active }
+        ))
+        presentation.append(NSAttributedString(
+            string: " \(receivedRate)  ",
+            attributes: baseAttributes
+        ))
+        presentation.append(NSAttributedString(
+            string: "↑",
+            attributes: baseAttributes.merging([
+                .foregroundColor: sendArrowIsActive
+                    ? NSColor.systemRed
+                    : NSColor.secondaryLabelColor,
+            ]) { _, active in active }
+        ))
+        presentation.append(NSAttributedString(
+            string: " \(sentRate)",
+            attributes: baseAttributes
+        ))
+        rateLabel.attributedStringValue = presentation
+        let value = "Download \(receivedRate), upload \(sentRate)"
         rateLabel.setAccessibilityLabel("Kubernetes API transfer rate")
         rateLabel.setAccessibilityValue(value)
         rateAccessibilityValue = value
@@ -116,18 +143,35 @@ final class ClusterConnectionActivityView: NSView {
         setAccessibilityValue("\(stateAccessibilityValue), \(rateAccessibilityValue)")
     }
 
-    private func blink(
-        _ light: NSView,
-        color: NSColor,
-        task: inout Task<Void, Never>?
-    ) {
-        task?.cancel()
-        light.layer?.backgroundColor = color.cgColor
-        task = Task { [weak light] in
+    private func activateReceiveArrow() {
+        receiveFadeTask?.cancel()
+        receiveArrowIsActive = true
+        receiveFadeTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            light?.layer?.backgroundColor = NSColor.tertiaryLabelColor.cgColor
+            self?.receiveArrowIsActive = false
+            self?.renderRateLabel()
         }
+    }
+
+    private func activateSendArrow() {
+        sendFadeTask?.cancel()
+        sendArrowIsActive = true
+        sendFadeTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            self?.sendArrowIsActive = false
+            self?.renderRateLabel()
+        }
+    }
+
+    private func resetRatePresentation() {
+        receiveFadeTask?.cancel()
+        sendFadeTask?.cancel()
+        receiveArrowIsActive = false
+        sendArrowIsActive = false
+        displayedRate = ClusterConnectionRate()
+        renderRateLabel()
     }
 
     private static func rate(_ bytesPerSecond: Double) -> String {

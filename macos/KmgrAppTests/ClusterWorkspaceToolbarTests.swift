@@ -116,22 +116,34 @@ struct ClusterWorkspaceToolbarTests {
         let labels = descendants(of: view).compactMap { $0 as? NSTextField }
         let state = try #require(labels.first { $0.stringValue == "Reconnecting…" })
         let rate = try #require(labels.first { $0.stringValue.hasPrefix("↓") })
-        let receive = try #require(descendants(of: view).first {
-            $0.identifier?.rawValue == "connection-receive-indicator"
-        })
-        let send = try #require(descendants(of: view).first {
-            $0.identifier?.rawValue == "connection-send-indicator"
-        })
         let stateFrame = view.convert(state.bounds, from: state)
         let rateFrame = view.convert(rate.bounds, from: rate)
-        let receiveFrame = view.convert(receive.bounds, from: receive)
-        let sendFrame = view.convert(send.bounds, from: send)
 
         #expect(!stateFrame.intersects(rateFrame))
         #expect(rateFrame.minX - stateFrame.maxX >= 4)
-        #expect(receiveFrame.maxX < sendFrame.minX)
-        #expect(abs(receiveFrame.midY - stateFrame.midY) < 2)
-        #expect(abs(sendFrame.midY - stateFrame.midY) < 2)
+        #expect(descendants(of: view).allSatisfy { type(of: $0) != NSView.self })
+        #expect(!descendants(of: view).contains {
+            $0.identifier?.rawValue == "connection-receive-indicator"
+                || $0.identifier?.rawValue == "connection-send-indicator"
+        })
+        let presentation = rate.attributedStringValue
+        let downArrow = (presentation.string as NSString).range(of: "↓").location
+        let upArrow = (presentation.string as NSString).range(of: "↑").location
+        #expect(downArrow != NSNotFound)
+        #expect(upArrow != NSNotFound)
+        let downColor = try #require(presentation.attribute(
+            .foregroundColor,
+            at: downArrow,
+            effectiveRange: nil
+        ) as? NSColor)
+        let upColor = try #require(presentation.attribute(
+            .foregroundColor,
+            at: upArrow,
+            effectiveRange: nil
+        ) as? NSColor)
+        #expect(downColor.isEqual(NSColor.systemGreen))
+        #expect(upColor.isEqual(NSColor.systemRed))
+        #expect(rate.maximumNumberOfLines == 1)
         #expect(view.intrinsicContentSize.height <= 20)
         let accessibilityValue = view.accessibilityValue() as? String
         #expect(accessibilityValue?.contains("Reconnecting…") == true)
@@ -139,6 +151,45 @@ struct ClusterWorkspaceToolbarTests {
         #expect(accessibilityValue?.contains("Download 12 MiB/s") == true)
         #expect(accessibilityValue?.contains("upload 3.0 MiB/s") == true)
         #expect(rate.accessibilityLabel() == "Kubernetes API transfer rate")
+    }
+
+    @Test("connection arrows activate independently and return to their idle presentation")
+    func connectionArrowPresentationResets() async throws {
+        let downloadView = ClusterConnectionActivityView()
+        downloadView.update(rate: ClusterConnectionRate(
+            bytesReceivedPerSecond: 1_024,
+            bytesSentPerSecond: 0,
+            receivedActive: true,
+            sentActive: false
+        ))
+        let downloadRate = try #require(descendants(of: downloadView)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.stringValue.hasPrefix("↓") })
+        var colors = try transferArrowColors(in: downloadRate)
+        #expect(colors.download.isEqual(NSColor.systemGreen))
+        #expect(colors.upload.isEqual(NSColor.secondaryLabelColor))
+
+        let uploadView = ClusterConnectionActivityView()
+        uploadView.update(rate: ClusterConnectionRate(
+            bytesReceivedPerSecond: 0,
+            bytesSentPerSecond: 2_048,
+            receivedActive: false,
+            sentActive: true
+        ))
+        let uploadRate = try #require(descendants(of: uploadView)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.stringValue.hasPrefix("↓") })
+        colors = try transferArrowColors(in: uploadRate)
+        #expect(colors.download.isEqual(NSColor.secondaryLabelColor))
+        #expect(colors.upload.isEqual(NSColor.systemRed))
+
+        try await Task.sleep(for: .milliseconds(500))
+        colors = try transferArrowColors(in: downloadRate)
+        #expect(colors.download.isEqual(NSColor.secondaryLabelColor))
+        #expect(colors.upload.isEqual(NSColor.secondaryLabelColor))
+        #expect(downloadRate.stringValue == "↓ 0 B/s  ↑ 0 B/s")
+        let accessibilityValue = downloadView.accessibilityValue() as? String
+        #expect(accessibilityValue?.contains("Download 0 B/s, upload 0 B/s") == true)
     }
 
     @Test("connection activity sits at the far right of the resource status bar")
@@ -2096,6 +2147,30 @@ private struct ServiceWorkspaceResourceProvider: WorkspaceResourceProviding {
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
+}
+
+@MainActor
+private func transferArrowColors(
+    in label: NSTextField
+) throws -> (download: NSColor, upload: NSColor) {
+    let presentation = label.attributedStringValue
+    let string = presentation.string as NSString
+    let downloadIndex = string.range(of: "↓").location
+    let uploadIndex = string.range(of: "↑").location
+    try #require(downloadIndex != NSNotFound)
+    try #require(uploadIndex != NSNotFound)
+    return (
+        try #require(presentation.attribute(
+            .foregroundColor,
+            at: downloadIndex,
+            effectiveRange: nil
+        ) as? NSColor),
+        try #require(presentation.attribute(
+            .foregroundColor,
+            at: uploadIndex,
+            effectiveRange: nil
+        ) as? NSColor)
+    )
 }
 
 private func workspaceLetterKey(
