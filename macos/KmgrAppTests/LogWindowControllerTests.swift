@@ -3,6 +3,7 @@ import KmgrCore
 import Testing
 @testable import Kmgr
 
+extension AppKitTestHarness {
 @MainActor
 @Suite("Log windows", .serialized)
 struct LogWindowControllerTests {
@@ -242,6 +243,7 @@ struct LogWindowControllerTests {
         #expect(!events.contains("terminated:1"))
         controller.close()
     }
+}
 }
 
 private func logSource(pod: String, uid: String, container: String) -> LogSource {

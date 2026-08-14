@@ -4,6 +4,7 @@ import KmgrCore
 import Testing
 @testable import Kmgr
 
+extension AppKitTestHarness {
 @MainActor
 @Suite("Columns manager windows", .serialized)
 struct ColumnsManagerWindowControllerTests {
@@ -112,6 +113,7 @@ struct ColumnsManagerWindowControllerTests {
         #expect(exactButtonFrame.minY >= cancelFrame.maxY)
         #expect(exactButtonFrame.minY >= addSelectedFrame.maxY)
     }
+}
 }
 
 private struct NoopColumnPreviewProvider: ColumnPreviewProviding {

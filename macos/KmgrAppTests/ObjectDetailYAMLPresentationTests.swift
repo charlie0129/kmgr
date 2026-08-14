@@ -4,6 +4,7 @@ import KmgrCore
 import Testing
 @testable import Kmgr
 
+extension AppKitTestHarness {
 @MainActor
 @Suite("Object detail YAML presentation")
 struct ObjectDetailYAMLPresentationTests {
@@ -378,6 +379,7 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(split.holdingPriorityForSubview(at: 0) == .defaultHigh)
         #expect(keyScroll.hasHorizontalScroller)
     }
+}
 }
 
 private struct NoopObjectDetailProvider: ObjectDetailProviding {

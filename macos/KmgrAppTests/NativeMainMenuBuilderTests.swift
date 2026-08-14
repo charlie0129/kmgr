@@ -2,6 +2,7 @@ import AppKit
 import Testing
 @testable import Kmgr
 
+extension AppKitTestHarness {
 @MainActor
 @Suite("Native main menu")
 struct NativeMainMenuBuilderTests {
@@ -128,6 +129,7 @@ struct NativeMainMenuBuilderTests {
         #expect(item.keyEquivalent == keyEquivalent)
         #expect(item.keyEquivalentModifierMask == modifiers)
     }
+}
 }
 
 @MainActor

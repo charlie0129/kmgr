@@ -3,6 +3,7 @@ import KmgrCore
 import Testing
 @testable import Kmgr
 
+extension AppKitTestHarness {
 @MainActor
 @Suite("Cluster workspace toolbar", .serialized)
 struct ClusterWorkspaceToolbarTests {
@@ -407,6 +408,7 @@ struct LazyWorkspaceRestorationTests {
         #expect(connectionItem?.view?.accessibilityValue() as? String ==
             "Connection failed, Authentication failed (401).")
     }
+}
 }
 
 @MainActor

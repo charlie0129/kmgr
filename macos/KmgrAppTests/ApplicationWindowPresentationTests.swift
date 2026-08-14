@@ -4,6 +4,7 @@ import KmgrCore
 import Testing
 @testable import Kmgr
 
+extension AppKitTestHarness {
 @MainActor
 @Suite("Application window presentation", .serialized)
 struct ApplicationWindowPresentationTests {
@@ -81,6 +82,7 @@ struct ApplicationWindowPresentationTests {
             hasActivePortForward: forward
         )
     }
+}
 }
 
 @MainActor

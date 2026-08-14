@@ -3,6 +3,7 @@ import Testing
 @testable import Kmgr
 import KmgrCore
 
+extension AppKitTestHarness {
 @MainActor
 @Suite("Resource usage AppKit cell")
 struct ResourceUsageTableCellViewTests {
@@ -42,4 +43,5 @@ struct ResourceUsageTableCellViewTests {
         #expect(ResourceUsageTrackView.markerStyle(for: .limit) == .doubleTick)
         #expect(ResourceUsageTrackView.markerStyle(for: .capacity) == .cappedTick)
     }
+}
 }

@@ -3,6 +3,7 @@ import KmgrCore
 import Testing
 @testable import Kmgr
 
+extension AppKitTestHarness {
 @MainActor
 @Suite("Shared resource columns", .serialized)
 struct ResourceColumnPropagationTests {
@@ -233,6 +234,7 @@ struct ResourceColumnPropagationTests {
             try await Task.sleep(for: .milliseconds(10))
         }
     }
+}
 }
 
 private struct ColumnPropagationFixture {

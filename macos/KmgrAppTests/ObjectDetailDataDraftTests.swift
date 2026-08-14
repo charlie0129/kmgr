@@ -4,6 +4,7 @@ import KmgrCore
 import Testing
 @testable import Kmgr
 
+extension AppKitTestHarness {
 @MainActor
 @Suite("Object detail Data drafts", .serialized)
 struct ObjectDetailDataDraftTests {
@@ -399,6 +400,7 @@ struct ObjectDetailDataDraftTests {
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
         var backCount = 0
         controller.onBack = { backCount += 1 }
         controller.loadView()
@@ -479,6 +481,7 @@ struct ObjectDetailDataDraftTests {
         }
         throw CancellationError()
     }
+}
 }
 
 private actor DraftMutationObjectDetailProvider: ObjectDetailProviding {
