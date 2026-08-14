@@ -227,6 +227,28 @@ public struct ResourceViewStatus: Hashable, Sendable {
         }
     }
 
+    /// Wait only until the text shown by `presentation(now:)` can change.
+    /// Ages use seconds for the first minute, then minute/hour/day buckets, so
+    /// continuing to wake every second after those boundaries wastes idle CPU.
+    public func nextAgeRefreshDelay(now: Date = Date()) -> Duration? {
+        guard needsAgeRefresh, let lastSynchronizedAt else { return nil }
+        let elapsed = max(0, now.timeIntervalSince(lastSynchronizedAt))
+        let bucket: TimeInterval
+        switch elapsed {
+        case ..<60:
+            bucket = 1
+        case ..<3_600:
+            bucket = 60
+        case ..<86_400:
+            bucket = 3_600
+        default:
+            bucket = 86_400
+        }
+        let nextBoundary = (floor(elapsed / bucket) + 1) * bucket
+        let milliseconds = max(1, Int64(ceil((nextBoundary - elapsed) * 1_000)))
+        return .milliseconds(milliseconds)
+    }
+
     public var presentation: String { presentation(now: Date()) }
 
     public func presentation(now: Date) -> String {

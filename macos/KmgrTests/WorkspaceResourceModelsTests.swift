@@ -59,6 +59,34 @@ import Testing
     ) == "Cached · age unavailable")
 }
 
+@Test func resourceAgeRefreshWaitsForTheNextVisibleBoundary() {
+    let synchronizedAt = Date(timeIntervalSince1970: 1_000)
+    let status = ResourceViewStatus(
+        freshness: .stale,
+        lastSynchronizedAt: synchronizedAt
+    )
+
+    #expect(status.nextAgeRefreshDelay(
+        now: synchronizedAt.addingTimeInterval(12.25)
+    ) == .milliseconds(750))
+    #expect(status.nextAgeRefreshDelay(
+        now: synchronizedAt.addingTimeInterval(90.25)
+    ) == .milliseconds(29_750))
+    #expect(status.nextAgeRefreshDelay(
+        now: synchronizedAt.addingTimeInterval(3_723.25)
+    ) == .milliseconds(3_476_750))
+    #expect(status.nextAgeRefreshDelay(
+        now: synchronizedAt.addingTimeInterval(172_923.25)
+    ) == .milliseconds(86_276_750))
+    #expect(ResourceViewStatus(
+        freshness: .watching,
+        lastSynchronizedAt: synchronizedAt
+    ).nextAgeRefreshDelay(now: synchronizedAt) == nil)
+    #expect(ResourceViewStatus(freshness: .stale).nextAgeRefreshDelay(
+        now: synchronizedAt
+    ) == nil)
+}
+
 @Test func everyResourceViewMessageCarriesGenerationCursor() {
     let cursor = StreamCursor(generation: 7, sequence: 31)
     let message = ResourceViewMessage.delta(

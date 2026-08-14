@@ -2421,9 +2421,15 @@ private final class ResourceListViewController: NSViewController,
         guard resourceViewStatus?.needsAgeRefresh == true else { return }
         freshnessAgeTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled,
-                    let self,
+                guard let status = self?.resourceViewStatus,
+                    let delay = status.nextAgeRefreshDelay()
+                else { return }
+                do {
+                    try await Task.sleep(for: delay)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, let self,
                     let status = self.resourceViewStatus,
                     status.needsAgeRefresh
                 else { return }
