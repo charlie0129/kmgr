@@ -6,70 +6,44 @@ import KmgrCore
 /// accounting detail remains available through the tooltip and accessibility
 /// value.
 @MainActor
-final class ResourceUsageTableCellView: NSTableCellView {
-    private let valueLabel = NSTextField(labelWithString: "")
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        valueLabel.lineBreakMode = .byTruncatingTail
-        valueLabel.translatesAutoresizingMaskIntoConstraints = false
-        valueLabel.setAccessibilityElement(false)
-        addSubview(valueLabel)
-        textField = valueLabel
-        setAccessibilityElement(true)
-        setAccessibilityRole(.staticText)
-
-        NSLayoutConstraint.activate([
-            valueLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("programmatic") }
-
+final class ResourceUsageTableCellView: HighlightableResourceTableCellView {
     func configure(
         presentation: ResourceUsageCellPresentation,
         toolTip: String?,
         alignment: NSTextAlignment,
-        textColor: NSColor
+        textColor: NSColor,
+        emphasizedTerm: String? = nil,
+        changeHighlight: ResourceCellHighlightPresentation? = nil
     ) {
-        valueLabel.stringValue = presentation.text
-        valueLabel.alignment = alignment
+        let baseFont: NSFont
+        let effectiveTextColor: NSColor
         switch presentation.effectiveSeverity {
         case .warning:
-            valueLabel.textColor = .systemOrange
-            valueLabel.font = .systemFont(
+            effectiveTextColor = .systemOrange
+            baseFont = .systemFont(
                 ofSize: NSFont.systemFontSize,
                 weight: .semibold
             )
         case .critical:
-            valueLabel.textColor = .systemRed
-            valueLabel.font = .systemFont(
+            effectiveTextColor = .systemRed
+            baseFont = .systemFont(
                 ofSize: NSFont.systemFontSize,
                 weight: .semibold
             )
         default:
-            valueLabel.textColor = textColor
-            valueLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+            effectiveTextColor = textColor
+            baseFont = .systemFont(ofSize: NSFont.systemFontSize)
         }
-        valueLabel.toolTip = toolTip
-        self.toolTip = toolTip
+        configureText(
+            presentation.text,
+            baseFont: baseFont,
+            textColor: effectiveTextColor,
+            alignment: alignment,
+            toolTip: toolTip,
+            emphasizedTerm: emphasizedTerm,
+            changeHighlight: changeHighlight
+        )
         setAccessibilityLabel(presentation.accessibilityLabel)
         setAccessibilityValue(presentation.accessibilityValue)
-        setAccessibilityHelp(toolTip)
-    }
-
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        valueLabel.stringValue = ""
-        valueLabel.textColor = .labelColor
-        valueLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
-        valueLabel.toolTip = nil
-        toolTip = nil
-        setAccessibilityLabel(nil)
-        setAccessibilityValue(nil)
-        setAccessibilityHelp(nil)
     }
 }
