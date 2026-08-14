@@ -2,7 +2,6 @@ package view
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -11,7 +10,6 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
 )
 
 const (
@@ -52,7 +50,6 @@ type KubernetesMetricSource struct {
 
 	mu        sync.Mutex
 	providers map[metricProviderKey]*metrics.Provider
-	clients   map[string]metricsclient.MetricsV1beta1Interface
 }
 
 type metricProviderKey struct {
@@ -76,6 +73,13 @@ func (s *KubernetesMetricSource) OpenMetrics(
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
+	if available, known := session.CachedMetricsAPIAvailability(); known && !available {
+		// Discovery is performed explicitly when the workspace opens. Reuse its
+		// authoritative negative result instead of waking a provider that can
+		// only generate repeated 404/forbidden traffic. Partial discovery stays
+		// unknown and is allowed to degrade through the normal provider path.
+		return nil, metrics.ErrMetricsAPIUnavailable
+	}
 	key := metricProviderKey{authorityID: authorityID, kind: kind, namespace: namespace}
 
 	s.mu.Lock()
@@ -83,23 +87,9 @@ func (s *KubernetesMetricSource) OpenMetrics(
 	if provider := s.providers[key]; provider != nil {
 		return provider, nil
 	}
-	client := s.clients[authorityID]
+	client := session.Metrics()
 	if client == nil {
-		config := session.RESTConfig()
-		if config == nil {
-			return nil, errors.New("cluster REST configuration is unavailable")
-		}
-		// Client construction is local-only: no discovery or Metrics API
-		// request occurs until the returned provider receives a subscriber.
-		created, err := metricsclient.NewForConfig(config)
-		if err != nil {
-			return nil, fmt.Errorf("construct Kubernetes Metrics API client: %w", err)
-		}
-		client = created
-		if s.clients == nil {
-			s.clients = make(map[string]metricsclient.MetricsV1beta1Interface)
-		}
-		s.clients[authorityID] = client
+		return nil, errors.New("cluster Metrics API client is unavailable")
 	}
 	provider, err := metrics.NewProvider(metrics.KubernetesFetcher{
 		Client: client, Kind: kind, Namespace: namespace,
