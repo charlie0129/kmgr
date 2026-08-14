@@ -123,15 +123,18 @@ class HighlightableResourceTableCellView: NSTableCellView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        if let renderedHighlightColor {
+            renderedHighlightColor.setFill()
+            let highlightRect = bounds.insetBy(dx: 1, dy: 1)
+            NSBezierPath(
+                roundedRect: highlightRect,
+                xRadius: 3,
+                yRadius: 3
+            ).fill()
+        }
+        // Keep text and the focus/selection presentation crisp above the
+        // translucent change tint.
         super.draw(dirtyRect)
-        guard let renderedHighlightColor else { return }
-        renderedHighlightColor.setFill()
-        let highlightRect = bounds.insetBy(dx: 1, dy: 1)
-        NSBezierPath(
-            roundedRect: highlightRect,
-            xRadius: 3,
-            yRadius: 3
-        ).fill()
     }
 
     override func prepareForReuse() {
