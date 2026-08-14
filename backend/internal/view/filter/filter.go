@@ -24,6 +24,7 @@ type Term struct {
 	Kind  Kind
 	Key   string
 	Value string
+	Exact bool
 }
 
 type Filter struct {
@@ -160,7 +161,11 @@ func parseTerm(value token) (Term, error) {
 }
 
 func keyedTerm(kind Kind, body string, offset int) (Term, error) {
-	key, value, hasValue := strings.Cut(body, "=")
+	key, value, hasValue := strings.Cut(body, "==")
+	exact := hasValue
+	if !hasValue {
+		key, value, hasValue = strings.Cut(body, "=")
+	}
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return Term{}, &ParseError{Offset: offset, Message: "key must not be empty"}
@@ -168,7 +173,10 @@ func keyedTerm(kind Kind, body string, offset int) (Term, error) {
 	if hasValue && value == "" {
 		return Term{}, &ParseError{Offset: offset + len(key) + 1, Message: "value must not be empty"}
 	}
-	return Term{Kind: kind, Key: key, Value: fold(value)}, nil
+	if !exact {
+		value = fold(value)
+	}
+	return Term{Kind: kind, Key: key, Value: value, Exact: exact}, nil
 }
 
 func termMatches(term Term, candidate Candidate) bool {
@@ -181,10 +189,10 @@ func termMatches(term Term, candidate Candidate) bool {
 		return containsFold(candidate.Status, term.Value)
 	case Label:
 		value, ok := candidate.Labels[term.Key]
-		return ok && (term.Value == "" || containsFold(value, term.Value))
+		return ok && (term.Value == "" || matchesStructuredValue(value, term))
 	case Field:
 		value, ok := candidate.Fields[term.Key]
-		return ok && (term.Value == "" || containsFold(value, term.Value))
+		return ok && (term.Value == "" || matchesStructuredValue(value, term))
 	case Text:
 		if containsFold(candidate.Namespace, term.Value) ||
 			containsFold(candidate.Name, term.Value) ||
@@ -200,6 +208,13 @@ func termMatches(term Term, candidate Candidate) bool {
 	default:
 		return false
 	}
+}
+
+func matchesStructuredValue(value string, term Term) bool {
+	if term.Exact {
+		return value == term.Value
+	}
+	return containsFold(value, term.Value)
 }
 
 func fold(value string) string {

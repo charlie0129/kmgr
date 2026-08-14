@@ -13,10 +13,16 @@ Structured terms are:
 | `status:value` | Typed status text contains `value` |
 | `label:key` | Label key is present |
 | `label:key=value` | Label key is present and its value contains `value` |
+| `label:key==value` | Label key is present and its value exactly equals `value` (case-sensitive) |
 | `field:path` | Projected field path is present |
 | `field:path=value` | Projected field path is present and its scalar text contains `value` |
+| `field:path==value` | Projected field path is present and its scalar text exactly equals `value` (case-sensitive) |
 
-Keys and field paths are exact and case-sensitive; values use case-insensitive substring matching. An unknown prefix, missing key/value, unterminated quote, or trailing escape is a parse error. The UI keeps the query visible and reports that error inline while retaining the last valid result set.
+Keys and field paths are exact and case-sensitive. A single `=` uses a
+case-insensitive substring match; `==` uses case-sensitive exact equality. An
+unknown prefix, missing key/value, unterminated quote, or trailing escape is a
+parse error. The UI keeps the query visible and reports that error inline while
+retaining the last valid result set.
 
 Examples:
 

@@ -43,6 +43,31 @@ func TestPresenceTerms(t *testing.T) {
 	}
 }
 
+func TestExactStructuredTermsAreCaseSensitiveAndDoNotMatchSubstrings(t *testing.T) {
+	t.Parallel()
+	compiled, err := Compile("label:app==api field:spec.nodeName==worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matching := Candidate{
+		Labels: map[string]string{"app": "api"},
+		Fields: map[string]string{"spec.nodeName": "worker-1"},
+	}
+	if !compiled.Match(matching) {
+		t.Fatal("exact values did not match themselves")
+	}
+	for _, candidate := range []Candidate{
+		{Labels: map[string]string{"app": "myapi"}, Fields: matching.Fields},
+		{Labels: map[string]string{"app": "API"}, Fields: matching.Fields},
+		{Labels: matching.Labels, Fields: map[string]string{"spec.nodeName": "worker-10"}},
+		{Labels: matching.Labels, Fields: map[string]string{"spec.nodeName": "WORKER-1"}},
+	} {
+		if compiled.Match(candidate) {
+			t.Fatalf("exact filter matched near miss %#v", candidate)
+		}
+	}
+}
+
 func TestAllTermsAreConjunctive(t *testing.T) {
 	t.Parallel()
 	compiled, err := Compile("api running")
