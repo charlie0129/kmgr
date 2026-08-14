@@ -910,6 +910,9 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		// lag raw events already retained in the store. Its catch-up takes a fresh
 		// store snapshot, so it may use the callback's newer completeness state.
 		subscription.snapshotComplete = entry.accountingReady
+		if usedWarmProjection && entry.state == resourceRunning {
+			subscription.warmCatchupRunNumber = entry.runNumber
+		}
 		subscription.markAuthoritativeResnapshotUnlocked()
 	} else {
 		subscription.snapshotComplete = snapshotComplete
@@ -2298,6 +2301,13 @@ type Subscription struct {
 	// snapshotComplete permits raw-store absence to prove deletion. Cold and
 	// progressive LIST stores remain incomplete until their final page commits.
 	snapshotComplete bool
+	// warmCatchupRunNumber identifies an already-running pipeline whose compact
+	// cached rows were sealed as a stale first paint. Once the mandatory full
+	// reprojection commits, the subscription republishes that run's current
+	// status so a debounce reopen does not remain visibly stale forever. A stop
+	// or restart changes the run number and leaves freshness to the new run's
+	// ordinary status callbacks.
+	warmCatchupRunNumber uint64
 	// scheduleProjection is replaced by tests to make coalescing flushes
 	// deterministic. Production uses one batchDelay timer.
 	scheduleProjection func(func()) *time.Timer
@@ -3128,6 +3138,7 @@ func (s *Subscription) runProjection() {
 			}
 			s.resnapshot = true
 			s.orderDirty = false
+			s.publishWarmCatchupStatusLocked()
 		} else {
 			orderChanged := false
 			for _, object := range objects {
@@ -3185,6 +3196,34 @@ func (s *Subscription) runProjection() {
 			return
 		}
 		s.mu.Unlock()
+	}
+}
+
+// publishWarmCatchupStatusLocked completes the visible stale-to-current
+// transition for a compatible reopen that reused a still-running pipeline.
+// Subscription.mu is held by the caller. Lifecycle code never waits for that
+// mutex while holding Runtime.mu, so taking the runtime lock here follows the
+// established handoff order used by replacement publication.
+func (s *Subscription) publishWarmCatchupStatusLocked() {
+	runNumber := s.warmCatchupRunNumber
+	if runNumber == 0 {
+		return
+	}
+	s.warmCatchupRunNumber = 0
+	if s.runtime == nil || s.resource == nil {
+		return
+	}
+	runtime := s.runtime
+	resource := s.resource
+	var status *kmgrv1.ViewStatus
+	runtime.mu.Lock()
+	if !runtime.closed && runtime.views[s.key] == s && resource.state == resourceRunning &&
+		resource.runNumber == runNumber {
+		status = statusFromPipeline(resource.lastStatus)
+	}
+	runtime.mu.Unlock()
+	if status != nil {
+		s.setStatusLocked(status)
 	}
 }
 

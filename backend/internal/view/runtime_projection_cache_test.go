@@ -147,6 +147,12 @@ func TestRuntimeWarmProjectionReopensDuringReleaseDebounce(t *testing.T) {
 		defer first.mu.Unlock()
 		return first.snapshotComplete && len(first.rows) == 1
 	})
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		return first.resource.state == resourceRunning &&
+			first.resource.lastStatus.Phase == watcher.PhaseWatching
+	})
 	entry := first.resource
 	first.Close()
 	runtime.mu.Lock()
@@ -176,11 +182,44 @@ func TestRuntimeWarmProjectionReopensDuringReleaseDebounce(t *testing.T) {
 	if got := snapshotEventUIDs(events); !slices.Equal(got, []string{"uid"}) {
 		t.Fatalf("debounce cached UIDs = %v, want [uid]", got)
 	}
+	var staleFromWarm bool
+	for _, event := range events {
+		status := event.GetStatus()
+		staleFromWarm = staleFromWarm || (status.GetFromWarmCache() &&
+			status.GetFreshness() == kmgrv1.ViewFreshness_VIEW_FRESHNESS_STALE)
+	}
+	if !staleFromWarm {
+		t.Fatal("debounce reopen did not expose cached rows as stale")
+	}
 	if got := projectionCalls.Load(); got != 1 {
 		t.Fatalf("debounce reopen synchronous projections = %d, want 1 cold projection total", got)
 	}
 	runtime.releaseOpenProjection()
 	gateHeld = false
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		refreshed, nextErr := second.Next(ctx)
+		cancel()
+		if nextErr != nil {
+			if errors.Is(nextErr, context.DeadlineExceeded) {
+				continue
+			}
+			t.Fatal(nextErr)
+		}
+		if err := second.AcknowledgeDelivery(refreshed); err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range refreshed {
+			status := event.GetStatus()
+			if status.GetFreshness() == kmgrv1.ViewFreshness_VIEW_FRESHNESS_WATCHING &&
+				!status.GetFromWarmCache() {
+				return
+			}
+		}
+	}
+	t.Fatal("authoritative debounce catch-up did not restore current watching status")
 }
 
 func TestRuntimeConcurrentCompatibleWarmOpensBothBypassAdmission(t *testing.T) {
