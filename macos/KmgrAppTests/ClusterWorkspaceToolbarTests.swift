@@ -196,6 +196,179 @@ struct ClusterWorkspaceToolbarTests {
         #expect(expandedWidth <= resourceRoot.bounds.width * 0.5 + 0.5)
     }
 
+    @Test("resource filter exposes native grammar completions without preselection")
+    func resourceFilterOffersUnselectedNativeCompletions() async throws {
+        let provider = FilterValidationWorkspaceResourceProvider()
+        let controller = makeWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+
+        try await waitUntil { provider.streamRequestCount == 1 }
+        let editor = NSTextView()
+        editor.string = "n"
+        editor.setSelectedRange(NSRange(location: 1, length: 0))
+        let originalSelection = editor.selectedRange()
+        var selectedIndex = 0
+        let completions = withUnsafeMutablePointer(to: &selectedIndex) { pointer in
+            filter.delegate?.control?(
+                filter,
+                textView: editor,
+                completions: ["native-dictionary-word"],
+                forPartialWordRange: editor.rangeForUserCompletion,
+                indexOfSelectedItem: pointer
+            ) ?? []
+        }
+
+        #expect(completions.prefix(3) == ["namespace:", "name:", "ns:"])
+        #expect(selectedIndex == -1)
+        #expect(editor.string == "n")
+        #expect(editor.selectedRange() == originalSelection)
+        #expect(filter.accessibilityHelp()?.contains("Suggestions are best effort") == true)
+        #expect(filter.accessibilityHelp()?.contains("Return applies") == true)
+    }
+
+    @Test("field completion replaces only AppKit's relative partial word")
+    func resourceFilterCompletesRelativeFieldPath() async throws {
+        let provider = FilterValidationWorkspaceResourceProvider()
+        let controller = makeWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+
+        try await waitUntil { provider.streamRequestCount == 1 }
+        let editor = NSTextView()
+        editor.string = "field:metadata."
+        editor.setSelectedRange(NSRange(
+            location: (editor.string as NSString).length,
+            length: 0
+        ))
+        let partialRange = editor.rangeForUserCompletion
+        var selectedIndex = 37
+        let completions = withUnsafeMutablePointer(to: &selectedIndex) { pointer in
+            filter.delegate?.control?(
+                filter,
+                textView: editor,
+                completions: [],
+                forPartialWordRange: partialRange,
+                indexOfSelectedItem: pointer
+            ) ?? []
+        }
+
+        #expect(partialRange == NSRange(location: 6, length: 9))
+        #expect(completions.first == "metadata.name")
+        #expect(completions.contains("metadata.namespace"))
+        #expect(completions.contains("status.phase") == false)
+        #expect(selectedIndex == -1)
+        #expect((editor.string as NSString).replacingCharacters(
+            in: partialRange,
+            with: try #require(completions.first)
+        ) == "field:metadata.name")
+        #expect(editor.string == "field:metadata.")
+    }
+
+    @Test("automatic completion trigger defers once per nonempty token")
+    func resourceFilterCompletionTriggerIsBoundedByToken() {
+        var deferred: [ResourceFilterCompletionTrigger.DeferredAction] = []
+        var presented: [String] = []
+        let trigger = ResourceFilterCompletionTrigger(
+            deferAction: { deferred.append($0) },
+            present: { presented.append($0.string) }
+        )
+        let editor = NSTextView()
+        let isCurrentEditor: @MainActor (NSTextView) -> Bool = { $0 === editor }
+        let hasCandidates: @MainActor (NSTextView) -> Bool = { _ in true }
+
+        editor.string = "n"
+        editor.setSelectedRange(NSRange(location: 1, length: 0))
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: isCurrentEditor,
+            hasCandidates: hasCandidates
+        )
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: isCurrentEditor,
+            hasCandidates: hasCandidates
+        )
+        #expect(deferred.count == 1)
+        #expect(presented.isEmpty)
+        deferred.removeFirst()()
+        #expect(presented == ["n"])
+
+        editor.string = "na"
+        editor.setSelectedRange(NSRange(location: 2, length: 0))
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: isCurrentEditor,
+            hasCandidates: hasCandidates
+        )
+        #expect(deferred.isEmpty)
+
+        editor.string = "na "
+        editor.setSelectedRange(NSRange(location: 3, length: 0))
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: isCurrentEditor,
+            hasCandidates: hasCandidates
+        )
+        editor.string = "na f"
+        editor.setSelectedRange(NSRange(location: 4, length: 0))
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: isCurrentEditor,
+            hasCandidates: hasCandidates
+        )
+        #expect(deferred.count == 1)
+        deferred.removeFirst()()
+        #expect(presented == ["n", "na f"])
+    }
+
+    @Test("automatic completion trigger revalidates editor state after deferral")
+    func resourceFilterCompletionTriggerRejectsStalePresentation() {
+        var deferred: [ResourceFilterCompletionTrigger.DeferredAction] = []
+        var presentationCount = 0
+        let trigger = ResourceFilterCompletionTrigger(
+            deferAction: { deferred.append($0) },
+            present: { _ in presentationCount += 1 }
+        )
+        let editor = NSTextView()
+        editor.string = "n"
+        editor.setSelectedRange(NSRange(location: 1, length: 0))
+
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { _ in false },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.count == 1)
+        deferred.removeFirst()()
+        #expect(presentationCount == 0)
+
+        editor.setSelectedRange(NSRange(location: 0, length: 1))
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { _ in true },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.isEmpty)
+
+        editor.setSelectedRange(NSRange(location: 1, length: 0))
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { _ in true },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.count == 1)
+        trigger.reset()
+        deferred.removeFirst()()
+        #expect(presentationCount == 0)
+    }
+
     @Test("Return applies a pending resource filter and restores table focus")
     func returnAppliesResourceFilterImmediately() async throws {
         let provider = FilterValidationWorkspaceResourceProvider()

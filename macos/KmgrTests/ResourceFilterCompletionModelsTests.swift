@@ -83,7 +83,8 @@ private let podCompletionContext = ResourceFilterCompletionContext(
     #expect(completions.first == "field:metadata.name")
     #expect(completions.contains("field:metadata.namespace"))
     #expect(completions.contains("field:spec.nodeName"))
-    #expect(completions.count == ResourceFilterCompletionCatalog.maximumResults)
+    #expect(completions.contains("field:status.phase"))
+    #expect(completions.count <= ResourceFilterCompletionCatalog.maximumResults)
     #expect(completions.allSatisfy { $0.lowercased().hasPrefix("f") })
 }
 

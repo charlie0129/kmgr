@@ -33,7 +33,7 @@ public struct ResourceFilterCompletionContext: Hashable, Sendable {
 /// UTF-16 code units; malformed, out-of-bounds, or grapheme-splitting ranges
 /// are rejected rather than repaired into a different edit.
 public enum ResourceFilterCompletionCatalog {
-    public static let maximumResults = 16
+    public static let maximumResults = 24
 
     public static func completions(
         in expression: String,
