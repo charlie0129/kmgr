@@ -368,6 +368,40 @@ private func makeWorkspace(
     )
 }
 
+/// Shared construction boundary for focused multi-window AppKit tests. The
+/// inert collaborators stay private to this file; callers provide only the
+/// resource streams that their scenario needs to observe.
+@MainActor
+func makeColumnPropagationWorkspace(
+    session: OpenedClusterSession,
+    provider: any WorkspaceResourceProviding,
+    optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
+    columnsConfigurationPath: String
+) -> ClusterWorkspaceWindowController {
+    let portForwards = PortForwardCoordinator(provider: NoopPortForwardProvider())
+    return ClusterWorkspaceWindowController(
+        session: session,
+        provider: provider,
+        connectionActivityProvider: NoopConnectionActivityProvider(),
+        optionalResourceCatalogProvider: optionalResourceCatalogProvider,
+        objectSearchProvider: NoopObjectSearchProvider(),
+        objectDetailProvider: NoopToolbarObjectDetailProvider(),
+        operationProvider: NoopOperationProvider(),
+        logProvider: NoopLogProvider(),
+        execProvider: NoopExecProvider(),
+        portForwards: portForwards,
+        columnsConfigurationPath: columnsConfigurationPath,
+        logDisplayConfiguration: .default,
+        confirmationPreferences: { ConfirmationPreferences() },
+        restoration: ClusterWindowRestorationRecord(
+            id: "column-propagation-\(UUID().uuidString)",
+            contextName: session.contextName,
+            contextReference: session.contextReference
+        ),
+        onShowPortForwards: {}
+    )
+}
+
 private func restoredWorkspaceRecord() -> ClusterWindowRestorationRecord {
     ClusterWindowRestorationRecord(
         id: "saved-production",

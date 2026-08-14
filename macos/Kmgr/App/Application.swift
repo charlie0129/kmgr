@@ -480,7 +480,9 @@ final class Application: NSObject, NSApplicationDelegate {
             configurationPath: configurationPath
         )
         controller.onDraftChanged = request.apply
-        controller.onSaved = request.apply
+        controller.onSaved = { [weak self] definitions in
+            self?.applySavedColumns(definitions, matching: request.match)
+        }
         controller.onClose = { [weak self, weak controller] in
             guard self?.columnsManagerControllers[identifier] === controller else { return }
             self?.columnsManagerControllers.removeValue(forKey: identifier)
@@ -495,6 +497,17 @@ final class Application: NSObject, NSApplicationDelegate {
             request.apply(columns)
         }
         controller.beginSheet(for: parent)
+    }
+
+    /// Column definitions are shared by exact GVR across cluster windows.
+    /// Draft previews stay local to their editor; only a successful persisted
+    /// save is fanned out to other open workspaces.
+    private func applySavedColumns(
+        _ definitions: [ColumnDefinition],
+        matching match: ColumnResourceMatch
+    ) {
+        SavedResourceColumnsChange(match: match, definitions: definitions)
+            .apply(to: workspaceControllers.values)
     }
 
     @objc func showPortForwards(_ sender: Any?) {

@@ -10,6 +10,25 @@ struct ResourceColumnsRequest {
     var apply: @MainActor ([ColumnDefinition]) -> Void
 }
 
+/// One successfully persisted GVR-scoped definition change. Keeping fan-out
+/// explicit and main-actor-bound avoids process-global notification payloads
+/// while allowing every currently open workspace to reconcile its own view.
+@MainActor
+struct SavedResourceColumnsChange {
+    var match: ColumnResourceMatch
+    var definitions: [ColumnDefinition]
+
+    @discardableResult
+    func apply<Workspaces: Sequence>(to workspaces: Workspaces) -> Int
+    where Workspaces.Element == ClusterWorkspaceWindowController {
+        workspaces.reduce(into: 0) { count, workspace in
+            if workspace.applySavedColumns(definitions, matching: match) {
+                count += 1
+            }
+        }
+    }
+}
+
 @MainActor
 final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate,
     NSMenuItemValidation
@@ -176,6 +195,18 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.recover(with: recoveredSession)
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
+    }
+
+    /// Applies a persisted definition change only when this window is
+    /// currently presenting the exact resource target. Navigation, filters,
+    /// selection, and the window's optional-resource overlay remain owned by
+    /// the receiving workspace.
+    @discardableResult
+    func applySavedColumns(
+        _ definitions: [ColumnDefinition],
+        matching match: ColumnResourceMatch
+    ) -> Bool {
+        workspaceController.applySavedColumns(definitions, matching: match)
     }
 
     private func dismissTransientOperationsForEngineRecovery() {
@@ -506,6 +537,14 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             contextReference: session.contextReference,
             isSidebarVisible: !splitViewItems[0].isCollapsed
         )
+    }
+
+    @discardableResult
+    func applySavedColumns(
+        _ definitions: [ColumnDefinition],
+        matching match: ColumnResourceMatch
+    ) -> Bool {
+        contentController.applySavedColumns(definitions, matching: match)
     }
 
     func engineDidDisconnect(message: String) {
@@ -2574,7 +2613,26 @@ private final class ResourceListViewController: NSViewController,
         onRestorationChanged?()
     }
 
+    @discardableResult
+    func applySavedColumns(
+        _ definitions: [ColumnDefinition],
+        matching match: ColumnResourceMatch
+    ) -> Bool {
+        guard let resource,
+            match == ColumnResourceMatch(
+                group: resource.group,
+                version: resource.version,
+                resource: resource.resource
+            )
+        else { return false }
+        applyColumns(definitions, forResourceID: resource.id)
+        return true
+    }
+
     private func installColumns(_ definitions: [ColumnDefinition]) {
+        let selectedRowIndexes = model.orderedVisibleUIDs.enumerated().compactMap {
+            model.selectedUIDs.contains($0.element) ? $0.offset : nil
+        }
         columnDefinitionsByID.removeAll(keepingCapacity: true)
         for definition in definitions {
             columnDefinitionsByID[definition.id] = definition
@@ -2583,7 +2641,12 @@ private final class ResourceListViewController: NSViewController,
         columnIDs = enabled.map(\.id)
 
         suppressSortChanges = true
-        defer { suppressSortChanges = false }
+        let wasSuppressingSelectionCallbacks = suppressSelectionCallbacks
+        suppressSelectionCallbacks = true
+        defer {
+            suppressSortChanges = false
+            suppressSelectionCallbacks = wasSuppressingSelectionCallbacks
+        }
         tableView.tableColumns.forEach(tableView.removeTableColumn)
         for definition in enabled {
             let column = NSTableColumn(identifier: .init(definition.id))
@@ -2603,6 +2666,10 @@ private final class ResourceListViewController: NSViewController,
             descriptor.key.map(enabledIDs.contains) ?? false
         }
         tableView.reloadData()
+        tableView.selectRowIndexes(
+            IndexSet(selectedRowIndexes),
+            byExtendingSelection: false
+        )
     }
 
     private var installedColumnDefinitions: [ColumnDefinition] {
