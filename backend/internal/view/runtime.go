@@ -1504,24 +1504,61 @@ func computeNodeAccounting(
 	dependencyErr error,
 ) NodeAccountingSnapshot {
 	nodes := make([]*corev1.Node, 0, len(nodeObjects))
+	nodeDecodeFailures := 0
 	for _, object := range nodeObjects {
-		var node corev1.Node
-		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &node); err == nil {
-			nodes = append(nodes, &node)
+		if object == nil {
+			nodeDecodeFailures++
+			continue
 		}
+		var node corev1.Node
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &node); err != nil {
+			nodeDecodeFailures++
+			continue
+		}
+		nodes = append(nodes, &node)
 	}
 	pods := make([]*corev1.Pod, 0, len(podObjects))
+	podDecodeFailures := 0
 	for _, object := range podObjects {
-		var pod corev1.Pod
-		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &pod); err == nil {
-			pods = append(pods, &pod)
+		if object == nil {
+			podDecodeFailures++
+			continue
 		}
+		var pod corev1.Pod
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &pod); err != nil {
+			podDecodeFailures++
+			continue
+		}
+		pods = append(pods, &pod)
+	}
+	if nodeDecodeFailures != 0 || podDecodeFailures != 0 {
+		dependencyErr = errors.Join(dependencyErr, &nodeAccountingDecodeError{
+			nodes: nodeDecodeFailures,
+			pods:  podDecodeFailures,
+		})
+		ready = false
 	}
 	return NodeAccountingSnapshot{
 		Active: true, Ready: ready, Err: dependencyErr,
 		Nodes:      metrics.AggregateNodes(nodes, pods, nil),
 		Discovered: metrics.DiscoverResources(nodes, pods, accelerators),
 	}
+}
+
+// nodeAccountingDecodeError deliberately reports only aggregate counts. Raw
+// converter errors may contain untrusted object values and do not belong in UI
+// tooltips or diagnostics.
+type nodeAccountingDecodeError struct {
+	nodes int
+	pods  int
+}
+
+func (e *nodeAccountingDecodeError) Error() string {
+	return fmt.Sprintf(
+		"scheduler accounting is incomplete: failed to decode %d Node object(s) and %d Pod object(s)",
+		e.nodes,
+		e.pods,
+	)
 }
 
 // Cancel is idempotent. A stale cancellation cannot close a newer generation.

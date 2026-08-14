@@ -584,7 +584,7 @@ func TestProjectorRejectsInvalidFilterWithoutTouchingObjects(t *testing.T) {
 	}
 }
 
-func TestDefaultPodAndNodeColumnsRequestCPUAndMemoryMetrics(t *testing.T) {
+func TestDefaultPodAndNodeColumnsActivateRequiredDependencies(t *testing.T) {
 	t.Parallel()
 	for _, resourceType := range []ResourceType{
 		{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
@@ -599,6 +599,10 @@ func TestDefaultPodAndNodeColumnsRequestCPUAndMemoryMetrics(t *testing.T) {
 		if !slices.Contains(projector.spec.ColumnIDs, PodCPUColumn) ||
 			!slices.Contains(projector.spec.ColumnIDs, PodMemoryColumn) || !needsMetricProvider(projector) {
 			t.Fatalf("default %s columns do not activate CPU/memory metrics: %v", resourceType.Resource, projector.spec.ColumnIDs)
+		}
+		if got, want := needsNodeAccounting(projector), resourceType.Resource == "nodes"; got != want {
+			t.Fatalf("default %s Node accounting dependency = %t, want %t: %v",
+				resourceType.Resource, got, want, projector.spec.ColumnIDs)
 		}
 	}
 }

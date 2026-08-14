@@ -57,8 +57,9 @@ type ProjectionSpec struct {
 
 // NodeAccountingSnapshot is an immutable scheduler-allocation revision for a
 // Nodes projection. Ready remains false while the shared cluster-wide Pod
-// snapshot is loading. Err records an optional dependency failure without
-// affecting the base Node LIST/WATCH or Metrics API enrichment.
+// snapshot is loading or when any source object could not be decoded. Err
+// records an optional dependency or completeness failure without affecting the
+// base Node LIST/WATCH or Metrics API enrichment.
 type NodeAccountingSnapshot struct {
 	Active     bool
 	Ready      bool

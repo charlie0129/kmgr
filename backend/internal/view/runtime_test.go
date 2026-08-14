@@ -2371,6 +2371,122 @@ func TestRuntimeMetricsFailureKeepsBaseRows(t *testing.T) {
 	}
 }
 
+func TestRuntimeDefaultNodeUsageStartsAccountingWithoutBlockingBaseRows(t *testing.T) {
+	t.Parallel()
+	nodes := newScriptedResource()
+	nodes.listPages = []*unstructured.UnstructuredList{listPage(
+		"nodes-rv", "", nodeObject(
+			"node-uid", "node-a",
+			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8")},
+		),
+	)}
+	pods := newScriptedResource()
+	podGate := make(chan struct{})
+	pods.beforeListPage = map[int]chan struct{}{0: podGate}
+	bound := pod("pod-uid", "ns", "api", "Running", 0, nil, time.Time{})
+	bound.Object["spec"].(map[string]any)["nodeName"] = "node-a"
+	bound.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
+		"requests": map[string]any{"cpu": "500m"},
+		"limits":   map[string]any{"cpu": "1"},
+	}
+	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "", bound)}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &gvrResourceSource{authority: "cluster-a", clients: map[string]watcher.ListerWatcher{
+			"nodes": nodes, "pods": pods,
+		}},
+		ReleaseDelay: time.Hour, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	request := openNodeView("session", "default-nodes", 1)
+	request.Spec.ColumnIds = nil
+	subscription, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+
+	// The Pod dependency is deliberately blocked. The default Node row and its
+	// allocatable CPU value must still arrive independently.
+	base := waitForRow(t, subscription, "node-uid")
+	baseCPU := cellByID(base, NodeCPUUsageColumn)
+	if baseCPU == nil || baseCPU.GetDisplayText() == "Calculating…" ||
+		baseCPU.GetUsage().GetCapacity() != 4 || baseCPU.GetUsage().Requested != nil ||
+		strings.Contains(baseCPU.GetTooltip(), "Effective request:") {
+		t.Fatalf("base default Node CPU before Pod accounting = %#v", baseCPU)
+	}
+	eventually(t, time.Second, func() bool { return pods.listCalls.Load() == 1 })
+
+	close(podGate)
+	updated := waitForNodeAccounting(t, subscription, "node-uid", NodeCPUUsageColumn, 0.5)
+	usage := updated.GetUsage()
+	if usage.GetLimit() != 1 || usage.GetCapacity() != 4 ||
+		!strings.Contains(updated.GetTooltip(), "Effective request: 500m") ||
+		!strings.Contains(updated.GetTooltip(), "Effective limit: 1") {
+		t.Fatalf("default Node CPU after Pod accounting = %#v", updated)
+	}
+}
+
+func TestComputeNodeAccountingMarksDecodeFailuresIncompleteAndKeepsValidTotals(t *testing.T) {
+	t.Parallel()
+	validNode := nodeObject(
+		"node-uid", "node-a",
+		corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+		corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8")},
+	)
+	invalidNode := nodeObject("invalid-node-uid", "node-b", nil, nil)
+	invalidNode.Object["spec"] = map[string]any{"unschedulable": "not-a-boolean"}
+	validPod := pod("pod-uid", "ns", "api", "Running", 0, nil, time.Time{})
+	validPod.Object["spec"].(map[string]any)["nodeName"] = "node-a"
+	validPod.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
+		"requests": map[string]any{"cpu": "500m"},
+	}
+	invalidPod := pod("invalid-pod-uid", "ns", "invalid", "Running", 0, nil, time.Time{})
+	invalidPod.Object["spec"].(map[string]any)["nodeName"] = []any{"node-a"}
+
+	snapshot := computeNodeAccounting(
+		[]*unstructured.Unstructured{validNode, invalidNode},
+		[]*unstructured.Unstructured{validPod, invalidPod},
+		metrics.AcceleratorConfig{},
+		true,
+		nil,
+	)
+	if snapshot.Ready || snapshot.Err == nil {
+		t.Fatalf("decode failure accounting state = ready %t, error %v", snapshot.Ready, snapshot.Err)
+	}
+	var decodeErr *nodeAccountingDecodeError
+	if !errors.As(snapshot.Err, &decodeErr) || decodeErr.nodes != 1 || decodeErr.pods != 1 {
+		t.Fatalf("decode failure = %#v", snapshot.Err)
+	}
+	accounting, found := snapshot.Nodes["node-a"]
+	request := accounting.Requested[corev1.ResourceCPU]
+	if !found || len(snapshot.Nodes) != 1 || accounting.PodCount != 1 || request.MilliValue() != 500 {
+		t.Fatalf("valid partial accounting was discarded: %#v", snapshot.Nodes)
+	}
+
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
+		NodeAccounting:   snapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, visible := projector.ProjectOne(validNode)
+	if !visible {
+		t.Fatal("valid base Node row was hidden by an accounting decode failure")
+	}
+	cpu := cellByID(row, NodeCPUUsageColumn)
+	if cpu == nil || cpu.GetUsage().GetCapacity() != 4 || cpu.GetUsage().Requested != nil ||
+		!strings.Contains(cpu.GetTooltip(), "scheduler accounting is incomplete") {
+		t.Fatalf("base Node usage did not surface incomplete accounting safely: %#v", cpu)
+	}
+}
+
 func TestRuntimeNodeAccountingIsAsyncSharedAndUpdatesFromPods(t *testing.T) {
 	t.Parallel()
 	nodes := newScriptedResource()

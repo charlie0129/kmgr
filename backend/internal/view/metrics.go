@@ -320,6 +320,14 @@ func needsNodeAccounting(projector *Projector) bool {
 		if _, _, allocation := nodeAllocationColumn(projector.spec.Resource, columnID); allocation {
 			return true
 		}
+		// Node usage cells include summed Pod requests and limits in their
+		// tooltips. Start the shared accounting dependency for these ordinary
+		// columns as well as for allocation-only columns; Runtime attaches it only
+		// after publishing the base Node view, so Metrics API and allocatable data
+		// remain available while the cluster-wide Pod snapshot loads.
+		if _, usage := metricColumnResource(projector.spec.Resource, columnID); usage {
+			return true
+		}
 	}
 	return false
 }
