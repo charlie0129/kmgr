@@ -3896,6 +3896,13 @@ private final class ResourceListViewController: NSViewController,
 
     private func installColumns(_ definitions: [ColumnDefinition]) {
         let enabled = definitions.filter(\.isEnabled)
+        // Removing an NSTableColumn makes AppKit immediately remove every
+        // descriptor that references it. Capture the user's backend sort
+        // before rebuilding presentation columns, then restore only IDs that
+        // still exist. Pods and Nodes rebuild here after optional-resource
+        // discovery; losing this state made those headers appear to undo a
+        // click while resource kinds without exact-resource columns worked.
+        let retainedSort = currentSortPresentation
         if installedColumnDefinitions != enabled {
             clearTransientCellPresentation()
         }
@@ -3932,10 +3939,7 @@ private final class ResourceListViewController: NSViewController,
             column.sortDescriptorPrototype = NSSortDescriptor(key: definition.id, ascending: true)
             tableView.addTableColumn(column)
         }
-        let enabledIDs = Set(columnIDs)
-        tableView.sortDescriptors = tableView.sortDescriptors.filter { descriptor in
-            descriptor.key.map(enabledIDs.contains) ?? false
-        }
+        applySortPresentation(retainedSort)
         tableView.reloadData()
         tableView.selectRowIndexes(
             IndexSet(selectedRowIndexes),
@@ -4260,11 +4264,17 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
-    private var currentSortPresentation: [SortDescriptorState] {
-        tableView.sortDescriptors.compactMap { descriptor in
+    private func sortPresentation(
+        _ descriptors: [NSSortDescriptor]
+    ) -> [SortDescriptorState] {
+        descriptors.compactMap { descriptor in
             guard let columnID = descriptor.key else { return nil }
             return SortDescriptorState(columnID: columnID, ascending: descriptor.ascending)
         }
+    }
+
+    private var currentSortPresentation: [SortDescriptorState] {
+        sortPresentation(tableView.sortDescriptors)
     }
 
     private func applySortPresentation(_ states: [SortDescriptorState]) {
@@ -4462,6 +4472,14 @@ private final class ResourceListViewController: NSViewController,
         sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
     ) {
         guard !suppressSortChanges else { return }
+        let proposed = currentSortPresentation
+        let cycled = ResourceSortCyclePolicy.applyingHeaderClickCycle(
+            previous: sortPresentation(oldDescriptors),
+            proposed: proposed
+        )
+        if cycled != proposed {
+            applySortPresentation(cycled)
+        }
         updateDeferredSortFromCurrentTable()
         if let key = tableView.sortDescriptors.first?.key {
             logger.debug("Requested backend table sort for \(key, privacy: .public)")

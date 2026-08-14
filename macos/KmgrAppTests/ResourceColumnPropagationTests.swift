@@ -7,6 +7,81 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Shared resource columns", .serialized)
 struct ResourceColumnPropagationTests {
+    @Test("Pod column rebuild retains sort and a third header click clears it")
+    func podColumnRebuildRetainsThreeStateSort() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let provider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let workspace = makeWorkspace(
+            suffix: "pod-sort-cycle",
+            provider: provider,
+            optionalResourceCatalogProvider: ExactResourceCatalogProvider(
+                resourceName: "nvidia.com/gpu",
+                category: .accelerator,
+                displayName: "NVIDIA GPU"
+            ),
+            configurationPath: fixture.path
+        )
+        start([workspace])
+        defer { workspace.close() }
+
+        let acceleratorID = "resource:nvidia.com/gpu"
+        try await waitUntil {
+            provider.streamRequests.count >= 2
+                && self.resourceTable(in: workspace)?.tableColumns.contains {
+                    $0.identifier.rawValue == acceleratorID
+                } == true
+        }
+        let table = try #require(resourceTable(in: workspace))
+
+        let noSort = table.sortDescriptors
+        table.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
+        table.dataSource?.tableView?(table, sortDescriptorsDidChange: noSort)
+        try await waitUntil {
+            provider.streamRequests.last?.sort == [ResourceSortDescriptor(
+                columnID: "name",
+                direction: .ascending
+            )]
+        }
+
+        let ascending = table.sortDescriptors
+        table.sortDescriptors = [NSSortDescriptor(key: "name", ascending: false)]
+        table.dataSource?.tableView?(table, sortDescriptorsDidChange: ascending)
+        try await waitUntil {
+            provider.streamRequests.last?.sort == [ResourceSortDescriptor(
+                columnID: "name",
+                direction: .descending
+            )]
+        }
+
+        // Reinstall the same effective Pod columns through the Columns… seam.
+        // AppKit clears descriptors when a sorted NSTableColumn is removed, so
+        // this pins the optional-resource rebuild regression seen only on Pods
+        // and Nodes.
+        let columnsRequest = try #require(resourceColumnsRequest(in: workspace))
+        columnsRequest.apply(
+            columnsRequest.defaultColumns + columnsRequest.discoveredColumns
+        )
+        try await waitUntil {
+            table.sortDescriptors.first?.key == "name"
+                && table.sortDescriptors.first?.ascending == false
+        }
+
+        // AppKit's next native proposal wraps descending back to ascending.
+        // The resource table interprets that third click as no sort.
+        let descending = table.sortDescriptors
+        table.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
+        table.dataSource?.tableView?(table, sortDescriptorsDidChange: descending)
+        try await waitUntil {
+            table.sortDescriptors.isEmpty
+                && provider.streamRequests.last?.sort.isEmpty == true
+        }
+    }
+
     @Test("pending column moves remain bounded for valid restoration")
     func pendingColumnMoveHistoryIsBounded() {
         var presentation = DeferredColumnPresentationState(columns: [], sort: [])
