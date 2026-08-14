@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +29,34 @@ import (
 type serviceFactory struct {
 	mu     sync.Mutex
 	closes int
+}
+
+type recordingDefaultServiceFactory struct {
+	mu     sync.Mutex
+	closes int
+}
+
+func (f *recordingDefaultServiceFactory) New(config *rest.Config) (cluster.BackendClients, error) {
+	clients, err := (cluster.DefaultClientFactory{}).New(config)
+	if err != nil {
+		return cluster.BackendClients{}, err
+	}
+	closeClients := clients.Close
+	clients.Close = func() {
+		if closeClients != nil {
+			closeClients()
+		}
+		f.mu.Lock()
+		f.closes++
+		f.mu.Unlock()
+	}
+	return clients, nil
+}
+
+func (f *recordingDefaultServiceFactory) closeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closes
 }
 
 func (f *serviceFactory) New(*rest.Config) (cluster.BackendClients, error) {
@@ -93,6 +123,95 @@ func TestListContextsIsOfflineAndOpenSessionProbes(t *testing.T) {
 	}
 	if _, ok := sessions.Get(opened.GetClusterSessionId()); !ok {
 		t.Fatal("successful session was not retained")
+	}
+}
+
+func TestOpenSessionDefaultProbeUsesAuthenticatedVersionRequest(t *testing.T) {
+	t.Parallel()
+	type observedRequest struct {
+		path          string
+		authorization string
+	}
+	observed := make(chan observedRequest, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		observed <- observedRequest{
+			path:          request.URL.Path,
+			authorization: request.Header.Get("Authorization"),
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"major":"1","minor":"30","gitVersion":"v1.30.0"}`))
+	}))
+	defer server.Close()
+
+	catalog := serviceProbeCatalog(t, server.URL, "probe-token")
+	probeConfig, err := catalog.RESTConfig("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probeConfig.BearerToken != "probe-token" {
+		t.Fatalf("probe REST config omitted bearer token")
+	}
+	factory := &recordingDefaultServiceFactory{}
+	sessions := cluster.NewSessionRegistry(factory)
+	service := NewClusterService(ClusterServiceOptions{
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) { return catalog, nil }),
+		Sessions: sessions,
+	})
+	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
+		Context: requestContext("authenticated-probe"), ContextName: "local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.GetError() != nil || opened.GetClusterSessionId() == "" {
+		t.Fatalf("open response = %#v", opened)
+	}
+	request := <-observed
+	if request.path != "/version" || request.authorization != "Bearer probe-token" {
+		t.Fatalf("probe request = %#v", request)
+	}
+	if !sessions.Close(opened.GetClusterSessionId()) || factory.closeCount() != 1 {
+		t.Fatalf("successful session cleanup: closed=%d response=%#v", factory.closeCount(), opened)
+	}
+}
+
+func TestOpenSessionDefaultProbeHTTP401RollsBackSession(t *testing.T) {
+	t.Parallel()
+	observed := make(chan string, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		observed <- request.Header.Get("Authorization")
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusUnauthorized)
+		_, _ = response.Write([]byte(`{
+			"apiVersion":"v1","kind":"Status","status":"Failure",
+			"reason":"Unauthorized","code":401,"message":"credentials rejected"
+		}`))
+	}))
+	defer server.Close()
+
+	catalog := serviceProbeCatalog(t, server.URL, "rejected-token")
+	factory := &recordingDefaultServiceFactory{}
+	sessions := cluster.NewSessionRegistry(factory)
+	service := NewClusterService(ClusterServiceOptions{
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) { return catalog, nil }),
+		Sessions: sessions,
+	})
+	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
+		Context: requestContext("rejected-probe"), ContextName: "local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorization := <-observed; authorization != "Bearer rejected-token" {
+		t.Fatalf("probe authorization = %q", authorization)
+	}
+	if opened.GetClusterSessionId() != "" ||
+		opened.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION ||
+		opened.GetError().GetHttpStatusCode() != http.StatusUnauthorized {
+		t.Fatalf("401 response = %#v", opened)
+	}
+	if factory.closeCount() != 1 {
+		t.Fatalf("401 rollback close count = %d, want 1", factory.closeCount())
 	}
 }
 
@@ -506,6 +625,32 @@ contexts:
   context: {cluster: target, user: static}
 current-context: local
 `)
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return mustCatalog(t, path)
+}
+
+func serviceProbeCatalog(t *testing.T, serverURL, token string) *cluster.Catalog {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config")
+	contents := []byte(fmt.Sprintf(`
+apiVersion: v1
+kind: Config
+clusters:
+- name: target
+  cluster:
+    server: %s
+    insecure-skip-tls-verify: true
+users:
+- name: static
+  user:
+    token: %s
+contexts:
+- name: local
+  context: {cluster: target, user: static}
+current-context: local
+`, serverURL, token))
 	if err := os.WriteFile(path, contents, 0o600); err != nil {
 		t.Fatal(err)
 	}
