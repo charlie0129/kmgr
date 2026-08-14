@@ -24,9 +24,11 @@ struct ResourceUsageCellPresentationTests {
             .init(component: .request, ratio: 0.5),
             .init(component: .limit, ratio: 1),
         ])
+        #expect(presentation.pressure == .warning)
+        #expect(presentation.effectiveSeverity == .warning)
         #expect(presentation.accessibilityLabel == "CPU resource usage")
         #expect(presentation.accessibilityValue ==
-            "CPU, usage 420 millicores, request 500 millicores, limit 1 core")
+            "Warning, CPU, usage 420 millicores, request 500 millicores, limit 1 core")
         #expect(!presentation.hasOverflow)
     }
 
@@ -49,6 +51,7 @@ struct ResourceUsageCellPresentationTests {
             .init(component: .request, ratio: 0.75),
             .init(component: .capacity, ratio: 1),
         ])
+        #expect(presentation.pressure == .normal)
         #expect(presentation.accessibilityLabel == "Memory resource allocation")
         #expect(presentation.accessibilityValue ==
             "Memory, request 1.5 gibibytes, capacity 2 gibibytes")
@@ -73,6 +76,8 @@ struct ResourceUsageCellPresentationTests {
             .init(component: .request, ratio: 1),
             .init(component: .limit, ratio: 0.5),
         ])
+        #expect(presentation.pressure == .critical)
+        #expect(presentation.effectiveSeverity == .critical)
         #expect(presentation.hasOverflow)
     }
 
@@ -120,5 +125,104 @@ struct ResourceUsageCellPresentationTests {
             columnID: "missing",
             displayText: "—"
         )) == nil)
+    }
+
+    @Test("Pod pressure uses exact request and limit boundaries")
+    func podPressureBoundaries() {
+        #expect(pressure(usage: 79.999, request: 100) == .normal)
+        #expect(pressure(usage: 80, request: 100) == .warning)
+        #expect(pressure(usage: 500, request: 100) == .warning)
+
+        #expect(pressure(usage: 79.999, limit: 100) == .normal)
+        #expect(pressure(usage: 80, limit: 100) == .warning)
+        #expect(pressure(usage: 89.999, limit: 100) == .warning)
+        #expect(pressure(usage: 90, limit: 100) == .critical)
+    }
+
+    @Test("Node pressure uses only actual usage and positive allocatable capacity")
+    func nodePressureBoundaries() {
+        #expect(pressure(usage: 79.999, request: 1, capacity: 100) == .normal)
+        #expect(pressure(usage: 80, request: 1, capacity: 100) == .warning)
+        #expect(pressure(usage: 89.999, limit: 1, capacity: 100) == .warning)
+        #expect(pressure(usage: 90, limit: 1, capacity: 100) == .critical)
+
+        #expect(pressure(request: 99, capacity: 100) == .normal)
+        #expect(pressure(limit: 99, capacity: 100) == .normal)
+    }
+
+    @Test("invalid pressure quantities are ignored")
+    func invalidPressureQuantities() {
+        #expect(pressure(usage: 0, request: 1, limit: 1) == .normal)
+        #expect(pressure(usage: -1, request: 1, limit: 1) == .normal)
+        #expect(pressure(usage: .nan, request: 1, limit: 1) == .normal)
+        #expect(pressure(usage: .infinity, request: 1, limit: 1) == .normal)
+
+        #expect(pressure(usage: 1, request: 0, limit: -1) == .normal)
+        #expect(pressure(usage: 1, request: .nan, limit: .infinity) == .normal)
+        #expect(pressure(usage: 1, capacity: 0) == .normal)
+        #expect(pressure(usage: 1, capacity: -.infinity) == .normal)
+    }
+
+    @Test("pressure composes with existing cell severity and critical wins")
+    func severityComposition() throws {
+        let staleAndCritical = try #require(ResourceUsageCellPresentation(cell: Cell(
+            columnID: "cpu",
+            displayText: "95m / 100m",
+            typedValue: .usage(ResourceUsageValue(
+                usage: 0.095,
+                limit: 0.1,
+                unit: "cores",
+                resourceName: "cpu"
+            )),
+            severity: .warning
+        )))
+        #expect(staleAndCritical.pressure == .critical)
+        #expect(staleAndCritical.effectiveSeverity == .critical)
+        #expect(staleAndCritical.accessibilityValue.hasPrefix("Critical, "))
+
+        let backendCriticalAndWarning = try #require(ResourceUsageCellPresentation(cell: Cell(
+            columnID: "memory",
+            displayText: "80 / 100",
+            typedValue: .usage(ResourceUsageValue(
+                usage: 80,
+                request: 100,
+                unit: "bytes",
+                resourceName: "memory"
+            )),
+            severity: .critical
+        )))
+        #expect(backendCriticalAndWarning.pressure == .warning)
+        #expect(backendCriticalAndWarning.effectiveSeverity == .critical)
+
+        let backendWarning = ResourceUsageCellPresentation(
+            displayText: "10 / 100",
+            value: ResourceUsageValue(
+                usage: 10,
+                request: 100,
+                unit: "count"
+            ),
+            cellSeverity: .warning
+        )
+        #expect(backendWarning.pressure == .normal)
+        #expect(backendWarning.effectiveSeverity == .warning)
+        #expect(backendWarning.accessibilityValue.hasPrefix("Warning, "))
+    }
+
+    private func pressure(
+        usage: Double? = nil,
+        request: Double? = nil,
+        limit: Double? = nil,
+        capacity: Double? = nil
+    ) -> ResourceUsageCellPresentation.Pressure {
+        ResourceUsageCellPresentation(
+            displayText: "typed values only",
+            value: ResourceUsageValue(
+                usage: usage,
+                request: request,
+                limit: limit,
+                capacity: capacity,
+                unit: "count"
+            )
+        ).pressure
     }
 }

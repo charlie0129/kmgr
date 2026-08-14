@@ -4,6 +4,12 @@ import Foundation
 /// cell. Ratios deliberately remain unbounded so callers can show over-request
 /// and over-limit values instead of silently clamping them to 100 percent.
 public struct ResourceUsageCellPresentation: Hashable, Sendable {
+    public enum Pressure: String, Hashable, Sendable {
+        case normal
+        case warning
+        case critical
+    }
+
     public enum Component: String, Hashable, Sendable {
         case usage
         case request
@@ -27,17 +33,32 @@ public struct ResourceUsageCellPresentation: Hashable, Sendable {
     public var primaryComponent: Component?
     public var fillRatio: Double?
     public var markers: [Marker]
+    public var pressure: Pressure
+    public var effectiveSeverity: CellSeverity
     public var accessibilityLabel: String
     public var accessibilityValue: String
 
     public init?(cell: Cell) {
         guard case .usage(let value)? = cell.typedValue else { return nil }
-        self.init(displayText: cell.displayText, value: value)
+        self.init(
+            displayText: cell.displayText,
+            value: value,
+            cellSeverity: cell.severity
+        )
     }
 
-    public init(displayText: String, value: ResourceUsageValue) {
+    public init(
+        displayText: String,
+        value: ResourceUsageValue,
+        cellSeverity: CellSeverity = .normal
+    ) {
         text = displayText.isEmpty ? "—" : displayText
         primaryComponent = Self.primaryComponent(value)
+        pressure = Self.pressure(value)
+        effectiveSeverity = Self.effectiveSeverity(
+            cellSeverity: cellSeverity,
+            pressure: pressure
+        )
 
         let components = Self.components(value)
         if let denominator = Self.denominator(value) {
@@ -69,11 +90,16 @@ public struct ResourceUsageCellPresentation: Hashable, Sendable {
         accessibilityLabel = value.usage == nil
             ? "\(title) resource allocation"
             : "\(title) resource usage"
-        accessibilityValue = Self.accessibilityValue(
+        let quantityDescription = Self.accessibilityValue(
             title: title,
             displayText: text,
             value: value
         )
+        accessibilityValue = switch effectiveSeverity {
+        case .warning: "Warning, \(quantityDescription)"
+        case .critical: "Critical, \(quantityDescription)"
+        default: quantityDescription
+        }
     }
 
     public var hasOverflow: Bool {
@@ -122,6 +148,48 @@ public struct ResourceUsageCellPresentation: Hashable, Sendable {
     private static func geometryValue(_ value: Double?) -> Double? {
         guard let value, value.isFinite, value >= 0 else { return nil }
         return value
+    }
+
+    private static func pressure(_ value: ResourceUsageValue) -> Pressure {
+        guard let usage = positiveFinite(value.usage) else { return .normal }
+
+        // A capacity component identifies Node-style usage. The protocol's
+        // capacity value is the allocatable denominator used for display;
+        // scheduler request/limit aggregates have different semantics and
+        // must never be substituted for missing actual usage.
+        if value.capacity != nil {
+            guard let capacity = positiveFinite(value.capacity) else { return .normal }
+            if usage >= capacity * 0.9 { return .critical }
+            if usage >= capacity * 0.8 { return .warning }
+            return .normal
+        }
+
+        // Pod-style usage becomes critical only near a positive limit. A
+        // request is a scheduling baseline, so crossing it is useful warning
+        // pressure but is not itself a critical condition.
+        let limit = positiveFinite(value.limit)
+        if let limit, usage >= limit * 0.9 { return .critical }
+        let warningReferences = [
+            positiveFinite(value.request),
+            limit,
+        ].compactMap { $0 }
+        return warningReferences.contains { usage >= $0 * 0.8 }
+            ? .warning
+            : .normal
+    }
+
+    private static func positiveFinite(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        return value
+    }
+
+    private static func effectiveSeverity(
+        cellSeverity: CellSeverity,
+        pressure: Pressure
+    ) -> CellSeverity {
+        if cellSeverity == .critical || pressure == .critical { return .critical }
+        if cellSeverity == .warning || pressure == .warning { return .warning }
+        return cellSeverity
     }
 
     private static func accessibilityValue(

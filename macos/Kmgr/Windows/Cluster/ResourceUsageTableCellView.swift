@@ -37,7 +37,23 @@ final class ResourceUsageTableCellView: NSTableCellView {
     ) {
         valueLabel.stringValue = presentation.text
         valueLabel.alignment = alignment
-        valueLabel.textColor = textColor
+        switch presentation.effectiveSeverity {
+        case .warning:
+            valueLabel.textColor = .systemOrange
+            valueLabel.font = .systemFont(
+                ofSize: NSFont.systemFontSize,
+                weight: .semibold
+            )
+        case .critical:
+            valueLabel.textColor = .systemRed
+            valueLabel.font = .systemFont(
+                ofSize: NSFont.systemFontSize,
+                weight: .semibold
+            )
+        default:
+            valueLabel.textColor = textColor
+            valueLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        }
         valueLabel.toolTip = toolTip
         self.toolTip = toolTip
         setAccessibilityLabel(presentation.accessibilityLabel)
@@ -48,6 +64,8 @@ final class ResourceUsageTableCellView: NSTableCellView {
     override func prepareForReuse() {
         super.prepareForReuse()
         valueLabel.stringValue = ""
+        valueLabel.textColor = .labelColor
+        valueLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
         valueLabel.toolTip = nil
         toolTip = nil
         setAccessibilityLabel(nil)
