@@ -235,8 +235,9 @@ The engine emits structured, redacted JSON diagnostics on stderr. The GUI
 drains that stream without mirroring raw text into application logs; run the
 helper directly with `--log-level debug` when developing its startup and IPC
 boundary. Set `KMGR_ENGINE_PATH` to an absolute local engine executable before
-launching Kmgr to test a separately built helper.
-Performance harness instructions are in
+launching Kmgr to test a separately built helper. Debug app builds also contain
+an opt-in, loopback-only Go profiler; it is absent from Release helpers and is
+documented with the performance harness in
 [docs/performance.md](docs/performance.md).
 
 ## Testing

@@ -15,8 +15,14 @@ script=$(<"$build_script")
   fail "Debug is no longer the default configuration"
 [[ "$script" == *'go_ldflags=(-X "main.version=$version")'* ]] ||
   fail "Debug Go builds lost version injection"
+[[ "$script" == *'go_build_flags=(-tags kmgr_dev)'* ]] ||
+  fail "Debug Go builds lost the explicit development-only build tag"
 [[ "$script" == *'go_ldflags=(-s -w -X "main.version=$version")'* ]] ||
   fail "Release Go builds do not strip symbols while injecting the version"
+[[ "$script" == *'go_build_flags=()'* ]] ||
+  fail "Release Go builds no longer clear development-only build tags"
+[[ "$script" == *'"${go_build_flags[@]}"'* ]] ||
+  fail "Go builds no longer apply configuration-specific build tags"
 [[ "$script" == *'-trimpath'* ]] || fail "Go builds lost -trimpath"
 [[ "$script" == *'--configuration "$configuration"'* ]] ||
   fail "SwiftPM no longer receives the selected configuration"
@@ -32,5 +38,14 @@ bundle_sign_number=$(grep -nF 'codesign --force --sign - "$app_dir"' "$build_scr
   fail "could not locate strip/signing commands"
 (( strip_number < helper_sign_number && helper_sign_number < bundle_sign_number )) ||
   fail "binary mutations must precede nested-code and bundle signing"
+
+release_pprof_dependency=$(cd "$repo_root" && go list -deps -f \
+  '{{if eq .ImportPath "net/http/pprof"}}{{.ImportPath}}{{end}}' ./backend/cmd/kmgr-engine)
+[[ -z "$release_pprof_dependency" ]] ||
+  fail "Release helper unexpectedly links net/http/pprof"
+development_pprof_dependency=$(cd "$repo_root" && go list -tags kmgr_dev -deps -f \
+  '{{if eq .ImportPath "net/http/pprof"}}{{.ImportPath}}{{end}}' ./backend/cmd/kmgr-engine)
+[[ "$development_pprof_dependency" == "net/http/pprof" ]] ||
+  fail "Development helper does not link the opt-in pprof implementation"
 
 print "build-app release policy: ok"

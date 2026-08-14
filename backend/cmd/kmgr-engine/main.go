@@ -33,6 +33,7 @@ func run(arguments []string) int {
 		"refresh interval for active Metrics API consumers",
 	)
 	logLevel := flags.String("log-level", "info", "stderr log level: debug, info, warn, or error")
+	startDevelopmentProfiler := registerDevelopmentProfiler(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -63,6 +64,12 @@ func run(arguments []string) int {
 		return 2
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	stopDevelopmentProfiler, err := startDevelopmentProfiler(logger)
+	if err != nil {
+		logger.Error("failed to start development profiler", "error_kind", "pprof")
+		return 1
+	}
+	defer stopDevelopmentProfiler()
 
 	endpoint, err := transport.ListenPrivateUnixPath(*socketPath)
 	if err != nil {

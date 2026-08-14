@@ -91,6 +91,37 @@ For redacted helper RPC timing, run a separately built helper with
 `kmgr-engine --log-level debug` as described in the README. The helper logs
 only RPC method, duration, and status and never request/response bodies.
 
+## Go helper profiles
+
+Debug app builds compile an opt-in pprof server behind the `kmgr_dev` Go build
+tag. It is disabled unless `KMGR_PPROF_ADDRESS` or the development-only
+`--pprof-address` flag names an explicit loopback IP and port. Release app
+builds omit both the profiler code and flag; the build-policy test checks the
+Release helper dependency graph for that exclusion.
+
+To profile the helper while exercising the native app, build Debug and launch
+the executable directly so the child helper inherits the opt-in environment:
+
+```sh
+make app
+KMGR_PPROF_ADDRESS=127.0.0.1:6060 \
+  build/Kmgr.app/Contents/MacOS/Kmgr
+```
+
+Then capture a heap or CPU profile locally:
+
+```sh
+go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+go tool pprof 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'
+```
+
+The server rejects wildcard addresses and hostnames, uses an isolated HTTP
+handler set, and does not expose `/debug/pprof/cmdline`, because the helper's
+launch token is a command-line argument. No Kubernetes names or values are
+added as profile labels. Profiles and traces are nevertheless local diagnostic
+artifacts from a process that holds cluster clients; inspect them before
+sharing and remove them when the investigation is complete.
+
 ## Current reference evidence
 
 On 2026-08-13, the diagnostic Release harness passed on an Apple M1 Max with

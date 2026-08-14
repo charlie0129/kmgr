@@ -13,9 +13,11 @@ version=$(git -C "$repo_root" describe --always --dirty 2>/dev/null || print dev
 case "$configuration" in
   debug)
     go_ldflags=(-X "main.version=$version")
+    go_build_flags=(-tags kmgr_dev)
     ;;
   release)
     go_ldflags=(-s -w -X "main.version=$version")
+    go_build_flags=()
     ;;
   *) print -u2 "CONFIGURATION must be 'debug' or 'release'"; exit 2 ;;
 esac
@@ -34,6 +36,7 @@ fi
 mkdir -p "$macos_dir" "$helpers_dir" "$resources_dir"
 
 go build \
+  "${go_build_flags[@]}" \
   -trimpath \
   -ldflags "${(j: :)go_ldflags}" \
   -o "$helpers_dir/kmgr-engine" \

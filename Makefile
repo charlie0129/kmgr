@@ -14,6 +14,7 @@ test-build:
 
 test-go:
 	go test ./...
+	go test -tags kmgr_dev ./backend/cmd/kmgr-engine
 
 test-swift:
 	swift test --package-path macos --no-parallel
