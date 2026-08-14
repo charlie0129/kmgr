@@ -98,6 +98,7 @@ final class DeleteResourcesWindowController: NSWindowController,
         for (id, title, width) in [
             ("gvr", "GVR", 220.0), ("namespace", "Namespace", 130.0),
             ("name", "Name", 240.0), ("uid", "UID", 190.0),
+            ("visibility", "Filter Status", 150.0),
             ("state", "Result", 130.0),
         ] {
             let column = NSTableColumn(identifier: .init(id))
@@ -205,6 +206,7 @@ final class DeleteResourcesWindowController: NSWindowController,
         case "namespace": value = identity.namespace.isEmpty ? "Cluster" : identity.namespace
         case "name": value = identity.name
         case "uid": value = identity.uid.rawValue
+        case "visibility": value = target.hiddenByFilter ? "Hidden by filter" : "Visible"
         case "state": value = resultText(resultsByUID[identity.uid])
         default: value = ""
         }
@@ -226,7 +228,14 @@ final class DeleteResourcesWindowController: NSWindowController,
         }
         cell.textField?.stringValue = value
         cell.textField?.toolTip = resultTooltip(resultsByUID[identity.uid]) ?? value
-        if let result = resultsByUID[identity.uid] {
+        if tableColumn.identifier.rawValue == "visibility" {
+            cell.setAccessibilityLabel("Filter status")
+            cell.setAccessibilityValue(value)
+        }
+        if tableColumn.identifier.rawValue == "visibility", target.hiddenByFilter {
+            cell.textField?.textColor = .systemOrange
+            cell.textField?.toolTip = "This selected resource is not visible in the current filtered table."
+        } else if let result = resultsByUID[identity.uid] {
             cell.textField?.textColor = result.state == .succeeded
                 ? .systemGreen : (result.state == .running ? .labelColor : .systemRed)
         } else {
