@@ -11,7 +11,7 @@ import Darwin
 @Suite("Swift to Go engine transport")
 @MainActor
 struct EngineTransportEndToEndTests {
-    @Test("private UDS authenticates, rejects a bad token, restarts, and shuts down")
+    @Test("private UDS authenticates, resets a stable restart budget, and shuts down")
     func authenticatedLifecycle() async throws {
         #if canImport(Darwin)
         let fixture = try EngineProcessFixture.create()
@@ -21,10 +21,13 @@ struct EngineTransportEndToEndTests {
             helperURL: fixture.wrapperURL,
             temporaryDirectoryURL: fixture.endpointBaseURL,
             restartPolicy: .init(
-                maximumAttempts: 3,
+                maximumAttempts: 2,
                 initialDelayMilliseconds: 10,
                 maximumDelayMilliseconds: 10
             ),
+            // Zero makes the production stability boundary deterministic in
+            // this lifecycle fixture: every handshaken generation is stable.
+            restartStabilityDuration: .zero,
             startupTimeout: .seconds(8),
             handshakeTimeout: .seconds(2),
             shutdownTimeout: .seconds(3),
@@ -80,6 +83,18 @@ struct EngineTransportEndToEndTests {
                 .health(healthRequest, options: healthOptions)
             #expect(health.state == .ready)
 
+            // With a two-attempt policy, the old lifetime counter stopped
+            // here. The stable second generation must clear the first crash
+            // before its own exit so generation three is still launched.
+            try fixture.crash(secondGeneration)
+            let third = try await waitForNewGeneration(
+                from: supervisor,
+                replacing: second.instanceID
+            )
+            let thirdGeneration = try await fixture.generation(3)
+            #expect(third.instanceID != second.instanceID)
+            #expect(thirdGeneration.processID != secondGeneration.processID)
+
             await supervisor.shutdown()
             supervisor.removeStateObserver(observer)
 
@@ -94,7 +109,7 @@ struct EngineTransportEndToEndTests {
                 atPath: fixture.endpointBaseURL.path
             ).isEmpty)
             #expect(!FileManager.default.fileExists(
-                atPath: URL(fileURLWithPath: secondGeneration.socketPath)
+                atPath: URL(fileURLWithPath: thirdGeneration.socketPath)
                     .deletingLastPathComponent().path
             ))
         } catch {

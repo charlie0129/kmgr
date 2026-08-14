@@ -69,6 +69,26 @@ public struct EngineRestartPolicy: Hashable, Sendable {
     }
 }
 
+/// Counts only consecutive unhealthy helper generations. A generation that
+/// remains handshaken and ready through the configured stability boundary
+/// starts a fresh restart sequence when it eventually exits.
+struct EngineRestartBudget {
+    private(set) var consecutiveFailures = 0
+
+    mutating func recordFailure(
+        precedingReadyDuration: Duration?,
+        stabilityDuration: Duration
+    ) -> Int {
+        if let precedingReadyDuration,
+            precedingReadyDuration >= stabilityDuration
+        {
+            consecutiveFailures = 0
+        }
+        consecutiveFailures += 1
+        return consecutiveFailures
+    }
+}
+
 public enum EngineSupervisorError: Error, LocalizedError, Sendable {
     case helperMissing(String)
     case helperExited(Int32)
@@ -105,6 +125,10 @@ public final class EngineSupervisor {
         public var helperURL: URL
         public var temporaryDirectoryURL: URL
         public var restartPolicy: EngineRestartPolicy
+        /// Ready time required before a generation clears earlier failures.
+        /// Short-lived handshaken generations therefore remain a bounded
+        /// crash loop, while unrelated crashes do not consume a lifetime cap.
+        public var restartStabilityDuration: Duration
         public var startupTimeout: Duration
         public var handshakeTimeout: Duration
         public var shutdownTimeout: Duration
@@ -117,6 +141,7 @@ public final class EngineSupervisor {
             helperURL: URL,
             temporaryDirectoryURL: URL = URL(fileURLWithPath: "/tmp", isDirectory: true),
             restartPolicy: EngineRestartPolicy = EngineRestartPolicy(),
+            restartStabilityDuration: Duration = .seconds(30),
             startupTimeout: Duration = .seconds(8),
             handshakeTimeout: Duration = .seconds(2),
             shutdownTimeout: Duration = .seconds(5),
@@ -125,9 +150,11 @@ public final class EngineSupervisor {
             metricsRefreshSeconds: Int? = nil,
             logLevel: String? = nil
         ) {
+            precondition(restartStabilityDuration >= .zero)
             self.helperURL = helperURL
             self.temporaryDirectoryURL = temporaryDirectoryURL
             self.restartPolicy = restartPolicy
+            self.restartStabilityDuration = restartStabilityDuration
             self.startupTimeout = startupTimeout
             self.handshakeTimeout = handshakeTimeout
             self.shutdownTimeout = shutdownTimeout
@@ -327,18 +354,23 @@ public final class EngineSupervisor {
     }
 
     private func supervise() async {
-        var failure = 0
+        var restartBudget = EngineRestartBudget()
         while !shutdownRequested, !Task.isCancelled {
-            state = .starting(attempt: failure + 1)
+            state = .starting(attempt: restartBudget.consecutiveFailures + 1)
+            var precedingReadyDuration: Duration?
             do {
-                try await runGeneration()
+                let generationExit = try await runGeneration()
                 if shutdownRequested || Task.isCancelled { break }
-                throw EngineSupervisorError.helperExited(0)
+                precedingReadyDuration = generationExit.readyDuration
+                throw EngineSupervisorError.helperExited(generationExit.status)
             } catch is CancellationError {
                 break
             } catch {
                 if shutdownRequested { break }
-                failure += 1
+                let failure = restartBudget.recordFailure(
+                    precedingReadyDuration: precedingReadyDuration,
+                    stabilityDuration: configuration.restartStabilityDuration
+                )
                 let message = safeMessage(for: error)
                 state = .disconnected(message: message)
                 guard let delay = configuration.restartPolicy.delayMilliseconds(
@@ -355,7 +387,7 @@ public final class EngineSupervisor {
         supervisionTask = nil
     }
 
-    private func runGeneration() async throws {
+    private func runGeneration() async throws -> EngineGenerationExit {
         guard FileManager.default.isExecutableFile(atPath: configuration.helperURL.path) else {
             throw EngineSupervisorError.helperMissing(configuration.helperURL.path)
         }
@@ -449,9 +481,11 @@ public final class EngineSupervisor {
             // authenticated protocol handshake and capability validation have
             // succeeded. The supervisor retains `currentClient` privately so
             // shutdown can still stop a helper whose startup is in progress.
+            let readyAt = ContinuousClock.now
             connection.install(client)
             state = .ready(information)
             let status = await exitWaiter.wait()
+            let readyDuration = readyAt.duration(to: ContinuousClock.now)
             connection.clear(client)
             currentClient = nil
             currentProcess = nil
@@ -459,9 +493,7 @@ public final class EngineSupervisor {
             connectionTask.cancel()
             diagnosticsTask?.cancel()
             try? endpoint.cleanup()
-            if !shutdownRequested {
-                throw EngineSupervisorError.helperExited(status)
-            }
+            return EngineGenerationExit(status: status, readyDuration: readyDuration)
         } catch {
             connection.clear(client)
             currentClient = nil
@@ -588,6 +620,11 @@ public final class EngineSupervisor {
         }
         return "The Kubernetes engine disconnected unexpectedly."
     }
+}
+
+private struct EngineGenerationExit {
+    var status: Int32
+    var readyDuration: Duration
 }
 
 extension EngineSupervisor.Configuration {

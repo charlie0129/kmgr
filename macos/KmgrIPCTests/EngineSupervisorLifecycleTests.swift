@@ -63,6 +63,135 @@ struct EngineSupervisorLifecycleTests {
         #expect(configuration.helperArguments(appendingTo: ["base"]) == ["base"])
     }
 
+    @Test("stable ready generations reset the consecutive restart budget")
+    func stableReadyGenerationResetsRestartBudget() {
+        let policy = EngineRestartPolicy(
+            maximumAttempts: 3,
+            initialDelayMilliseconds: 0,
+            maximumDelayMilliseconds: 0
+        )
+        let stabilityDuration = Duration.seconds(30)
+        var budget = EngineRestartBudget()
+
+        #expect(budget.recordFailure(
+            precedingReadyDuration: nil,
+            stabilityDuration: stabilityDuration
+        ) == 1)
+        #expect(budget.recordFailure(
+            precedingReadyDuration: .seconds(29),
+            stabilityDuration: stabilityDuration
+        ) == 2)
+
+        // Reaching the boundary clears both the failure count and its
+        // accumulated backoff. Widely separated crashes remain first failures
+        // rather than eventually exhausting a lifetime budget.
+        for _ in 0..<6 {
+            let failure = budget.recordFailure(
+                precedingReadyDuration: .seconds(30),
+                stabilityDuration: stabilityDuration
+            )
+            #expect(failure == 1)
+            #expect(policy.delayMilliseconds(afterFailure: failure) == 0)
+        }
+    }
+
+    @Test("startup and short-ready failures exhaust the consecutive budget")
+    func consecutiveFailuresExhaustRestartBudget() {
+        let policy = EngineRestartPolicy(
+            maximumAttempts: 3,
+            initialDelayMilliseconds: 10,
+            maximumDelayMilliseconds: 40
+        )
+        let stabilityDuration = Duration.seconds(30)
+        var budget = EngineRestartBudget()
+
+        let startupFailure = budget.recordFailure(
+            precedingReadyDuration: nil,
+            stabilityDuration: stabilityDuration
+        )
+        #expect(startupFailure == 1)
+        #expect(policy.delayMilliseconds(afterFailure: startupFailure) == 10)
+
+        let firstCrash = budget.recordFailure(
+            precedingReadyDuration: .seconds(1),
+            stabilityDuration: stabilityDuration
+        )
+        #expect(firstCrash == 2)
+        #expect(policy.delayMilliseconds(afterFailure: firstCrash) == 20)
+
+        let secondCrash = budget.recordFailure(
+            precedingReadyDuration: .seconds(29),
+            stabilityDuration: stabilityDuration
+        )
+        #expect(secondCrash == 3)
+        #expect(policy.delayMilliseconds(afterFailure: secondCrash) == nil)
+    }
+
+    @Test("consecutive startup failures stop after the launch-attempt budget")
+    func consecutiveStartupFailuresStopSupervisor() async throws {
+        let fixtureDirectory = URL(
+            fileURLWithPath: "/tmp/ks.\(String(UUID().uuidString.prefix(8)))",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: fixtureDirectory,
+            withIntermediateDirectories: false
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+
+        let countURL = fixtureDirectory.appendingPathComponent("launch-count")
+        let helper = fixtureDirectory.appendingPathComponent("failing-helper")
+        let script = """
+        #!/bin/sh
+        set -eu
+        count_file='\(countURL.path)'
+        count=0
+        if [ -f "$count_file" ]; then
+          count=$(tr -d '\\n' < "$count_file")
+        fi
+        count=$((count + 1))
+        printf '%s\\n' "$count" > "$count_file"
+        exit 17
+        """
+        try Data(script.utf8).write(to: helper, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: helper.path
+        )
+
+        let supervisor = EngineSupervisor(configuration: .init(
+            helperURL: helper,
+            temporaryDirectoryURL: fixtureDirectory,
+            restartPolicy: .init(
+                maximumAttempts: 3,
+                initialDelayMilliseconds: 0,
+                maximumDelayMilliseconds: 0
+            ),
+            restartStabilityDuration: .seconds(30),
+            startupTimeout: .milliseconds(100),
+            handshakeTimeout: .milliseconds(40),
+            shutdownTimeout: .milliseconds(100)
+        ))
+        supervisor.start()
+
+        for _ in 0..<400 {
+            if case .failed = supervisor.state { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        guard case .failed(let message) = supervisor.state else {
+            Issue.record("Expected failed state, got \(supervisor.state)")
+            await supervisor.shutdown()
+            return
+        }
+        #expect(message.contains("status 17"))
+        let launches = try String(contentsOf: countURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(launches == "3")
+
+        await supervisor.shutdown()
+        #expect(supervisor.state == .stopped)
+    }
+
     @Test("missing helper reaches a bounded failure and shutdown is clean")
     func missingHelperFailsWithoutRestartLoop() async {
         let missing = FileManager.default.temporaryDirectory
