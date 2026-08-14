@@ -150,6 +150,100 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(fallback.text(showingManagedFields: false) == malformed)
     }
 
+    @Test("managed-fields preparation runs off main and rejects stale results")
+    func managedFieldsPreparationConcurrency() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let initialYAML = #"""
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: api
+              managedFields:
+                - manager: stale-manager
+            spec:
+              revision: stale
+            """#
+        let latestYAML = #"""
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: api
+              managedFields:
+                - manager: latest-manager
+            spec:
+              revision: latest
+            """#
+        let watch = AsyncThrowingStream<ObjectWatchEvent, Error>.makeStream()
+        let provider = LoadedObjectDetailProvider(
+            detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-1",
+                yamlUTF8: Data(initialYAML.utf8)
+            ),
+            data: ObjectData(
+                identity: identity,
+                resourceVersion: "rv-1",
+                entries: [],
+                secret: false
+            ),
+            objectWatch: watch.stream
+        )
+        let probe = YAMLPresentationBuilderProbe()
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: provider,
+            initialTab: .yaml,
+            yamlPresentationBuilder: { probe.build($0) }
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer {
+            probe.releaseFirstBuild()
+            watch.continuation.finish()
+            controller.stop()
+        }
+
+        let editor = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Kubernetes object YAML" })
+        try await waitUntil { probe.buildCount == 1 }
+
+        watch.continuation.yield(.updated(
+            cursor: StreamCursor(generation: 1, sequence: 1),
+            detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-2",
+                yamlUTF8: Data(latestYAML.utf8)
+            )
+        ))
+        try await waitUntil { probe.buildCount == 2 }
+        try await waitUntil {
+            editor.string.contains("revision: latest")
+                && !editor.string.contains("latest-manager")
+        }
+
+        #expect(probe.allBuildsRanOffMain)
+
+        // The first synchronous builder ignores cancellation until released.
+        // Its late presentation must not replace the newer watch generation.
+        probe.releaseFirstBuild()
+        try await waitUntil { probe.completedBuildCount == 2 }
+        try await Task.sleep(for: .milliseconds(30))
+
+        #expect(probe.firstBuildObservedCancellation == true)
+        #expect(editor.string.contains("revision: latest"))
+        #expect(!editor.string.contains("stale-manager"))
+        #expect(!editor.string.contains("latest-manager"))
+    }
+
     @Test("YAML scroll view installs a visible line-number ruler and explicit managed-fields control")
     func detailYAMLControls() throws {
         let identity = ResourceIdentity(
@@ -660,6 +754,46 @@ private actor YAMLSaveObjectDetailProvider: ObjectDetailProviding {
     }
 }
 
+private final class YAMLPresentationBuilderProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let firstBuildGate = DispatchSemaphore(value: 0)
+    private var storedBuildCount = 0
+    private var storedCompletedBuildCount = 0
+    private var storedRanOnMainThread: [Bool] = []
+    private var storedFirstBuildObservedCancellation: Bool?
+
+    var buildCount: Int { lock.withLock { storedBuildCount } }
+    var completedBuildCount: Int { lock.withLock { storedCompletedBuildCount } }
+    var allBuildsRanOffMain: Bool {
+        lock.withLock {
+            !storedRanOnMainThread.isEmpty
+                && storedRanOnMainThread.allSatisfy { !$0 }
+        }
+    }
+    var firstBuildObservedCancellation: Bool? {
+        lock.withLock { storedFirstBuildObservedCancellation }
+    }
+
+    func build(_ yamlUTF8: Data) -> YAMLManagedFieldsPresentation {
+        let ordinal = lock.withLock {
+            storedBuildCount += 1
+            storedRanOnMainThread.append(Thread.isMainThread)
+            return storedBuildCount
+        }
+        if ordinal == 1 {
+            firstBuildGate.wait()
+            lock.withLock {
+                storedFirstBuildObservedCancellation = Task.isCancelled
+            }
+        }
+        let presentation = YAMLManagedFieldsPresentation(yamlUTF8: yamlUTF8)
+        lock.withLock { storedCompletedBuildCount += 1 }
+        return presentation
+    }
+
+    func releaseFirstBuild() { firstBuildGate.signal() }
+}
+
 private struct NoopObjectDetailProvider: ObjectDetailProviding {
     func getObject(identity: ResourceIdentity) async throws -> ObjectDetail {
         throw CancellationError()
@@ -731,6 +865,7 @@ private struct NoopObjectDetailProvider: ObjectDetailProviding {
 private struct LoadedObjectDetailProvider: ObjectDetailProviding {
     var detail: ObjectDetail
     var data: ObjectData
+    var objectWatch = AsyncThrowingStream<ObjectWatchEvent, Error> { $0.finish() }
 
     func getObject(identity: ResourceIdentity) async throws -> ObjectDetail { detail }
 
@@ -738,7 +873,7 @@ private struct LoadedObjectDetailProvider: ObjectDetailProviding {
         identity: ResourceIdentity,
         resourceVersion: String
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
-        AsyncThrowingStream { $0.finish() }
+        objectWatch
     }
 
     func getEvents(identity: ResourceIdentity, limit: UInt32) async throws

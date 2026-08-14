@@ -3,10 +3,20 @@ import Yams
 
 /// Keeps the complete server YAML as the editing authority while providing a
 /// quieter read-only presentation with metadata.managedFields omitted.
-struct YAMLManagedFieldsPresentation: Equatable {
+struct YAMLManagedFieldsPresentation: Equatable, Sendable {
     let completeYAML: String
     let YAMLWithoutManagedFields: String
     let hasManagedFields: Bool
+
+    /// A parse-free presentation used while the Yams-backed representation is
+    /// prepared away from the main actor. The complete source remains
+    /// available immediately for editing.
+    init(unprocessedYAMLUTF8 yamlUTF8: Data) {
+        let source = String(decoding: yamlUTF8, as: UTF8.self)
+        completeYAML = source
+        YAMLWithoutManagedFields = source
+        hasManagedFields = false
+    }
 
     init(yamlUTF8: Data) {
         let source = String(decoding: yamlUTF8, as: UTF8.self)

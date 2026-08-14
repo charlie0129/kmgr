@@ -133,6 +133,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let initialTab: ObjectDetailInitialTab
     private let dataFileReader: @Sendable (URL) throws -> Data
     private let dataFileWriter: @Sendable (Data, URL) throws -> Void
+    private let yamlPresentationBuilder:
+        @Sendable (Data) -> YAMLManagedFieldsPresentation
     private let segmented = NSSegmentedControl(
         labels: ["Summary", "YAML", "Events", "Relationships", "Metrics", "Data"],
         trackingMode: .selectOne,
@@ -189,7 +191,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var selectedDataKey: String?
     private var selectedDataEntry: ObjectDataEntry?
     private var originalYAML = Data()
-    private var yamlPresentation = YAMLManagedFieldsPresentation(yamlUTF8: Data())
+    private var yamlPresentation = YAMLManagedFieldsPresentation(
+        unprocessedYAMLUTF8: Data()
+    )
+    private var yamlPresentationTask: Task<Void, Never>?
+    private var yamlPresentationGeneration: UInt64 = 0
     private var yamlLineNumberRuler: LineNumberRulerView?
     private var loadTask: Task<Void, Never>?
     private var watchTask: Task<Void, Never>?
@@ -230,6 +236,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         },
         dataFileWriter: @escaping @Sendable (Data, URL) throws -> Void = {
             try DataValueFileIO.write($0, to: $1)
+        },
+        yamlPresentationBuilder: @escaping @Sendable (Data)
+            -> YAMLManagedFieldsPresentation = {
+            YAMLManagedFieldsPresentation(yamlUTF8: $0)
         }
     ) {
         self.identity = identity
@@ -238,6 +248,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         self.initialTab = initialTab
         self.dataFileReader = dataFileReader
         self.dataFileWriter = dataFileWriter
+        self.yamlPresentationBuilder = yamlPresentationBuilder
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -253,6 +264,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         operationTask?.cancel()
         recoveryTask?.cancel()
         dataFileTask?.cancel()
+        yamlPresentationTask?.cancel()
     }
 
     override func loadView() {
@@ -314,6 +326,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relationshipScanTask?.cancel()
         operationTask?.cancel()
         recoveryTask?.cancel()
+        cancelYAMLPresentationPreparation()
         cancelDataFileOperation()
         recoveryTask = nil
         authoritativeMutationRefreshInFlight = false
@@ -340,6 +353,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         operationTask = nil
         recoveryTask?.cancel()
         recoveryTask = nil
+        cancelYAMLPresentationPreparation()
         cancelDataFileOperation()
         authoritativeMutationRefreshInFlight = false
         dataConflictController?.close()
@@ -808,9 +822,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         terminalObjectState = false
         editButton.isEnabled = true
         saveButton.isEnabled = isEditingYAML
-        originalYAML = updatedDetail.yamlUTF8
-        yamlPresentation = YAMLManagedFieldsPresentation(yamlUTF8: updatedDetail.yamlUTF8)
-        managedFieldsButton.isHidden = !yamlPresentation.hasManagedFields
+        installYAML(updatedDetail.yamlUTF8)
         if preserveYAML, var editingBasis = detail {
             editingBasis.identity = updatedDetail.identity
             detail = editingBasis
@@ -1293,10 +1305,46 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func installYAML(_ yamlUTF8: Data) {
         originalYAML = yamlUTF8
-        yamlPresentation = YAMLManagedFieldsPresentation(yamlUTF8: yamlUTF8)
-        if !yamlPresentation.hasManagedFields { managedFieldsButton.state = .off }
-        managedFieldsButton.isHidden = !yamlPresentation.hasManagedFields || isEditingYAML
+        yamlPresentationGeneration &+= 1
+        let generation = yamlPresentationGeneration
+        yamlPresentationTask?.cancel()
+        yamlPresentation = YAMLManagedFieldsPresentation(
+            unprocessedYAMLUTF8: yamlUTF8
+        )
+        managedFieldsButton.isHidden = true
         if !isEditingYAML { showYAMLPresentation() }
+
+        let builder = yamlPresentationBuilder
+        yamlPresentationTask = Task { [weak self] in
+            let presentation = await Self.prepareYAMLPresentation(
+                yamlUTF8,
+                using: builder
+            )
+            guard let self, !Task.isCancelled,
+                yamlPresentationGeneration == generation
+            else { return }
+            yamlPresentationTask = nil
+            yamlPresentation = presentation
+            if !presentation.hasManagedFields { managedFieldsButton.state = .off }
+            managedFieldsButton.isHidden = !presentation.hasManagedFields || isEditingYAML
+            if !isEditingYAML { showYAMLPresentation() }
+        }
+    }
+
+    /// Nonisolated async functions execute on the generic executor. Keeping
+    /// the synchronous Yams work inside this hop prevents large managedFields
+    /// payloads from blocking AppKit's main actor.
+    private nonisolated static func prepareYAMLPresentation(
+        _ yamlUTF8: Data,
+        using builder: @Sendable (Data) -> YAMLManagedFieldsPresentation
+    ) async -> YAMLManagedFieldsPresentation {
+        builder(yamlUTF8)
+    }
+
+    private func cancelYAMLPresentationPreparation() {
+        yamlPresentationGeneration &+= 1
+        yamlPresentationTask?.cancel()
+        yamlPresentationTask = nil
     }
 
     private func showYAMLPresentation() {
