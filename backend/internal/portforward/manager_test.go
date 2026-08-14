@@ -578,6 +578,100 @@ func TestTerminalRetentionJanitorRemovesEntryAndReleasesLease(t *testing.T) {
 	}
 }
 
+func TestPrunedRemovalPrecedesSameIDReplacementSnapshot(t *testing.T) {
+	t.Parallel()
+	clock := &portForwardTestClock{value: time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)}
+	sessions := &blockingFirstReleaseSessionResolver{
+		session: Session{
+			ContextName: "context",
+			Resolver: &sequenceResolver{results: []resolveResult{
+				{target: podIdentity("pod", "uid")}, {target: podIdentity("pod", "uid")},
+			}},
+			Forwarder: &fakeForwarder{ports: []uint16{12345, 12346}},
+		},
+		releaseEntered: make(chan struct{}),
+		releaseUnblock: make(chan struct{}),
+	}
+	manager, err := NewManager(Config{
+		Sessions: sessions, Backoff: BackoffFunc(func(context.Context, int) error { return nil }),
+		Now: clock.Now, TerminalRetention: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	updates, unsubscribe := manager.subscribe()
+	defer unsubscribe()
+	request := StartRequest{ID: "reused", Target: podIdentity("pod", "uid"), RemotePort: 8080}
+	if _, err := manager.Start(request); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyForward(t, func() bool {
+		current := manager.lookup("reused", "session")
+		return current != nil && current.Snapshot().State == StateListening
+	})
+	if !manager.Stop("reused", "session") {
+		t.Fatal("Stop rejected")
+	}
+	eventuallyForward(t, func() bool {
+		current := manager.lookup("reused", "session")
+		if current == nil || current.Snapshot().State != StateStopped {
+			return false
+		}
+		current.mu.RLock()
+		done := current.runDone
+		current.mu.RUnlock()
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+	// Discard the original entry's lifecycle updates while leaving the
+	// subscriber active for the prune/reuse ordering assertion.
+	select {
+	case <-updates.ready:
+	default:
+	}
+	_ = updates.drain()
+
+	clock.Advance(2 * time.Hour)
+	pruneDone := make(chan struct{})
+	go func() {
+		_ = manager.List("", true)
+		close(pruneDone)
+	}()
+	select {
+	case <-sessions.releaseEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal prune did not reach lease release")
+	}
+	if _, err := manager.Start(request); err != nil {
+		t.Fatalf("same-ID replacement Start: %v", err)
+	}
+	close(sessions.releaseUnblock)
+	select {
+	case <-pruneDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal prune did not finish")
+	}
+
+	batch := updates.drain()
+	removalIndex, replacementIndex := -1, -1
+	for index, update := range batch.updates {
+		if update.removedID == "reused" && removalIndex == -1 {
+			removalIndex = index
+		}
+		if update.snapshot.ID == "reused" && replacementIndex == -1 {
+			replacementIndex = index
+		}
+	}
+	if removalIndex == -1 || replacementIndex == -1 || removalIndex >= replacementIndex {
+		t.Fatalf("prune/replacement update order = %#v", batch.updates)
+	}
+}
+
 func TestPortForwardStartFailuresDoNotLeakRetainedLease(t *testing.T) {
 	t.Parallel()
 	resolver := &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}}
@@ -631,6 +725,32 @@ type leaseSessionResolver struct {
 	err      error
 	acquires int
 	releases int
+}
+
+type blockingFirstReleaseSessionResolver struct {
+	mu             sync.Mutex
+	session        Session
+	acquires       int
+	releaseEntered chan struct{}
+	releaseUnblock chan struct{}
+}
+
+func (r *blockingFirstReleaseSessionResolver) ResolveSession(string) (Session, error) {
+	r.mu.Lock()
+	r.acquires++
+	acquisition := r.acquires
+	r.mu.Unlock()
+	session := r.session
+	var once sync.Once
+	session.Release = func() {
+		once.Do(func() {
+			if acquisition == 1 {
+				close(r.releaseEntered)
+				<-r.releaseUnblock
+			}
+		})
+	}
+	return session, nil
 }
 
 func (r *leaseSessionResolver) ResolveSession(string) (Session, error) {

@@ -430,12 +430,14 @@ func (m *Manager) transition(
 
 func (m *Manager) publish(update managerUpdate) {
 	m.mu.RLock()
-	watchers := make([]*subscription, 0, len(m.watchers))
-	for _, watcher := range m.watchers {
-		watchers = append(watchers, watcher)
-	}
+	m.publishLocked(update)
 	m.mu.RUnlock()
-	for _, watcher := range watchers {
+}
+
+// publishLocked preserves mutation order for updates whose entry-map change
+// occurs under Manager.mu. subscription.enqueue never calls back into Manager.
+func (m *Manager) publishLocked(update managerUpdate) {
+	for _, watcher := range m.watchers {
 		watcher.enqueue(update)
 	}
 }
@@ -483,12 +485,14 @@ func (m *Manager) pruneTerminalEntries(now time.Time) {
 			releases = append(releases, current)
 		}
 	}
+	for _, id := range removed {
+		// Publish before releasing Manager.mu so a same-ID Start cannot enqueue
+		// its live snapshot before this removal and then be erased by it.
+		m.publishLocked(managerUpdate{removedID: id})
+	}
 	m.mu.Unlock()
 	for _, current := range releases {
 		current.releaseSession()
-	}
-	for _, id := range removed {
-		m.publish(managerUpdate{removedID: id})
 	}
 	if len(removed) > 0 {
 		m.signalRetentionJanitor()
