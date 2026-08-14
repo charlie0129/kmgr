@@ -25,6 +25,7 @@ type GRPCService struct {
 	kmgrv1.UnimplementedObjectServiceServer
 	reader          *Reader
 	metricsProvider DetailMetricsProvider
+	watchRetryDelay func(int) time.Duration
 	scanMu          sync.Mutex
 	scans           map[relationshipScanKey]context.CancelFunc
 }
@@ -35,6 +36,17 @@ type relationshipScanKey struct {
 	generation uint64
 }
 
+// objectWatchStreamSendError separates a failed gRPC delivery from failures
+// opening or consuming the Kubernetes watch. A disconnected client must end
+// this RPC; retrying the API watch would retain authority and work that no
+// caller can observe.
+type objectWatchStreamSendError struct {
+	err error
+}
+
+func (e *objectWatchStreamSendError) Error() string { return e.err.Error() }
+func (e *objectWatchStreamSendError) Unwrap() error { return e.err }
+
 func NewGRPCService(reader *Reader, metricsProviders ...DetailMetricsProvider) (*GRPCService, error) {
 	if reader == nil {
 		return nil, errors.New("object reader must not be nil")
@@ -42,7 +54,10 @@ func NewGRPCService(reader *Reader, metricsProviders ...DetailMetricsProvider) (
 	if len(metricsProviders) > 1 {
 		return nil, errors.New("at most one object detail metrics provider may be configured")
 	}
-	service := &GRPCService{reader: reader, scans: make(map[relationshipScanKey]context.CancelFunc)}
+	service := &GRPCService{
+		reader: reader, scans: make(map[relationshipScanKey]context.CancelFunc),
+		watchRetryDelay: objectWatchRetryDelay,
+	}
 	if len(metricsProviders) == 1 {
 		service.metricsProvider = metricsProviders[0]
 	}
@@ -111,12 +126,6 @@ func (s *GRPCService) WatchObject(
 	if resourceVersion == "" {
 		resourceVersion = current.GetResourceVersion()
 	}
-	objectWatch, err := s.reader.Watch(operationContext, identity, resourceVersion)
-	if err != nil {
-		return s.sendObjectFailure(stream, request, 1, err, "watch-object")
-	}
-	defer objectWatch.Stop()
-
 	var sequence uint64 = 1
 	if err := stream.Send(&kmgrv1.ObjectEvent{
 		Cursor: objectCursor(request, sequence),
@@ -127,62 +136,178 @@ func (s *GRPCService) WatchObject(
 	}); err != nil {
 		return err
 	}
+	retryAttempt := 0
+	needsReanchor := false
 	for {
-		select {
-		case <-operationContext.Done():
-			return objectStatusError(operationContext.Err())
-		case event, open := <-objectWatch.ResultChan():
-			if !open {
-				sequence++
-				return s.sendObjectFailure(stream, request, sequence, ErrObjectWatchClosed, "watch-object")
-			}
-			sequence++
-			if event.Type == watch.Error {
-				watchErr := apierrors.FromObject(event.Object)
-				if watchErr == nil {
-					watchErr = errors.New("Kubernetes object watch failed")
+		if needsReanchor {
+			current, getErr := s.reader.Get(operationContext, identity)
+			if getErr != nil {
+				if !retryableObjectWatchError(getErr) {
+					sequence++
+					return s.sendObjectFailure(stream, request, sequence, getErr, "watch-object")
 				}
-				return s.sendObjectFailure(stream, request, sequence, watchErr, "watch-object")
-			}
-			value, conversionErr := unstructuredObject(event.Object)
-			if conversionErr != nil {
-				return s.sendObjectFailure(stream, request, sequence, conversionErr, "watch-object")
-			}
-			if event.Type == watch.Bookmark {
-				if err := stream.Send(&kmgrv1.ObjectEvent{
-					Cursor: objectCursor(request, sequence),
-					Type:   kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_STATUS,
-					Object: &kmgrv1.GetObjectResponse{
-						RequestId: requestID, Identity: request.GetIdentity(),
-						ResourceVersion: value.GetResourceVersion(),
-					},
-				}); err != nil {
-					return err
+				if err := waitForObjectWatchRetry(operationContext, s.watchRetryDelay(retryAttempt)); err != nil {
+					return objectStatusError(err)
 				}
+				retryAttempt++
 				continue
 			}
-			if event.Type != watch.Added && event.Type != watch.Modified && event.Type != watch.Deleted {
-				return s.sendObjectFailure(
-					stream, request, sequence,
-					fmt.Errorf("unsupported Kubernetes watch event type %q", event.Type), "watch-object",
-				)
-			}
-			detail, detailErr := detailFromObject(value, identity, true, true)
+			resourceVersion = current.GetResourceVersion()
+			detail, detailErr := detailFromObject(current, identity, true, true)
 			if detailErr != nil {
+				sequence++
 				return s.sendObjectFailure(stream, request, sequence, detailErr, "watch-object")
 			}
-			eventType := kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_UPDATED
-			if event.Type == watch.Deleted {
-				eventType = kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_DELETED
-			}
+			sequence++
 			if err := stream.Send(&kmgrv1.ObjectEvent{
-				Cursor: objectCursor(request, sequence), Type: eventType,
+				Cursor: objectCursor(request, sequence), Type: kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_UPDATED,
 				Object: detailResponse(requestID, request.GetIdentity(), detail),
 			}); err != nil {
 				return err
 			}
+			needsReanchor = false
+			retryAttempt = 0
+		}
+		objectWatch, watchErr := s.reader.Watch(operationContext, identity, resourceVersion)
+		if watchErr == nil && objectWatch == nil {
+			watchErr = ErrObjectWatchClosed
+		}
+		if watchErr == nil {
+			watchErr = func() error {
+				defer objectWatch.Stop()
+				for {
+					select {
+					case <-operationContext.Done():
+						return operationContext.Err()
+					case event, open := <-objectWatch.ResultChan():
+						if !open {
+							return ErrObjectWatchClosed
+						}
+						if event.Type == watch.Error {
+							result := apierrors.FromObject(event.Object)
+							if result == nil {
+								result = errors.New("Kubernetes object watch failed")
+							}
+							return result
+						}
+						value, conversionErr := unstructuredObject(event.Object)
+						if conversionErr != nil {
+							return fmt.Errorf("%w: %v", ErrInvalidObjectWatchEvent, conversionErr)
+						}
+						if value.GetResourceVersion() != "" {
+							resourceVersion = value.GetResourceVersion()
+						}
+						sequence++
+						if event.Type == watch.Bookmark {
+							if err := stream.Send(&kmgrv1.ObjectEvent{
+								Cursor: objectCursor(request, sequence),
+								Type:   kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_STATUS,
+								Object: &kmgrv1.GetObjectResponse{
+									RequestId: requestID, Identity: request.GetIdentity(),
+									ResourceVersion: resourceVersion,
+								},
+							}); err != nil {
+								return &objectWatchStreamSendError{err: err}
+							}
+							retryAttempt = 0
+							continue
+						}
+						if event.Type != watch.Added && event.Type != watch.Modified && event.Type != watch.Deleted {
+							return fmt.Errorf("%w: unsupported event type %q", ErrInvalidObjectWatchEvent, event.Type)
+						}
+						detail, detailErr := detailFromObject(value, identity, true, true)
+						if detailErr != nil {
+							var changed *IdentityChangedError
+							if errors.As(detailErr, &changed) {
+								return detailErr
+							}
+							return fmt.Errorf("%w: %v", ErrInvalidObjectWatchEvent, detailErr)
+						}
+						eventType := kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_UPDATED
+						if event.Type == watch.Deleted {
+							eventType = kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_DELETED
+						}
+						if err := stream.Send(&kmgrv1.ObjectEvent{
+							Cursor: objectCursor(request, sequence), Type: eventType,
+							Object: detailResponse(requestID, request.GetIdentity(), detail),
+						}); err != nil {
+							return &objectWatchStreamSendError{err: err}
+						}
+						retryAttempt = 0
+					}
+				}
+			}()
+		}
+		var streamSendErr *objectWatchStreamSendError
+		if errors.As(watchErr, &streamSendErr) {
+			return streamSendErr.err
+		}
+		if operationContext.Err() != nil {
+			return objectStatusError(operationContext.Err())
+		}
+		if apierrors.IsGone(watchErr) || apierrors.IsResourceExpired(watchErr) {
+			needsReanchor = true
+			continue
+		} else if !retryableObjectWatchError(watchErr) {
+			sequence++
+			return s.sendObjectFailure(stream, request, sequence, watchErr, "watch-object")
+		}
+		if err := waitForObjectWatchRetry(operationContext, s.watchRetryDelay(retryAttempt)); err != nil {
+			return objectStatusError(err)
+		}
+		retryAttempt++
+	}
+}
+
+func objectWatchRetryDelay(attempt int) time.Duration {
+	delay := 100 * time.Millisecond
+	for range min(max(attempt, 0), 6) {
+		delay *= 2
+	}
+	return min(delay, 5*time.Second)
+}
+
+func waitForObjectWatchRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
 		}
 	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func retryableObjectWatchError(err error) bool {
+	if err == nil || errors.Is(err, ErrInvalidObjectWatchEvent) {
+		return false
+	}
+	var changed *IdentityChangedError
+	if errors.As(err, &changed) || errors.Is(err, ErrInvalidIdentity) ||
+		errors.Is(err, ErrSessionNotFound) || apierrors.IsNotFound(err) ||
+		apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) {
+		return false
+	}
+	if errors.Is(err, ErrObjectWatchClosed) {
+		return true
+	}
+	var apiStatus apierrors.APIStatus
+	if errors.As(err, &apiStatus) {
+		code := apiStatus.Status().Code
+		return code == 0 || code == 408 || code == 429 || code >= 500
+	}
+	// Transport and decoding-layer watch failures often arrive without a
+	// Kubernetes Status. Keep the last authoritative detail visible and retry;
+	// malformed object events are wrapped above and fail closed instead.
+	return true
 }
 
 func (s *GRPCService) GetEvents(

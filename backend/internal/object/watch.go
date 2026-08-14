@@ -9,7 +9,10 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 )
 
-var ErrObjectWatchClosed = errors.New("Kubernetes object watch closed unexpectedly")
+var (
+	ErrObjectWatchClosed       = errors.New("Kubernetes object watch closed unexpectedly")
+	ErrInvalidObjectWatchEvent = errors.New("Kubernetes object watch returned an invalid event")
+)
 
 // Watch opens a server-side watch restricted to the selected namespace/name.
 // The UID is checked on every delivered object by the gRPC adapter, because a
