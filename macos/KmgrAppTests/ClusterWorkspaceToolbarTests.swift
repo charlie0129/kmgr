@@ -84,18 +84,272 @@ struct ClusterWorkspaceToolbarTests {
 }
 
 @MainActor
+@Suite("Lazy workspace restoration", .serialized)
+struct LazyWorkspaceRestorationTests {
+    @Test("stalled authentication leaves a responsive metadata-only shell")
+    func stalledAuthenticationShowsShellWithoutWorkspaceRequests() async throws {
+        let provider = RecordingRestorationWorkspaceProvider()
+        let record = restoredWorkspaceRecord()
+        let shell = RestoredWorkspaceShell(record: record)
+        let controller = makeWorkspace(
+            session: shell.session,
+            provider: provider,
+            restoration: record,
+            startsAuthenticated: false
+        )
+        let attempt = RestoredWorkspaceConnectionAttempt(
+            provider: StallingRestorationContextProvider(),
+            contextReference: record.state.contextReference
+        )
+        controller.showWindow(nil)
+        attempt.start()
+        defer {
+            attempt.cancel()
+            controller.close()
+        }
+
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let textValues = descendants(of: root).compactMap {
+            ($0 as? NSTextField)?.stringValue
+        }
+        let searchFields = descendants(of: root).compactMap { $0 as? NSSearchField }
+        let resourceTable = descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" }
+        #expect(window.isVisible)
+        #expect(!controller.isAuthenticated)
+        #expect(textValues.contains("Deployment"))
+        #expect(searchFields.contains { $0.stringValue == "name:api" })
+        #expect(resourceTable?.numberOfRows == 0)
+        #expect(window.toolbar?.items.compactMap { $0.view as? NSPopUpButton }
+            .first?.titleOfSelectedItem == "payments")
+        let connectionItem = window.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.connection"
+        }
+        #expect(connectionItem?.view?.accessibilityValue() as? String ==
+            "Reconnecting…, Opening saved Kubernetes context…")
+
+        try await Task.sleep(for: .milliseconds(40))
+        #expect(provider.events.isEmpty)
+    }
+
+    @Test("authenticated discovery validates the saved GVR before streaming in the same window")
+    func successfulAuthenticationRecoversSameWindowAfterDiscovery() async throws {
+        let discoveryGate = RestorationDiscoveryGate()
+        let provider = RecordingRestorationWorkspaceProvider(discoveryGates: [discoveryGate])
+        let record = restoredWorkspaceRecord()
+        let shell = RestoredWorkspaceShell(record: record)
+        let controller = makeWorkspace(
+            session: shell.session,
+            provider: provider,
+            restoration: record,
+            startsAuthenticated: false
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let originalWindow = try #require(controller.window)
+        #expect(provider.events.isEmpty)
+
+        controller.recover(with: OpenedClusterSession(
+            sessionID: "authenticated-session",
+            contextName: "production",
+            clusterName: "production-cluster",
+            serverHostname: "api.production.example",
+            defaultNamespace: "payments",
+            contextReference: record.state.contextReference
+        ))
+        try await waitUntil { provider.discoverySessionIDs == ["authenticated-session"] }
+        try triggerResourceFilterChange(in: originalWindow, value: "name:changed-before-discovery")
+        try await Task.sleep(for: .milliseconds(240))
+        #expect(provider.streamRequests.isEmpty)
+
+        discoveryGate.open()
+        try await waitUntil { provider.streamRequests.count == 1 }
+
+        #expect(controller.window === originalWindow)
+        #expect(controller.isAuthenticated)
+        #expect(provider.discoverySessionIDs == ["authenticated-session"])
+        #expect(provider.streamRequests.count == 1)
+        let request = try #require(provider.streamRequests.first)
+        #expect(request.sessionID == "authenticated-session")
+        #expect(request.resource.id == "apps/v1/deployments")
+        #expect(request.filterExpression == "name:changed-before-discovery")
+        #expect(provider.events.firstIndex(of: "discover:authenticated-session")! <
+            provider.events.firstIndex(of: "stream:authenticated-session:apps/v1/deployments")!)
+        #expect(!provider.events.contains { $0.contains("restoring-") })
+    }
+
+    @Test("helper restart ignores pre-restart discovery and revalidates the shell")
+    func helperRestartDuringRestoredDiscoveryUsesOnlyNewSession() async throws {
+        let oldGate = RestorationDiscoveryGate()
+        let newGate = RestorationDiscoveryGate()
+        let provider = RecordingRestorationWorkspaceProvider(
+            discoveryGates: [oldGate, newGate]
+        )
+        let record = restoredWorkspaceRecord()
+        let shell = RestoredWorkspaceShell(record: record)
+        let controller = makeWorkspace(
+            session: shell.session,
+            provider: provider,
+            restoration: record,
+            startsAuthenticated: false
+        )
+        controller.showWindow(nil)
+        defer {
+            oldGate.open()
+            newGate.open()
+            controller.close()
+        }
+
+        controller.recover(with: authenticatedRestorationSession(
+            for: record,
+            sessionID: "pre-restart-session"
+        ))
+        try await waitUntil { provider.discoverySessionIDs == ["pre-restart-session"] }
+        controller.engineDidDisconnect(message: "helper restarted")
+        controller.recover(with: authenticatedRestorationSession(
+            for: record,
+            sessionID: "post-restart-session"
+        ))
+        try await waitUntil {
+            provider.discoverySessionIDs == ["pre-restart-session", "post-restart-session"]
+        }
+
+        oldGate.open()
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(provider.streamRequests.isEmpty)
+
+        newGate.open()
+        try await waitUntil { provider.streamRequests.count == 1 }
+        #expect(provider.streamRequests.first?.sessionID == "post-restart-session")
+        #expect(provider.streamRequests.first?.resource.id == "apps/v1/deployments")
+        #expect(!provider.events.contains { $0.contains("restoring-") })
+    }
+
+    @Test("empty authenticated discovery never authorizes the saved target")
+    func emptyDiscoveryKeepsZeroRowsWithoutStreamingSavedGVR() async throws {
+        let provider = RecordingRestorationWorkspaceProvider(
+            discoveryOutcome: .resources([])
+        )
+        let record = restoredWorkspaceRecord()
+        let shell = RestoredWorkspaceShell(record: record)
+        let controller = makeWorkspace(
+            session: shell.session,
+            provider: provider,
+            restoration: record,
+            startsAuthenticated: false
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+
+        controller.recover(with: authenticatedRestorationSession(for: record))
+        try await waitUntil { provider.discoveryFinished }
+        try triggerResourceFilterChange(in: window, value: "name:after-empty-discovery")
+        try await Task.sleep(for: .milliseconds(240))
+
+        let table = descendants(of: try #require(window.contentView))
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" }
+        #expect(table?.numberOfRows == 0)
+        #expect(provider.streamRequests.isEmpty)
+        #expect(provider.discoverySessionIDs == ["authenticated-session"])
+        #expect(!provider.events.contains { $0.contains("restoring-") })
+    }
+
+    @Test("discovery error revokes the synthetic saved target")
+    func discoveryErrorKeepsSavedGVRUnrequestable() async throws {
+        let provider = RecordingRestorationWorkspaceProvider(
+            discoveryOutcome: .failure(ClusterManagerIssue(
+                category: .unavailable,
+                reason: "DiscoveryFailed",
+                message: "Discovery unavailable.",
+                retryable: true,
+                operation: "discover restored resources"
+            ))
+        )
+        let record = restoredWorkspaceRecord()
+        let shell = RestoredWorkspaceShell(record: record)
+        let controller = makeWorkspace(
+            session: shell.session,
+            provider: provider,
+            restoration: record,
+            startsAuthenticated: false
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+
+        controller.recover(with: authenticatedRestorationSession(for: record))
+        try await waitUntil { provider.discoveryFinished }
+        try triggerResourceFilterChange(in: window, value: "name:after-discovery-error")
+        try await Task.sleep(for: .milliseconds(240))
+
+        #expect(provider.streamRequests.isEmpty)
+        #expect(provider.discoverySessionIDs == ["authenticated-session"])
+        #expect(!provider.events.contains { $0.contains("restoring-") })
+        let values = descendants(of: try #require(window.contentView))
+            .compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(values.contains { $0.contains("Discovery unavailable") })
+    }
+
+    @Test("authentication failure keeps the same offline shell with no workspace requests")
+    func failedAuthenticationKeepsOfflineShell() throws {
+        let provider = RecordingRestorationWorkspaceProvider()
+        let record = restoredWorkspaceRecord()
+        let shell = RestoredWorkspaceShell(record: record)
+        let controller = makeWorkspace(
+            session: shell.session,
+            provider: provider,
+            restoration: record,
+            startsAuthenticated: false
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let originalWindow = try #require(controller.window)
+
+        controller.engineRecoveryFailed(ClusterManagerIssue(
+            category: .authentication,
+            reason: "Unauthorized",
+            message: "Authentication failed (401).",
+            retryable: false,
+            operation: "open saved context"
+        ))
+
+        #expect(controller.window === originalWindow)
+        #expect(originalWindow.isVisible)
+        #expect(!controller.isAuthenticated)
+        #expect(provider.events.isEmpty)
+        let values = descendants(of: try #require(originalWindow.contentView))
+            .compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(values.contains { $0.contains("Authentication failed (401).") })
+        let connectionItem = originalWindow.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.connection"
+        }
+        #expect(connectionItem?.view?.accessibilityValue() as? String ==
+            "Connection failed, Authentication failed (401).")
+    }
+}
+
+@MainActor
 private func makeWorkspace(
-    provider: any WorkspaceResourceProviding = NoopWorkspaceResourceProvider()
+    session: OpenedClusterSession = OpenedClusterSession(
+        sessionID: "test-session",
+        contextName: "test-context",
+        clusterName: "test-cluster",
+        serverHostname: "example.invalid",
+        defaultNamespace: "default"
+    ),
+    provider: any WorkspaceResourceProviding = NoopWorkspaceResourceProvider(),
+    restoration: ClusterWindowRestorationRecord = ClusterWindowRestorationRecord(
+        id: "toolbar-test",
+        contextName: "test-context"
+    ),
+    startsAuthenticated: Bool = true
 ) -> ClusterWorkspaceWindowController {
     let portForwards = PortForwardCoordinator(provider: NoopPortForwardProvider())
     return ClusterWorkspaceWindowController(
-        session: OpenedClusterSession(
-            sessionID: "test-session",
-            contextName: "test-context",
-            clusterName: "test-cluster",
-            serverHostname: "example.invalid",
-            defaultNamespace: "default"
-        ),
+        session: session,
         provider: provider,
         connectionActivityProvider: NoopConnectionActivityProvider(),
         optionalResourceCatalogProvider: NoopOptionalResourceCatalogProvider(),
@@ -108,12 +362,155 @@ private func makeWorkspace(
         columnsConfigurationPath: "/tmp/kmgr-toolbar-test-columns.yaml",
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },
-        restoration: ClusterWindowRestorationRecord(
-            id: "toolbar-test",
-            contextName: "test-context"
-        ),
+        restoration: restoration,
+        startsAuthenticated: startsAuthenticated,
         onShowPortForwards: {}
     )
+}
+
+private func restoredWorkspaceRecord() -> ClusterWindowRestorationRecord {
+    ClusterWindowRestorationRecord(
+        id: "saved-production",
+        state: ClusterWindowRestorationState(
+            contextName: "production",
+            contextReference: "/configs/production.yaml#production",
+            gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
+            namespaceScope: .namespace("payments"),
+            filter: "name:api"
+        )
+    )
+}
+
+private func authenticatedRestorationSession(
+    for record: ClusterWindowRestorationRecord,
+    sessionID: String = "authenticated-session"
+) -> OpenedClusterSession {
+    OpenedClusterSession(
+        sessionID: sessionID,
+        contextName: "production",
+        clusterName: "production-cluster",
+        serverHostname: "api.production.example",
+        defaultNamespace: "payments",
+        contextReference: record.state.contextReference
+    )
+}
+
+private enum RestorationDiscoveryOutcome: Sendable {
+    case resources([DiscoveredResource])
+    case failure(ClusterManagerIssue)
+}
+
+private final class RestorationDiscoveryGate: @unchecked Sendable {
+    private let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let pair = AsyncStream<Void>.makeStream()
+        stream = pair.stream
+        continuation = pair.continuation
+    }
+
+    func wait() async {
+        for await _ in stream { return }
+    }
+
+    func open() {
+        continuation.yield(())
+        continuation.finish()
+    }
+}
+
+private final class RecordingRestorationWorkspaceProvider: WorkspaceResourceProviding,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let discoveryOutcome: RestorationDiscoveryOutcome
+    private let discoveryGates: [RestorationDiscoveryGate]
+    private var discoveryCallCount = 0
+    private var storedEvents: [String] = []
+    private var storedStreamRequests: [ResourceViewRequest] = []
+
+    init(
+        discoveryOutcome: RestorationDiscoveryOutcome = .resources([DiscoveredResource(
+            group: "apps", version: "v1", resource: "deployments", kind: "Deployment",
+            namespaced: true, verbs: ["list", "watch"]
+        )]),
+        discoveryGates: [RestorationDiscoveryGate] = []
+    ) {
+        self.discoveryOutcome = discoveryOutcome
+        self.discoveryGates = discoveryGates
+    }
+
+    var events: [String] { lock.withLock { storedEvents } }
+    var streamRequests: [ResourceViewRequest] { lock.withLock { storedStreamRequests } }
+    var discoveryFinished: Bool {
+        events.contains { $0.hasPrefix("discover-finished:") }
+    }
+    var discoverySessionIDs: [String] {
+        events.compactMap { event in
+            event.hasPrefix("discover:") ? String(event.dropFirst("discover:".count)) : nil
+        }
+    }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult {
+        let gate = lock.withLock { () -> RestorationDiscoveryGate? in
+            storedEvents.append("discover:\(sessionID)")
+            defer { discoveryCallCount += 1 }
+            return discoveryGates.indices.contains(discoveryCallCount)
+                ? discoveryGates[discoveryCallCount]
+                : nil
+        }
+        await gate?.wait()
+        lock.withLock { storedEvents.append("discover-finished:\(sessionID)") }
+        switch discoveryOutcome {
+        case .resources(let resources): return .init(resources: resources)
+        case .failure(let error): throw error
+        }
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] {
+        lock.withLock { storedEvents.append("namespaces:\(sessionID)") }
+        return ["payments"]
+    }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error> {
+        lock.withLock {
+            storedEvents.append("stream:\(request.sessionID):\(request.resource.id)")
+            storedStreamRequests.append(request)
+        }
+        return AsyncThrowingStream { $0.finish() }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {
+        lock.withLock { storedEvents.append("cancel:\(sessionID)") }
+    }
+
+    func closeSession(sessionID: String) async {
+        lock.withLock { storedEvents.append("close:\(sessionID)") }
+    }
+}
+
+@MainActor
+private func triggerResourceFilterChange(in window: NSWindow, value: String) throws {
+    let root = try #require(window.contentView)
+    let field = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+        .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+    field.stringValue = value
+    field.delegate?.controlTextDidChange?(Notification(
+        name: NSControl.textDidChangeNotification,
+        object: field
+    ))
+}
+
+private struct StallingRestorationContextProvider: ClusterContextProviding {
+    func listContexts(reload: Bool) async throws -> [ClusterContextSummary] { [] }
+
+    func openContext(reference: String) async throws -> OpenedClusterSession {
+        try await Task.sleep(for: .seconds(60))
+        throw CancellationError()
+    }
 }
 
 private struct HeaderStatusWorkspaceResourceProvider: WorkspaceResourceProviding {

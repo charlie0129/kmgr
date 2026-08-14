@@ -15,6 +15,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     NSMenuItemValidation
 {
     private(set) var session: OpenedClusterSession
+    private(set) var isAuthenticated: Bool
     var restorationID: String { restoration.id }
     var onClose: (() -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
@@ -41,6 +42,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var execConfigurationController: ExecConfigurationWindowController?
     private var deleteResourcesController: DeleteResourcesWindowController?
     private var resourceMutationController: ResourceMutationWindowController?
+    private var didStartWorkspace = false
 
     init(
         session: OpenedClusterSession,
@@ -58,9 +60,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         logDisplayConfiguration: LogDisplayConfiguration,
         confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
         restoration: ClusterWindowRestorationRecord,
+        startsAuthenticated: Bool = true,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
         self.session = session
+        self.isAuthenticated = startsAuthenticated
         self.provider = provider
         self.connectionActivityProvider = connectionActivityProvider
         self.objectDetailProvider = objectDetailProvider
@@ -90,6 +94,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
         workspaceController = ClusterWorkspaceViewController(
             session: session,
+            isAuthenticated: startsAuthenticated,
             provider: provider,
             connectionActivityProvider: connectionActivityProvider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
@@ -140,7 +145,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
-        workspaceController.start(restoring: restoration.state)
+        guard !didStartWorkspace else { return }
+        didStartWorkspace = true
+        workspaceController.start(
+            restoring: restoration.state,
+            connectsImmediately: isAuthenticated
+        )
     }
 
     /// Keep the last rendered view visible while the shared helper is down.
@@ -160,6 +170,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     func recover(with recoveredSession: OpenedClusterSession) {
         dismissTransientOperationsForEngineRecovery()
         session = recoveredSession
+        isAuthenticated = true
         window?.title = "\(recoveredSession.contextName) — \(Product.applicationName)"
         window?.subtitle = recoveredSession.serverHostname
         workspaceController.recover(with: recoveredSession)
@@ -185,8 +196,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.stop()
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
-        Task { [provider, session] in
-            await provider.closeSession(sessionID: session.sessionID)
+        if isAuthenticated {
+            Task { [provider, session] in
+                await provider.closeSession(sessionID: session.sessionID)
+            }
         }
         onClose?()
     }
@@ -333,6 +346,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     NSToolbarDelegate, NSSearchFieldDelegate
 {
     private var session: OpenedClusterSession
+    private var isAuthenticated: Bool
     private let provider: any WorkspaceResourceProviding
     private let connectionActivityProvider: any ClusterConnectionActivityProviding
     private let objectSearchProvider: any ObjectSearchProviding
@@ -370,6 +384,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     init(
         session: OpenedClusterSession,
+        isAuthenticated: Bool,
         provider: any WorkspaceResourceProviding,
         connectionActivityProvider: any ClusterConnectionActivityProviding,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
@@ -381,6 +396,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
         self.session = session
+        self.isAuthenticated = isAuthenticated
         self.provider = provider
         self.connectionActivityProvider = connectionActivityProvider
         self.objectSearchProvider = objectSearchProvider
@@ -389,9 +405,14 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.portForwards = portForwards
         self.columnsConfigurationPath = columnsConfigurationPath
         self.onShowPortForwards = onShowPortForwards
-        sidebarController = ResourceSidebarViewController(session: session, provider: provider)
+        sidebarController = ResourceSidebarViewController(
+            session: session,
+            isAuthenticated: isAuthenticated,
+            provider: provider
+        )
         contentController = ResourceListViewController(
             session: session,
+            isAuthenticated: isAuthenticated,
             provider: provider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             columnsConfigurationPath: columnsConfigurationPath
@@ -447,12 +468,20 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         fatalError("ClusterWorkspaceViewController is programmatic")
     }
 
-    func start(restoring state: ClusterWindowRestorationState? = nil) {
+    func start(
+        restoring state: ClusterWindowRestorationState? = nil,
+        connectsImmediately: Bool = true
+    ) {
+        guard connectsImmediately else {
+            installRestoredShell(state)
+            return
+        }
         pendingRestorationState = state
         connectionActivityView.setState(.connected)
         startConnectionActivityWatch()
-        sidebarController.start { [weak self] resources in
+        sidebarController.start { [weak self] result in
             guard let self else { return }
+            guard case .success(let resources) = result else { return }
             let restored = pendingRestorationState.flatMap {
                 contentController.applyRestoration($0, discoveredResources: resources)
             } ?? false
@@ -468,12 +497,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             }
         }
         loadNamespaces()
-        portForwards.register(sessionID: session.sessionID)
-        if portForwardObserver == nil {
-            portForwardObserver = portForwards.observe { [weak self] snapshot in
-                self?.updatePortForwardButton(snapshot)
-            }
-        }
+        startPortForwardObservation()
     }
 
     func restorationState() -> ClusterWindowRestorationState {
@@ -491,6 +515,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         palettePresentationTask = nil
         paletteController?.close()
         paletteController = nil
+        // Discovery is session-bound. In particular, a restored shell must not
+        // accept an exact-GVR result from the helper generation that just died.
+        sidebarController.stop()
         detailController?.engineDidDisconnect()
         contentController.engineDidDisconnect()
         connectionActivityTask?.cancel()
@@ -500,11 +527,25 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     func engineRecoveryFailed(_ error: Error) {
         connectionActivityView.setState(.failed, detail: error.localizedDescription)
+        if !isAuthenticated {
+            contentController.showDisconnected(
+                "Could not connect to this saved context. \(error.localizedDescription)"
+            )
+        }
     }
 
     func recover(with recoveredSession: OpenedClusterSession) {
+        // Authentication can complete before discovery has validated a saved
+        // target. A helper restart in that interval must stay on the shell
+        // path; treating authentication alone as resumable would authorize the
+        // synthetic resource in the new helper generation.
+        let resumesCurrentResource = isAuthenticated
+            && contentController.resourceCatalogValidated
+        let restoredShellState = resumesCurrentResource ? nil : restorationState()
         let previousSessionID = session.sessionID
         session = recoveredSession
+        isAuthenticated = true
+        updateToolbarSessionPresentation()
         startConnectionActivityWatch()
         Task { [recentObjectStore] in
             await recentObjectStore.rebind(
@@ -512,15 +553,41 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 to: recoveredSession.sessionID
             )
         }
-        sidebarController.recover(session: recoveredSession) { [weak self] _ in
+        contentController.recover(
+            session: recoveredSession,
+            opensCurrentResource: resumesCurrentResource
+        )
+        sidebarController.recover(session: recoveredSession) { [weak self] result in
             guard let self else { return }
-            sidebarController.reconcileSelection(
-                matching: contentController.currentResourceID
-            )
+            switch result {
+            case .success(let resources):
+                if restoredShellState != nil,
+                    contentController.validateRestoredResource(
+                        restorationState(),
+                        discoveredResources: resources
+                    )
+                {
+                    sidebarController.selectResource(
+                        matchingCurrent: contentController.currentResourceID
+                    )
+                } else {
+                    sidebarController.reconcileSelection(
+                        matching: contentController.currentResourceID
+                    )
+                }
+                connectionActivityView.setState(.connected)
+            case .failure(let error):
+                // Existing authenticated workspaces keep their warm/current
+                // resource behavior when rediscovery fails. Only an initial
+                // shell still needs its synthetic target revoked.
+                guard restoredShellState != nil else { return }
+                sidebarController.discardRestoredResource()
+                contentController.rejectRestoredResourceValidation(error)
+                connectionActivityView.setState(.failed, detail: error.localizedDescription)
+            }
         }
-        contentController.recover(session: recoveredSession)
         loadNamespaces()
-        portForwards.register(sessionID: recoveredSession.sessionID)
+        startPortForwardObservation()
         if let detailController {
             connectionActivityView.setState(.connecting, detail: "Reopening view…")
             detailController.recover(sessionID: recoveredSession.sessionID) { [weak self] result in
@@ -531,13 +598,62 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     self?.engineRecoveryFailed(error)
                 }
             }
-        } else {
+        } else if resumesCurrentResource {
             connectionActivityView.setState(.connected)
+        } else {
+            connectionActivityView.setState(
+                .connecting,
+                detail: "Loading the saved resource target…"
+            )
         }
     }
 
     private func checkpointRestoration() {
         onRestorationChanged?(restorationState())
+    }
+
+    private func installRestoredShell(_ state: ClusterWindowRestorationState?) {
+        isAuthenticated = false
+        connectionActivityView.setState(
+            .reconnecting,
+            detail: "Opening saved Kubernetes context…"
+        )
+        if let state {
+            splitViewItems[0].isCollapsed = !state.isSidebarVisible
+            applyNamespaceScopeSelection(state.namespaceScope.namespaceSelection)
+            contentController.applyRestoredShell(state)
+            if let resource = RestoredWorkspaceShell(
+                record: ClusterWindowRestorationRecord(id: "shell", state: state)
+            ).targetResource {
+                resources = [resource]
+                sidebarController.installRestoredResource(resource)
+                sidebarController.selectResource(matching: resource.id)
+            }
+        } else {
+            contentController.showDisconnected("Opening saved Kubernetes context…")
+        }
+        view.window?.makeFirstResponder(contentController.tableResponder)
+    }
+
+    private func startPortForwardObservation() {
+        guard isAuthenticated else { return }
+        portForwards.register(sessionID: session.sessionID)
+        if portForwardObserver == nil {
+            portForwardObserver = portForwards.observe { [weak self] snapshot in
+                self?.updatePortForwardButton(snapshot)
+            }
+        }
+    }
+
+    private func updateToolbarSessionPresentation() {
+        guard let item = view.window?.toolbar?.items.first(where: {
+            $0.itemIdentifier == .cluster
+        }) else { return }
+        item.label = session.contextName
+        if let button = item.view as? NSButton {
+            button.title = session.contextName
+            button.toolTip = "\(session.clusterName) · \(session.serverHostname)"
+        }
     }
 
     private func startConnectionActivityWatch() {
@@ -772,6 +888,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     func presentCommandPalette() {
+        guard isAuthenticated, contentController.resourceCatalogValidated else {
+            NSSound.beep()
+            return
+        }
         if let paletteController {
             paletteController.showWindow(nil)
             return
@@ -1061,6 +1181,7 @@ private final class ResourceSidebarViewController: NSViewController,
     }
 
     private var session: OpenedClusterSession
+    private var isAuthenticated: Bool
     private let provider: any WorkspaceResourceProviding
     private let pinStore: SidebarPinStore
     private let outlineView = NSOutlineView()
@@ -1077,10 +1198,12 @@ private final class ResourceSidebarViewController: NSViewController,
 
     init(
         session: OpenedClusterSession,
+        isAuthenticated: Bool,
         provider: any WorkspaceResourceProviding,
         pinStore: SidebarPinStore = .shared
     ) {
         self.session = session
+        self.isAuthenticated = isAuthenticated
         self.provider = provider
         self.pinStore = pinStore
         super.init(nibName: nil, bundle: nil)
@@ -1139,7 +1262,10 @@ private final class ResourceSidebarViewController: NSViewController,
         view = root
     }
 
-    func start(onLoaded: (([DiscoveredResource]) -> Void)? = nil) {
+    func start(
+        onComplete: ((Result<[DiscoveredResource], Error>) -> Void)? = nil
+    ) {
+        guard isAuthenticated else { return }
         if pinObserver == nil {
             pinObserver = pinStore.observe { [weak self] _ in
                 self?.rebuildSections()
@@ -1171,10 +1297,12 @@ private final class ResourceSidebarViewController: NSViewController,
                     statusLabel.toolTip = nil
                     statusLabel.textColor = .secondaryLabelColor
                 }
-                onLoaded?(allResources)
+                onComplete?(.success(allResources))
             } catch {
+                guard !Task.isCancelled else { return }
                 statusLabel.stringValue = error.localizedDescription
                 statusLabel.textColor = .systemRed
+                onComplete?(.failure(error))
             }
         }
     }
@@ -1190,14 +1318,31 @@ private final class ResourceSidebarViewController: NSViewController,
 
     func recover(
         session: OpenedClusterSession,
-        onLoaded: (([DiscoveredResource]) -> Void)? = nil
+        onComplete: ((Result<[DiscoveredResource], Error>) -> Void)? = nil
     ) {
         task?.cancel()
         task = nil
         self.session = session
+        isAuthenticated = true
         statusLabel.stringValue = "Reloading discovery…"
         statusLabel.textColor = .secondaryLabelColor
-        start(onLoaded: onLoaded)
+        start(onComplete: onComplete)
+    }
+
+    func installRestoredResource(_ resource: DiscoveredResource) {
+        task?.cancel()
+        task = nil
+        allResources = [resource]
+        onResourcesChanged?(allResources)
+        statusLabel.stringValue = "Saved target · waiting for context"
+        statusLabel.textColor = .systemOrange
+        rebuildSections()
+    }
+
+    func discardRestoredResource() {
+        allResources = []
+        onResourcesChanged?(allResources)
+        rebuildSections()
     }
 
     @objc private func searchChanged() { rebuildSections() }
@@ -1449,6 +1594,7 @@ private final class ResourceListViewController: NSViewController,
     private static let autoWidthPolicy = TableColumnAutoWidthPolicy()
 
     private var session: OpenedClusterSession
+    private var isAuthenticated: Bool
     private let provider: any WorkspaceResourceProviding
     private let optionalResourceCatalogProvider: any OptionalResourceCatalogProviding
     private let columnsConfigurationPath: String
@@ -1495,6 +1641,11 @@ private final class ResourceListViewController: NSViewController,
     private var resourceViewStatus: ResourceViewStatus?
     private var suppressPresentationCheckpoint = false
     private var recoveredResourceTrust = RecoveredResourceTrust()
+    /// A restored shell's synthetic resource is presentation-only. A real
+    /// session does not make it requestable until authenticated discovery has
+    /// confirmed the catalog (and `applyRestoration` has matched the exact
+    /// group/version/resource).
+    private(set) var resourceCatalogValidated: Bool
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
     private let tableSignposter = OSSignposter(
         subsystem: PerformanceSignpostCatalog.subsystem,
@@ -1514,11 +1665,14 @@ private final class ResourceListViewController: NSViewController,
 
     init(
         session: OpenedClusterSession,
+        isAuthenticated: Bool,
         provider: any WorkspaceResourceProviding,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         columnsConfigurationPath: String
     ) {
         self.session = session
+        self.isAuthenticated = isAuthenticated
+        self.resourceCatalogValidated = isAuthenticated
         self.provider = provider
         self.optionalResourceCatalogProvider = optionalResourceCatalogProvider
         self.columnsConfigurationPath = columnsConfigurationPath
@@ -1697,9 +1851,26 @@ private final class ResourceListViewController: NSViewController,
         updateStatusLine()
     }
 
-    func recover(session: OpenedClusterSession) {
+    func showDisconnected(_ message: String) {
+        endProjectionRequest(outcome: "disconnected")
+        streamTask?.cancel()
+        streamTask = nil
+        cancelOptionalResourceDiscovery(selecting: nil)
+        model = ResourceTableModel()
+        tableView.reloadData()
+        installFreshnessText("Disconnected")
+        showInlineIssue(message, color: .systemOrange)
+        updateStatusLine()
+    }
+
+    func recover(
+        session: OpenedClusterSession,
+        opensCurrentResource: Bool = true
+    ) {
         let sessionChanged = self.session.sessionID != session.sessionID
         self.session = session
+        isAuthenticated = true
+        resourceCatalogValidated = opensCurrentResource
         history.rebindClusterSessionID(session.sessionID)
         model.rebindClusterSessionID(session.sessionID)
         recoveredResourceTrust.requireValidation()
@@ -1708,7 +1879,7 @@ private final class ResourceListViewController: NSViewController,
             clearOptionalResourceOverlay()
             if let resource { installEffectiveColumns(for: resource) }
         }
-        if resource != nil { openStream() }
+        if opensCurrentResource, resource != nil { openStream() }
     }
 
     func suspend() {
@@ -1874,6 +2045,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     @objc private func showColumns() {
+        guard isAuthenticated, resourceCatalogValidated else { NSSound.beep(); return }
         guard let resource else { return }
         let resourceID = resource.id
         onShowColumns?(ResourceColumnsRequest(
@@ -1924,6 +2096,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func openStream() {
+        guard isAuthenticated, resourceCatalogValidated else { return }
         guard let resource else { return }
         endProjectionRequest(outcome: "superseded")
         let previousGeneration = generation
@@ -2577,6 +2750,72 @@ private final class ResourceListViewController: NSViewController,
         history = WorkspaceNavigationHistory(initial: .resource(nav))
         openStream()
         return true
+    }
+
+    /// Completes the one-time trust transition from a presentation-only saved
+    /// target to the authenticated discovery catalog. If the exact saved GVR
+    /// is absent, discard the synthetic resource before authorizing ordinary
+    /// resource selection so no later UI event can stream it.
+    @discardableResult
+    func validateRestoredResource(
+        _ restoration: ClusterWindowRestorationState,
+        discoveredResources: [DiscoveredResource]
+    ) -> Bool {
+        guard isAuthenticated else { return false }
+        resourceCatalogValidated = true
+        if applyRestoration(restoration, discoveredResources: discoveredResources) {
+            return true
+        }
+
+        resource = nil
+        history = WorkspaceNavigationHistory()
+        pendingScrollAnchor = nil
+        pendingSelectionUIDs = nil
+        model = ResourceTableModel()
+        tableView.reloadData()
+        titleLabel.stringValue = "Resources"
+        installFreshnessText("Ready")
+        if restoration.gvr != nil, discoveredResources.isEmpty {
+            showInlineIssue(
+                "The saved resource target is not present in authenticated discovery.",
+                color: .systemOrange
+            )
+        }
+        updateStatusLine()
+        return false
+    }
+
+    func rejectRestoredResourceValidation(_ error: Error) {
+        resourceCatalogValidated = false
+        resource = nil
+        history = WorkspaceNavigationHistory()
+        pendingScrollAnchor = nil
+        pendingSelectionUIDs = nil
+        showDisconnected(
+            "Authenticated discovery failed before the saved resource target could be validated. "
+                + error.localizedDescription
+        )
+        titleLabel.stringValue = "Resources"
+    }
+
+    /// Installs only the allow-listed presentation state from a saved window.
+    /// `openStream()` is authentication-gated, so this cannot use the shell's
+    /// synthetic session ID for discovery or resource requests.
+    func applyRestoredShell(_ restoration: ClusterWindowRestorationState) {
+        isAuthenticated = false
+        scope = restoration.namespaceScope.namespaceSelection
+        filterField.stringValue = restoration.filter
+
+        let shell = RestoredWorkspaceShell(record: ClusterWindowRestorationRecord(
+            id: "shell",
+            state: restoration
+        ))
+        if let resource = shell.targetResource {
+            _ = applyRestoration(restoration, discoveredResources: [resource])
+            titleLabel.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
+            scopeLabel.stringValue = scope.presentation
+        }
+        showDisconnected("Opening saved Kubernetes context…")
     }
 
     func restoreResource(_ state: ResourceNavigationState) {

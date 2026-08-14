@@ -31,14 +31,13 @@ final class Application: NSObject, NSApplicationDelegate {
     private var readyEngineInstanceID: String?
     private var helperRecoveryRequired = false
     private var workspaceRecoveryTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+    private var restoredWorkspaceAttempts: [
+        ObjectIdentifier: RestoredWorkspaceConnectionAttempt
+    ] = [:]
     private var logWindowControllers: [ObjectIdentifier: LogWindowController] = [:]
     private var terminalWindowControllers: [ObjectIdentifier: TerminalWindowController] = [:]
     private var isTerminating = false
     private var terminationTask: Task<Void, Never>?
-    private var restorationTasks: [Task<Void, Never>] = []
-    private var restorationAttemptsRemaining = 0
-    private var didRestoreWorkspace = false
-    private var shouldShowChooserAfterRestore = false
 
     override init() {
         let preferences = AppPreferencesStore()
@@ -165,6 +164,7 @@ final class Application: NSObject, NSApplicationDelegate {
         for task in workspaceRecoveryTasks.values { task.cancel() }
         workspaceRecoveryTasks.removeAll()
         for (identifier, controller) in workspaceControllers {
+            guard controller.isAuthenticated else { continue }
             let contextReference = controller.session.contextReference
             let task = Task { [weak self, weak controller, clusterContextProvider] in
                 guard let self, let controller else { return }
@@ -222,6 +222,8 @@ final class Application: NSObject, NSApplicationDelegate {
         }
         for task in workspaceRecoveryTasks.values { task.cancel() }
         workspaceRecoveryTasks.removeAll()
+        for attempt in restoredWorkspaceAttempts.values { attempt.cancel() }
+        restoredWorkspaceAttempts.removeAll()
         terminationTask = Task { [engineSupervisor, portForwardCoordinator] in
             await portForwardCoordinator.stopAllActive()
             portForwardCoordinator.stopWatching()
@@ -273,8 +275,9 @@ final class Application: NSObject, NSApplicationDelegate {
 
     private func openWorkspace(
         for session: OpenedClusterSession,
-        restoration: ClusterWindowRestorationRecord
-    ) {
+        restoration: ClusterWindowRestorationRecord,
+        startsAuthenticated: Bool = true
+    ) -> ClusterWorkspaceWindowController {
         let controller = ClusterWorkspaceWindowController(
             session: session,
             provider: workspaceResourceProvider,
@@ -294,6 +297,7 @@ final class Application: NSObject, NSApplicationDelegate {
                 self?.preferencesStore.current.confirmations ?? ConfirmationPreferences()
             },
             restoration: restoration,
+            startsAuthenticated: startsAuthenticated,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
             }
@@ -306,6 +310,7 @@ final class Application: NSObject, NSApplicationDelegate {
             }
             self?.columnsManagerControllers.removeValue(forKey: identifier)?.close()
             self?.workspaceRecoveryTasks.removeValue(forKey: identifier)?.cancel()
+            self?.restoredWorkspaceAttempts.removeValue(forKey: identifier)?.cancel()
             self?.workspaceControllers.removeValue(forKey: identifier)
         }
         controller.onStartPortForward = { [weak controller] identity in
@@ -327,42 +332,47 @@ final class Application: NSObject, NSApplicationDelegate {
         try? restorationStore.upsert(restoration)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+        return controller
     }
 
     private func restoreWorkspacesOrShowChooser() {
         let records = restorationStore.windows
         guard !records.isEmpty else { showClusterManager(); return }
-        restorationAttemptsRemaining = records.count
-        didRestoreWorkspace = false
-        shouldShowChooserAfterRestore = false
         for record in records {
-            let task = Task { [weak self, clusterContextProvider] in
-                guard let self else { return }
-                defer { restorationAttemptFinished() }
-                do {
-                    let session = try await clusterContextProvider.openContext(
-                        reference: record.state.contextReference
-                    )
-                    guard !Task.isCancelled else { return }
-                    openWorkspace(for: session, restoration: record)
-                    didRestoreWorkspace = true
-                } catch {
-                    logger.error(
-                        "Workspace restore failed for context \(record.state.contextName, privacy: .public): \(error.localizedDescription, privacy: .public)"
-                    )
-                    shouldShowChooserAfterRestore = true
-                }
+            let shell = RestoredWorkspaceShell(record: record)
+            let controller = openWorkspace(
+                for: shell.session,
+                restoration: record,
+                startsAuthenticated: false
+            )
+            let identifier = ObjectIdentifier(controller)
+            let attempt = RestoredWorkspaceConnectionAttempt(
+                provider: clusterContextProvider,
+                contextReference: record.state.contextReference
+            )
+            attempt.onOpened = { [weak self, weak controller] session in
+                guard let self, let controller,
+                    self.workspaceControllers[identifier] === controller
+                else { return }
+                controller.recover(with: session)
             }
-            restorationTasks.append(task)
-        }
-    }
-
-    private func restorationAttemptFinished() {
-        restorationAttemptsRemaining -= 1
-        guard restorationAttemptsRemaining == 0 else { return }
-        restorationTasks.removeAll()
-        if shouldShowChooserAfterRestore || !didRestoreWorkspace {
-            showClusterManager()
+            attempt.onFailure = { [weak self, weak controller] error in
+                guard let self, let controller,
+                    self.workspaceControllers[identifier] === controller
+                else { return }
+                self.logger.error(
+                    "Workspace restore failed for context \(record.state.contextName, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+                controller.engineRecoveryFailed(error)
+            }
+            attempt.onFinish = { [weak self, weak attempt] in
+                guard let self,
+                    self.restoredWorkspaceAttempts[identifier] === attempt
+                else { return }
+                self.restoredWorkspaceAttempts.removeValue(forKey: identifier)
+            }
+            restoredWorkspaceAttempts[identifier] = attempt
+            attempt.start()
         }
     }
 
