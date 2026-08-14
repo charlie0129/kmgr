@@ -343,7 +343,8 @@ func runProjectionWorker(ctx context.Context, project func() error) error {
 }
 
 // ProjectOne computes a single compact row and whether it belongs to the
-// current namespace/filter projection.
+// current namespace/filter projection. The object is treated as immutable for
+// the call, and the returned protobuf row retains no nested object aliases.
 func (p *Projector) ProjectOne(object *unstructured.Unstructured) (*kmgrv1.ResourceRow, bool) {
 	return p.beginBatch().projectOne(object)
 }
@@ -1121,7 +1122,7 @@ func statusText(object *unstructured.Unstructured) string {
 	}
 	kind := strings.ToLower(object.GetKind())
 	if kind == "node" {
-		conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
+		conditions := nestedSliceNoCopy(object.Object, "status", "conditions")
 		for _, raw := range conditions {
 			condition, _ := raw.(map[string]any)
 			if condition["type"] == "Ready" {
@@ -1168,7 +1169,7 @@ func statusSeverity(status string) kmgrv1.CellSeverity {
 }
 
 func readyContainers(object *unstructured.Unstructured) (ready, total int) {
-	statuses, _, _ := unstructured.NestedSlice(object.Object, "status", "containerStatuses")
+	statuses := nestedSliceNoCopy(object.Object, "status", "containerStatuses")
 	for _, raw := range statuses {
 		status, ok := raw.(map[string]any)
 		if !ok {
@@ -1180,14 +1181,14 @@ func readyContainers(object *unstructured.Unstructured) (ready, total int) {
 		}
 	}
 	if total == 0 {
-		containers, _, _ := unstructured.NestedSlice(object.Object, "spec", "containers")
+		containers := nestedSliceNoCopy(object.Object, "spec", "containers")
 		total = len(containers)
 	}
 	return ready, total
 }
 
 func restartCount(object *unstructured.Unstructured) int64 {
-	statuses, _, _ := unstructured.NestedSlice(object.Object, "status", "containerStatuses")
+	statuses := nestedSliceNoCopy(object.Object, "status", "containerStatuses")
 	var result int64
 	for _, raw := range statuses {
 		status, ok := raw.(map[string]any)
@@ -1202,6 +1203,23 @@ func restartCount(object *unstructured.Unstructured) int64 {
 		case float64:
 			result += int64(value)
 		}
+	}
+	return result
+}
+
+// nestedSliceNoCopy returns a read-only view of a JSON slice. Projector inputs
+// are immutable UID-store snapshots or immutable WATCH values, and every
+// caller only inspects scalar fields before returning detached protobuf
+// cells. Keeping that contract here avoids NestedSlice's recursive copy for
+// every projected row without retaining raw-object aliases in projected state.
+func nestedSliceNoCopy(object map[string]any, fields ...string) []any {
+	value, found, err := unstructured.NestedFieldNoCopy(object, fields...)
+	if err != nil || !found {
+		return nil
+	}
+	result, ok := value.([]any)
+	if !ok {
+		return nil
 	}
 	return result
 }

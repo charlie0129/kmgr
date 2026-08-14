@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -212,6 +213,106 @@ func TestProjectorFiltersAndSortsTypedValues(t *testing.T) {
 	}
 	if rows[0].GetCells()[4].GetTimestampUnixMs() == 0 {
 		t.Fatal("age has no typed timestamp")
+	}
+}
+
+func TestProjectionSliceReadersDoNotMutateOrAliasRawObjects(t *testing.T) {
+	t.Parallel()
+	podObject := pod("uid-pod", "team-a", "api", "Running", 7, nil, time.Now().Add(-time.Hour))
+	podBefore := podObject.DeepCopy()
+	podProjector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs:        []string{"ready", "restarts", "status"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	podRow, visible := podProjector.ProjectOne(podObject)
+	if !visible {
+		t.Fatal("Pod row was unexpectedly hidden")
+	}
+	if !reflect.DeepEqual(podObject.Object, podBefore.Object) {
+		t.Fatal("Pod projection mutated its immutable raw object")
+	}
+	statuses := nestedSliceNoCopy(podObject.Object, "status", "containerStatuses")
+	status := statuses[0].(map[string]any)
+	status["ready"] = false
+	status["restartCount"] = int64(99)
+	podObject.Object["status"].(map[string]any)["phase"] = "Failed"
+	if ready := cellByID(podRow, "ready"); ready.GetDisplayText() != "1/1" {
+		t.Fatalf("projected ready cell aliased raw status: %#v", ready)
+	}
+	if restarts := cellByID(podRow, "restarts"); restarts.GetNumberValue() != 7 {
+		t.Fatalf("projected restart cell aliased raw status: %#v", restarts)
+	}
+	if phase := cellByID(podRow, "status"); phase.GetDisplayText() != "Running" {
+		t.Fatalf("projected status cell aliased raw status: %#v", phase)
+	}
+
+	nodeObject := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Node",
+		"metadata":   map[string]any{"uid": "uid-node", "name": "worker"},
+		"status": map[string]any{"conditions": []any{map[string]any{
+			"type": "Ready", "status": "True",
+		}}},
+	}}
+	nodeBefore := nodeObject.DeepCopy()
+	nodeProjector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
+		ColumnIDs:        []string{"status"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeRow, visible := nodeProjector.ProjectOne(nodeObject)
+	if !visible {
+		t.Fatal("Node row was unexpectedly hidden")
+	}
+	if !reflect.DeepEqual(nodeObject.Object, nodeBefore.Object) {
+		t.Fatal("Node projection mutated its immutable raw object")
+	}
+	conditions := nestedSliceNoCopy(nodeObject.Object, "status", "conditions")
+	conditions[0].(map[string]any)["status"] = "False"
+	if status := cellByID(nodeRow, "status"); status.GetDisplayText() != "Ready" {
+		t.Fatalf("projected Node status aliased raw conditions: %#v", status)
+	}
+}
+
+func TestProjectionSliceReadersPreserveMalformedFieldFallbacks(t *testing.T) {
+	t.Parallel()
+	podObject := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata":   map[string]any{"uid": "uid-pod", "namespace": "ns", "name": "pod"},
+		"spec":       map[string]any{"containers": map[string]any{"not": "a slice"}},
+		"status": map[string]any{
+			"phase":             "Running",
+			"containerStatuses": map[string]any{"not": "a slice"},
+		},
+	}}
+	ready, total := readyContainers(podObject)
+	if ready != 0 || total != 0 {
+		t.Fatalf("malformed ready containers = %d/%d, want 0/0", ready, total)
+	}
+	if restarts := restartCount(podObject); restarts != 0 {
+		t.Fatalf("malformed restart count = %d, want 0", restarts)
+	}
+	nodeObject := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Node",
+		"metadata":   map[string]any{"uid": "uid-node", "name": "worker"},
+		"status":     map[string]any{"conditions": map[string]any{"not": "a slice"}},
+	}}
+	if status := statusText(nodeObject); status != "Active" {
+		t.Fatalf("malformed Node conditions status = %q, want Active", status)
+	}
+	nodeObject.Object["status"] = "not an object"
+	if status := statusText(nodeObject); status != "Active" {
+		t.Fatalf("malformed Node status object = %q, want Active", status)
 	}
 }
 
