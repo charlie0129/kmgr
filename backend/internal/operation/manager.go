@@ -245,8 +245,10 @@ func (m *Manager) StartMany(
 		items[index] = ItemStatus{Identity: identity, State: ItemStatePending}
 	}
 
-	operationParent, releaseParent := context.WithCancel(m.ctx)
-	stopParent := context.AfterFunc(parent, releaseParent)
+	operationParent, releaseParent := context.WithCancelCause(m.ctx)
+	stopParent := context.AfterFunc(parent, func() {
+		releaseParent(context.Cause(parent))
+	})
 	ctx, cancel := context.WithCancel(operationParent)
 	operation := &TrackedOperation{
 		status: Status{
@@ -260,7 +262,7 @@ func (m *Manager) StartMany(
 	if m.closed {
 		m.mu.Unlock()
 		stopParent()
-		releaseParent()
+		releaseParent(context.Canceled)
 		cancel()
 		return nil, ErrManagerClosed
 	}
@@ -268,7 +270,7 @@ func (m *Manager) StartMany(
 	if _, duplicate := m.operations[operationID]; duplicate {
 		m.mu.Unlock()
 		stopParent()
-		releaseParent()
+		releaseParent(context.Canceled)
 		cancel()
 		return nil, fmt.Errorf("operation ID %q already exists", operationID)
 	}
@@ -276,7 +278,7 @@ func (m *Manager) StartMany(
 	if m.maxTracked >= 0 && len(m.operations) >= m.maxTracked {
 		m.mu.Unlock()
 		stopParent()
-		releaseParent()
+		releaseParent(context.Canceled)
 		cancel()
 		return nil, ErrManagerFull
 	}
@@ -286,7 +288,7 @@ func (m *Manager) StartMany(
 	go func() {
 		defer func() {
 			stopParent()
-			releaseParent()
+			releaseParent(context.Canceled)
 			cancel()
 			m.recordTerminal(operationID, operation)
 			close(operation.done)

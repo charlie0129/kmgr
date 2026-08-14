@@ -108,6 +108,29 @@ func TestManagerHonorsCallerCancellationWithoutLosingShutdownOwnership(t *testin
 	}
 }
 
+func TestManagerPreservesCallerDeadlineCause(t *testing.T) {
+	t.Parallel()
+	manager := NewManager()
+	t.Cleanup(manager.Close)
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancelParent()
+	operation, err := manager.StartOne(
+		parent, "caller-deadline", "scale", operationTestIdentity("one", "uid-one"),
+		func(ctx context.Context) (string, error) {
+			<-ctx.Done()
+			return "", context.Cause(ctx)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-operation.Done()
+	if status := operation.Status(); status.State != StateCancelled ||
+		!errors.Is(status.Err, context.DeadlineExceeded) {
+		t.Fatalf("deadline status = %#v", status)
+	}
+}
+
 func TestManagerCloseCancelsAndDrainsActiveOperations(t *testing.T) {
 	t.Parallel()
 	manager := NewManager()
