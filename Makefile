@@ -16,7 +16,7 @@ test-go:
 	go test ./...
 
 test-swift:
-	swift test --package-path macos
+	swift test --package-path macos --no-parallel
 
 app:
 	./scripts/build-app.sh
