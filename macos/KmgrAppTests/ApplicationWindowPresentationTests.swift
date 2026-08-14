@@ -42,6 +42,30 @@ struct ApplicationWindowPresentationTests {
         #expect(!policy(terminating: true, independent: true).shouldPresentAfterWorkspaceClose)
     }
 
+    @Test("cluster chooser surfaces a workspace restoration load failure")
+    func restorationLoadFailureNotice() throws {
+        let provider = AnyClusterContextProvider(
+            listContexts: { _ in [] },
+            openContext: { _ in throw CancellationError() }
+        )
+        let controller = ClusterManagerWindowController(
+            provider: provider,
+            initialNotice: ClusterManagerInitialNotice(
+                title: "Workspace restoration skipped",
+                message: "Saved cluster windows use an unsupported version and will not be reopened."
+            )
+        )
+        let root = try #require(controller.window?.contentView)
+        let fields = descendants(of: root).compactMap { $0 as? NSTextField }
+
+        #expect(fields.first {
+            $0.identifier?.rawValue == "cluster-manager-issue-title"
+        }?.stringValue == "Workspace restoration skipped")
+        #expect(fields.first {
+            $0.identifier?.rawValue == "cluster-manager-issue-message"
+        }?.stringValue.contains("unsupported version") == true)
+    }
+
     private func policy(
         terminating: Bool = false,
         workspaces: Int = 0,

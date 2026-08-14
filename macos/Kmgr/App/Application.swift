@@ -23,6 +23,7 @@ final class Application: NSObject, NSApplicationDelegate {
     private let preferencesStore: AppPreferencesStore
     private let engineColumnsConfigurationPath: String
     private let restorationStore: WorkspaceRestorationStore
+    private var pendingRestorationNotice: ClusterManagerInitialNotice?
     private let settingsWindowController: SettingsWindowController
     private let portForwardCoordinator: PortForwardCoordinator
     private let portForwardsWindowController: PortForwardsWindowController
@@ -48,7 +49,14 @@ final class Application: NSObject, NSApplicationDelegate {
         engineConfiguration.metricsRefreshSeconds = preferences.current.metricsRefreshSeconds
         let supervisor = EngineSupervisor(configuration: engineConfiguration)
         self.engineSupervisor = supervisor
-        self.restorationStore = WorkspaceRestorationStore()
+        let restorationStore = WorkspaceRestorationStore()
+        self.restorationStore = restorationStore
+        self.pendingRestorationNotice = restorationStore.loadIssue.map {
+            ClusterManagerInitialNotice(
+                title: "Workspace restoration skipped",
+                message: $0.message
+            )
+        }
         let settings = SettingsWindowController(preferencesStore: preferences)
         self.settingsWindowController = settings
         self.clusterContextProvider = EngineClusterContextProvider(
@@ -251,7 +259,12 @@ final class Application: NSObject, NSApplicationDelegate {
     @objc private func showClusterManager() {
         // Every Command-N starts a fresh chooser so the user can open several
         // independent workspaces, including the same context more than once.
-        let controller = ClusterManagerWindowController(provider: clusterContextProvider)
+        let initialNotice = pendingRestorationNotice
+        pendingRestorationNotice = nil
+        let controller = ClusterManagerWindowController(
+            provider: clusterContextProvider,
+            initialNotice: initialNotice
+        )
         let identifier = ObjectIdentifier(controller)
         chooserControllers[identifier] = controller
         controller.onOpenSession = { [weak self] session in

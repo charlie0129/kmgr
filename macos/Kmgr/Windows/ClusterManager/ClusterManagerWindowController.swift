@@ -1,6 +1,11 @@
 import AppKit
 import KmgrCore
 
+struct ClusterManagerInitialNotice: Hashable, Sendable {
+    var title: String
+    var message: String
+}
+
 @MainActor
 final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate {
     var onOpenSession: ((OpenedClusterSession) -> Void)?
@@ -11,10 +16,14 @@ final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate
 
     init(
         provider: any ClusterContextProviding,
+        initialNotice: ClusterManagerInitialNotice? = nil,
         closesAfterOpening: Bool = true
     ) {
         self.closesAfterOpening = closesAfterOpening
-        self.managerViewController = ClusterManagerViewController(provider: provider)
+        self.managerViewController = ClusterManagerViewController(
+            provider: provider,
+            initialNotice: initialNotice
+        )
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 880, height: 520),
@@ -82,6 +91,7 @@ private final class ClusterManagerViewController: NSViewController,
     }
 
     private let provider: any ClusterContextProviding
+    private let initialNotice: ClusterManagerInitialNotice?
     private var model = ClusterManagerModel()
     private var loadTask: Task<Void, Never>?
     private var openTask: Task<Void, Never>?
@@ -110,8 +120,12 @@ private final class ClusterManagerViewController: NSViewController,
     private let openProgress = NSProgressIndicator()
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
 
-    init(provider: any ClusterContextProviding) {
+    init(
+        provider: any ClusterContextProviding,
+        initialNotice: ClusterManagerInitialNotice?
+    ) {
         self.provider = provider
+        self.initialNotice = initialNotice
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -517,6 +531,19 @@ private final class ClusterManagerViewController: NSViewController,
         }
 
         guard let issue else {
+            if let initialNotice {
+                issueView.isHidden = false
+                issueImageView.image = NSImage(
+                    systemSymbolName: "exclamationmark.triangle",
+                    accessibilityDescription: initialNotice.title
+                )
+                issueImageView.contentTintColor = .systemOrange
+                issueTitleLabel.stringValue = initialNotice.title
+                issueMessageLabel.stringValue = initialNotice.message
+                issueMetadataLabel.stringValue = ""
+                issueMetadataLabel.isHidden = true
+                return
+            }
             issueView.isHidden = true
             return
         }
@@ -611,7 +638,9 @@ private final class ClusterManagerViewController: NSViewController,
         issueImageView.translatesAutoresizingMaskIntoConstraints = false
 
         issueTitleLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        issueTitleLabel.identifier = .init("cluster-manager-issue-title")
         issueMessageLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        issueMessageLabel.identifier = .init("cluster-manager-issue-message")
         issueMessageLabel.textColor = .secondaryLabelColor
         issueMessageLabel.maximumNumberOfLines = 2
         issueMetadataLabel.font = .monospacedSystemFont(
