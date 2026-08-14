@@ -2,6 +2,73 @@ import Foundation
 import Testing
 @testable import KmgrCore
 
+private func podIdentity(_ name: String, uid: String) -> ResourceIdentity {
+    ResourceIdentity(
+        clusterSessionID: "session",
+        group: "",
+        version: "v1",
+        resource: "pods",
+        namespace: "team-a",
+        name: name,
+        uid: ResourceUID(uid)
+    )
+}
+
+@Test func multiPodLogsOfferAllContainersWithoutACommonName() {
+    let inventories = [
+        PodLogSourceInventory(
+            identity: podIdentity("api", uid: "api-uid"),
+            containers: ["app", "sidecar"]
+        ),
+        PodLogSourceInventory(
+            identity: podIdentity("worker", uid: "worker-uid"),
+            containers: ["worker"]
+        ),
+    ]
+
+    #expect(PodLogSourcePlanner.selections(for: inventories) == [.all])
+    let sources = PodLogSourcePlanner.sources(for: inventories, selection: .all)
+    #expect(sources.map(\.label) == [
+        "team-a/api/app", "team-a/api/sidecar", "team-a/worker/worker",
+    ])
+    #expect(sources.map(\.sourceID) == [
+        "api-uid/app", "api-uid/sidecar", "worker-uid/worker",
+    ])
+}
+
+@Test func multiPodLogsKeepCommonContainerAsNarrowerChoice() {
+    let inventories = [
+        PodLogSourceInventory(
+            identity: podIdentity("api", uid: "api-uid"),
+            containers: ["app", "proxy"]
+        ),
+        PodLogSourceInventory(
+            identity: podIdentity("worker", uid: "worker-uid"),
+            containers: ["app", "metrics"]
+        ),
+    ]
+
+    #expect(PodLogSourcePlanner.selections(for: inventories) == [.all, .named("app")])
+    #expect(PodLogSourcePlanner.sources(
+        for: inventories,
+        selection: .named("app")
+    ).map(\.label) == ["team-a/api/app", "team-a/worker/app"])
+}
+
+@Test func logSourcePresentationKeepsExactContextAndSourcesVisible() {
+    let source = LogSource(
+        identity: podIdentity("api", uid: "api-uid"),
+        container: "app",
+        sourceID: "api-uid/app",
+        label: "team-a/api/app"
+    )
+    #expect(LogSourcePresentation.toolbarSummary(
+        contextName: "production",
+        sources: [source]
+    ) == "Context: production · Sources: team-a/api/app")
+    #expect(LogSourcePresentation.titleSummary(for: [source]) == "team-a/api/app")
+}
+
 @Test func logStreamGateKeepsLatePreviousGenerationOutOfBufferAfterOptionsReset() {
     let old = LogRecord(sourceID: "pod", data: Data("old".utf8), endsWithNewline: true)
     let stale = LogRecord(sourceID: "pod", data: Data("stale".utf8), endsWithNewline: true)

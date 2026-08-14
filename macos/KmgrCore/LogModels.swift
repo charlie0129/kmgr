@@ -19,6 +19,95 @@ public struct LogSource: Hashable, Sendable {
     }
 }
 
+public struct PodLogSourceInventory: Hashable, Sendable {
+    public var identity: ResourceIdentity
+    public var containers: [String]
+
+    public init(identity: ResourceIdentity, containers: [String]) {
+        self.identity = identity
+        self.containers = containers
+    }
+}
+
+public enum PodLogContainerSelection: Hashable, Sendable {
+    case all
+    case named(String)
+
+    public var title: String {
+        switch self {
+        case .all: "All Containers"
+        case .named(let name): name
+        }
+    }
+}
+
+/// Pure planning for the log configuration sheet. Multi-Pod selections always
+/// retain an aggregate option, even when Pods do not share a container name.
+/// A common named container remains available as a narrower convenience.
+public enum PodLogSourcePlanner {
+    public static func selections(
+        for inventories: [PodLogSourceInventory]
+    ) -> [PodLogContainerSelection] {
+        guard !inventories.isEmpty else { return [] }
+        let normalized = inventories.map { inventory in
+            Array(Set(inventory.containers.filter { !$0.isEmpty })).sorted()
+        }
+        guard normalized.allSatisfy({ !$0.isEmpty }) else { return [] }
+
+        let common = normalized.dropFirst().reduce(Set(normalized[0])) {
+            $0.intersection($1)
+        }.sorted()
+        let onlyOneSourcePerPod = normalized.allSatisfy { $0.count == 1 }
+        let allShareOnlyNamedChoice = common.count == 1 && onlyOneSourcePerPod
+        var result: [PodLogContainerSelection] = []
+        if !allShareOnlyNamedChoice { result.append(.all) }
+        result.append(contentsOf: common.map(PodLogContainerSelection.named))
+        return result
+    }
+
+    public static func sources(
+        for inventories: [PodLogSourceInventory],
+        selection: PodLogContainerSelection
+    ) -> [LogSource] {
+        inventories.flatMap { inventory in
+            let containers: [String] = switch selection {
+            case .all:
+                Array(Set(inventory.containers.filter { !$0.isEmpty })).sorted()
+            case .named(let name):
+                inventory.containers.contains(name) ? [name] : []
+            }
+            return containers.map { container in
+                LogSource(
+                    identity: inventory.identity,
+                    container: container,
+                    sourceID: "\(inventory.identity.uid.rawValue)/\(container)",
+                    label: "\(inventory.identity.namespace)/\(inventory.identity.name)/\(container)"
+                )
+            }
+        }
+    }
+}
+
+public enum LogSourcePresentation {
+    public static func titleSummary(for sources: [LogSource]) -> String {
+        sources.count == 1 ? displaySafe(sources[0].label) : "\(sources.count) sources"
+    }
+
+    public static func toolbarSummary(
+        contextName: String,
+        sources: [LogSource]
+    ) -> String {
+        let labels = sources.map { displaySafe($0.label) }.joined(separator: ", ")
+        return "Context: \(displaySafe(contextName)) · Sources: \(labels)"
+    }
+
+    private static func displaySafe(_ value: String) -> String {
+        value.unicodeScalars.map { scalar in
+            CharacterSet.controlCharacters.contains(scalar) ? "�" : String(scalar)
+        }.joined()
+    }
+}
+
 public struct LogOptions: Hashable, Sendable {
     public var follow: Bool
     public var previous: Bool

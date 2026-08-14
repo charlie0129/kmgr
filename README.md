@@ -84,8 +84,10 @@ app-wide Port Forwards window.
 - ConfigMap and Secret keys support text and raw binary values. Secret bytes
   are decoded/encoded by the engine and concealed by default in the UI.
 - Pod logs support one or many UID-pinned Pods, bounded sources and buffers,
-  container selection, follow, previous logs, timestamps, tail, since,
-  filtering, pause, copy, and explicit save.
+  aggregate All Containers even across heterogeneous Pods, common-container
+  selection, follow, previous logs, timestamps, tail, since, filtering, pause,
+  copy, and explicit save. The context and exact source labels remain visible
+  above the log buffer.
 - Pod exec uses a SwiftTerm window and direct argv transport. The configuration
   can probe `/bin/bash` then `/bin/sh`, or run an explicit executable without
   shell parsing.

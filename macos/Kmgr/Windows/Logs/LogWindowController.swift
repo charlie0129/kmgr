@@ -39,6 +39,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private let textView = NSTextView()
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "Connecting…")
+    private let sourceLabel = NSTextField(labelWithString: "")
     private let searchField = NSSearchField()
     private let followButton = NSButton(checkboxWithTitle: "Follow", target: nil, action: nil)
     private let previousButton = NSButton(checkboxWithTitle: "Previous", target: nil, action: nil)
@@ -73,7 +74,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             sources.map { ($0.sourceID, $0.label) },
             uniquingKeysWith: { first, _ in first }
         )
-        let titleSources = sources.count == 1 ? sources[0].label : "\(sources.count) Pods"
+        let titleSources = LogSourcePresentation.titleSummary(for: sources)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -165,6 +166,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         searchField.widthAnchor.constraint(equalToConstant: 220).isActive = true
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
+        sourceLabel.stringValue = LogSourcePresentation.toolbarSummary(
+            contextName: session.contextName,
+            sources: sources
+        )
+        sourceLabel.toolTip = sourceLabel.stringValue
+        sourceLabel.lineBreakMode = .byTruncatingMiddle
+        sourceLabel.textColor = .secondaryLabelColor
+        sourceLabel.setAccessibilityLabel("Log sources")
+        sourceLabel.setAccessibilityValue(sourceLabel.stringValue)
 
         let clearButton = NSButton(title: "Clear", target: self, action: #selector(clearVisibleBuffer))
         let saveButton = NSButton(title: "Save…", target: self, action: #selector(saveVisibleBuffer))
@@ -197,17 +207,22 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        sourceLabel.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(toolbar)
+        root.addSubview(sourceLabel)
         root.addSubview(scrollView)
         root.addSubview(statusLabel)
         NSLayoutConstraint.activate([
             toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
             toolbar.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            sourceLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
+            sourceLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
+            sourceLabel.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 5),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 7),
+            scrollView.topAnchor.constraint(equalTo: sourceLabel.bottomAnchor, constant: 5),
             scrollView.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -4),
             statusLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
             statusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),

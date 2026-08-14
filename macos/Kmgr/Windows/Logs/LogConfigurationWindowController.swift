@@ -3,11 +3,6 @@ import KmgrCore
 
 @MainActor
 final class LogConfigurationWindowController: NSWindowController, NSWindowDelegate {
-    private struct PodContainers: Sendable {
-        var identity: ResourceIdentity
-        var containers: [String]
-    }
-
     private let session: OpenedClusterSession
     private let pods: [ResourceIdentity]
     private let detailProvider: any ObjectDetailProviding
@@ -22,7 +17,7 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
     private let statusLabel = NSTextField(wrappingLabelWithString: "Loading Pod containers…")
     private let openButton = NSButton(title: "Open Logs", target: nil, action: nil)
     private var loadTask: Task<Void, Never>?
-    private var podContainers: [PodContainers] = []
+    private var podContainers: [PodLogSourceInventory] = []
     private var parentWindow: NSWindow?
 
     var onOpenWindow: ((LogWindowController) -> Void)?
@@ -142,14 +137,14 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
         guard loadTask == nil else { return }
         loadTask = Task { [weak self, detailProvider, pods] in
             guard let self else { return }
-            var values: [PodContainers] = []
+            var values: [PodLogSourceInventory] = []
             do {
                 // Bound concurrent fresh GETs so a large multi-selection never
                 // turns into an unbounded request burst.
                 for chunkStart in stride(from: 0, to: pods.count, by: 8) {
                     let chunk = Array(pods[chunkStart..<min(chunkStart + 8, pods.count)])
                     let resolved = try await withThrowingTaskGroup(
-                        of: PodContainers.self
+                        of: PodLogSourceInventory.self
                     ) { group in
                         for pod in chunk {
                             group.addTask {
@@ -159,10 +154,13 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
                                         field.fieldID.hasPrefix("container:") else { return nil }
                                     return field.displayText
                                 }
-                                return PodContainers(identity: detail.identity, containers: containers)
+                                return PodLogSourceInventory(
+                                    identity: detail.identity,
+                                    containers: containers
+                                )
                             }
                         }
-                        var result: [PodContainers] = []
+                        var result: [PodLogSourceInventory] = []
                         for try await value in group { result.append(value) }
                         return result
                     }
@@ -170,23 +168,15 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
                 }
                 guard !Task.isCancelled else { return }
                 values.sort { ($0.identity.namespace, $0.identity.name) < ($1.identity.namespace, $1.identity.name) }
-                let common = values.dropFirst().reduce(Set(values.first?.containers ?? [])) {
-                    $0.intersection($1.containers)
-                }.sorted()
                 podContainers = values
                 containerButton.removeAllItems()
-                if pods.count == 1, (values.first?.containers.count ?? 0) > 1 {
-                    containerButton.addItem(withTitle: "All Containers")
-                }
-                containerButton.addItems(withTitles: pods.count == 1
-                    ? (values.first?.containers ?? []) : common)
+                let selections = PodLogSourcePlanner.selections(for: values)
+                containerButton.addItems(withTitles: selections.map(\.title))
                 if containerButton.numberOfItems == 0 {
                     throw ClusterManagerIssue(
                         category: .validation,
-                        reason: "NoCommonContainer",
-                        message: pods.count == 1
-                            ? "The selected Pod declares no regular containers."
-                            : "The selected Pods have no common regular container name.",
+                        reason: "NoLogContainers",
+                        message: "At least one selected Pod declares no regular containers.",
                         contextName: session.contextName,
                         operation: "configure Pod logs"
                     )
@@ -214,19 +204,12 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
             return
         }
         let selected = containerButton.titleOfSelectedItem ?? ""
-        var sources: [LogSource] = []
-        for pod in podContainers {
-            let names = selected == "All Containers" ? pod.containers : [selected]
-            for container in names where !container.isEmpty {
-                let sourceID = "\(pod.identity.uid.rawValue)/\(container)"
-                sources.append(LogSource(
-                    identity: pod.identity,
-                    container: container,
-                    sourceID: sourceID,
-                    label: "\(pod.identity.namespace)/\(pod.identity.name)/\(container)"
-                ))
-            }
-        }
+        let selection: PodLogContainerSelection = selected == "All Containers"
+            ? .all : .named(selected)
+        let sources = PodLogSourcePlanner.sources(
+            for: podContainers,
+            selection: selection
+        )
         guard !sources.isEmpty, sources.count <= 128 else {
             statusLabel.stringValue = "The selection expands to too many log sources (maximum 128)."
             statusLabel.textColor = .systemRed
