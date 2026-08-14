@@ -177,6 +177,22 @@ object.?spec.?nodeName.orValue("—")
 object.?metadata.?labels[?"team"].orValue("—")
 ```
 
+`kmgr.cel/v1` enables exactly three CEL library layers:
+
+1. the standard CEL operators, functions, and macros supplied by the pinned
+   `cel-go` v0.31.0 environment, including `has`, `all`, `exists`,
+   `exists_one`, `map` (with its filtering form), and `filter`;
+2. `cel-go` optional types, including optional field/map/list selection,
+   optional literal elements, `optional.of`, `optional.ofNonZeroValue`,
+   `optional.none`, `hasValue`, `value`, `or`, `orValue`, `optMap`,
+   `optFlatMap`, `first`, `last`, `optional.unwrap`, and `unwrapOpt`;
+3. the two Kmgr helpers documented below.
+
+No `cel-go/ext` string, math, regex, encoding, set, or Kubernetes-specific
+extension library is enabled. Adding one would change the CEL environment and
+therefore requires a new `celEnvironment` version rather than silently making
+new expressions valid under `kmgr.cel/v1`.
+
 `kmgr.cel/v1` also exposes two namespaced, pure helpers for common bounded
 column operations:
 
@@ -196,7 +212,24 @@ work as well as baseline CEL operations. The existing behavior where a string
 column directly returns a scalar list and uses that column's `listJoiner`
 remains supported independently.
 
-The supported CEL-declared types are `string`, `integer`, `number`, `boolean`, `quantity`, `timestamp`, and `duration`. Quantity expressions return one Kubernetes quantity string; the helper validates and retains its exact canonical quantity alongside display text and an approximate numeric UI hint. Authoritative sorting uses Kubernetes quantity semantics, not lexical display order or the approximate hint. Integer results remain signed 64-bit values across IPC and are not converted through a double. A string column may accept a list of scalar values, joined by its configured separator. `resourceUsage` is reserved for native metric/accounting extractors and is not a valid CEL result type.
+The supported CEL-declared types are `string`, `integer`, `number`, `boolean`,
+`quantity`, `timestamp`, and `duration`. Coercion is intentionally narrow:
+
+| Declared type | Accepted CEL result | Display/typed behavior |
+| --- | --- | --- |
+| `string` | `string`, or a list containing only `string`, `int`, `uint`, `double`, and `bool` scalars | A scalar is retained exactly. A list is formatted element by element and joined with `listJoiner`; no map/object/list nesting is coerced. |
+| `integer` | `int` only | Retained as a signed 64-bit integer across IPC and formatted in base 10; it never passes through a double. |
+| `number` | `int`, `uint`, or `double` | Converted to a finite IEEE-754 double and formatted with compact decimal notation; NaN and infinities fail the cell. |
+| `boolean` | `bool` only | Retained as a typed Boolean and displayed as `true` or `false`. |
+| `quantity` | `string` only | Parsed with Kubernetes Quantity semantics. The exact quantity is retained and sorting uses Quantity comparison rather than lexical display or the approximate UI hint. |
+| `timestamp` | CEL `timestamp` only | Retained as an instant and displayed as RFC 3339. |
+| `duration` | CEL `duration` only | Retained as a duration and displayed with Go/CEL duration units such as `1h2m3s`. |
+
+Null, `optional.none()`, or an absent optional uses the column's `missing`
+text and has no typed sort value. A runtime type mismatch is a cell-local
+error; Kmgr does not parse a formatted string to make it fit the declaration.
+`resourceUsage` is reserved for native metric/accounting extractors and is not
+a valid CEL result type.
 
 Evaluation is deterministic and side-effect free. Each evaluation has a runtime cost limit (10,000 by default), a maximum of 128 list elements, and a 4 KiB rendered-value limit. Programs are compiled and type-checked when their definition/environment changes, then reused. Absent, null, and empty optional results render as `—` unless the definition supplies another missing value. Runtime failures belong to the individual column/cell and do not discard a row or view.
 
@@ -252,6 +285,15 @@ two fractional digits. Tooltips retain the exact canonical Kubernetes
 Quantity, and sorting continues to use the unformatted typed numeric value.
 Generic extended resources retain their canonical Quantity text because their
 units are resource-specific counts rather than bytes.
+
+`resourceUsage` sorting uses one documented numeric component rather than its
+formatted triple. When measured usage exists, Kmgr sorts by usage/capacity,
+falling back to usage/request, usage/limit, then raw usage when no denominator
+exists. When usage is unavailable, allocation columns sort by
+request/capacity, then limit/capacity; if those ratios cannot be formed, they
+fall back in order to raw request, raw limit, then raw capacity. A value with
+no usable component sorts as unavailable. Namespace, name, and UID remain the
+stable deterministic tie-breakers.
 
 An explicitly configured exact resource uses the value
 `resource:<kubernetes-resource-name>`, for example

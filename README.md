@@ -228,6 +228,12 @@ snapshot validates them. Mutations and exec commands are never replayed, and
 old helper-owned port-forwards remain visible as failed records rather than
 being recreated silently.
 
+The helper runs as the current user without privilege escalation. Its only
+management endpoint is the private Unix socket; Kmgr does not expose a TCP or
+other network-accessible management API. Kubernetes operations use pinned
+`client-go` APIs and structured arguments—Kmgr never constructs or shells out
+to `kubectl` commands.
+
 Kmgr does not copy kubeconfig credentials into app storage. It rejects
 `users[].user.exec` and legacy `auth-provider` entries before connection and
 never invokes cloud CLIs or custom credential programs. It also does not
@@ -298,8 +304,9 @@ objects. With separate approval, mutation tests should be isolated to a
 temporary `kmgr-smoke` namespace in a disposable cluster. Then:
 
 1. Open two windows, then list, filter, and sort Pods independently.
-2. Open Nodes, switch away long enough for its watch debounce, then return and
-   verify cached rows appear while state changes through Resuming or Relisting.
+2. Open Nodes, switch away long enough for its watch debounce, verify the Nodes
+   WATCH actually stops after the last consumer leaves, then return and verify
+   cached rows appear while state changes through Resuming or Relisting.
 3. Create a multi-selection with a Shift anchor, cause updates that reorder the
    sorted rows, and verify the selected UIDs and anchor still identify the same
    objects rather than the same row indexes.
@@ -319,10 +326,11 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
    resource-version conflict.
 9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
-10. Compare metrics behavior with Metrics API available and unavailable. Enable
-    configured Node request/limit and exact-resource columns, verify discovered
-    huge-page/accelerator columns appear after the base snapshot, and confirm
-    asynchronous Pod accounting does not block that snapshot.
+10. View both Pod and Node metrics, then compare their behavior with Metrics API
+    available and unavailable. Enable configured Node request/limit and
+    exact-resource columns, verify discovered huge-page/accelerator columns
+    appear after the base snapshot, and confirm asynchronous Pod accounting
+    does not block that snapshot.
 11. In Relationships, verify cached results are labeled potentially incomplete;
     run **Scan All Resources…** only against a cluster where that read load is
     acceptable.

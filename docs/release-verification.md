@@ -40,30 +40,44 @@ Developer ID signing, hardened runtime, notarization, and stapling belong to a
 future distribution pipeline. The local artifact is intentionally ad-hoc
 signed.
 
-The synthetic model performance gate is also cluster-independent:
+The synthetic model and native AppKit performance gates are also
+cluster-independent:
 
 ```sh
 KMGR_PERF_BUDGETS=1 \
   swift test --package-path macos -c release --no-parallel \
   --filter LargeViewHarness
+
+KMGR_PERF_BUDGETS=1 \
+  swift test --package-path macos -c release --no-parallel \
+  --filter ResourceTableAppKitPerformanceTests
 ```
 
-It proves the documented model budgets and identity/cardinality invariants; it
-does not prove interactive AppKit or end-to-end Kubernetes performance.
+Together they enforce the documented compact-model budgets,
+identity/cardinality invariants, viewport-sized native cell requests, and the
+one-frame typical selection/model-apply/table-restoration budgets. They do not
+prove end-to-end Kubernetes performance or replace an interactive Instruments
+run.
 
-Exercise the backend's matching cluster-independent 100,000-row projection
-workload and record allocation counts with:
+Exercise the backend's matching cluster-independent 100,000-object store and
+projection workloads and record allocation counts with:
 
 ```sh
+go test ./backend/internal/store \
+  -run '^$' \
+  -bench '^BenchmarkUIDStoreUpsert100K$' \
+  -benchtime=1x -benchmem -count=1
+
 go test ./backend/internal/view \
   -run '^$' \
   -bench '^BenchmarkBackendProjection100K$' \
   -benchtime=1x -benchmem -count=1
 ```
 
-This benchmark validates cardinality and incremental projection accounting but
-has no elapsed-time gate. Its timings are machine-load-sensitive; the reference
-evidence and optional profiling commands are documented in
+These benchmarks validate UID-store cardinality, retained-size accounting, and
+incremental projection behavior but have no elapsed-time gate. Their timings
+are machine-load-sensitive; the reference evidence and optional profiling
+commands are documented in
 `docs/performance.md`.
 
 ## Runtime-only evidence
