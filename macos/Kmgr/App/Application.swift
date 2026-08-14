@@ -102,7 +102,9 @@ final class Application: NSObject, NSApplicationDelegate {
         let delegate = Application()
         application.delegate = delegate
         application.setActivationPolicy(.regular)
-        application.run()
+        withExtendedLifetime(delegate) {
+            application.run()
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -256,7 +258,7 @@ final class Application: NSObject, NSApplicationDelegate {
             guard let self else { return }
             let initialNamespace = preferencesStore.current.defaultNamespace
                 .initialSelection(contextDefaultNamespace: session.defaultNamespace)
-            openWorkspace(
+            _ = openWorkspace(
                 for: session,
                 restoration: ClusterWindowRestorationRecord(
                     state: ClusterWindowRestorationState(
@@ -495,7 +497,7 @@ final class Application: NSObject, NSApplicationDelegate {
     }
 
     private func installMainMenu() {
-        let menu = NativeMainMenuBuilder.make(actions: NativeMainMenuActions(
+        let actions = NativeMainMenuActions(
             target: self,
             showSettings: #selector(showSettings(_:)),
             newClusterWindow: #selector(showClusterManager),
@@ -503,7 +505,8 @@ final class Application: NSObject, NSApplicationDelegate {
             showPortForwards: #selector(showPortForwards(_:)),
             cycleWindowsForward: #selector(cycleWindowsForward(_:)),
             cycleWindowsBackward: #selector(cycleWindowsBackward(_:))
-        ))
+        )
+        let menu = NativeMainMenuBuilder.make(actions: actions)
         NSApp.windowsMenu = menu.window
         NSApp.mainMenu = menu.main
     }
