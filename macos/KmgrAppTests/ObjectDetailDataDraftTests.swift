@@ -1,4 +1,5 @@
 import AppKit
+import Dispatch
 import Foundation
 import KmgrCore
 import Testing
@@ -217,6 +218,108 @@ struct ObjectDetailDataDraftTests {
         #expect(!editor.string.contains("unsaved"))
         #expect(!save.isEnabled)
         #expect(rename.isEnabled)
+    }
+
+    @Test("data value file I/O runs off main and keeps its captured key")
+    func dataValueFileIORunsOffMainAndKeepsTargetKey() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let probe = DataValueFileOperationProbe(
+            importedBytes: Data([0x00, 0xff, 0x10, 0x80])
+        )
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data),
+            initialTab: .data,
+            dataFileReader: { try probe.read($0) },
+            dataFileWriter: { try probe.write($0, to: $1) }
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer {
+            probe.releaseAll()
+            controller.stop()
+        }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let importButton = try #require(dataButtons(in: controller.view)
+            .first { $0.title == "Replace from File…" })
+        let exportButton = try #require(dataButtons(in: controller.view)
+            .first { $0.title == "Export…" })
+        try await waitForDataRows(table, count: 2)
+
+        let alphaRow = try row(forKey: "alpha", in: table)
+        let betaRow = try row(forKey: "beta", in: table)
+        select(row: alphaRow, in: table, controller: controller)
+        controller.importDataFile(
+            from: URL(fileURLWithPath: "/tmp/kmgr-import-probe.bin"),
+            forKey: "alpha"
+        )
+        try await waitForCondition { probe.readStarted }
+        #expect(probe.readRanOnMainThread == false)
+        #expect(!importButton.isEnabled)
+        #expect(!exportButton.isEnabled)
+
+        // A table selection can change while the utility task is reading. The
+        // completion must still update the key captured before the read.
+        select(row: betaRow, in: table, controller: controller)
+        probe.releaseRead()
+        try await waitForCondition {
+            (try? stateText(in: table, row: alphaRow)) == "Unsaved"
+        }
+        #expect(try stateText(in: table, row: betaRow) == "Saved")
+        #expect(editor.string == "server-beta")
+
+        select(row: alphaRow, in: table, controller: controller)
+        controller.exportDataFile(
+            probe.importedBytes,
+            key: "alpha",
+            to: URL(fileURLWithPath: "/tmp/kmgr-export-probe.bin")
+        )
+        try await waitForCondition { probe.writeStarted }
+        #expect(probe.writeRanOnMainThread == false)
+        #expect(!importButton.isEnabled)
+        #expect(!exportButton.isEnabled)
+        probe.releaseWrite()
+        try await waitForCondition { probe.writeFinished }
+        #expect(probe.writtenBytes == probe.importedBytes)
+    }
+
+    @Test("stopping detail ignores a late file-read completion")
+    func stoppingDetailInvalidatesDataFileCallback() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let probe = DataValueFileOperationProbe(
+            importedBytes: Data([0xde, 0xad, 0xbe, 0xef])
+        )
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data),
+            initialTab: .data,
+            dataFileReader: { try probe.read($0) }
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { probe.releaseAll() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        try await waitForDataRows(table, count: 2)
+        let alphaRow = try row(forKey: "alpha", in: table)
+        select(row: alphaRow, in: table, controller: controller)
+        #expect(editor.string == "server-alpha")
+
+        controller.importDataFile(
+            from: URL(fileURLWithPath: "/tmp/kmgr-late-import-probe.bin"),
+            forKey: "alpha"
+        )
+        try await waitForCondition { probe.readStarted }
+        controller.stop()
+        probe.releaseRead()
+        try await waitForCondition { probe.readFinished }
+        try await Task.sleep(for: .milliseconds(30))
+
+        #expect(editor.string == "server-alpha")
+        #expect(try stateText(in: table, row: alphaRow) == "Saved")
     }
 
     @Test("save locks editing and a missing sibling draft remains recoverable")
@@ -482,6 +585,62 @@ struct ObjectDetailDataDraftTests {
         throw CancellationError()
     }
 }
+}
+
+private final class DataValueFileOperationProbe: @unchecked Sendable {
+    let importedBytes: Data
+    private let lock = NSLock()
+    private let readGate = DispatchSemaphore(value: 0)
+    private let writeGate = DispatchSemaphore(value: 0)
+    private var storedReadStarted = false
+    private var storedReadFinished = false
+    private var storedReadRanOnMainThread: Bool?
+    private var storedWriteStarted = false
+    private var storedWriteFinished = false
+    private var storedWriteRanOnMainThread: Bool?
+    private var storedWrittenBytes: Data?
+
+    init(importedBytes: Data) {
+        self.importedBytes = importedBytes
+    }
+
+    var readStarted: Bool { lock.withLock { storedReadStarted } }
+    var readFinished: Bool { lock.withLock { storedReadFinished } }
+    var readRanOnMainThread: Bool? { lock.withLock { storedReadRanOnMainThread } }
+    var writeStarted: Bool { lock.withLock { storedWriteStarted } }
+    var writeFinished: Bool { lock.withLock { storedWriteFinished } }
+    var writeRanOnMainThread: Bool? { lock.withLock { storedWriteRanOnMainThread } }
+    var writtenBytes: Data? { lock.withLock { storedWrittenBytes } }
+
+    func read(_ url: URL) throws -> Data {
+        lock.withLock {
+            storedReadStarted = true
+            storedReadRanOnMainThread = Thread.isMainThread
+        }
+        readGate.wait()
+        lock.withLock { storedReadFinished = true }
+        return importedBytes
+    }
+
+    func write(_ bytes: Data, to url: URL) throws {
+        lock.withLock {
+            storedWriteStarted = true
+            storedWriteRanOnMainThread = Thread.isMainThread
+        }
+        writeGate.wait()
+        lock.withLock {
+            storedWrittenBytes = bytes
+            storedWriteFinished = true
+        }
+    }
+
+    func releaseRead() { readGate.signal() }
+    func releaseWrite() { writeGate.signal() }
+
+    func releaseAll() {
+        readGate.signal()
+        writeGate.signal()
+    }
 }
 
 private actor DraftMutationObjectDetailProvider: ObjectDetailProviding {

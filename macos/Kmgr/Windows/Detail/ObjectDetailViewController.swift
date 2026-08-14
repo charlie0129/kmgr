@@ -130,6 +130,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private(set) var identity: ResourceIdentity
     private let provider: any ObjectDetailProviding
     private let initialTab: ObjectDetailInitialTab
+    private let dataFileReader: @Sendable (URL) throws -> Data
+    private let dataFileWriter: @Sendable (Data, URL) throws -> Void
     private let segmented = NSSegmentedControl(
         labels: ["Summary", "YAML", "Events", "Relationships", "Metrics", "Data"],
         trackingMode: .selectOne,
@@ -196,6 +198,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var activeRelationshipScan: (id: String, generation: UInt64)?
     private var operationTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
+    private var dataFileTask: Task<Void, Never>?
+    private var dataFileGeneration: UInt64 = 0
     private var authoritativeMutationRefreshInFlight = false
     private var dataConflictController: DataConflictWindowController?
     private var conflictedDataKey: String?
@@ -218,11 +222,19 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     init(
         identity: ResourceIdentity,
         provider: any ObjectDetailProviding,
-        initialTab: ObjectDetailInitialTab = .automatic
+        initialTab: ObjectDetailInitialTab = .automatic,
+        dataFileReader: @escaping @Sendable (URL) throws -> Data = {
+            try DataValueFileIO.readBounded(from: $0)
+        },
+        dataFileWriter: @escaping @Sendable (Data, URL) throws -> Void = {
+            try DataValueFileIO.write($0, to: $1)
+        }
     ) {
         self.identity = identity
         self.provider = provider
         self.initialTab = initialTab
+        self.dataFileReader = dataFileReader
+        self.dataFileWriter = dataFileWriter
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -237,6 +249,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relationshipScanTask?.cancel()
         operationTask?.cancel()
         recoveryTask?.cancel()
+        dataFileTask?.cancel()
     }
 
     override func loadView() {
@@ -298,6 +311,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relationshipScanTask?.cancel()
         operationTask?.cancel()
         recoveryTask?.cancel()
+        cancelDataFileOperation()
         recoveryTask = nil
         authoritativeMutationRefreshInFlight = false
         dataConflictController?.close()
@@ -323,6 +337,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         operationTask = nil
         recoveryTask?.cancel()
         recoveryTask = nil
+        cancelDataFileOperation()
         authoritativeMutationRefreshInFlight = false
         dataConflictController?.close()
         dataConflictController = nil
@@ -990,6 +1005,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func disableEditingAfterDeletion() {
+        cancelDataFileOperation()
         editButton.isEnabled = false
         saveButton.isEnabled = false
         saveKeyButton.isEnabled = false
@@ -1564,7 +1580,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         let hasSelection = selectedDataKey != nil && !terminalObjectState
         let hasStoredSelection = selectedDataEntry != nil && !terminalObjectState
         let idle = operationTask == nil && dataConflictController == nil
-            && !authoritativeMutationRefreshInFlight
+            && dataFileTask == nil && !authoritativeMutationRefreshInFlight
         addKeyButton.isEnabled = objectData != nil && !terminalObjectState && idle
         renameKeyButton.isEnabled = hasStoredSelection && idle && !hasDataDraftChanges
         deleteKeyButton.isEnabled = hasStoredSelection && idle && !hasDataDraftChanges
@@ -1687,10 +1703,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             return
         }
         if kindButton.indexOfSelectedItem == 1 {
-            chooseImportedBytes { [weak self] bytes in
-                self?.performDataMutation(.set(
-                    key: key, kind: .binary, value: bytes, expectedContentHash: Data()
-                ), successMessage: "Added \(key)")
+            chooseImportedFile { [weak self] url in
+                self?.readImportedBytes(from: url) { [weak self] bytes in
+                    self?.performDataMutation(.set(
+                        key: key, kind: .binary, value: bytes, expectedContentHash: Data()
+                    ), successMessage: "Added \(key)")
+                }
             }
         } else {
             performDataMutation(.set(
@@ -1741,15 +1759,20 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func importCurrentKey() {
-        chooseImportedBytes { [weak self] bytes in
-            self?.replaceSelectedDataWithImportedBytes(bytes)
+        guard let key = selectedDataKey else { return }
+        chooseImportedFile { [weak self] url in
+            self?.importDataFile(from: url, forKey: key)
         }
     }
 
     func replaceSelectedDataWithImportedBytes(_ bytes: Data) {
         guard let key = selectedDataKey else { return }
-        selectedDataDraftKind = .binary
-        if let entry = selectedDataEntry {
+        replaceDataWithImportedBytes(bytes, forKey: key)
+    }
+
+    private func replaceDataWithImportedBytes(_ bytes: Data, forKey key: String) {
+        let entry = objectData?.entries.first { $0.id == key }
+        if let entry {
             dataDrafts.update(
                 key: key,
                 kind: .binary,
@@ -1761,26 +1784,52 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         } else {
             dataDrafts.replaceExisting(key: key, kind: .binary, value: bytes)
         }
-        displaySelectedData()
-        reloadSelectedDataRow()
+        if selectedDataKey == key {
+            selectedDataDraftKind = .binary
+            selectedDataEntry = entry
+            displaySelectedData()
+        }
+        if let row = dataEditorRows.firstIndex(where: { $0.key == key }) {
+            reloadDataRows([row])
+        }
         statusLabel.stringValue = dataDrafts.contains(key)
             ? "Loaded \(bytes.count.formatted()) bytes locally for \(key)"
             : "Selected file matches the saved value for \(key)"
         statusLabel.textColor = .secondaryLabelColor
     }
 
-    private func chooseImportedBytes(_ completion: @escaping (Data) -> Void) {
+    private func chooseImportedFile(_ completion: @escaping (URL) -> Void) {
         guard let window = view.window else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.beginSheetModal(for: window) { response in
             guard response == .OK, let url = panel.url else { return }
-            do {
-                completion(try Data(contentsOf: url, options: .mappedIfSafe))
-            } catch {
-                self.show(error: error)
-            }
+            completion(url)
+        }
+    }
+
+    /// Testable seam used after NSOpenPanel has supplied a URL. The key is
+    /// captured before asynchronous I/O so a selection change cannot redirect
+    /// imported bytes into a different ConfigMap or Secret entry.
+    func importDataFile(from url: URL, forKey key: String) {
+        guard dataEditorRows.contains(where: { $0.key == key }) else { return }
+        readImportedBytes(from: url) { [weak self] bytes in
+            self?.replaceDataWithImportedBytes(bytes, forKey: key)
+        }
+    }
+
+    private func readImportedBytes(
+        from url: URL,
+        completion: @escaping @MainActor (Data) -> Void
+    ) {
+        let reader = dataFileReader
+        startDataFileOperation(status: "Importing \(url.lastPathComponent)…") {
+            try await Task.detached(priority: .utility) {
+                try reader(url)
+            }.value
+        } completion: { value in
+            completion(value)
         }
     }
 
@@ -1793,14 +1842,64 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         panel.beginSheetModal(for: window) { [weak self] response in
             defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
             guard response == .OK, let url = panel.url else { return }
+            self?.exportDataFile(bytes, key: key, to: url)
+        }
+    }
+
+    /// Testable seam used after NSSavePanel has supplied its destination.
+    func exportDataFile(_ bytes: Data, key: String, to url: URL) {
+        let writer = dataFileWriter
+        startDataFileOperation(status: "Exporting \(url.lastPathComponent)…") {
+            try await Task.detached(priority: .utility) {
+                var protectedBytes = bytes
+                defer {
+                    protectedBytes.resetBytes(
+                        in: protectedBytes.startIndex..<protectedBytes.endIndex
+                    )
+                }
+                try writer(protectedBytes, url)
+            }.value
+        } completion: { [weak self] _ in
+            self?.statusLabel.stringValue = "Exported \(key)"
+            self?.statusLabel.textColor = .secondaryLabelColor
+        }
+    }
+
+    private func startDataFileOperation<Value: Sendable>(
+        status: String,
+        operation: @escaping @Sendable () async throws -> Value,
+        completion: @escaping @MainActor (Value) -> Void
+    ) {
+        guard dataFileTask == nil else { return }
+        dataFileGeneration &+= 1
+        let generation = dataFileGeneration
+        statusLabel.stringValue = status
+        statusLabel.textColor = .secondaryLabelColor
+        dataFileTask = Task { [weak self] in
             do {
-                try bytes.write(to: url, options: .atomic)
-                self?.statusLabel.stringValue = "Exported \(key)"
-                self?.statusLabel.textColor = .secondaryLabelColor
+                let value = try await operation()
+                guard let self, !Task.isCancelled,
+                    dataFileGeneration == generation
+                else { return }
+                dataFileTask = nil
+                completion(value)
+                updateDataEditorControls()
             } catch {
-                self?.show(error: error)
+                guard let self, !Task.isCancelled,
+                    dataFileGeneration == generation
+                else { return }
+                dataFileTask = nil
+                show(error: error)
+                updateDataEditorControls()
             }
         }
+        updateDataEditorControls()
+    }
+
+    private func cancelDataFileOperation() {
+        dataFileGeneration &+= 1
+        dataFileTask?.cancel()
+        dataFileTask = nil
     }
 
     @objc private func saveCurrentKey() {
