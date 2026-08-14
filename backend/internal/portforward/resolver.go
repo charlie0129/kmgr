@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
@@ -46,6 +45,8 @@ type ClientGoTargetResolver struct {
 	Core v1.CoreV1Interface
 }
 
+const servicePodListPageSize int64 = 500
+
 func (r ClientGoTargetResolver) Resolve(ctx context.Context, target Identity, remotePort uint16) (ResolvedTarget, error) {
 	if r.Core == nil {
 		return ResolvedTarget{}, errors.New("Kubernetes Core client is unavailable")
@@ -74,35 +75,57 @@ func (r ClientGoTargetResolver) Resolve(ctx context.Context, target Identity, re
 		if len(service.Spec.Selector) == 0 {
 			return ResolvedTarget{}, fmt.Errorf("%w: Service has no selector", ErrNoEligiblePod)
 		}
-		pods, err := r.Core.Pods(target.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labels.SelectorFromSet(service.Spec.Selector).String(),
-			FieldSelector: fields.OneTermNotEqualSelector("status.phase", "Succeeded").String(),
-		})
-		if err != nil {
-			return ResolvedTarget{}, err
-		}
-		eligible := make([]Identity, 0, len(pods.Items))
-		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase == "Failed" || pod.Status.Phase == "Succeeded" ||
-				!podReady(pod.Status.Conditions) {
-				continue
-			}
-			eligible = append(eligible, Identity{
-				SessionID: target.SessionID, Version: "v1", Resource: "pods", Namespace: pod.Namespace,
-				Name: pod.Name, UID: pod.UID,
+		selector := labels.SelectorFromSet(service.Spec.Selector).String()
+		phaseSelector := fields.AndSelectors(
+			fields.OneTermNotEqualSelector("status.phase", string(corev1.PodSucceeded)),
+			fields.OneTermNotEqualSelector("status.phase", string(corev1.PodFailed)),
+		).String()
+		var selected *corev1.Pod
+		continuation := ""
+		seenContinuations := make(map[string]struct{})
+		for {
+			pods, err := r.Core.Pods(target.Namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: selector,
+				FieldSelector: phaseSelector,
+				Limit:         servicePodListPageSize,
+				Continue:      continuation,
 			})
+			if err != nil {
+				return ResolvedTarget{}, err
+			}
+			for index := range pods.Items {
+				pod := &pods.Items[index]
+				if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed ||
+					pod.Status.Phase == corev1.PodSucceeded || !podReady(pod.Status.Conditions) {
+					continue
+				}
+				if selected == nil || strings.Compare(string(pod.UID), string(selected.UID)) < 0 {
+					copy := pod.DeepCopy()
+					selected = copy
+				}
+			}
+			next := pods.GetContinue()
+			if next == "" {
+				break
+			}
+			if _, duplicate := seenContinuations[next]; duplicate {
+				return ResolvedTarget{}, errors.New("Kubernetes Pod pagination repeated a continuation token")
+			}
+			seenContinuations[next] = struct{}{}
+			continuation = next
 		}
-		if len(eligible) == 0 {
+		if selected == nil {
 			return ResolvedTarget{}, ErrNoEligiblePod
 		}
-		sort.Slice(eligible, func(i, j int) bool {
-			return strings.Compare(string(eligible[i].UID), string(eligible[j].UID)) < 0
-		})
-		resolvedPort, err := serviceTargetPort(service.Spec.Ports, pods.Items, eligible[0], remotePort)
+		identity := Identity{
+			SessionID: target.SessionID, Version: "v1", Resource: "pods", Namespace: selected.Namespace,
+			Name: selected.Name, UID: selected.UID,
+		}
+		resolvedPort, err := serviceTargetPort(service.Spec.Ports, *selected, remotePort)
 		if err != nil {
 			return ResolvedTarget{}, err
 		}
-		return ResolvedTarget{Pod: eligible[0], RemotePort: resolvedPort}, nil
+		return ResolvedTarget{Pod: identity, RemotePort: resolvedPort}, nil
 	default:
 		return ResolvedTarget{}, fmt.Errorf("%w: target must be a Pod or Service", ErrInvalidRequest)
 	}
@@ -119,8 +142,7 @@ func podReady(conditions []corev1.PodCondition) bool {
 
 func serviceTargetPort(
 	ports []corev1.ServicePort,
-	pods []corev1.Pod,
-	selected Identity,
+	selected corev1.Pod,
 	remotePort uint16,
 ) (uint16, error) {
 	for _, port := range ports {
@@ -133,15 +155,10 @@ func serviceTargetPort(
 		if port.TargetPort.StrVal == "" {
 			return remotePort, nil
 		}
-		for _, pod := range pods {
-			if pod.UID != selected.UID {
-				continue
-			}
-			for _, container := range pod.Spec.Containers {
-				for _, containerPort := range container.Ports {
-					if containerPort.Name == port.TargetPort.StrVal && containerPort.ContainerPort > 0 {
-						return uint16(containerPort.ContainerPort), nil
-					}
+		for _, container := range selected.Spec.Containers {
+			for _, containerPort := range container.Ports {
+				if containerPort.Name == port.TargetPort.StrVal && containerPort.ContainerPort > 0 {
+					return uint16(containerPort.ContainerPort), nil
 				}
 			}
 		}
