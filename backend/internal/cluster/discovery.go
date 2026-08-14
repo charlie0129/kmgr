@@ -19,7 +19,10 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const discoveryParallelism = 8
+const (
+	discoveryParallelism  = 8
+	namespaceListPageSize = int64(500)
+)
 
 type APIResource struct {
 	Group            string
@@ -452,18 +455,32 @@ func ListNamespaces(ctx context.Context, session *Session) ([]string, error) {
 	if session == nil || session.Dynamic() == nil {
 		return nil, errors.New("cluster session dynamic client is unavailable")
 	}
-	list, err := session.Dynamic().Resource(schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}).List(
-		ctx,
-		metav1.ListOptions{},
-	)
-	if err != nil {
-		return nil, err
-	}
-	namespaces := make([]string, 0, len(list.Items))
-	for index := range list.Items {
-		if name := list.Items[index].GetName(); name != "" {
-			namespaces = append(namespaces, name)
+	resource := session.Dynamic().Resource(schema.GroupVersionResource{Version: "v1", Resource: "namespaces"})
+	options := metav1.ListOptions{Limit: namespaceListPageSize}
+	seenContinueTokens := make(map[string]struct{})
+	namespaces := make([]string, 0)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		list, err := resource.List(ctx, options)
+		if err != nil {
+			return nil, err
+		}
+		for index := range list.Items {
+			if name := list.Items[index].GetName(); name != "" {
+				namespaces = append(namespaces, name)
+			}
+		}
+		next := list.GetContinue()
+		if next == "" {
+			break
+		}
+		if _, duplicate := seenContinueTokens[next]; duplicate {
+			return nil, errors.New("namespace pagination returned a repeated continuation token")
+		}
+		seenContinueTokens[next] = struct{}{}
+		options.Continue = next
 	}
 	sort.Strings(namespaces)
 	return slices.Compact(namespaces), nil

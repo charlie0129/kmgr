@@ -16,6 +16,8 @@ import (
 
 const MetricsAPIGroupVersion = "metrics.k8s.io/v1beta1"
 
+const metricsListPageSize int64 = 500
+
 var (
 	ErrMetricsAPIUnavailable = errors.New("Kubernetes Metrics API is unavailable")
 	ErrMetricsAPIForbidden   = errors.New("Kubernetes Metrics API access is forbidden")
@@ -43,24 +45,88 @@ func (f KubernetesFetcher) Fetch(ctx context.Context) (map[string]Sample, error)
 	}
 	switch f.Kind {
 	case PodMetrics:
-		list, err := f.Client.PodMetricses(f.Namespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return nil, classifyMetricsError(err)
-		}
-		return podSamples(list.Items), nil
+		return fetchPodMetricPages(ctx, f.Client.PodMetricses(f.Namespace))
 	case NodeMetrics:
-		list, err := f.Client.NodeMetricses().List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return nil, classifyMetricsError(err)
-		}
-		return nodeSamples(list.Items), nil
+		return fetchNodeMetricPages(ctx, f.Client.NodeMetricses())
 	default:
 		return nil, fmt.Errorf("unsupported metrics kind %d", f.Kind)
 	}
 }
 
+func fetchPodMetricPages(
+	ctx context.Context,
+	client metricsclient.PodMetricsInterface,
+) (map[string]Sample, error) {
+	result := make(map[string]Sample)
+	options := metav1.ListOptions{Limit: metricsListPageSize}
+	seenContinueTokens := make(map[string]struct{})
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		list, err := client.List(ctx, options)
+		if err != nil {
+			return nil, classifyMetricsError(err)
+		}
+		appendPodSamples(result, list.Items)
+		if err := advanceMetricsPage(&options, list.GetContinue(), seenContinueTokens); err != nil {
+			return nil, err
+		}
+		if options.Continue == "" {
+			return result, nil
+		}
+	}
+}
+
+func fetchNodeMetricPages(
+	ctx context.Context,
+	client metricsclient.NodeMetricsInterface,
+) (map[string]Sample, error) {
+	result := make(map[string]Sample)
+	options := metav1.ListOptions{Limit: metricsListPageSize}
+	seenContinueTokens := make(map[string]struct{})
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		list, err := client.List(ctx, options)
+		if err != nil {
+			return nil, classifyMetricsError(err)
+		}
+		appendNodeSamples(result, list.Items)
+		if err := advanceMetricsPage(&options, list.GetContinue(), seenContinueTokens); err != nil {
+			return nil, err
+		}
+		if options.Continue == "" {
+			return result, nil
+		}
+	}
+}
+
+func advanceMetricsPage(
+	options *metav1.ListOptions,
+	next string,
+	seen map[string]struct{},
+) error {
+	if next == "" {
+		options.Continue = ""
+		return nil
+	}
+	if _, duplicate := seen[next]; duplicate {
+		return fmt.Errorf("%w: pagination returned a repeated continuation token", ErrMetricsAPIUnavailable)
+	}
+	seen[next] = struct{}{}
+	options.Continue = next
+	return nil
+}
+
 func podSamples(values []metricsapi.PodMetrics) map[string]Sample {
 	result := make(map[string]Sample, len(values))
+	appendPodSamples(result, values)
+	return result
+}
+
+func appendPodSamples(result map[string]Sample, values []metricsapi.PodMetrics) {
 	for index := range values {
 		value := &values[index]
 		resources := make(map[string]int64)
@@ -75,11 +141,15 @@ func podSamples(values []metricsapi.PodMetrics) map[string]Sample {
 			MeasuredAt: value.Timestamp.Time, Resources: resources,
 		}
 	}
-	return result
 }
 
 func nodeSamples(values []metricsapi.NodeMetrics) map[string]Sample {
 	result := make(map[string]Sample, len(values))
+	appendNodeSamples(result, values)
+	return result
+}
+
+func appendNodeSamples(result map[string]Sample, values []metricsapi.NodeMetrics) {
 	for index := range values {
 		value := &values[index]
 		identity := string(value.UID)
@@ -90,7 +160,6 @@ func nodeSamples(values []metricsapi.NodeMetrics) map[string]Sample {
 		addUsage(resources, value.Usage)
 		result[identity] = Sample{MeasuredAt: value.Timestamp.Time, Resources: resources}
 	}
-	return result
 }
 
 // CPU is stored as nanocores and byte-addressed resources as bytes. Generic
@@ -112,6 +181,8 @@ func addUsage(result map[string]int64, usage corev1.ResourceList) {
 
 func classifyMetricsError(err error) error {
 	switch {
+	case errors.Is(err, ErrMetricsAPIUnavailable), errors.Is(err, ErrMetricsAPIForbidden):
+		return err
 	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
 		return fmt.Errorf("%w: %T", ErrMetricsAPIForbidden, err)
 	case apierrors.IsNotFound(err), apierrors.IsServiceUnavailable(err):

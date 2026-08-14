@@ -126,6 +126,101 @@ func TestKubernetesMetricsFetcherPreservesSubMillicoreCPUPrecision(t *testing.T)
 	}
 }
 
+func TestKubernetesMetricsFetcherPaginatesPodsAndNodes(t *testing.T) {
+	t.Parallel()
+	client := metricsfake.NewSimpleClientset()
+	optionsByResource := map[string][]metav1.ListOptions{}
+	client.PrependReactor("list", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		options := metricsListOptions(t, action)
+		optionsByResource["pods"] = append(optionsByResource["pods"], options)
+		switch options.Continue {
+		case "":
+			return true, &metricsapi.PodMetricsList{
+				ListMeta: metav1.ListMeta{Continue: "pods-next"},
+				Items:    []metricsapi.PodMetrics{{ObjectMeta: metav1.ObjectMeta{UID: "pod-one"}}},
+			}, nil
+		case "pods-next":
+			return true, &metricsapi.PodMetricsList{
+				Items: []metricsapi.PodMetrics{{ObjectMeta: metav1.ObjectMeta{UID: "pod-two"}}},
+			}, nil
+		default:
+			t.Fatalf("unexpected Pod continuation %q", options.Continue)
+			return true, nil, nil
+		}
+	})
+	client.PrependReactor("list", "nodes", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		options := metricsListOptions(t, action)
+		optionsByResource["nodes"] = append(optionsByResource["nodes"], options)
+		switch options.Continue {
+		case "":
+			return true, &metricsapi.NodeMetricsList{
+				ListMeta: metav1.ListMeta{Continue: "nodes-next"},
+				Items:    []metricsapi.NodeMetrics{{ObjectMeta: metav1.ObjectMeta{UID: "node-one"}}},
+			}, nil
+		case "nodes-next":
+			return true, &metricsapi.NodeMetricsList{
+				Items: []metricsapi.NodeMetrics{{ObjectMeta: metav1.ObjectMeta{UID: "node-two"}}},
+			}, nil
+		default:
+			t.Fatalf("unexpected Node continuation %q", options.Continue)
+			return true, nil, nil
+		}
+	})
+	for _, test := range []struct {
+		kind     APIKind
+		resource string
+		want     []string
+	}{
+		{kind: PodMetrics, resource: "pods", want: []string{"pod-one", "pod-two"}},
+		{kind: NodeMetrics, resource: "nodes", want: []string{"node-one", "node-two"}},
+	} {
+		samples, err := (KubernetesFetcher{Client: client.MetricsV1beta1(), Kind: test.kind}).Fetch(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, identity := range test.want {
+			if _, found := samples[identity]; !found {
+				t.Fatalf("%s samples = %#v, missing %q", test.resource, samples, identity)
+			}
+		}
+		options := optionsByResource[test.resource]
+		if len(options) != 2 || options[0].Limit != metricsListPageSize || options[0].Continue != "" ||
+			options[1].Limit != metricsListPageSize || options[1].Continue != test.resource+"-next" {
+			t.Fatalf("%s list options = %#v", test.resource, options)
+		}
+	}
+}
+
+func TestKubernetesMetricsFetcherRejectsRepeatedContinuationToken(t *testing.T) {
+	t.Parallel()
+	client := metricsfake.NewSimpleClientset()
+	calls := 0
+	client.PrependReactor("list", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+		calls++
+		return true, &metricsapi.NodeMetricsList{ListMeta: metav1.ListMeta{Continue: "sensitive-token"}}, nil
+	})
+	_, err := (KubernetesFetcher{Client: client.MetricsV1beta1(), Kind: NodeMetrics}).Fetch(context.Background())
+	if !errors.Is(err, ErrMetricsAPIUnavailable) || calls != 2 || strings.Contains(err.Error(), "sensitive-token") {
+		t.Fatalf("error = %v, calls = %d", err, calls)
+	}
+}
+
+func TestKubernetesMetricsFetcherStopsPaginationAfterCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	client := metricsfake.NewSimpleClientset()
+	calls := 0
+	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		calls++
+		cancel()
+		return true, &metricsapi.PodMetricsList{ListMeta: metav1.ListMeta{Continue: "next"}}, nil
+	})
+	_, err := (KubernetesFetcher{Client: client.MetricsV1beta1(), Kind: PodMetrics}).Fetch(ctx)
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("error = %v, calls = %d", err, calls)
+	}
+}
+
 func TestKubernetesMetricsFetcherClassifiesForbiddenWithoutRemotePayload(t *testing.T) {
 	t.Parallel()
 	client := metricsfake.NewSimpleClientset()
@@ -139,4 +234,13 @@ func TestKubernetesMetricsFetcherClassifiesForbiddenWithoutRemotePayload(t *test
 	if !errors.Is(err, ErrMetricsAPIForbidden) || strings.Contains(err.Error(), "sensitive upstream response") {
 		t.Fatalf("error = %v", err)
 	}
+}
+
+func metricsListOptions(t *testing.T, action clienttesting.Action) metav1.ListOptions {
+	t.Helper()
+	withOptions, ok := action.(interface{ GetListOptions() metav1.ListOptions })
+	if !ok {
+		t.Fatalf("list action type = %T, want ListOptions", action)
+	}
+	return withOptions.GetListOptions()
 }

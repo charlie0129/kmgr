@@ -6,17 +6,16 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 )
 
@@ -189,16 +188,26 @@ func writeDiscoveryJSON(t *testing.T, writer http.ResponseWriter, value any) {
 	}
 }
 
-func TestListNamespacesIsSortedAndUsesOneList(t *testing.T) {
+func TestListNamespacesPaginatesSortsAndDeduplicates(t *testing.T) {
 	t.Parallel()
-	scheme := runtime.NewScheme()
-	listKinds := map[schema.GroupVersionResource]string{{Version: "v1", Resource: "namespaces"}: "NamespaceList"}
-	objects := []runtime.Object{
-		&unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "z"}}},
-		&unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "a"}}},
-	}
-	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds, objects...)
-	session := &Session{backend: &sharedBackend{clients: BackendClients{Dynamic: dynamicClient}}}
+	queries := make(chan url.Values, 2)
+	session := namespaceTestSession(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/namespaces" {
+			http.NotFound(writer, request)
+			return
+		}
+		query := request.URL.Query()
+		queries <- query
+		switch query.Get("continue") {
+		case "":
+			writeNamespaceList(t, writer, "namespace-next", "z")
+		case "namespace-next":
+			writeNamespaceList(t, writer, "", "a", "z")
+		default:
+			t.Errorf("unexpected namespace continuation %q", query.Get("continue"))
+			http.Error(writer, "bad continuation", http.StatusBadRequest)
+		}
+	}))
 	namespaces, err := ListNamespaces(context.Background(), session)
 	if err != nil {
 		t.Fatal(err)
@@ -206,4 +215,61 @@ func TestListNamespacesIsSortedAndUsesOneList(t *testing.T) {
 	if !slices.Equal(namespaces, []string{"a", "z"}) {
 		t.Fatalf("namespaces = %v", namespaces)
 	}
+	first, second := <-queries, <-queries
+	if first.Get("limit") != "500" || first.Get("continue") != "" ||
+		second.Get("limit") != "500" || second.Get("continue") != "namespace-next" {
+		t.Fatalf("namespace queries = %#v, %#v", first, second)
+	}
+}
+
+func TestListNamespacesRejectsRepeatedContinuationAndHonorsCancellation(t *testing.T) {
+	t.Parallel()
+	var repeatedCalls atomic.Int32
+	repeated := namespaceTestSession(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		repeatedCalls.Add(1)
+		writeNamespaceList(t, writer, "sensitive-token")
+	}))
+	_, err := ListNamespaces(context.Background(), repeated)
+	if err == nil || !strings.Contains(err.Error(), "repeated continuation") ||
+		strings.Contains(err.Error(), "sensitive-token") || repeatedCalls.Load() != 2 {
+		t.Fatalf("repeated-token error = %v, calls = %d", err, repeatedCalls.Load())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var cancelledCalls atomic.Int32
+	cancelled := namespaceTestSession(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		cancelledCalls.Add(1)
+		cancel()
+		writeNamespaceList(t, writer, "next")
+	}))
+	_, err = ListNamespaces(ctx, cancelled)
+	if !errors.Is(err, context.Canceled) || cancelledCalls.Load() != 1 {
+		t.Fatalf("cancellation error = %v, calls = %d", err, cancelledCalls.Load())
+	}
+}
+
+func namespaceTestSession(t *testing.T, handler http.Handler) *Session {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	client, err := dynamic.NewForConfig(&rest.Config{Host: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Session{backend: &sharedBackend{clients: BackendClients{Dynamic: client}}}
+}
+
+func writeNamespaceList(t *testing.T, writer http.ResponseWriter, continuation string, names ...string) {
+	t.Helper()
+	items := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		items = append(items, map[string]any{
+			"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": name},
+		})
+	}
+	writeDiscoveryJSON(t, writer, map[string]any{
+		"apiVersion": "v1", "kind": "NamespaceList",
+		"metadata": map[string]any{"continue": continuation, "resourceVersion": "1"},
+		"items":    items,
+	})
 }
