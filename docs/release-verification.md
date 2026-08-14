@@ -20,11 +20,12 @@ with in-process parallelism explicitly disabled. The explicit setting is
 required for Swift Testing 124.4 even though this SwiftPM version describes
 non-parallel execution as its command-line default.
 
-The app verifier does not launch the GUI. It checks the bundle identifier,
-minimum macOS version, package type and principal class; requires exactly one
-main executable and the `kmgr-engine` helper; verifies both are executable
-Mach-O files; performs strict nested code-signature verification; rejects an
-App Sandbox entitlement; and executes only `kmgr-engine --version`.
+The app verifier does not launch the GUI. It checks the product and bundle
+names, identifier, declared and Mach-O minimum macOS version, package type and
+principal class; requires exactly one main executable and the `kmgr-engine`
+helper; verifies both are executable macOS Mach-O files; performs strict nested
+code-signature verification; rejects an App Sandbox entitlement; and executes
+only `kmgr-engine --version`.
 
 Before treating an optimized bundle as a distribution candidate, repeat the
 artifact gate in Release configuration:

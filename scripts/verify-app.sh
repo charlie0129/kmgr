@@ -28,13 +28,18 @@ plist_value() {
 /usr/bin/plutil -lint "$info_plist" >/dev/null || fail "Info.plist is invalid"
 
 bundle_identifier=$(plist_value CFBundleIdentifier)
+bundle_name=$(plist_value CFBundleName)
+bundle_display_name=$(plist_value CFBundleDisplayName)
 bundle_executable=$(plist_value CFBundleExecutable)
 bundle_type=$(plist_value CFBundlePackageType)
 minimum_system=$(plist_value LSMinimumSystemVersion)
 principal_class=$(plist_value NSPrincipalClass)
 
+[[ "${app_dir:t}" == Kmgr.app ]] || fail "application bundle must be named Kmgr.app"
 [[ "$bundle_identifier" == "$expected_identifier" ]] ||
   fail "bundle identifier is $bundle_identifier, expected $expected_identifier"
+[[ "$bundle_name" == Kmgr && "$bundle_display_name" == Kmgr ]] ||
+  fail "bundle and display names must both be Kmgr"
 [[ "$bundle_executable" == Kmgr ]] ||
   fail "CFBundleExecutable is $bundle_executable, expected Kmgr"
 [[ "$bundle_type" == APPL ]] || fail "CFBundlePackageType is not APPL"
@@ -61,6 +66,16 @@ for executable in "$main_executable" "$helper_executable"; do
   /usr/bin/file -b "$executable" | /usr/bin/grep -Fq "Mach-O" ||
     fail "not a Mach-O executable: $executable"
 done
+
+main_build=$(/usr/bin/xcrun vtool -show-build "$main_executable") ||
+  fail "could not inspect the main executable's build target"
+helper_build=$(/usr/bin/xcrun vtool -show-build "$helper_executable") ||
+  fail "could not inspect the helper executable's build target"
+[[ "$main_build" == *"platform MACOS"* && "$helper_build" == *"platform MACOS"* ]] ||
+  fail "all embedded executables must target macOS"
+main_minimum=$(print -r -- "$main_build" | /usr/bin/awk '$1 == "minos" { print $2; exit }')
+[[ "$main_minimum" == "$expected_minimum_system" ]] ||
+  fail "main executable targets macOS $main_minimum, expected $expected_minimum_system"
 
 # Verify the nested seal independently before checking the complete bundle.
 # This remains valid when ad-hoc signatures are replaced with Developer ID.
