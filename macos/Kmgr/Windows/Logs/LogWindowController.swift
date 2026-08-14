@@ -111,6 +111,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         )
         window.title = "\(session.contextName) — Logs — \(titleSources)"
         window.minSize = NSSize(width: 560, height: 320)
+        window.tabbingMode = .disallowed
+        // A log stream is an ephemeral, independently configured surface.
+        // Reopening a workspace must never recreate it or merge it into a
+        // cluster-window tab group.
+        window.isRestorable = false
         super.init(window: window)
         window.delegate = self
         configureContent(in: window)

@@ -7,6 +7,25 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Log windows", .serialized)
 struct LogWindowControllerTests {
+    @Test("log streams remain independent ephemeral windows")
+    func logWindowIsIndependentAndNotRestored() throws {
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session",
+                contextName: "production",
+                clusterName: "cluster",
+                serverHostname: "example.invalid",
+                defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: NoopLogWindowProvider()
+        )
+        let window = try #require(controller.window)
+
+        #expect(window.tabbingMode == .disallowed)
+        #expect(!window.isRestorable)
+    }
+
     @Test("exact context and every source remain visible above the buffer")
     func exactSourcesRemainVisible() throws {
         let sources = [
