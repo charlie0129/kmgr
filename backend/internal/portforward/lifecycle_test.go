@@ -19,7 +19,7 @@ func TestDirectPodLifecycleRetriesThenRejectsSameNameReplacement(t *testing.T) {
 	backoff := &recordingBackoff{}
 	manager := lifecycleManager(t, client, forwarder, backoff)
 	defer manager.Close()
-	updates, unsubscribe := manager.Subscribe()
+	updates, unsubscribe := manager.subscribe()
 	defer unsubscribe()
 
 	_, err := manager.Start(StartRequest{
@@ -68,7 +68,7 @@ func TestServiceLifecycleReconnectsToSameNameReplacement(t *testing.T) {
 	backoff := &recordingBackoff{}
 	manager := lifecycleManager(t, client, forwarder, backoff)
 	defer manager.Close()
-	updates, unsubscribe := manager.Subscribe()
+	updates, unsubscribe := manager.subscribe()
 	defer unsubscribe()
 
 	_, err := manager.Start(StartRequest{
@@ -153,7 +153,7 @@ func failRunningForward(t *testing.T, forwarder *fakeForwarder, index int, err e
 
 func forwardStatesUntil(
 	t *testing.T,
-	updates <-chan Snapshot,
+	updates *subscription,
 	done func(Snapshot) bool,
 ) []State {
 	t.Helper()
@@ -162,10 +162,19 @@ func forwardStatesUntil(
 	defer timer.Stop()
 	for {
 		select {
-		case update := <-updates:
-			states = append(states, update.State)
-			if done(update) {
-				return states
+		case <-updates.ready:
+			batch := updates.drain()
+			if batch.resync {
+				t.Fatal("port-forward test subscriber unexpectedly required a resync")
+			}
+			for _, update := range batch.updates {
+				if update.removedID != "" {
+					continue
+				}
+				states = append(states, update.snapshot.State)
+				if done(update.snapshot) {
+					return states
+				}
 			}
 		case <-timer.C:
 			t.Fatalf("timed out waiting for port-forward state; observed %v", states)

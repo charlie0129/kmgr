@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
@@ -131,10 +132,11 @@ func (s *GRPCService) Watch(
 		request.GetStreamId() == "" || request.GetGeneration() == 0 {
 		return status.Error(codes.InvalidArgument, "request context, stream ID, and generation are required")
 	}
-	updates, unsubscribe := s.manager.Subscribe()
+	updates, unsubscribe := s.manager.subscribe()
 	defer unsubscribe()
 	sequence := uint64(1)
 	initial := s.manager.List("", request.GetIncludeStopped())
+	known := make(map[string]struct{}, len(initial))
 	event := &kmgrv1.PortForwardEvent{
 		Cursor: &kmgrv1.StreamCursor{
 			StreamId: request.GetStreamId(), Generation: request.GetGeneration(), Sequence: sequence,
@@ -142,6 +144,7 @@ func (s *GRPCService) Watch(
 		Delta: &kmgrv1.PortForwardDelta{Upserts: make([]*kmgrv1.PortForward, 0, len(initial))},
 	}
 	for _, value := range initial {
+		known[value.ID] = struct{}{}
 		event.Delta.Upserts = append(event.Delta.Upserts, snapshotToProto(value))
 	}
 	if err := stream.Send(event); err != nil {
@@ -151,14 +154,48 @@ func (s *GRPCService) Watch(
 		select {
 		case <-stream.Context().Done():
 			return stream.Context().Err()
-		case value := <-updates:
-			sequence++
+		case <-updates.ready:
+			batch := updates.drain()
 			delta := &kmgrv1.PortForwardDelta{}
-			if value.State == StateStopped && !request.GetIncludeStopped() {
-				delta.RemovedPortForwardIds = []string{value.ID}
+			if batch.resync {
+				current := s.manager.List("", request.GetIncludeStopped())
+				currentIDs := make(map[string]struct{}, len(current))
+				for _, value := range current {
+					currentIDs[value.ID] = struct{}{}
+					delta.Upserts = append(delta.Upserts, snapshotToProto(value))
+				}
+				for id := range known {
+					if _, exists := currentIDs[id]; !exists {
+						delta.RemovedPortForwardIds = append(delta.RemovedPortForwardIds, id)
+					}
+				}
+				sort.Strings(delta.RemovedPortForwardIds)
+				known = currentIDs
 			} else {
-				delta.Upserts = []*kmgrv1.PortForward{snapshotToProto(value)}
+				for _, update := range batch.updates {
+					if update.removedID != "" {
+						if _, exists := known[update.removedID]; exists {
+							delta.RemovedPortForwardIds = append(delta.RemovedPortForwardIds, update.removedID)
+							delete(known, update.removedID)
+						}
+						continue
+					}
+					value := update.snapshot
+					if value.State == StateStopped && !request.GetIncludeStopped() {
+						if _, exists := known[value.ID]; exists {
+							delta.RemovedPortForwardIds = append(delta.RemovedPortForwardIds, value.ID)
+							delete(known, value.ID)
+						}
+					} else {
+						delta.Upserts = append(delta.Upserts, snapshotToProto(value))
+						known[value.ID] = struct{}{}
+					}
+				}
 			}
+			if len(delta.Upserts) == 0 && len(delta.RemovedPortForwardIds) == 0 {
+				continue
+			}
+			sequence++
 			if err := stream.Send(&kmgrv1.PortForwardEvent{
 				Cursor: &kmgrv1.StreamCursor{
 					StreamId: request.GetStreamId(), Generation: request.GetGeneration(), Sequence: sequence,

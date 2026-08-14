@@ -77,7 +77,7 @@ func TestDirectPodReconnectsAfterTransportFailureButNeverSwitchesUID(t *testing.
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	updates, unsubscribe := manager.Subscribe()
+	updates, unsubscribe := manager.subscribe()
 	defer unsubscribe()
 	_, err = manager.Start(StartRequest{
 		ID: "pod-forward", Target: podIdentity("pod", "old-uid"), RemotePort: 8080,
@@ -274,16 +274,17 @@ func TestStopListWatchAndRestartAreRaceSafe(t *testing.T) {
 	resolver := &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}, {target: podIdentity("pod", "uid")}}}
 	forwarder := &fakeForwarder{ports: []uint16{12345, 12345}}
 	manager := testManager(t, resolver, forwarder)
-	updates, unsubscribe := manager.Subscribe()
+	updates, unsubscribe := manager.subscribe()
 	defer unsubscribe()
 	_, err := manager.Start(StartRequest{ID: "forward", Target: podIdentity("pod", "uid"), RemotePort: 8080})
 	if err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case update := <-updates:
-		if update.ID != "forward" {
-			t.Fatalf("update = %#v", update)
+	case <-updates.ready:
+		batch := updates.drain()
+		if batch.resync || len(batch.updates) == 0 || batch.updates[0].snapshot.ID != "forward" {
+			t.Fatalf("update batch = %#v", batch)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("watch did not receive start")
@@ -302,6 +303,103 @@ func TestStopListWatchAndRestartAreRaceSafe(t *testing.T) {
 	manager.Close()
 	if _, err := manager.Start(StartRequest{ID: "late", Target: podIdentity("pod", "uid"), RemotePort: 1}); !errors.Is(err, ErrManagerClosed) {
 		t.Fatalf("start after close error = %v", err)
+	}
+}
+
+func TestSubscriberOverflowRequestsAuthoritativeResync(t *testing.T) {
+	t.Parallel()
+	manager, err := NewManager(Config{
+		Sessions:               staticSessionResolver{session: Session{}},
+		SubscriberPendingLimit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	updates, unsubscribe := manager.subscribe()
+	defer unsubscribe()
+
+	manager.publish(managerUpdate{snapshot: Snapshot{ID: "one", State: StateStarting}})
+	manager.publish(managerUpdate{snapshot: Snapshot{ID: "two", State: StateStarting}})
+	manager.publish(managerUpdate{snapshot: Snapshot{ID: "three", State: StateStarting}})
+	select {
+	case <-updates.ready:
+	case <-time.After(time.Second):
+		t.Fatal("overflowed subscriber was not notified")
+	}
+	if batch := updates.drain(); !batch.resync || len(batch.updates) != 0 {
+		t.Fatalf("overflow batch = %#v, want authoritative resync", batch)
+	}
+
+	manager.publish(managerUpdate{snapshot: Snapshot{ID: "after", State: StateListening}})
+	select {
+	case <-updates.ready:
+	case <-time.After(time.Second):
+		t.Fatal("subscriber did not recover after resync")
+	}
+	batch := updates.drain()
+	if batch.resync || len(batch.updates) != 1 || batch.updates[0].snapshot.ID != "after" {
+		t.Fatalf("post-resync batch = %#v", batch)
+	}
+}
+
+func TestTerminalPortForwardsHaveBoundedAgeAndCountRetention(t *testing.T) {
+	t.Parallel()
+	clock := &portForwardTestClock{value: time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)}
+	manager, err := NewManager(Config{
+		Sessions: staticSessionResolver{session: Session{
+			ContextName: "context",
+			Resolver:    &sequenceResolver{results: []resolveResult{{target: podIdentity("pod", "uid")}}},
+			Forwarder:   &fakeForwarder{ports: []uint16{41001, 41002, 41003}},
+		}},
+		Backoff:               BackoffFunc(func(context.Context, int) error { return nil }),
+		Now:                   clock.Now,
+		TerminalRetention:     time.Hour,
+		RetainedTerminalLimit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	for _, id := range []string{"one", "two", "three"} {
+		if _, err := manager.Start(StartRequest{
+			ID: id, Target: podIdentity("pod", "uid"), RemotePort: 8080,
+		}); err != nil {
+			t.Fatalf("start %s: %v", id, err)
+		}
+		eventuallyForward(t, func() bool {
+			current := manager.lookup(id, "session")
+			return current != nil && current.Snapshot().State == StateListening
+		})
+		if !manager.Stop(id, "session") {
+			t.Fatalf("stop %s was rejected", id)
+		}
+		eventuallyForward(t, func() bool {
+			current := manager.lookup(id, "session")
+			if current == nil || current.Snapshot().State != StateStopped {
+				return false
+			}
+			current.mu.RLock()
+			done := current.runDone
+			current.mu.RUnlock()
+			select {
+			case <-done:
+				return true
+			default:
+				return false
+			}
+		})
+		clock.Advance(time.Minute)
+	}
+
+	retained := manager.List("", true)
+	if len(retained) != 2 || retained[0].ID != "two" || retained[1].ID != "three" {
+		t.Fatalf("count-bounded retained forwards = %#v", retained)
+	}
+	clock.Advance(2 * time.Hour)
+	if retained = manager.List("", true); len(retained) != 0 {
+		t.Fatalf("expired retained forwards = %#v", retained)
 	}
 }
 
@@ -509,6 +607,23 @@ func (f *fakeRunning) Close() error {
 type recordingBackoff struct {
 	mu    sync.Mutex
 	calls int
+}
+
+type portForwardTestClock struct {
+	mu    sync.Mutex
+	value time.Time
+}
+
+func (c *portForwardTestClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.value
+}
+
+func (c *portForwardTestClock) Advance(duration time.Duration) {
+	c.mu.Lock()
+	c.value = c.value.Add(duration)
+	c.mu.Unlock()
 }
 
 func (b *recordingBackoff) Wait(ctx context.Context, _ int) error {

@@ -10,14 +10,20 @@ import (
 )
 
 const (
-	DefaultInitialBackoff = 250 * time.Millisecond
-	DefaultMaxBackoff     = 15 * time.Second
+	DefaultInitialBackoff         = 250 * time.Millisecond
+	DefaultMaxBackoff             = 15 * time.Second
+	DefaultTerminalRetention      = 24 * time.Hour
+	DefaultRetainedTerminalLimit  = 256
+	DefaultSubscriberPendingLimit = 64
 )
 
 type Config struct {
-	Sessions SessionResolver
-	Backoff  Backoff
-	Now      func() time.Time
+	Sessions               SessionResolver
+	Backoff                Backoff
+	Now                    func() time.Time
+	TerminalRetention      time.Duration
+	RetainedTerminalLimit  int
+	SubscriberPendingLimit int
 }
 
 type entry struct {
@@ -43,7 +49,53 @@ func (e *entry) Snapshot() Snapshot {
 
 type subscription struct {
 	id      uint64
-	updates chan Snapshot
+	ready   chan struct{}
+	limit   int
+	mu      sync.Mutex
+	pending []managerUpdate
+	resync  bool
+}
+
+type managerUpdate struct {
+	snapshot  Snapshot
+	removedID string
+}
+
+type updateBatch struct {
+	updates []managerUpdate
+	resync  bool
+}
+
+func (s *subscription) enqueue(update managerUpdate) {
+	if update.removedID == "" && update.snapshot.ID == "" {
+		return
+	}
+	s.mu.Lock()
+	if !s.resync {
+		if len(s.pending) >= s.limit {
+			s.pending = s.pending[:0]
+			s.resync = true
+		} else {
+			s.pending = append(s.pending, update)
+		}
+	}
+	s.mu.Unlock()
+	select {
+	case s.ready <- struct{}{}:
+	default:
+	}
+}
+
+func (s *subscription) drain() updateBatch {
+	s.mu.Lock()
+	result := updateBatch{resync: s.resync}
+	if !s.resync {
+		result.updates = append([]managerUpdate(nil), s.pending...)
+	}
+	s.pending = s.pending[:0]
+	s.resync = false
+	s.mu.Unlock()
+	return result
 }
 
 type Manager struct {
@@ -65,6 +117,18 @@ func NewManager(config Config) (*Manager, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
+	if config.TerminalRetention < 0 || config.RetainedTerminalLimit < 0 || config.SubscriberPendingLimit < 0 {
+		return nil, errors.New("port-forward retention and pending limits must not be negative")
+	}
+	if config.TerminalRetention == 0 {
+		config.TerminalRetention = DefaultTerminalRetention
+	}
+	if config.RetainedTerminalLimit == 0 {
+		config.RetainedTerminalLimit = DefaultRetainedTerminalLimit
+	}
+	if config.SubscriberPendingLimit == 0 {
+		config.SubscriberPendingLimit = DefaultSubscriberPendingLimit
+	}
 	return &Manager{
 		config: config, entries: make(map[string]*entry), watchers: make(map[uint64]*subscription),
 	}, nil
@@ -74,6 +138,7 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 	if err := request.normalize(); err != nil {
 		return Snapshot{}, err
 	}
+	m.pruneTerminalEntries(m.config.Now())
 	session, err := m.config.Sessions.ResolveSession(request.Target.SessionID)
 	if err != nil {
 		return Snapshot{}, err
@@ -111,7 +176,7 @@ func (m *Manager) Start(request StartRequest) (Snapshot, error) {
 	}
 	m.entries[request.ID] = current
 	m.mu.Unlock()
-	m.publish(current.Snapshot())
+	m.publish(managerUpdate{snapshot: current.Snapshot()})
 	go m.run(ctx, current, current.revision, session)
 	releaseSession = false
 	return current.Snapshot(), nil
@@ -180,12 +245,13 @@ func (m *Manager) Restart(id, sessionID string) bool {
 	current.snapshot.UpdatedAt = m.config.Now()
 	current.mu.Unlock()
 	m.mu.Unlock()
-	m.publish(current.Snapshot())
+	m.publish(managerUpdate{snapshot: current.Snapshot()})
 	go m.run(ctx, current, revision, session)
 	return true
 }
 
 func (m *Manager) List(sessionID string, includeStopped bool) []Snapshot {
+	m.pruneTerminalEntries(m.config.Now())
 	m.mu.RLock()
 	values := make([]*entry, 0, len(m.entries))
 	for _, value := range m.entries {
@@ -212,14 +278,17 @@ func (m *Manager) List(sessionID string, includeStopped bool) []Snapshot {
 	return result
 }
 
-func (m *Manager) Subscribe() (<-chan Snapshot, func()) {
+func (m *Manager) subscribe() (*subscription, func()) {
 	m.mu.Lock()
 	m.nextID++
-	value := &subscription{id: m.nextID, updates: make(chan Snapshot, 64)}
+	value := &subscription{
+		id: m.nextID, ready: make(chan struct{}, 1), limit: m.config.SubscriberPendingLimit,
+		pending: make([]managerUpdate, 0, m.config.SubscriberPendingLimit),
+	}
 	m.watchers[value.id] = value
 	m.mu.Unlock()
 	var once sync.Once
-	return value.updates, func() {
+	return value, func() {
 		once.Do(func() {
 			m.mu.Lock()
 			delete(m.watchers, value.id)
@@ -264,6 +333,7 @@ func (m *Manager) run(ctx context.Context, current *entry, revision uint64, sess
 			session.Release()
 		}
 		close(done)
+		m.pruneTerminalEntries(m.config.Now())
 	}()
 	request := current.request
 	for attempt := 0; ; attempt++ {
@@ -343,10 +413,10 @@ func (m *Manager) transition(
 	current.snapshot.UpdatedAt = m.config.Now()
 	snapshot := current.snapshot
 	current.mu.Unlock()
-	m.publish(snapshot)
+	m.publish(managerUpdate{snapshot: snapshot})
 }
 
-func (m *Manager) publish(snapshot Snapshot) {
+func (m *Manager) publish(update managerUpdate) {
 	m.mu.RLock()
 	watchers := make([]*subscription, 0, len(m.watchers))
 	for _, watcher := range m.watchers {
@@ -354,20 +424,54 @@ func (m *Manager) publish(snapshot Snapshot) {
 	}
 	m.mu.RUnlock()
 	for _, watcher := range watchers {
-		select {
-		case watcher.updates <- snapshot:
-		default:
-			// State is authoritative in List. A slow UI watcher may coalesce
-			// intermediate transitions, but producers never block.
-			select {
-			case <-watcher.updates:
-			default:
-			}
-			select {
-			case watcher.updates <- snapshot:
-			default:
-			}
+		watcher.enqueue(update)
+	}
+}
+
+func (m *Manager) pruneTerminalEntries(now time.Time) {
+	type candidate struct {
+		id        string
+		updatedAt time.Time
+		expired   bool
+	}
+	cutoff := now.Add(-m.config.TerminalRetention)
+	m.mu.Lock()
+	candidates := make([]candidate, 0, len(m.entries))
+	for id, current := range m.entries {
+		current.mu.RLock()
+		snapshot, done := current.snapshot, current.runDone
+		current.mu.RUnlock()
+		if snapshot.State != StateFailed && snapshot.State != StateStopped {
+			continue
 		}
+		select {
+		case <-done:
+			candidates = append(candidates, candidate{
+				id: id, updatedAt: snapshot.UpdatedAt, expired: !snapshot.UpdatedAt.After(cutoff),
+			})
+		default:
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].updatedAt.Equal(candidates[j].updatedAt) {
+			return candidates[i].id < candidates[j].id
+		}
+		return candidates[i].updatedAt.Before(candidates[j].updatedAt)
+	})
+	removeCount := max(0, len(candidates)-m.config.RetainedTerminalLimit)
+	removed := make([]string, 0, removeCount)
+	for index, value := range candidates {
+		if !value.expired && index >= removeCount {
+			continue
+		}
+		if current := m.entries[value.id]; current != nil {
+			delete(m.entries, value.id)
+			removed = append(removed, value.id)
+		}
+	}
+	m.mu.Unlock()
+	for _, id := range removed {
+		m.publish(managerUpdate{removedID: id})
 	}
 }
 

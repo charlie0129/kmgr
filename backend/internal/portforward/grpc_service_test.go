@@ -105,12 +105,140 @@ func TestGRPCWatchStartsWithSnapshotAndEmitsStoppedRemoval(t *testing.T) {
 	}
 }
 
+func TestGRPCWatchOverflowResynchronizesEveryForward(t *testing.T) {
+	t.Parallel()
+	manager, err := NewManager(Config{
+		Sessions:               staticSessionResolver{session: Session{}},
+		SubscriberPendingLimit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	service, err := NewGRPCService(manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watchContext, cancel := context.WithCancel(context.Background())
+	stream := newGatedPFStream(watchContext)
+	done := make(chan error, 1)
+	go func() {
+		done <- service.Watch(&kmgrv1.WatchPortForwardsRequest{
+			Context: pfContext("watch-resync"), StreamId: "stream", Generation: 9,
+			IncludeStopped: true,
+		}, stream)
+	}()
+	select {
+	case <-stream.initialSent:
+	case <-time.After(time.Second):
+		t.Fatal("watch did not send initial snapshot")
+	}
+
+	manager.publish(managerUpdate{snapshot: Snapshot{ID: "superseded", State: StateStarting}})
+	select {
+	case <-stream.updateBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("watch did not block on the first delta")
+	}
+
+	now := time.Now()
+	for _, id := range []string{"one", "two", "three"} {
+		runDone := make(chan struct{})
+		close(runDone)
+		snapshot := Snapshot{
+			ID: id, State: StateListening, StartedAt: now, UpdatedAt: now,
+			Target: Identity{SessionID: "session"},
+		}
+		manager.mu.Lock()
+		manager.entries[id] = &entry{
+			snapshot: snapshot, cancel: func() {}, runDone: runDone, revision: 1,
+		}
+		manager.mu.Unlock()
+		manager.publish(managerUpdate{snapshot: snapshot})
+	}
+	close(stream.releaseUpdate)
+	eventuallyForward(t, func() bool { return len(stream.Events()) >= 3 })
+
+	events := stream.Events()
+	resync := events[2]
+	upserts := make(map[string]struct{}, len(resync.GetDelta().GetUpserts()))
+	for _, value := range resync.GetDelta().GetUpserts() {
+		upserts[value.GetPortForwardId()] = struct{}{}
+	}
+	if len(upserts) != 3 {
+		t.Fatalf("resync upserts = %#v", resync.GetDelta().GetUpserts())
+	}
+	for _, id := range []string{"one", "two", "three"} {
+		if _, exists := upserts[id]; !exists {
+			t.Fatalf("resync omitted %q: %#v", id, resync.GetDelta())
+		}
+	}
+	removed := resync.GetDelta().GetRemovedPortForwardIds()
+	if len(removed) != 1 || removed[0] != "superseded" {
+		t.Fatalf("resync removals = %v", removed)
+	}
+	if cursor := resync.GetCursor(); cursor.GetGeneration() != 9 || cursor.GetSequence() != 3 {
+		t.Fatalf("resync cursor = %#v", cursor)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watch did not stop")
+	}
+}
+
 type recordingPFStream struct {
 	grpc.ServerStream
 	ctx    context.Context
 	mu     sync.Mutex
 	events []*kmgrv1.PortForwardEvent
 	sent   chan struct{}
+}
+
+type gatedPFStream struct {
+	grpc.ServerStream
+	ctx           context.Context
+	mu            sync.Mutex
+	events        []*kmgrv1.PortForwardEvent
+	initialSent   chan struct{}
+	updateBlocked chan struct{}
+	releaseUpdate chan struct{}
+}
+
+func newGatedPFStream(ctx context.Context) *gatedPFStream {
+	return &gatedPFStream{
+		ctx: ctx, initialSent: make(chan struct{}), updateBlocked: make(chan struct{}),
+		releaseUpdate: make(chan struct{}),
+	}
+}
+
+func (s *gatedPFStream) Context() context.Context { return s.ctx }
+
+func (s *gatedPFStream) Send(event *kmgrv1.PortForwardEvent) error {
+	s.mu.Lock()
+	s.events = append(s.events, event)
+	count := len(s.events)
+	s.mu.Unlock()
+	switch count {
+	case 1:
+		close(s.initialSent)
+	case 2:
+		close(s.updateBlocked)
+		select {
+		case <-s.releaseUpdate:
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (s *gatedPFStream) Events() []*kmgrv1.PortForwardEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*kmgrv1.PortForwardEvent(nil), s.events...)
 }
 
 func (s *recordingPFStream) Context() context.Context { return s.ctx }
