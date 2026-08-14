@@ -1655,6 +1655,7 @@ private final class ResourceListViewController: NSViewController,
     private var scope = NamespaceSelection()
     private var viewID = UUID().uuidString.lowercased()
     private var generation: UInt64 = 0
+    private var lastCancelledGeneration: UInt64 = 0
     private var filterRevision: UInt64 = 0
     private var streamTask: Task<Void, Never>?
     private var optionalResourceCatalogTask: Task<Void, Never>?
@@ -1677,6 +1678,9 @@ private final class ResourceListViewController: NSViewController,
     private var restorationCheckpointTask: Task<Void, Never>?
     private var freshnessAgeTask: Task<Void, Never>?
     private var resourceViewStatus: ResourceViewStatus?
+    /// Records whether retained rows came from a usable projection. A rejected
+    /// replacement may keep those rows, but must label them as no longer watched.
+    private var hasLastUsableResourceViewStatus = false
     private var suppressPresentationCheckpoint = false
     private var recoveredResourceTrust = RecoveredResourceTrust()
     /// A restored shell's synthetic resource is presentation-only. A real
@@ -1927,14 +1931,8 @@ private final class ResourceListViewController: NSViewController,
         freshnessProgressIndicator.isHidden = true
         filterTask?.cancel()
         filterTask = nil
-        streamTask?.cancel()
-        streamTask = nil
+        cancelCurrentStream()
         cancelOptionalResourceDiscovery(selecting: nil)
-        let generation = generation
-        guard generation > 0 else { return }
-        Task { [provider, session, viewID] in
-            await provider.cancelView(sessionID: session.sessionID, viewID: viewID, generation: generation)
-        }
     }
 
     func resume() {
@@ -2109,6 +2107,13 @@ private final class ResourceListViewController: NSViewController,
     func controlTextDidChange(_ obj: Notification) {
         filterRevision &+= 1
         filterTask?.cancel()
+        endProjectionRequest(outcome: "filter-revision")
+        cancelCurrentStream()
+        hideInlineIssue()
+        installFreshnessText(
+            model.orderedVisibleUIDs.isEmpty
+                ? "Filtering…" : "Filtering… · last good rows"
+        )
         rememberCurrentFilter()
         let revision = filterRevision
         filterTask = Task { [weak self] in
@@ -2137,20 +2142,17 @@ private final class ResourceListViewController: NSViewController,
         guard isAuthenticated, resourceCatalogValidated else { return }
         guard let resource else { return }
         endProjectionRequest(outcome: "superseded")
-        let previousGeneration = generation
-        streamTask?.cancel()
-        if previousGeneration > 0 {
-            Task { [provider, session, viewID] in
-                await provider.cancelView(sessionID: session.sessionID, viewID: viewID, generation: previousGeneration)
-            }
-        }
+        cancelCurrentStream()
         generation &+= 1
         prepareOptionalResourceDiscovery(for: resource)
         beginProjectionRequest()
         generationGate.reset()
-        let canKeepWarmRows = lastStreamResourceID == resource.id
+        let reprojectsSameView = lastStreamResourceID == resource.id
             && lastStreamScope == scope
-            && !model.orderedVisibleUIDs.isEmpty
+        let canKeepWarmRows = reprojectsSameView && !model.orderedVisibleUIDs.isEmpty
+        if !reprojectsSameView {
+            hasLastUsableResourceViewStatus = false
+        }
         if !canKeepWarmRows {
             model = ResourceTableModel()
             tableView.reloadData()
@@ -2191,6 +2193,25 @@ private final class ResourceListViewController: NSViewController,
                 self?.endProjectionRequest(outcome: "failed")
                 self?.show(error: error)
             }
+        }
+    }
+
+    /// A typed filter revision invalidates projection work immediately; the
+    /// debounce delays only creation of its replacement. Duplicate cancellation
+    /// calls for the same generation are suppressed because `openStream()` also
+    /// crosses this boundary after the debounce.
+    private func cancelCurrentStream() {
+        streamTask?.cancel()
+        streamTask = nil
+        let generation = generation
+        guard generation > 0, generation != lastCancelledGeneration else { return }
+        lastCancelledGeneration = generation
+        Task { [provider, session, viewID] in
+            await provider.cancelView(
+                sessionID: session.sessionID,
+                viewID: viewID,
+                generation: generation
+            )
         }
     }
 
@@ -2368,6 +2389,21 @@ private final class ResourceListViewController: NSViewController,
 
     private func show(error: Error) {
         showInlineIssue(error.localizedDescription)
+        if let issue = error as? ClusterManagerIssue,
+            issue.category == .validation
+        {
+            let localState = filterField.stringValue.isEmpty
+                ? "View configuration error" : "Invalid filter"
+            if hasLastUsableResourceViewStatus {
+                // The prior projection was cancelled before this replacement
+                // was rejected. Its rows remain useful, but they are no longer
+                // being watched and must not retain a "Watching" claim.
+                installFreshnessText("\(localState) · last good rows")
+            } else {
+                installFreshnessText(localState)
+            }
+            return
+        }
         installFreshnessText("Disconnected")
     }
 
@@ -2376,6 +2412,9 @@ private final class ResourceListViewController: NSViewController,
         now: Date = Date()
     ) {
         resourceViewStatus = status
+        if status.freshness != .loading {
+            hasLastUsableResourceViewStatus = true
+        }
         freshnessLabel.stringValue = status.presentation(now: now)
         freshnessLabel.setAccessibilityValue(freshnessLabel.stringValue)
         if status.showsProgress {

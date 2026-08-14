@@ -385,6 +385,52 @@ struct ObjectDetailDataDraftTests {
         )
     }
 
+    @Test("Escape leaves Data value editing before navigating Back")
+    func escapeLeavesDataEditorBeforeBack() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let controller = ObjectDetailViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data),
+            initialTab: .data
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        var backCount = 0
+        controller.onBack = { backCount += 1 }
+        controller.loadView()
+        window.contentView = controller.view
+        controller.viewDidAppear()
+        defer {
+            window.makeFirstResponder(nil)
+            controller.stop()
+            window.contentView = NSView()
+            window.close()
+        }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        try await waitForDataRows(table, count: 2)
+        select(row: 0, in: table, controller: controller)
+        editor.string = "draft-kept-after-escape"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        #expect(window.makeFirstResponder(editor))
+        #expect(window.firstResponder === editor)
+
+        controller.cancelOperation(nil)
+
+        #expect(backCount == 0)
+        #expect(window.firstResponder === table)
+        #expect(editor.string == "draft-kept-after-escape")
+        #expect(try stateText(in: table, row: 0) == "Unsaved")
+
+        controller.cancelOperation(nil)
+        #expect(backCount == 1)
+    }
+
     private func dataEntry(key: String, value: String, hashByte: UInt8) -> ObjectDataEntry {
         ObjectDataEntry(
             key: key,

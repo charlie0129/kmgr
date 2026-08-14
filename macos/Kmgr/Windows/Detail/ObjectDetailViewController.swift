@@ -1255,9 +1255,25 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     override func cancelOperation(_ sender: Any?) {
         if isEditingYAML {
             cancelYAMLEdit()
+        } else if leaveDataValueEditorIfActive() {
+            return
         } else {
             onBack?()
         }
+    }
+
+    /// Escape follows the workspace priority order: while the value editor is
+    /// active it first ends text entry and retains the in-memory key draft.
+    /// A subsequent Escape from the key table may navigate back normally.
+    private func leaveDataValueEditorIfActive() -> Bool {
+        guard supportsDataEditor, segmented.selectedSegment == 5,
+            let window = view.window,
+            let responderView = window.firstResponder as? NSView,
+            responderView === dataValueTextView
+                || responderView.isDescendant(of: dataValueScroll)
+        else { return false }
+        window.makeFirstResponder(keysTable)
+        return true
     }
 
     @objc func saveDocument(_ sender: Any?) {

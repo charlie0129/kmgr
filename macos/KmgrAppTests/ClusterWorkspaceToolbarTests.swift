@@ -81,6 +81,84 @@ struct ClusterWorkspaceToolbarTests {
         #expect(!progress.isDisplayedWhenStopped)
         #expect(label.accessibilityValue() == label.stringValue)
     }
+
+    @Test("invalid filter keeps last good rows without claiming they are watched")
+    func invalidFilterPreservesRowsAndFreshness() async throws {
+        let provider = FilterValidationWorkspaceResourceProvider()
+        let controller = makeWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let freshness = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Resource freshness" })
+        let filter = try #require(descendants(of: root)
+            .compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+        let table = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil {
+            freshness.stringValue == "Watching" && table.numberOfRows == 1
+        }
+        try triggerResourceFilterChange(
+            in: try #require(controller.window),
+            value: "unknown:value"
+        )
+        #expect(provider.streamRequestCount == 1)
+        #expect(table.numberOfRows == 1)
+        #expect(freshness.stringValue == "Filtering… · last good rows")
+        try await waitUntil(timeout: .milliseconds(120)) {
+            provider.cancelRequestCount == 1
+        }
+        try await waitUntil {
+            provider.streamRequestCount == 2
+                && descendants(of: root).compactMap { ($0 as? NSTextField)?.stringValue }
+                    .contains("Unknown filter term unknown")
+        }
+
+        #expect(filter.stringValue == "unknown:value")
+        #expect(table.numberOfRows == 1)
+        #expect(freshness.stringValue == "Invalid filter · last good rows")
+        #expect(freshness.accessibilityValue() == "Invalid filter · last good rows")
+    }
+
+    @Test("invalid initial filter never presents as loading or disconnected")
+    func invalidInitialFilterHasLocalFreshnessState() async throws {
+        let provider = FilterValidationWorkspaceResourceProvider(initialRequestIsInvalid: true)
+        let restoration = ClusterWindowRestorationRecord(
+            id: "invalid-initial-filter",
+            state: ClusterWindowRestorationState(
+                contextName: "test-context",
+                gvr: GVR(group: "", version: "v1", resource: "pods"),
+                namespaceScope: .all,
+                filter: "unknown:value"
+            )
+        )
+        let controller = makeWorkspace(
+            provider: provider,
+            restoration: restoration
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let freshness = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Resource freshness" })
+        let filter = try #require(descendants(of: root)
+            .compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+
+        try await waitUntil {
+            freshness.stringValue == "Invalid filter"
+                && descendants(of: root).compactMap { ($0 as? NSTextField)?.stringValue }
+                    .contains("Unknown filter term unknown")
+        }
+
+        #expect(filter.stringValue == "unknown:value")
+        #expect(freshness.accessibilityValue() == "Invalid filter")
+    }
 }
 
 @MainActor
@@ -577,6 +655,85 @@ private struct HeaderStatusWorkspaceResourceProvider: WorkspaceResourceProviding
     }
 
     func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+private final class FilterValidationWorkspaceResourceProvider: WorkspaceResourceProviding,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let initialRequestIsInvalid: Bool
+    private var storedStreamRequestCount = 0
+    private var storedCancelRequestCount = 0
+
+    init(initialRequestIsInvalid: Bool = false) {
+        self.initialRequestIsInvalid = initialRequestIsInvalid
+    }
+
+    var streamRequestCount: Int { lock.withLock { storedStreamRequestCount } }
+    var cancelRequestCount: Int { lock.withLock { storedCancelRequestCount } }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult {
+        .init(resources: [DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { [] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error> {
+        let requestNumber = lock.withLock { () -> Int in
+            storedStreamRequestCount += 1
+            return storedStreamRequestCount
+        }
+        return AsyncThrowingStream { continuation in
+            if requestNumber == 1 && !initialRequestIsInvalid {
+                let identity = ResourceIdentity(
+                    clusterSessionID: request.sessionID,
+                    group: "", version: "v1", resource: "pods",
+                    namespace: "default", name: "api", uid: "pod-api"
+                )
+                continuation.yield(.snapshot(
+                    cursor: StreamCursor(generation: request.generation, sequence: 1),
+                    chunk: ResourceSnapshotChunk(
+                        rows: [ResourceRow(identity: identity, cells: [
+                            Cell(
+                                columnID: "name", displayText: "api",
+                                typedValue: .string("api")
+                            ),
+                        ])],
+                        first: true,
+                        last: true,
+                        index: 0,
+                        estimatedTotalRows: 1
+                    )
+                ))
+                continuation.yield(.status(
+                    cursor: StreamCursor(generation: request.generation, sequence: 2),
+                    status: ResourceViewStatus(
+                        freshness: .watching,
+                        rowsVisible: 1
+                    )
+                ))
+            } else {
+                continuation.finish(throwing: ClusterManagerIssue(
+                    category: .validation,
+                    reason: "InvalidFilter",
+                    message: "Unknown filter term unknown",
+                    operation: "compile resource filter"
+                ))
+                return
+            }
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {
+        lock.withLock { storedCancelRequestCount += 1 }
+    }
     func closeSession(sessionID: String) async {}
 }
 
