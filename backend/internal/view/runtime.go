@@ -739,7 +739,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		}
 		return nil, ErrViewClosed
 	}
-	if entry.store.ResourceVersion() != "" || entry.state != resourceIdle || entry.transientSearchList != nil {
+	if entry.store.ResourceVersion() != "" || entry.store.Len() != 0 || entry.state != resourceIdle || entry.transientSearchList != nil {
 		initialStatus = statusForWarmEntry(entry)
 	} else {
 		initialStatus = &kmgrv1.ViewStatus{Freshness: kmgrv1.ViewFreshness_VIEW_FRESHNESS_LOADING}
@@ -969,7 +969,7 @@ func (r *Runtime) attachNodeAccounting(subscription *Subscription, sessionID, au
 	if entry.dependents == nil {
 		entry.dependents = make(map[*Subscription]struct{})
 	}
-	if !entry.accountingReady && entry.store.ResourceVersion() != "" {
+	if !entry.accountingReady && entry.state == resourceIdle && entry.store.ResourceVersion() != "" {
 		// A warm pipeline resumes directly from its retained resourceVersion and
 		// has no new LIST-complete callback. Its retained Pod snapshot is already
 		// a valid (stale-until-watch-connects) accounting basis.
@@ -1054,10 +1054,12 @@ func (r *Runtime) startResourceLocked(entry *resourceRuntime) ([]*Subscription, 
 	entry.cancel = cancel
 	entry.state = resourceRunning
 	pipeline, err := watcher.NewPipeline(watcher.PipelineConfig{
-		Client:       entry.client,
-		Store:        entry.store,
-		PageSize:     r.pageSize,
-		WatchTimeout: r.watchTimeout,
+		Client:                  entry.client,
+		Store:                   entry.store,
+		PageSize:                r.pageSize,
+		WatchTimeout:            r.watchTimeout,
+		ForceRelist:             !entry.accountingReady,
+		InitialLastSynchronized: entry.lastStatus.LastSynchronized,
 		ListOptions: metav1.ListOptions{
 			LabelSelector: entry.key.labels,
 			FieldSelector: entry.key.fields,
@@ -1109,6 +1111,15 @@ func (r *Runtime) receiveStatus(entry *resourceRuntime, runNumber uint64, status
 		r.mu.Unlock()
 		return
 	}
+	if status.LastSynchronized.Before(entry.lastStatus.LastSynchronized) {
+		status.LastSynchronized = entry.lastStatus.LastSynchronized
+	}
+	if status.Phase == watcher.PhaseListing {
+		// Once a LIST starts, progressive pages make the store a mixture of the
+		// prior snapshot and the replacement snapshot until the final page. Keep
+		// that state explicitly incomplete even if the run is cancelled midway.
+		entry.accountingReady = false
+	}
 	entry.lastStatus = status
 	translated := statusFromPipeline(status)
 	subscriptions := make([]*Subscription, 0, len(entry.subscribers))
@@ -1143,6 +1154,16 @@ func (r *Runtime) prepareEntryBatchLocked(
 	batch watcher.Batch,
 ) []*Subscription {
 	entry.revision++
+	if batch.SynchronizedAt.After(entry.lastStatus.LastSynchronized) {
+		entry.lastStatus.LastSynchronized = batch.SynchronizedAt
+	}
+	if batch.ResourceVersion != "" && (batch.SnapshotComplete || !batch.FromList) {
+		entry.lastStatus.ResourceVersion = batch.ResourceVersion
+	}
+	if batch.FromList {
+		entry.lastStatus.PagesListed = batch.ListPage
+		entry.lastStatus.ObjectsListed = batch.ObjectsListed
+	}
 	// Capture consumers while the lifecycle graph is stable, then project the
 	// batch after releasing the runtime-wide mutex. Subscription.applyBatch has
 	// its own closed/generation gate, so a concurrent detach is safe.
@@ -1512,7 +1533,7 @@ func (r *Runtime) finalizeWarmLocked(entry *resourceRuntime) {
 		ObjectCount:      entry.store.Len(),
 		ResourceVersion:  entry.store.ResourceVersion(),
 		LastSynchronized: entry.lastStatus.LastSynchronized,
-		Complete:         entry.store.ResourceVersion() != "",
+		Complete:         entry.accountingReady && entry.store.ResourceVersion() != "",
 	})
 	if !admitted && r.resources[key] == entry {
 		delete(r.resources, key)
@@ -1737,7 +1758,7 @@ func (r *Runtime) DiscoverOptionalResources(ctx context.Context, sessionID strin
 			continue
 		}
 		entries = append(entries, cachedStore{
-			key: key, store: entry.store, complete: entry.accountingReady || entry.store.ResourceVersion() != "",
+			key: key, store: entry.store, complete: entry.accountingReady,
 		})
 	}
 	acceleratorProvider, _ := r.columns.(AcceleratorConfigProvider)

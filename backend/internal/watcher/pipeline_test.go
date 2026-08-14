@@ -297,8 +297,8 @@ func TestPipelineExpiredResumeRelistsWithoutRemovingWarmRowsEarly(t *testing.T) 
 	if _, ok := uidStore.Get("uid-stale"); !ok {
 		t.Fatal("cached row was removed before the relist completed")
 	}
-	if got := uidStore.ResourceVersion(); got != "10" {
-		t.Fatalf("resourceVersion changed during incomplete relist: %q", got)
+	if got := uidStore.ResourceVersion(); got != "" {
+		t.Fatalf("incomplete relist retained resumable resourceVersion %q", got)
 	}
 	close(releaseLastPage)
 

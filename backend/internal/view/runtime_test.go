@@ -486,6 +486,228 @@ func TestRuntimeRelistKeepsWarmRowsUntilFinalPage(t *testing.T) {
 	})
 }
 
+func TestRuntimeCancelledWarmRelistReopensWithForcedList(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	client.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-initial", "", pod("uid-old", "ns", "old", "Running", 0, nil, time.Time{})),
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay: 5 * time.Millisecond, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	first, err := runtime.Open(openView("session", "first", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, first, "uid-old")
+	key := first.resource.key
+	first.Close()
+	eventually(t, time.Second, func() bool { return client.lastWatch().stopped.Load() })
+
+	finalPageGate := make(chan struct{})
+	client.mu.Lock()
+	client.expireNextWatch = true
+	client.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-interrupted", "next", pod("uid-partial", "ns", "partial", "Running", 0, nil, time.Time{})),
+		listPage("rv-interrupted", "", pod("uid-never", "ns", "never", "Running", 0, nil, time.Time{})),
+	}
+	client.beforeListPage = map[int]chan struct{}{1: finalPageGate}
+	client.mu.Unlock()
+
+	second, err := runtime.Open(openView("session", "second", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, second, "uid-partial")
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() >= 3 })
+	second.Close()
+
+	var interrupted watcher.WarmEntry[*resourceRuntime]
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		cached, ok := runtime.warm.Get(key)
+		if !ok || cached.Value.state != resourceIdle {
+			return false
+		}
+		interrupted = cached
+		return true
+	})
+	if interrupted.Complete || interrupted.ResourceVersion != "" ||
+		interrupted.Value.store.ResourceVersion() != "" || interrupted.Value.accountingReady {
+		t.Fatalf("interrupted relist admitted as complete: %#v, storeRV=%q ready=%t",
+			interrupted, interrupted.Value.store.ResourceVersion(), interrupted.Value.accountingReady)
+	}
+
+	client.mu.Lock()
+	client.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-reopened", "", pod("uid-final", "ns", "final", "Running", 0, nil, time.Time{})),
+	}
+	client.beforeListPage = nil
+	client.mu.Unlock()
+
+	third, err := runtime.Open(openView("session", "third", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer third.Close()
+	waitForSnapshotUID(t, third, "uid-final")
+	eventually(t, time.Second, func() bool {
+		return client.listCalls.Load() >= 4 && client.lastWatchResourceVersion() == "rv-reopened"
+	})
+	if got := client.watchCalls.Load(); got != 3 {
+		t.Fatalf("watch calls = %d, want initial, expired resume, and post-reopen watch", got)
+	}
+	eventually(t, time.Second, func() bool {
+		third.mu.Lock()
+		defer third.mu.Unlock()
+		_, old := third.rows["uid-old"]
+		_, partial := third.rows["uid-partial"]
+		_, final := third.rows["uid-final"]
+		return !old && !partial && final
+	})
+}
+
+func TestRuntimeLastSynchronizedSurvivesWarmResumeRelistAndWatch(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	client.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-initial", "", pod("uid-a", "ns", "a", "Running", 0, nil, time.Time{})),
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay: 5 * time.Millisecond, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	first, err := runtime.Open(openView("session", "first-timestamp", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, first, "uid-a")
+	key := first.resource.key
+	var listedAt time.Time
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		listedAt = first.resource.lastStatus.LastSynchronized
+		return first.resource.lastStatus.Phase == watcher.PhaseWatching && !listedAt.IsZero()
+	})
+	first.Close()
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		cached, ok := runtime.warm.Get(key)
+		return ok && cached.LastSynchronized.Equal(listedAt)
+	})
+
+	second, err := runtime.Open(openView("session", "second-timestamp", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	initial, err := second.Next(ctx)
+	cancel()
+	if err != nil {
+		second.Close()
+		t.Fatal(err)
+	}
+	if err := second.AcknowledgeDelivery(initial); err != nil {
+		second.Close()
+		t.Fatal(err)
+	}
+	warmTimestamp := int64(0)
+	for _, event := range initial {
+		if status := event.GetStatus(); status != nil && status.GetFromWarmCache() {
+			warmTimestamp = status.GetLastSynchronizedUnixMs()
+			break
+		}
+	}
+	if warmTimestamp != listedAt.UnixMilli() {
+		second.Close()
+		t.Fatalf("warm resume timestamp = %d, want %d", warmTimestamp, listedAt.UnixMilli())
+	}
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 2 })
+	time.Sleep(time.Millisecond)
+	bookmark := &unstructured.Unstructured{}
+	bookmark.SetResourceVersion("rv-bookmark")
+	client.lastWatch().channel <- watch.Event{Type: watch.Bookmark, Object: bookmark}
+	var watchedAt time.Time
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		watchedAt = second.resource.lastStatus.LastSynchronized
+		return second.resource.store.ResourceVersion() == "rv-bookmark" && watchedAt.After(listedAt)
+	})
+	second.Close()
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		cached, ok := runtime.warm.Get(key)
+		return ok && cached.ResourceVersion == "rv-bookmark" && cached.LastSynchronized.Equal(watchedAt)
+	})
+
+	relistGate := make(chan struct{})
+	client.mu.Lock()
+	client.expireNextWatch = true
+	client.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-relisted", "", pod("uid-b", "ns", "b", "Running", 0, nil, time.Time{})),
+	}
+	client.beforeListPage = map[int]chan struct{}{0: relistGate}
+	client.mu.Unlock()
+
+	third, err := runtime.Open(openView("session", "third-timestamp", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer third.Close()
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	initial, err = third.Next(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := third.AcknowledgeDelivery(initial); err != nil {
+		t.Fatal(err)
+	}
+	warmTimestamp = 0
+	for _, event := range initial {
+		if status := event.GetStatus(); status != nil && status.GetFromWarmCache() {
+			warmTimestamp = status.GetLastSynchronizedUnixMs()
+			break
+		}
+	}
+	if warmTimestamp != watchedAt.UnixMilli() {
+		t.Fatalf("second warm timestamp = %d, want %d", warmTimestamp, watchedAt.UnixMilli())
+	}
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		return third.resource.lastStatus.Phase == watcher.PhaseListing &&
+			third.resource.lastStatus.LastSynchronized.Equal(watchedAt) &&
+			third.resource.store.ResourceVersion() == "" && !third.resource.accountingReady
+	})
+	time.Sleep(time.Millisecond)
+	close(relistGate)
+	var relistedAt time.Time
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		relistedAt = third.resource.lastStatus.LastSynchronized
+		return third.resource.lastStatus.Phase == watcher.PhaseWatching &&
+			third.resource.store.ResourceVersion() == "rv-relisted" && relistedAt.After(watchedAt)
+	})
+}
+
 func TestSlowSubscriptionFallsBackToBoundedSnapshot(t *testing.T) {
 	projector := newRuntimeTestProjector(t, "", nil)
 	subscription, _ := newControlledProjectionSubscription(projector)

@@ -95,6 +95,34 @@ struct ObjectDetailYAMLPresentationTests {
         let toggle = try #require(descendants(of: root).compactMap { $0 as? NSButton }
             .first { $0.title == "Show Managed Fields" })
         #expect(toggle.state == .off)
+        #expect(!descendants(of: root).contains {
+            $0.identifier?.rawValue == "secret-yaml-base64-notice"
+        })
+    }
+
+    @Test("Secret YAML clearly labels Kubernetes base64 encoding")
+    func secretYAMLEncodingNotice() throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: "secrets",
+            namespace: "dev",
+            name: "credentials",
+            uid: ResourceUID("uid")
+        )
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: NoopObjectDetailProvider(),
+            initialTab: .yaml
+        )
+        controller.loadView()
+
+        let notice = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "secret-yaml-base64-notice" })
+        #expect(notice.stringValue.localizedCaseInsensitiveContains("base64"))
+        #expect(notice.stringValue.contains("Data"))
     }
 
     @Test("line-number geometry grows at digit boundaries")

@@ -82,30 +82,32 @@ type RetryDelay func(attempt int) time.Duration
 // client must already be scoped to the desired GVR and namespace. Selectors in
 // ListOptions are reused unchanged for every list page and watch reconnect.
 type PipelineConfig struct {
-	Client       ListerWatcher
-	Store        *store.UIDStore
-	ListOptions  metav1.ListOptions
-	PageSize     int64
-	WatchTimeout time.Duration
-	ForceRelist  bool
-	RetryDelay   RetryDelay
-	OnStatus     func(Status)
-	OnBatch      func(Batch)
+	Client                  ListerWatcher
+	Store                   *store.UIDStore
+	ListOptions             metav1.ListOptions
+	PageSize                int64
+	WatchTimeout            time.Duration
+	ForceRelist             bool
+	InitialLastSynchronized time.Time
+	RetryDelay              RetryDelay
+	OnStatus                func(Status)
+	OnBatch                 func(Batch)
 }
 
 // Pipeline maintains a UIDStore without clearing it during reconnects or
 // relists. A Pipeline may be run again after Run returns, but not concurrently.
 type Pipeline struct {
-	client       ListerWatcher
-	store        *store.UIDStore
-	listOptions  metav1.ListOptions
-	pageSize     int64
-	watchTimeout time.Duration
-	forceRelist  bool
-	retryDelay   RetryDelay
-	onStatus     func(Status)
-	onBatch      func(Batch)
-	running      atomic.Bool
+	client           ListerWatcher
+	store            *store.UIDStore
+	listOptions      metav1.ListOptions
+	pageSize         int64
+	watchTimeout     time.Duration
+	forceRelist      bool
+	lastSynchronized time.Time
+	retryDelay       RetryDelay
+	onStatus         func(Status)
+	onBatch          func(Batch)
+	running          atomic.Bool
 }
 
 var ErrAlreadyRunning = errors.New("watcher: pipeline is already running")
@@ -141,15 +143,16 @@ func NewPipeline(config PipelineConfig) (*Pipeline, error) {
 	}
 
 	return &Pipeline{
-		client:       config.Client,
-		store:        config.Store,
-		listOptions:  config.ListOptions,
-		pageSize:     pageSize,
-		watchTimeout: watchTimeout,
-		forceRelist:  config.ForceRelist,
-		retryDelay:   retryDelay,
-		onStatus:     config.OnStatus,
-		onBatch:      config.OnBatch,
+		client:           config.Client,
+		store:            config.Store,
+		listOptions:      config.ListOptions,
+		pageSize:         pageSize,
+		watchTimeout:     watchTimeout,
+		forceRelist:      config.ForceRelist,
+		lastSynchronized: config.InitialLastSynchronized,
+		retryDelay:       retryDelay,
+		onStatus:         config.OnStatus,
+		onBatch:          config.OnBatch,
 	}, nil
 }
 
@@ -166,7 +169,8 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	firstWatch := !needsList
 	retryAttempt := 0
 	var listedPages, listedObjects int
-	var lastSynchronized time.Time
+	lastSynchronized := p.lastSynchronized
+	defer func() { p.lastSynchronized = lastSynchronized }()
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -174,6 +178,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 
 		if needsList {
+			// Progressive relist pages mutate the retained store before the final
+			// reconciliation commits a new consistent snapshot. Invalidate the old
+			// continuation point first so cancellation or a page error can never
+			// make that mixed store look safe to resume by WATCH.
+			p.store.SetResourceVersion("")
 			p.emitStatus(Status{
 				Phase:            PhaseListing,
 				Stale:            p.store.Len() != 0,
@@ -226,13 +235,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			PagesListed:      listedPages,
 			ObjectsListed:    listedObjects,
 		})
+		if result.lastSynchronized.After(lastSynchronized) {
+			lastSynchronized = result.lastSynchronized
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
 		resourceVersion = p.store.ResourceVersion()
-		if result.lastSynchronized.After(lastSynchronized) {
-			lastSynchronized = result.lastSynchronized
-		}
 		if result.expired {
 			needsList = true
 			retryAttempt = 0

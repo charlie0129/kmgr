@@ -68,6 +68,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let yamlTextView = NSTextView()
     private let yamlScrollView = NSScrollView()
     private let yamlContainerView = NSView()
+    private let secretYAMLEncodingNotice = NSTextField(labelWithString:
+        "Secret data values in YAML use Kubernetes base64 encoding. Use Data to edit decoded values."
+    )
     private let editButton = NSButton(title: "Edit", target: nil, action: nil)
     private let managedFieldsButton = NSButton(
         checkboxWithTitle: "Show Managed Fields", target: nil, action: nil
@@ -286,6 +289,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             && (identity.resource == "configmaps" || identity.resource == "secrets")
     }
 
+    private var isSecretObject: Bool {
+        identity.group.isEmpty && identity.version == "v1" && identity.resource == "secrets"
+    }
+
     private var supportsMetrics: Bool {
         identity.group.isEmpty && identity.version == "v1"
             && (identity.resource == "pods" || identity.resource == "nodes")
@@ -422,18 +429,50 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         ])
         controls.orientation = .horizontal
         controls.translatesAutoresizingMaskIntoConstraints = false
+        secretYAMLEncodingNotice.identifier = .init("secret-yaml-base64-notice")
+        secretYAMLEncodingNotice.textColor = .secondaryLabelColor
+        secretYAMLEncodingNotice.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        secretYAMLEncodingNotice.lineBreakMode = .byWordWrapping
+        secretYAMLEncodingNotice.maximumNumberOfLines = 2
+        secretYAMLEncodingNotice.setAccessibilityLabel(
+            "Secret YAML values are Kubernetes base64 encoded"
+        )
+        secretYAMLEncodingNotice.translatesAutoresizingMaskIntoConstraints = false
         yamlScrollView.translatesAutoresizingMaskIntoConstraints = false
         yamlContainerView.addSubview(controls)
+        if isSecretObject {
+            yamlContainerView.addSubview(secretYAMLEncodingNotice)
+        }
         yamlContainerView.addSubview(yamlScrollView)
-        NSLayoutConstraint.activate([
+        var constraints = [
             controls.leadingAnchor.constraint(equalTo: yamlContainerView.leadingAnchor, constant: 10),
             controls.trailingAnchor.constraint(equalTo: yamlContainerView.trailingAnchor, constant: -10),
             controls.topAnchor.constraint(equalTo: yamlContainerView.topAnchor, constant: 6),
             yamlScrollView.leadingAnchor.constraint(equalTo: yamlContainerView.leadingAnchor),
             yamlScrollView.trailingAnchor.constraint(equalTo: yamlContainerView.trailingAnchor),
-            yamlScrollView.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 5),
             yamlScrollView.bottomAnchor.constraint(equalTo: yamlContainerView.bottomAnchor),
-        ])
+        ]
+        if isSecretObject {
+            constraints.append(contentsOf: [
+                secretYAMLEncodingNotice.leadingAnchor.constraint(
+                    equalTo: yamlContainerView.leadingAnchor, constant: 12
+                ),
+                secretYAMLEncodingNotice.trailingAnchor.constraint(
+                    lessThanOrEqualTo: yamlContainerView.trailingAnchor, constant: -12
+                ),
+                secretYAMLEncodingNotice.topAnchor.constraint(
+                    equalTo: controls.bottomAnchor, constant: 4
+                ),
+                yamlScrollView.topAnchor.constraint(
+                    equalTo: secretYAMLEncodingNotice.bottomAnchor, constant: 5
+                ),
+            ])
+        } else {
+            constraints.append(yamlScrollView.topAnchor.constraint(
+                equalTo: controls.bottomAnchor, constant: 5
+            ))
+        }
+        NSLayoutConstraint.activate(constraints)
     }
 
     private func configureDataEditor() {
