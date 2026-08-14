@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
@@ -47,8 +48,7 @@ type EngineService struct {
 	startedAt        time.Time
 	stopping         chan struct{}
 	stopOnce         sync.Once
-	streamMu         sync.Mutex
-	streamGeneration map[string]uint64
+	streamGeneration atomic.Uint64
 }
 
 func NewEngineService(version string, startedAt time.Time) (*EngineService, error) {
@@ -63,11 +63,10 @@ func NewEngineService(version string, startedAt time.Time) (*EngineService, erro
 		return nil, err
 	}
 	return &EngineService{
-		version:          version,
-		instanceID:       instanceID,
-		startedAt:        startedAt,
-		stopping:         make(chan struct{}),
-		streamGeneration: make(map[string]uint64),
+		version:    version,
+		instanceID: instanceID,
+		startedAt:  startedAt,
+		stopping:   make(chan struct{}),
 	}, nil
 }
 
@@ -151,14 +150,13 @@ func (s *EngineService) WatchHealth(
 		return err
 	}
 	defer cancel()
-	if request.GetStreamId() == "" {
-		return status.Error(codes.InvalidArgument, "stream ID is required")
+	if request.GetStreamId() == "" || len(request.GetStreamId()) > 256 {
+		return status.Error(codes.InvalidArgument, "a stream ID of at most 256 bytes is required")
 	}
 
-	s.streamMu.Lock()
-	s.streamGeneration[request.GetStreamId()]++
-	generation := s.streamGeneration[request.GetStreamId()]
-	s.streamMu.Unlock()
+	// A process-wide monotonic generation distinguishes every replacement
+	// without retaining caller-controlled stream IDs for the helper lifetime.
+	generation := s.streamGeneration.Add(1)
 	state := s.State()
 	if err := stream.Send(&kmgrv1.HealthEvent{
 		Cursor: &kmgrv1.StreamCursor{
@@ -214,9 +212,6 @@ func (s *EngineService) Shutdown(
 func (s *EngineService) RequestStop() {
 	s.stopOnce.Do(func() {
 		close(s.stopping)
-		s.streamMu.Lock()
-		clear(s.streamGeneration)
-		s.streamMu.Unlock()
 	})
 }
 

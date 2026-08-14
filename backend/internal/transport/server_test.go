@@ -61,6 +61,15 @@ func TestServerAuthenticatesEveryRPC(t *testing.T) {
 	if health.GetState() != kmgrv1.HealthState_HEALTH_STATE_READY {
 		t.Fatalf("health = %#v", health)
 	}
+	oversizedWatch, err := client.WatchHealth(goodContext, &kmgrv1.WatchHealthRequest{
+		Context: requestContext("oversized-health-stream"), StreamId: strings.Repeat("h", 257),
+	})
+	if err == nil {
+		_, err = oversizedWatch.Recv()
+	}
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("oversized stream ID status = %v, error = %v", status.Code(err), err)
+	}
 
 	watch, err := client.WatchHealth(goodContext, &kmgrv1.WatchHealthRequest{
 		Context: requestContext("watch-health"), StreamId: "health-stream",
@@ -86,5 +95,23 @@ func TestServerAuthenticatesEveryRPC(t *testing.T) {
 	}
 	if stopping.GetState() != kmgrv1.HealthState_HEALTH_STATE_STOPPING || stopping.GetCursor().GetSequence() != 2 {
 		t.Fatalf("stopping health event = %#v", stopping)
+	}
+
+	// Generations are process-wide and monotonic. Unique caller-controlled
+	// stream IDs therefore do not accumulate in helper state.
+	replacement, err := client.WatchHealth(goodContext, &kmgrv1.WatchHealthRequest{
+		Context: requestContext("watch-health-replacement"), StreamId: "another-health-stream",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementState, err := replacement.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacementState.GetState() != kmgrv1.HealthState_HEALTH_STATE_STOPPING ||
+		replacementState.GetCursor().GetGeneration() != 2 ||
+		replacementState.GetCursor().GetSequence() != 1 {
+		t.Fatalf("replacement health event = %#v", replacementState)
 	}
 }
