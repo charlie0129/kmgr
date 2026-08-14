@@ -106,9 +106,10 @@ KMGR_PERF_DIAGNOSTICS=1 \
   --filter ResourceTableAppKitPerformanceTests
 ```
 
-An explicit local budget checks that selection and the typical table
-reload/scroll restoration fit within one 60 Hz display frame, with a
-three-frame ceiling for the slowest of the eight synthetic reloads:
+An explicit local budget checks that selection, the typical compact-model
+reorder, and the typical table reload/scroll restoration fit within one 60 Hz
+display frame, with a three-frame ceiling for the slowest of the eight model
+applies and synthetic reloads:
 
 ```sh
 KMGR_PERF_BUDGETS=1 \
@@ -245,16 +246,19 @@ CPU-speed improvement.
 
 | AppKit phase/evidence | Result |
 | --- | ---: |
-| Initial 100,000-row `NSTableView` reload/layout | 2.388 ms |
-| Four-UID selection projection | 0.291 ms |
-| Typical reorder reload/selection/scroll restoration | 0.990 ms |
-| Slowest reorder reload/selection/scroll restoration | 1.110 ms |
-| Slowest compact-model apply (reported separately) | 63.138 ms |
+| Initial 100,000-row `NSTableView` reload/layout | 2.385 ms |
+| Four-UID selection projection | 0.436 ms |
+| Typical compact-model apply | 13.562 ms |
+| Slowest compact-model apply | 15.792 ms |
+| Typical reorder reload/selection/scroll restoration | 0.917 ms |
+| Slowest reorder reload/selection/scroll restoration | 1.118 ms |
 | Cell-view requests across initial render plus eight reloads | 208 |
 | Maximum simultaneously installed table row views | 21 |
 
-The complete AppKit case passed in 0.863 seconds. These are single-machine
-references, not cross-machine or end-to-end product guarantees.
+The complete AppKit case passed in 0.489 seconds. The slowest compact-model
+apply is 75.0% below the preceding 63.138 ms reference after reusing its
+UID-index projection during reorder and scroll restoration. These are
+single-machine references, not cross-machine or end-to-end product guarantees.
 
 A standalone final Release helper was also held idle for 49.58 seconds with its
 local RPC endpoint running and no Kubernetes session open. It consumed 0.00
