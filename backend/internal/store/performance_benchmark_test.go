@@ -43,6 +43,7 @@ func BenchmarkUIDStoreUpsert100K(b *testing.B) {
 	}
 	b.StopTimer()
 	b.ReportMetric(syntheticStoreRows, "objects/op")
+	b.ReportMetric(float64(benchmarkUIDStore.RetainedBytes()), "retained_bytes/op")
 	if benchmarkUIDStore.Len() != syntheticStoreRows {
 		b.Fatalf("stored objects = %d, want %d", benchmarkUIDStore.Len(), syntheticStoreRows)
 	}

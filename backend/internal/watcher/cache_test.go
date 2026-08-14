@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"math"
 	"reflect"
 	"testing"
 	"time"
@@ -94,6 +95,21 @@ func TestWarmCacheEvictsAndRejectsByRetainedBytes(t *testing.T) {
 	}
 	if retained, ok := cache.Get("nodes"); !ok || retained.Value != "nodes" {
 		t.Fatal("rejected byte-oversized entry disturbed useful data")
+	}
+}
+
+func TestWarmCacheAggregateWeightsCannotOverflowBudgets(t *testing.T) {
+	t.Parallel()
+	cache := NewWarmCache[string, string](4, math.MaxInt, math.MaxInt64)
+	largeObjects := math.MaxInt/2 + 1
+	largeBytes := int64(math.MaxInt64/2 + 1)
+	cache.Put("first", weightedEntry("first", largeObjects, largeBytes))
+	evicted, admitted := cache.Put("second", weightedEntry("second", largeObjects, largeBytes))
+	if !admitted || !reflect.DeepEqual(evicted, []string{"first"}) {
+		t.Fatalf("overflow-safe insertion: admitted=%t evicted=%v", admitted, evicted)
+	}
+	if cache.ObjectCount() != largeObjects || cache.ByteCount() != largeBytes {
+		t.Fatalf("overflowed aggregate: objects=%d bytes=%d", cache.ObjectCount(), cache.ByteCount())
 	}
 }
 

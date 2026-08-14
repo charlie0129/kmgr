@@ -199,6 +199,74 @@ func TestWarmCacheEnforcesPerAuthorityByteBudgetWithoutEvictingAnotherCluster(t 
 	}
 }
 
+func TestWarmCacheGlobalByteEvictionIsRemovedFromAuthorityLRU(t *testing.T) {
+	t.Parallel()
+	aPods := newWarmBudgetEntry("cluster-a", "pods", "")
+	bPods := newWarmBudgetEntry("cluster-b", "pods", "")
+	cPods := newWarmBudgetEntry("cluster-c", "pods", "")
+	entryBytes := aPods.store.RetainedBytes()
+	if bPods.store.RetainedBytes() != entryBytes || cPods.store.RetainedBytes() != entryBytes {
+		t.Fatal("equal-shaped byte fixtures have different weights")
+	}
+
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:                      &fakeResourceSource{},
+		WarmViewLimit:               8,
+		WarmObjectLimit:             100,
+		WarmByteLimit:               2 * entryBytes,
+		WarmViewLimitPerAuthority:   4,
+		WarmObjectLimitPerAuthority: 100,
+		WarmByteLimitPerAuthority:   2 * entryBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	admitWarmBudgetEntry(runtime, aPods)
+	admitWarmBudgetEntry(runtime, bPods)
+	admitWarmBudgetEntry(runtime, cPods)
+
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.resources[aPods.key] != nil {
+		t.Fatal("global byte LRU did not evict its oldest entry")
+	}
+	if runtime.resources[bPods.key] != bPods || runtime.resources[cPods.key] != cPods {
+		t.Fatal("global byte LRU evicted a newer entry")
+	}
+	if _, exists := runtime.warmByAuthority["cluster-a"]; exists {
+		t.Fatal("global byte eviction left an authority-cache ghost")
+	}
+}
+
+func TestRuntimeWarmByteDefaultsAndNegativeValidation(t *testing.T) {
+	t.Parallel()
+	runtime, err := NewRuntime(RuntimeConfig{Source: &fakeResourceSource{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.warmByteLimit != DefaultWarmByteLimit ||
+		runtime.warmByteLimitPerAuthority != DefaultWarmByteLimitPerAuthority {
+		t.Fatalf(
+			"warm byte defaults = %d/%d, want %d/%d",
+			runtime.warmByteLimit, runtime.warmByteLimitPerAuthority,
+			DefaultWarmByteLimit, DefaultWarmByteLimitPerAuthority,
+		)
+	}
+	runtime.Close()
+
+	for _, config := range []RuntimeConfig{
+		{Source: &fakeResourceSource{}, WarmByteLimit: -1},
+		{Source: &fakeResourceSource{}, WarmByteLimitPerAuthority: -1},
+	} {
+		if invalid, err := NewRuntime(config); err == nil {
+			invalid.Close()
+			t.Fatal("negative warm byte limit was accepted")
+		}
+	}
+}
+
 func newWarmBudgetRuntime(
 	t *testing.T,
 	globalViews, globalObjects, authorityViews, authorityObjects int,

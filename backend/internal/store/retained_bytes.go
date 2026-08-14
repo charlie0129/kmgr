@@ -13,9 +13,14 @@ import (
 // memory ceiling. These constants approximate 64-bit Go container overhead
 // and apply a two-times safety factor to the recursively retained object graph.
 const (
-	uidStoreBaseRetainedBytes int64 = 2 << 10
-	objectIndexRetainedBytes  int64 = 1 << 10
-	maxRetainedEstimateDepth        = 256
+	uidStoreBaseRetainedBytes   int64 = 2 << 10
+	objectIndexRetainedBytes    int64 = 512
+	topLevelIndexBytesPerObject int64 = 512
+	topLevelIndexBytesPerOwner  int64 = 256
+	topLevelIndexBytesPerNode   int64 = 256
+	nestedIndexBytesPerLink     int64 = 96
+	maxRetainedBytes                  = math.MaxInt64
+	maxRetainedEstimateDepth          = 256
 )
 
 func estimateRetainedObjectBytes(object *unstructured.Unstructured) int64 {
@@ -29,7 +34,7 @@ func estimateRetainedObjectBytes(object *unstructured.Unstructured) int64 {
 
 func estimateRetainedValue(value any, depth int) int64 {
 	if depth > maxRetainedEstimateDepth {
-		return math.MaxInt64
+		return maxRetainedBytes
 	}
 
 	switch typed := value.(type) {
@@ -84,20 +89,20 @@ func estimateRetainedValue(value any, depth int) int64 {
 		// Kubernetes unstructured values are restricted to the cases above.
 		// Treat an unexpected custom value as unbounded instead of allowing it to
 		// bypass the warm memory ceiling with an unknowable retained graph.
-		return math.MaxInt64
+		return maxRetainedBytes
 	}
 }
 
 func saturatingRetainedAdd(left, right int64) int64 {
-	if left < 0 || right < 0 || left > math.MaxInt64-right {
-		return math.MaxInt64
+	if left < 0 || right < 0 || left > maxRetainedBytes-right {
+		return maxRetainedBytes
 	}
 	return left + right
 }
 
 func saturatingRetainedMultiply(value, factor int64) int64 {
-	if value < 0 || factor < 0 || (factor != 0 && value > math.MaxInt64/factor) {
-		return math.MaxInt64
+	if value < 0 || factor < 0 || (factor != 0 && value > maxRetainedBytes/factor) {
+		return maxRetainedBytes
 	}
 	return value * factor
 }

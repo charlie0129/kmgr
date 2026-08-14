@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"math"
 	"slices"
 	"testing"
@@ -184,11 +185,13 @@ func TestRetainedBytesFollowUpdateRecreationDeleteAndReconcile(t *testing.T) {
 		t.Fatal("second object did not increase retained-byte estimate")
 	}
 	s.ReconcileSnapshot(map[types.UID]struct{}{"uid-new": {}}, "rv")
-	if got := s.RetainedBytes(); got != recreatedBytes {
-		t.Fatalf("reconciled estimate = %d, want %d", got, recreatedBytes)
+	wantReconciled := recreatedBytes + topLevelIndexBytesPerObject
+	if got := s.RetainedBytes(); got != wantReconciled {
+		t.Fatalf("reconciled estimate = %d, want %d", got, wantReconciled)
 	}
-	if !s.Delete("uid-new") || s.RetainedBytes() != baseline {
-		t.Fatalf("delete did not restore baseline: got %d, want %d", s.RetainedBytes(), baseline)
+	wantEmpty := baseline + 2*topLevelIndexBytesPerObject
+	if !s.Delete("uid-new") || s.RetainedBytes() != wantEmpty {
+		t.Fatalf("delete did not retain index high-water %d: got %d", wantEmpty, s.RetainedBytes())
 	}
 }
 
@@ -198,14 +201,116 @@ func TestRetainedBytesRecoverAfterUnsupportedObjectSaturatesEstimate(t *testing.
 	finite := object("uid-finite", "ns", "finite", "")
 	s.Upsert(finite)
 	finiteBytes := s.RetainedBytes()
+	finiteObjectBytes := s.finiteBytes
 	invalid := object("uid-invalid", "ns", "invalid", "")
 	invalid.Object["unsupported"] = struct{ Value string }{Value: "not unstructured JSON"}
 	s.Upsert(invalid)
 	if got := s.RetainedBytes(); got != math.MaxInt64 {
 		t.Fatalf("unsupported graph estimate = %d, want saturation", got)
 	}
-	if !s.Delete("uid-invalid") || s.RetainedBytes() != finiteBytes {
-		t.Fatalf("saturated estimate did not recover finite bytes %d: %d", finiteBytes, s.RetainedBytes())
+	wantRetained := finiteBytes + topLevelIndexBytesPerObject
+	if !s.Delete("uid-invalid") || s.RetainedBytes() != wantRetained || s.finiteBytes != finiteObjectBytes {
+		t.Fatalf(
+			"saturated estimate did not recover finite object/index bytes: retained=%d want=%d finite=%d want=%d",
+			s.RetainedBytes(), wantRetained, s.finiteBytes, finiteObjectBytes,
+		)
+	}
+}
+
+func TestRetainedBytesKeepTopLevelIndexHighWaterAfterDeletes(t *testing.T) {
+	t.Parallel()
+	s := New()
+	const count = 100
+	for index := range count {
+		s.Upsert(object(fmt.Sprintf("uid-%d", index), "ns", fmt.Sprintf("name-%d", index), ""))
+	}
+	for index := range count {
+		if !s.Delete(types.UID(fmt.Sprintf("uid-%d", index))) {
+			t.Fatalf("delete %d failed", index)
+		}
+	}
+	want := uidStoreBaseRetainedBytes + count*topLevelIndexBytesPerObject
+	if got := s.RetainedBytes(); got != want {
+		t.Fatalf("empty high-water estimate = %d, want %d", got, want)
+	}
+}
+
+func TestRetainedBytesUsePersistedWeightAfterAccidentalMutation(t *testing.T) {
+	t.Parallel()
+	s := New()
+	value := object("uid", "ns", "name", "")
+	s.Upsert(value)
+	value.Object["accidental"] = string(make([]byte, 1<<20))
+	if !s.Delete("uid") {
+		t.Fatal("delete failed")
+	}
+	want := uidStoreBaseRetainedBytes + topLevelIndexBytesPerObject
+	if got := s.RetainedBytes(); got != want || s.finiteBytes != 0 {
+		t.Fatalf("mutated delete estimate = %d/finite %d, want %d/0", got, s.finiteBytes, want)
+	}
+}
+
+func TestRetainedBytesKeepNestedOwnerMembershipHighWaterAfterReconcile(t *testing.T) {
+	t.Parallel()
+	s := New()
+	const objectCount = 40
+	const ownerCount = 25
+	owners := make([]metav1.OwnerReference, ownerCount)
+	for index := range owners {
+		owners[index] = metav1.OwnerReference{UID: types.UID(fmt.Sprintf("owner-%d", index))}
+	}
+	for index := range objectCount {
+		value := object(fmt.Sprintf("uid-%d", index), "ns", fmt.Sprintf("name-%d", index), "")
+		value.SetOwnerReferences(owners)
+		s.Upsert(value)
+	}
+	if got, want := s.ownerLinkCapacity, int64(objectCount*ownerCount); got != want {
+		t.Fatalf("owner-link high-water = %d, want %d", got, want)
+	}
+
+	s.ReconcileSnapshot(map[types.UID]struct{}{"uid-0": {}}, "rv")
+	currentLinks := int64(0)
+	for _, children := range s.byOwnerUID {
+		currentLinks += int64(len(children))
+	}
+	if currentLinks != ownerCount {
+		t.Fatalf("current owner links = %d, want %d", currentLinks, ownerCount)
+	}
+	minimum := uidStoreBaseRetainedBytes + int64(objectCount*ownerCount)*nestedIndexBytesPerLink
+	if got := s.RetainedBytes(); got < minimum {
+		t.Fatalf("reconciled retained bytes = %d, want at least owner-link high-water %d", got, minimum)
+	}
+}
+
+func TestRetainedBytesSumSequentialSurvivingOwnerMapHighWater(t *testing.T) {
+	t.Parallel()
+	s := New()
+	const peak = 80
+	ownerA := metav1.OwnerReference{UID: "owner-a"}
+	ownerB := metav1.OwnerReference{UID: "owner-b"}
+	for index := range peak {
+		value := object(fmt.Sprintf("a-%d", index), "ns", fmt.Sprintf("a-%d", index), "")
+		value.SetOwnerReferences([]metav1.OwnerReference{ownerA})
+		s.Upsert(value)
+	}
+	s.ReconcileSnapshot(map[types.UID]struct{}{"a-0": {}}, "rv-a")
+	for index := range peak {
+		value := object(fmt.Sprintf("b-%d", index), "ns", fmt.Sprintf("b-%d", index), "")
+		value.SetOwnerReferences([]metav1.OwnerReference{ownerB})
+		s.Upsert(value)
+	}
+	s.ReconcileSnapshot(map[types.UID]struct{}{"a-0": {}, "b-0": {}}, "rv-b")
+
+	wantCapacity := int64(2 * peak)
+	if s.ownerLinkCapacity != wantCapacity {
+		t.Fatalf("sequential owner-map capacity = %d, want %d", s.ownerLinkCapacity, wantCapacity)
+	}
+	if s.ownerLinkHighWater[ownerA.UID] != peak || s.ownerLinkHighWater[ownerB.UID] != peak {
+		t.Fatalf("per-owner high-water = %#v", s.ownerLinkHighWater)
+	}
+	minimum := uidStoreBaseRetainedBytes + wantCapacity*nestedIndexBytesPerLink
+	if got := s.RetainedBytes(); got < minimum {
+		t.Fatalf("sequential retained bytes = %d, want at least %d", got, minimum)
 	}
 }
 

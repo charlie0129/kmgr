@@ -3,7 +3,6 @@ package store
 
 import (
 	"cmp"
-	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -37,23 +36,35 @@ type SearchIdentity struct {
 type UIDStore struct {
 	mu sync.RWMutex
 
-	byUID         map[types.UID]*unstructured.Unstructured
-	byName        map[NamespacedName]types.UID
-	byOwnerUID    map[types.UID]map[types.UID]struct{}
-	byNodeName    map[string]map[types.UID]struct{}
-	bySearchUID   map[types.UID]SearchIdentity
-	retainedBytes int64
-	resourceVer   string
+	byUID                 map[types.UID]*unstructured.Unstructured
+	byName                map[NamespacedName]types.UID
+	byOwnerUID            map[types.UID]map[types.UID]struct{}
+	byNodeName            map[string]map[types.UID]struct{}
+	bySearchUID           map[types.UID]SearchIdentity
+	byUIDBytes            map[types.UID]int64
+	finiteBytes           int64
+	unbounded             int
+	finiteOverflow        bool
+	indexHighWaterObjects int64
+	indexHighWaterOwners  int64
+	indexHighWaterNodes   int64
+	ownerLinkHighWater    map[types.UID]int64
+	nodeLinkHighWater     map[string]int64
+	ownerLinkCapacity     int64
+	nodeLinkCapacity      int64
+	resourceVer           string
 }
 
 func New() *UIDStore {
 	return &UIDStore{
-		byUID:         make(map[types.UID]*unstructured.Unstructured),
-		byName:        make(map[NamespacedName]types.UID),
-		byOwnerUID:    make(map[types.UID]map[types.UID]struct{}),
-		byNodeName:    make(map[string]map[types.UID]struct{}),
-		bySearchUID:   make(map[types.UID]SearchIdentity),
-		retainedBytes: uidStoreBaseRetainedBytes,
+		byUID:              make(map[types.UID]*unstructured.Unstructured),
+		byName:             make(map[NamespacedName]types.UID),
+		byOwnerUID:         make(map[types.UID]map[types.UID]struct{}),
+		byNodeName:         make(map[string]map[types.UID]struct{}),
+		bySearchUID:        make(map[types.UID]SearchIdentity),
+		byUIDBytes:         make(map[types.UID]int64),
+		ownerLinkHighWater: make(map[types.UID]int64),
+		nodeLinkHighWater:  make(map[string]int64),
 	}
 }
 
@@ -71,7 +82,7 @@ func (s *UIDStore) Upsert(object *unstructured.Unstructured) Change {
 	change := Change{UID: uid}
 	if current, ok := s.byUID[uid]; ok {
 		s.removeIndexesLocked(current)
-		s.removeRetainedBytesLocked(current)
+		s.removeRetainedBytesLocked(uid)
 	} else {
 		change.Created = true
 	}
@@ -79,7 +90,7 @@ func (s *UIDStore) Upsert(object *unstructured.Unstructured) Change {
 	if previousUID, ok := s.byName[key]; ok && previousUID != uid {
 		if previous := s.byUID[previousUID]; previous != nil {
 			s.removeIndexesLocked(previous)
-			s.removeRetainedBytesLocked(previous)
+			s.removeRetainedBytesLocked(previousUID)
 			delete(s.byUID, previousUID)
 		}
 		change.ReplacedUID = previousUID
@@ -87,8 +98,9 @@ func (s *UIDStore) Upsert(object *unstructured.Unstructured) Change {
 
 	s.byUID[uid] = object
 	s.byName[key] = uid
-	s.retainedBytes = saturatingRetainedAdd(s.retainedBytes, objectBytes)
+	s.addRetainedBytesLocked(uid, objectBytes)
 	s.addIndexesLocked(object)
+	s.recordIndexHighWaterLocked()
 	return change
 }
 
@@ -101,7 +113,7 @@ func (s *UIDStore) Delete(uid types.UID) bool {
 		return false
 	}
 	s.removeIndexesLocked(object)
-	s.removeRetainedBytesLocked(object)
+	s.removeRetainedBytesLocked(uid)
 	delete(s.byUID, uid)
 	key := NamespacedName{Namespace: object.GetNamespace(), Name: object.GetName()}
 	if s.byName[key] == uid {
@@ -153,7 +165,10 @@ func (s *UIDStore) Len() int {
 func (s *UIDStore) RetainedBytes() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.retainedBytes
+	if s.unbounded != 0 || s.finiteOverflow {
+		return maxRetainedBytes
+	}
+	return saturatingRetainedAdd(s.finiteBytes, s.retainedIndexHighWaterBytesLocked())
 }
 
 // Snapshot returns the immutable objects currently retained by the store in a
@@ -229,7 +244,7 @@ func (s *UIDStore) ReconcileSnapshot(present map[types.UID]struct{}, resourceVer
 			continue
 		}
 		s.removeIndexesLocked(object)
-		s.removeRetainedBytesLocked(object)
+		s.removeRetainedBytesLocked(uid)
 		delete(s.byUID, uid)
 		key := NamespacedName{Namespace: object.GetNamespace(), Name: object.GetName()}
 		if s.byName[key] == uid {
@@ -251,10 +266,14 @@ func (s *UIDStore) addIndexesLocked(object *unstructured.Unstructured) {
 		NormalizedQualified: strings.ToLower(object.GetNamespace()) + "/" + name,
 	}
 	for _, owner := range object.GetOwnerReferences() {
-		addToIndex(s.byOwnerUID, owner.UID, uid)
+		if addToIndex(s.byOwnerUID, owner.UID, uid) {
+			s.recordOwnerLinkHighWaterLocked(owner.UID)
+		}
 	}
 	if nodeName, found, _ := unstructured.NestedString(object.Object, "spec", "nodeName"); found && nodeName != "" {
-		addToIndex(s.byNodeName, nodeName, uid)
+		if addToIndex(s.byNodeName, nodeName, uid) {
+			s.recordNodeLinkHighWaterLocked(nodeName)
+		}
 	}
 }
 
@@ -262,37 +281,103 @@ func (s *UIDStore) removeIndexesLocked(object *unstructured.Unstructured) {
 	uid := object.GetUID()
 	delete(s.bySearchUID, uid)
 	for _, owner := range object.GetOwnerReferences() {
-		removeFromIndex(s.byOwnerUID, owner.UID, uid)
+		if _, emptied := removeFromIndex(s.byOwnerUID, owner.UID, uid); emptied {
+			s.ownerLinkCapacity -= s.ownerLinkHighWater[owner.UID]
+			delete(s.ownerLinkHighWater, owner.UID)
+		}
 	}
 	if nodeName, found, _ := unstructured.NestedString(object.Object, "spec", "nodeName"); found && nodeName != "" {
-		removeFromIndex(s.byNodeName, nodeName, uid)
+		if _, emptied := removeFromIndex(s.byNodeName, nodeName, uid); emptied {
+			s.nodeLinkCapacity -= s.nodeLinkHighWater[nodeName]
+			delete(s.nodeLinkHighWater, nodeName)
+		}
 	}
 }
 
-func (s *UIDStore) removeRetainedBytesLocked(object *unstructured.Unstructured) {
-	if s.retainedBytes == math.MaxInt64 {
-		// Saturation is possible only for an invalid/deep custom graph or an
-		// unrealistically large store. Rebuild after its removal so one rejected
-		// object cannot leave all later warm-cache weights permanently saturated.
-		removedUID := object.GetUID()
-		s.retainedBytes = uidStoreBaseRetainedBytes
-		for uid, retained := range s.byUID {
-			if uid == removedUID {
-				continue
-			}
-			s.retainedBytes = saturatingRetainedAdd(
-				s.retainedBytes, estimateRetainedObjectBytes(retained),
-			)
-		}
+func (s *UIDStore) addRetainedBytesLocked(uid types.UID, objectBytes int64) {
+	s.byUIDBytes[uid] = objectBytes
+	if objectBytes == maxRetainedBytes {
+		s.unbounded++
 		return
 	}
-	objectBytes := estimateRetainedObjectBytes(object)
-	s.retainedBytes -= objectBytes
-	if s.retainedBytes < uidStoreBaseRetainedBytes {
-		// Defensive saturation keeps accounting usable even if a future mutation
-		// path is changed without updating its byte bookkeeping.
-		s.retainedBytes = uidStoreBaseRetainedBytes
+	if s.finiteOverflow || s.finiteBytes > maxRetainedBytes-objectBytes {
+		s.finiteBytes = maxRetainedBytes
+		s.finiteOverflow = true
+		return
 	}
+	s.finiteBytes += objectBytes
+}
+
+func (s *UIDStore) removeRetainedBytesLocked(uid types.UID) {
+	objectBytes, exists := s.byUIDBytes[uid]
+	if !exists {
+		return
+	}
+	delete(s.byUIDBytes, uid)
+	if objectBytes == maxRetainedBytes {
+		s.unbounded--
+		return
+	}
+	if !s.finiteOverflow {
+		s.finiteBytes -= objectBytes
+		return
+	}
+	// Physical finite overflow is not realistic, but rebuilding from persisted
+	// per-UID weights makes subtraction reversible without traversing payloads.
+	s.finiteBytes = 0
+	s.finiteOverflow = false
+	for _, retained := range s.byUIDBytes {
+		if retained == maxRetainedBytes {
+			continue
+		}
+		if s.finiteBytes > maxRetainedBytes-retained {
+			s.finiteBytes = maxRetainedBytes
+			s.finiteOverflow = true
+			break
+		}
+		s.finiteBytes += retained
+	}
+}
+
+func (s *UIDStore) recordIndexHighWaterLocked() {
+	s.indexHighWaterObjects = max(s.indexHighWaterObjects, int64(len(s.byUID)))
+	s.indexHighWaterOwners = max(s.indexHighWaterOwners, int64(len(s.byOwnerUID)))
+	s.indexHighWaterNodes = max(s.indexHighWaterNodes, int64(len(s.byNodeName)))
+}
+
+func (s *UIDStore) recordOwnerLinkHighWaterLocked(ownerUID types.UID) {
+	current := int64(len(s.byOwnerUID[ownerUID]))
+	if previous := s.ownerLinkHighWater[ownerUID]; current > previous {
+		s.ownerLinkHighWater[ownerUID] = current
+		s.ownerLinkCapacity += current - previous
+	}
+}
+
+func (s *UIDStore) recordNodeLinkHighWaterLocked(nodeName string) {
+	current := int64(len(s.byNodeName[nodeName]))
+	if previous := s.nodeLinkHighWater[nodeName]; current > previous {
+		s.nodeLinkHighWater[nodeName] = current
+		s.nodeLinkCapacity += current - previous
+	}
+}
+
+func (s *UIDStore) retainedIndexHighWaterBytesLocked() int64 {
+	result := uidStoreBaseRetainedBytes
+	result = saturatingRetainedAdd(result, saturatingRetainedMultiply(
+		s.indexHighWaterObjects, topLevelIndexBytesPerObject,
+	))
+	result = saturatingRetainedAdd(result, saturatingRetainedMultiply(
+		s.indexHighWaterOwners, topLevelIndexBytesPerOwner,
+	))
+	result = saturatingRetainedAdd(result, saturatingRetainedMultiply(
+		s.indexHighWaterNodes, topLevelIndexBytesPerNode,
+	))
+	result = saturatingRetainedAdd(result, saturatingRetainedMultiply(
+		s.ownerLinkCapacity, nestedIndexBytesPerLink,
+	))
+	return saturatingRetainedAdd(result, saturatingRetainedMultiply(
+		s.nodeLinkCapacity, nestedIndexBytesPerLink,
+	))
 }
 
 func (s *UIDStore) objectsForUIDSetLocked(set map[types.UID]struct{}) []*unstructured.Unstructured {
@@ -314,19 +399,30 @@ func (s *UIDStore) objectsForUIDSetLocked(set map[types.UID]struct{}) []*unstruc
 	return objects
 }
 
-func addToIndex[K comparable](index map[K]map[types.UID]struct{}, key K, uid types.UID) {
+func addToIndex[K comparable](index map[K]map[types.UID]struct{}, key K, uid types.UID) bool {
 	values := index[key]
 	if values == nil {
 		values = make(map[types.UID]struct{})
 		index[key] = values
 	}
+	if _, exists := values[uid]; exists {
+		return false
+	}
 	values[uid] = struct{}{}
+	return true
 }
 
-func removeFromIndex[K comparable](index map[K]map[types.UID]struct{}, key K, uid types.UID) {
+func removeFromIndex[K comparable](
+	index map[K]map[types.UID]struct{}, key K, uid types.UID,
+) (removed, emptied bool) {
 	values := index[key]
+	if _, exists := values[uid]; !exists {
+		return false, false
+	}
 	delete(values, uid)
 	if len(values) == 0 {
 		delete(index, key)
+		return true, true
 	}
+	return true, false
 }

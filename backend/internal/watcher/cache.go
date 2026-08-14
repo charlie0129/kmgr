@@ -70,12 +70,8 @@ func (c *WarmCache[K, V]) Put(key K, entry WarmEntry[V]) (evicted []K, admitted 
 		delete(c.byKey, key)
 	}
 
-	item := &cacheItem[K, V]{key: key, entry: entry}
-	c.byKey[key] = c.lru.PushFront(item)
-	c.objects += entry.ObjectCount
-	c.bytes += entry.ByteCount
-
-	for len(c.byKey) > c.maxEntries || c.objects > c.maxObjects || c.bytes > c.maxBytes {
+	for len(c.byKey) >= c.maxEntries || entry.ObjectCount > c.maxObjects-c.objects ||
+		entry.ByteCount > c.maxBytes-c.bytes {
 		element := c.lru.Back()
 		item := element.Value.(*cacheItem[K, V])
 		c.lru.Remove(element)
@@ -84,6 +80,11 @@ func (c *WarmCache[K, V]) Put(key K, entry WarmEntry[V]) (evicted []K, admitted 
 		c.bytes -= item.entry.ByteCount
 		evicted = append(evicted, item.key)
 	}
+
+	item := &cacheItem[K, V]{key: key, entry: entry}
+	c.byKey[key] = c.lru.PushFront(item)
+	c.objects += entry.ObjectCount
+	c.bytes += entry.ByteCount
 	return evicted, true
 }
 
