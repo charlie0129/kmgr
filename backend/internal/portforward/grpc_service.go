@@ -132,6 +132,11 @@ func (s *GRPCService) Watch(
 		request.GetStreamId() == "" || request.GetGeneration() == 0 {
 		return status.Error(codes.InvalidArgument, "request context, stream ID, and generation are required")
 	}
+	_, watchContext, cancel, err := portForwardRequestContext(stream.Context(), request.GetContext())
+	if err != nil {
+		return err
+	}
+	defer cancel()
 	updates, unsubscribe := s.manager.subscribe()
 	defer unsubscribe()
 	sequence := uint64(1)
@@ -152,8 +157,8 @@ func (s *GRPCService) Watch(
 	}
 	for {
 		select {
-		case <-stream.Context().Done():
-			return stream.Context().Err()
+		case <-watchContext.Done():
+			return portForwardStatusError(watchContext.Err())
 		case <-updates.ready:
 			batch := updates.drain()
 			delta := &kmgrv1.PortForwardDelta{}

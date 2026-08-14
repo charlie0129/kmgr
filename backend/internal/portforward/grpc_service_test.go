@@ -8,6 +8,8 @@ import (
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestGRPCStartListStopAndNonLoopbackWarning(t *testing.T) {
@@ -102,6 +104,38 @@ func TestGRPCWatchStartsWithSnapshotAndEmitsStoppedRemoval(t *testing.T) {
 		if event.GetCursor().GetGeneration() != 7 || event.GetCursor().GetSequence() != uint64(index+1) {
 			t.Fatalf("cursor %d = %#v", index, event.GetCursor())
 		}
+	}
+}
+
+func TestGRPCWatchHonorsApplicationDeadline(t *testing.T) {
+	t.Parallel()
+	manager := testManager(t, &sequenceResolver{}, &fakeForwarder{})
+	defer manager.Close()
+	service, err := NewGRPCService(manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestContext := pfContext("deadline-watch")
+	requestContext.DeadlineUnixMs = time.Now().Add(40 * time.Millisecond).UnixMilli()
+	stream := &recordingPFStream{ctx: context.Background(), sent: make(chan struct{}, 1)}
+	done := make(chan error, 1)
+	go func() {
+		done <- service.Watch(&kmgrv1.WatchPortForwardsRequest{
+			Context: requestContext, StreamId: "deadline-stream", Generation: 1,
+		}, stream)
+	}()
+	select {
+	case <-stream.sent:
+	case <-time.After(time.Second):
+		t.Fatal("watch did not send its initial snapshot")
+	}
+	select {
+	case err := <-done:
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Fatalf("watch error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watch did not stop at its application deadline")
 	}
 }
 

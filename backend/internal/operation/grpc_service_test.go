@@ -10,6 +10,8 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 )
@@ -95,6 +97,48 @@ func TestApplyWatchAndCancelOperation(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestWatchOperationHonorsApplicationDeadline(t *testing.T) {
+	t.Parallel()
+	editor := &fakeYAMLEditor{block: make(chan struct{})}
+	service := testOperationService(t, editor)
+	started, err := service.ApplyYaml(context.Background(), &kmgrv1.ApplyYamlRequest{
+		Context: operationContext("start-deadline-watch"), OperationId: "deadline-watch-operation",
+		Identity: operationIdentity(), YamlUtf8: []byte("data: pending"),
+		ExpectedResourceVersion: "rv-1", FieldManager: "kmgr",
+	})
+	if err != nil || !started.GetAccepted() {
+		t.Fatalf("start = %#v, error = %v", started, err)
+	}
+	requestContext := operationContext("deadline-watch")
+	requestContext.DeadlineUnixMs = time.Now().Add(40 * time.Millisecond).UnixMilli()
+	stream := &recordingOperationStream{ctx: context.Background()}
+	done := make(chan error, 1)
+	go func() {
+		done <- service.WatchOperation(&kmgrv1.WatchOperationRequest{
+			Context: requestContext, StreamId: "deadline-stream", Generation: 1,
+			OperationId: "deadline-watch-operation",
+		}, stream)
+	}()
+	select {
+	case err := <-done:
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Fatalf("watch error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watch did not stop at its application deadline")
+	}
+	operation, found := service.manager.Get("deadline-watch-operation")
+	if !found {
+		t.Fatal("watch deadline removed the underlying operation")
+	}
+	select {
+	case <-operation.Done():
+		t.Fatal("watch deadline cancelled the underlying operation")
+	default:
+	}
+	operation.Cancel()
 }
 
 func TestAcceptedApplyYamlRetainsApplicationDeadline(t *testing.T) {

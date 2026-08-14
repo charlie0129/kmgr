@@ -307,11 +307,16 @@ func (s *GRPCService) WatchOperation(
 	request *kmgrv1.WatchOperationRequest,
 	stream kmgrv1.OperationService_WatchOperationServer,
 ) error {
-	if request == nil || request.GetContext() == nil || request.GetContext().GetRequestId() == "" ||
+	if request == nil || stream == nil || request.GetContext() == nil || request.GetContext().GetRequestId() == "" ||
 		request.GetContext().GetClusterSessionId() == "" || request.GetStreamId() == "" ||
 		request.GetGeneration() == 0 || request.GetOperationId() == "" {
 		return status.Error(codes.InvalidArgument, "request context, stream ID, generation, and operation ID are required")
 	}
+	_, watchContext, cancel, err := operationRequestContext(stream.Context(), request.GetContext())
+	if err != nil {
+		return err
+	}
+	defer cancel()
 	operation, found := s.manager.Get(request.GetOperationId())
 	if !found {
 		return status.Error(codes.NotFound, "operation was not found")
@@ -334,11 +339,22 @@ func (s *GRPCService) WatchOperation(
 			return nil
 		}
 		select {
-		case <-stream.Context().Done():
-			return stream.Context().Err()
+		case <-watchContext.Done():
+			return operationWatchStatusError(watchContext.Err())
 		case <-operation.Done():
 		case <-changed:
 		}
+	}
+}
+
+func operationWatchStatusError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, "operation watch was cancelled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, "operation watch request deadline exceeded")
+	default:
+		return status.Error(codes.Internal, "operation watch failed")
 	}
 }
 
