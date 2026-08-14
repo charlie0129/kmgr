@@ -44,6 +44,90 @@ public enum DataEditorRowState: String, Hashable, Sendable {
     }
 }
 
+public enum DataValuePreviewState: Hashable, Sendable {
+    case text
+    case binary
+    case concealed
+}
+
+/// A bounded, single-line value for the Data editor's table. Secret input is
+/// concealed by default and becomes presentable only when the caller supplies
+/// explicit reveal authority. The source `Data` is consumed during
+/// initialization and is never retained by this value.
+public struct DataValuePreviewPresentation: Hashable, Sendable {
+    public static let maximumTextCharacterCount = 160
+
+    public let displayText: String
+    public let accessibilityValue: String
+    public let state: DataValuePreviewState
+    public let isTruncated: Bool
+
+    public init(
+        kind: DataValueKind,
+        value: Data,
+        secret: Bool,
+        hasRevealAuthority: Bool = false
+    ) {
+        let countText = Self.countText(value.count)
+        guard !secret || hasRevealAuthority else {
+            displayText = "Secret concealed · \(countText)"
+            accessibilityValue = "Secret value concealed, \(countText)"
+            state = .concealed
+            isTruncated = false
+            return
+        }
+
+        guard kind == .text, let decoded = String(data: value, encoding: .utf8) else {
+            displayText = "Binary · \(countText)"
+            accessibilityValue = "Binary value, \(countText)"
+            state = .binary
+            isTruncated = false
+            return
+        }
+
+        let normalized = Self.singleLine(decoded)
+        let bounded = Self.bounded(normalized)
+        displayText = bounded.text.isEmpty ? "(empty)" : bounded.text
+        accessibilityValue = bounded.text.isEmpty
+            ? "Empty text value"
+            : "Text value: \(bounded.text)" + (bounded.truncated ? ", truncated preview" : "")
+        state = .text
+        isTruncated = bounded.truncated
+    }
+
+    private static func singleLine(_ value: String) -> String {
+        var result = String.UnicodeScalarView()
+        result.reserveCapacity(min(value.unicodeScalars.count, maximumTextCharacterCount + 1))
+        var previousWasNormalizedControl = false
+
+        for scalar in value.unicodeScalars {
+            let isControl = CharacterSet.controlCharacters.contains(scalar)
+                || CharacterSet.newlines.contains(scalar)
+            if isControl {
+                if !previousWasNormalizedControl {
+                    result.append(" ")
+                }
+                previousWasNormalizedControl = true
+            } else {
+                result.append(scalar)
+                previousWasNormalizedControl = false
+            }
+        }
+        return String(result).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func bounded(_ value: String) -> (text: String, truncated: Bool) {
+        guard value.count > maximumTextCharacterCount else {
+            return (value, false)
+        }
+        return (String(value.prefix(maximumTextCharacterCount - 1)) + "…", true)
+    }
+
+    private static func countText(_ count: Int) -> String {
+        count == 1 ? "1 byte" : "\(count.formatted()) bytes"
+    }
+}
+
 /// Metadata-only presentation for the Data editor's key list. It deliberately
 /// has no value or preview input, so the same presentation is safe for Secrets
 /// whether or not the selected value is currently revealed in the editor.

@@ -118,6 +118,138 @@ import Testing
     #expect(row.accessibilityValue == "old-conflict, text, 24 bytes, Conflict")
 }
 
+@Test func configMapValuePreviewNormalizesControlsIntoOneLine() {
+    let value = Data("  first\r\nsecond\t\u{7}\u{2028}third  ".utf8)
+    let preview = DataValuePreviewPresentation(
+        kind: .text,
+        value: value,
+        secret: false
+    )
+
+    #expect(preview.displayText == "first second third")
+    #expect(!preview.displayText.contains("\n"))
+    #expect(!preview.displayText.contains("\r"))
+    #expect(preview.accessibilityValue == "Text value: first second third")
+    #expect(preview.state == .text)
+    #expect(!preview.isTruncated)
+}
+
+@Test func textValuePreviewIsBoundedAndMarksTruncation() {
+    let limit = DataValuePreviewPresentation.maximumTextCharacterCount
+    let value = Data(String(repeating: "a", count: limit + 80).utf8)
+    let preview = DataValuePreviewPresentation(
+        kind: .text,
+        value: value,
+        secret: false
+    )
+
+    #expect(preview.displayText.count == limit)
+    #expect(preview.displayText.hasSuffix("…"))
+    #expect(preview.isTruncated)
+    #expect(preview.accessibilityValue.contains("truncated preview"))
+}
+
+@Test func emptyTextValueHasAUsefulAccessiblePlaceholder() {
+    let preview = DataValuePreviewPresentation(
+        kind: .text,
+        value: Data("\n\t".utf8),
+        secret: false
+    )
+
+    #expect(preview.displayText == "(empty)")
+    #expect(preview.accessibilityValue == "Empty text value")
+    #expect(preview.state == .text)
+}
+
+@Test func binaryValuePreviewNeverRendersRawOrBase64Bytes() {
+    let value = Data("binary-looking-text".utf8)
+    let encoded = value.base64EncodedString()
+    let preview = DataValuePreviewPresentation(
+        kind: .binary,
+        value: value,
+        secret: false
+    )
+
+    #expect(preview.displayText == "Binary · 19 bytes")
+    #expect(preview.accessibilityValue == "Binary value, 19 bytes")
+    #expect(!preview.displayText.contains("binary-looking-text"))
+    #expect(!preview.displayText.contains(encoded))
+    #expect(preview.state == .binary)
+}
+
+@Test func invalidUTF8TextValueFallsBackToTheSafeBinaryLabel() {
+    let preview = DataValuePreviewPresentation(
+        kind: .text,
+        value: Data([0xff, 0xfe, 0xfd]),
+        secret: false
+    )
+
+    #expect(preview.displayText == "Binary · 3 bytes")
+    #expect(preview.state == .binary)
+}
+
+@Test func secretValuePreviewRequiresExplicitRevealAuthority() {
+    let sentinel = "decoded-secret-value"
+    let value = Data(sentinel.utf8)
+    let encoded = value.base64EncodedString()
+    let preview = DataValuePreviewPresentation(
+        kind: .text,
+        value: value,
+        secret: true
+    )
+
+    #expect(preview.displayText == "Secret concealed · 20 bytes")
+    #expect(preview.accessibilityValue == "Secret value concealed, 20 bytes")
+    #expect(!preview.displayText.contains(sentinel))
+    #expect(!preview.displayText.contains(encoded))
+    #expect(!preview.accessibilityValue.contains(sentinel))
+    #expect(preview.state == .concealed)
+}
+
+@Test func revealedSecretUsesTheDecodedConfigMapTextPolicy() {
+    let value = Data("decoded\nsecret".utf8)
+    let configMap = DataValuePreviewPresentation(
+        kind: .text,
+        value: value,
+        secret: false
+    )
+    let secret = DataValuePreviewPresentation(
+        kind: .text,
+        value: value,
+        secret: true,
+        hasRevealAuthority: true
+    )
+
+    #expect(secret.displayText == "decoded secret")
+    #expect(secret.displayText == configMap.displayText)
+    #expect(secret.accessibilityValue == configMap.accessibilityValue)
+    #expect(secret.state == .text)
+    #expect(!secret.displayText.contains(value.base64EncodedString()))
+}
+
+@Test func revealedBinarySecretStillUsesOnlyTheSafeBinaryLabel() {
+    let preview = DataValuePreviewPresentation(
+        kind: .binary,
+        value: Data([0x00, 0x01, 0x02]),
+        secret: true,
+        hasRevealAuthority: true
+    )
+
+    #expect(preview.displayText == "Binary · 3 bytes")
+    #expect(preview.accessibilityValue == "Binary value, 3 bytes")
+    #expect(preview.state == .binary)
+}
+
+@Test func valuePreviewDoesNotRetainItsInputData() {
+    let preview = DataValuePreviewPresentation(
+        kind: .text,
+        value: Data("transient".utf8),
+        secret: false
+    )
+
+    #expect(!Mirror(reflecting: preview).children.contains { $0.value is Data })
+}
+
 @Test func configMapConflictDisplayShowsTextAndDecodedByteHash() {
     let value = Data("local value".utf8)
     let display = DataConflictValueDisplay(
