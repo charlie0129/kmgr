@@ -307,13 +307,25 @@ final class Application: NSObject, NSApplicationDelegate {
         let identifier = ObjectIdentifier(controller)
         workspaceControllers[identifier] = controller
         controller.onClose = { [weak self] in
-            if self?.isTerminating == false {
-                try? self?.restorationStore.remove(id: restoration.id)
+            guard let self else { return }
+            if !isTerminating {
+                try? restorationStore.remove(id: restoration.id)
             }
-            self?.columnsManagerControllers.removeValue(forKey: identifier)?.close()
-            self?.workspaceRecoveryTasks.removeValue(forKey: identifier)?.cancel()
-            self?.restoredWorkspaceAttempts.removeValue(forKey: identifier)?.cancel()
-            self?.workspaceControllers.removeValue(forKey: identifier)
+            columnsManagerControllers.removeValue(forKey: identifier)?.close()
+            workspaceRecoveryTasks.removeValue(forKey: identifier)?.cancel()
+            restoredWorkspaceAttempts.removeValue(forKey: identifier)?.cancel()
+            workspaceControllers.removeValue(forKey: identifier)
+
+            let policy = ClusterManagerPresentationPolicy(
+                isTerminating: isTerminating,
+                remainingWorkspaceCount: workspaceControllers.count,
+                hasClusterManager: !chooserControllers.isEmpty,
+                hasVisibleIndependentWindow: hasVisibleIndependentWindow,
+                hasActivePortForward: portForwardCoordinator.hasActiveForwards
+            )
+            if policy.shouldPresentAfterWorkspaceClose {
+                showClusterManager()
+            }
         }
         controller.onStartPortForward = { [weak controller] identity in
             controller?.showPortForwardConfiguration(identity)
@@ -338,6 +350,14 @@ final class Application: NSObject, NSApplicationDelegate {
     }
 
     private func restoreWorkspacesOrShowChooser() {
+        guard preferencesStore.current.restoreOpenClusterWindows else {
+            // A skipped document describes windows from a process that no
+            // longer exists. Consume it now so re-enabling restoration later
+            // cannot resurrect an older launch's workspace set.
+            restorationStore.reset()
+            showClusterManager()
+            return
+        }
         let records = restorationStore.windows
         guard !records.isEmpty else { showClusterManager(); return }
         for record in records {
@@ -404,6 +424,20 @@ final class Application: NSObject, NSApplicationDelegate {
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private var hasVisibleIndependentWindow: Bool {
+        if settingsWindowController.window?.isVisible == true
+            || portForwardsWindowController.window?.isVisible == true
+        {
+            return true
+        }
+        if logWindowControllers.values.contains(where: { $0.window?.isVisible == true }) {
+            return true
+        }
+        return terminalWindowControllers.values.contains {
+            $0.window?.isVisible == true
+        }
     }
 
     @objc private func showSettings(_ sender: Any?) {

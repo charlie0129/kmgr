@@ -99,6 +99,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
     public var logs: LogDisplayPreferences
     public var metricsRefreshSeconds: Int
     public var defaultNamespace: DefaultNamespacePreference
+    public var restoreOpenClusterWindows: Bool
     public var confirmations: ConfirmationPreferences
     public var columnsConfigurationPath: String
 
@@ -107,6 +108,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         logs: LogDisplayPreferences = LogDisplayPreferences(),
         metricsRefreshSeconds: Int = 15,
         defaultNamespace: DefaultNamespacePreference = .contextDefault,
+        restoreOpenClusterWindows: Bool = true,
         confirmations: ConfirmationPreferences = ConfirmationPreferences(),
         columnsConfigurationPath: String = AppPreferences.defaultColumnsConfigurationPath
     ) {
@@ -114,8 +116,47 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         self.logs = logs
         self.metricsRefreshSeconds = metricsRefreshSeconds
         self.defaultNamespace = defaultNamespace
+        self.restoreOpenClusterWindows = restoreOpenClusterWindows
         self.confirmations = confirmations
         self.columnsConfigurationPath = columnsConfigurationPath
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case appearance
+        case logs
+        case metricsRefreshSeconds
+        case defaultNamespace
+        case restoreOpenClusterWindows
+        case confirmations
+        case columnsConfigurationPath
+    }
+
+    /// Preferences documents predate the restoration toggle but share the v1
+    /// schema. Preserve those users' settings and apply the documented
+    /// default instead of rejecting the complete document for one absent key.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            appearance: try container.decode(AppearancePreference.self, forKey: .appearance),
+            logs: try container.decode(LogDisplayPreferences.self, forKey: .logs),
+            metricsRefreshSeconds: try container.decode(Int.self, forKey: .metricsRefreshSeconds),
+            defaultNamespace: try container.decode(
+                DefaultNamespacePreference.self,
+                forKey: .defaultNamespace
+            ),
+            restoreOpenClusterWindows: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .restoreOpenClusterWindows
+            ) ?? true,
+            confirmations: try container.decode(
+                ConfirmationPreferences.self,
+                forKey: .confirmations
+            ),
+            columnsConfigurationPath: try container.decode(
+                String.self,
+                forKey: .columnsConfigurationPath
+            )
+        )
     }
 
     public static var defaultColumnsConfigurationPath: String {
@@ -179,6 +220,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
     case logDisplay
     case confirmations
     case defaultNamespace
+    case workspaceRestoration
     case metricsRefresh
     case columnsConfigurationPath
 
@@ -194,7 +236,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
             .immediate
         case .defaultNamespace:
             .newWorkspace
-        case .metricsRefresh, .columnsConfigurationPath:
+        case .workspaceRestoration, .metricsRefresh, .columnsConfigurationPath:
             .applicationRelaunch
         }
     }
@@ -205,6 +247,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         case .logDisplay: "Log display"
         case .confirmations: "Confirmation prompts"
         case .defaultNamespace: "Default namespace"
+        case .workspaceRestoration: "Open cluster window restoration"
         case .metricsRefresh: "Metrics refresh"
         case .columnsConfigurationPath: "Programmable columns path"
         }
@@ -224,6 +267,9 @@ public struct AppPreferencesDelta: Hashable, Sendable {
         if previous.confirmations != updated.confirmations { changes.insert(.confirmations) }
         if previous.defaultNamespace != updated.defaultNamespace {
             changes.insert(.defaultNamespace)
+        }
+        if previous.restoreOpenClusterWindows != updated.restoreOpenClusterWindows {
+            changes.insert(.workspaceRestoration)
         }
         if previous.metricsRefreshSeconds != updated.metricsRefreshSeconds {
             changes.insert(.metricsRefresh)
@@ -369,10 +415,19 @@ public struct KeyboardShortcutReference: Hashable, Sendable {
         Self(keys: "⌘N", action: "New Cluster Window"),
         Self(keys: "⌘K", action: "Command Palette"),
         Self(keys: "/", action: "Filter current resource list"),
+        Self(keys: "↑ / ↓ or K / J", action: "Move table selection"),
+        Self(keys: "⇧↑ / ⇧↓ or ⇧-click", action: "Extend selection"),
+        Self(keys: "⌘-click", action: "Toggle one selected object"),
+        Self(keys: "⌘A", action: "Select all visible rows"),
         Self(keys: "Return", action: "Open selected object"),
+        Self(keys: "⌘[ / ⌘]", action: "Back / Forward"),
+        Self(keys: "Escape", action: "Close transient UI, leave edit mode, clear filter, or return focus"),
+        Self(keys: "Y", action: "Open YAML for one object"),
+        Self(keys: "E", action: "Open Events for one object"),
         Self(keys: "L", action: "Open logs"),
         Self(keys: "S", action: "Open Pod shell"),
-        Self(keys: "E", action: "Edit selected object"),
+        Self(keys: "P", action: "Start a Pod or Service port-forward"),
         Self(keys: "⌘⌫", action: "Delete selection"),
+        Self(keys: "⌘S", action: "Save the active object edit"),
     ]
 }

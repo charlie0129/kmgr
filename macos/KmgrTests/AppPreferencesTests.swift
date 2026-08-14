@@ -17,6 +17,7 @@ import Testing
     )
     preferences.metricsRefreshSeconds = 30
     preferences.defaultNamespace = .allNamespaces
+    preferences.restoreOpenClusterWindows = false
     preferences.confirmations.confirmWorkloadRestart = false
     preferences.columnsConfigurationPath = "~/Library/Application Support/kmgr/custom-columns.yaml"
     try store.save(preferences)
@@ -27,6 +28,7 @@ import Testing
     #expect(reloaded.current.logs.byteLimit == 32 << 20)
     #expect(reloaded.current.metricsRefreshSeconds == 30)
     #expect(reloaded.current.defaultNamespace == .allNamespaces)
+    #expect(!reloaded.current.restoreOpenClusterWindows)
     #expect(!reloaded.current.confirmations.confirmWorkloadRestart)
     #expect(reloaded.current.columnsConfigurationPath.hasPrefix("/"))
     #expect(reloaded.loadIssue == nil)
@@ -85,6 +87,7 @@ import Testing
     #expect(ConfirmationPreferences.alwaysConfirmNonLoopbackPortForward)
     #expect(ConfirmationPreferences.alwaysShowClusterAndNamespaceIdentity)
     #expect(KeyboardShortcutReference.defaults.contains { $0.keys == "S" })
+    #expect(AppPreferences().restoreOpenClusterWindows)
 }
 
 @Test func defaultNamespacePreferenceSeedsOnlyNewWorkspaceScope() {
@@ -117,6 +120,7 @@ import Testing
     updated.logs.recordLimit += 1_000
     updated.confirmations.confirmScaling.toggle()
     updated.defaultNamespace = .allNamespaces
+    updated.restoreOpenClusterWindows = false
     updated.metricsRefreshSeconds += 5
     updated.columnsConfigurationPath = "/tmp/kmgr-columns.yaml"
 
@@ -127,11 +131,40 @@ import Testing
     ])
     #expect(delta.changes(activated: .newWorkspace) == [.defaultNamespace])
     #expect(delta.changes(activated: .applicationRelaunch) == [
-        .metricsRefresh, .columnsConfigurationPath,
+        .workspaceRestoration, .metricsRefresh, .columnsConfigurationPath,
     ])
     #expect(delta.requiresApplicationRelaunch)
     #expect(!delta.isEmpty)
     #expect(AppPreferencesDelta(previous: updated, updated: updated).isEmpty)
+}
+
+@Test func olderV1PreferencesDefaultWindowRestorationOn() throws {
+    let encoded = try JSONEncoder().encode(AppPreferences())
+    var object = try #require(
+        JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    )
+    object.removeValue(forKey: "restoreOpenClusterWindows")
+
+    let decoded = try JSONDecoder().decode(
+        AppPreferences.self,
+        from: JSONSerialization.data(withJSONObject: object)
+    )
+
+    #expect(decoded.restoreOpenClusterWindows)
+}
+
+@Test func keyboardShortcutReferenceMatchesRequiredBindings() {
+    let shortcuts = Dictionary(
+        uniqueKeysWithValues: KeyboardShortcutReference.defaults.map { ($0.keys, $0.action) }
+    )
+    for keys in [
+        "⌘N", "⌘K", "/", "↑ / ↓ or K / J", "⇧↑ / ⇧↓ or ⇧-click",
+        "⌘-click", "⌘A", "Return", "⌘[ / ⌘]", "Escape", "Y", "E",
+        "L", "S", "P", "⌘⌫", "⌘S",
+    ] {
+        #expect(shortcuts[keys] != nil, "Missing shortcut reference for \(keys)")
+    }
+    #expect(shortcuts["E"] == "Open Events for one object")
 }
 
 @Test func confirmationPreferencesControlOnlyRestartAndScalingPrompts() {

@@ -14,6 +14,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let logByteLimitField = NSTextField()
     private let renderBatchField = NSTextField()
     private let metricsRefreshField = NSTextField()
+    private let restoreWindowsButton = NSButton(
+        checkboxWithTitle: "Restore open cluster windows when Kmgr launches",
+        target: nil,
+        action: nil
+    )
     private let confirmRestartButton = NSButton(checkboxWithTitle: "Confirm workload restarts", target: nil, action: nil)
     private let confirmScaleButton = NSButton(checkboxWithTitle: "Confirm scaling changes", target: nil, action: nil)
     private let columnsPathField = NSTextField()
@@ -65,6 +70,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         namespaceButton.addItems(withTitles: DefaultNamespacePreference.allCases.map(\.title))
         namespaceButton.target = self
         namespaceButton.action = #selector(controlValueChanged)
+        restoreWindowsButton.target = self
+        restoreWindowsButton.action = #selector(controlValueChanged)
+        restoreWindowsButton.setAccessibilityIdentifier("settings.restoreOpenClusterWindows")
 
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
@@ -92,6 +100,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 labeledRow("Appearance", control: appearanceButton),
                 labeledRow("Default namespace", control: namespaceButton),
                 labeledRow("Metrics refresh", control: metricsRefreshField, suffix: "seconds"),
+                restoreWindowsButton,
             ]
         )
         let logs = section(
@@ -269,6 +278,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         logByteLimitField.integerValue = preferences.logs.byteLimit / (1 << 20)
         renderBatchField.integerValue = preferences.logs.renderBatchMilliseconds
         metricsRefreshField.integerValue = preferences.metricsRefreshSeconds
+        restoreWindowsButton.state = preferences.restoreOpenClusterWindows ? .on : .off
         confirmRestartButton.state = preferences.confirmations.confirmWorkloadRestart ? .on : .off
         confirmScaleButton.state = preferences.confirmations.confirmScaling ? .on : .off
         columnsPathField.stringValue = preferences.columnsConfigurationPath
@@ -295,6 +305,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             ),
             metricsRefreshSeconds: parsedInteger(metricsRefreshField),
             defaultNamespace: DefaultNamespacePreference.allCases[safe: namespaceIndex] ?? .contextDefault,
+            restoreOpenClusterWindows: restoreWindowsButton.state == .on,
             confirmations: ConfirmationPreferences(
                 confirmWorkloadRestart: confirmRestartButton.state == .on,
                 confirmScaling: confirmScaleButton.state == .on
@@ -304,7 +315,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func parsedInteger(_ field: NSTextField) -> Int {
-        Int(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let integer = Int(value) { return integer }
+
+        // NSTextField may format an integerValue with the current locale's
+        // grouping separator (for example "20,000"). Accept that exact
+        // integer representation without accepting fractional input.
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.allowsFloats = false
+        formatter.isLenient = false
+        return formatter.number(from: value)?.intValue ?? 0
     }
 
     private func validateControls(showSuccess: Bool) {
