@@ -151,11 +151,25 @@ public struct ResourceTableUpdatePlan: Hashable, Sendable {
     /// selection callbacks are suppressed.
     public var selectedRowIndexes: [Int]
     public var scrollRestoration: ScrollRestorationPlan?
+    public var contentUpdate: ResourceTableContentUpdate
 
-    public init(selectedRowIndexes: [Int], scrollRestoration: ScrollRestorationPlan?) {
+    public init(
+        selectedRowIndexes: [Int],
+        scrollRestoration: ScrollRestorationPlan?,
+        contentUpdate: ResourceTableContentUpdate = .reloadAll
+    ) {
         self.selectedRowIndexes = selectedRowIndexes
         self.scrollRestoration = scrollRestoration
+        self.contentUpdate = contentUpdate
     }
+}
+
+public enum ResourceTableContentUpdate: Hashable, Sendable {
+    /// Row membership or ordering changed, so AppKit must rebuild its row map.
+    case reloadAll
+    /// Membership and ordering are unchanged; only these visible rows need
+    /// their reusable cells refreshed. An empty array requires no data reload.
+    case reloadRows([Int])
 }
 
 public struct SelectionCounts: Hashable, Sendable {
@@ -177,6 +191,7 @@ public struct ResourceTableModel: Hashable, Sendable {
     public private(set) var selectionAnchorUID: ResourceUID?
     public private(set) var orderedVisibleUIDs: [ResourceUID]
     public private(set) var rowByUID: [ResourceUID: ResourceRow]
+    private var visibleIndexByUID: [ResourceUID: Int]
 
     public init(
         rows: [ResourceRow] = [],
@@ -192,10 +207,12 @@ public struct ResourceTableModel: Hashable, Sendable {
             rowByUID[uid] = row
         }
         self.rowByUID = rowByUID
-        self.orderedVisibleUIDs = Self.validatedOrder(
+        let order = Self.validatedOrder(
             orderedVisibleUIDs ?? insertionOrder,
             rowByUID: rowByUID
         )
+        self.orderedVisibleUIDs = order
+        self.visibleIndexByUID = Self.indexes(for: order)
         self.selectedUIDs = selectedUIDs.filter { rowByUID[$0] != nil }
         if let selectionAnchorUID, rowByUID[selectionAnchorUID] != nil {
             self.selectionAnchorUID = selectionAnchorUID
@@ -205,8 +222,7 @@ public struct ResourceTableModel: Hashable, Sendable {
     }
 
     public var selectionCounts: SelectionCounts {
-        let visibleSet = Set(orderedVisibleUIDs)
-        let visible = selectedUIDs.intersection(visibleSet).count
+        let visible = selectedUIDs.lazy.filter { visibleIndexByUID[$0] != nil }.count
         return SelectionCounts(
             selected: selectedUIDs.count,
             visible: visible,
@@ -227,7 +243,7 @@ public struct ResourceTableModel: Hashable, Sendable {
         pixelOffsetFromTop: Double = 0
     ) -> ResourceTableUpdateCapture {
         let scrollAnchor = topVisibleUID.flatMap { uid in
-            orderedVisibleUIDs.firstIndex(of: uid).map {
+            visibleIndexByUID[uid].map {
                 ScrollAnchor(uid: uid, pixelOffsetFromTop: pixelOffsetFromTop, priorRowIndex: $0)
             }
         }
@@ -261,17 +277,28 @@ public struct ResourceTableModel: Hashable, Sendable {
             rowByUID[row.identity.uid] = row
         }
 
-        let survivingOldOrder = orderedVisibleUIDs.filter {
-            rowByUID[$0] != nil && !batch.removedUIDs.contains($0)
-        }
+        var orderChanged = false
         switch batch.visibleOrder {
         case .unchanged:
-            orderedVisibleUIDs = survivingOldOrder
+            if batch.removedUIDs.contains(where: { visibleIndexByUID[$0] != nil }) {
+                orderedVisibleUIDs.removeAll { batch.removedUIDs.contains($0) }
+                orderChanged = true
+            }
         case .replace(let uids):
-            orderedVisibleUIDs = Self.validatedOrder(uids, rowByUID: rowByUID)
+            let replacement = Self.validatedOrder(uids, rowByUID: rowByUID)
+            orderChanged = replacement != orderedVisibleUIDs
+            orderedVisibleUIDs = replacement
         case .append(let uids):
-            let appended = survivingOldOrder + uids
-            orderedVisibleUIDs = Self.validatedOrder(appended, rowByUID: rowByUID)
+            var surviving = orderedVisibleUIDs
+            if batch.removedUIDs.contains(where: { visibleIndexByUID[$0] != nil }) {
+                surviving.removeAll { batch.removedUIDs.contains($0) }
+            }
+            let appended = Self.validatedOrder(surviving + uids, rowByUID: rowByUID)
+            orderChanged = appended != orderedVisibleUIDs
+            orderedVisibleUIDs = appended
+        }
+        if orderChanged {
+            visibleIndexByUID = Self.indexes(for: orderedVisibleUIDs)
         }
 
         // Selection is retained when a row merely becomes invisible. Only an
@@ -281,11 +308,15 @@ public struct ResourceTableModel: Hashable, Sendable {
             selectionAnchorUID = nil
         }
 
-        return makeUpdatePlan(capture: capture)
+        return makeUpdatePlan(
+            capture: capture,
+            orderChanged: orderChanged,
+            upsertedUIDs: batch.upserts.lazy.map(\.identity.uid)
+        )
     }
 
     public mutating func selectExclusively(_ uid: ResourceUID) {
-        guard rowByUID[uid] != nil, orderedVisibleUIDs.contains(uid) else { return }
+        guard rowByUID[uid] != nil, visibleIndexByUID[uid] != nil else { return }
         selectedUIDs = [uid]
         selectionAnchorUID = uid
     }
@@ -294,7 +325,7 @@ public struct ResourceTableModel: Hashable, Sendable {
     /// Shift anchor even when the click toggles it off, matching native range
     /// selection behavior while keeping the anchor independent of row indexes.
     public mutating func toggleSelection(of uid: ResourceUID) {
-        guard rowByUID[uid] != nil, orderedVisibleUIDs.contains(uid) else { return }
+        guard rowByUID[uid] != nil, visibleIndexByUID[uid] != nil else { return }
         if selectedUIDs.contains(uid) {
             selectedUIDs.remove(uid)
         } else {
@@ -304,10 +335,10 @@ public struct ResourceTableModel: Hashable, Sendable {
     }
 
     public mutating func extendSelection(to uid: ResourceUID, additive: Bool = false) {
-        guard let clickedIndex = orderedVisibleUIDs.firstIndex(of: uid) else { return }
+        guard let clickedIndex = visibleIndexByUID[uid] else { return }
         guard
             let anchor = selectionAnchorUID,
-            let anchorIndex = orderedVisibleUIDs.firstIndex(of: anchor)
+            let anchorIndex = visibleIndexByUID[anchor]
         else {
             if additive {
                 selectedUIDs.insert(uid)
@@ -385,14 +416,12 @@ public struct ResourceTableModel: Hashable, Sendable {
         let step = movingDown ? 1 : -1
         guard
             let anchor = selectionAnchorUID,
-            let anchorIndex = orderedVisibleUIDs.firstIndex(of: anchor)
+            let anchorIndex = visibleIndexByUID[anchor]
         else {
             return movingDown ? 0 : orderedVisibleUIDs.count - 1
         }
 
-        let selectedIndexes = orderedVisibleUIDs.indices.filter {
-            selectedUIDs.contains(orderedVisibleUIDs[$0])
-        }
+        let selectedIndexes = selectedUIDs.compactMap { visibleIndexByUID[$0] }.sorted()
         let lowerBound = selectedIndexes.first ?? anchorIndex
         let upperBound = selectedIndexes.last ?? anchorIndex
         let activeIndex: Int
@@ -447,18 +476,42 @@ public struct ResourceTableModel: Hashable, Sendable {
         }
     }
 
-    private func makeUpdatePlan(capture: ResourceTableUpdateCapture) -> ResourceTableUpdatePlan {
-        let selectedRowIndexes = orderedVisibleUIDs.enumerated().compactMap {
-            selectedUIDs.contains($0.element) ? $0.offset : nil
-        }
-        return ResourceTableUpdatePlan(
-            selectedRowIndexes: selectedRowIndexes,
-            scrollRestoration: ScrollRestorationPlanner.plan(
+    private func makeUpdatePlan(
+        capture: ResourceTableUpdateCapture,
+        orderChanged: Bool,
+        upsertedUIDs: some Sequence<ResourceUID>
+    ) -> ResourceTableUpdatePlan {
+        let selectedRowIndexes = selectedUIDs.compactMap { visibleIndexByUID[$0] }.sorted()
+        let scrollRestoration: ScrollRestorationPlan?
+        if !orderChanged,
+            let anchor = capture.scrollAnchor,
+            let rowIndex = visibleIndexByUID[anchor.uid]
+        {
+            scrollRestoration = ScrollRestorationPlan(
+                uid: anchor.uid,
+                rowIndex: rowIndex,
+                pixelOffsetFromTop: anchor.pixelOffsetFromTop,
+                precision: .exactIdentity
+            )
+        } else {
+            scrollRestoration = ScrollRestorationPlanner.plan(
                 anchor: capture.scrollAnchor,
                 previousOrder: capture.previousOrder,
                 newOrder: orderedVisibleUIDs
             )
+        }
+        let contentUpdate: ResourceTableContentUpdate = orderChanged
+            ? .reloadAll
+            : .reloadRows(Array(Set(upsertedUIDs.compactMap { visibleIndexByUID[$0] })).sorted())
+        return ResourceTableUpdatePlan(
+            selectedRowIndexes: selectedRowIndexes,
+            scrollRestoration: scrollRestoration,
+            contentUpdate: contentUpdate
         )
+    }
+
+    private static func indexes(for order: [ResourceUID]) -> [ResourceUID: Int] {
+        Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
     }
 
     private static func validatedOrder(

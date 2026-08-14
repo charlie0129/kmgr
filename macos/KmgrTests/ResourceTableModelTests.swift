@@ -29,6 +29,48 @@ import Testing
         pixelOffsetFromTop: 7.5,
         precision: .exactIdentity
     ))
+    #expect(plan.contentUpdate == .reloadAll)
+}
+
+@Test func cellOnlyUpdatesReloadOnlyAffectedVisibleRows() {
+    let a: ResourceUID = "a"
+    let b: ResourceUID = "b"
+    let hidden: ResourceUID = "hidden"
+    let d: ResourceUID = "d"
+    var model = ResourceTableModel(
+        rows: [row(a), row(b), row(hidden), row(d)],
+        orderedVisibleUIDs: [a, b, d]
+    )
+    model.selectExclusively(b)
+    let capture = model.captureUpdate(topVisibleUID: b, pixelOffsetFromTop: 4)
+
+    let plan = model.apply(ResourceRowBatch(
+        upserts: [row(d, status: "Running"), row(hidden, status: "Pending"), row(b, status: "Ready")],
+        visibleOrder: .unchanged
+    ), capture: capture)
+
+    #expect(model.orderedVisibleUIDs == [a, b, d])
+    #expect(plan.contentUpdate == .reloadRows([1, 2]))
+    #expect(plan.selectedRowIndexes == [1])
+    #expect(plan.scrollRestoration == ScrollRestorationPlan(
+        uid: b,
+        rowIndex: 1,
+        pixelOffsetFromTop: 4,
+        precision: .exactIdentity
+    ))
+}
+
+@Test func identicalReplacementOrderUsesCellOnlyReloadPath() {
+    let a: ResourceUID = "a"
+    let b: ResourceUID = "b"
+    var model = ResourceTableModel(rows: [row(a), row(b)])
+
+    let plan = model.apply(ResourceRowBatch(
+        upserts: [row(a, status: "Running")],
+        visibleOrder: .replace([a, b])
+    ))
+
+    #expect(plan.contentUpdate == .reloadRows([0]))
 }
 
 @Test func confirmedDeletionRemovesOnlyThatUIDFromSelection() {

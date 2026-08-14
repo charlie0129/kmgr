@@ -2297,7 +2297,8 @@ private final class ResourceListViewController: NSViewController,
             selectedRowIndexes: model.orderedVisibleUIDs.enumerated().compactMap {
                 model.selectedUIDs.contains($0.element) ? $0.offset : nil
             },
-            scrollRestoration: plan.scrollRestoration
+            scrollRestoration: plan.scrollRestoration,
+            contentUpdate: plan.contentUpdate
         )
     }
 
@@ -2317,7 +2318,19 @@ private final class ResourceListViewController: NSViewController,
             "visible_rows=\(self.model.orderedVisibleUIDs.count) selected_rows=\(plan.selectedRowIndexes.count) restores_scroll=\(plan.scrollRestoration != nil)"
         )
         suppressSelectionCallbacks = true
-        tableView.reloadData()
+        switch plan.contentUpdate {
+        case .reloadAll:
+            tableView.reloadData()
+        case .reloadRows(let rows):
+            let rowIndexes = IndexSet(rows.filter(model.orderedVisibleUIDs.indices.contains))
+            let columnIndexes = IndexSet(integersIn: tableView.tableColumns.indices)
+            if !rowIndexes.isEmpty, !columnIndexes.isEmpty {
+                tableView.reloadData(
+                    forRowIndexes: rowIndexes,
+                    columnIndexes: columnIndexes
+                )
+            }
+        }
         tableView.selectRowIndexes(IndexSet(plan.selectedRowIndexes), byExtendingSelection: false)
         suppressSelectionCallbacks = false
         if let restoration = plan.scrollRestoration,
