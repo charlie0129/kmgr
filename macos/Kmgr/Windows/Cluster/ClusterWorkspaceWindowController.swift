@@ -2,6 +2,9 @@ import AppKit
 import KmgrCore
 import OSLog
 
+typealias NamespacePickerPresenter = (NSPopUpButton, Any?) -> Void
+typealias NamespacePickerKeyWindowCheck = (NSWindow) -> Bool
+
 struct ResourceColumnsRequest {
     var resourceTitle: String
     var match: ColumnResourceMatch
@@ -109,6 +112,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
         logDisplayConfiguration: LogDisplayConfiguration,
         confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
+        namespacePickerPresenter: @escaping NamespacePickerPresenter = { control, sender in
+            control.performClick(sender)
+        },
+        namespacePickerKeyWindowCheck: @escaping NamespacePickerKeyWindowCheck = {
+            $0.isKeyWindow
+        },
         restoration: ClusterWindowRestorationRecord,
         startsAuthenticated: Bool = true,
         onShowPortForwards: @escaping @MainActor () -> Void
@@ -155,6 +164,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             portForwards: portForwards,
             columnsConfigurationPath: columnsConfigurationPath,
             columnsConfigurationLoader: columnsConfigurationLoader,
+            namespacePickerPresenter: namespacePickerPresenter,
+            namespacePickerKeyWindowCheck: namespacePickerKeyWindowCheck,
             onShowPortForwards: onShowPortForwards
         )
         super.init(window: window)
@@ -467,6 +478,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func copyResourceReference(_ sender: Any?) { workspaceController.copyResourceReference(sender) }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(chooseNamespace(_:)) {
+            return workspaceController.canChooseNamespace
+        }
         let command: ResourceTableCommand?
         switch menuItem.action {
         case #selector(focusResourceFilter(_:)): command = .focusFilter
@@ -510,6 +524,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let recentObjectStore: RecentObjectStore
     private let portForwards: PortForwardCoordinator
     private let columnsConfigurationPath: String
+    private let namespacePickerPresenter: NamespacePickerPresenter
+    private let namespacePickerKeyWindowCheck: NamespacePickerKeyWindowCheck
     private let onShowPortForwards: @MainActor () -> Void
     private let sidebarController: ResourceSidebarViewController
     private let contentController: ResourceListViewController
@@ -563,6 +579,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         portForwards: PortForwardCoordinator,
         columnsConfigurationPath: String,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
+        namespacePickerPresenter: @escaping NamespacePickerPresenter,
+        namespacePickerKeyWindowCheck: @escaping NamespacePickerKeyWindowCheck,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
         self.session = session
@@ -574,6 +592,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.recentObjectStore = recentObjectStore
         self.portForwards = portForwards
         self.columnsConfigurationPath = columnsConfigurationPath
+        self.namespacePickerPresenter = namespacePickerPresenter
+        self.namespacePickerKeyWindowCheck = namespacePickerKeyWindowCheck
         self.onShowPortForwards = onShowPortForwards
         sidebarController = ResourceSidebarViewController(
             session: session,
@@ -1006,13 +1026,36 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     /// Opens the existing native popup rather than maintaining a second
     /// namespace picker. Once open, AppKit supplies type-to-select, arrows,
     /// Return, and Escape entirely from the keyboard.
+    var canChooseNamespace: Bool {
+        guard isViewLoaded, let window = view.window else { return false }
+        return namespacePickerKeyWindowCheck(window)
+            && window.attachedSheet == nil
+            && namespaceControl.isEnabled
+            && !namespaceControl.isHidden
+            && namespaceControl.numberOfItems > 0
+    }
+
     @objc func chooseNamespace(_ sender: Any?) {
-        guard namespaceControl.numberOfItems > 0 else {
+        guard canChooseNamespace, let window = view.window else {
             NSSound.beep()
             return
         }
-        view.window?.makeFirstResponder(namespaceControl)
-        namespaceControl.performClick(sender)
+        let previousResponder = window.firstResponder
+        window.makeFirstResponder(namespaceControl)
+        namespacePickerPresenter(namespaceControl, sender)
+
+        // NSPopUpButton leaves itself first responder when native menu
+        // tracking ends. A namespace selection returns to the resource list;
+        // a cancellation in a detail/subresource preserves that leaf's prior
+        // responder. In the ordinary list, always make keyboard discovery
+        // immediately usable again.
+        if detailController != nil || subresourceController != nil,
+            let previousResponder,
+            window.makeFirstResponder(previousResponder)
+        {
+            return
+        }
+        window.makeFirstResponder(contentController.tableResponder)
     }
 
     @objc private func showPortForwards() {

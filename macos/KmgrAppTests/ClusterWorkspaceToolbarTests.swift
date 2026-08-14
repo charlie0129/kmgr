@@ -30,6 +30,75 @@ struct ClusterWorkspaceToolbarTests {
             }.map { $0 + 1 })
     }
 
+    @Test("namespace picker returns keyboard focus to the resource list")
+    func namespacePickerRestoresResourceListFocus() async throws {
+        var didPresentPicker = false
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            namespacePickerPresenter: { control, _ in
+                didPresentPicker = true
+                control.sendAction(control.action, to: control.target)
+            },
+            namespacePickerKeyWindowCheck: { _ in true }
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        window.makeKeyAndOrderFront(nil)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { table.numberOfRows == 1 }
+        #expect(window.makeFirstResponder(table))
+        controller.chooseNamespace(nil)
+
+        #expect(didPresentPicker)
+        #expect(window.firstResponder === table)
+    }
+
+    @Test("namespace shortcut requires the active enabled sheet-free picker")
+    func namespacePickerMenuValidationMatchesWindowState() async throws {
+        var treatsWorkspaceAsKey = false
+        let controller = makeWorkspace(
+            namespacePickerKeyWindowCheck: { _ in treatsWorkspaceAsKey }
+        )
+        defer { controller.close() }
+        let item = NSMenuItem(
+            title: "Choose Namespace…",
+            action: #selector(ClusterWorkspaceWindowController.chooseNamespace(_:)),
+            keyEquivalent: ""
+        )
+        #expect(!controller.validateMenuItem(item))
+
+        controller.showWindow(nil)
+        let window = try #require(controller.window)
+        window.makeKeyAndOrderFront(nil)
+        treatsWorkspaceAsKey = true
+        #expect(controller.validateMenuItem(item))
+
+        let picker = try #require(window.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.namespace"
+        }?.view as? NSPopUpButton)
+        picker.isEnabled = false
+        #expect(!controller.validateMenuItem(item))
+        picker.isEnabled = true
+
+        let sheet = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 240, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.beginSheet(sheet) { _ in }
+        defer {
+            if window.attachedSheet === sheet { window.endSheet(sheet) }
+        }
+        try await waitUntil { window.attachedSheet === sheet }
+        #expect(!controller.validateMenuItem(item))
+    }
+
     @Test("connection state and transfer rate keep separate toolbar geometry")
     func connectionActivityLabelsDoNotOverlap() throws {
         let view = ClusterConnectionActivityView()
@@ -1159,6 +1228,12 @@ private func makeWorkspace(
     provider: any WorkspaceResourceProviding = NoopWorkspaceResourceProvider(),
     logProvider: any LogStreamProviding = NoopLogProvider(),
     objectDetailProvider: any ObjectDetailProviding = NoopToolbarObjectDetailProvider(),
+    namespacePickerPresenter: @escaping NamespacePickerPresenter = { control, sender in
+        control.performClick(sender)
+    },
+    namespacePickerKeyWindowCheck: @escaping NamespacePickerKeyWindowCheck = {
+        $0.isKeyWindow
+    },
     restoration: ClusterWindowRestorationRecord = ClusterWindowRestorationRecord(
         id: "toolbar-test",
         contextName: "test-context"
@@ -1180,6 +1255,8 @@ private func makeWorkspace(
         columnsConfigurationPath: "/tmp/kmgr-toolbar-test-columns.yaml",
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },
+        namespacePickerPresenter: namespacePickerPresenter,
+        namespacePickerKeyWindowCheck: namespacePickerKeyWindowCheck,
         restoration: restoration,
         startsAuthenticated: startsAuthenticated,
         onShowPortForwards: {}
