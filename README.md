@@ -56,7 +56,11 @@ already checked into the repository.
 
 1. Launch Kmgr. The Cluster Manager reads normal kubeconfig resolution,
    including `KUBECONFIG` path lists and the default kubeconfig location,
-   without contacting every listed server.
+   without contacting every listed server. When `KUBECONFIG` is unset, it also
+   catalogs valid regular kubeconfig files directly inside `~/.kube` as
+   independent sources. This makes sibling files such as `work.kubeconfig`
+   discoverable without flat-merging same-named users, clusters, or credentials
+   from an unrelated file.
 2. Select a context and choose **Open**. This is the explicit connection
    boundary: the engine creates authenticated `client-go` clients and makes a
    short, deadline-bounded `GET /version` probe before accepting the session.
@@ -241,12 +245,19 @@ restored, but warm object caches remain process-memory-only and are never
 presented as restored cluster truth after relaunch.
 
 The engine emits structured, redacted JSON diagnostics on stderr. The GUI
-drains that stream without mirroring raw text into application logs; run the
-helper directly with `--log-level debug` when developing its startup and IPC
-boundary. Set `KMGR_ENGINE_PATH` to an absolute local engine executable before
-launching Kmgr to test a separately built helper. Debug app builds also contain
-an opt-in, loopback-only Go profiler; it is absent from Release helpers and is
-documented with the performance harness in
+normally drains that stream without mirroring raw text into application logs.
+To inspect actual helper RPC timing from a terminal without persisting it, run:
+
+```sh
+KMGR_ENGINE_LOG_LEVEL=debug build/Kmgr.app/Contents/MacOS/Kmgr
+```
+
+Accepted levels are `debug`, `info`, `warn`, and `error`; any other value is
+ignored and retains the normal drained-stderr behavior. Set `KMGR_ENGINE_PATH`
+to an absolute local engine executable in the same command to test a separately
+built helper. Debug app builds also contain an opt-in, loopback-only Go
+profiler; it is absent from Release helpers and is documented with the
+performance harness in
 [docs/performance.md](docs/performance.md).
 
 ## Testing

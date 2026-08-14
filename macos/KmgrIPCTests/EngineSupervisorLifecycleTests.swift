@@ -41,12 +41,14 @@ struct EngineSupervisorLifecycleTests {
         let configuration = EngineSupervisor.Configuration(
             helperURL: URL(fileURLWithPath: "/tmp/kmgr-engine"),
             columnsConfigurationPath: "/tmp/columns.yaml",
-            metricsRefreshSeconds: 45
+            metricsRefreshSeconds: 45,
+            logLevel: " DEBUG "
         )
         #expect(configuration.helperArguments(appendingTo: ["--socket", "/tmp/a.sock"]) == [
             "--socket", "/tmp/a.sock",
             "--columns", "/tmp/columns.yaml",
             "--metrics-refresh", "45s",
+            "--log-level", "debug",
         ])
     }
 
@@ -55,7 +57,8 @@ struct EngineSupervisorLifecycleTests {
         let configuration = EngineSupervisor.Configuration(
             helperURL: URL(fileURLWithPath: "/tmp/kmgr-engine"),
             columnsConfigurationPath: "",
-            metricsRefreshSeconds: 0
+            metricsRefreshSeconds: 0,
+            logLevel: "verbose"
         )
         #expect(configuration.helperArguments(appendingTo: ["base"]) == ["base"])
     }

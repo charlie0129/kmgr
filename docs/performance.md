@@ -176,9 +176,11 @@ The trace can contain other system/application logs even though Kmgr's
 signposts are redacted. Treat it as local diagnostic data and inspect it before
 sharing.
 
-For redacted helper RPC timing, run a separately built helper with
-`kmgr-engine --log-level debug` as described in the README. The helper logs
-only RPC method, duration, and status and never request/response bodies.
+For redacted helper RPC timing, launch the app from a terminal with
+`KMGR_ENGINE_LOG_LEVEL=debug` as described in the README. The supervisor passes
+the validated level to the helper and inherits its stderr only for this explicit
+diagnostic mode. The helper logs only RPC method, duration, and status and never
+request/response bodies.
 
 ## Go helper profiles
 

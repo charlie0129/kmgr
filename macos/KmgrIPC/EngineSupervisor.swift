@@ -111,6 +111,7 @@ public final class EngineSupervisor {
         public var clientVersion: String
         public var columnsConfigurationPath: String?
         public var metricsRefreshSeconds: Int?
+        public var logLevel: String?
 
         public init(
             helperURL: URL,
@@ -121,7 +122,8 @@ public final class EngineSupervisor {
             shutdownTimeout: Duration = .seconds(5),
             clientVersion: String = "dev",
             columnsConfigurationPath: String? = nil,
-            metricsRefreshSeconds: Int? = nil
+            metricsRefreshSeconds: Int? = nil,
+            logLevel: String? = nil
         ) {
             self.helperURL = helperURL
             self.temporaryDirectoryURL = temporaryDirectoryURL
@@ -132,6 +134,7 @@ public final class EngineSupervisor {
             self.clientVersion = clientVersion
             self.columnsConfigurationPath = columnsConfigurationPath
             self.metricsRefreshSeconds = metricsRefreshSeconds
+            self.logLevel = logLevel
         }
 
         public static func bundled(bundle: Bundle = .main) -> Self {
@@ -152,7 +155,11 @@ public final class EngineSupervisor {
             }
             let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString")
                 as? String ?? "dev"
-            return Self(helperURL: helperURL, clientVersion: version)
+            return Self(
+                helperURL: helperURL,
+                clientVersion: version,
+                logLevel: ProcessInfo.processInfo.environment["KMGR_ENGINE_LOG_LEVEL"]
+            )
         }
 
         /// `swift run` has no application bundle Helpers directory. Walk up
@@ -357,7 +364,7 @@ public final class EngineSupervisor {
             baseDirectoryURL: configuration.temporaryDirectoryURL
         )
         let process = Process()
-        let stderrPipe = Pipe()
+        let stderrPipe = configuration.normalizedLogLevel == nil ? Pipe() : nil
         let exitWaiter = ProcessExitWaiter()
         process.executableURL = configuration.helperURL
         let helperArguments = configuration.helperArguments(
@@ -366,7 +373,15 @@ public final class EngineSupervisor {
         process.arguments = helperArguments
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = stderrPipe
+        if let stderrPipe {
+            process.standardError = stderrPipe
+        } else {
+            // A valid, explicitly configured log level is a local diagnostic
+            // opt-in. Inherit stderr so a terminal-launched app can expose the
+            // helper's already-redacted structured records without persisting
+            // them or copying them into the app's ordinary OSLog stream.
+            process.standardError = FileHandle.standardError
+        }
         process.terminationHandler = { process in
             exitWaiter.signal(status: process.terminationStatus)
         }
@@ -379,15 +394,19 @@ public final class EngineSupervisor {
         }
         currentProcess = process
 
-        let diagnosticsTask = Task.detached(priority: .utility) {
-            let handle = stderrPipe.fileHandleForReading
-            while !Task.isCancelled {
-                do {
-                    guard let data = try handle.read(upToCount: 4_096), !data.isEmpty else { break }
-                    // The engine owns formatting/redaction. Draining without
-                    // mirroring raw text keeps diagnostics out of app logs.
-                } catch {
-                    break
+        let diagnosticsTask = stderrPipe.map { pipe in
+            Task.detached(priority: .utility) {
+                let handle = pipe.fileHandleForReading
+                while !Task.isCancelled {
+                    do {
+                        guard let data = try handle.read(upToCount: 4_096), !data.isEmpty else {
+                            break
+                        }
+                        // The engine owns formatting/redaction. Draining without
+                        // mirroring raw text keeps diagnostics out of app logs.
+                    } catch {
+                        break
+                    }
                 }
             }
         }
@@ -420,7 +439,7 @@ public final class EngineSupervisor {
             }
         } catch {
             await stopProcess(process, waiter: exitWaiter)
-            diagnosticsTask.cancel()
+            diagnosticsTask?.cancel()
             try? endpoint.cleanup()
             throw error
         }
@@ -434,7 +453,7 @@ public final class EngineSupervisor {
             currentProcess = nil
             client.beginGracefulShutdown()
             connectionTask.cancel()
-            diagnosticsTask.cancel()
+            diagnosticsTask?.cancel()
             try? endpoint.cleanup()
             if !shutdownRequested {
                 throw EngineSupervisorError.helperExited(status)
@@ -446,7 +465,7 @@ public final class EngineSupervisor {
             currentProcess = nil
             client.beginGracefulShutdown()
             connectionTask.cancel()
-            diagnosticsTask.cancel()
+            diagnosticsTask?.cancel()
             try? endpoint.cleanup()
             throw error
         }
@@ -568,6 +587,12 @@ public final class EngineSupervisor {
 }
 
 extension EngineSupervisor.Configuration {
+    var normalizedLogLevel: String? {
+        guard let logLevel else { return nil }
+        let normalized = logLevel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["debug", "info", "warn", "error"].contains(normalized) ? normalized : nil
+    }
+
     /// Adds only non-sensitive engine behavior settings. Endpoint credentials
     /// stay in the launch endpoint and are never exposed through preferences.
     func helperArguments(appendingTo base: [String]) -> [String] {
@@ -577,6 +602,9 @@ extension EngineSupervisor.Configuration {
         }
         if let metricsRefreshSeconds, metricsRefreshSeconds > 0 {
             arguments += ["--metrics-refresh", "\(metricsRefreshSeconds)s"]
+        }
+        if let normalizedLogLevel {
+            arguments += ["--log-level", normalizedLogLevel]
         }
         return arguments
     }
