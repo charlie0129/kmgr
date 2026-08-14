@@ -24,6 +24,7 @@ struct ClusterWorkspaceToolbarTests {
             }).isNavigational)
         }
         #expect(!items.contains { $0.itemIdentifier.rawValue == "workspace.cluster" })
+        #expect(!items.contains { $0.itemIdentifier.rawValue == "workspace.connection" })
         #expect(items.firstIndex { $0.itemIdentifier == .flexibleSpace }
             == items.firstIndex {
                 $0.itemIdentifier.rawValue == "workspace.namespace"
@@ -99,25 +100,72 @@ struct ClusterWorkspaceToolbarTests {
         #expect(!controller.validateMenuItem(item))
     }
 
-    @Test("connection state and transfer rate keep separate toolbar geometry")
+    @Test("connection activity stays compact, one-line, and accessible")
     func connectionActivityLabelsDoNotOverlap() throws {
         let view = ClusterConnectionActivityView()
-        view.setState(.connected)
+        view.setState(.reconnecting, detail: "Retrying the Kubernetes API")
         view.update(rate: ClusterConnectionRate(
             bytesReceivedPerSecond: 12 * 1_024 * 1_024,
-            bytesSentPerSecond: 3 * 1_024 * 1_024
+            bytesSentPerSecond: 3 * 1_024 * 1_024,
+            receivedActive: true,
+            sentActive: true
         ))
         view.frame.size = view.intrinsicContentSize
         view.layoutSubtreeIfNeeded()
 
         let labels = descendants(of: view).compactMap { $0 as? NSTextField }
-        let state = try #require(labels.first { $0.stringValue == "Connected" })
+        let state = try #require(labels.first { $0.stringValue == "Reconnecting…" })
         let rate = try #require(labels.first { $0.stringValue.hasPrefix("↓") })
+        let receive = try #require(descendants(of: view).first {
+            $0.identifier?.rawValue == "connection-receive-indicator"
+        })
+        let send = try #require(descendants(of: view).first {
+            $0.identifier?.rawValue == "connection-send-indicator"
+        })
         let stateFrame = view.convert(state.bounds, from: state)
         let rateFrame = view.convert(rate.bounds, from: rate)
+        let receiveFrame = view.convert(receive.bounds, from: receive)
+        let sendFrame = view.convert(send.bounds, from: send)
 
         #expect(!stateFrame.intersects(rateFrame))
         #expect(rateFrame.minX - stateFrame.maxX >= 4)
+        #expect(receiveFrame.maxX < sendFrame.minX)
+        #expect(abs(receiveFrame.midY - stateFrame.midY) < 2)
+        #expect(abs(sendFrame.midY - stateFrame.midY) < 2)
+        #expect(view.intrinsicContentSize.height <= 20)
+        let accessibilityValue = view.accessibilityValue() as? String
+        #expect(accessibilityValue?.contains("Reconnecting…") == true)
+        #expect(accessibilityValue?.contains("Retrying the Kubernetes API") == true)
+        #expect(accessibilityValue?.contains("Download 12 MiB/s") == true)
+        #expect(accessibilityValue?.contains("upload 3.0 MiB/s") == true)
+        #expect(rate.accessibilityLabel() == "Kubernetes API transfer rate")
+    }
+
+    @Test("connection activity sits at the far right of the resource status bar")
+    func connectionActivityUsesResourceFooter() throws {
+        let controller = makeWorkspace()
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        root.layoutSubtreeIfNeeded()
+
+        let statusBar = try #require(descendants(of: root).first {
+            $0.identifier?.rawValue == "resource-status-bar"
+        } as? NSStackView)
+        let status = try #require(descendants(of: statusBar).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "resource-status-line" })
+        let activity = try #require(descendants(of: statusBar).first {
+            $0.accessibilityLabel() == "Kubernetes API connection activity"
+        })
+        statusBar.layoutSubtreeIfNeeded()
+        let statusFrame = statusBar.convert(status.bounds, from: status)
+        let activityFrame = statusBar.convert(activity.bounds, from: activity)
+
+        #expect(statusFrame.maxX <= activityFrame.minX)
+        #expect(abs(statusFrame.midY - activityFrame.midY) < 2)
+        #expect(abs(activityFrame.maxX - statusBar.bounds.maxX) < 1)
+        #expect(statusBar.fittingSize.height <= 20)
     }
 
     @Test("floating sidebar section rows supply a native vibrant background")
@@ -1000,11 +1048,13 @@ struct LazyWorkspaceRestorationTests {
         #expect(resourceTable?.numberOfRows == 0)
         #expect(window.toolbar?.items.compactMap { $0.view as? NSPopUpButton }
             .first?.titleOfSelectedItem == "payments")
-        let connectionItem = window.toolbar?.items.first {
-            $0.itemIdentifier.rawValue == "workspace.connection"
+        let connection = descendants(of: root).first {
+            $0.accessibilityLabel() == "Kubernetes API connection activity"
         }
-        #expect(connectionItem?.view?.accessibilityValue() as? String ==
-            "Reconnecting…, Opening saved Kubernetes context…")
+        let connectionValue = connection?.accessibilityValue() as? String
+        #expect(connectionValue?.contains("Reconnecting…") == true)
+        #expect(connectionValue?.contains("Opening saved Kubernetes context…") == true)
+        #expect(connectionValue?.contains("Download 0 B/s, upload 0 B/s") == true)
 
         try await Task.sleep(for: .milliseconds(40))
         #expect(provider.events.isEmpty)
@@ -1205,10 +1255,10 @@ struct LazyWorkspaceRestorationTests {
         let values = descendants(of: try #require(originalWindow.contentView))
             .compactMap { ($0 as? NSTextField)?.stringValue }
         #expect(values.contains { $0.contains("Authentication failed (401).") })
-        let connectionItem = originalWindow.toolbar?.items.first {
-            $0.itemIdentifier.rawValue == "workspace.connection"
+        let connection = descendants(of: try #require(originalWindow.contentView)).first {
+            $0.accessibilityLabel() == "Kubernetes API connection activity"
         }
-        let connectionValue = connectionItem?.view?.accessibilityValue() as? String
+        let connectionValue = connection?.accessibilityValue() as? String
         #expect(connectionValue?.contains("Authentication failed (401).") == true)
         #expect(connectionValue?.contains("Operation: open saved context") == true)
         #expect(connectionValue?.contains("Reason: Unauthorized") == true)

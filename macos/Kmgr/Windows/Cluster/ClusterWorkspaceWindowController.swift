@@ -530,7 +530,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let sidebarController: ResourceSidebarViewController
     private let contentController: ResourceListViewController
     private let namespaceControl = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let connectionActivityView = ClusterConnectionActivityView()
+    private let connectionActivityView: ClusterConnectionActivityView
     private let connectionActivityStreamID = UUID().uuidString.lowercased()
     private var connectionActivityTask: Task<Void, Never>?
     private var connectionActivityGate = GenerationSequenceGate()
@@ -595,6 +595,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.namespacePickerPresenter = namespacePickerPresenter
         self.namespacePickerKeyWindowCheck = namespacePickerKeyWindowCheck
         self.onShowPortForwards = onShowPortForwards
+        let connectionActivityView = ClusterConnectionActivityView()
+        self.connectionActivityView = connectionActivityView
         sidebarController = ResourceSidebarViewController(
             session: session,
             isAuthenticated: isAuthenticated,
@@ -606,7 +608,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             provider: provider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             columnsConfigurationPath: columnsConfigurationPath,
-            columnsConfigurationLoader: columnsConfigurationLoader
+            columnsConfigurationLoader: columnsConfigurationLoader,
+            connectionActivityView: connectionActivityView
         )
         super.init(nibName: nil, bundle: nil)
 
@@ -927,11 +930,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebar, .back, .forward, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
+        [.sidebar, .back, .forward, .namespace, .flexibleSpace, .palette, .forwards, .actions]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebar, .back, .forward, .namespace, .flexibleSpace, .palette, .connection, .forwards, .actions]
+        [.sidebar, .back, .forward, .namespace, .flexibleSpace, .palette, .forwards, .actions]
     }
 
     func toolbar(
@@ -976,11 +979,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             item.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Command Palette")
             item.target = self
             item.action = #selector(showCommandPalette)
-            return item
-        case .connection:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Connection"
-            item.view = connectionActivityView
             return item
         case .forwards:
             forwardsButton.bezelStyle = .texturedRounded
@@ -1581,7 +1579,6 @@ private extension NSToolbarItem.Identifier {
     static let forward = Self("workspace.forward")
     static let namespace = Self("workspace.namespace")
     static let palette = Self("workspace.palette")
-    static let connection = Self("workspace.connection")
     static let forwards = Self("workspace.forwards")
     static let actions = Self("workspace.actions")
 }
@@ -2058,6 +2055,7 @@ private final class ResourceListViewController: NSViewController,
     private let optionalResourceCatalogProvider: any OptionalResourceCatalogProviding
     private let columnsConfigurationPath: String
     private let columnsConfigurationLoader: ColumnConfigurationDocumentLoader
+    private let connectionActivityView: ClusterConnectionActivityView
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let freshnessLabel = NSTextField(labelWithString: "Idle")
@@ -2192,7 +2190,8 @@ private final class ResourceListViewController: NSViewController,
         provider: any WorkspaceResourceProviding,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         columnsConfigurationPath: String,
-        columnsConfigurationLoader: ColumnConfigurationDocumentLoader
+        columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
+        connectionActivityView: ClusterConnectionActivityView
     ) {
         self.session = session
         self.isAuthenticated = isAuthenticated
@@ -2201,6 +2200,7 @@ private final class ResourceListViewController: NSViewController,
         self.optionalResourceCatalogProvider = optionalResourceCatalogProvider
         self.columnsConfigurationPath = columnsConfigurationPath
         self.columnsConfigurationLoader = columnsConfigurationLoader
+        self.connectionActivityView = connectionActivityView
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -2302,11 +2302,19 @@ private final class ResourceListViewController: NSViewController,
         statusLine.identifier = .init("resource-status-line")
         statusLine.textColor = .secondaryLabelColor
         statusLine.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        statusLine.lineBreakMode = .byTruncatingTail
+        statusLine.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLine.translatesAutoresizingMaskIntoConstraints = false
+        let statusBar = NSStackView(views: [statusLine, NSView(), connectionActivityView])
+        statusBar.identifier = .init("resource-status-bar")
+        statusBar.orientation = .horizontal
+        statusBar.alignment = .centerY
+        statusBar.spacing = 8
+        statusBar.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(errorLabel)
         root.addSubview(scrollView)
-        root.addSubview(statusLine)
+        root.addSubview(statusBar)
         let tableTopWithoutError = scrollView.topAnchor.constraint(
             equalTo: header.bottomAnchor,
             constant: 5
@@ -2326,10 +2334,10 @@ private final class ResourceListViewController: NSViewController,
             errorLabel.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: statusLine.topAnchor, constant: -2),
-            statusLine.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            statusLine.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            statusLine.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
+            scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -2),
+            statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            statusBar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            statusBar.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
         ])
         applyInlineIssueState()
         view = root
@@ -3519,6 +3527,7 @@ private final class ResourceListViewController: NSViewController,
             ? "\(counts.selected) selected (\(counts.hidden) hidden by filter)"
             : "\(counts.selected) selected"
         statusLine.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects · \(selection) · \(freshnessLabel.stringValue)"
+        statusLine.toolTip = statusLine.stringValue
     }
 
     private func setFilterShortcutContextActive(_ active: Bool) {

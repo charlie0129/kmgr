@@ -10,16 +10,21 @@ final class ClusterConnectionActivityView: NSView {
     private var receiveFadeTask: Task<Void, Never>?
     private var sendFadeTask: Task<Void, Never>?
     private var rateResetTask: Task<Void, Never>?
+    private var stateAccessibilityValue = "Connected"
+    private var rateAccessibilityValue = "Download 0 B/s, upload 0 B/s"
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         for light in [receiveLight, sendLight] {
             light.wantsLayer = true
             light.layer?.cornerRadius = 3
+            light.layer?.backgroundColor = NSColor.tertiaryLabelColor.cgColor
             light.translatesAutoresizingMaskIntoConstraints = false
             light.widthAnchor.constraint(equalToConstant: 6).isActive = true
             light.heightAnchor.constraint(equalToConstant: 6).isActive = true
         }
+        receiveLight.identifier = .init("connection-receive-indicator")
+        sendLight.identifier = .init("connection-send-indicator")
         stateLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         rateLabel.font = .monospacedDigitSystemFont(
             ofSize: NSFont.smallSystemFontSize - 1,
@@ -27,22 +32,15 @@ final class ClusterConnectionActivityView: NSView {
         )
         rateLabel.textColor = .secondaryLabelColor
         let lights = NSStackView(views: [receiveLight, sendLight])
-        lights.orientation = .vertical
-        lights.alignment = .centerX
+        lights.orientation = .horizontal
+        lights.alignment = .centerY
         lights.spacing = 3
-        let labels = NSStackView(views: [stateLabel, rateLabel])
-        // A unified toolbar can compress a custom view to roughly one text
-        // line. Keeping these labels side by side prevents AppKit from
-        // squeezing two baselines into the same vertical space.
-        labels.orientation = .horizontal
-        labels.alignment = .centerY
-        labels.spacing = 8
         stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         rateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let stack = NSStackView(views: [lights, labels])
+        let stack = NSStackView(views: [stateLabel, lights, rateLabel])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 5
+        stack.spacing = 7
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -51,21 +49,23 @@ final class ClusterConnectionActivityView: NSView {
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
-        setState(.connected)
-        update(rate: ClusterConnectionRate())
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Kubernetes API connection activity")
+        setState(.connected)
+        update(rate: ClusterConnectionRate())
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
     override var intrinsicContentSize: NSSize {
-        let content = subviews.first?.fittingSize ?? NSSize(width: 180, height: 24)
+        let content = subviews.first?.fittingSize ?? NSSize(width: 176, height: 16)
         return NSSize(
-            width: min(270, max(180, content.width)),
-            height: max(24, content.height)
+            width: min(280, max(176, content.width)),
+            height: max(16, content.height)
         )
     }
 
@@ -81,7 +81,10 @@ final class ClusterConnectionActivityView: NSView {
         stateLabel.stringValue = presentation.0
         stateLabel.textColor = presentation.1
         toolTip = detail
-        setAccessibilityValue(detail.map { "\(presentation.0), \($0)" } ?? presentation.0)
+        stateAccessibilityValue = detail.map {
+            "\(presentation.0), \($0)"
+        } ?? presentation.0
+        updateAccessibilityValue()
         invalidateIntrinsicContentSize()
     }
 
@@ -102,8 +105,15 @@ final class ClusterConnectionActivityView: NSView {
     private func setRateLabel(_ rate: ClusterConnectionRate) {
         rateLabel.stringValue = "↓ \(Self.rate(rate.bytesReceivedPerSecond))  ↑ \(Self.rate(rate.bytesSentPerSecond))"
         let value = "Download \(Self.rate(rate.bytesReceivedPerSecond)), upload \(Self.rate(rate.bytesSentPerSecond))"
-        rateLabel.setAccessibilityLabel(value)
+        rateLabel.setAccessibilityLabel("Kubernetes API transfer rate")
+        rateLabel.setAccessibilityValue(value)
+        rateAccessibilityValue = value
+        updateAccessibilityValue()
         invalidateIntrinsicContentSize()
+    }
+
+    private func updateAccessibilityValue() {
+        setAccessibilityValue("\(stateAccessibilityValue), \(rateAccessibilityValue)")
     }
 
     private func blink(
