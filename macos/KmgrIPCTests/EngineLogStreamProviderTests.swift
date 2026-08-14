@@ -8,9 +8,27 @@ import KmgrProto
 private actor LogRPCCapture: LogRPC {
     var streamed: [Kmgr_V1_StartLogsRequest] = []
     var cancelled: [Kmgr_V1_CancelLogsRequest] = []
+    var resolutions: [Kmgr_V1_ResolveLogSourcesRequest] = []
+    var resolutionTimeouts: [Duration] = []
+    var resolutionResponse = Kmgr_V1_ResolveLogSourcesResponse()
     var events: [Kmgr_V1_LogEvent] = []
 
     func setEvents(_ values: [Kmgr_V1_LogEvent]) { events = values }
+
+    func setResolutionResponse(_ value: Kmgr_V1_ResolveLogSourcesResponse) {
+        resolutionResponse = value
+    }
+
+    func resolveLogSources(
+        request: Kmgr_V1_ResolveLogSourcesRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_ResolveLogSourcesResponse {
+        resolutions.append(request)
+        resolutionTimeouts.append(timeout)
+        var response = resolutionResponse
+        if response.requestID.isEmpty { response.requestID = request.context.requestID }
+        return response
+    }
 
     func streamLogs(
         request: Kmgr_V1_StartLogsRequest,
@@ -35,6 +53,9 @@ private actor LogRPCCapture: LogRPC {
     func requests() -> ([Kmgr_V1_StartLogsRequest], [Kmgr_V1_CancelLogsRequest]) {
         (streamed, cancelled)
     }
+
+    func resolutionRequests() -> [Kmgr_V1_ResolveLogSourcesRequest] { resolutions }
+    func capturedResolutionTimeouts() -> [Duration] { resolutionTimeouts }
 }
 
 @Test func logProviderMapsOpaqueRecordsAndAuthenticatedRequestEnvelope() async throws {
@@ -71,7 +92,10 @@ private actor LogRPCCapture: LogRPC {
         sources: [LogSource(
             identity: identity, container: "main", sourceID: "pod-a/main", label: "pod-a/main"
         )],
-        options: LogOptions(follow: true, previous: true, timestamps: true, tailLines: 42)
+        options: LogOptions(
+            follow: true, previous: true, timestamps: true,
+            sinceSeconds: 0, tailLines: 42
+        )
     )
 
     var messages: [LogStreamMessage] = []
@@ -83,6 +107,7 @@ private actor LogRPCCapture: LogRPC {
     #expect(mappedCursor == StreamCursor(generation: 3, sequence: 8))
     #expect(mappedRecords.first?.data == Data([0xff, 0, 0x61]))
     #expect(mappedRecords.first?.endsWithNewline == false)
+    #expect(mappedRecords.first?.startsLine == true)
     #expect(totalBytes == 3)
 
     let (starts, _) = await rpc.requests()
@@ -91,7 +116,50 @@ private actor LogRPCCapture: LogRPC {
     #expect(starts.first?.context.deadlineUnixMs == 1_020_000)
     #expect(starts.first?.sources.first?.identity.uid == "uid-a")
     #expect(starts.first?.options.tailLines == 42)
+    #expect(starts.first?.options.hasSinceSeconds == false)
     #expect(starts.first?.options.previous == true)
+}
+
+@Test func logProviderMapsStaticUIDPinnedWorkloadResolution() async throws {
+    let rpc = LogRPCCapture()
+    var pod = Kmgr_V1_ResolvedPodLogSource()
+    pod.identity.clusterSessionID = "session-1"
+    pod.identity.version = "v1"
+    pod.identity.resource = "pods"
+    pod.identity.namespace = "team"
+    pod.identity.name = "web-abc"
+    pod.identity.uid = "pod-uid"
+    pod.containers = ["sidecar", "app", "app"]
+    var response = Kmgr_V1_ResolveLogSourcesResponse()
+    response.pods = [pod]
+    response.staticWorkloadSnapshot = true
+    await rpc.setResolutionResponse(response)
+
+    let provider = EngineLogStreamProvider(
+        rpc: rpc,
+        now: { Date(timeIntervalSince1970: 1_000) },
+        requestID: { "resolve-1" }
+    )
+    let workload = ResourceIdentity(
+        clusterSessionID: "session-1", group: "apps", version: "v1",
+        resource: "deployments", namespace: "team", name: "web", uid: "deployment-uid"
+    )
+    let resolution = try await provider.resolveLogSources(resources: [workload])
+
+    #expect(resolution.staticWorkloadSnapshot)
+    #expect(resolution.pods == [PodLogSourceInventory(
+        identity: ResourceIdentity(
+            clusterSessionID: "session-1", group: "", version: "v1", resource: "pods",
+            namespace: "team", name: "web-abc", uid: "pod-uid"
+        ),
+        containers: ["app", "sidecar"]
+    )])
+    let requests = await rpc.resolutionRequests()
+    #expect(requests.first?.context.requestID == "resolve-1")
+    #expect(requests.first?.context.clusterSessionID == "session-1")
+    #expect(requests.first?.context.deadlineUnixMs == 1_030_000)
+    #expect(requests.first?.resources.first?.uid == "deployment-uid")
+    #expect(await rpc.capturedResolutionTimeouts() == [.seconds(30)])
 }
 
 @Test func logProviderRejectsCrossStreamEvents() async {

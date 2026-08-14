@@ -75,6 +75,83 @@ public enum Kmgr_V1_LogStreamState: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
+/// Resolves an immutable selection of Pods and supported workload controllers
+/// to one UID-pinned Pod snapshot before a log window opens. Membership is
+/// deliberately static; dynamic controller membership is a separate opt-in
+/// behavior represented by LogOptions.follow_workload_membership.
+public struct Kmgr_V1_ResolveLogSourcesRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var resources: [Kmgr_V1_ResourceIdentity] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+}
+
+public struct Kmgr_V1_ResolvedPodLogSource: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var identity: Kmgr_V1_ResourceIdentity {
+    get {return _identity ?? Kmgr_V1_ResourceIdentity()}
+    set {_identity = newValue}
+  }
+  /// Returns true if `identity` has been explicitly set.
+  public var hasIdentity: Bool {return self._identity != nil}
+  /// Clears the value of `identity`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentity() {self._identity = nil}
+
+  public var containers: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _identity: Kmgr_V1_ResourceIdentity? = nil
+}
+
+public struct Kmgr_V1_ResolveLogSourcesResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var pods: [Kmgr_V1_ResolvedPodLogSource] = []
+
+  public var staticWorkloadSnapshot: Bool = false
+
+  public var error: Kmgr_V1_StructuredError {
+    get {return _error ?? Kmgr_V1_StructuredError()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {return self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: Kmgr_V1_StructuredError? = nil
+}
+
 public struct Kmgr_V1_LogSource: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -236,6 +313,11 @@ public struct Kmgr_V1_LogRecord: Sendable {
 
   public var endsWithNewline: Bool = false
 
+  /// True when this record continues a prior logical Kubernetes log line.
+  /// The negative/default-false form keeps older producers compatible while
+  /// allowing renderers to suppress repeated prefixes on oversized lines.
+  public var continuesLine: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -346,6 +428,133 @@ fileprivate let _protobuf_package = "kmgr.v1"
 
 extension Kmgr_V1_LogStreamState: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0LOG_STREAM_STATE_UNSPECIFIED\0\u{1}LOG_STREAM_STATE_CONNECTING\0\u{1}LOG_STREAM_STATE_STREAMING\0\u{1}LOG_STREAM_STATE_RECONNECTING\0\u{1}LOG_STREAM_STATE_COMPLETED\0\u{1}LOG_STREAM_STATE_CANCELLED\0\u{1}LOG_STREAM_STATE_FAILED\0")
+}
+
+extension Kmgr_V1_ResolveLogSourcesRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ResolveLogSourcesRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{1}resources\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.resources) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.resources.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.resources, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ResolveLogSourcesRequest, rhs: Kmgr_V1_ResolveLogSourcesRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.resources != rhs.resources {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_ResolvedPodLogSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ResolvedPodLogSource"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}containers\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._identity) }()
+      case 2: try { try decoder.decodeRepeatedStringField(value: &self.containers) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._identity {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.containers.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.containers, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ResolvedPodLogSource, rhs: Kmgr_V1_ResolvedPodLogSource) -> Bool {
+    if lhs._identity != rhs._identity {return false}
+    if lhs.containers != rhs.containers {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_ResolveLogSourcesResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ResolveLogSourcesResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}pods\0\u{3}static_workload_snapshot\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.pods) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.staticWorkloadSnapshot) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.pods.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.pods, fieldNumber: 2)
+    }
+    if self.staticWorkloadSnapshot != false {
+      try visitor.visitSingularBoolField(value: self.staticWorkloadSnapshot, fieldNumber: 3)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ResolveLogSourcesResponse, rhs: Kmgr_V1_ResolveLogSourcesResponse) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.pods != rhs.pods {return false}
+    if lhs.staticWorkloadSnapshot != rhs.staticWorkloadSnapshot {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
 }
 
 extension Kmgr_V1_LogSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -566,7 +775,7 @@ extension Kmgr_V1_CancelLogsRequest: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 extension Kmgr_V1_LogRecord: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LogRecord"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}source_id\0\u{1}data\0\u{3}timestamp_unix_ms\0\u{3}ends_with_newline\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}source_id\0\u{1}data\0\u{3}timestamp_unix_ms\0\u{3}ends_with_newline\0\u{3}continues_line\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -578,6 +787,7 @@ extension Kmgr_V1_LogRecord: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
       case 2: try { try decoder.decodeSingularBytesField(value: &self.data) }()
       case 3: try { try decoder.decodeSingularInt64Field(value: &self.timestampUnixMs) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.endsWithNewline) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.continuesLine) }()
       default: break
       }
     }
@@ -596,6 +806,9 @@ extension Kmgr_V1_LogRecord: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
     if self.endsWithNewline != false {
       try visitor.visitSingularBoolField(value: self.endsWithNewline, fieldNumber: 4)
     }
+    if self.continuesLine != false {
+      try visitor.visitSingularBoolField(value: self.continuesLine, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -604,6 +817,7 @@ extension Kmgr_V1_LogRecord: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
     if lhs.data != rhs.data {return false}
     if lhs.timestampUnixMs != rhs.timestampUnixMs {return false}
     if lhs.endsWithNewline != rhs.endsWithNewline {return false}
+    if lhs.continuesLine != rhs.continuesLine {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

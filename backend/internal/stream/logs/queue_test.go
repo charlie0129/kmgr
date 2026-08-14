@@ -11,7 +11,9 @@ func TestRecordQueueFragmentsHugeRecordsBeforeEnforcingBounds(t *testing.T) {
 		maxRecords: 2, maxBytes: 8, maxRecordBytes: 4,
 		batchRecords: 2, batchBytes: 8,
 	})
-	queue.enqueue(Record{SourceID: "pod", Data: []byte("abcdefghijklmnopq"), EndsWithNewline: true})
+	queue.enqueue(Record{
+		SourceID: "pod", Data: []byte("abcdefghijklmnopq"), StartsLine: true, EndsWithNewline: true,
+	})
 	stats := queue.stats()
 	if stats.QueuedRecords != 2 || stats.QueuedBytes != 5 || stats.PeakQueuedRecords > 2 || stats.PeakQueuedBytes > 8 {
 		t.Fatalf("queue stats = %#v", stats)
@@ -36,5 +38,8 @@ func TestRecordQueueFragmentsHugeRecordsBeforeEnforcingBounds(t *testing.T) {
 	}
 	if delivery.Records[0].EndsWithNewline || !delivery.Records[1].EndsWithNewline {
 		t.Fatalf("newline markers = %#v", delivery.Records)
+	}
+	if delivery.Records[0].StartsLine || delivery.Records[1].StartsLine {
+		t.Fatalf("retained mid-line fragments gained a source-prefix boundary: %#v", delivery.Records)
 	}
 }

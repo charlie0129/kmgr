@@ -1,5 +1,25 @@
 import Foundation
 
+public enum LogResourceCompatibility {
+    public static func supportsStaticPodResolution(_ identity: ResourceIdentity) -> Bool {
+        guard !identity.namespace.isEmpty else { return false }
+        if identity.group.isEmpty, identity.version == "v1", identity.resource == "pods" {
+            return true
+        }
+        if identity.group == "apps", identity.version == "v1" {
+            return ["deployments", "statefulsets", "daemonsets", "replicasets"]
+                .contains(identity.resource)
+        }
+        return identity.group == "batch" && identity.version == "v1"
+            && ["jobs", "cronjobs"].contains(identity.resource)
+    }
+
+    public static func supportsSelection(_ identities: [ResourceIdentity]) -> Bool {
+        !identities.isEmpty && identities.count <= 128
+            && identities.allSatisfy(supportsStaticPodResolution)
+    }
+}
+
 public struct LogSource: Hashable, Sendable {
     public var identity: ResourceIdentity
     public var container: String
@@ -26,6 +46,19 @@ public struct PodLogSourceInventory: Hashable, Sendable {
     public init(identity: ResourceIdentity, containers: [String]) {
         self.identity = identity
         self.containers = containers
+    }
+}
+
+public struct LogSourceResolution: Hashable, Sendable {
+    public var pods: [PodLogSourceInventory]
+    public var staticWorkloadSnapshot: Bool
+
+    public init(
+        pods: [PodLogSourceInventory],
+        staticWorkloadSnapshot: Bool
+    ) {
+        self.pods = pods
+        self.staticWorkloadSnapshot = staticWorkloadSnapshot
     }
 }
 
@@ -162,17 +195,20 @@ public struct LogRecord: Hashable, Sendable {
     public var sourceID: String
     public var data: Data
     public var timestampUnixMilliseconds: Int64?
+    public var startsLine: Bool
     public var endsWithNewline: Bool
 
     public init(
         sourceID: String,
         data: Data,
         timestampUnixMilliseconds: Int64? = nil,
+        startsLine: Bool = true,
         endsWithNewline: Bool
     ) {
         self.sourceID = sourceID
         self.data = data
         self.timestampUnixMilliseconds = timestampUnixMilliseconds
+        self.startsLine = startsLine
         self.endsWithNewline = endsWithNewline
     }
 }
@@ -222,8 +258,20 @@ public enum LogStreamMessage: Hashable, Sendable {
 }
 
 public protocol LogStreamProviding: Sendable {
+    func resolveLogSources(resources: [ResourceIdentity]) async throws -> LogSourceResolution
     func streamLogs(request: LogStreamRequest) -> AsyncThrowingStream<LogStreamMessage, Error>
     func cancelLogs(sessionID: String, streamID: String, generation: UInt64) async
+}
+
+public extension LogStreamProviding {
+    func resolveLogSources(resources: [ResourceIdentity]) async throws -> LogSourceResolution {
+        throw ClusterManagerIssue(
+            category: .internalFailure,
+            reason: "LogSourceResolutionUnavailable",
+            message: "This log provider cannot resolve the selected resources to Pods.",
+            operation: "resolve workload logs"
+        )
+    }
 }
 
 /// Owns the active log generation and admits messages only after their cursor
@@ -294,6 +342,7 @@ public struct LogRecordRing: Sendable {
                 let end = min(offset + fragmentByteLimit, record.data.count)
                 var fragment = record
                 fragment.data = record.data.subdata(in: offset..<end)
+                fragment.startsLine = record.startsLine && offset == 0
                 fragment.endsWithNewline = record.endsWithNewline && end == record.data.count
                 appendOne(fragment)
                 offset = end
@@ -588,6 +637,14 @@ public enum LogTextInstallPlanner {
 /// newest matching records when source labels or UTF-8 replacement expansion
 /// would exceed the configured visible-text budget.
 public enum LogTextRenderer {
+    private struct Candidate {
+        var record: LogRecord
+        var decoded: String
+        var recordIndex: Int
+        var sourcePrefix: String
+        var timestampPrefix: String
+    }
+
     public static func render(
         records: [LogRecord],
         sourceLabels: [String: String],
@@ -597,40 +654,108 @@ public enum LogTextRenderer {
     ) throws -> RenderedLogText {
         precondition(maximumOutputUTF8Bytes > 0)
         let foldedFilter = filter.lowercased()
-        var chunks: [String] = []
-        chunks.reserveCapacity(min(records.count, 4_096))
-        var outputBytes = 0
+        var candidates: [Candidate] = []
+        candidates.reserveCapacity(min(records.count, 4_096))
+        var estimatedOutputBytes = 0
         var omittedRecords = 0
         var omittedBytes: UInt64 = 0
+        let timestampFormatter: ISO8601DateFormatter? = records.contains {
+            $0.timestampUnixMilliseconds != nil
+        } ? {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            return formatter
+        }() : nil
+        var cachedSourcePrefixes: [String: String] = [:]
 
-        for (offset, record) in records.reversed().enumerated() {
+        for (offset, index) in records.indices.reversed().enumerated() {
             if offset & 63 == 0 { try Task.checkCancellation() }
+            let record = records[index]
             let decoded = String(decoding: record.data, as: UTF8.self)
             if !foldedFilter.isEmpty && !decoded.lowercased().contains(foldedFilter) {
                 continue
             }
-            let prefix: String
-            if showSourceLabels, let label = sourceLabels[record.sourceID] {
-                prefix = "[\(displaySafeLabel(label))] "
+            let sourcePrefix: String
+            if showSourceLabels {
+                if let cached = cachedSourcePrefixes[record.sourceID] {
+                    sourcePrefix = cached
+                } else {
+                    let label = sourceLabels[record.sourceID] ?? record.sourceID
+                    let value = "[\(displaySafeLabel(label))] "
+                    cachedSourcePrefixes[record.sourceID] = value
+                    sourcePrefix = value
+                }
             } else {
-                prefix = ""
+                sourcePrefix = ""
             }
-            let chunk = prefix + decoded + (record.endsWithNewline ? "\n" : "")
-            let chunkBytes = chunk.utf8.count
-            if chunkBytes > maximumOutputUTF8Bytes - outputBytes {
+            let timestampPrefix: String
+            if let milliseconds = record.timestampUnixMilliseconds,
+                let timestampFormatter
+            {
+                timestampPrefix = timestampFormatter.string(
+                    from: Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+                ) + " "
+            } else {
+                timestampPrefix = ""
+            }
+            // A continuation may become the first visible fragment after
+            // filtering, ring eviction, or byte-budget omission. Reserve for
+            // a source prefix and ellipsis on every continuation; the forward
+            // pass uses them only when the preceding fragment is not visible.
+            let estimate = sourcePrefix.utf8.count + timestampPrefix.utf8.count
+                + (record.startsLine ? 0 : "… ".utf8.count)
+                + decoded.utf8.count
+                // Reserve both a visual separator before a disjoint segment
+                // and the record's own newline. Most records use only one;
+                // the conservative bound keeps interleaving byte-safe.
+                + 1 + (record.endsWithNewline ? 1 : 0)
+            if estimate > maximumOutputUTF8Bytes - estimatedOutputBytes {
                 omittedRecords += 1
                 omittedBytes &+= UInt64(record.data.count)
                 continue
             }
-            chunks.append(chunk)
-            outputBytes += chunkBytes
+            candidates.append(Candidate(
+                record: record,
+                decoded: decoded,
+                recordIndex: index,
+                sourcePrefix: sourcePrefix,
+                timestampPrefix: timestampPrefix
+            ))
+            estimatedOutputBytes += estimate
         }
         try Task.checkCancellation()
-        let orderedChunks = chunks.reversed()
-        let resultChunks = Array(orderedChunks)
+        var chunks: [String] = []
+        chunks.reserveCapacity(candidates.count)
+        var outputBytes = 0
+        var previousVisibleSourceID: String?
+        var previousVisibleIndex = -1
+        var previousVisibleLineOpen = false
+        for (offset, candidate) in candidates.reversed().enumerated() {
+            if offset & 63 == 0 { try Task.checkCancellation() }
+            let record = candidate.record
+            let continuesPreviousVisibleFragment = !record.startsLine
+                && previousVisibleLineOpen
+                && previousVisibleSourceID == record.sourceID
+                && previousVisibleIndex == candidate.recordIndex - 1
+            let truncatedStart = !record.startsLine && !continuesPreviousVisibleFragment
+            let beginsVisibleSegment = record.startsLine || truncatedStart
+            let separator = previousVisibleLineOpen && !continuesPreviousVisibleFragment
+                ? "\n" : ""
+            let prefix = beginsVisibleSegment ? candidate.sourcePrefix : ""
+            let timestamp = beginsVisibleSegment ? candidate.timestampPrefix : ""
+            let truncation = truncatedStart ? "… " : ""
+            let chunk = separator + prefix + timestamp + truncation + candidate.decoded
+                + (record.endsWithNewline ? "\n" : "")
+            chunks.append(chunk)
+            outputBytes += chunk.utf8.count
+            previousVisibleSourceID = record.sourceID
+            previousVisibleIndex = candidate.recordIndex
+            previousVisibleLineOpen = !record.endsWithNewline
+        }
         return RenderedLogText(
-            chunks: resultChunks,
-            renderedRecords: resultChunks.count,
+            chunks: chunks,
+            renderedRecords: chunks.count,
             omittedRecords: omittedRecords,
             omittedSourceBytes: omittedBytes,
             outputUTF8Bytes: outputBytes

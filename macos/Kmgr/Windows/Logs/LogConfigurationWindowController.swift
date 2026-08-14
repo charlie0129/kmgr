@@ -4,8 +4,7 @@ import KmgrCore
 @MainActor
 final class LogConfigurationWindowController: NSWindowController, NSWindowDelegate {
     private let session: OpenedClusterSession
-    private let pods: [ResourceIdentity]
-    private let detailProvider: any ObjectDetailProviding
+    private let resources: [ResourceIdentity]
     private let logProvider: any LogStreamProviding
     private let displayConfiguration: LogDisplayConfiguration
     private let containerButton = NSPopUpButton()
@@ -14,10 +13,13 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
     private let timestampsButton = NSButton(checkboxWithTitle: "Request timestamps", target: nil, action: nil)
     private let tailField = NSTextField()
     private let sinceField = NSTextField()
-    private let statusLabel = NSTextField(wrappingLabelWithString: "Loading Pod containers…")
+    private let statusLabel = NSTextField(
+        wrappingLabelWithString: "Resolving a UID-pinned Pod snapshot…"
+    )
     private let openButton = NSButton(title: "Open Logs", target: nil, action: nil)
     private var loadTask: Task<Void, Never>?
     private var podContainers: [PodLogSourceInventory] = []
+    private var staticWorkloadSnapshot = false
     private var parentWindow: NSWindow?
 
     var onOpenWindow: ((LogWindowController) -> Void)?
@@ -25,15 +27,13 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
 
     init(
         session: OpenedClusterSession,
-        pods: [ResourceIdentity],
-        detailProvider: any ObjectDetailProviding,
+        resources: [ResourceIdentity],
         logProvider: any LogStreamProviding,
         displayConfiguration: LogDisplayConfiguration = .default
     ) {
-        precondition(!pods.isEmpty && pods.count <= 128)
+        precondition(!resources.isEmpty && resources.count <= 128)
         self.session = session
-        self.pods = pods
-        self.detailProvider = detailProvider
+        self.resources = resources
         self.logProvider = logProvider
         self.displayConfiguration = displayConfiguration
         let window = NSWindow(
@@ -67,7 +67,7 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
 
     private func configureContent(in window: NSWindow) {
         let identity = NSTextField(wrappingLabelWithString:
-            "Context: \(session.contextName)\nPods: \(pods.map { $0.namespace + "/" + $0.name }.joined(separator: ", "))"
+            "Context: \(session.contextName)\nResources: \(resources.map { $0.namespace + "/" + $0.name }.joined(separator: ", "))"
         )
         identity.lineBreakMode = .byTruncatingMiddle
         identity.maximumNumberOfLines = 3
@@ -135,40 +135,23 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
 
     private func loadContainers() {
         guard loadTask == nil else { return }
-        loadTask = Task { [weak self, detailProvider, pods] in
+        loadTask = Task { [weak self, logProvider, resources] in
             guard let self else { return }
-            var values: [PodLogSourceInventory] = []
             do {
-                // Bound concurrent fresh GETs so a large multi-selection never
-                // turns into an unbounded request burst.
-                for chunkStart in stride(from: 0, to: pods.count, by: 8) {
-                    let chunk = Array(pods[chunkStart..<min(chunkStart + 8, pods.count)])
-                    let resolved = try await withThrowingTaskGroup(
-                        of: PodLogSourceInventory.self
-                    ) { group in
-                        for pod in chunk {
-                            group.addTask {
-                                let detail = try await detailProvider.getObject(identity: pod)
-                                let containers = detail.summaryFields.compactMap { field -> String? in
-                                    guard field.sectionID == "containers",
-                                        field.fieldID.hasPrefix("container:") else { return nil }
-                                    return field.displayText
-                                }
-                                return PodLogSourceInventory(
-                                    identity: detail.identity,
-                                    containers: containers
-                                )
-                            }
-                        }
-                        var result: [PodLogSourceInventory] = []
-                        for try await value in group { result.append(value) }
-                        return result
-                    }
-                    values.append(contentsOf: resolved)
-                }
+                let resolution = try await logProvider.resolveLogSources(resources: resources)
                 guard !Task.isCancelled else { return }
-                values.sort { ($0.identity.namespace, $0.identity.name) < ($1.identity.namespace, $1.identity.name) }
+                let values = resolution.pods
+                guard !values.isEmpty else {
+                    throw ClusterManagerIssue(
+                        category: .notFound,
+                        reason: "NoWorkloadPods",
+                        message: "The static snapshot contains no Pods. The workload may be scaled to zero or have no current Jobs.",
+                        contextName: session.contextName,
+                        operation: "configure workload logs"
+                    )
+                }
                 podContainers = values
+                staticWorkloadSnapshot = resolution.staticWorkloadSnapshot
                 containerButton.removeAllItems()
                 let selections = PodLogSourcePlanner.selections(for: values)
                 containerButton.addItems(withTitles: selections.map(\.title))
@@ -181,7 +164,11 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
                         operation: "configure Pod logs"
                     )
                 }
-                statusLabel.stringValue = "Container selection is UID-pinned for \(pods.count) Pod\(pods.count == 1 ? "" : "s")."
+                if resolution.staticWorkloadSnapshot {
+                    statusLabel.stringValue = "Resolved \(values.count) UID-pinned Pod\(values.count == 1 ? "" : "s") as a static snapshot. Membership changes are not followed; reopen Logs to refresh."
+                } else {
+                    statusLabel.stringValue = "Container selection is UID-pinned for \(values.count) Pod\(values.count == 1 ? "" : "s")."
+                }
                 openButton.isEnabled = true
             } catch {
                 guard !Task.isCancelled else { return }
@@ -218,6 +205,10 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
         let controller = LogWindowController(
             session: session,
             sources: sources,
+            availableSources: PodLogSourcePlanner.sources(
+                for: podContainers,
+                selection: .all
+            ),
             provider: logProvider,
             options: LogOptions(
                 follow: followButton.state == .on,
@@ -226,7 +217,8 @@ final class LogConfigurationWindowController: NSWindowController, NSWindowDelega
                 sinceSeconds: since > 0 ? since : nil,
                 tailLines: tail
             ),
-            displayConfiguration: displayConfiguration
+            displayConfiguration: displayConfiguration,
+            staticWorkloadSnapshot: staticWorkloadSnapshot
         )
         onOpenWindow?(controller)
         closeSheet()

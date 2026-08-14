@@ -20,6 +20,19 @@ public enum Kmgr_V1_LogService: Sendable {
     public static let descriptor = GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.LogService")
     /// Namespace for method metadata.
     public enum Method: Sendable {
+        /// Namespace for "ResolveLogSources" metadata.
+        public enum ResolveLogSources: Sendable {
+            /// Request type for "ResolveLogSources".
+            public typealias Input = Kmgr_V1_ResolveLogSourcesRequest
+            /// Response type for "ResolveLogSources".
+            public typealias Output = Kmgr_V1_ResolveLogSourcesResponse
+            /// Descriptor for "ResolveLogSources".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.LogService"),
+                method: "ResolveLogSources",
+                type: .unary
+            )
+        }
         /// Namespace for "StreamLogs" metadata.
         public enum StreamLogs: Sendable {
             /// Request type for "StreamLogs".
@@ -48,6 +61,7 @@ public enum Kmgr_V1_LogService: Sendable {
         }
         /// Descriptors for all methods in the "kmgr.v1.LogService" service.
         public static let descriptors: [GRPCCore.MethodDescriptor] = [
+            ResolveLogSources.descriptor,
             StreamLogs.descriptor,
             CancelLogs.descriptor
         ]
@@ -69,6 +83,25 @@ extension Kmgr_V1_LogService {
     /// You don't need to implement this protocol directly, use the generated
     /// implementation, ``Client``.
     public protocol ClientProtocol: Sendable {
+        /// Call the "ResolveLogSources" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_ResolveLogSourcesRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_ResolveLogSourcesRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_ResolveLogSourcesResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func resolveLogSources<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_ResolveLogSourcesRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_ResolveLogSourcesRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ResolveLogSourcesResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ResolveLogSourcesResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
         /// Call the "StreamLogs" method.
         ///
         /// - Parameters:
@@ -122,6 +155,36 @@ extension Kmgr_V1_LogService {
         ///   - client: A `GRPCCore.GRPCClient` providing a communication channel to the service.
         public init(wrapping client: GRPCCore.GRPCClient<Transport>) {
             self.client = client
+        }
+
+        /// Call the "ResolveLogSources" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_ResolveLogSourcesRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_ResolveLogSourcesRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_ResolveLogSourcesResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func resolveLogSources<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_ResolveLogSourcesRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_ResolveLogSourcesRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ResolveLogSourcesResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ResolveLogSourcesResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Kmgr_V1_LogService.Method.ResolveLogSources.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
         }
 
         /// Call the "StreamLogs" method.
@@ -187,6 +250,31 @@ extension Kmgr_V1_LogService {
 // Helpers providing default arguments to 'ClientProtocol' methods.
 @available(macOS 15.0, iOS 18.0, watchOS 11.0, tvOS 18.0, visionOS 2.0, *)
 extension Kmgr_V1_LogService.ClientProtocol {
+    /// Call the "ResolveLogSources" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_ResolveLogSourcesRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func resolveLogSources<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_ResolveLogSourcesRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ResolveLogSourcesResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.resolveLogSources(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_ResolveLogSourcesRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_ResolveLogSourcesResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "StreamLogs" method.
     ///
     /// - Parameters:
@@ -239,6 +327,35 @@ extension Kmgr_V1_LogService.ClientProtocol {
 // Helpers providing sugared APIs for 'ClientProtocol' methods.
 @available(macOS 15.0, iOS 18.0, watchOS 11.0, tvOS 18.0, visionOS 2.0, *)
 extension Kmgr_V1_LogService.ClientProtocol {
+    /// Call the "ResolveLogSources" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func resolveLogSources<Result>(
+        _ message: Kmgr_V1_ResolveLogSourcesRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ResolveLogSourcesResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_ResolveLogSourcesRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.resolveLogSources(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "StreamLogs" method.
     ///
     /// - Parameters:

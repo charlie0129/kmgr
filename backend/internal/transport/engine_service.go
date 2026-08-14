@@ -16,7 +16,7 @@ import (
 
 const (
 	ProtocolMajor uint32 = 1
-	ProtocolMinor uint32 = 0
+	ProtocolMinor uint32 = 1
 )
 
 var engineCapabilities = []*kmgrv1.Capability{
@@ -34,6 +34,7 @@ var engineCapabilities = []*kmgrv1.Capability{
 	{Name: "object.data", Version: 1},
 	{Name: "operation.mutations", Version: 1},
 	{Name: "logs.stream", Version: 1},
+	{Name: "logs.resolve-sources", Version: 1},
 	{Name: "exec.stream", Version: 1},
 	{Name: "port-forward.manager", Version: 1},
 }

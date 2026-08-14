@@ -8,8 +8,30 @@ option go_package = "github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1";
 option swift_prefix = "Kmgr_V1_";
 
 service LogService {
+  rpc ResolveLogSources(ResolveLogSourcesRequest) returns (ResolveLogSourcesResponse);
   rpc StreamLogs(StartLogsRequest) returns (stream LogEvent);
   rpc CancelLogs(CancelLogsRequest) returns (Acknowledgement);
+}
+
+// Resolves an immutable selection of Pods and supported workload controllers
+// to one UID-pinned Pod snapshot before a log window opens. Membership is
+// deliberately static; dynamic controller membership is a separate opt-in
+// behavior represented by LogOptions.follow_workload_membership.
+message ResolveLogSourcesRequest {
+  RequestContext context = 1;
+  repeated ResourceIdentity resources = 2;
+}
+
+message ResolvedPodLogSource {
+  ResourceIdentity identity = 1;
+  repeated string containers = 2;
+}
+
+message ResolveLogSourcesResponse {
+  string request_id = 1;
+  repeated ResolvedPodLogSource pods = 2;
+  bool static_workload_snapshot = 3;
+  StructuredError error = 4;
 }
 
 message LogSource {
@@ -49,6 +71,10 @@ message LogRecord {
   bytes data = 2;
   int64 timestamp_unix_ms = 3;
   bool ends_with_newline = 4;
+  // True when this record continues a prior logical Kubernetes log line.
+  // The negative/default-false form keeps older producers compatible while
+  // allowing renderers to suppress repeated prefixes on oversized lines.
+  bool continues_line = 5;
 }
 
 enum LogStreamState {

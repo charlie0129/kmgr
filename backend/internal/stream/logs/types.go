@@ -87,6 +87,7 @@ type Record struct {
 	SourceID        string
 	Data            []byte
 	Timestamp       time.Time
+	StartsLine      bool
 	EndsWithNewline bool
 }
 
@@ -125,8 +126,8 @@ type ResolvedSession struct {
 	ContextName string
 	Opener      SourceOpener
 	// Release relinquishes the cluster-session lease acquired by Resolve.
-	// Managers call it exactly once after the operation terminates or if Start
-	// rejects the resolved operation before it becomes active.
+	// Managers call it exactly once after every producer and window subscription
+	// sharing it has ended, or if Start rejects it before activation.
 	Release func()
 }
 

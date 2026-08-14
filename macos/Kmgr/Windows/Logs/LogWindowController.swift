@@ -6,12 +6,21 @@ import OSLog
 final class LogWindowController: NSWindowController, NSWindowDelegate,
     NSSearchFieldDelegate
 {
+    private struct AppliedStreamConfiguration {
+        var sources: [LogSource]
+        var options: LogOptions
+        var containerTitle: String
+    }
+
     let session: OpenedClusterSession
-    let sources: [LogSource]
+    private(set) var sources: [LogSource]
+    private let availableSources: [LogSource]
+    private let staticWorkloadSnapshot: Bool
     private let provider: any LogStreamProviding
     private let streamID = UUID().uuidString.lowercased()
     private var generation: UInt64 = 0
-    private var streamTask: Task<Void, Never>?
+    private var streamTasks: [UInt64: Task<Void, Never>] = [:]
+    private var pendingGeneration: UInt64?
     private var renderTask: Task<Void, Never>?
     private var streamGate = LogStreamGenerationGate()
     private let recordStore: LogRecordStore
@@ -32,6 +41,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var latestRenderOmissions = 0
     private var latestStreamState: LogStreamState = .connecting
     private var renderedChunks: [String] = []
+    private var appliedContainerTitle = ""
+    private var establishedConfiguration: AppliedStreamConfiguration?
     private let logSignposter = OSSignposter(
         subsystem: PerformanceSignpostCatalog.subsystem,
         category: PerformanceSignpostCatalog.logsCategory
@@ -45,6 +56,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private let followButton = NSButton(checkboxWithTitle: "Follow", target: nil, action: nil)
     private let previousButton = NSButton(checkboxWithTitle: "Previous", target: nil, action: nil)
     private let timestampsButton = NSButton(checkboxWithTitle: "Timestamps", target: nil, action: nil)
+    private let containerButton = NSPopUpButton()
+    private let tailField = NSTextField()
+    private let sinceField = NSTextField()
+    private let applyButton = NSButton(title: "Apply", target: nil, action: nil)
     private let wrapButton = NSButton(checkboxWithTitle: "Wrap", target: nil, action: nil)
     private let pauseButton = NSButton(title: "Pause", target: nil, action: nil)
 
@@ -53,13 +68,20 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     init(
         session: OpenedClusterSession,
         sources: [LogSource],
+        availableSources: [LogSource]? = nil,
         provider: any LogStreamProviding,
         options: LogOptions = LogOptions(),
-        displayConfiguration: LogDisplayConfiguration = .default
+        displayConfiguration: LogDisplayConfiguration = .default,
+        staticWorkloadSnapshot: Bool = false
     ) {
         precondition(!sources.isEmpty)
+        let allSources = availableSources ?? sources
+        precondition(!allSources.isEmpty)
+        precondition(Set(sources.map(\.sourceID)).isSubset(of: Set(allSources.map(\.sourceID))))
         self.session = session
         self.sources = sources
+        self.availableSources = allSources
+        self.staticWorkloadSnapshot = staticWorkloadSnapshot
         self.provider = provider
         self.options = options
         self.recordStore = LogRecordStore(
@@ -72,7 +94,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         // out in one main-thread NSTextView.string replacement.
         self.maximumRenderedUTF8Bytes = min(displayConfiguration.byteLimit, 32 << 20)
         self.sourceLabels = Dictionary(
-            sources.map { ($0.sourceID, $0.label) },
+            allSources.map { ($0.sourceID, $0.label) },
             uniquingKeysWith: { first, _ in first }
         )
         let titleSources = LogSourcePresentation.titleSummary(for: sources)
@@ -87,6 +109,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         super.init(window: window)
         window.delegate = self
         configureContent(in: window)
+        establishedConfiguration = AppliedStreamConfiguration(
+            sources: sources,
+            options: options,
+            containerTitle: appliedContainerTitle
+        )
     }
 
     @available(*, unavailable)
@@ -152,6 +179,19 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         followButton.state = options.follow ? .on : .off
         previousButton.state = options.previous ? .on : .off
         timestampsButton.state = options.timestamps ? .on : .off
+        tailField.stringValue = options.tailLines.map(String.init) ?? ""
+        tailField.placeholderString = "Default"
+        tailField.alignment = .right
+        tailField.setAccessibilityLabel("Log tail lines")
+        tailField.identifier = NSUserInterfaceItemIdentifier("log-tail-lines")
+        tailField.widthAnchor.constraint(equalToConstant: 62).isActive = true
+        sinceField.stringValue = options.sinceSeconds.map(String.init) ?? ""
+        sinceField.placeholderString = "All"
+        sinceField.alignment = .right
+        sinceField.setAccessibilityLabel("Log since seconds")
+        sinceField.identifier = NSUserInterfaceItemIdentifier("log-since-seconds")
+        sinceField.widthAnchor.constraint(equalToConstant: 62).isActive = true
+        configureContainerButton()
         wrapButton.state = .off
         for button in [followButton, previousButton, timestampsButton] {
             button.target = self
@@ -161,17 +201,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         wrapButton.action = #selector(toggleWrap)
         pauseButton.target = self
         pauseButton.action = #selector(togglePause)
+        containerButton.target = self
+        containerButton.action = #selector(restartFromControls)
         searchField.placeholderString = "Filter visible logs"
         searchField.delegate = self
         searchField.sendsSearchStringImmediately = true
         searchField.widthAnchor.constraint(equalToConstant: 220).isActive = true
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
-        sourceLabel.stringValue = LogSourcePresentation.toolbarSummary(
-            contextName: session.contextName,
-            sources: sources
-        )
-        sourceLabel.toolTip = sourceLabel.stringValue
+        updateSourcePresentation()
         sourceLabel.lineBreakMode = .byTruncatingMiddle
         sourceLabel.textColor = .secondaryLabelColor
         sourceLabel.setAccessibilityLabel("Log sources")
@@ -179,13 +217,32 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
         let clearButton = NSButton(title: "Clear", target: self, action: #selector(clearVisibleBuffer))
         let saveButton = NSButton(title: "Save…", target: self, action: #selector(saveVisibleBuffer))
-        let toolbar = NSStackView(views: [
-            followButton, previousButton, timestampsButton, wrapButton, pauseButton,
-            clearButton, saveButton, NSView(), searchField,
+        applyButton.target = self
+        applyButton.action = #selector(restartFromControls)
+        applyButton.setAccessibilityLabel("Apply log stream options")
+        let containerLabel = NSTextField(labelWithString: "Container")
+        let tailLabel = NSTextField(labelWithString: "Tail")
+        let sinceLabel = NSTextField(labelWithString: "Since (s)")
+        for label in [containerLabel, tailLabel, sinceLabel] {
+            label.textColor = .secondaryLabelColor
+        }
+        let streamToolbar = NSStackView(views: [
+            containerLabel, containerButton, followButton, previousButton, timestampsButton,
+            tailLabel, tailField, sinceLabel, sinceField, applyButton, NSView(),
         ])
-        toolbar.orientation = .horizontal
-        toolbar.alignment = .centerY
-        toolbar.spacing = 8
+        streamToolbar.orientation = .horizontal
+        streamToolbar.alignment = .centerY
+        streamToolbar.spacing = 7
+        let viewToolbar = NSStackView(views: [
+            wrapButton, pauseButton, clearButton, saveButton, NSView(), searchField,
+        ])
+        viewToolbar.orientation = .horizontal
+        viewToolbar.alignment = .centerY
+        viewToolbar.spacing = 8
+        let toolbar = NSStackView(views: [streamToolbar, viewToolbar])
+        toolbar.orientation = .vertical
+        toolbar.alignment = .leading
+        toolbar.spacing = 5
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
         textView.isEditable = false
@@ -233,59 +290,210 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     @objc private func restartFromControls() {
+        guard pendingGeneration == nil else { return }
+        let tailText = tailField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sinceText = sinceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard tailText.isEmpty || (Int64(tailText).map { $0 >= -1 } ?? false),
+            sinceText.isEmpty || (Int64(sinceText).map { $0 >= 0 } ?? false)
+        else {
+            restoreAppliedStreamControls()
+            statusLabel.stringValue = "Tail must be -1 or greater; since seconds must be non-negative."
+            statusLabel.textColor = .systemRed
+            return
+        }
+        let tail = tailText.isEmpty ? nil : Int64(tailText)
+        let since = sinceText.isEmpty ? nil : Int64(sinceText)
+        let selectedContainer = containerButton.titleOfSelectedItem ?? "All Containers"
+        let selectedSources = selectedContainer == "All Containers"
+            ? availableSources
+            : availableSources.filter { $0.container == selectedContainer }
+        guard !selectedSources.isEmpty, selectedSources.count <= 128 else {
+            restoreAppliedStreamControls()
+            statusLabel.stringValue = "This container choice expands to too many streams (maximum 128)."
+            statusLabel.textColor = .systemRed
+            return
+        }
+        sources = selectedSources
+        appliedContainerTitle = selectedContainer
         options.follow = followButton.state == .on
         options.previous = previousButton.state == .on
         options.timestamps = timestampsButton.state == .on
+        options.since = nil
+        options.sinceSeconds = since.flatMap { $0 == 0 ? nil : $0 }
+        options.tailLines = tail
+        updateSourcePresentation()
         startStream()
     }
 
+    private func configureContainerButton() {
+        var inventories: [ResourceIdentity: Set<String>] = [:]
+        for source in availableSources {
+            inventories[source.identity, default: []].insert(source.container)
+        }
+        let values = inventories.map { identity, containers in
+            PodLogSourceInventory(identity: identity, containers: Array(containers))
+        }
+        let selections = PodLogSourcePlanner.selections(for: values)
+        containerButton.addItems(withTitles: selections.map(\.title))
+        containerButton.identifier = NSUserInterfaceItemIdentifier("log-container")
+        containerButton.setAccessibilityLabel("Log container")
+        containerButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+
+        let selectedContainers = Set(sources.map(\.container))
+        let selectedTitle: String
+        if Set(sources.map(\.sourceID)) == Set(availableSources.map(\.sourceID)),
+            selections.contains(.all)
+        {
+            selectedTitle = PodLogContainerSelection.all.title
+        } else if selectedContainers.count == 1, let name = selectedContainers.first {
+            selectedTitle = name
+        } else {
+            selectedTitle = PodLogContainerSelection.all.title
+        }
+        containerButton.selectItem(withTitle: selectedTitle)
+        appliedContainerTitle = selectedTitle
+        if availableSources.count > 128,
+            let allItem = containerButton.item(withTitle: PodLogContainerSelection.all.title)
+        {
+            allItem.isEnabled = false
+            containerButton.toolTip = "All Containers would exceed the 128-stream limit. Choose one common container."
+        }
+    }
+
+    private func restoreAppliedStreamControls() {
+        followButton.state = options.follow ? .on : .off
+        previousButton.state = options.previous ? .on : .off
+        timestampsButton.state = options.timestamps ? .on : .off
+        containerButton.selectItem(withTitle: appliedContainerTitle)
+        tailField.stringValue = options.tailLines.map(String.init) ?? ""
+        sinceField.stringValue = options.sinceSeconds.map(String.init) ?? ""
+    }
+
+    private func restoreEstablishedStreamConfiguration() {
+        guard let establishedConfiguration else { return }
+        sources = establishedConfiguration.sources
+        options = establishedConfiguration.options
+        appliedContainerTitle = establishedConfiguration.containerTitle
+        restoreAppliedStreamControls()
+        updateSourcePresentation()
+    }
+
+    private func setStreamControlsEnabled(_ enabled: Bool) {
+        for control: NSControl in [
+            containerButton, followButton, previousButton, timestampsButton,
+            tailField, sinceField, applyButton,
+        ] {
+            control.isEnabled = enabled
+        }
+    }
+
+    private func updateSourcePresentation() {
+        let summary = LogSourcePresentation.toolbarSummary(
+            contextName: session.contextName,
+            sources: sources
+        )
+        let snapshotNote = staticWorkloadSnapshot
+            ? "Static workload Pod snapshot; membership changes are not followed—reopen Logs to refresh."
+            : ""
+        sourceLabel.stringValue = snapshotNote.isEmpty ? summary : "\(summary) · \(snapshotNote)"
+        sourceLabel.toolTip = sourceLabel.stringValue
+        sourceLabel.setAccessibilityValue(sourceLabel.stringValue)
+        window?.title = "\(session.contextName) — Logs — \(LogSourcePresentation.titleSummary(for: sources))"
+    }
+
     private func startStream() {
-        let previousGeneration = generation
-        streamTask?.cancel()
-        if previousGeneration > 0 {
+        guard pendingGeneration == nil else { return }
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+        let activeGeneration = generation
+        pendingGeneration = activeGeneration
+        setStreamControlsEnabled(false)
+        statusLabel.stringValue = "Connecting…"
+        statusLabel.textColor = .secondaryLabelColor
+        let request = LogStreamRequest(
+            sessionID: session.sessionID,
+            streamID: streamID,
+            generation: activeGeneration,
+            sources: sources,
+            options: options
+        )
+        let task = Task { [weak self, provider] in
+            var replacementEstablished = false
+            defer {
+                self?.streamTasks.removeValue(forKey: activeGeneration)
+            }
+            do {
+                for try await message in provider.streamLogs(request: request) {
+                    guard !Task.isCancelled else { return }
+                    if !replacementEstablished {
+                        guard activeGeneration == self?.generation,
+                            activeGeneration == self?.pendingGeneration
+                        else { continue }
+                        replacementEstablished = true
+                        self?.establishedConfiguration = AppliedStreamConfiguration(
+                            sources: request.sources,
+                            options: request.options,
+                            containerTitle: self?.appliedContainerTitle ?? ""
+                        )
+                        self?.pendingGeneration = nil
+                        self?.setStreamControlsEnabled(true)
+                        self?.streamGate.begin(generation: activeGeneration)
+                        self?.retireGenerations(before: activeGeneration)
+                    }
+                    await self?.receive(message)
+                }
+                guard replacementEstablished || Task.isCancelled ||
+                    activeGeneration != self?.generation
+                else {
+                    self?.pendingGeneration = nil
+                    self?.setStreamControlsEnabled(true)
+                    self?.restoreEstablishedStreamConfiguration()
+                    self?.statusLabel.stringValue = "The log stream ended before connecting."
+                    self?.statusLabel.textColor = .systemRed
+                    return
+                }
+            } catch {
+                guard !Task.isCancelled, let self,
+                    activeGeneration == generation
+                else { return }
+                if pendingGeneration == activeGeneration {
+                    pendingGeneration = nil
+                    setStreamControlsEnabled(true)
+                }
+                restoreEstablishedStreamConfiguration()
+                statusLabel.stringValue = error.localizedDescription
+                statusLabel.textColor = .systemRed
+            }
+        }
+        streamTasks[activeGeneration] = task
+    }
+
+    private func retireGenerations(before replacement: UInt64) {
+        let obsolete = streamTasks.keys.filter { $0 < replacement }
+        for generation in obsolete {
+            streamTasks.removeValue(forKey: generation)?.cancel()
             Task { [provider, session, streamID] in
                 await provider.cancelLogs(
                     sessionID: session.sessionID,
                     streamID: streamID,
-                    generation: previousGeneration
+                    generation: generation
                 )
-            }
-        }
-        generation &+= 1
-        if generation == 0 { generation = 1 }
-        streamGate.begin(generation: generation)
-        statusLabel.stringValue = "Connecting…"
-        let request = LogStreamRequest(
-            sessionID: session.sessionID,
-            streamID: streamID,
-            generation: generation,
-            sources: sources,
-            options: options
-        )
-        streamTask = Task { [weak self, provider] in
-            do {
-                for try await message in provider.streamLogs(request: request) {
-                    guard !Task.isCancelled else { return }
-                    await self?.receive(message)
-                }
-            } catch {
-                guard !Task.isCancelled else { return }
-                self?.statusLabel.stringValue = error.localizedDescription
-                self?.statusLabel.textColor = .systemRed
             }
         }
     }
 
     private func stopStream() {
         cancelScheduledRender()
-        streamTask?.cancel()
-        let generation = generation
-        Task { [provider, session, streamID] in
-            await provider.cancelLogs(
-                sessionID: session.sessionID,
-                streamID: streamID,
-                generation: generation
-            )
+        let activeGenerations = Array(streamTasks.keys)
+        for generation in activeGenerations {
+            streamTasks.removeValue(forKey: generation)?.cancel()
+            Task { [provider, session, streamID] in
+                await provider.cancelLogs(
+                    sessionID: session.sessionID,
+                    streamID: streamID,
+                    generation: generation
+                )
+            }
         }
     }
 
@@ -372,7 +580,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let wasAtTail = isAtTail
         let selectedRange = textView.selectedRange()
         let filter = searchField.stringValue
-        let showLabels = sources.count > 1
+        let showLabels = availableSources.count > 1
         let snapshot = await recordStore.snapshot()
         let records = snapshot.records
         let labels = sourceLabels

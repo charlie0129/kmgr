@@ -260,8 +260,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         guard let window, logConfigurationController == nil else { NSSound.beep(); return }
         let controller = LogConfigurationWindowController(
             session: session,
-            pods: identities,
-            detailProvider: objectDetailProvider,
+            resources: identities,
             logProvider: logProvider,
             displayConfiguration: logDisplayConfiguration
         )
@@ -3158,10 +3157,7 @@ private final class ResourceListViewController: NSViewController,
             else { return }
             onStartPortForward?(identity)
         case .openLogs:
-            guard !selected.isEmpty, selected.count <= 128,
-                selected.allSatisfy({
-                    $0.group.isEmpty && $0.version == "v1" && $0.resource == "pods"
-                })
+            guard LogResourceCompatibility.supportsSelection(selected)
             else { NSSound.beep(); return }
             onOpenLogs?(selected)
         case .openExec:
@@ -3277,9 +3273,7 @@ private final class ResourceListViewController: NSViewController,
         case .open, .openYAML, .openEvents:
             return selected.count == 1
         case .openLogs:
-            return !selected.isEmpty && selected.count <= 128 && selected.allSatisfy {
-                $0.group.isEmpty && $0.version == "v1" && $0.resource == "pods"
-            }
+            return LogResourceCompatibility.supportsSelection(selected)
         case .openExec:
             return selected.count == 1 && selected[0].group.isEmpty
                 && selected[0].version == "v1" && selected[0].resource == "pods"

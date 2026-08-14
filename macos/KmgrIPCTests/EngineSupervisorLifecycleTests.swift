@@ -1,10 +1,41 @@
 import Foundation
 @testable import KmgrIPC
+import KmgrProto
 import Testing
 
 @Suite("Engine supervisor lifecycle")
 @MainActor
 struct EngineSupervisorLifecycleTests {
+    @Test("protocol 1.0 engine is rejected before optional RPCs are used")
+    func oldProtocolMinorIsRejected() {
+        var response = compatibleHandshakeResponse()
+        response.negotiatedProtocol.minor = 0
+        do {
+            _ = try EngineSupervisor.validateHandshakeResponse(response)
+            Issue.record("Protocol 1.0 was accepted")
+        } catch EngineSupervisorError.incompatibleProtocol(let message) {
+            #expect(message.contains("1.1"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("workload log resolution capability is required")
+    func missingResolutionCapabilityIsRejected() {
+        var response = compatibleHandshakeResponse()
+        response.capabilities = response.capabilities.filter {
+            $0.name != "logs.resolve-sources"
+        }
+        do {
+            _ = try EngineSupervisor.validateHandshakeResponse(response)
+            Issue.record("Missing workload resolution capability was accepted")
+        } catch EngineSupervisorError.incompatibleProtocol(let message) {
+            #expect(message.contains("logs.resolve-sources"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
     @Test("helper launch arguments include validated behavior settings")
     func helperArgumentsIncludeBehaviorSettings() {
         let configuration = EngineSupervisor.Configuration(
@@ -121,4 +152,18 @@ struct EngineSupervisorLifecycleTests {
         await supervisor.shutdown()
         #expect(observed.count == count)
     }
+}
+
+@MainActor
+private func compatibleHandshakeResponse() -> Kmgr_V1_HandshakeResponse {
+    var response = Kmgr_V1_HandshakeResponse()
+    response.engineVersion = "test"
+    response.engineInstanceID = "engine-test"
+    response.negotiatedProtocol.major = EngineSupervisor.protocolMajor
+    response.negotiatedProtocol.minor = EngineSupervisor.requiredProtocolMinor
+    var resolution = Kmgr_V1_Capability()
+    resolution.name = "logs.resolve-sources"
+    resolution.version = 1
+    response.capabilities = [resolution]
+    return response
 }

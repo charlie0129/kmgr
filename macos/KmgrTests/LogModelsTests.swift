@@ -55,6 +55,31 @@ private func podIdentity(_ name: String, uid: String) -> ResourceIdentity {
     ).map(\.label) == ["team-a/api/app", "team-a/worker/app"])
 }
 
+@Test func compatibleWorkloadsIncludeUIDSafeStaticControllerFamilies() {
+    let resources = [
+        ("apps", "deployments"),
+        ("apps", "statefulsets"),
+        ("apps", "daemonsets"),
+        ("apps", "replicasets"),
+        ("batch", "jobs"),
+        ("batch", "cronjobs"),
+    ].map { group, resource in
+        ResourceIdentity(
+            clusterSessionID: "session", group: group, version: "v1",
+            resource: resource, namespace: "team-a", name: "workload", uid: "uid"
+        )
+    }
+    #expect(resources.allSatisfy(LogResourceCompatibility.supportsStaticPodResolution))
+    #expect(LogResourceCompatibility.supportsSelection(resources))
+
+    var unsupported = resources[0]
+    unsupported.version = "v1beta1"
+    #expect(LogResourceCompatibility.supportsStaticPodResolution(unsupported) == false)
+    unsupported.version = "v1"
+    unsupported.resource = "services"
+    #expect(LogResourceCompatibility.supportsSelection([unsupported]) == false)
+}
+
 @Test func logSourcePresentationKeepsExactContextAndSourcesVisible() {
     let source = LogSource(
         identity: podIdentity("api", uid: "api-uid"),
@@ -131,9 +156,129 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     ])
     #expect(ring.records.map { String(decoding: $0.data, as: UTF8.self) } == ["ghi", "jkl"])
     #expect(ring.records.map(\.endsWithNewline) == [false, true])
+    #expect(ring.records.map(\.startsLine) == [false, false])
     #expect(ring.byteCount == 6)
     #expect(ring.droppedRecords == 2)
     #expect(ring.droppedBytes == 6)
+}
+
+@Test func logRendererPrefixesOnlyTheStartOfAHugeLogicalLine() throws {
+    let rendered = try LogTextRenderer.render(
+        records: [
+            LogRecord(
+                sourceID: "pod", data: Data("first ".utf8),
+                startsLine: true, endsWithNewline: false
+            ),
+            LogRecord(
+                sourceID: "pod", data: Data("continued ".utf8),
+                startsLine: false, endsWithNewline: false
+            ),
+            LogRecord(
+                sourceID: "pod", data: Data("finished".utf8),
+                startsLine: false, endsWithNewline: true
+            ),
+        ],
+        sourceLabels: ["pod": "team-a/api/app"],
+        showSourceLabels: true,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10
+    )
+    #expect(rendered.text == "[team-a/api/app] first continued finished\n")
+}
+
+@Test func logRendererRestoresSourceIdentityForAVisibleContinuationGap() throws {
+    let rendered = try LogTextRenderer.render(
+        records: [
+            LogRecord(
+                sourceID: "pod", data: Data("filtered beginning ".utf8),
+                startsLine: true, endsWithNewline: false
+            ),
+            LogRecord(
+                sourceID: "pod", data: Data("MATCH continuation".utf8),
+                startsLine: false, endsWithNewline: true
+            ),
+        ],
+        sourceLabels: ["pod": "team-a/api/app"],
+        showSourceLabels: true,
+        filter: "match",
+        maximumOutputUTF8Bytes: 1 << 10
+    )
+    #expect(rendered.text == "[team-a/api/app] … MATCH continuation\n")
+}
+
+@Test func logRendererSeparatesInterleavedOversizedFragmentsByVisibleSource() throws {
+    let rendered = try LogTextRenderer.render(
+        records: [
+            LogRecord(
+                sourceID: "a", data: Data("first fragment".utf8),
+                startsLine: true, endsWithNewline: false
+            ),
+            LogRecord(
+                sourceID: "b", data: Data("complete line".utf8),
+                startsLine: true, endsWithNewline: true
+            ),
+            LogRecord(
+                sourceID: "a", data: Data("last fragment".utf8),
+                startsLine: false, endsWithNewline: true
+            ),
+        ],
+        sourceLabels: ["a": "team-a/api/app", "b": "team-b/worker/app"],
+        showSourceLabels: true,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10
+    )
+    #expect(rendered.text == "[team-a/api/app] first fragment\n"
+        + "[team-b/worker/app] complete line\n"
+        + "[team-a/api/app] … last fragment\n")
+    #expect(rendered.outputUTF8Bytes <= 1 << 10)
+}
+
+@Test func logRendererDoesNotJoinFragmentsAcrossAFilteredInterleavedRecord() throws {
+    let rendered = try LogTextRenderer.render(
+        records: [
+            LogRecord(
+                sourceID: "a", data: Data("MATCH first".utf8),
+                startsLine: true, endsWithNewline: false
+            ),
+            LogRecord(
+                sourceID: "b", data: Data("filtered other source".utf8),
+                startsLine: true, endsWithNewline: true
+            ),
+            LogRecord(
+                sourceID: "a", data: Data("MATCH last".utf8),
+                startsLine: false, endsWithNewline: true
+            ),
+        ],
+        sourceLabels: ["a": "team-a/api/app", "b": "team-b/worker/app"],
+        showSourceLabels: true,
+        filter: "match",
+        maximumOutputUTF8Bytes: 1 << 10
+    )
+    #expect(rendered.text == "[team-a/api/app] MATCH first\n"
+        + "[team-a/api/app] … MATCH last\n")
+}
+
+@Test func logRendererShowsRequestedTimestampOncePerLogicalLine() throws {
+    let timestamp = Int64(1_723_524_306_123)
+    let rendered = try LogTextRenderer.render(
+        records: [
+            LogRecord(
+                sourceID: "pod", data: Data("first ".utf8),
+                timestampUnixMilliseconds: timestamp,
+                startsLine: true, endsWithNewline: false
+            ),
+            LogRecord(
+                sourceID: "pod", data: Data("continued".utf8),
+                timestampUnixMilliseconds: timestamp,
+                startsLine: false, endsWithNewline: true
+            ),
+        ],
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10
+    )
+    #expect(rendered.text == "2024-08-13T04:45:06.123Z first continued\n")
 }
 
 @Test func sustainedRingEvictionPreservesStrictRecordAndByteBounds() {

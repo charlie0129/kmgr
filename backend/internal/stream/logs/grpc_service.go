@@ -3,6 +3,7 @@ package logs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -42,14 +43,84 @@ func (r ClusterResolver) Resolve(sessionID string) (ResolvedSession, error) {
 
 type GRPCService struct {
 	kmgrv1.UnimplementedLogServiceServer
-	manager *Manager
+	manager  *Manager
+	resolver WorkloadSourceResolver
 }
 
-func NewGRPCService(manager *Manager) (*GRPCService, error) {
+func NewGRPCService(manager *Manager, resolvers ...WorkloadSourceResolver) (*GRPCService, error) {
 	if manager == nil {
 		return nil, errors.New("log stream manager must not be nil")
 	}
-	return &GRPCService{manager: manager}, nil
+	if len(resolvers) > 1 {
+		return nil, errors.New("at most one workload log resolver may be configured")
+	}
+	service := &GRPCService{manager: manager}
+	if len(resolvers) == 1 {
+		service.resolver = resolvers[0]
+	}
+	return service, nil
+}
+
+func (s *GRPCService) ResolveLogSources(
+	ctx context.Context,
+	request *kmgrv1.ResolveLogSourcesRequest,
+) (*kmgrv1.ResolveLogSourcesResponse, error) {
+	if request == nil || request.GetContext() == nil {
+		return nil, status.Error(codes.InvalidArgument, "request context is required")
+	}
+	operationContext, cancel, err := logRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	if s.resolver == nil {
+		return nil, status.Error(codes.FailedPrecondition, "workload log resolution is unavailable")
+	}
+	if len(request.GetResources()) == 0 || len(request.GetResources()) > DefaultMaxResolvedPods {
+		return nil, status.Errorf(
+			codes.InvalidArgument,
+			"resource count must be between 1 and %d",
+			DefaultMaxResolvedPods,
+		)
+	}
+	identities := make([]Identity, 0, len(request.GetResources()))
+	for _, value := range request.GetResources() {
+		identity, identityErr := resolutionIdentityFromProto(
+			value, request.GetContext().GetClusterSessionId(),
+		)
+		if identityErr != nil {
+			return nil, status.Error(codes.InvalidArgument, identityErr.Error())
+		}
+		identities = append(identities, identity)
+	}
+	resolved, err := s.resolver.Resolve(
+		operationContext,
+		request.GetContext().GetClusterSessionId(),
+		identities,
+		DefaultMaxResolvedPods,
+	)
+	response := &kmgrv1.ResolveLogSourcesResponse{RequestId: request.GetContext().GetRequestId()}
+	if err != nil {
+		response.Error = structuredResolutionError(err, request.GetResources(), "resolve-workload-logs")
+		return response, nil
+	}
+	response.StaticWorkloadSnapshot = resolved.StaticWorkloadSnapshot
+	response.Pods = make([]*kmgrv1.ResolvedPodLogSource, 0, len(resolved.Pods))
+	for _, pod := range resolved.Pods {
+		response.Pods = append(response.Pods, &kmgrv1.ResolvedPodLogSource{
+			Identity: &kmgrv1.ResourceIdentity{
+				ClusterSessionId: pod.Identity.SessionID,
+				Group:            pod.Identity.Group,
+				Version:          pod.Identity.Version,
+				Resource:         pod.Identity.Resource,
+				Namespace:        pod.Identity.Namespace,
+				Name:             pod.Identity.Name,
+				Uid:              pod.Identity.UID,
+			},
+			Containers: slices.Clone(pod.Containers),
+		})
+	}
+	return response, nil
 }
 
 func (s *GRPCService) StreamLogs(
@@ -97,7 +168,8 @@ func (s *GRPCService) StreamLogs(
 			batch := &kmgrv1.LogBatch{TotalBytes: delivery.TotalBytes, Records: make([]*kmgrv1.LogRecord, 0, len(delivery.Records))}
 			for _, record := range delivery.Records {
 				converted := &kmgrv1.LogRecord{
-					SourceId: record.SourceID, Data: slices.Clone(record.Data), EndsWithNewline: record.EndsWithNewline,
+					SourceId: record.SourceID, Data: slices.Clone(record.Data), ContinuesLine: !record.StartsLine,
+					EndsWithNewline: record.EndsWithNewline,
 				}
 				if !record.Timestamp.IsZero() {
 					converted.TimestampUnixMs = record.Timestamp.UnixMilli()
@@ -110,7 +182,15 @@ func (s *GRPCService) StreamLogs(
 			return err
 		}
 		if delivery.Status != nil && delivery.Status.SourceID == "" && isTerminal(delivery.Status.State) {
-			return nil
+			// Keep the RPC—and therefore its independent cluster-session
+			// lease—alive for the log window. A replacement generation can
+			// reuse that authority even after the workspace has closed.
+			select {
+			case <-subscription.Done():
+				return nil
+			case <-stream.Context().Done():
+				return logStatusError(stream.Context().Err())
+			}
 		}
 	}
 }
@@ -182,6 +262,27 @@ func startFromProto(request *kmgrv1.StartLogsRequest) (StartRequest, error) {
 		})
 	}
 	return result, nil
+}
+
+func resolutionIdentityFromProto(value *kmgrv1.ResourceIdentity, sessionID string) (Identity, error) {
+	if value == nil || sessionID == "" || value.GetClusterSessionId() != sessionID ||
+		value.GetVersion() == "" || value.GetResource() == "" || value.GetNamespace() == "" ||
+		value.GetName() == "" || value.GetUid() == "" {
+		return Identity{}, fmt.Errorf("%w: every resource must be a complete namespaced identity in this session", ErrInvalidRequest)
+	}
+	if len(value.GetGroup()) > 253 || len(value.GetVersion()) > 63 || len(value.GetResource()) > 253 ||
+		len(value.GetNamespace()) > 253 || len(value.GetName()) > 253 || len(value.GetUid()) > 256 {
+		return Identity{}, fmt.Errorf("%w: resource identity field is too long", ErrInvalidRequest)
+	}
+	return Identity{
+		SessionID: sessionID,
+		Group:     value.GetGroup(),
+		Version:   value.GetVersion(),
+		Resource:  value.GetResource(),
+		Namespace: value.GetNamespace(),
+		Name:      value.GetName(),
+		UID:       value.GetUid(),
+	}, nil
 }
 
 func logRequestContext(
@@ -303,6 +404,119 @@ func structuredLogError(err error, source *Source, contextName string) *kmgrv1.S
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CANCELLED
 		result.Reason = "LogRequestCancelled"
 		result.Message = "The Pod log request was cancelled."
+	case errors.As(err, &apiStatus):
+		value := apiStatus.Status()
+		result.HttpStatusCode = value.Code
+		result.Reason = string(value.Reason)
+		result.Retryable = value.Code == 408 || value.Code == 429 || value.Code >= 500
+	}
+	return result
+}
+
+func structuredResolutionError(
+	err error,
+	requested []*kmgrv1.ResourceIdentity,
+	operation string,
+) *kmgrv1.StructuredError {
+	result := &kmgrv1.StructuredError{
+		Category:  kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL,
+		Reason:    "WorkloadLogResolutionFailed",
+		Message:   "The selected resources could not be resolved to a UID-pinned Pod snapshot.",
+		Operation: operation,
+	}
+	if len(requested) > 0 && requested[0] != nil {
+		result.Resource = requested[0]
+	}
+	kubeerrors.Enrich(result, err)
+	var tooMany *TooManyResolvedPodsError
+	var scanLimit *ResolutionScanLimitError
+	var requestLimit *ResolutionRequestLimitError
+	var unsupported *UnsupportedLogResourceError
+	var uidMismatch *ResolutionUIDMismatchError
+	var apiStatus apierrors.APIStatus
+	switch {
+	case errors.As(err, &tooMany):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
+		result.Reason = "TooManyResolvedPods"
+		result.Message = fmt.Sprintf(
+			"The selected resources resolve to more than %d Pods. Select a narrower workload or a smaller Pod subset.",
+			tooMany.Limit,
+		)
+		result.SafeDetails = map[string]string{"maximum_pods": fmt.Sprint(tooMany.Limit)}
+	case errors.As(err, &requestLimit):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
+		result.Reason = "WorkloadResolutionRequestLimit"
+		result.Message = "The static workload snapshot required too many Kubernetes API requests. Select fewer workloads or select Pods directly."
+		result.SafeDetails = map[string]string{
+			"api_call_limit": fmt.Sprint(requestLimit.Limit),
+		}
+	case errors.As(err, &scanLimit):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
+		result.Reason = "WorkloadResolutionTooBroad"
+		result.Message = "The static workload snapshot was too broad to resolve safely. Select Pods directly or narrow the workload."
+		result.SafeDetails = map[string]string{
+			"resource":              scanLimit.Resource,
+			"examined_object_limit": fmt.Sprint(scanLimit.Limit),
+		}
+	case errors.As(err, &unsupported):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION
+		result.Reason = "UnsupportedLogResource"
+		result.Message = "Logs are available for Pods and supported workload controllers only."
+		result.Resource = &kmgrv1.ResourceIdentity{
+			ClusterSessionId: unsupported.Identity.SessionID,
+			Group:            unsupported.Identity.Group,
+			Version:          unsupported.Identity.Version,
+			Resource:         unsupported.Identity.Resource,
+			Namespace:        unsupported.Identity.Namespace,
+			Name:             unsupported.Identity.Name,
+			Uid:              unsupported.Identity.UID,
+		}
+	case errors.As(err, &uidMismatch):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		result.Reason = "ResourceRecreated"
+		result.Message = "A selected resource was replaced before its Pod snapshot could be resolved. Select it again and reopen Logs."
+		result.Resource = &kmgrv1.ResourceIdentity{
+			ClusterSessionId: uidMismatch.Identity.SessionID,
+			Group:            uidMismatch.Identity.Group,
+			Version:          uidMismatch.Identity.Version,
+			Resource:         uidMismatch.Identity.Resource,
+			Namespace:        uidMismatch.Identity.Namespace,
+			Name:             uidMismatch.Identity.Name,
+			Uid:              uidMismatch.Identity.UID,
+		}
+		result.SafeDetails = map[string]string{
+			"expected_uid": uidMismatch.Identity.UID,
+			"current_uid":  uidMismatch.Actual,
+		}
+	case errors.Is(err, ErrSessionNotFound):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
+		result.Reason = "ClusterSessionNotFound"
+		result.Message = "The cluster session closed before workload logs could be resolved."
+	case errors.Is(err, ErrWorkloadResolutionUnavailable):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL
+		result.Reason = "WorkloadResolutionUnavailable"
+		result.Message = "The cluster session cannot resolve workload Pods."
+	case apierrors.IsNotFound(err):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
+		result.Reason = "ResourceNotFound"
+		result.Message = "A selected resource no longer exists. Select it again and reopen Logs."
+	case apierrors.IsUnauthorized(err):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION
+		result.Reason = "AuthenticationRejected"
+		result.Message = "The Kubernetes API server rejected the configured credentials."
+	case apierrors.IsForbidden(err):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHORIZATION
+		result.Reason = "Forbidden"
+		result.Message = "The configured identity is not authorized to resolve this workload's Pods."
+	case errors.Is(err, context.DeadlineExceeded):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TIMEOUT
+		result.Reason = "WorkloadResolutionTimedOut"
+		result.Message = "Resolving the workload's Pod snapshot timed out."
+		result.Retryable = true
+	case errors.Is(err, context.Canceled):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CANCELLED
+		result.Reason = "WorkloadResolutionCancelled"
+		result.Message = "Resolving workload logs was cancelled."
 	case errors.As(err, &apiStatus):
 		value := apiStatus.Status()
 		result.HttpStatusCode = value.Code

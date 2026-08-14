@@ -450,9 +450,7 @@ public struct CommandContext: Hashable, Sendable {
         let isPod: (ResourceIdentity) -> Bool = {
             $0.group.isEmpty && $0.version == "v1" && $0.resource == "pods"
         }
-        let logCompatible = !selectedIdentities.isEmpty
-            && selectedIdentities.count <= 128
-            && selectedIdentities.allSatisfy(isPod)
+        let logCompatible = LogResourceCompatibility.supportsSelection(selectedIdentities)
         let execCompatible = selectedIdentities.count == 1
             && selectedIdentities.first.map(isPod) == true
         let portForwardCompatible = selectedIdentities.count == 1

@@ -4,6 +4,11 @@ import KmgrCore
 import KmgrProto
 
 public protocol LogRPC: Sendable {
+    func resolveLogSources(
+        request: Kmgr_V1_ResolveLogSourcesRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_ResolveLogSourcesResponse
+
     func streamLogs(
         request: Kmgr_V1_StartLogsRequest,
         timeout: Duration,
@@ -21,6 +26,17 @@ public struct EngineLogRPC: LogRPC {
 
     public init(connection: EngineConnection) {
         self.connection = connection
+    }
+
+    public func resolveLogSources(
+        request: Kmgr_V1_ResolveLogSourcesRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_ResolveLogSourcesResponse {
+        var options = CallOptions.defaults
+        options.timeout = timeout
+        options.waitForReady = false
+        let client = Kmgr_V1_LogService.Client(wrapping: try connection.currentClient())
+        return try await client.resolveLogSources(request, options: options)
     }
 
     public func streamLogs(
@@ -55,6 +71,7 @@ public struct EngineLogStreamProvider: LogStreamProviding {
     private let rpc: any LogRPC
     private let streamTimeout: Duration
     private let controlTimeout: Duration
+    private let resolutionTimeout: Duration
     private let maximumBufferedMessages: Int
     private let now: @Sendable () -> Date
     private let requestID: @Sendable () -> String
@@ -63,12 +80,14 @@ public struct EngineLogStreamProvider: LogStreamProviding {
         connection: EngineConnection,
         streamTimeout: Duration = .seconds(86_400),
         controlTimeout: Duration = .seconds(5),
+        resolutionTimeout: Duration = .seconds(30),
         maximumBufferedMessages: Int = 128
     ) {
         self.init(
             rpc: EngineLogRPC(connection: connection),
             streamTimeout: streamTimeout,
             controlTimeout: controlTimeout,
+            resolutionTimeout: resolutionTimeout,
             maximumBufferedMessages: maximumBufferedMessages
         )
     }
@@ -77,6 +96,7 @@ public struct EngineLogStreamProvider: LogStreamProviding {
         rpc: any LogRPC,
         streamTimeout: Duration = .seconds(86_400),
         controlTimeout: Duration = .seconds(5),
+        resolutionTimeout: Duration = .seconds(30),
         maximumBufferedMessages: Int = 128,
         now: @escaping @Sendable () -> Date = Date.init,
         requestID: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() }
@@ -85,6 +105,7 @@ public struct EngineLogStreamProvider: LogStreamProviding {
         self.rpc = rpc
         self.streamTimeout = streamTimeout
         self.controlTimeout = controlTimeout
+        self.resolutionTimeout = resolutionTimeout
         self.maximumBufferedMessages = maximumBufferedMessages
         self.now = now
         self.requestID = requestID
@@ -127,6 +148,82 @@ public struct EngineLogStreamProvider: LogStreamProviding {
         }
     }
 
+    public func resolveLogSources(
+        resources: [ResourceIdentity]
+    ) async throws -> LogSourceResolution {
+        guard let first = resources.first,
+            resources.count <= 128,
+            resources.allSatisfy({ $0.clusterSessionID == first.clusterSessionID })
+        else {
+            throw ClusterManagerIssue(
+                category: .validation,
+                reason: "InvalidLogSourceSelection",
+                message: "Select between 1 and 128 resources from one cluster session.",
+                operation: "resolve workload logs"
+            )
+        }
+        var request = Kmgr_V1_ResolveLogSourcesRequest()
+        request.context = makeContext(
+            sessionID: first.clusterSessionID,
+            timeout: resolutionTimeout
+        )
+        request.resources = resources.map(Self.identity)
+        do {
+            let response = try await rpc.resolveLogSources(
+                request: request,
+                timeout: resolutionTimeout
+            )
+            guard response.requestID == request.context.requestID else {
+                throw LogStreamBridgeError.resolutionEnvelopeMismatch
+            }
+            if response.hasError {
+                throw EngineClusterContextProvider.issue(from: response.error)
+            }
+            var seenUIDs: Set<ResourceUID> = []
+            let pods = try response.pods.map { value -> PodLogSourceInventory in
+                let identity = Self.resourceIdentity(from: value.identity)
+                guard identity.clusterSessionID == first.clusterSessionID,
+                    identity.group.isEmpty,
+                    identity.version == "v1",
+                    identity.resource == "pods",
+                    !identity.namespace.isEmpty,
+                    !identity.name.isEmpty,
+                    !identity.uid.rawValue.isEmpty,
+                    seenUIDs.insert(identity.uid).inserted
+                else {
+                    throw LogStreamBridgeError.resolutionEnvelopeMismatch
+                }
+                return PodLogSourceInventory(
+                    identity: identity,
+                    containers: Array(Set(value.containers.filter { !$0.isEmpty })).sorted()
+                )
+            }
+            guard pods.count <= 128 else {
+                throw LogStreamBridgeError.resolutionEnvelopeMismatch
+            }
+            return LogSourceResolution(
+                pods: pods,
+                staticWorkloadSnapshot: response.staticWorkloadSnapshot
+            )
+        } catch let issue as ClusterManagerIssue {
+            throw issue
+        } catch {
+            if case LogStreamBridgeError.resolutionEnvelopeMismatch = error {
+                throw ClusterManagerIssue(
+                    category: .internalFailure,
+                    reason: "LogSourceResolutionEnvelopeMismatch",
+                    message: "The engine returned an invalid workload log snapshot.",
+                    operation: "resolve workload logs"
+                )
+            }
+            throw EngineClusterContextProvider.issue(
+                from: error,
+                contextName: "",
+                operation: "resolve workload logs"
+            )
+        }
+    }
+
     public func cancelLogs(
         sessionID: String,
         streamID: String,
@@ -158,7 +255,9 @@ public struct EngineLogStreamProvider: LogStreamProviding {
         if let since = request.options.since {
             result.options.sinceUnixMs = Int64(since.timeIntervalSince1970 * 1_000)
         }
-        if let value = request.options.sinceSeconds { result.options.sinceSeconds = value }
+        if let value = request.options.sinceSeconds, value != 0 {
+            result.options.sinceSeconds = value
+        }
         if let value = request.options.tailLines { result.options.tailLines = value }
         if let value = request.options.byteLimit { result.options.byteLimit = value }
         return result
@@ -189,6 +288,7 @@ public struct EngineLogStreamProvider: LogStreamProviding {
                         data: record.data,
                         timestampUnixMilliseconds: record.timestampUnixMs == 0
                             ? nil : record.timestampUnixMs,
+                        startsLine: !record.continuesLine,
                         endsWithNewline: record.endsWithNewline
                     )
                 },
@@ -241,6 +341,20 @@ public struct EngineLogStreamProvider: LogStreamProviding {
         return result
     }
 
+    private static func resourceIdentity(
+        from value: Kmgr_V1_ResourceIdentity
+    ) -> ResourceIdentity {
+        ResourceIdentity(
+            clusterSessionID: value.clusterSessionID,
+            group: value.group,
+            version: value.version,
+            resource: value.resource,
+            namespace: value.namespace,
+            name: value.name,
+            uid: ResourceUID(value.uid)
+        )
+    }
+
     private static func issue(from error: Error) -> ClusterManagerIssue {
         if case LogStreamBridgeError.bufferExceeded(let limit) = error {
             return ClusterManagerIssue(
@@ -277,6 +391,7 @@ public struct EngineLogStreamProvider: LogStreamProviding {
 private enum LogStreamBridgeError: Error {
     case bufferExceeded(Int)
     case cursorMismatch
+    case resolutionEnvelopeMismatch
 }
 
 private final class LogStreamCursorValidator: @unchecked Sendable {

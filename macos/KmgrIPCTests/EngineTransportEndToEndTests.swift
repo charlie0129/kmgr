@@ -38,7 +38,9 @@ struct EngineTransportEndToEndTests {
         do {
             let first = try await supervisor.waitUntilReady(timeout: .seconds(10))
             #expect(first.protocolMajor == 1)
+            #expect(first.protocolMinor >= 1)
             #expect(first.capabilities["engine.health"] == 1)
+            #expect(first.capabilities["logs.resolve-sources"] == 1)
 
             let firstGeneration = try await fixture.generation(1)
             try await expectBadTokenRejected(socketPath: firstGeneration.socketPath)

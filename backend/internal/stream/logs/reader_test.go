@@ -48,6 +48,9 @@ func TestHugeBinaryRecordIsFragmentedWithoutDataLoss(t *testing.T) {
 		if record.EndsWithNewline != (index == len(records)-1) {
 			t.Fatalf("fragment %d newline = %v", index, record.EndsWithNewline)
 		}
+		if record.StartsLine != (index == 0) {
+			t.Fatalf("fragment %d starts-line = %v", index, record.StartsLine)
+		}
 	}
 	if got := joinRecords(records); !bytes.Equal(got, payload) {
 		t.Fatalf("reassembled payload differs: got %d bytes, want %d", len(got), len(payload))
@@ -73,7 +76,8 @@ func TestTimestampPrefixIsParsedOffThePayload(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("records = %d, want 1", len(records))
 	}
-	if !records[0].Timestamp.Equal(wantTimestamp) || !bytes.Equal(records[0].Data, wantData) || !records[0].EndsWithNewline {
+	if !records[0].Timestamp.Equal(wantTimestamp) || !bytes.Equal(records[0].Data, wantData) ||
+		!records[0].StartsLine || !records[0].EndsWithNewline {
 		t.Fatalf("record = %#v", records[0])
 	}
 }

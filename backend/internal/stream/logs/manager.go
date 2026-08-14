@@ -41,14 +41,38 @@ type generationEntry struct {
 	generation uint64
 }
 
+// retainedLogSession shares one independently acquired cluster-session lease
+// across overlapping generations of the same logical log window. refs is
+// protected by Manager.mu. The underlying release is invoked once after every
+// producer and subscription using the session has finished.
+type retainedLogSession struct {
+	contextName string
+	opener      SourceOpener
+	release     func()
+	releaseOnce sync.Once
+	refs        int
+}
+
+func (s *retainedLogSession) releaseUnderlying() {
+	if s == nil {
+		return
+	}
+	s.releaseOnce.Do(func() {
+		if s.release != nil {
+			s.release()
+		}
+	})
+}
+
 type operation struct {
 	key                streamKey
 	generation         uint64
-	contextName        string
+	context            context.Context
 	cancel             context.CancelFunc
+	done               <-chan struct{}
 	queue              *recordQueue
-	releaseSession     func()
-	releaseSessionOnce sync.Once
+	session            *retainedLogSession
+	sessionReleased    bool
 	producerDone       bool
 	subscriptionClosed bool
 }
@@ -111,6 +135,27 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Subscriptio
 	if err := validateStart(request, m.config.MaxSourcesPerStream); err != nil {
 		return nil, err
 	}
+	key := streamKey{sessionID: request.SessionID, streamID: request.StreamID}
+
+	// Prefer an existing generation's retained authority. This is what lets a
+	// log window change options after its originating workspace has closed:
+	// SessionRegistry intentionally refuses brand-new leases at that point.
+	m.mu.Lock()
+	previous, err := m.checkStartLocked(key, request.Generation)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	if previous != nil && previous.session != nil && !previous.sessionReleased {
+		previous.session.refs++
+		op := m.newOperation(ctx, key, request.Generation, previous.session)
+		m.installLocked(op)
+		m.mu.Unlock()
+		previous.cancel()
+		return m.begin(op, request), nil
+	}
+	m.mu.Unlock()
+
 	resolved, err := m.config.Resolver.Resolve(request.SessionID)
 	if err != nil {
 		return nil, err
@@ -124,54 +169,84 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (*Subscriptio
 	if resolved.Opener == nil {
 		return nil, ErrLogClientUnavailable
 	}
+	session := &retainedLogSession{
+		contextName: resolved.ContextName,
+		opener:      resolved.Opener,
+		release:     resolved.Release,
+		refs:        1,
+	}
+	op := m.newOperation(ctx, key, request.Generation, session)
 
-	key := streamKey{sessionID: request.SessionID, streamID: request.StreamID}
+	// Resolve runs without Manager.mu, so revalidate against starts that may
+	// have won the race while the external session acquisition was in flight.
+	m.mu.Lock()
+	previous, err = m.checkStartLocked(key, request.Generation)
+	if err != nil {
+		m.mu.Unlock()
+		op.cancel()
+		return nil, err
+	}
+	m.installLocked(op)
+	m.mu.Unlock()
+	if previous != nil {
+		previous.cancel()
+	}
+	releaseResolved = false
+	return m.begin(op, request), nil
+}
+
+func (m *Manager) checkStartLocked(key streamKey, generation uint64) (*operation, error) {
+	if m.closed {
+		return nil, ErrStreamClosed
+	}
+	if latest := m.latest[key]; generation <= latest {
+		return nil, fmt.Errorf("%w: generation %d is not newer than %d", ErrStaleGeneration, generation, latest)
+	}
+	previous := m.streams[key]
+	if previous == nil && len(m.streams) >= m.config.MaxStreams {
+		return nil, ErrTooManyStreams
+	}
+	// A replacement briefly overlaps the generation it cancels. Bound even a
+	// client that repeatedly replaces faster than old RPCs can unwind.
+	if len(m.operations) >= 2*m.config.MaxStreams {
+		return nil, ErrTooManyStreams
+	}
+	return previous, nil
+}
+
+func (m *Manager) newOperation(
+	ctx context.Context,
+	key streamKey,
+	generation uint64,
+	session *retainedLogSession,
+) *operation {
 	streamContext, cancel := context.WithCancel(ctx)
-	op := &operation{
-		key: key, generation: request.Generation, contextName: resolved.ContextName, cancel: cancel,
-		releaseSession: resolved.Release,
+	return &operation{
+		key: key, generation: generation, context: streamContext, cancel: cancel,
+		done: streamContext.Done(), session: session,
 		queue: newRecordQueue(queueConfig{
 			maxRecords: m.config.QueueRecords, maxBytes: m.config.QueueBytes,
 			maxRecordBytes: m.config.MaxRecordBytes,
 			batchRecords:   m.config.BatchRecords, batchBytes: m.config.BatchBytes,
 		}),
 	}
+}
 
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		cancel()
-		return nil, ErrStreamClosed
-	}
-	if latest := m.latest[key]; request.Generation <= latest {
-		m.mu.Unlock()
-		cancel()
-		return nil, fmt.Errorf("%w: generation %d is not newer than %d", ErrStaleGeneration, request.Generation, latest)
-	}
-	previous := m.streams[key]
-	if len(m.operations) >= m.config.MaxStreams {
-		m.mu.Unlock()
-		cancel()
-		return nil, ErrTooManyStreams
-	}
-	m.streams[key] = op
+func (m *Manager) installLocked(op *operation) {
+	m.streams[op.key] = op
 	m.operations[op] = struct{}{}
-	m.latest[key] = request.Generation
-	m.history = append(m.history, generationEntry{key: key, generation: request.Generation})
+	m.latest[op.key] = op.generation
+	m.history = append(m.history, generationEntry{key: op.key, generation: op.generation})
 	m.trimHistoryLocked()
-	m.mu.Unlock()
-	if previous != nil {
-		previous.cancel()
-	}
+}
 
+func (m *Manager) begin(op *operation, request StartRequest) *Subscription {
 	op.queue.setStatus(Status{State: StateConnecting})
-	go m.run(streamContext, op, resolved.Opener, request)
-	releaseResolved = false
-	return &Subscription{manager: m, operation: op}, nil
+	go m.run(op.context, op, op.session.opener, request)
+	return &Subscription{manager: m, operation: op}
 }
 
 func (m *Manager) run(ctx context.Context, op *operation, opener SourceOpener, request StartRequest) {
-	defer op.releaseLease()
 	var wait sync.WaitGroup
 	var failures atomic.Int32
 	wait.Add(len(request.Sources))
@@ -196,16 +271,6 @@ func (m *Manager) run(ctx context.Context, op *operation, opener SourceOpener, r
 	}
 	op.queue.finish(status, discard)
 	m.detach(op)
-}
-
-func (op *operation) releaseLease() {
-	if op != nil {
-		op.releaseSessionOnce.Do(func() {
-			if op.releaseSession != nil {
-				op.releaseSession()
-			}
-		})
-	}
 }
 
 // runSource returns true only for a source failure, not normal cancellation.
@@ -255,16 +320,33 @@ func (m *Manager) Cancel(sessionID, streamID string, generation uint64) bool {
 }
 
 func (m *Manager) detach(op *operation) {
+	var release *retainedLogSession
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	op.producerDone = true
-	if m.streams[op.key] == op {
-		delete(m.streams, op.key)
-	}
 	if op.subscriptionClosed {
 		delete(m.operations, op)
+		if m.streams[op.key] == op {
+			delete(m.streams, op.key)
+		}
+		release = m.releaseSessionRefLocked(op)
 	}
 	m.trimHistoryLocked()
+	m.mu.Unlock()
+	release.releaseUnderlying()
+}
+
+func (m *Manager) releaseSessionRefLocked(op *operation) *retainedLogSession {
+	if op == nil || op.session == nil || op.sessionReleased {
+		return nil
+	}
+	op.sessionReleased = true
+	if op.session.refs > 0 {
+		op.session.refs--
+	}
+	if op.session.refs == 0 {
+		return op.session
+	}
+	return nil
 }
 
 func (m *Manager) trimHistoryLocked() {
@@ -306,12 +388,25 @@ func (m *Manager) Close() {
 	}
 	m.closed = true
 	operations := make([]*operation, 0, len(m.operations))
+	releases := make([]*retainedLogSession, 0, len(m.operations))
 	for op := range m.operations {
 		operations = append(operations, op)
+		op.subscriptionClosed = true
+		if op.producerDone {
+			delete(m.operations, op)
+			if release := m.releaseSessionRefLocked(op); release != nil {
+				releases = append(releases, release)
+			}
+		}
 	}
+	clear(m.streams)
+	m.trimHistoryLocked()
 	m.mu.Unlock()
 	for _, op := range operations {
 		op.cancel()
+	}
+	for _, release := range releases {
+		release.releaseUnderlying()
 	}
 }
 
@@ -322,16 +417,23 @@ func (m *Manager) Active() int {
 }
 
 func (m *Manager) release(op *operation) {
+	var release *retainedLogSession
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if op.subscriptionClosed {
+		m.mu.Unlock()
+		return
+	}
 	op.subscriptionClosed = true
 	if op.producerDone {
 		delete(m.operations, op)
-	}
-	if m.streams[op.key] == op {
-		delete(m.streams, op.key)
+		release = m.releaseSessionRefLocked(op)
+		if m.streams[op.key] == op {
+			delete(m.streams, op.key)
+		}
 	}
 	m.trimHistoryLocked()
+	m.mu.Unlock()
+	release.releaseUnderlying()
 }
 
 type Subscription struct {
@@ -355,10 +457,23 @@ func (s *Subscription) Stats() QueueStats {
 }
 
 func (s *Subscription) ContextName() string {
-	if s == nil || s.operation == nil {
+	if s == nil || s.operation == nil || s.operation.session == nil {
 		return ""
 	}
-	return s.operation.contextName
+	return s.operation.session.contextName
+}
+
+// Done closes when the subscription is cancelled, replaced by a newer
+// generation, or its parent request context ends. Producer completion alone
+// deliberately does not close it: a completed log window may still restart
+// with different options using the retained cluster-session lease.
+func (s *Subscription) Done() <-chan struct{} {
+	if s == nil || s.operation == nil || s.operation.done == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return s.operation.done
 }
 
 func (s *Subscription) Close() {

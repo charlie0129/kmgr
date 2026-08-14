@@ -38,6 +38,7 @@ func readRecords(
 			fragment = fragment[:len(fragment)-1]
 		}
 		if len(fragment) > 0 || endsWithNewline {
+			startsLine := atLineStart
 			if timestamps && atLineStart {
 				if parsed, rest, ok := parseTimestampPrefix(fragment); ok {
 					lineTimestamp = parsed
@@ -48,7 +49,7 @@ func readRecords(
 			}
 			emit(Record{
 				SourceID: sourceID, Data: fragment, Timestamp: lineTimestamp,
-				EndsWithNewline: endsWithNewline,
+				StartsLine: startsLine, EndsWithNewline: endsWithNewline,
 			})
 			atLineStart = endsWithNewline
 			if endsWithNewline {

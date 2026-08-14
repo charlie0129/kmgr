@@ -83,11 +83,14 @@ app-wide Port Forwards window.
   protection.
 - ConfigMap and Secret keys support text and raw binary values. Secret bytes
   are decoded/encoded by the engine and concealed by default in the UI.
-- Pod logs support one or many UID-pinned Pods, bounded sources and buffers,
-  aggregate All Containers even across heterogeneous Pods, common-container
-  selection, follow, previous logs, timestamps, tail, since, filtering, pause,
-  copy, and explicit save. The context and exact source labels remain visible
-  above the log buffer.
+- Logs support one or many UID-pinned Pods plus Deployments, StatefulSets,
+  DaemonSets, ReplicaSets, Jobs, and CronJobs. A workload is resolved through
+  UID-checked controller-owner hops to a bounded, static Pod snapshot; the
+  window says that membership changes require reopening Logs. All Containers
+  and common-container selection work across heterogeneous Pods. Container,
+  follow, previous logs, timestamps, tail, and since remain adjustable in the
+  live window toolbar alongside filtering, pause, copy, and explicit save. The
+  context and exact source labels remain visible above the bounded log buffer.
 - Pod exec uses a SwiftTerm window and direct argv transport. The configuration
   can probe `/bin/bash` then `/bin/sh`, or run an explicit executable without
   shell parsing.
@@ -134,7 +137,7 @@ so they do not steal input from filters, YAML/data editors, logs, or terminals.
 | Escape | Clear selection or return focus to the table |
 | `Y` | Open YAML for one object |
 | `E` | Open Events for one object |
-| `L` | Configure logs for selected Pods |
+| `L` | Configure logs for compatible selected Pods or workloads |
 | `S` | Configure exec for one Pod |
 | `P` | Configure a port-forward for one Pod or Service |
 | Command-Backspace | Confirm deletion of selected resources |
@@ -299,8 +302,8 @@ discoverable listable type.
 - macOS only; the native UI requires macOS 15 with the current dependency set.
 - External kubeconfig exec plugins and legacy auth-provider integrations are
   deliberately unsupported in v1.
-- Log configuration currently accepts Pods, not dynamic workload membership;
-  workload membership following is not implemented.
+- Supported workloads resolve to a bounded, UID-pinned static Pod snapshot;
+  following dynamic workload membership is not implemented.
 - Exec reconnect starts a new process; it cannot preserve the original remote
   process.
 - Relationship cache results are deliberately incomplete by default, and even

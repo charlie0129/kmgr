@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -340,8 +341,8 @@ func TestManagerReleasesResolvedSessionOnFailureAndTermination(t *testing.T) {
 		t.Fatalf("stale Start error = %v", err)
 	}
 	mu.Lock()
-	if acquired != 3 || released != 2 {
-		t.Fatalf("before termination acquired/released = %d/%d, want 3/2", acquired, released)
+	if acquired != 1 || released != 0 {
+		t.Fatalf("before termination acquired/released = %d/%d, want 1/0", acquired, released)
 	}
 	mu.Unlock()
 	manager.Close()
@@ -351,19 +352,241 @@ func TestManagerReleasesResolvedSessionOnFailureAndTermination(t *testing.T) {
 	waitFor(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return released == 3
+		return released == 1
 	}, "active session lease release")
 	first.Close()
 	mu.Lock()
 	defer mu.Unlock()
-	if released != 3 {
+	if released != 1 {
 		t.Fatalf("subscription close released lease again: %d", released)
 	}
+}
+
+func TestManagerReleasesResolvedSessionWhenOpenerIsUnavailable(t *testing.T) {
+	t.Parallel()
+	var releases atomic.Int32
+	manager, err := NewManager(Config{Resolver: ResolverFunc(func(string) (ResolvedSession, error) {
+		return ResolvedSession{Release: func() { releases.Add(1) }}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "logs", Generation: 1,
+		Sources: []Source{testSource("a")},
+	}); !errors.Is(err, ErrLogClientUnavailable) {
+		t.Fatalf("Start error = %v", err)
+	}
+	if releases.Load() != 1 {
+		t.Fatalf("resolved session releases = %d, want 1", releases.Load())
+	}
+}
+
+func TestCompletedGenerationRetainsSessionForReplacementAfterWorkspaceClose(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	workspaceOpen := true
+	resolveCalls := 0
+	releases := 0
+	resolver := ResolverFunc(func(string) (ResolvedSession, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		resolveCalls++
+		if !workspaceOpen {
+			return ResolvedSession{}, ErrSessionNotFound
+		}
+		return ResolvedSession{
+			ContextName: "local",
+			Opener: openerFunc(func(context.Context, Source, corev1.PodLogOptions) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewBufferString("ready\n")), nil
+			}),
+			Release: func() {
+				mu.Lock()
+				releases++
+				mu.Unlock()
+			},
+		}, nil
+	})
+	manager, err := NewManager(Config{Resolver: resolver, MaxStreams: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+
+	first, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "logs", Generation: 1,
+		Sources: []Source{testSource("first")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal := waitForTerminal(t, first); terminal.State != StateCompleted {
+		t.Fatalf("first terminal = %#v", terminal)
+	}
+	select {
+	case <-first.Done():
+		t.Fatal("producer completion closed the retained subscription")
+	default:
+	}
+
+	mu.Lock()
+	workspaceOpen = false
+	mu.Unlock()
+	second, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "logs", Generation: 2,
+		Sources: []Source{testSource("second")},
+	})
+	if err != nil {
+		t.Fatalf("replacement after workspace close: %v", err)
+	}
+	select {
+	case <-first.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("replacement did not retire the prior generation")
+	}
+	if terminal := waitForTerminal(t, second); terminal.State != StateCompleted {
+		t.Fatalf("second terminal = %#v", terminal)
+	}
+
+	mu.Lock()
+	if resolveCalls != 1 || releases != 0 {
+		t.Fatalf("before close resolve/release calls = %d/%d, want 1/0", resolveCalls, releases)
+	}
+	mu.Unlock()
+	first.Close()
+	mu.Lock()
+	if releases != 0 {
+		t.Fatalf("first close released a session still used by replacement: %d", releases)
+	}
+	mu.Unlock()
+	second.Close()
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return releases == 1
+	}, "shared retained session release")
+}
+
+func TestClosingGenerationRemainsReusableUntilProducerTeardown(t *testing.T) {
+	t.Parallel()
+	firstReader := newGatedCloseReadCloser()
+	var mu sync.Mutex
+	workspaceOpen := true
+	resolveCalls := 0
+	releases := 0
+	resolver := ResolverFunc(func(string) (ResolvedSession, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		resolveCalls++
+		if !workspaceOpen {
+			return ResolvedSession{}, ErrSessionNotFound
+		}
+		return ResolvedSession{
+			ContextName: "local",
+			Opener: openerFunc(func(_ context.Context, source Source, _ corev1.PodLogOptions) (io.ReadCloser, error) {
+				if source.ID == "first" {
+					return firstReader, nil
+				}
+				return io.NopCloser(bytes.NewBufferString("replacement\n")), nil
+			}),
+			Release: func() {
+				mu.Lock()
+				releases++
+				mu.Unlock()
+			},
+		}, nil
+	})
+	manager, err := NewManager(Config{Resolver: resolver, MaxStreams: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		firstReader.allowReturn()
+		manager.Close()
+	})
+
+	first, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "logs", Generation: 1,
+		Sources: []Source{testSource("first")}, Options: Options{Follow: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstReader.reading:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first producer did not begin reading")
+	}
+	first.Close()
+	select {
+	case <-firstReader.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscription close did not cancel the first reader")
+	}
+
+	mu.Lock()
+	workspaceOpen = false
+	mu.Unlock()
+	second, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "logs", Generation: 2,
+		Sources: []Source{testSource("second")},
+	})
+	if err != nil {
+		t.Fatalf("replacement during producer teardown: %v", err)
+	}
+	if terminal := waitForTerminal(t, second); terminal.State != StateCompleted {
+		t.Fatalf("replacement terminal = %#v", terminal)
+	}
+	mu.Lock()
+	if resolveCalls != 1 || releases != 0 {
+		t.Fatalf("before teardown resolve/release calls = %d/%d, want 1/0", resolveCalls, releases)
+	}
+	mu.Unlock()
+
+	firstReader.allowReturn()
+	waitFor(t, func() bool { return manager.Active() == 1 }, "first producer teardown")
+	second.Close()
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return releases == 1
+	}, "retained session release after every producer exits")
 }
 
 type blockingReadCloser struct {
 	once   sync.Once
 	closed chan struct{}
+}
+
+type gatedCloseReadCloser struct {
+	readOnce  sync.Once
+	closeOnce sync.Once
+	allowOnce sync.Once
+	reading   chan struct{}
+	closed    chan struct{}
+	allowed   chan struct{}
+}
+
+func newGatedCloseReadCloser() *gatedCloseReadCloser {
+	return &gatedCloseReadCloser{
+		reading: make(chan struct{}), closed: make(chan struct{}), allowed: make(chan struct{}),
+	}
+}
+
+func (r *gatedCloseReadCloser) Read(_ []byte) (int, error) {
+	r.readOnce.Do(func() { close(r.reading) })
+	<-r.closed
+	<-r.allowed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *gatedCloseReadCloser) Close() error {
+	r.closeOnce.Do(func() { close(r.closed) })
+	return nil
+}
+
+func (r *gatedCloseReadCloser) allowReturn() {
+	r.allowOnce.Do(func() { close(r.allowed) })
 }
 
 func newBlockingReadCloser() *blockingReadCloser {

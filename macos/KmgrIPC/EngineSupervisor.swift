@@ -95,6 +95,12 @@ public enum EngineSupervisorError: Error, LocalizedError, Sendable {
 
 @MainActor
 public final class EngineSupervisor {
+    static let protocolMajor: UInt32 = 1
+    static let requiredProtocolMinor: UInt32 = 1
+    static let requiredCapabilities: [String: UInt32] = [
+        "logs.resolve-sources": 1
+    ]
+
     public struct Configuration: Sendable {
         public var helperURL: URL
         public var temporaryDirectoryURL: URL
@@ -458,8 +464,8 @@ public final class EngineSupervisor {
                 let service = Kmgr_V1_EngineService.Client(wrapping: client)
                 var request = Kmgr_V1_HandshakeRequest()
                 request.context = requestContext(timeout: configuration.handshakeTimeout)
-                request.clientProtocol.major = 1
-                request.clientProtocol.minor = 0
+                request.clientProtocol.major = Self.protocolMajor
+                request.clientProtocol.minor = Self.requiredProtocolMinor
                 request.clientVersion = configuration.clientVersion
                 var options = CallOptions.defaults
                 options.timeout = configuration.handshakeTimeout
@@ -468,31 +474,7 @@ public final class EngineSupervisor {
                     request,
                     options: options
                 )
-                if response.hasError {
-                    throw EngineSupervisorError.incompatibleProtocol(
-                        response.error.message.isEmpty
-                            ? "The engine rejected the protocol handshake."
-                            : response.error.message
-                    )
-                }
-                guard response.hasNegotiatedProtocol,
-                    response.negotiatedProtocol.major == 1,
-                    !response.engineInstanceID.isEmpty
-                else {
-                    throw EngineSupervisorError.invalidHandshake(
-                        "The engine returned an incomplete protocol handshake."
-                    )
-                }
-                return EngineInformation(
-                    version: response.engineVersion,
-                    instanceID: response.engineInstanceID,
-                    protocolMajor: response.negotiatedProtocol.major,
-                    protocolMinor: response.negotiatedProtocol.minor,
-                    capabilities: Dictionary(
-                        response.capabilities.map { ($0.name, $0.version) },
-                        uniquingKeysWith: max
-                    )
-                )
+                return try Self.validateHandshakeResponse(response)
             } catch let error as EngineSupervisorError {
                 throw error
             } catch {
@@ -505,6 +487,50 @@ public final class EngineSupervisor {
             throw EngineSupervisorError.helperExited(process.terminationStatus)
         }
         throw EngineSupervisorError.startupTimedOut
+    }
+
+    static func validateHandshakeResponse(
+        _ response: Kmgr_V1_HandshakeResponse
+    ) throws -> EngineInformation {
+        if response.hasError {
+            throw EngineSupervisorError.incompatibleProtocol(
+                response.error.message.isEmpty
+                    ? "The engine rejected the protocol handshake."
+                    : response.error.message
+            )
+        }
+        guard response.hasNegotiatedProtocol,
+            response.negotiatedProtocol.major == protocolMajor,
+            !response.engineInstanceID.isEmpty
+        else {
+            throw EngineSupervisorError.invalidHandshake(
+                "The engine returned an incomplete protocol handshake."
+            )
+        }
+        guard response.negotiatedProtocol.minor >= requiredProtocolMinor else {
+            throw EngineSupervisorError.incompatibleProtocol(
+                "This version of kmgr requires Kubernetes engine protocol \(protocolMajor).\(requiredProtocolMinor) or newer."
+            )
+        }
+        let capabilities = Dictionary(
+            response.capabilities.map { ($0.name, $0.version) },
+            uniquingKeysWith: max
+        )
+        let missing = requiredCapabilities.keys.sorted().filter {
+            capabilities[$0, default: 0] < requiredCapabilities[$0, default: 0]
+        }
+        guard missing.isEmpty else {
+            throw EngineSupervisorError.incompatibleProtocol(
+                "The Kubernetes engine is missing required capability: \(missing.joined(separator: ", "))."
+            )
+        }
+        return EngineInformation(
+            version: response.engineVersion,
+            instanceID: response.engineInstanceID,
+            protocolMajor: response.negotiatedProtocol.major,
+            protocolMinor: response.negotiatedProtocol.minor,
+            capabilities: capabilities
+        )
     }
 
     private func stopProcess(_ process: Process, waiter: ProcessExitWaiter) async {

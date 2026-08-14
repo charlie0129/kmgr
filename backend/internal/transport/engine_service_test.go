@@ -51,6 +51,7 @@ func TestEngineServiceHandshakeAndHealth(t *testing.T) {
 		"cluster.sessions",
 		"engine.health",
 		"exec.stream",
+		"logs.resolve-sources",
 		"logs.stream",
 		"object.data",
 		"object.details",

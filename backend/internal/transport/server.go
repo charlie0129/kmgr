@@ -131,7 +131,10 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		viewRuntime.Close()
 		return nil, err
 	}
-	logService, err := streamlogs.NewGRPCService(logManager)
+	logService, err := streamlogs.NewGRPCService(
+		logManager,
+		streamlogs.ClusterWorkloadSourceResolver{Sessions: sessions},
+	)
 	if err != nil {
 		logManager.Close()
 		operationManager.Close()

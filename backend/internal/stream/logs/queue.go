@@ -94,6 +94,7 @@ func (q *recordQueue) enqueue(record Record) {
 		end := min(offset+q.config.maxRecordBytes, len(record.Data))
 		fragment := record
 		fragment.Data = record.Data[offset:end]
+		fragment.StartsLine = record.StartsLine && offset == 0
 		fragment.EndsWithNewline = record.EndsWithNewline && end == len(record.Data)
 		q.enqueueOne(fragment)
 		offset = end

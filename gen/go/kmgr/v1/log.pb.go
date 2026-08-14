@@ -82,6 +82,182 @@ func (LogStreamState) EnumDescriptor() ([]byte, []int) {
 	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{0}
 }
 
+// Resolves an immutable selection of Pods and supported workload controllers
+// to one UID-pinned Pod snapshot before a log window opens. Membership is
+// deliberately static; dynamic controller membership is a separate opt-in
+// behavior represented by LogOptions.follow_workload_membership.
+type ResolveLogSourcesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	Resources     []*ResourceIdentity    `protobuf:"bytes,2,rep,name=resources,proto3" json:"resources,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveLogSourcesRequest) Reset() {
+	*x = ResolveLogSourcesRequest{}
+	mi := &file_kmgr_v1_log_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveLogSourcesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveLogSourcesRequest) ProtoMessage() {}
+
+func (x *ResolveLogSourcesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_log_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveLogSourcesRequest.ProtoReflect.Descriptor instead.
+func (*ResolveLogSourcesRequest) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *ResolveLogSourcesRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *ResolveLogSourcesRequest) GetResources() []*ResourceIdentity {
+	if x != nil {
+		return x.Resources
+	}
+	return nil
+}
+
+type ResolvedPodLogSource struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Identity      *ResourceIdentity      `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	Containers    []string               `protobuf:"bytes,2,rep,name=containers,proto3" json:"containers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolvedPodLogSource) Reset() {
+	*x = ResolvedPodLogSource{}
+	mi := &file_kmgr_v1_log_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolvedPodLogSource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolvedPodLogSource) ProtoMessage() {}
+
+func (x *ResolvedPodLogSource) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_log_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolvedPodLogSource.ProtoReflect.Descriptor instead.
+func (*ResolvedPodLogSource) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ResolvedPodLogSource) GetIdentity() *ResourceIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+func (x *ResolvedPodLogSource) GetContainers() []string {
+	if x != nil {
+		return x.Containers
+	}
+	return nil
+}
+
+type ResolveLogSourcesResponse struct {
+	state                  protoimpl.MessageState  `protogen:"open.v1"`
+	RequestId              string                  `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Pods                   []*ResolvedPodLogSource `protobuf:"bytes,2,rep,name=pods,proto3" json:"pods,omitempty"`
+	StaticWorkloadSnapshot bool                    `protobuf:"varint,3,opt,name=static_workload_snapshot,json=staticWorkloadSnapshot,proto3" json:"static_workload_snapshot,omitempty"`
+	Error                  *StructuredError        `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *ResolveLogSourcesResponse) Reset() {
+	*x = ResolveLogSourcesResponse{}
+	mi := &file_kmgr_v1_log_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveLogSourcesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveLogSourcesResponse) ProtoMessage() {}
+
+func (x *ResolveLogSourcesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_log_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveLogSourcesResponse.ProtoReflect.Descriptor instead.
+func (*ResolveLogSourcesResponse) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ResolveLogSourcesResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *ResolveLogSourcesResponse) GetPods() []*ResolvedPodLogSource {
+	if x != nil {
+		return x.Pods
+	}
+	return nil
+}
+
+func (x *ResolveLogSourcesResponse) GetStaticWorkloadSnapshot() bool {
+	if x != nil {
+		return x.StaticWorkloadSnapshot
+	}
+	return false
+}
+
+func (x *ResolveLogSourcesResponse) GetError() *StructuredError {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
 type LogSource struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Identity      *ResourceIdentity      `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
@@ -94,7 +270,7 @@ type LogSource struct {
 
 func (x *LogSource) Reset() {
 	*x = LogSource{}
-	mi := &file_kmgr_v1_log_proto_msgTypes[0]
+	mi := &file_kmgr_v1_log_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -106,7 +282,7 @@ func (x *LogSource) String() string {
 func (*LogSource) ProtoMessage() {}
 
 func (x *LogSource) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_log_proto_msgTypes[0]
+	mi := &file_kmgr_v1_log_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -119,7 +295,7 @@ func (x *LogSource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogSource.ProtoReflect.Descriptor instead.
 func (*LogSource) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{0}
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *LogSource) GetIdentity() *ResourceIdentity {
@@ -166,7 +342,7 @@ type LogOptions struct {
 
 func (x *LogOptions) Reset() {
 	*x = LogOptions{}
-	mi := &file_kmgr_v1_log_proto_msgTypes[1]
+	mi := &file_kmgr_v1_log_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -178,7 +354,7 @@ func (x *LogOptions) String() string {
 func (*LogOptions) ProtoMessage() {}
 
 func (x *LogOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_log_proto_msgTypes[1]
+	mi := &file_kmgr_v1_log_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -191,7 +367,7 @@ func (x *LogOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogOptions.ProtoReflect.Descriptor instead.
 func (*LogOptions) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{1}
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *LogOptions) GetFollow() bool {
@@ -263,7 +439,7 @@ type StartLogsRequest struct {
 
 func (x *StartLogsRequest) Reset() {
 	*x = StartLogsRequest{}
-	mi := &file_kmgr_v1_log_proto_msgTypes[2]
+	mi := &file_kmgr_v1_log_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -275,7 +451,7 @@ func (x *StartLogsRequest) String() string {
 func (*StartLogsRequest) ProtoMessage() {}
 
 func (x *StartLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_log_proto_msgTypes[2]
+	mi := &file_kmgr_v1_log_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -288,7 +464,7 @@ func (x *StartLogsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartLogsRequest.ProtoReflect.Descriptor instead.
 func (*StartLogsRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{2}
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *StartLogsRequest) GetContext() *RequestContext {
@@ -337,7 +513,7 @@ type CancelLogsRequest struct {
 
 func (x *CancelLogsRequest) Reset() {
 	*x = CancelLogsRequest{}
-	mi := &file_kmgr_v1_log_proto_msgTypes[3]
+	mi := &file_kmgr_v1_log_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -349,7 +525,7 @@ func (x *CancelLogsRequest) String() string {
 func (*CancelLogsRequest) ProtoMessage() {}
 
 func (x *CancelLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_log_proto_msgTypes[3]
+	mi := &file_kmgr_v1_log_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -362,7 +538,7 @@ func (x *CancelLogsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelLogsRequest.ProtoReflect.Descriptor instead.
 func (*CancelLogsRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{3}
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CancelLogsRequest) GetContext() *RequestContext {
@@ -392,13 +568,17 @@ type LogRecord struct {
 	Data            []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
 	TimestampUnixMs int64                  `protobuf:"varint,3,opt,name=timestamp_unix_ms,json=timestampUnixMs,proto3" json:"timestamp_unix_ms,omitempty"`
 	EndsWithNewline bool                   `protobuf:"varint,4,opt,name=ends_with_newline,json=endsWithNewline,proto3" json:"ends_with_newline,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// True when this record continues a prior logical Kubernetes log line.
+	// The negative/default-false form keeps older producers compatible while
+	// allowing renderers to suppress repeated prefixes on oversized lines.
+	ContinuesLine bool `protobuf:"varint,5,opt,name=continues_line,json=continuesLine,proto3" json:"continues_line,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *LogRecord) Reset() {
 	*x = LogRecord{}
-	mi := &file_kmgr_v1_log_proto_msgTypes[4]
+	mi := &file_kmgr_v1_log_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -410,7 +590,7 @@ func (x *LogRecord) String() string {
 func (*LogRecord) ProtoMessage() {}
 
 func (x *LogRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_log_proto_msgTypes[4]
+	mi := &file_kmgr_v1_log_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -423,7 +603,7 @@ func (x *LogRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogRecord.ProtoReflect.Descriptor instead.
 func (*LogRecord) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{4}
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *LogRecord) GetSourceId() string {
@@ -454,6 +634,13 @@ func (x *LogRecord) GetEndsWithNewline() bool {
 	return false
 }
 
+func (x *LogRecord) GetContinuesLine() bool {
+	if x != nil {
+		return x.ContinuesLine
+	}
+	return false
+}
+
 type LogStatus struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	State          LogStreamState         `protobuf:"varint,1,opt,name=state,proto3,enum=kmgr.v1.LogStreamState" json:"state,omitempty"`
@@ -467,7 +654,7 @@ type LogStatus struct {
 
 func (x *LogStatus) Reset() {
 	*x = LogStatus{}
-	mi := &file_kmgr_v1_log_proto_msgTypes[5]
+	mi := &file_kmgr_v1_log_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -479,7 +666,7 @@ func (x *LogStatus) String() string {
 func (*LogStatus) ProtoMessage() {}
 
 func (x *LogStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_log_proto_msgTypes[5]
+	mi := &file_kmgr_v1_log_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -492,7 +679,7 @@ func (x *LogStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogStatus.ProtoReflect.Descriptor instead.
 func (*LogStatus) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{5}
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *LogStatus) GetState() LogStreamState {
@@ -542,7 +729,7 @@ type LogBatch struct {
 
 func (x *LogBatch) Reset() {
 	*x = LogBatch{}
-	mi := &file_kmgr_v1_log_proto_msgTypes[6]
+	mi := &file_kmgr_v1_log_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -554,7 +741,7 @@ func (x *LogBatch) String() string {
 func (*LogBatch) ProtoMessage() {}
 
 func (x *LogBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_log_proto_msgTypes[6]
+	mi := &file_kmgr_v1_log_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -567,7 +754,7 @@ func (x *LogBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogBatch.ProtoReflect.Descriptor instead.
 func (*LogBatch) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{6}
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *LogBatch) GetRecords() []*LogRecord {
@@ -599,7 +786,7 @@ type LogEvent struct {
 
 func (x *LogEvent) Reset() {
 	*x = LogEvent{}
-	mi := &file_kmgr_v1_log_proto_msgTypes[7]
+	mi := &file_kmgr_v1_log_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -611,7 +798,7 @@ func (x *LogEvent) String() string {
 func (*LogEvent) ProtoMessage() {}
 
 func (x *LogEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_log_proto_msgTypes[7]
+	mi := &file_kmgr_v1_log_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -624,7 +811,7 @@ func (x *LogEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEvent.ProtoReflect.Descriptor instead.
 func (*LogEvent) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{7}
+	return file_kmgr_v1_log_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *LogEvent) GetCursor() *StreamCursor {
@@ -694,7 +881,21 @@ var File_kmgr_v1_log_proto protoreflect.FileDescriptor
 
 const file_kmgr_v1_log_proto_rawDesc = "" +
 	"\n" +
-	"\x11kmgr/v1/log.proto\x12\akmgr.v1\x1a\x14kmgr/v1/common.proto\"\xa0\x01\n" +
+	"\x11kmgr/v1/log.proto\x12\akmgr.v1\x1a\x14kmgr/v1/common.proto\"\x86\x01\n" +
+	"\x18ResolveLogSourcesRequest\x121\n" +
+	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x127\n" +
+	"\tresources\x18\x02 \x03(\v2\x19.kmgr.v1.ResourceIdentityR\tresources\"m\n" +
+	"\x14ResolvedPodLogSource\x125\n" +
+	"\bidentity\x18\x01 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12\x1e\n" +
+	"\n" +
+	"containers\x18\x02 \x03(\tR\n" +
+	"containers\"\xd7\x01\n" +
+	"\x19ResolveLogSourcesResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x121\n" +
+	"\x04pods\x18\x02 \x03(\v2\x1d.kmgr.v1.ResolvedPodLogSourceR\x04pods\x128\n" +
+	"\x18static_workload_snapshot\x18\x03 \x01(\bR\x16staticWorkloadSnapshot\x12.\n" +
+	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\xa0\x01\n" +
 	"\tLogSource\x125\n" +
 	"\bidentity\x18\x01 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12\x1c\n" +
 	"\tcontainer\x18\x02 \x01(\tR\tcontainer\x12\x1b\n" +
@@ -731,12 +932,13 @@ const file_kmgr_v1_log_proto_rawDesc = "" +
 	"\rlog_stream_id\x18\x02 \x01(\tR\vlogStreamId\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x03 \x01(\x04R\n" +
-	"generation\"\x94\x01\n" +
+	"generation\"\xbb\x01\n" +
 	"\tLogRecord\x12\x1b\n" +
 	"\tsource_id\x18\x01 \x01(\tR\bsourceId\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12*\n" +
 	"\x11timestamp_unix_ms\x18\x03 \x01(\x03R\x0ftimestampUnixMs\x12*\n" +
-	"\x11ends_with_newline\x18\x04 \x01(\bR\x0fendsWithNewline\"\xd5\x01\n" +
+	"\x11ends_with_newline\x18\x04 \x01(\bR\x0fendsWithNewline\x12%\n" +
+	"\x0econtinues_line\x18\x05 \x01(\bR\rcontinuesLine\"\xd5\x01\n" +
 	"\tLogStatus\x12-\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x17.kmgr.v1.LogStreamStateR\x05state\x12'\n" +
 	"\x0fdropped_records\x18\x02 \x01(\x04R\x0edroppedRecords\x12#\n" +
@@ -760,9 +962,10 @@ const file_kmgr_v1_log_proto_rawDesc = "" +
 	"\x1dLOG_STREAM_STATE_RECONNECTING\x10\x03\x12\x1e\n" +
 	"\x1aLOG_STREAM_STATE_COMPLETED\x10\x04\x12\x1e\n" +
 	"\x1aLOG_STREAM_STATE_CANCELLED\x10\x05\x12\x1b\n" +
-	"\x17LOG_STREAM_STATE_FAILED\x10\x062\x8e\x01\n" +
+	"\x17LOG_STREAM_STATE_FAILED\x10\x062\xea\x01\n" +
 	"\n" +
-	"LogService\x12<\n" +
+	"LogService\x12Z\n" +
+	"\x11ResolveLogSources\x12!.kmgr.v1.ResolveLogSourcesRequest\x1a\".kmgr.v1.ResolveLogSourcesResponse\x12<\n" +
 	"\n" +
 	"StreamLogs\x12\x19.kmgr.v1.StartLogsRequest\x1a\x11.kmgr.v1.LogEvent0\x01\x12B\n" +
 	"\n" +
@@ -781,45 +984,55 @@ func file_kmgr_v1_log_proto_rawDescGZIP() []byte {
 }
 
 var file_kmgr_v1_log_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_kmgr_v1_log_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_kmgr_v1_log_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_kmgr_v1_log_proto_goTypes = []any{
-	(LogStreamState)(0),       // 0: kmgr.v1.LogStreamState
-	(*LogSource)(nil),         // 1: kmgr.v1.LogSource
-	(*LogOptions)(nil),        // 2: kmgr.v1.LogOptions
-	(*StartLogsRequest)(nil),  // 3: kmgr.v1.StartLogsRequest
-	(*CancelLogsRequest)(nil), // 4: kmgr.v1.CancelLogsRequest
-	(*LogRecord)(nil),         // 5: kmgr.v1.LogRecord
-	(*LogStatus)(nil),         // 6: kmgr.v1.LogStatus
-	(*LogBatch)(nil),          // 7: kmgr.v1.LogBatch
-	(*LogEvent)(nil),          // 8: kmgr.v1.LogEvent
-	(*ResourceIdentity)(nil),  // 9: kmgr.v1.ResourceIdentity
-	(*RequestContext)(nil),    // 10: kmgr.v1.RequestContext
-	(*StructuredError)(nil),   // 11: kmgr.v1.StructuredError
-	(*StreamCursor)(nil),      // 12: kmgr.v1.StreamCursor
-	(*Acknowledgement)(nil),   // 13: kmgr.v1.Acknowledgement
+	(LogStreamState)(0),               // 0: kmgr.v1.LogStreamState
+	(*ResolveLogSourcesRequest)(nil),  // 1: kmgr.v1.ResolveLogSourcesRequest
+	(*ResolvedPodLogSource)(nil),      // 2: kmgr.v1.ResolvedPodLogSource
+	(*ResolveLogSourcesResponse)(nil), // 3: kmgr.v1.ResolveLogSourcesResponse
+	(*LogSource)(nil),                 // 4: kmgr.v1.LogSource
+	(*LogOptions)(nil),                // 5: kmgr.v1.LogOptions
+	(*StartLogsRequest)(nil),          // 6: kmgr.v1.StartLogsRequest
+	(*CancelLogsRequest)(nil),         // 7: kmgr.v1.CancelLogsRequest
+	(*LogRecord)(nil),                 // 8: kmgr.v1.LogRecord
+	(*LogStatus)(nil),                 // 9: kmgr.v1.LogStatus
+	(*LogBatch)(nil),                  // 10: kmgr.v1.LogBatch
+	(*LogEvent)(nil),                  // 11: kmgr.v1.LogEvent
+	(*RequestContext)(nil),            // 12: kmgr.v1.RequestContext
+	(*ResourceIdentity)(nil),          // 13: kmgr.v1.ResourceIdentity
+	(*StructuredError)(nil),           // 14: kmgr.v1.StructuredError
+	(*StreamCursor)(nil),              // 15: kmgr.v1.StreamCursor
+	(*Acknowledgement)(nil),           // 16: kmgr.v1.Acknowledgement
 }
 var file_kmgr_v1_log_proto_depIdxs = []int32{
-	9,  // 0: kmgr.v1.LogSource.identity:type_name -> kmgr.v1.ResourceIdentity
-	10, // 1: kmgr.v1.StartLogsRequest.context:type_name -> kmgr.v1.RequestContext
-	1,  // 2: kmgr.v1.StartLogsRequest.sources:type_name -> kmgr.v1.LogSource
-	2,  // 3: kmgr.v1.StartLogsRequest.options:type_name -> kmgr.v1.LogOptions
-	10, // 4: kmgr.v1.CancelLogsRequest.context:type_name -> kmgr.v1.RequestContext
-	0,  // 5: kmgr.v1.LogStatus.state:type_name -> kmgr.v1.LogStreamState
-	11, // 6: kmgr.v1.LogStatus.error:type_name -> kmgr.v1.StructuredError
-	5,  // 7: kmgr.v1.LogBatch.records:type_name -> kmgr.v1.LogRecord
-	12, // 8: kmgr.v1.LogEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	7,  // 9: kmgr.v1.LogEvent.batch:type_name -> kmgr.v1.LogBatch
-	6,  // 10: kmgr.v1.LogEvent.status:type_name -> kmgr.v1.LogStatus
-	11, // 11: kmgr.v1.LogEvent.error:type_name -> kmgr.v1.StructuredError
-	3,  // 12: kmgr.v1.LogService.StreamLogs:input_type -> kmgr.v1.StartLogsRequest
-	4,  // 13: kmgr.v1.LogService.CancelLogs:input_type -> kmgr.v1.CancelLogsRequest
-	8,  // 14: kmgr.v1.LogService.StreamLogs:output_type -> kmgr.v1.LogEvent
-	13, // 15: kmgr.v1.LogService.CancelLogs:output_type -> kmgr.v1.Acknowledgement
-	14, // [14:16] is the sub-list for method output_type
-	12, // [12:14] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	12, // 0: kmgr.v1.ResolveLogSourcesRequest.context:type_name -> kmgr.v1.RequestContext
+	13, // 1: kmgr.v1.ResolveLogSourcesRequest.resources:type_name -> kmgr.v1.ResourceIdentity
+	13, // 2: kmgr.v1.ResolvedPodLogSource.identity:type_name -> kmgr.v1.ResourceIdentity
+	2,  // 3: kmgr.v1.ResolveLogSourcesResponse.pods:type_name -> kmgr.v1.ResolvedPodLogSource
+	14, // 4: kmgr.v1.ResolveLogSourcesResponse.error:type_name -> kmgr.v1.StructuredError
+	13, // 5: kmgr.v1.LogSource.identity:type_name -> kmgr.v1.ResourceIdentity
+	12, // 6: kmgr.v1.StartLogsRequest.context:type_name -> kmgr.v1.RequestContext
+	4,  // 7: kmgr.v1.StartLogsRequest.sources:type_name -> kmgr.v1.LogSource
+	5,  // 8: kmgr.v1.StartLogsRequest.options:type_name -> kmgr.v1.LogOptions
+	12, // 9: kmgr.v1.CancelLogsRequest.context:type_name -> kmgr.v1.RequestContext
+	0,  // 10: kmgr.v1.LogStatus.state:type_name -> kmgr.v1.LogStreamState
+	14, // 11: kmgr.v1.LogStatus.error:type_name -> kmgr.v1.StructuredError
+	8,  // 12: kmgr.v1.LogBatch.records:type_name -> kmgr.v1.LogRecord
+	15, // 13: kmgr.v1.LogEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	10, // 14: kmgr.v1.LogEvent.batch:type_name -> kmgr.v1.LogBatch
+	9,  // 15: kmgr.v1.LogEvent.status:type_name -> kmgr.v1.LogStatus
+	14, // 16: kmgr.v1.LogEvent.error:type_name -> kmgr.v1.StructuredError
+	1,  // 17: kmgr.v1.LogService.ResolveLogSources:input_type -> kmgr.v1.ResolveLogSourcesRequest
+	6,  // 18: kmgr.v1.LogService.StreamLogs:input_type -> kmgr.v1.StartLogsRequest
+	7,  // 19: kmgr.v1.LogService.CancelLogs:input_type -> kmgr.v1.CancelLogsRequest
+	3,  // 20: kmgr.v1.LogService.ResolveLogSources:output_type -> kmgr.v1.ResolveLogSourcesResponse
+	11, // 21: kmgr.v1.LogService.StreamLogs:output_type -> kmgr.v1.LogEvent
+	16, // 22: kmgr.v1.LogService.CancelLogs:output_type -> kmgr.v1.Acknowledgement
+	20, // [20:23] is the sub-list for method output_type
+	17, // [17:20] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_log_proto_init() }
@@ -828,8 +1041,8 @@ func file_kmgr_v1_log_proto_init() {
 		return
 	}
 	file_kmgr_v1_common_proto_init()
-	file_kmgr_v1_log_proto_msgTypes[1].OneofWrappers = []any{}
-	file_kmgr_v1_log_proto_msgTypes[7].OneofWrappers = []any{
+	file_kmgr_v1_log_proto_msgTypes[4].OneofWrappers = []any{}
+	file_kmgr_v1_log_proto_msgTypes[10].OneofWrappers = []any{
 		(*LogEvent_Batch)(nil),
 		(*LogEvent_Status)(nil),
 		(*LogEvent_Error)(nil),
@@ -840,7 +1053,7 @@ func file_kmgr_v1_log_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_log_proto_rawDesc), len(file_kmgr_v1_log_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   8,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

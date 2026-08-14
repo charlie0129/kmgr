@@ -34,6 +34,214 @@ struct LogWindowControllerTests {
         #expect(label.toolTip == label.stringValue)
         #expect(controller.window?.title.contains("2 sources") == true)
     }
+
+    @Test("live toolbar exposes container tail and since controls and static scope")
+    func liveStreamControlsRemainAvailable() throws {
+        let app = logSource(pod: "api", uid: "api-uid", container: "app")
+        let sidecar = logSource(pod: "api", uid: "api-uid", container: "sidecar")
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session",
+                contextName: "production",
+                clusterName: "cluster",
+                serverHostname: "example.invalid",
+                defaultNamespace: "default"
+            ),
+            sources: [app],
+            availableSources: [app, sidecar],
+            provider: NoopLogWindowProvider(),
+            options: LogOptions(sinceSeconds: 60, tailLines: 200),
+            staticWorkloadSnapshot: true
+        )
+
+        let root = try #require(controller.window?.contentView)
+        let views = descendants(of: root)
+        let container = try #require(views.compactMap { $0 as? NSPopUpButton }
+            .first { $0.identifier?.rawValue == "log-container" })
+        let tail = try #require(views.compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-tail-lines" })
+        let since = try #require(views.compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-since-seconds" })
+        let sources = try #require(views.compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Log sources" })
+
+        #expect(container.itemTitles == ["All Containers", "app", "sidecar"])
+        #expect(tail.stringValue == "200")
+        #expect(since.stringValue == "60")
+        #expect(sources.stringValue.contains("Static workload Pod snapshot"))
+        #expect(sources.stringValue.contains("reopen Logs to refresh"))
+    }
+
+    @Test("All Containers is disabled when it exceeds the bounded stream limit")
+    func oversizedAllContainersCannotMisrepresentTheActiveStream() throws {
+        let allSources = (0..<65).flatMap { index in
+            [
+                logSource(pod: "pod-\(index)", uid: "uid-\(index)", container: "app"),
+                logSource(pod: "pod-\(index)", uid: "uid-\(index)", container: "sidecar"),
+            ]
+        }
+        let appSources = allSources.filter { $0.container == "app" }
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: appSources,
+            availableSources: allSources,
+            provider: NoopLogWindowProvider()
+        )
+
+        let root = try #require(controller.window?.contentView)
+        let container = try #require(descendants(of: root).compactMap { $0 as? NSPopUpButton }
+            .first { $0.identifier?.rawValue == "log-container" })
+        #expect(container.titleOfSelectedItem == "app")
+        #expect(container.item(withTitle: "All Containers")?.isEnabled == false)
+        #expect(container.toolTip?.contains("128-stream limit") == true)
+    }
+
+    @Test("replacement stream starts before the established generation is retired")
+    func replacementStartsBeforePriorCancellation() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider
+        )
+        controller.showWindow(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitConnecting(generation: 1)
+
+        let root = try #require(controller.window?.contentView)
+        let apply = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Apply" })
+        try await waitForLogWindowControl(apply, enabled: true)
+        apply.performClick(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        var events = provider.snapshot()
+        #expect(!events.contains("cancel:1"))
+        #expect(!events.contains("terminated:1"))
+
+        provider.emitConnecting(generation: 2)
+        try await waitForLogWindowEvent(provider) {
+            $0.contains("cancel:1") && $0.contains("terminated:1")
+        }
+        events = provider.snapshot()
+        #expect(events.firstIndex(of: "start:2")! < events.firstIndex(of: "cancel:1")!)
+        #expect(events.firstIndex(of: "start:2")! < events.firstIndex(of: "terminated:1")!)
+        controller.close()
+    }
+
+    @Test("failed replacement restores controls without retiring established stream")
+    func failedReplacementRestoresAppliedConfiguration() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider
+        )
+        controller.showWindow(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitConnecting(generation: 1)
+
+        let root = try #require(controller.window?.contentView)
+        let follow = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Follow" })
+        try await waitForLogWindowControl(follow, enabled: true)
+        #expect(follow.state == .on)
+        follow.performClick(nil)
+        #expect(follow.state == .off)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        provider.fail(generation: 2)
+        for _ in 0..<200 {
+            if follow.state == .on { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(follow.state == .on)
+        let events = provider.snapshot()
+        #expect(!events.contains("cancel:1"))
+        #expect(!events.contains("terminated:1"))
+        controller.close()
+    }
+
+    @Test("rapid Apply clicks serialize replacement generations")
+    func rapidApplyClicksDoNotOverlapPendingStarts() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider
+        )
+        controller.showWindow(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitConnecting(generation: 1)
+
+        let root = try #require(controller.window?.contentView)
+        let apply = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Apply" })
+        try await waitForLogWindowControl(apply, enabled: true)
+        apply.performClick(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        #expect(!apply.isEnabled)
+        apply.performClick(nil)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(!provider.snapshot().contains("start:3"))
+
+        provider.fail(generation: 2)
+        for _ in 0..<200 {
+            if apply.isEnabled { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(apply.isEnabled)
+        let events = provider.snapshot()
+        #expect(!events.contains("cancel:1"))
+        #expect(!events.contains("terminated:1"))
+        controller.close()
+    }
+
+    @Test("replacement ending before its first event restores established configuration")
+    func emptyReplacementRestoresAppliedConfiguration() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider
+        )
+        controller.showWindow(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitConnecting(generation: 1)
+
+        let root = try #require(controller.window?.contentView)
+        let follow = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Follow" })
+        try await waitForLogWindowControl(follow, enabled: true)
+        follow.performClick(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        provider.finish(generation: 2)
+        for _ in 0..<200 {
+            if follow.state == .on { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(follow.state == .on)
+        let events = provider.snapshot()
+        #expect(!events.contains("cancel:1"))
+        #expect(!events.contains("terminated:1"))
+        controller.close()
+    }
 }
 
 private func logSource(pod: String, uid: String, container: String) -> LogSource {
@@ -66,4 +274,81 @@ private struct NoopLogWindowProvider: LogStreamProviding {
     }
 
     func cancelLogs(sessionID: String, streamID: String, generation: UInt64) async {}
+}
+
+private final class OrderedLogWindowProvider: LogStreamProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedEvents: [String] = []
+    private var continuations: [UInt64: AsyncThrowingStream<LogStreamMessage, Error>.Continuation] = [:]
+
+    func streamLogs(request: LogStreamRequest)
+        -> AsyncThrowingStream<LogStreamMessage, Error> {
+        return AsyncThrowingStream { continuation in
+            lock.withLock {
+                continuations[request.generation] = continuation
+                recordedEvents.append("start:\(request.generation)")
+            }
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                lock.withLock {
+                    continuations.removeValue(forKey: request.generation)
+                    recordedEvents.append("terminated:\(request.generation)")
+                }
+            }
+        }
+    }
+
+    func cancelLogs(sessionID: String, streamID: String, generation: UInt64) async {
+        lock.withLock { recordedEvents.append("cancel:\(generation)") }
+    }
+
+    func emitConnecting(generation: UInt64) {
+        let continuation = lock.withLock { continuations[generation] }
+        continuation?.yield(.status(
+            cursor: StreamCursor(generation: generation, sequence: 1),
+            status: LogStatus(state: .connecting)
+        ))
+    }
+
+    func fail(generation: UInt64) {
+        let continuation = lock.withLock { continuations[generation] }
+        continuation?.finish(throwing: OrderedLogWindowProviderError.rejected)
+    }
+
+    func finish(generation: UInt64) {
+        let continuation = lock.withLock { continuations[generation] }
+        continuation?.finish()
+    }
+
+    func snapshot() -> [String] {
+        lock.withLock { recordedEvents }
+    }
+}
+
+private enum OrderedLogWindowProviderError: Error {
+    case rejected
+}
+
+@MainActor
+private func waitForLogWindowEvent(
+    _ provider: OrderedLogWindowProvider,
+    condition: ([String]) -> Bool
+) async throws {
+    for _ in 0..<200 {
+        if condition(provider.snapshot()) { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Timed out waiting for log window event; got \(provider.snapshot())")
+}
+
+@MainActor
+private func waitForLogWindowControl(
+    _ control: NSControl,
+    enabled: Bool
+) async throws {
+    for _ in 0..<200 {
+        if control.isEnabled == enabled { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Timed out waiting for log control enabled=\(enabled)")
 }

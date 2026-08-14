@@ -19,14 +19,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	LogService_StreamLogs_FullMethodName = "/kmgr.v1.LogService/StreamLogs"
-	LogService_CancelLogs_FullMethodName = "/kmgr.v1.LogService/CancelLogs"
+	LogService_ResolveLogSources_FullMethodName = "/kmgr.v1.LogService/ResolveLogSources"
+	LogService_StreamLogs_FullMethodName        = "/kmgr.v1.LogService/StreamLogs"
+	LogService_CancelLogs_FullMethodName        = "/kmgr.v1.LogService/CancelLogs"
 )
 
 // LogServiceClient is the client API for LogService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type LogServiceClient interface {
+	ResolveLogSources(ctx context.Context, in *ResolveLogSourcesRequest, opts ...grpc.CallOption) (*ResolveLogSourcesResponse, error)
 	StreamLogs(ctx context.Context, in *StartLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogEvent], error)
 	CancelLogs(ctx context.Context, in *CancelLogsRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
 }
@@ -37,6 +39,16 @@ type logServiceClient struct {
 
 func NewLogServiceClient(cc grpc.ClientConnInterface) LogServiceClient {
 	return &logServiceClient{cc}
+}
+
+func (c *logServiceClient) ResolveLogSources(ctx context.Context, in *ResolveLogSourcesRequest, opts ...grpc.CallOption) (*ResolveLogSourcesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveLogSourcesResponse)
+	err := c.cc.Invoke(ctx, LogService_ResolveLogSources_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *logServiceClient) StreamLogs(ctx context.Context, in *StartLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogEvent], error) {
@@ -72,6 +84,7 @@ func (c *logServiceClient) CancelLogs(ctx context.Context, in *CancelLogsRequest
 // All implementations must embed UnimplementedLogServiceServer
 // for forward compatibility.
 type LogServiceServer interface {
+	ResolveLogSources(context.Context, *ResolveLogSourcesRequest) (*ResolveLogSourcesResponse, error)
 	StreamLogs(*StartLogsRequest, grpc.ServerStreamingServer[LogEvent]) error
 	CancelLogs(context.Context, *CancelLogsRequest) (*Acknowledgement, error)
 	mustEmbedUnimplementedLogServiceServer()
@@ -84,6 +97,9 @@ type LogServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedLogServiceServer struct{}
 
+func (UnimplementedLogServiceServer) ResolveLogSources(context.Context, *ResolveLogSourcesRequest) (*ResolveLogSourcesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveLogSources not implemented")
+}
 func (UnimplementedLogServiceServer) StreamLogs(*StartLogsRequest, grpc.ServerStreamingServer[LogEvent]) error {
 	return status.Error(codes.Unimplemented, "method StreamLogs not implemented")
 }
@@ -109,6 +125,24 @@ func RegisterLogServiceServer(s grpc.ServiceRegistrar, srv LogServiceServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&LogService_ServiceDesc, srv)
+}
+
+func _LogService_ResolveLogSources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveLogSourcesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LogServiceServer).ResolveLogSources(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LogService_ResolveLogSources_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LogServiceServer).ResolveLogSources(ctx, req.(*ResolveLogSourcesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _LogService_StreamLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
@@ -147,6 +181,10 @@ var LogService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "kmgr.v1.LogService",
 	HandlerType: (*LogServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ResolveLogSources",
+			Handler:    _LogService_ResolveLogSources_Handler,
+		},
 		{
 			MethodName: "CancelLogs",
 			Handler:    _LogService_CancelLogs_Handler,
