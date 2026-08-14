@@ -44,6 +44,37 @@ redacted `WorkspaceStreamBufferExceeded` error instead of allowing unbounded
 queue growth. This is an enforcement limit, not evidence that 256 queued
 messages deliver acceptable UI latency.
 
+## Warm-cache retained-size accounting
+
+The engine's process-memory-only warm resource LRU has simultaneous global and
+per-cluster ceilings. The defaults are:
+
+| Scope | Views | Kubernetes objects | Conservative retained bytes |
+| --- | ---: | ---: | ---: |
+| Process | 24 | 250,000 | 512 MiB |
+| Cluster authority | 8 | 100,000 | 192 MiB |
+
+An entry must fit all three ceilings at both scopes. Retained bytes are an
+incrementally maintained, deliberately conservative estimate of immutable
+unstructured maps/slices/scalars plus UID-store index overhead. They are not
+live heap or RSS samples. This avoids serializing a whole stopped view while
+the lifecycle lock is held and ensures a low object count cannot hide a very
+large ConfigMap, Secret, or custom resource payload.
+
+The estimate adds bounded work to the LIST/WATCH insertion path. Exercise that
+path independently from fixture construction with:
+
+```sh
+go test ./backend/internal/store \
+  -run '^$' \
+  -bench '^BenchmarkUIDStoreUpsert100K$' \
+  -benchtime=1x -benchmem -count=5
+```
+
+The benchmark inserts 100,000 prebuilt unstructured Pods and verifies final
+cardinality. It has no elapsed-time gate; compare repeated samples and allocation
+counts on the same machine when changing retained-size accounting.
+
 When diagnostics are enabled, the harness also samples its own process with
 Mach `TASK_VM_INFO` before and after the large view. It reports resident size,
 physical footprint, and peak physical-footprint growth without including the

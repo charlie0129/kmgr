@@ -110,6 +110,95 @@ func TestWarmCacheRejectsEntryLargerThanAuthorityBudgetWithoutDisturbingPeers(t 
 	}
 }
 
+func TestWarmCacheRejectsLargePayloadByByteBudgetWithoutDisturbingPeers(t *testing.T) {
+	t.Parallel()
+	small := newWarmBudgetEntry("cluster-a", "pods", "small")
+	large := newWarmBudgetEntry("cluster-a", "configmaps", string(make([]byte, 64<<10)))
+	smallBytes := small.store.RetainedBytes()
+	largeBytes := large.store.RetainedBytes()
+	if largeBytes <= smallBytes {
+		t.Fatalf("large estimate = %d, small estimate = %d", largeBytes, smallBytes)
+	}
+	byteLimit := smallBytes + (largeBytes-smallBytes)/2
+
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:                      &fakeResourceSource{},
+		WarmViewLimit:               8,
+		WarmObjectLimit:             100,
+		WarmByteLimit:               byteLimit,
+		WarmViewLimitPerAuthority:   4,
+		WarmObjectLimitPerAuthority: 100,
+		WarmByteLimitPerAuthority:   byteLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	admitWarmBudgetEntry(runtime, small)
+	admitWarmBudgetEntry(runtime, large)
+
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.resources[small.key] != small {
+		t.Fatal("byte-oversized entry disturbed useful warm data")
+	}
+	if runtime.resources[large.key] != nil {
+		t.Fatal("entry larger than the retained-byte budget remained cached")
+	}
+	if got := runtime.warm.ByteCount(); got != smallBytes {
+		t.Fatalf("global retained bytes = %d, want %d", got, smallBytes)
+	}
+	if got := runtime.warmByAuthority["cluster-a"].ByteCount(); got != smallBytes {
+		t.Fatalf("authority retained bytes = %d, want %d", got, smallBytes)
+	}
+}
+
+func TestWarmCacheEnforcesPerAuthorityByteBudgetWithoutEvictingAnotherCluster(t *testing.T) {
+	t.Parallel()
+	aPods := newWarmBudgetEntry("cluster-a", "pods", "")
+	aNodes := newWarmBudgetEntry("cluster-a", "nodes", "")
+	bPods := newWarmBudgetEntry("cluster-b", "pods", "")
+	aPodsBytes := aPods.store.RetainedBytes()
+	aNodesBytes := aNodes.store.RetainedBytes()
+	bPodsBytes := bPods.store.RetainedBytes()
+	authorityLimit := max(aPodsBytes, aNodesBytes)
+	globalLimit := aPodsBytes + aNodesBytes + bPodsBytes
+
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:                      &fakeResourceSource{},
+		WarmViewLimit:               8,
+		WarmObjectLimit:             100,
+		WarmByteLimit:               globalLimit,
+		WarmViewLimitPerAuthority:   4,
+		WarmObjectLimitPerAuthority: 100,
+		WarmByteLimitPerAuthority:   authorityLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	admitWarmBudgetEntry(runtime, aPods)
+	admitWarmBudgetEntry(runtime, bPods)
+	admitWarmBudgetEntry(runtime, aNodes)
+
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.resources[aPods.key] != nil {
+		t.Fatal("authority byte pressure did not evict its least recently used entry")
+	}
+	if runtime.resources[aNodes.key] != aNodes || runtime.resources[bPods.key] != bPods {
+		t.Fatal("authority byte pressure evicted a newer or different-cluster entry")
+	}
+	if got := runtime.warm.ByteCount(); got != aNodesBytes+bPodsBytes {
+		t.Fatalf("global retained bytes = %d, want %d", got, aNodesBytes+bPodsBytes)
+	}
+	if got := runtime.warmByAuthority["cluster-a"].ByteCount(); got != aNodesBytes {
+		t.Fatalf("cluster-a retained bytes = %d, want %d", got, aNodesBytes)
+	}
+}
+
 func newWarmBudgetRuntime(
 	t *testing.T,
 	globalViews, globalObjects, authorityViews, authorityObjects int,
@@ -135,24 +224,45 @@ func addWarmBudgetEntry(
 	objectCount int,
 ) *resourceRuntime {
 	t.Helper()
-	key := resourceKey{authorityID: authority, version: "v1", resource: resourceName}
-	entryStore := store.New()
+	entry := newWarmBudgetEntry(authority, resourceName, "")
 	for index := range objectCount {
+		if index == 0 {
+			continue
+		}
 		object := &unstructured.Unstructured{}
 		object.SetUID(types.UID(fmt.Sprintf("%s-%s-%d", authority, resourceName, index)))
 		object.SetName(fmt.Sprintf("object-%d", index))
-		entryStore.Upsert(object)
+		entry.store.Upsert(object)
 	}
+	admitWarmBudgetEntry(runtime, entry)
+	return entry
+}
+
+func newWarmBudgetEntry(authority, resourceName, payload string) *resourceRuntime {
+	key := resourceKey{authorityID: authority, version: "v1", resource: resourceName}
+	entryStore := store.New()
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"uid":  fmt.Sprintf("%s-%s-0", authority, resourceName),
+			"name": "object-0",
+		},
+	}}
+	if payload != "" {
+		object.Object["data"] = map[string]any{"payload": payload}
+	}
+	entryStore.Upsert(object)
 	entryStore.SetResourceVersion("rv")
-	entry := &resourceRuntime{
+	return &resourceRuntime{
 		key: key, store: entryStore, state: resourceIdle, accountingReady: true,
 		subscribers: make(map[*Subscription]struct{}),
 		dependents:  make(map[*Subscription]struct{}),
 		lastStatus:  watcher.Status{ResourceVersion: "rv"},
 	}
+}
+
+func admitWarmBudgetEntry(runtime *Runtime, entry *resourceRuntime) {
 	runtime.mu.Lock()
-	runtime.resources[key] = entry
+	runtime.resources[entry.key] = entry
 	runtime.finalizeWarmLocked(entry)
 	runtime.mu.Unlock()
-	return entry
 }

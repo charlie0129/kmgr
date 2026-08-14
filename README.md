@@ -245,6 +245,16 @@ Versioned UI settings and column configuration are kept under
 restored, but warm object caches remain process-memory-only and are never
 presented as restored cluster truth after relaunch.
 
+Warm resource stores are governed by three independent LRU ceilings. Defaults
+are 24 views, 250,000 objects, and a conservative 512 MiB retained-size
+estimate process-wide, plus 8 views, 100,000 objects, and 192 MiB for each
+cluster authority. Crossing any ceiling evicts the least recently used store;
+one store larger than a whole ceiling is not admitted. The byte estimate covers
+the immutable unstructured object graph and UID-store indexes with safety
+overhead. It is intentionally conservative and is neither an RSS measurement
+nor a promise that the Go allocator will return the same number of bytes to the
+operating system immediately after eviction.
+
 The engine emits structured, redacted JSON diagnostics on stderr. The GUI
 normally drains that stream without mirroring raw text into application logs.
 To inspect actual helper RPC timing from a terminal without persisting it, run:

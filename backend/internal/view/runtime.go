@@ -31,19 +31,21 @@ import (
 )
 
 const (
-	DefaultViewReleaseDelay            = 3 * time.Second
-	DefaultViewBatchDelay              = 35 * time.Millisecond
-	DefaultSnapshotChunk               = 500
-	DefaultPendingRowLimit             = 4096
-	DefaultWarmViewLimit               = 24
-	DefaultWarmObjectLimit             = 250_000
-	DefaultWarmViewLimitPerAuthority   = 8
-	DefaultWarmObjectLimitPerAuthority = 100_000
-	DefaultSearchSnapshotLimit         = 4
-	DefaultSearchSnapshotObjectLimit   = 250_000
-	DefaultSearchSnapshotTTL           = 30 * time.Second
-	DefaultOpenGenerationHistory       = 1024
-	defaultOpenProjectionLimit         = 4
+	DefaultViewReleaseDelay                  = 3 * time.Second
+	DefaultViewBatchDelay                    = 35 * time.Millisecond
+	DefaultSnapshotChunk                     = 500
+	DefaultPendingRowLimit                   = 4096
+	DefaultWarmViewLimit                     = 24
+	DefaultWarmObjectLimit                   = 250_000
+	DefaultWarmByteLimit               int64 = 512 << 20
+	DefaultWarmViewLimitPerAuthority         = 8
+	DefaultWarmObjectLimitPerAuthority       = 100_000
+	DefaultWarmByteLimitPerAuthority   int64 = 192 << 20
+	DefaultSearchSnapshotLimit               = 4
+	DefaultSearchSnapshotObjectLimit         = 250_000
+	DefaultSearchSnapshotTTL                 = 30 * time.Second
+	DefaultOpenGenerationHistory             = 1024
+	defaultOpenProjectionLimit               = 4
 )
 
 var (
@@ -132,8 +134,10 @@ type RuntimeConfig struct {
 	PendingRowLimit             int
 	WarmViewLimit               int
 	WarmObjectLimit             int
+	WarmByteLimit               int64
 	WarmViewLimitPerAuthority   int
 	WarmObjectLimitPerAuthority int
+	WarmByteLimitPerAuthority   int64
 	PipelinePageSize            int64
 	PipelineTimeout             time.Duration
 	SearchSnapshotLimit         int
@@ -183,8 +187,10 @@ type Runtime struct {
 	warm                        *watcher.WarmCache[resourceKey, *resourceRuntime]
 	warmByAuthority             map[string]*watcher.WarmCache[resourceKey, *resourceRuntime]
 	warmObjectLimit             int
+	warmByteLimit               int64
 	warmViewLimitPerAuthority   int
 	warmObjectLimitPerAuthority int
+	warmByteLimitPerAuthority   int64
 
 	searchSnapshots           map[searchSnapshotKey]*completedSearchSnapshot
 	searchSnapshotLimit       int
@@ -378,8 +384,9 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	}
 	if config.ReleaseDelay < 0 || config.BatchDelay < 0 || config.PipelinePageSize < 0 || config.PipelineTimeout < 0 ||
 		config.SearchSnapshotLimit < 0 || config.SearchSnapshotObjectLimit < 0 || config.SearchSnapshotTTL < 0 ||
-		config.OpenProjectionLimit < 0 || config.OpenGenerationHistory < 0 {
-		return nil, errors.New("view runtime durations and page size must not be negative")
+		config.OpenProjectionLimit < 0 || config.OpenGenerationHistory < 0 ||
+		config.WarmByteLimit < 0 || config.WarmByteLimitPerAuthority < 0 {
+		return nil, errors.New("view runtime durations and limits must not be negative")
 	}
 	releaseDelay := config.ReleaseDelay
 	if releaseDelay == 0 {
@@ -405,6 +412,10 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if warmObjects == 0 {
 		warmObjects = DefaultWarmObjectLimit
 	}
+	warmBytes := config.WarmByteLimit
+	if warmBytes == 0 {
+		warmBytes = DefaultWarmByteLimit
+	}
 	warmViewsPerAuthority := config.WarmViewLimitPerAuthority
 	if warmViewsPerAuthority == 0 {
 		warmViewsPerAuthority = DefaultWarmViewLimitPerAuthority
@@ -413,8 +424,13 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if warmObjectsPerAuthority == 0 {
 		warmObjectsPerAuthority = DefaultWarmObjectLimitPerAuthority
 	}
+	warmBytesPerAuthority := config.WarmByteLimitPerAuthority
+	if warmBytesPerAuthority == 0 {
+		warmBytesPerAuthority = DefaultWarmByteLimitPerAuthority
+	}
 	if chunkSize <= 0 || pendingLimit <= 0 || warmViews <= 0 || warmObjects <= 0 ||
-		warmViewsPerAuthority <= 0 || warmObjectsPerAuthority <= 0 {
+		warmBytes <= 0 || warmViewsPerAuthority <= 0 || warmObjectsPerAuthority <= 0 ||
+		warmBytesPerAuthority <= 0 {
 		return nil, errors.New("view runtime limits must be positive")
 	}
 	searchSnapshotLimit := config.SearchSnapshotLimit
@@ -455,11 +471,13 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		watchTimeout:                config.PipelineTimeout,
 		resources:                   make(map[resourceKey]*resourceRuntime),
 		views:                       make(map[viewKey]*Subscription),
-		warm:                        watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects),
+		warm:                        watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects, warmBytes),
 		warmByAuthority:             make(map[string]*watcher.WarmCache[resourceKey, *resourceRuntime]),
 		warmObjectLimit:             warmObjects,
+		warmByteLimit:               warmBytes,
 		warmViewLimitPerAuthority:   warmViewsPerAuthority,
 		warmObjectLimitPerAuthority: warmObjectsPerAuthority,
+		warmByteLimitPerAuthority:   warmBytesPerAuthority,
 		searchSnapshots:             make(map[searchSnapshotKey]*completedSearchSnapshot),
 		searchSnapshotLimit:         searchSnapshotLimit,
 		searchSnapshotObjectLimit:   searchSnapshotObjectLimit,
@@ -1600,13 +1618,14 @@ func (r *Runtime) putWarmLocked(
 	key resourceKey,
 	entry watcher.WarmEntry[*resourceRuntime],
 ) ([]resourceKey, bool) {
-	if entry.ObjectCount > r.warmObjectLimit || entry.ObjectCount > r.warmObjectLimitPerAuthority {
+	if entry.ObjectCount > r.warmObjectLimit || entry.ObjectCount > r.warmObjectLimitPerAuthority ||
+		entry.ByteCount > r.warmByteLimit || entry.ByteCount > r.warmByteLimitPerAuthority {
 		return nil, false
 	}
 	authorityCache := r.warmByAuthority[key.authorityID]
 	if authorityCache == nil {
 		authorityCache = watcher.NewWarmCache[resourceKey, *resourceRuntime](
-			r.warmViewLimitPerAuthority, r.warmObjectLimitPerAuthority,
+			r.warmViewLimitPerAuthority, r.warmObjectLimitPerAuthority, r.warmByteLimitPerAuthority,
 		)
 		r.warmByAuthority[key.authorityID] = authorityCache
 	}
@@ -1672,6 +1691,7 @@ func (r *Runtime) finalizeWarmLocked(entry *resourceRuntime) {
 	evicted, admitted := r.putWarmLocked(key, watcher.WarmEntry[*resourceRuntime]{
 		Value:            entry,
 		ObjectCount:      entry.store.Len(),
+		ByteCount:        entry.store.RetainedBytes(),
 		ResourceVersion:  entry.store.ResourceVersion(),
 		LastSynchronized: entry.lastStatus.LastSynchronized,
 		Complete:         entry.accountingReady && entry.store.ResourceVersion() != "",

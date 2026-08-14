@@ -3,6 +3,7 @@ package store
 
 import (
 	"cmp"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -36,21 +37,23 @@ type SearchIdentity struct {
 type UIDStore struct {
 	mu sync.RWMutex
 
-	byUID       map[types.UID]*unstructured.Unstructured
-	byName      map[NamespacedName]types.UID
-	byOwnerUID  map[types.UID]map[types.UID]struct{}
-	byNodeName  map[string]map[types.UID]struct{}
-	bySearchUID map[types.UID]SearchIdentity
-	resourceVer string
+	byUID         map[types.UID]*unstructured.Unstructured
+	byName        map[NamespacedName]types.UID
+	byOwnerUID    map[types.UID]map[types.UID]struct{}
+	byNodeName    map[string]map[types.UID]struct{}
+	bySearchUID   map[types.UID]SearchIdentity
+	retainedBytes int64
+	resourceVer   string
 }
 
 func New() *UIDStore {
 	return &UIDStore{
-		byUID:       make(map[types.UID]*unstructured.Unstructured),
-		byName:      make(map[NamespacedName]types.UID),
-		byOwnerUID:  make(map[types.UID]map[types.UID]struct{}),
-		byNodeName:  make(map[string]map[types.UID]struct{}),
-		bySearchUID: make(map[types.UID]SearchIdentity),
+		byUID:         make(map[types.UID]*unstructured.Unstructured),
+		byName:        make(map[NamespacedName]types.UID),
+		byOwnerUID:    make(map[types.UID]map[types.UID]struct{}),
+		byNodeName:    make(map[string]map[types.UID]struct{}),
+		bySearchUID:   make(map[types.UID]SearchIdentity),
+		retainedBytes: uidStoreBaseRetainedBytes,
 	}
 }
 
@@ -60,6 +63,7 @@ func (s *UIDStore) Upsert(object *unstructured.Unstructured) Change {
 		panic("store: object has no UID")
 	}
 	key := NamespacedName{Namespace: object.GetNamespace(), Name: object.GetName()}
+	objectBytes := estimateRetainedObjectBytes(object)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -67,6 +71,7 @@ func (s *UIDStore) Upsert(object *unstructured.Unstructured) Change {
 	change := Change{UID: uid}
 	if current, ok := s.byUID[uid]; ok {
 		s.removeIndexesLocked(current)
+		s.removeRetainedBytesLocked(current)
 	} else {
 		change.Created = true
 	}
@@ -74,6 +79,7 @@ func (s *UIDStore) Upsert(object *unstructured.Unstructured) Change {
 	if previousUID, ok := s.byName[key]; ok && previousUID != uid {
 		if previous := s.byUID[previousUID]; previous != nil {
 			s.removeIndexesLocked(previous)
+			s.removeRetainedBytesLocked(previous)
 			delete(s.byUID, previousUID)
 		}
 		change.ReplacedUID = previousUID
@@ -81,6 +87,7 @@ func (s *UIDStore) Upsert(object *unstructured.Unstructured) Change {
 
 	s.byUID[uid] = object
 	s.byName[key] = uid
+	s.retainedBytes = saturatingRetainedAdd(s.retainedBytes, objectBytes)
 	s.addIndexesLocked(object)
 	return change
 }
@@ -94,6 +101,7 @@ func (s *UIDStore) Delete(uid types.UID) bool {
 		return false
 	}
 	s.removeIndexesLocked(object)
+	s.removeRetainedBytesLocked(object)
 	delete(s.byUID, uid)
 	key := NamespacedName{Namespace: object.GetNamespace(), Name: object.GetName()}
 	if s.byName[key] == uid {
@@ -136,6 +144,16 @@ func (s *UIDStore) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.byUID)
+}
+
+// RetainedBytes returns a conservative estimate of the heap retained by raw
+// objects and the UID store's indexes. It is maintained incrementally so warm
+// cache admission never needs to serialize or traverse a complete large view
+// while holding a runtime lifecycle lock.
+func (s *UIDStore) RetainedBytes() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.retainedBytes
 }
 
 // Snapshot returns the immutable objects currently retained by the store in a
@@ -211,6 +229,7 @@ func (s *UIDStore) ReconcileSnapshot(present map[types.UID]struct{}, resourceVer
 			continue
 		}
 		s.removeIndexesLocked(object)
+		s.removeRetainedBytesLocked(object)
 		delete(s.byUID, uid)
 		key := NamespacedName{Namespace: object.GetNamespace(), Name: object.GetName()}
 		if s.byName[key] == uid {
@@ -247,6 +266,32 @@ func (s *UIDStore) removeIndexesLocked(object *unstructured.Unstructured) {
 	}
 	if nodeName, found, _ := unstructured.NestedString(object.Object, "spec", "nodeName"); found && nodeName != "" {
 		removeFromIndex(s.byNodeName, nodeName, uid)
+	}
+}
+
+func (s *UIDStore) removeRetainedBytesLocked(object *unstructured.Unstructured) {
+	if s.retainedBytes == math.MaxInt64 {
+		// Saturation is possible only for an invalid/deep custom graph or an
+		// unrealistically large store. Rebuild after its removal so one rejected
+		// object cannot leave all later warm-cache weights permanently saturated.
+		removedUID := object.GetUID()
+		s.retainedBytes = uidStoreBaseRetainedBytes
+		for uid, retained := range s.byUID {
+			if uid == removedUID {
+				continue
+			}
+			s.retainedBytes = saturatingRetainedAdd(
+				s.retainedBytes, estimateRetainedObjectBytes(retained),
+			)
+		}
+		return
+	}
+	objectBytes := estimateRetainedObjectBytes(object)
+	s.retainedBytes -= objectBytes
+	if s.retainedBytes < uidStoreBaseRetainedBytes {
+		// Defensive saturation keeps accounting usable even if a future mutation
+		// path is changed without updating its byte bookkeeping.
+		s.retainedBytes = uidStoreBaseRetainedBytes
 	}
 }
 

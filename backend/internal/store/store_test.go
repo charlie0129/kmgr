@@ -1,6 +1,7 @@
 package store
 
 import (
+	"math"
 	"slices"
 	"testing"
 
@@ -146,6 +147,65 @@ func TestSearchIndexReconcilesCompletedSnapshot(t *testing.T) {
 	entries := s.SearchSnapshot()
 	if len(entries) != 1 || entries[0].Object.GetUID() != "keep" {
 		t.Fatalf("reconciled search index = %#v", entries)
+	}
+}
+
+func TestRetainedBytesFollowUpdateRecreationDeleteAndReconcile(t *testing.T) {
+	t.Parallel()
+	s := New()
+	baseline := s.RetainedBytes()
+
+	large := object("uid-large", "ns", "config", "")
+	large.Object["data"] = map[string]any{"payload": string(make([]byte, 32<<10))}
+	s.Upsert(large)
+	largeBytes := s.RetainedBytes()
+	if largeBytes <= baseline+(32<<10) {
+		t.Fatalf("large object estimate = %d, baseline = %d", largeBytes, baseline)
+	}
+
+	small := object("uid-large", "ns", "config", "")
+	s.Upsert(small)
+	smallBytes := s.RetainedBytes()
+	if smallBytes <= baseline || smallBytes >= largeBytes {
+		t.Fatalf("updated estimate = %d, want between baseline %d and large %d", smallBytes, baseline, largeBytes)
+	}
+
+	recreated := object("uid-new", "ns", "config", "")
+	s.Upsert(recreated)
+	recreatedBytes := s.RetainedBytes()
+	if recreatedBytes <= baseline || recreatedBytes >= smallBytes*2 {
+		t.Fatalf("same-name recreation retained stale payload bytes: got %d, prior %d", recreatedBytes, smallBytes)
+	}
+
+	second := object("uid-second", "ns", "second", "")
+	s.Upsert(second)
+	twoObjectsBytes := s.RetainedBytes()
+	if twoObjectsBytes <= smallBytes {
+		t.Fatal("second object did not increase retained-byte estimate")
+	}
+	s.ReconcileSnapshot(map[types.UID]struct{}{"uid-new": {}}, "rv")
+	if got := s.RetainedBytes(); got != recreatedBytes {
+		t.Fatalf("reconciled estimate = %d, want %d", got, recreatedBytes)
+	}
+	if !s.Delete("uid-new") || s.RetainedBytes() != baseline {
+		t.Fatalf("delete did not restore baseline: got %d, want %d", s.RetainedBytes(), baseline)
+	}
+}
+
+func TestRetainedBytesRecoverAfterUnsupportedObjectSaturatesEstimate(t *testing.T) {
+	t.Parallel()
+	s := New()
+	finite := object("uid-finite", "ns", "finite", "")
+	s.Upsert(finite)
+	finiteBytes := s.RetainedBytes()
+	invalid := object("uid-invalid", "ns", "invalid", "")
+	invalid.Object["unsupported"] = struct{ Value string }{Value: "not unstructured JSON"}
+	s.Upsert(invalid)
+	if got := s.RetainedBytes(); got != math.MaxInt64 {
+		t.Fatalf("unsupported graph estimate = %d, want saturation", got)
+	}
+	if !s.Delete("uid-invalid") || s.RetainedBytes() != finiteBytes {
+		t.Fatalf("saturated estimate did not recover finite bytes %d: %d", finiteBytes, s.RetainedBytes())
 	}
 }
 
