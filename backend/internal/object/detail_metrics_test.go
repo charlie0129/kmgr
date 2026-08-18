@@ -142,23 +142,26 @@ func TestKubernetesDetailMetricsProviderAccountsPodAndPreservesExactResources(t 
 	cpu := detailUsageByName(t, values, corev1.ResourceCPU)
 	if !cpu.GetUsageAvailable() || !nearlyEqual(cpu.GetUsed(), 0.000004) ||
 		cpu.GetRequested() != 0.25 || cpu.GetLimit() != 1 || cpu.GetUnit() != "cores" ||
+		!nearlyEqual(cpu.GetSortValue(), 0.000004) ||
 		cpu.GetMeasuredAtUnixMs() != measuredAt.UnixMilli() ||
 		cpu.GetProvider() != metrics.MetricsAPIGroupVersion || cpu.GetMeasurementScope() != "pod containers" {
 		t.Fatalf("CPU detail metric = %#v", cpu)
 	}
 	memory := detailUsageByName(t, values, corev1.ResourceMemory)
 	if memory.GetUsed() != 5*1024*1024 || memory.GetRequested() != 64*1024*1024 ||
-		memory.GetLimit() != 128*1024*1024 || memory.GetUnit() != "bytes" {
+		memory.GetLimit() != 128*1024*1024 || memory.GetUnit() != "bytes" ||
+		memory.GetSortValue() != 5*1024*1024 {
 		t.Fatalf("memory detail metric = %#v", memory)
 	}
 	hugePages := detailUsageByName(t, values, "hugepages-2Mi")
 	if hugePages.GetUsageAvailable() || hugePages.GetRequested() != 1024*1024*1024 ||
-		hugePages.GetLimit() != 2*1024*1024*1024 || hugePages.GetUnit() != "bytes" {
+		hugePages.GetLimit() != 2*1024*1024*1024 || hugePages.GetUnit() != "bytes" ||
+		hugePages.SortValue != nil {
 		t.Fatalf("huge-page detail metric = %#v", hugePages)
 	}
 	accelerator := detailUsageByName(t, values, "aliyun.com/ppu")
 	if accelerator.GetUsageAvailable() || accelerator.GetRequested() != 1 ||
-		accelerator.GetLimit() != 2 || accelerator.GetUnit() != "count" {
+		accelerator.GetLimit() != 2 || accelerator.GetUnit() != "count" || accelerator.SortValue != nil {
 		t.Fatalf("accelerator detail metric = %#v", accelerator)
 	}
 }
@@ -204,12 +207,12 @@ func TestKubernetesDetailMetricsProviderUsesNodeAllocatableAsCapacity(t *testing
 	}
 	cpu := detailUsageByName(t, values, corev1.ResourceCPU)
 	if !nearlyEqual(cpu.GetUsed(), 0.0000015) || !nearlyEqual(cpu.GetCapacity(), 3.9) ||
-		cpu.GetRequested() != 0 || cpu.Requested != nil {
+		cpu.GetRequested() != 0 || cpu.Requested != nil || !nearlyEqual(cpu.GetSortValue(), 0.0000015) {
 		t.Fatalf("Node CPU detail metric = %#v", cpu)
 	}
 	hugePages := detailUsageByName(t, values, "hugepages-1Gi")
 	if hugePages.GetUsageAvailable() || hugePages.GetCapacity() != 2*1024*1024*1024 ||
-		hugePages.GetUnit() != "bytes" {
+		hugePages.GetUnit() != "bytes" || hugePages.SortValue != nil {
 		t.Fatalf("Node huge-page detail metric = %#v", hugePages)
 	}
 }
@@ -306,9 +309,10 @@ func TestGRPCGetObjectKeepsSchedulerAccountingWhenMeasuredUsageFails(t *testing.
 	cpu := detailUsageByName(t, response.GetMetrics(), corev1.ResourceCPU)
 	memory := detailUsageByName(t, response.GetMetrics(), corev1.ResourceMemory)
 	hugePages := detailUsageByName(t, response.GetMetrics(), "hugepages-2Mi")
-	if cpu.GetUsageAvailable() || cpu.GetRequested() != 0.25 ||
+	if cpu.GetUsageAvailable() || cpu.GetRequested() != 0.25 || cpu.SortValue != nil ||
 		memory.GetUsageAvailable() || memory.GetRequested() != 64*1024*1024 ||
-		hugePages.GetUsageAvailable() || hugePages.GetRequested() != 1024*1024*1024 {
+		memory.SortValue != nil || hugePages.GetUsageAvailable() ||
+		hugePages.GetRequested() != 1024*1024*1024 || hugePages.SortValue != nil {
 		t.Fatalf("degraded scheduler accounting = %#v", response.GetMetrics())
 	}
 }

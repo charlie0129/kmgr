@@ -540,6 +540,57 @@ func TestQuantityCellSortUsesKubernetesSemantics(t *testing.T) {
 	}
 }
 
+func TestNumericCellSortUsesTypedValuesNotDisplayText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		left  *kmgrv1.Cell
+		right *kmgrv1.Cell
+	}{
+		{
+			name: "number and duration seconds",
+			left: &kmgrv1.Cell{
+				DisplayText: "aaa",
+				TypedValue:  &kmgrv1.Cell_NumberValue{NumberValue: 2},
+			},
+			right: &kmgrv1.Cell{
+				DisplayText: "zzz",
+				TypedValue:  &kmgrv1.Cell_NumberValue{NumberValue: 1},
+			},
+		},
+		{
+			name: "integer",
+			left: &kmgrv1.Cell{
+				DisplayText: "aaa",
+				TypedValue:  &kmgrv1.Cell_IntegerValue{IntegerValue: 2},
+			},
+			right: &kmgrv1.Cell{
+				DisplayText: "zzz",
+				TypedValue:  &kmgrv1.Cell_IntegerValue{IntegerValue: 1},
+			},
+		},
+		{
+			name: "timestamp",
+			left: &kmgrv1.Cell{
+				DisplayText: "aaa",
+				TypedValue:  &kmgrv1.Cell_TimestampUnixMs{TimestampUnixMs: 2},
+			},
+			right: &kmgrv1.Cell{
+				DisplayText: "zzz",
+				TypedValue:  &kmgrv1.Cell_TimestampUnixMs{TimestampUnixMs: 1},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if compareCells(test.left, test.right, false) <= 0 {
+				t.Fatal("cell was sorted by display text instead of its typed value")
+			}
+		})
+	}
+}
+
 func TestProjectorCapturesNowOncePerProjectionBatch(t *testing.T) {
 	t.Parallel()
 	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
@@ -852,7 +903,7 @@ func TestProjectorEmitsPodResourceUsageWithEffectiveAccounting(t *testing.T) {
 	cpu := cellByID(row, PodCPUColumn).GetUsage()
 	if !cpu.GetUsageAvailable() || math.Abs(cpu.GetUsed()-0.42) > 1e-9 || cpu.GetRequested() != 0.5 ||
 		cpu.GetLimit() != 1 || cpu.GetProvider() != metrics.MetricsAPIGroupVersion ||
-		cpu.GetMeasuredAtUnixMs() != measuredAt.UnixMilli() {
+		cpu.GetMeasuredAtUnixMs() != measuredAt.UnixMilli() || math.Abs(cpu.GetSortValue()-0.42) > 1e-9 {
 		t.Fatalf("CPU usage = %#v", cpu)
 	}
 	if got := cellByID(row, PodCPUColumn).GetDisplayText(); got != "0.42 / 0.5 / 1" {
@@ -863,12 +914,13 @@ func TestProjectorEmitsPodResourceUsageWithEffectiveAccounting(t *testing.T) {
 		t.Fatalf("CPU tooltip = %q", tooltip)
 	}
 	memory := cellByID(row, PodMemoryColumn).GetUsage()
-	if !memory.GetUsageAvailable() || memory.GetUsed() != 64*1024*1024 || memory.GetRequested() != 128*1024*1024 {
+	if !memory.GetUsageAvailable() || memory.GetUsed() != 64*1024*1024 || memory.GetRequested() != 128*1024*1024 ||
+		memory.GetSortValue() != 64*1024*1024 {
 		t.Fatalf("memory usage = %#v", memory)
 	}
 	accelerator := cellByID(row, metricColumnID("nvidia.com/gpu")).GetUsage()
 	if accelerator.GetUsageAvailable() || accelerator.GetRequested() != 1 || accelerator.GetLimit() != 2 ||
-		accelerator.GetResourceName() != "nvidia.com/gpu" {
+		accelerator.GetResourceName() != "nvidia.com/gpu" || accelerator.SortValue != nil {
 		t.Fatalf("accelerator accounting invented usage or lost identity: %#v", accelerator)
 	}
 }
@@ -1087,7 +1139,7 @@ func TestProjectorKeepsUnavailableAndRealZeroMetricsDistinct(t *testing.T) {
 	}
 }
 
-func TestProjectorEmitsNodeUsageOverAllocatableAndSortsRatio(t *testing.T) {
+func TestProjectorEmitsNodeUsageOverAllocatableAndSortsCurrentUsage(t *testing.T) {
 	t.Parallel()
 	projector, err := NewProjector(ProjectionSpec{
 		ClusterSessionID: "session-a",
@@ -1120,14 +1172,15 @@ func TestProjectorEmitsNodeUsageOverAllocatableAndSortsRatio(t *testing.T) {
 		node("uid-a", "node-a", "2", "4"),
 		node("uid-b", "node-b", "8", "16"),
 	})
-	if got := []string{rows[0].GetIdentity().GetName(), rows[1].GetIdentity().GetName()}; !slices.Equal(got, []string{"node-a", "node-b"}) {
-		t.Fatalf("Node CPU ratio sort = %v", got)
+	if got := []string{rows[0].GetIdentity().GetName(), rows[1].GetIdentity().GetName()}; !slices.Equal(got, []string{"node-b", "node-a"}) {
+		t.Fatalf("Node CPU current-usage sort = %v", got)
 	}
 	usage := cellByID(rows[0], NodeCPUUsageColumn).GetUsage()
-	if usage.GetUsed() != 1 || usage.GetCapacity() != 2 || usage.GetRequested() != 0 {
+	if usage.GetUsed() != 2 || usage.GetCapacity() != 8 || usage.GetRequested() != 0 ||
+		usage.GetSortValue() != 2 {
 		t.Fatalf("Node CPU usage/allocatable = %#v", usage)
 	}
-	if tooltip := cellByID(rows[0], NodeCPUUsageColumn).GetTooltip(); !strings.Contains(tooltip, "Physical capacity: 4") {
+	if tooltip := cellByID(rows[0], NodeCPUUsageColumn).GetTooltip(); !strings.Contains(tooltip, "Physical capacity: 16") {
 		t.Fatalf("Node tooltip = %q", tooltip)
 	}
 }
@@ -1181,16 +1234,20 @@ func TestProjectorEmitsNodeSchedulerAccountingAndExactResources(t *testing.T) {
 	if !visible {
 		t.Fatal("Node row was not visible")
 	}
-	if usage := cellByID(row, NodeCPUUsageColumn).GetUsage(); usage.GetRequested() != 1.5 || usage.GetLimit() != 3 {
+	if usage := cellByID(row, NodeCPUUsageColumn).GetUsage(); usage.GetRequested() != 1.5 || usage.GetLimit() != 3 ||
+		usage.SortValue != nil {
 		t.Fatalf("base CPU accounting = %#v", usage)
 	}
-	if usage := cellByID(row, NodeCPURequestsColumn).GetUsage(); usage.GetRequested() != 1.5 || usage.GetCapacity() != 7.5 {
+	if usage := cellByID(row, NodeCPURequestsColumn).GetUsage(); usage.GetRequested() != 1.5 ||
+		usage.GetCapacity() != 7.5 || usage.GetSortValue() != 1.5 {
 		t.Fatalf("CPU requests = %#v", usage)
 	}
-	if usage := cellByID(row, NodeCPULimitsColumn).GetUsage(); usage.GetLimit() != 3 || usage.GetCapacity() != 7.5 {
+	if usage := cellByID(row, NodeCPULimitsColumn).GetUsage(); usage.GetLimit() != 3 ||
+		usage.GetCapacity() != 7.5 || usage.GetSortValue() != 3 {
 		t.Fatalf("CPU limits = %#v", usage)
 	}
-	if usage := cellByID(row, NodePodCountColumn).GetUsage(); usage.GetRequested() != 12 || usage.GetCapacity() != 100 {
+	if usage := cellByID(row, NodePodCountColumn).GetUsage(); usage.GetRequested() != 12 ||
+		usage.GetCapacity() != 100 || usage.GetSortValue() != 12 {
 		t.Fatalf("Pod count = %#v", usage)
 	}
 	for id, want := range map[string]float64{
@@ -1200,7 +1257,8 @@ func TestProjectorEmitsNodeSchedulerAccountingAndExactResources(t *testing.T) {
 		metricColumnID("aliyun.com/ppu"): 3,
 	} {
 		usage := cellByID(row, id).GetUsage()
-		if usage.GetResourceName() != strings.TrimPrefix(id, metricResourceColumnPrefix) || usage.GetRequested() != want {
+		if usage.GetResourceName() != strings.TrimPrefix(id, metricResourceColumnPrefix) ||
+			usage.GetRequested() != want || usage.GetSortValue() != want {
 			t.Fatalf("exact resource %q = %#v", id, usage)
 		}
 		if tooltip := cellByID(row, id).GetTooltip(); !strings.Contains(
@@ -1300,7 +1358,7 @@ func TestProjectorShowsCalculatingBeforeNodePodSnapshot(t *testing.T) {
 	}
 }
 
-func TestNodeLimitColumnsSortByLimitOverAllocatable(t *testing.T) {
+func TestNodeLimitColumnsSortByRawLimitValue(t *testing.T) {
 	t.Parallel()
 	projector, err := NewProjector(ProjectionSpec{
 		ClusterSessionID: "session-a",
@@ -1325,8 +1383,8 @@ func TestNodeLimitColumnsSortByLimitOverAllocatable(t *testing.T) {
 		nodeObject("uid-raw", "node-high-raw", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100")}, nil),
 		nodeObject("uid-ratio", "node-high-ratio", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}, nil),
 	})
-	if got := rows[0].GetIdentity().GetName(); got != "node-high-ratio" {
-		t.Fatalf("limit ratio sort put %q first", got)
+	if got := rows[0].GetIdentity().GetName(); got != "node-high-raw" {
+		t.Fatalf("raw limit sort put %q first", got)
 	}
 }
 
@@ -1363,8 +1421,8 @@ func TestExactResourceCellsDistinguishAbsentFromPresentZero(t *testing.T) {
 	if value, available := usageSortValue(&kmgrv1.ResourceUsageValue{ResourceName: "nvidia.com/gpu"}); available || value != 0 {
 		t.Fatalf("absent usage components produced a sort value = %v, %v", value, available)
 	}
-	if value, available := usageSortValue(&kmgrv1.ResourceUsageValue{Capacity: numberPointer(0)}); !available || value != 0 {
-		t.Fatalf("present zero capacity sort value = %v, %v", value, available)
+	if value, available := usageSortValue(&kmgrv1.ResourceUsageValue{Capacity: numberPointer(0)}); available || value != 0 {
+		t.Fatalf("context-only capacity produced a sort value = %v, %v", value, available)
 	}
 
 	podProjector, err := NewProjector(ProjectionSpec{
@@ -1455,13 +1513,21 @@ func TestProjectorNodeAccountingSurvivesMetricsFailure(t *testing.T) {
 func TestCompareUsageCellsUsesTypedValuesNotDisplayText(t *testing.T) {
 	t.Parallel()
 	left := &kmgrv1.Cell{TypedValue: &kmgrv1.Cell_Usage{Usage: &kmgrv1.ResourceUsageValue{
-		Used: 9, Requested: numberPointer(10), UsageAvailable: true,
+		Used: 9, Requested: numberPointer(100), UsageAvailable: true,
+		SortValue: numberPointer(9),
 	}}, DisplayText: "zzz"}
 	right := &kmgrv1.Cell{TypedValue: &kmgrv1.Cell_Usage{Usage: &kmgrv1.ResourceUsageValue{
-		Used: 1, Requested: numberPointer(10), UsageAvailable: true,
+		Used: 1, Requested: numberPointer(1), UsageAvailable: true,
+		SortValue: numberPointer(1),
 	}}, DisplayText: "aaa"}
 	if compareCells(left, right, false) <= 0 {
-		t.Fatal("resource usage sort reparsed display text")
+		t.Fatal("resource usage sort used ratio or display text instead of current usage")
+	}
+	allocationOnly := &kmgrv1.Cell{TypedValue: &kmgrv1.Cell_Usage{Usage: &kmgrv1.ResourceUsageValue{
+		Requested: numberPointer(1_000), Limit: numberPointer(2_000),
+	}}, DisplayText: "1000 / 2000"}
+	if compareCells(allocationOnly, right, true) >= 0 {
+		t.Fatal("missing current usage fell back to request or limit")
 	}
 	zero := resource.MustParse("0")
 	if quantityNumeric(corev1.ResourceCPU, zero) != 0 {

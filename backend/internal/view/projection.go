@@ -862,11 +862,19 @@ func (p *Projector) nodeAllocationCell(
 	label := "Summed effective requests"
 	if field == nodeLimited {
 		value = optionalQuantity(limited, hasLimit)
-		usage.Limit = numberPointer(quantityNumeric(resourceName, limited))
+		if value != nil {
+			numeric := quantityNumeric(resourceName, *value)
+			usage.Limit = numberPointer(numeric)
+			usage.SortValue = numberPointer(numeric)
+		}
 		label = "Summed effective limits"
 	} else {
 		value = optionalQuantity(requested, hasRequest)
-		usage.Requested = numberPointer(quantityNumeric(resourceName, requested))
+		if value != nil {
+			numeric := quantityNumeric(resourceName, *value)
+			usage.Requested = numberPointer(numeric)
+			usage.SortValue = numberPointer(numeric)
+		}
 	}
 	if hasAllocatable {
 		usage.Capacity = numberPointer(quantityNumeric(resourceName, allocatable))
@@ -913,7 +921,9 @@ func (p *Projector) nodePodCountCell(object *unstructured.Unstructured, columnID
 	}
 	allocatable, hasAllocatable := accounting.Allocatable[corev1.ResourcePods]
 	capacity, hasCapacity := accounting.Capacity[corev1.ResourcePods]
-	usage.Requested = numberPointer(float64(accounting.PodCount))
+	podCount := float64(accounting.PodCount)
+	usage.Requested = numberPointer(podCount)
+	usage.SortValue = numberPointer(podCount)
 	if hasAllocatable {
 		usage.Capacity = numberPointer(quantityNumeric(corev1.ResourcePods, allocatable))
 	}
@@ -939,7 +949,9 @@ func setUsageQuantities(
 	value.Unit = resourceUnit(name)
 	value.UsageAvailable = measurement.HasValue()
 	if measurement.HasValue() {
-		value.Used = quantityNumeric(name, measurement.Quantity)
+		used := quantityNumeric(name, measurement.Quantity)
+		value.Used = used
+		value.SortValue = numberPointer(used)
 		value.MeasuredAtUnixMs = measurement.Timestamp.UnixMilli()
 		value.Provider = measurement.Provider
 		value.MeasurementScope = measurement.Scope
@@ -1405,7 +1417,11 @@ func compareCells(left, right *kmgrv1.Cell, nullsFirst bool) int {
 		}
 	case *kmgrv1.Cell_Usage:
 		if rightValue, ok := right.GetTypedValue().(*kmgrv1.Cell_Usage); ok {
-			return compareUsageValues(leftValue.Usage, rightValue.Usage)
+			return compareUsageValues(
+				leftValue.Usage,
+				rightValue.Usage,
+				nullsFirst,
+			)
 		}
 	}
 	return strings.Compare(left.GetDisplayText(), right.GetDisplayText())
@@ -1423,53 +1439,27 @@ func compareQuantityValues(left, right *kmgrv1.KubernetesQuantityValue) int {
 	return strings.Compare(left.GetExact(), right.GetExact())
 }
 
-func compareUsageValues(left, right *kmgrv1.ResourceUsageValue) int {
+func compareUsageValues(
+	left, right *kmgrv1.ResourceUsageValue,
+	nullsFirst bool,
+) int {
 	leftValue, leftAvailable := usageSortValue(left)
 	rightValue, rightAvailable := usageSortValue(right)
 	if leftAvailable != rightAvailable {
-		if leftAvailable {
-			return 1
+		leftMissing := !leftAvailable
+		if leftMissing == nullsFirst {
+			return -1
 		}
-		return -1
+		return 1
 	}
 	return cmp.Compare(leftValue, rightValue)
 }
 
 func usageSortValue(value *kmgrv1.ResourceUsageValue) (float64, bool) {
-	if value == nil {
+	if value == nil || value.SortValue == nil {
 		return 0, false
 	}
-	if value.GetUsageAvailable() {
-		denominator := value.GetCapacity()
-		if denominator == 0 {
-			denominator = value.GetRequested()
-		}
-		if denominator == 0 {
-			denominator = value.GetLimit()
-		}
-		if denominator != 0 {
-			return value.GetUsed() / denominator, true
-		}
-		return value.GetUsed(), true
-	}
-	if value.Capacity != nil {
-		if value.GetCapacity() != 0 && value.Requested != nil {
-			return value.GetRequested() / value.GetCapacity(), true
-		}
-		if value.GetCapacity() != 0 && value.Limit != nil {
-			return value.GetLimit() / value.GetCapacity(), true
-		}
-	}
-	if value.Requested != nil {
-		return value.GetRequested(), true
-	}
-	if value.Limit != nil {
-		return value.GetLimit(), true
-	}
-	if value.Capacity != nil {
-		return value.GetCapacity(), true
-	}
-	return 0, false
+	return value.GetSortValue(), true
 }
 
 func formatAge(duration time.Duration) string {

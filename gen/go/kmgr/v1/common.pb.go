@@ -1005,8 +1005,13 @@ type ResourceUsageValue struct {
 	Provider         string                 `protobuf:"bytes,8,opt,name=provider,proto3" json:"provider,omitempty"`
 	MeasurementScope string                 `protobuf:"bytes,9,opt,name=measurement_scope,json=measurementScope,proto3" json:"measurement_scope,omitempty"`
 	UsageAvailable   bool                   `protobuf:"varint,10,opt,name=usage_available,json=usageAvailable,proto3" json:"usage_available,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Authoritative scalar for this cell's sort semantics. Usage columns set
+	// current usage only; explicit allocation columns set their named value.
+	// Absence means the cell is null for sorting even if contextual request,
+	// limit, or capacity components are present.
+	SortValue     *float64 `protobuf:"fixed64,11,opt,name=sort_value,json=sortValue,proto3,oneof" json:"sort_value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ResourceUsageValue) Reset() {
@@ -1107,6 +1112,13 @@ func (x *ResourceUsageValue) GetUsageAvailable() bool {
 		return x.UsageAvailable
 	}
 	return false
+}
+
+func (x *ResourceUsageValue) GetSortValue() float64 {
+	if x != nil && x.SortValue != nil {
+		return *x.SortValue
+	}
+	return 0
 }
 
 // KubernetesQuantityValue preserves the exact Kubernetes quantity while also
@@ -1510,7 +1522,7 @@ const file_kmgr_v1_common_proto_rawDesc = "" +
 	"namespaces\"8\n" +
 	"\x0eStringMapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\"\x86\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\xb9\x03\n" +
 	"\x12ResourceUsageValue\x12\x12\n" +
 	"\x04used\x18\x01 \x01(\x01R\x04used\x12!\n" +
 	"\trequested\x18\x02 \x01(\x01H\x00R\trequested\x88\x01\x01\x12\x19\n" +
@@ -1522,11 +1534,14 @@ const file_kmgr_v1_common_proto_rawDesc = "" +
 	"\bprovider\x18\b \x01(\tR\bprovider\x12+\n" +
 	"\x11measurement_scope\x18\t \x01(\tR\x10measurementScope\x12'\n" +
 	"\x0fusage_available\x18\n" +
-	" \x01(\bR\x0eusageAvailableB\f\n" +
+	" \x01(\bR\x0eusageAvailable\x12\"\n" +
+	"\n" +
+	"sort_value\x18\v \x01(\x01H\x03R\tsortValue\x88\x01\x01B\f\n" +
 	"\n" +
 	"_requestedB\b\n" +
 	"\x06_limitB\v\n" +
-	"\t_capacity\"h\n" +
+	"\t_capacityB\r\n" +
+	"\v_sort_value\"h\n" +
 	"\x17KubernetesQuantityValue\x12\x14\n" +
 	"\x05exact\x18\x01 \x01(\tR\x05exact\x12\x1d\n" +
 	"\n" +

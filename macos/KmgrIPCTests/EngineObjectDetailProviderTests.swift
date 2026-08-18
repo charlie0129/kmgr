@@ -168,6 +168,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     usage.used = 0
     usage.usageAvailable = true
     usage.requested = 0
+    usage.sortValue = 0
     response.metrics = [usage]
     await rpc.installObject(response)
 
@@ -178,6 +179,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(detail.metrics.first?.request == 0)
     #expect(detail.metrics.first?.limit == nil)
     #expect(detail.metrics.first?.capacity == nil)
+    #expect(detail.metrics.first?.sortValue == 0)
     #expect(detail.yamlUTF8 == Data("kind: Deployment\n".utf8))
     let request = await rpc.capturedObject()
     #expect(request?.includeYaml == true)

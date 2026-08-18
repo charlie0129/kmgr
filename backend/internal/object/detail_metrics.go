@@ -277,7 +277,9 @@ func resourceUsageValuesWithNames(
 			ResourceName: string(name), Unit: detailResourceUnit(name),
 		}
 		if quantity, found := usage[name]; found {
-			item.Used = detailQuantityNumeric(quantity)
+			used := detailQuantityNumeric(quantity)
+			item.Used = used
+			item.SortValue = detailNumberPointer(used)
 			item.UsageAvailable = true
 			item.MeasuredAtUnixMs = measuredAt
 			item.Provider = provider

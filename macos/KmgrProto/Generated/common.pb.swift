@@ -498,6 +498,19 @@ public struct Kmgr_V1_ResourceUsageValue: Sendable {
 
   public var usageAvailable: Bool = false
 
+  /// Authoritative scalar for this cell's sort semantics. Usage columns set
+  /// current usage only; explicit allocation columns set their named value.
+  /// Absence means the cell is null for sorting even if contextual request,
+  /// limit, or capacity components are present.
+  public var sortValue: Double {
+    get {return _sortValue ?? 0}
+    set {_sortValue = newValue}
+  }
+  /// Returns true if `sortValue` has been explicitly set.
+  public var hasSortValue: Bool {return self._sortValue != nil}
+  /// Clears the value of `sortValue`. Subsequent reads from it will return its default value.
+  public mutating func clearSortValue() {self._sortValue = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -505,6 +518,7 @@ public struct Kmgr_V1_ResourceUsageValue: Sendable {
   fileprivate var _requested: Double? = nil
   fileprivate var _limit: Double? = nil
   fileprivate var _capacity: Double? = nil
+  fileprivate var _sortValue: Double? = nil
 }
 
 /// KubernetesQuantityValue preserves the exact Kubernetes quantity while also
@@ -1230,7 +1244,7 @@ extension Kmgr_V1_StringMapEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResourceUsageValue"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}used\0\u{1}requested\0\u{1}limit\0\u{1}capacity\0\u{1}unit\0\u{3}resource_name\0\u{3}measured_at_unix_ms\0\u{1}provider\0\u{3}measurement_scope\0\u{3}usage_available\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}used\0\u{1}requested\0\u{1}limit\0\u{1}capacity\0\u{1}unit\0\u{3}resource_name\0\u{3}measured_at_unix_ms\0\u{1}provider\0\u{3}measurement_scope\0\u{3}usage_available\0\u{3}sort_value\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1248,6 +1262,7 @@ extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._Mess
       case 8: try { try decoder.decodeSingularStringField(value: &self.provider) }()
       case 9: try { try decoder.decodeSingularStringField(value: &self.measurementScope) }()
       case 10: try { try decoder.decodeSingularBoolField(value: &self.usageAvailable) }()
+      case 11: try { try decoder.decodeSingularDoubleField(value: &self._sortValue) }()
       default: break
       }
     }
@@ -1288,6 +1303,9 @@ extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if self.usageAvailable != false {
       try visitor.visitSingularBoolField(value: self.usageAvailable, fieldNumber: 10)
     }
+    try { if let v = self._sortValue {
+      try visitor.visitSingularDoubleField(value: v, fieldNumber: 11)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1302,6 +1320,7 @@ extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if lhs.provider != rhs.provider {return false}
     if lhs.measurementScope != rhs.measurementScope {return false}
     if lhs.usageAvailable != rhs.usageAvailable {return false}
+    if lhs._sortValue != rhs._sortValue {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

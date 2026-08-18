@@ -183,6 +183,7 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(usage.request == 0.5)
         #expect(usage.limit == 1)
         #expect(usage.capacity == 8)
+        #expect(usage.sortValue == 0.42)
         #expect(usage.resourceName == "cpu")
         #expect(usage.measuredAtUnixMilliseconds == 1_234_000)
         #expect(usage.provider == "metrics.k8s.io")
@@ -428,6 +429,7 @@ struct EngineWorkspaceResourceProviderTests {
         usageValue.provider = "metrics.k8s.io"
         usageValue.measurementScope = "pod"
         usageValue.usageAvailable = true
+        usageValue.sortValue = 0.42
         var usage = Kmgr_V1_Cell()
         usage.columnID = "cpu"
         usage.displayText = "420m / 500m / 1"

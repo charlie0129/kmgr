@@ -606,11 +606,7 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
     private static func usageSortValue(
         _ value: Kmgr_V1_ResourceUsageValue
     ) -> Double? {
-        if value.usageAvailable { return value.used }
-        if value.hasRequested { return value.requested }
-        if value.hasLimit { return value.limit }
-        if value.hasCapacity { return value.capacity }
-        return nil
+        value.hasSortValue ? value.sortValue : nil
     }
 
     private static func seconds(_ duration: Duration) -> TimeInterval {

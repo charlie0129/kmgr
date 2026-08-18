@@ -133,6 +133,7 @@ struct EngineColumnPreviewProviderTests {
         usageResponse.preview.usage.used = 0
         usageResponse.preview.usage.usageAvailable = true
         usageResponse.preview.usage.requested = 0
+        usageResponse.preview.usage.sortValue = 0
         let usageResult = try await deterministicProvider(
             rpc: FakeColumnPreviewRPC(response: usageResponse)
         ).previewColumn(Self.request())
@@ -147,6 +148,7 @@ struct EngineColumnPreviewProviderTests {
         #expect(usage.sortValue == 0)
 
         usageResponse.preview.usage.clearRequested()
+        usageResponse.preview.usage.clearSortValue()
         usageResponse.preview.usage.usageAvailable = false
         let absentResult = try await deterministicProvider(
             rpc: FakeColumnPreviewRPC(response: usageResponse)
@@ -173,6 +175,7 @@ struct EngineColumnPreviewProviderTests {
         usage.provider = "metrics.k8s.io"
         usage.measurementScope = "pod"
         usage.usageAvailable = true
+        usage.sortValue = 0.75
 
         var response = Kmgr_V1_PreviewColumnResponse()
         response.requestID = "preview-request"
