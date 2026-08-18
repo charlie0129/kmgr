@@ -7,7 +7,7 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Shared resource columns", .serialized)
 struct ResourceColumnPropagationTests {
-    @Test("switching Pod columns keeps one sort and a third header click clears it")
+    @Test("reopening Columns preserves presentation and the third sort click clears it")
     func podColumnRebuildRetainsThreeStateSort() async throws {
         let fixture = try ColumnPropagationFixture()
         defer { fixture.remove() }
@@ -82,6 +82,12 @@ struct ResourceColumnPropagationTests {
         // AppKit clears descriptors when a sorted NSTableColumn is removed, so
         // this pins the optional-resource rebuild regression seen only on Pods
         // and Nodes.
+        let acceleratorColumn = try #require(table.tableColumns.first(where: {
+            $0.identifier.rawValue == acceleratorID
+        }))
+        acceleratorColumn.width = 347
+        try moveColumn(acceleratorColumn, to: 0, in: table)
+        let customizedOrder = table.tableColumns.map { $0.identifier.rawValue }
         let columnsRequest = try #require(resourceColumnsRequest(in: workspace))
         columnsRequest.apply(
             columnsRequest.defaultColumns + columnsRequest.discoveredColumns
@@ -90,6 +96,8 @@ struct ResourceColumnPropagationTests {
             table.sortDescriptors.first?.key == acceleratorID
                 && table.sortDescriptors.first?.ascending == false
         }
+        #expect(table.tableColumns.map { $0.identifier.rawValue } == customizedOrder)
+        #expect(table.tableColumns.first { $0.identifier.rawValue == acceleratorID }?.width == 347)
 
         // AppKit's next native proposal wraps descending back to ascending.
         // The resource table interprets that third click as no sort.

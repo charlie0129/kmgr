@@ -482,6 +482,33 @@ func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID stri
 		status := statusText(object)
 		setStringCell(cell, status)
 		cell.Severity = statusSeverity(status)
+	case "roles":
+		roles := nodeRoles(object)
+		if len(roles) == 0 {
+			setStringCell(cell, DefaultMissingCell)
+			cell.Tooltip = "No node-role.kubernetes.io/* labels are present"
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		} else {
+			setStringCell(cell, strings.Join(roles, ", "))
+			cell.Tooltip = "Roles from node-role.kubernetes.io/* label keys"
+		}
+	case "taints":
+		count := int64(len(nestedSliceNoCopy(object.Object, "spec", "taints")))
+		cell.DisplayText = strconv.FormatInt(count, 10)
+		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: float64(count)}
+		cell.Tooltip = fmt.Sprintf("%d configured Node taint(s)", count)
+	case "ip":
+		addresses, addressType := nodeIPAddresses(object)
+		if len(addresses) == 0 {
+			setStringCell(cell, DefaultMissingCell)
+			cell.Tooltip = "No InternalIP or ExternalIP address is reported"
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		} else {
+			setStringCell(cell, strings.Join(addresses, ", "))
+			cell.Tooltip = addressType + ": " + strings.Join(
+				addresses, "\n"+addressType+": ",
+			)
+		}
 	case "replicas":
 		state, supported := replicaStateFor(p.spec.Resource, object)
 		if !supported {
@@ -1145,7 +1172,7 @@ func sortRowsContext(
 }
 
 func defaultColumns(resource ResourceType) []string {
-	columns := make([]string, 0, 9)
+	columns := make([]string, 0, 12)
 	if resource.Namespaced {
 		columns = append(columns, "namespace")
 	}
@@ -1153,7 +1180,10 @@ func defaultColumns(resource ResourceType) []string {
 	if strings.EqualFold(resource.Kind, "Pod") || resource.Resource == "pods" {
 		columns = append(columns, "ready", "status", "restarts", "node", PodCPUColumn, PodMemoryColumn)
 	} else if strings.EqualFold(resource.Kind, "Node") || resource.Resource == "nodes" {
-		columns = append(columns, "status", NodeCPUUsageColumn, NodeMemoryUsageColumn)
+		columns = append(
+			columns, "status", "roles", "taints", "ip",
+			NodeCPUUsageColumn, NodeMemoryUsageColumn,
+		)
 	} else if isReplicaWorkloadResource(resource) {
 		columns = append(columns, "replicas", "status")
 	} else {
@@ -1239,21 +1269,25 @@ func valueOrMissing(value string) string {
 }
 
 func statusText(object *unstructured.Unstructured) string {
-	if object.GetDeletionTimestamp() != nil {
-		return "Terminating"
-	}
 	kind := strings.ToLower(object.GetKind())
+	if object.GetDeletionTimestamp() != nil {
+		return nodeSchedulingStatus(object, "Terminating", kind == "node")
+	}
 	if kind == "node" {
+		status := "Active"
 		conditions := nestedSliceNoCopy(object.Object, "status", "conditions")
 		for _, raw := range conditions {
 			condition, _ := raw.(map[string]any)
 			if condition["type"] == "Ready" {
 				if condition["status"] == "True" {
-					return "Ready"
+					status = "Ready"
+				} else {
+					status = "NotReady"
 				}
-				return "NotReady"
+				break
 			}
 		}
+		return nodeSchedulingStatus(object, status, true)
 	}
 	if value, found, _ := unstructured.NestedString(object.Object, "status", "phase"); found && value != "" {
 		return value
@@ -1278,16 +1312,77 @@ func statusText(object *unstructured.Unstructured) string {
 	return "Active"
 }
 
+func nodeSchedulingStatus(
+	object *unstructured.Unstructured,
+	status string,
+	isNode bool,
+) string {
+	if !isNode {
+		return status
+	}
+	unschedulable, found, err := unstructured.NestedBool(
+		object.Object, "spec", "unschedulable",
+	)
+	if err == nil && found && unschedulable {
+		return status + ",Unschedulable"
+	}
+	return status
+}
+
 func statusSeverity(status string) kmgrv1.CellSeverity {
 	folded := strings.ToLower(status)
 	switch {
 	case strings.Contains(folded, "fail"), strings.Contains(folded, "error"), strings.Contains(folded, "crash"), strings.Contains(folded, "notready"):
 		return kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
-	case strings.Contains(folded, "pending"), strings.Contains(folded, "progress"), strings.Contains(folded, "terminating"), strings.Contains(folded, "unknown"):
+	case strings.Contains(folded, "pending"), strings.Contains(folded, "progress"), strings.Contains(folded, "terminating"), strings.Contains(folded, "unknown"), strings.Contains(folded, "unschedulable"):
 		return kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
 	default:
 		return kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL
 	}
+}
+
+func nodeRoles(object *unstructured.Unstructured) []string {
+	const prefix = "node-role.kubernetes.io/"
+	roles := make([]string, 0)
+	for key := range object.GetLabels() {
+		role, found := strings.CutPrefix(key, prefix)
+		if found && role != "" {
+			roles = append(roles, role)
+		}
+	}
+	slices.Sort(roles)
+	return roles
+}
+
+func nodeIPAddresses(object *unstructured.Unstructured) ([]string, string) {
+	internal := make([]string, 0, 2)
+	external := make([]string, 0, 2)
+	seenInternal := make(map[string]struct{}, 2)
+	seenExternal := make(map[string]struct{}, 2)
+	for _, raw := range nestedSliceNoCopy(object.Object, "status", "addresses") {
+		address, _ := raw.(map[string]any)
+		value, _ := address["address"].(string)
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		switch address["type"] {
+		case string(corev1.NodeInternalIP):
+			if _, duplicate := seenInternal[value]; !duplicate {
+				seenInternal[value] = struct{}{}
+				internal = append(internal, value)
+			}
+		case string(corev1.NodeExternalIP):
+			if _, duplicate := seenExternal[value]; !duplicate {
+				seenExternal[value] = struct{}{}
+				external = append(external, value)
+			}
+		}
+	}
+	if len(internal) != 0 {
+		return internal, string(corev1.NodeInternalIP)
+	}
+	return external, string(corev1.NodeExternalIP)
 }
 
 func readyContainers(object *unstructured.Unstructured) (ready, total int) {

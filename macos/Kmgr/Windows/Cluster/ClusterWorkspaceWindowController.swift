@@ -3935,15 +3935,24 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func applyColumns(_ definitions: [ColumnDefinition], forResourceID resourceID: String) {
-        guard resource?.id == resourceID else { return }
+        guard let resource, resource.id == resourceID else { return }
         provisionalDefaultColumnResourceIDs.remove(resourceID)
+        let nextEffective = effectiveColumnDefinitions(
+            persistedDefinitions: definitions,
+            resource: resource
+        )
         columnDefinitionsByResourceID[resourceID] = definitions
         let previousEffective = installedColumnDefinitions
         let previousSort = currentSortPresentation
         let deferredPresentation = deferredColumnPresentationByResourceID
             .removeValue(forKey: resourceID)
-        if let resource {
-            installEffectiveColumns(for: resource)
+        // Opening Columns publishes its freshly loaded draft even when it is
+        // byte-for-byte equivalent to the active layout. Rebuilding AppKit
+        // columns in that case destroys the user's per-window widths and drag
+        // order. Only rebuild when an enabled definition actually changed;
+        // explicit manager reorders and width edits still differ here.
+        if enabledColumnDefinitions(in: nextEffective) != previousEffective {
+            installColumns(nextEffective, preservingCurrentPresentation: true)
         }
         if let deferredPresentation {
             applyDeferredColumnPresentation(deferredPresentation)
@@ -3989,7 +3998,10 @@ private final class ResourceListViewController: NSViewController,
         return true
     }
 
-    private func installColumns(_ definitions: [ColumnDefinition]) {
+    private func installColumns(
+        _ definitions: [ColumnDefinition],
+        preservingCurrentPresentation: Bool = false
+    ) {
         let enabled = definitions.filter(\.isEnabled)
         // Removing an NSTableColumn makes AppKit immediately remove every
         // descriptor that references it. Capture the user's backend sort
@@ -3998,6 +4010,12 @@ private final class ResourceListViewController: NSViewController,
         // discovery; losing this state made those headers appear to undo a
         // click while resource kinds without exact-resource columns worked.
         let retainedSort = currentSortPresentation
+        let retainedPresentation = currentColumnPresentation
+        let retainedPresentationByID = Dictionary(uniqueKeysWithValues:
+            retainedPresentation.map { ($0.columnID, $0) }
+        )
+        let previousDefinitionsByID = columnDefinitionsByID
+        let definitionOrderUnchanged = columnIDs == enabled.map(\.id)
         if installedColumnDefinitions != enabled {
             clearTransientCellPresentation()
         }
@@ -4024,15 +4042,27 @@ private final class ResourceListViewController: NSViewController,
         for definition in enabled {
             let column = NSTableColumn(identifier: .init(definition.id))
             column.title = definition.title
-            column.width = definition.width.map { CGFloat($0) }
+            let configuredWidth = definition.width.map { CGFloat($0) }
                 ?? NativeColumnCatalog.descriptor(
                     source: definition.source,
                     value: definition.value ?? definition.id
                 ).map { CGFloat($0.width) }
                 ?? 120
+            if preservingCurrentPresentation,
+                previousDefinitionsByID[definition.id]?.width == definition.width,
+                let retained = retainedPresentationByID[definition.id]
+            {
+                column.width = CGFloat(retained.width)
+                column.isHidden = !retained.isVisible
+            } else {
+                column.width = configuredWidth
+            }
             column.minWidth = 55
             column.sortDescriptorPrototype = NSSortDescriptor(key: definition.id, ascending: true)
             tableView.addTableColumn(column)
+        }
+        if preservingCurrentPresentation, definitionOrderUnchanged {
+            applyColumnOrder(retainedPresentation.map(\.columnID))
         }
         applySortPresentation(retainedSort)
         tableView.reloadData()

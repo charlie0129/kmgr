@@ -30,6 +30,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
 
     private let resourceTitle: String
     private let match: ColumnResourceMatch
+    private let baseDefaultColumns: [ColumnDefinition]
     private let defaultColumns: [ColumnDefinition]
     private let discoveredColumns: [ColumnDefinition]
     private let previewProvider: any ColumnPreviewProviding
@@ -41,6 +42,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private var lastAppliedColumns: [ColumnDefinition]
     private var persistenceAvailable: Bool
     private var configurationReady = false
+    private var customColumnIDs: Set<String> = []
     private var fileOperationTask: Task<Void, Never>?
     private var dirty = false
     private var didFinishDismissal = false
@@ -52,6 +54,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private let addNativeButton = NSButton(title: "Add Built-in/Metric…", target: nil, action: nil)
     private let addCELButton = NSButton(title: "Add CEL…", target: nil, action: nil)
     private let editButton = NSButton(title: "Edit…", target: nil, action: nil)
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let moveUpButton = NSButton(title: "Move Up", target: nil, action: nil)
     private let moveDownButton = NSButton(title: "Move Down", target: nil, action: nil)
     private let resetButton = NSButton(title: "Reset to Defaults", target: nil, action: nil)
@@ -81,6 +84,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         )
         self.resourceTitle = resourceTitle
         self.match = match
+        baseDefaultColumns = defaultColumns
         self.discoveredColumns = discoveredColumns
         self.defaultColumns = mergedDefaults
         self.previewProvider = previewProvider
@@ -290,6 +294,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         addCELButton.action = #selector(addCEL)
         editButton.target = self
         editButton.action = #selector(editSelected)
+        removeButton.target = self
+        removeButton.action = #selector(removeSelected)
+        removeButton.toolTip = "Remove the selected custom column"
         moveUpButton.target = self
         moveUpButton.action = #selector(moveSelectedUp)
         moveDownButton.target = self
@@ -301,8 +308,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         openButton.target = self
         openButton.action = #selector(openInEditor)
         let controls = NSStackView(views: [
-            addNativeButton, addCELButton, editButton, moveUpButton, moveDownButton, resetButton,
-            NSView(), reloadButton, openButton,
+            addNativeButton, addCELButton, editButton, removeButton,
+            moveUpButton, moveDownButton, resetButton,
+            NSView(),
         ])
         controls.orientation = .horizontal
         controls.alignment = .centerY
@@ -319,7 +327,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         saveButton.target = self
         saveButton.action = #selector(save)
         saveButton.keyEquivalent = "\r"
-        let footer = NSStackView(views: [statusLabel, NSView(), closeButton, saveButton])
+        let footer = NSStackView(views: [
+            statusLabel, NSView(), reloadButton, openButton, closeButton, saveButton,
+        ])
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
@@ -352,6 +362,19 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         draft.columns.indices.contains(tableView.selectedRow) ? tableView.selectedRow : nil
     }
 
+    private func isRemovable(_ definition: ColumnDefinition) -> Bool {
+        customColumnIDs.contains(definition.id)
+    }
+
+    private func isBaseDefault(_ definition: ColumnDefinition) -> Bool {
+        baseDefaultColumns.contains { baseline in
+            baseline.id == definition.id
+                && baseline.source == definition.source
+                && baseline.value == definition.value
+                && baseline.expression == definition.expression
+        }
+    }
+
     private func makeEnabledButton(identifier: NSUserInterfaceItemIdentifier) -> NSButton {
         let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleEnabled(_:)))
         button.identifier = identifier
@@ -382,6 +405,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         addNativeButton.isEnabled = idle
         addCELButton.isEnabled = idle
         editButton.isEnabled = idle && (index.map { draft.columns[$0].source == .cel } ?? false)
+        removeButton.isEnabled = idle && (index.map {
+            isRemovable(draft.columns[$0])
+        } ?? false)
         moveUpButton.isEnabled = idle && (index.map { $0 > 0 } ?? false)
         moveDownButton.isEnabled = idle && (index.map { $0 + 1 < draft.columns.count } ?? false)
         resetButton.isEnabled = idle
@@ -431,6 +457,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
 
     @objc private func resetToDefaults() {
         draft.reset(to: defaultColumns)
+        customColumnIDs.removeAll(keepingCapacity: true)
         markChanged(selecting: defaultColumns.isEmpty ? nil : 0)
     }
 
@@ -448,6 +475,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
             guard let self else { return }
             do {
                 try self.draft.appendNative(definition)
+                self.customColumnIDs.insert(definition.id)
                 self.markChanged(selecting: self.draft.columns.count - 1)
             } catch {
                 self.showStatus(error.localizedDescription, error: true)
@@ -464,6 +492,22 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
             return
         }
         presentEditor(existingIndex: index)
+    }
+
+    @objc private func removeSelected() {
+        guard let index = selectedIndex else {
+            NSSound.beep()
+            return
+        }
+        let columnID = draft.columns[index].id
+        guard isRemovable(draft.columns[index]), draft.remove(columnID: columnID)
+        else {
+            NSSound.beep()
+            return
+        }
+        customColumnIDs.remove(columnID)
+        let selection = draft.columns.isEmpty ? nil : min(index, draft.columns.count - 1)
+        markChanged(selecting: selection)
     }
 
     private func presentEditor(existingIndex: Int?) {
@@ -483,11 +527,15 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
                 if let existingIndex {
                     var columns = self.draft.columns
                     guard columns.indices.contains(existingIndex) else { return }
+                    let previousID = columns[existingIndex].id
                     columns[existingIndex] = definition
                     self.draft = ResourceColumnDraft(match: self.match, columns: columns)
+                    self.customColumnIDs.remove(previousID)
+                    self.customColumnIDs.insert(definition.id)
                     self.markChanged(selecting: existingIndex)
                 } else {
                     try self.draft.appendCEL(definition)
+                    self.customColumnIDs.insert(definition.id)
                     self.markChanged(selecting: self.draft.columns.count - 1)
                 }
             } catch {
@@ -515,7 +563,10 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
                 guard let self else { return }
                 configurationDocument = loaded
                 let configured = loaded.views.first(where: { $0.match == match })?.columns
-                    ?? defaultColumns
+                    ?? baseDefaultColumns
+                customColumnIDs = Set(configured.lazy.filter {
+                    !self.isBaseDefault($0)
+                }.map(\.id))
                 let columns = Self.mergingDiscoveredColumns(
                     discoveredColumns,
                     into: configured

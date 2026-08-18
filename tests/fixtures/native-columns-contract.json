@@ -26,6 +26,9 @@
     },
     {
       "columns": [
+        {"id": "roles", "title": "Roles", "source": "builtin", "value": "roles", "type": "string"},
+        {"id": "taints", "title": "Taints", "source": "builtin", "value": "taints", "type": "integer"},
+        {"id": "ip", "title": "IP", "source": "builtin", "value": "ip", "type": "string"},
         {"id": "cpu", "title": "CPU", "source": "metric", "value": "cpu", "type": "resourceUsage"},
         {"id": "memory", "title": "Memory", "source": "metric", "value": "memory", "type": "resourceUsage"},
         {"id": "ephemeral-storage", "title": "Ephemeral Storage", "source": "metric", "value": "ephemeral-storage", "type": "resourceUsage"},

@@ -48,6 +48,13 @@ import Testing
     let nodes = NativeColumnCatalog.defaultDefinitions(
         group: "", version: "v1", resource: "nodes", namespaced: false
     )
+    #expect(nodes.map(\.value) == [
+        "name", "status", "roles", "taints", "ip",
+        "cpu", "memory", "ephemeral-storage", "age",
+    ])
+    #expect(nodes.first(where: { $0.value == "roles" })?.type == .string)
+    #expect(nodes.first(where: { $0.value == "taints" })?.type == .integer)
+    #expect(nodes.first(where: { $0.value == "ip" })?.type == .string)
     #expect(nodes.contains(where: { $0.value == "cpu" && $0.type == .resourceUsage }))
     #expect(nodes.first(where: { $0.value == "ephemeral-storage" })?.isEnabled == false)
     #expect(!nodes.contains(where: { $0.value == "ready" || $0.value == "node" }))
@@ -129,6 +136,7 @@ import Testing
         group: "", version: "v1", resource: "nodes", existingColumns: []
     ).map(\.descriptor.value))
     #expect(nodeValues.contains("pod-count"))
+    #expect(nodeValues.isSuperset(of: ["roles", "taints", "ip"]))
     #expect(!nodeValues.contains("ready"))
 
     let deploymentValues = Set(NativeColumnCatalog.items(

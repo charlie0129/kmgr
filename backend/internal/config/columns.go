@@ -96,6 +96,9 @@ var builtinExtractors = map[string]columns.ResultType{
 	"name":            columns.ResultString,
 	"kind":            columns.ResultString,
 	"status":          columns.ResultString,
+	"roles":           columns.ResultString,
+	"taints":          columns.ResultInteger,
+	"ip":              columns.ResultString,
 	"replicas":        columns.ResultString,
 	"node":            columns.ResultString,
 	"ready":           columns.ResultString,
@@ -190,6 +193,8 @@ func builtinSupportedForResource(key resourceKey, value string) bool {
 	switch value {
 	case "node", "ready", "restarts":
 		return isCoreResource(key, "pods")
+	case "roles", "taints", "ip":
+		return isCoreResource(key, "nodes")
 	case "replicas":
 		return isReplicaWorkload(key)
 	default:

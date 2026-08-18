@@ -282,6 +282,95 @@ func TestProjectionSliceReadersDoNotMutateOrAliasRawObjects(t *testing.T) {
 	}
 }
 
+func TestProjectorShowsNodeSchedulingRolesTaintsAndDualStackIPs(t *testing.T) {
+	t.Parallel()
+	node := &corev1.Node{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Node"},
+		ObjectMeta: metav1.ObjectMeta{
+			UID:  "uid-node",
+			Name: "worker-a",
+			Labels: map[string]string{
+				"node-role.kubernetes.io/worker":        "",
+				"node-role.kubernetes.io/control-plane": "true",
+				"topology.kubernetes.io/zone":           "zone-a",
+			},
+		},
+		Spec: corev1.NodeSpec{
+			Unschedulable: true,
+			Taints: []corev1.Taint{
+				{Key: "dedicated", Value: "gpu", Effect: corev1.TaintEffectNoSchedule},
+				{Key: "maintenance", Effect: corev1.TaintEffectNoExecute},
+			},
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{{
+				Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+			}},
+			Addresses: []corev1.NodeAddress{
+				{Type: corev1.NodeInternalIP, Address: "fd00::10"},
+				{Type: corev1.NodeExternalIP, Address: "203.0.113.10"},
+				{Type: corev1.NodeInternalIP, Address: "10.0.0.10"},
+				{Type: corev1.NodeInternalIP, Address: "fd00::10"},
+			},
+		},
+	}
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
+		ColumnIDs:        []string{"status", "roles", "taints", "ip"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, visible := projector.ProjectOne(&unstructured.Unstructured{Object: raw})
+	if !visible {
+		t.Fatal("Node row was unexpectedly hidden")
+	}
+	status := cellByID(row, "status")
+	if status.GetDisplayText() != "Ready,Unschedulable" ||
+		status.GetSeverity() != kmgrv1.CellSeverity_CELL_SEVERITY_WARNING {
+		t.Fatalf("Node scheduling status = %#v", status)
+	}
+	if roles := cellByID(row, "roles"); roles.GetDisplayText() != "control-plane, worker" {
+		t.Fatalf("Node roles = %#v", roles)
+	}
+	if taints := cellByID(row, "taints"); taints.GetDisplayText() != "2" ||
+		taints.GetNumberValue() != 2 {
+		t.Fatalf("Node taints = %#v", taints)
+	}
+	if ip := cellByID(row, "ip"); ip.GetDisplayText() != "fd00::10, 10.0.0.10" ||
+		strings.Contains(ip.GetDisplayText(), "203.0.113.10") ||
+		!strings.Contains(ip.GetTooltip(), "InternalIP") {
+		t.Fatalf("Node IP = %#v", ip)
+	}
+	for _, columnID := range []string{"roles", "taints", "ip"} {
+		if !slices.Contains(defaultColumns(projector.spec.Resource), columnID) {
+			t.Errorf("default Node columns omit %q", columnID)
+		}
+	}
+}
+
+func TestNodeIPAddressesFallBackToUniqueExternalAddresses(t *testing.T) {
+	t.Parallel()
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"addresses": []any{
+			map[string]any{"type": "Hostname", "address": "worker-a"},
+			map[string]any{"type": "ExternalIP", "address": "203.0.113.10"},
+			map[string]any{"type": "ExternalIP", "address": "2001:db8::10"},
+			map[string]any{"type": "ExternalIP", "address": "203.0.113.10"},
+		}},
+	}}
+	addresses, addressType := nodeIPAddresses(object)
+	if addressType != string(corev1.NodeExternalIP) ||
+		!slices.Equal(addresses, []string{"203.0.113.10", "2001:db8::10"}) {
+		t.Fatalf("external fallback = %q %v", addressType, addresses)
+	}
+}
+
 func TestProjectionSliceReadersPreserveMalformedFieldFallbacks(t *testing.T) {
 	t.Parallel()
 	podObject := &unstructured.Unstructured{Object: map[string]any{

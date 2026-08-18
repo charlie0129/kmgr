@@ -132,6 +132,11 @@ import Testing
     #expect(throws: ColumnDraftError.invalidOrDuplicateCELColumn) {
         try draft.appendCEL(name)
     }
+    let removed = draft.remove(columnID: "node")
+    #expect(removed)
+    #expect(draft.columns.map(\.id) == ["status", "name"])
+    let removedMissing = draft.remove(columnID: "missing")
+    #expect(!removedMissing)
     draft.reset(to: [name])
     #expect(draft.columns == [name])
     #expect(draft.match == match)

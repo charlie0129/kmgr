@@ -200,6 +200,58 @@ struct ColumnsManagerWindowControllerTests {
         #expect(expression.string == "object.metadata.name")
     }
 
+    @Test("custom columns can be removed while default columns remain available")
+    func customColumnRemoval() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-columns-remove-\(UUID().uuidString)")
+        let path = directory.appendingPathComponent("columns.yaml").path
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let name = ColumnDefinition(
+            id: "name", title: "Name", source: .builtin,
+            value: "name", type: .string
+        )
+        let custom = ColumnDefinition(
+            id: "team", title: "Team", source: .cel,
+            expression: #"object.metadata.labels["team"]"#, type: .string
+        )
+        try ColumnConfigurationFileStore(path: path).save(
+            ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+                columns: [name, custom]
+            )])
+        )
+        let manager = ColumnsManagerWindowController(
+            resourceTitle: "Pods",
+            match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+            defaultColumns: [name],
+            previewProvider: NoopColumnPreviewProvider(),
+            previewContext: testPreviewContext(),
+            configurationPath: path
+        )
+        defer { manager.window?.orderOut(nil) }
+        let root = try #require(manager.window?.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Columns for Pods" })
+        let remove = try #require(button(titled: "Remove", beneath: root))
+        var latestDraft: [ColumnDefinition] = []
+        manager.onDraftChanged = { latestDraft = $0 }
+
+        try await waitUntil { table.numberOfRows == 2 && table.isEnabled }
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        table.delegate?.tableViewSelectionDidChange?(Notification(
+            name: NSTableView.selectionDidChangeNotification,
+            object: table
+        ))
+        #expect(remove.isEnabled)
+        remove.performClick(nil)
+
+        #expect(table.numberOfRows == 1)
+        #expect(latestDraft.map(\.id) == ["name"])
+        #expect(table.selectedRow == 0)
+        #expect(!remove.isEnabled)
+    }
+
     @Test("discovered disabled resources merge without overriding configured identity")
     func discoveredColumnsMerge() {
         let configured = ColumnDefinition(
@@ -232,6 +284,25 @@ struct ColumnsManagerWindowControllerTests {
         )
         #expect(merged == [configured, hugePages])
         #expect(!merged[1].isEnabled)
+    }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(3),
+        condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !condition() {
+            guard clock.now < deadline else {
+                throw ClusterManagerIssue(
+                    category: .internalFailure,
+                    reason: "AppKitTestTimeout",
+                    message: "Timed out waiting for the Columns manager.",
+                    operation: "test custom column removal"
+                )
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 }
 }

@@ -240,6 +240,15 @@ public struct ResourceColumnDraft: Hashable, Sendable {
         return true
     }
 
+    @discardableResult
+    public mutating func remove(columnID: String) -> Bool {
+        guard let index = columns.firstIndex(where: { $0.id == columnID }) else {
+            return false
+        }
+        columns.remove(at: index)
+        return true
+    }
+
     public mutating func reset(to defaults: [ColumnDefinition]) {
         columns = defaults
     }

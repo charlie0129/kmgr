@@ -121,6 +121,9 @@ public enum NativeColumnCatalog {
         builtin("name", "Name", .string, .leading, 280, .any),
         builtin("kind", "Kind", .string, .leading, 120, .any),
         builtin("status", "Status", .string, .leading, 130, .any),
+        builtin("roles", "Roles", .string, .leading, 160, .nodes),
+        builtin("taints", "Taints", .integer, .trailing, 75, .nodes),
+        builtin("ip", "IP", .string, .leading, 220, .nodes),
         builtin(
             "replicas", "Replicas (A/R/T)", .string, .center, 120,
             .replicaWorkloads
@@ -240,7 +243,10 @@ public enum NativeColumnCatalog {
                 "cpu", "memory", "ephemeral-storage", "age",
             ]
         } else if group.isEmpty && version == "v1" && resource == "nodes" {
-            values += ["status", "cpu", "memory", "ephemeral-storage", "age"]
+            values += [
+                "status", "roles", "taints", "ip",
+                "cpu", "memory", "ephemeral-storage", "age",
+            ]
         } else if NativeColumnResourceScope.replicaWorkloads.supports(
             group: group,
             version: version,

@@ -420,6 +420,27 @@ func TestReplicaBuiltinSupportsStandardReplicaControllersOnly(t *testing.T) {
 	}
 }
 
+func TestNodeMetadataBuiltinsSupportCoreNodesOnly(t *testing.T) {
+	t.Parallel()
+	definitions := []ColumnConfiguration{
+		{ID: "roles", Title: "Roles", Source: "builtin", Value: "roles", Type: columns.ResultString},
+		{ID: "taints", Title: "Taints", Source: "builtin", Value: "taints", Type: columns.ResultInteger},
+		{ID: "ip", Title: "IP", Source: "builtin", Value: "ip", Type: columns.ResultString},
+	}
+	for _, definition := range definitions {
+		if got, err := validateExtractor(
+			resourceKey{version: "v1", resource: "nodes"}, definition,
+		); err != nil || got != definition.Value {
+			t.Errorf("validate Node %q = %q, %v", definition.Value, got, err)
+		}
+		if _, err := validateExtractor(
+			resourceKey{version: "v1", resource: "pods"}, definition,
+		); err == nil {
+			t.Errorf("Pod accepted Node builtin %q", definition.Value)
+		}
+	}
+}
+
 func TestParseColumnsRejectsUnknownFieldsEnvironmentAndDuplicateIDs(t *testing.T) {
 	t.Parallel()
 	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)

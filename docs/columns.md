@@ -240,7 +240,11 @@ Sorting uses the typed result retained alongside display text. It never reparses
 The native built-in/metric picker is filtered to the current resource GVR and
 marks extractors already represented by the draft. It can add a catalog entry
 disabled for deliberate review, or validate and add an exact Kubernetes
-resource name such as `nvidia.com/gpu`. The CEL editor compiles each current
+resource name such as `nvidia.com/gpu`. Definitions added by the user can be
+removed; default and discovered definitions remain recoverable and are hidden
+with their enabled checkbox instead. Reopening Columns with an unchanged draft
+preserves the resource table's per-window drag order and resized widths. The
+CEL editor compiles each current
 revision through the engine and previews it against the selected table object
 when exactly one is selected, otherwise against a bounded sample object. Only
 the latest successful validation can be committed. A `?` help popover shows
@@ -269,13 +273,14 @@ keeps the table column ID `gpu` while accounting the exact Kubernetes resource
 ```
 
 Built-in values include `name`, `namespace`, `kind`, `status`, `replicas`,
-`node`, `ready`, `restarts`, `age`, `created`, and `resourceVersion`; the
+`node`, `ready`, `restarts`, `roles`, `taints`, `ip`, `age`, `created`, and
+`resourceVersion`; the
 documented Pod-qualified forms such as `pod.status` resolve to the same
 optimized extractors. Metric values include `cpu`, `memory`,
 `ephemeral-storage`, Node request/limit and Pod-count variants, and
 `resource:<exact-resource-name>`. The documented qualified forms such as
 `pod.cpu.usageRequestLimit` are also accepted. Native result types are part of
-that contract: `ready` and `replicas` are `string`, `restarts` is `integer`,
+that contract: `ready` and `replicas` are `string`, `restarts` and `taints` are `integer`,
 `age` is `duration`, `created` is `timestamp`, and metric values are
 `resourceUsage`; other metadata/status built-ins are `string`.
 Source, value, result type, and resource-kind compatibility are validated when
@@ -287,6 +292,15 @@ StatefulSets, DaemonSets, and ReplicaSets, plus core/v1 ReplicationControllers.
 It renders `available/ready/total`; its tooltip labels all three values and
 also includes the controller's desired replica count when Kubernetes exposes
 one. A mismatch is shown as a warning while the controller converges.
+
+The Node-only `roles` column sorts the suffixes of every
+`node-role.kubernetes.io/<role>` label key and joins them with commas. `taints`
+is the number of entries in `spec.taints`. A Node whose
+`spec.unschedulable` is true appends `Unschedulable` to its readiness status,
+for example `Ready,Unschedulable`. The `ip` column shows every unique
+`InternalIP` in Kubernetes' reported address order, so dual-stack Nodes show
+both IPv4 and IPv6; it uses unique `ExternalIP` values only when no internal
+address is reported.
 
 Pod and Node views use the built-in IDs `cpu`, `memory`, and
 `ephemeral-storage`. Pods render actual usage / effective request / effective
