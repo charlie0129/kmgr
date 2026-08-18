@@ -23,12 +23,17 @@ import (
 // DetailMetricsProvider is the optional enrichment seam for GetObject. The
 // object is the same fresh, UID-validated object used to form the base detail;
 // providers must never fetch a replacement object by namespace/name.
+type DetailMetrics struct {
+	Resources          []*kmgrv1.ResourceUsageValue
+	ContainerResources map[string][]*kmgrv1.ResourceUsageValue
+}
+
 type DetailMetricsProvider interface {
 	Metrics(
 		ctx context.Context,
 		identity Identity,
 		object *unstructured.Unstructured,
-	) ([]*kmgrv1.ResourceUsageValue, error)
+	) (DetailMetrics, error)
 }
 
 type detailMetricsClientResolver interface {
@@ -94,35 +99,36 @@ func (p *KubernetesDetailMetricsProvider) Metrics(
 	ctx context.Context,
 	identity Identity,
 	object *unstructured.Unstructured,
-) ([]*kmgrv1.ResourceUsageValue, error) {
+) (DetailMetrics, error) {
 	if p == nil || p.clients == nil {
-		return nil, errors.New("object detail metrics provider is unavailable")
+		return DetailMetrics{}, errors.New("object detail metrics provider is unavailable")
 	}
 	if err := validateObjectUID(object, identity); err != nil {
-		return nil, err
+		return DetailMetrics{}, err
 	}
 
 	kind := metricsKindForIdentity(identity)
 	if kind == 0 {
-		return nil, nil
+		return DetailMetrics{}, nil
 	}
 
 	var (
-		accounting []*kmgrv1.ResourceUsageValue
+		accounting DetailMetrics
 		pod        corev1.Pod
 		node       corev1.Node
 	)
 	switch kind {
 	case metrics.PodMetrics:
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &pod); err != nil {
-			return nil, fmt.Errorf("decode Pod for resource accounting: %w", err)
+			return DetailMetrics{}, fmt.Errorf("decode Pod for resource accounting: %w", err)
 		}
-		accounting = podResourceUsage(&pod, nil)
+		accounting.Resources = podResourceUsage(&pod, nil)
+		accounting.ContainerResources = podContainerResourceUsage(&pod, nil)
 	case metrics.NodeMetrics:
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &node); err != nil {
-			return nil, fmt.Errorf("decode Node for resource accounting: %w", err)
+			return DetailMetrics{}, fmt.Errorf("decode Node for resource accounting: %w", err)
 		}
-		accounting = nodeResourceUsage(&node, nil)
+		accounting.Resources = nodeResourceUsage(&node, nil)
 	}
 
 	available, known, err := p.clients.CachedMetricsAPIAvailability(identity.SessionID)
@@ -149,7 +155,10 @@ func (p *KubernetesDetailMetricsProvider) Metrics(
 		if err := validateMetricsUID(value.GetUID(), identity); err != nil {
 			return accounting, err
 		}
-		return podResourceUsage(&pod, value), nil
+		return DetailMetrics{
+			Resources:          podResourceUsage(&pod, value),
+			ContainerResources: podContainerResourceUsage(&pod, value),
+		}, nil
 	case metrics.NodeMetrics:
 		value, err := client.NodeMetricses().Get(ctx, identity.Name, metav1.GetOptions{})
 		if err != nil {
@@ -158,9 +167,9 @@ func (p *KubernetesDetailMetricsProvider) Metrics(
 		if err := validateMetricsUID(value.GetUID(), identity); err != nil {
 			return accounting, err
 		}
-		return nodeResourceUsage(&node, value), nil
+		return DetailMetrics{Resources: nodeResourceUsage(&node, value)}, nil
 	default:
-		return nil, nil
+		return DetailMetrics{}, nil
 	}
 }
 
@@ -202,6 +211,59 @@ func podResourceUsage(pod *corev1.Pod, value *metricsapi.PodMetrics) []*kmgrv1.R
 		usage, requests, limits, nil,
 		metrics.MetricsAPIGroupVersion, "pod containers", metricsTimestamp(value),
 	)
+}
+
+func podContainerResourceUsage(
+	pod *corev1.Pod,
+	value *metricsapi.PodMetrics,
+) map[string][]*kmgrv1.ResourceUsageValue {
+	if pod == nil {
+		return nil
+	}
+	usageByName := make(map[string]corev1.ResourceList)
+	if value != nil {
+		for _, container := range value.Containers {
+			usage := usageByName[container.Name]
+			if usage == nil {
+				usage = make(corev1.ResourceList)
+				usageByName[container.Name] = usage
+			}
+			addQuantities(usage, container.Usage)
+		}
+	}
+
+	type declaredResources struct {
+		name      string
+		resources corev1.ResourceRequirements
+	}
+	declared := make([]declaredResources, 0,
+		len(pod.Spec.Containers)+len(pod.Spec.InitContainers)+len(pod.Spec.EphemeralContainers))
+	for _, container := range pod.Spec.Containers {
+		declared = append(declared, declaredResources{container.Name, container.Resources})
+	}
+	for _, container := range pod.Spec.InitContainers {
+		declared = append(declared, declaredResources{container.Name, container.Resources})
+	}
+	for _, container := range pod.Spec.EphemeralContainers {
+		declared = append(declared, declaredResources{container.Name, container.Resources})
+	}
+
+	result := make(map[string][]*kmgrv1.ResourceUsageValue, len(declared))
+	for _, container := range declared {
+		if _, duplicate := result[container.name]; duplicate {
+			continue
+		}
+		result[container.name] = resourceUsageValues(
+			usageByName[container.name],
+			container.resources.Requests,
+			container.resources.Limits,
+			nil,
+			metrics.MetricsAPIGroupVersion,
+			"container "+container.name,
+			metricsTimestamp(value),
+		)
+	}
+	return result
 }
 
 func nodeResourceUsage(node *corev1.Node, value *metricsapi.NodeMetrics) []*kmgrv1.ResourceUsageValue {

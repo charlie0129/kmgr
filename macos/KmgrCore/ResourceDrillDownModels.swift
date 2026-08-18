@@ -24,7 +24,7 @@ public struct ResourceDrillDownQuery: Hashable, Sendable {
 
 public enum ResourceDrillDownPlan: Hashable, Sendable {
     case resource(ResourceDrillDownQuery)
-    case containers(pod: ResourceIdentity, values: [ExecContainerCandidate])
+    case containers(pod: ResourceIdentity, values: [PodContainerDetail])
     case data(ResourceIdentity)
 }
 
@@ -59,7 +59,7 @@ public enum ResourceDrillDownPlanner {
             guard !detail.summaryFields.contains(where: {
                 $0.sectionID == "containers" && $0.fieldID == "containersOmitted"
             }) else { return nil }
-            let containers = ExecContainerCatalog.candidates(from: detail.summaryFields)
+            let containers = ExecContainerCatalog.orderedDetails(from: detail.containers)
             return containers.isEmpty ? nil : .containers(pod: identity, values: containers)
         case ("", "v1", "configmaps"), ("", "v1", "secrets"):
             return .data(identity)

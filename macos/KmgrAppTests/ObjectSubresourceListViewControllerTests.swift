@@ -13,8 +13,32 @@ struct ObjectSubresourceListViewControllerTests {
         let controller = ObjectSubresourceListViewController(content: .containers(
             pod: pod,
             values: [
-                ExecContainerCandidate(name: "api", kind: .regular),
-                ExecContainerCandidate(name: "migrate", kind: .initContainer),
+                PodContainerDetail(
+                    name: "api",
+                    kind: .regular,
+                    status: "Running",
+                    statusTooltip: "State: Running",
+                    ready: true,
+                    restartCount: 2,
+                    ports: ["http: 8080/TCP", "8443/TCP"],
+                    metrics: [
+                        ResourceUsageValue(
+                            usage: 0.42, request: 0.5, limit: 1,
+                            unit: "cores", resourceName: "cpu"
+                        ),
+                        ResourceUsageValue(
+                            usage: 64 * 1_048_576,
+                            request: 128 * 1_048_576,
+                            limit: 256 * 1_048_576,
+                            unit: "bytes", resourceName: "memory"
+                        ),
+                    ]
+                ),
+                PodContainerDetail(
+                    name: "migrate",
+                    kind: .initContainer,
+                    status: "Terminated: Completed"
+                ),
             ]
         ))
         controller.loadView()
@@ -41,7 +65,19 @@ struct ObjectSubresourceListViewControllerTests {
         button.performClick(nil)
 
         #expect(opened == .namedContainer("migrate", in: pod))
-        #expect(table.tableColumns.map(\.title) == ["Container", "Type"])
+        #expect(table.tableColumns.map(\.title) == [
+            "Container", "Type", "Status", "Ready", "Restarts", "CPU", "Memory", "Ports",
+        ])
+        let apiValues = try table.tableColumns.indices.map { column in
+            try #require(table.view(
+                atColumn: column, row: 0, makeIfNecessary: true
+            ) as? NSTableCellView).textField?.stringValue
+        }
+        #expect(apiValues == [
+            "api", "Regular", "Running", "Yes", "2",
+            "420m / 500m / 1", "64Mi / 128Mi / 256Mi",
+            "http: 8080/TCP, 8443/TCP",
+        ])
 
         opened = nil
         table.keyDown(with: try subresourceKey("l", modifiers: [.shift]))

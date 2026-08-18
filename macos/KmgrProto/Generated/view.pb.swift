@@ -259,6 +259,10 @@ public struct Kmgr_V1_PreviewColumnResponse: @unchecked Sendable {
     set {_uniqueStorage()._celEnvironment = newValue}
   }
 
+  /// When evaluation succeeds but the value does not match the draft's
+  /// declared result type, preview is a display-only raw YAML value and error
+  /// also carries the validation diagnostic. This lets clients teach from maps
+  /// and lists without treating them as valid sortable cells.
   public var preview: Kmgr_V1_Cell {
     get {return _storage._preview ?? Kmgr_V1_Cell()}
     set {_uniqueStorage()._preview = newValue}

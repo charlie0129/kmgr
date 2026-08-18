@@ -185,6 +185,46 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(request?.includeYaml == true)
 }
 
+@Test func objectDetailProviderMapsTypedContainerPresentationAndMetrics() async throws {
+    let rpc = ObjectDetailRPCCapture()
+    var response = Kmgr_V1_GetObjectResponse()
+    response.identity = protoIdentity(name: "api", uid: "uid-api")
+    response.yamlUtf8 = Data("kind: Pod\n".utf8)
+    var cpu = Kmgr_V1_ResourceUsageValue()
+    cpu.resourceName = "cpu"
+    cpu.unit = "cores"
+    cpu.used = 0.42
+    cpu.usageAvailable = true
+    cpu.requested = 0.5
+    cpu.limit = 1
+    var container = Kmgr_V1_PodContainerDetail()
+    container.name = "app"
+    container.kind = .regular
+    container.status = "Waiting: CrashLoopBackOff"
+    container.statusTooltip = "State: Waiting"
+    container.statusSeverity = .error
+    container.restartCount = 3
+    container.ports = ["http: 8080/TCP"]
+    container.metrics = [cpu]
+    response.containers = [container]
+    await rpc.installObject(response)
+
+    let detail = try await EngineObjectDetailProvider(
+        rpc: rpc, identifier: { "request" }
+    ).getObject(identity: identity(name: "api", uid: "uid-api"))
+    let mapped = try #require(detail.containers.first)
+    #expect(mapped.name == "app")
+    #expect(mapped.kind == .regular)
+    #expect(mapped.status == "Waiting: CrashLoopBackOff")
+    #expect(mapped.statusSeverity == .critical)
+    #expect(!mapped.ready)
+    #expect(mapped.restartCount == 3)
+    #expect(mapped.ports == ["http: 8080/TCP"])
+    #expect(mapped.metric(named: "cpu")?.usage == 0.42)
+    #expect(mapped.metric(named: "cpu")?.request == 0.5)
+    #expect(mapped.metric(named: "cpu")?.limit == 1)
+}
+
 @Test func objectDetailProviderRejectsSuccessfulEmptyYAML() async {
     let rpc = ObjectDetailRPCCapture()
     var response = Kmgr_V1_GetObjectResponse()

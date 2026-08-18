@@ -259,6 +259,7 @@ type Detail struct {
 	Labels          map[string]string
 	Annotations     map[string]string
 	Summary         []SummaryField
+	Containers      []ContainerDetail
 	// object is the same fresh, UID-validated value used to build the detail.
 	// It stays package-private so optional enrichers can calculate from the
 	// authoritative read without performing a second GET or exposing raw
@@ -308,6 +309,9 @@ func detailFromObject(
 	}
 	if includeSummary {
 		detail.Summary = summarize(value)
+		if identity.Group == "" && identity.Version == "v1" && identity.Resource == "pods" {
+			detail.Containers = podContainerDetails(value)
+		}
 	}
 	return detail, nil
 }

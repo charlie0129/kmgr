@@ -34,6 +34,28 @@ message ObjectSummaryField {
   CellSeverity severity = 6;
 }
 
+enum PodContainerKind {
+  POD_CONTAINER_KIND_UNSPECIFIED = 0;
+  POD_CONTAINER_KIND_REGULAR = 1;
+  POD_CONTAINER_KIND_INIT = 2;
+  POD_CONTAINER_KIND_EPHEMERAL = 3;
+}
+
+// PodContainerDetail is a bounded, display-safe projection of one declared
+// Pod container. It deliberately excludes images, environment variables, and
+// the raw Pod object while retaining the fields needed by container actions.
+message PodContainerDetail {
+  string name = 1;
+  PodContainerKind kind = 2;
+  string status = 3;
+  string status_tooltip = 4;
+  CellSeverity status_severity = 5;
+  bool ready = 6;
+  int32 restart_count = 7;
+  repeated string ports = 8;
+  repeated ResourceUsageValue metrics = 9;
+}
+
 message GetObjectResponse {
   string request_id = 1;
   ResourceIdentity identity = 2;
@@ -44,6 +66,7 @@ message GetObjectResponse {
   repeated StringMapEntry annotations = 7;
   repeated ResourceUsageValue metrics = 8;
   StructuredError error = 9;
+  repeated PodContainerDetail containers = 10;
 }
 
 message WatchObjectRequest {

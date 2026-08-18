@@ -25,6 +25,44 @@ public struct ObjectSummaryField: Hashable, Sendable {
     }
 }
 
+public struct PodContainerDetail: Hashable, Sendable {
+    public var name: String
+    public var kind: ExecContainerKind
+    public var status: String
+    public var statusTooltip: String
+    public var statusSeverity: CellSeverity
+    public var ready: Bool
+    public var restartCount: Int32
+    public var ports: [String]
+    public var metrics: [ResourceUsageValue]
+
+    public init(
+        name: String,
+        kind: ExecContainerKind,
+        status: String = "Pending",
+        statusTooltip: String = "",
+        statusSeverity: CellSeverity = .normal,
+        ready: Bool = false,
+        restartCount: Int32 = 0,
+        ports: [String] = [],
+        metrics: [ResourceUsageValue] = []
+    ) {
+        self.name = name
+        self.kind = kind
+        self.status = status
+        self.statusTooltip = statusTooltip
+        self.statusSeverity = statusSeverity
+        self.ready = ready
+        self.restartCount = restartCount
+        self.ports = ports
+        self.metrics = metrics
+    }
+
+    public func metric(named resourceName: String) -> ResourceUsageValue? {
+        metrics.first { $0.resourceName == resourceName }
+    }
+}
+
 public struct ObjectDetail: Hashable, Sendable {
     public var identity: ResourceIdentity
     public var resourceVersion: String
@@ -33,6 +71,7 @@ public struct ObjectDetail: Hashable, Sendable {
     public var labels: [String: String]
     public var annotations: [String: String]
     public var metrics: [ResourceUsageValue]
+    public var containers: [PodContainerDetail]
 
     public init(
         identity: ResourceIdentity,
@@ -41,7 +80,8 @@ public struct ObjectDetail: Hashable, Sendable {
         summaryFields: [ObjectSummaryField] = [],
         labels: [String: String] = [:],
         annotations: [String: String] = [:],
-        metrics: [ResourceUsageValue] = []
+        metrics: [ResourceUsageValue] = [],
+        containers: [PodContainerDetail] = []
     ) {
         self.identity = identity
         self.resourceVersion = resourceVersion
@@ -50,6 +90,7 @@ public struct ObjectDetail: Hashable, Sendable {
         self.labels = labels
         self.annotations = annotations
         self.metrics = metrics
+        self.containers = containers
     }
 }
 

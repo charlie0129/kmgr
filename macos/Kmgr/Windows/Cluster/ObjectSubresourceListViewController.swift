@@ -14,7 +14,7 @@ struct DataSubresourceRow: Hashable, Sendable {
 }
 
 enum ObjectSubresourceContent: Hashable, Sendable {
-    case containers(pod: ResourceIdentity, values: [ExecContainerCandidate])
+    case containers(pod: ResourceIdentity, values: [PodContainerDetail])
     case data(object: ResourceIdentity, values: [DataSubresourceRow])
 
     var parent: ResourceIdentity {
@@ -181,6 +181,16 @@ final class ObjectSubresourceListViewController: NSViewController,
         row: Int
     ) -> NSView? {
         guard let tableColumn else { return nil }
+        if case .containers(_, let values) = content,
+            values.indices.contains(row),
+            ["cpu", "memory"].contains(tableColumn.identifier.rawValue)
+        {
+            return resourceUsageCell(
+                in: tableView,
+                columnID: tableColumn.identifier.rawValue,
+                container: values[row]
+            )
+        }
         let identifier = NSUserInterfaceItemIdentifier("object-subresource-cell")
         let cell: NSTableCellView
         if let reused = tableView.makeView(withIdentifier: identifier, owner: self)
@@ -203,12 +213,32 @@ final class ObjectSubresourceListViewController: NSViewController,
         }
 
         let value: String
+        var toolTip: String?
+        var textColor = NSColor.labelColor
+        var alignment = NSTextAlignment.left
         switch content {
         case .containers(_, let values):
             guard values.indices.contains(row) else { return nil }
             switch tableColumn.identifier.rawValue {
             case "name": value = values[row].name
             case "type": value = containerType(values[row].kind)
+            case "status":
+                value = values[row].status.isEmpty ? "Unknown" : values[row].status
+                toolTip = values[row].statusTooltip.isEmpty
+                    ? value : values[row].statusTooltip
+                textColor = statusTextColor(for: values[row].statusSeverity)
+            case "ready":
+                value = values[row].ready ? "Yes" : "No"
+                textColor = values[row].ready ? .labelColor : .systemOrange
+                alignment = .center
+            case "restarts":
+                value = String(values[row].restartCount)
+                alignment = .right
+            case "ports":
+                value = values[row].ports.isEmpty ? "—" : values[row].ports.joined(separator: ", ")
+                toolTip = values[row].ports.isEmpty
+                    ? "No declared container ports" : values[row].ports.joined(separator: "\n")
+                if values[row].ports.isEmpty { textColor = .secondaryLabelColor }
             default: value = ""
             }
         case .data(_, let values):
@@ -224,7 +254,10 @@ final class ObjectSubresourceListViewController: NSViewController,
             }
         }
         cell.textField?.stringValue = value
-        cell.textField?.toolTip = value
+        cell.textField?.toolTip = toolTip ?? value
+        cell.textField?.textColor = textColor
+        cell.textField?.alignment = alignment
+        cell.textField?.font = .systemFont(ofSize: NSFont.systemFontSize)
         return cell
     }
 
@@ -243,7 +276,16 @@ final class ObjectSubresourceListViewController: NSViewController,
         let columns: [(String, String, CGFloat)]
         switch content {
         case .containers:
-            columns = [("name", "Container", 320), ("type", "Type", 140)]
+            columns = [
+                ("name", "Container", 240),
+                ("type", "Type", 100),
+                ("status", "Status", 190),
+                ("ready", "Ready", 70),
+                ("restarts", "Restarts", 80),
+                ("cpu", "CPU", 210),
+                ("memory", "Memory", 230),
+                ("ports", "Ports", 220),
+            ]
             tableView.setAccessibilityLabel("Pod containers")
         case .data:
             columns = [("key", "Key", 320), ("type", "Type", 100), ("size", "Size", 110)]
@@ -254,6 +296,9 @@ final class ObjectSubresourceListViewController: NSViewController,
             column.title = title
             column.width = width
             column.minWidth = 70
+            if identifier == "cpu" || identifier == "memory" {
+                column.headerToolTip = "Actual usage / request / limit"
+            }
             tableView.addTableColumn(column)
         }
         tableView.delegate = self
@@ -283,6 +328,78 @@ final class ObjectSubresourceListViewController: NSViewController,
         case .regular: "Regular"
         case .ephemeral: "Ephemeral"
         case .initContainer: "Init"
+        }
+    }
+
+    private func resourceUsageCell(
+        in tableView: NSTableView,
+        columnID: String,
+        container: PodContainerDetail
+    ) -> NSView {
+        let resourceName = columnID
+        let unit = resourceName == "cpu" ? "cores" : "bytes"
+        let value = container.metric(named: resourceName) ?? ResourceUsageValue(
+            unit: unit,
+            resourceName: resourceName,
+            measurementScope: "container \(container.name)"
+        )
+        let displayText = [value.usage, value.request, value.limit]
+            .map { quantity in
+                quantity.map {
+                    KubernetesResourceQuantityFormatter.compact($0, unit: value.unit)
+                } ?? "—"
+            }
+            .joined(separator: " / ")
+        let severity: CellSeverity = value.usage == nil ? .muted : .normal
+        let cellValue = Cell(
+            columnID: columnID,
+            displayText: displayText,
+            typedValue: .usage(value),
+            tooltip: resourceUsageTooltip(value),
+            severity: severity
+        )
+        let presentation = ResourceUsageCellPresentation(cell: cellValue)!
+        let identifier = NSUserInterfaceItemIdentifier("container-usage-cell.\(columnID)")
+        let cell = tableView.makeView(
+            withIdentifier: identifier,
+            owner: self
+        ) as? ResourceUsageTableCellView ?? ResourceUsageTableCellView()
+        cell.identifier = identifier
+        cell.configure(
+            presentation: presentation,
+            toolTip: cellValue.tooltip,
+            alignment: .right,
+            textColor: severity == .muted ? .secondaryLabelColor : .labelColor
+        )
+        return cell
+    }
+
+    private func resourceUsageTooltip(_ value: ResourceUsageValue) -> String {
+        let title = value.resourceName == "cpu" ? "CPU" : "Memory"
+        let formatted: (Double?) -> String = { quantity in
+            quantity.map {
+                KubernetesResourceQuantityFormatter.compact($0, unit: value.unit)
+            } ?? "unavailable"
+        }
+        var lines = [
+            "Resource: \(title)",
+            "Actual usage: \(formatted(value.usage))",
+            "Request: \(formatted(value.request))",
+            "Limit: \(formatted(value.limit))",
+        ]
+        if !value.provider.isEmpty { lines.append("Provider: \(value.provider)") }
+        if !value.measurementScope.isEmpty {
+            lines.append("Scope: \(value.measurementScope)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func statusTextColor(for severity: CellSeverity) -> NSColor {
+        switch severity {
+        case .warning: .systemOrange
+        case .critical: .systemRed
+        case .muted: .secondaryLabelColor
+        default: .labelColor
         }
     }
 

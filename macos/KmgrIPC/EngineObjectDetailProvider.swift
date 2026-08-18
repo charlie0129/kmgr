@@ -651,7 +651,32 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                 response.annotations.map { ($0.key, $0.value) },
                 uniquingKeysWith: { _, latest in latest }
             ),
-            metrics: response.metrics.map(usage)
+            metrics: response.metrics.map(usage),
+            containers: response.containers.compactMap(container)
+        )
+    }
+
+    private static func container(
+        _ value: Kmgr_V1_PodContainerDetail
+    ) -> PodContainerDetail? {
+        guard !value.name.isEmpty else { return nil }
+        let kind: ExecContainerKind
+        switch value.kind {
+        case .regular: kind = .regular
+        case .init_: kind = .initContainer
+        case .ephemeral: kind = .ephemeral
+        case .unspecified, .UNRECOGNIZED: return nil
+        }
+        return PodContainerDetail(
+            name: value.name,
+            kind: kind,
+            status: value.status,
+            statusTooltip: value.statusTooltip,
+            statusSeverity: severity(value.statusSeverity),
+            ready: value.ready,
+            restartCount: max(0, value.restartCount),
+            ports: value.ports,
+            metrics: value.metrics.map(usage)
         )
     }
 

@@ -92,8 +92,10 @@ func (s *GRPCService) GetObject(
 		// Metrics API failures must not turn a successful authoritative object
 		// read into a failed detail page. Providers may still return safe
 		// scheduler accounting when measured usage is unavailable.
-		if values, _ := s.metricsProvider.Metrics(operationContext, identity, detail.object); len(values) > 0 {
-			response.Metrics = values
+		values, _ := s.metricsProvider.Metrics(operationContext, identity, detail.object)
+		response.Metrics = values.Resources
+		for _, container := range response.Containers {
+			container.Metrics = values.ContainerResources[container.GetName()]
 		}
 	}
 	return response, nil
@@ -604,7 +606,42 @@ func detailResponse(requestID string, identity *kmgrv1.ResourceIdentity, detail 
 			DisplayText: field.Value, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		})
 	}
+	for _, container := range detail.Containers {
+		response.Containers = append(response.Containers, &kmgrv1.PodContainerDetail{
+			Name: container.Name, Kind: containerKindToProto(container.Kind),
+			Status: container.Status, StatusTooltip: container.StatusTooltip,
+			StatusSeverity: containerStatusSeverityToProto(container.StatusSeverity),
+			Ready:          container.Ready, RestartCount: container.RestartCount,
+			Ports: slices.Clone(container.Ports),
+		})
+	}
 	return response
+}
+
+func containerKindToProto(value ContainerKind) kmgrv1.PodContainerKind {
+	switch value {
+	case ContainerRegular:
+		return kmgrv1.PodContainerKind_POD_CONTAINER_KIND_REGULAR
+	case ContainerInit:
+		return kmgrv1.PodContainerKind_POD_CONTAINER_KIND_INIT
+	case ContainerEphemeral:
+		return kmgrv1.PodContainerKind_POD_CONTAINER_KIND_EPHEMERAL
+	default:
+		return kmgrv1.PodContainerKind_POD_CONTAINER_KIND_UNSPECIFIED
+	}
+}
+
+func containerStatusSeverityToProto(value ContainerStatusSeverity) kmgrv1.CellSeverity {
+	switch value {
+	case ContainerStatusWarning:
+		return kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
+	case ContainerStatusCritical:
+		return kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
+	case ContainerStatusMuted:
+		return kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+	default:
+		return kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL
+	}
 }
 
 func identityToProto(identity Identity) *kmgrv1.ResourceIdentity {

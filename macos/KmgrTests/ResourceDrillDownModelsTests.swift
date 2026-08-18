@@ -4,6 +4,10 @@ import Testing
 
 @Test func podDrillDownUsesBoundedAuthoritativeContainerCatalog() {
     let pod = drillDownIdentity(resource: "pods")
+    let containers = [
+        PodContainerDetail(name: "api", kind: .regular, status: "Running"),
+        PodContainerDetail(name: "migrate", kind: .initContainer, status: "Terminated"),
+    ]
     let detail = ObjectDetail(
         identity: pod,
         resourceVersion: "rv-1",
@@ -16,14 +20,12 @@ import Testing
                 sectionID: "containers", fieldID: "initContainer:migrate",
                 label: "Init Container", displayText: "migrate"
             ),
-        ]
+        ],
+        containers: containers
     )
     #expect(ResourceDrillDownPlanner.plan(for: detail) == .containers(
         pod: pod,
-        values: [
-            ExecContainerCandidate(name: "api", kind: .regular),
-            ExecContainerCandidate(name: "migrate", kind: .initContainer),
-        ]
+        values: containers
     ))
 }
 
@@ -130,7 +132,8 @@ import Testing
                 sectionID: "containers", fieldID: "containersOmitted",
                 label: "Additional Containers", displayText: "1 not shown"
             ),
-        ]
+        ],
+        containers: [PodContainerDetail(name: "api", kind: .regular)]
     )) == nil)
 }
 

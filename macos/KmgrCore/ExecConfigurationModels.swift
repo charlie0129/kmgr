@@ -38,6 +38,39 @@ public struct ExecContainerCandidate: Hashable, Sendable {
 /// authoritative object GET. A name is offered once, preferring a regular
 /// container if malformed input repeats it across container groups.
 public enum ExecContainerCatalog {
+    public static func orderedDetails(
+        from values: [PodContainerDetail]
+    ) -> [PodContainerDetail] {
+        var byName: [String: PodContainerDetail] = [:]
+        for value in values {
+            guard !value.name.isEmpty, value.name.utf8.count <= 253,
+                !value.name.unicodeScalars.contains(where: {
+                    CharacterSet.controlCharacters.contains($0)
+                })
+            else { continue }
+            if let existing = byName[value.name],
+                existing.kind.sortOrder <= value.kind.sortOrder
+            {
+                continue
+            }
+            byName[value.name] = value
+        }
+        return byName.values.sorted { lhs, rhs in
+            if lhs.kind.sortOrder != rhs.kind.sortOrder {
+                return lhs.kind.sortOrder < rhs.kind.sortOrder
+            }
+            return lhs.name < rhs.name
+        }
+    }
+
+    public static func candidates(
+        from values: [PodContainerDetail]
+    ) -> [ExecContainerCandidate] {
+        orderedDetails(from: values).map {
+            ExecContainerCandidate(name: $0.name, kind: $0.kind)
+        }
+    }
+
     public static func candidates(from fields: [ObjectSummaryField]) -> [ExecContainerCandidate] {
         var byName: [String: ExecContainerCandidate] = [:]
         for field in fields where field.sectionID == "containers" {

@@ -21,6 +21,48 @@ fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAP
   typealias Version = _2
 }
 
+public enum Kmgr_V1_PodContainerKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case regular // = 1
+  case init_ // = 2
+  case ephemeral // = 3
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .regular
+    case 2: self = .init_
+    case 3: self = .ephemeral
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .regular: return 1
+    case .init_: return 2
+    case .ephemeral: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Kmgr_V1_PodContainerKind] = [
+    .unspecified,
+    .regular,
+    .init_,
+    .ephemeral,
+  ]
+
+}
+
 public enum Kmgr_V1_ObjectEventType: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
@@ -202,6 +244,37 @@ public struct Kmgr_V1_ObjectSummaryField: Sendable {
   public init() {}
 }
 
+/// PodContainerDetail is a bounded, display-safe projection of one declared
+/// Pod container. It deliberately excludes images, environment variables, and
+/// the raw Pod object while retaining the fields needed by container actions.
+public struct Kmgr_V1_PodContainerDetail: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var name: String = String()
+
+  public var kind: Kmgr_V1_PodContainerKind = .unspecified
+
+  public var status: String = String()
+
+  public var statusTooltip: String = String()
+
+  public var statusSeverity: Kmgr_V1_CellSeverity = .unspecified
+
+  public var ready: Bool = false
+
+  public var restartCount: Int32 = 0
+
+  public var ports: [String] = []
+
+  public var metrics: [Kmgr_V1_ResourceUsageValue] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Kmgr_V1_GetObjectResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -238,6 +311,8 @@ public struct Kmgr_V1_GetObjectResponse: Sendable {
   public var hasError: Bool {return self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
+
+  public var containers: [Kmgr_V1_PodContainerDetail] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -764,6 +839,10 @@ public struct Kmgr_V1_GetDataResponse: Sendable {
 
 fileprivate let _protobuf_package = "kmgr.v1"
 
+extension Kmgr_V1_PodContainerKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0POD_CONTAINER_KIND_UNSPECIFIED\0\u{1}POD_CONTAINER_KIND_REGULAR\0\u{1}POD_CONTAINER_KIND_INIT\0\u{1}POD_CONTAINER_KIND_EPHEMERAL\0")
+}
+
 extension Kmgr_V1_ObjectEventType: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0OBJECT_EVENT_TYPE_UNSPECIFIED\0\u{1}OBJECT_EVENT_TYPE_UPDATED\0\u{1}OBJECT_EVENT_TYPE_DELETED\0\u{1}OBJECT_EVENT_TYPE_STATUS\0")
 }
@@ -885,9 +964,79 @@ extension Kmgr_V1_ObjectSummaryField: SwiftProtobuf.Message, SwiftProtobuf._Mess
   }
 }
 
+extension Kmgr_V1_PodContainerDetail: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PodContainerDetail"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}kind\0\u{1}status\0\u{3}status_tooltip\0\u{3}status_severity\0\u{1}ready\0\u{3}restart_count\0\u{1}ports\0\u{1}metrics\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.status) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.statusTooltip) }()
+      case 5: try { try decoder.decodeSingularEnumField(value: &self.statusSeverity) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.ready) }()
+      case 7: try { try decoder.decodeSingularInt32Field(value: &self.restartCount) }()
+      case 8: try { try decoder.decodeRepeatedStringField(value: &self.ports) }()
+      case 9: try { try decoder.decodeRepeatedMessageField(value: &self.metrics) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
+    }
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 2)
+    }
+    if !self.status.isEmpty {
+      try visitor.visitSingularStringField(value: self.status, fieldNumber: 3)
+    }
+    if !self.statusTooltip.isEmpty {
+      try visitor.visitSingularStringField(value: self.statusTooltip, fieldNumber: 4)
+    }
+    if self.statusSeverity != .unspecified {
+      try visitor.visitSingularEnumField(value: self.statusSeverity, fieldNumber: 5)
+    }
+    if self.ready != false {
+      try visitor.visitSingularBoolField(value: self.ready, fieldNumber: 6)
+    }
+    if self.restartCount != 0 {
+      try visitor.visitSingularInt32Field(value: self.restartCount, fieldNumber: 7)
+    }
+    if !self.ports.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.ports, fieldNumber: 8)
+    }
+    if !self.metrics.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.metrics, fieldNumber: 9)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_PodContainerDetail, rhs: Kmgr_V1_PodContainerDetail) -> Bool {
+    if lhs.name != rhs.name {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.statusTooltip != rhs.statusTooltip {return false}
+    if lhs.statusSeverity != rhs.statusSeverity {return false}
+    if lhs.ready != rhs.ready {return false}
+    if lhs.restartCount != rhs.restartCount {return false}
+    if lhs.ports != rhs.ports {return false}
+    if lhs.metrics != rhs.metrics {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Kmgr_V1_GetObjectResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".GetObjectResponse"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}identity\0\u{3}resource_version\0\u{3}yaml_utf8\0\u{3}summary_fields\0\u{1}labels\0\u{1}annotations\0\u{1}metrics\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}identity\0\u{3}resource_version\0\u{3}yaml_utf8\0\u{3}summary_fields\0\u{1}labels\0\u{1}annotations\0\u{1}metrics\0\u{1}error\0\u{1}containers\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -904,6 +1053,7 @@ extension Kmgr_V1_GetObjectResponse: SwiftProtobuf.Message, SwiftProtobuf._Messa
       case 7: try { try decoder.decodeRepeatedMessageField(value: &self.annotations) }()
       case 8: try { try decoder.decodeRepeatedMessageField(value: &self.metrics) }()
       case 9: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      case 10: try { try decoder.decodeRepeatedMessageField(value: &self.containers) }()
       default: break
       }
     }
@@ -941,6 +1091,9 @@ extension Kmgr_V1_GetObjectResponse: SwiftProtobuf.Message, SwiftProtobuf._Messa
     try { if let v = self._error {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
     } }()
+    if !self.containers.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.containers, fieldNumber: 10)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -954,6 +1107,7 @@ extension Kmgr_V1_GetObjectResponse: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if lhs.annotations != rhs.annotations {return false}
     if lhs.metrics != rhs.metrics {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.containers != rhs.containers {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

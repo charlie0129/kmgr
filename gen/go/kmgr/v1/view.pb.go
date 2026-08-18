@@ -353,13 +353,17 @@ func (x *CELColumnDefinition) GetListJoiner() string {
 }
 
 type PreviewColumnResponse struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	RequestId        string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	CelEnvironment   string                 `protobuf:"bytes,2,opt,name=cel_environment,json=celEnvironment,proto3" json:"cel_environment,omitempty"`
-	Preview          *Cell                  `protobuf:"bytes,3,opt,name=preview,proto3" json:"preview,omitempty"`
-	UsedSampleObject bool                   `protobuf:"varint,4,opt,name=used_sample_object,json=usedSampleObject,proto3" json:"used_sample_object,omitempty"`
-	EvaluatedObject  *ResourceIdentity      `protobuf:"bytes,5,opt,name=evaluated_object,json=evaluatedObject,proto3" json:"evaluated_object,omitempty"`
-	Error            *StructuredError       `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RequestId      string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	CelEnvironment string                 `protobuf:"bytes,2,opt,name=cel_environment,json=celEnvironment,proto3" json:"cel_environment,omitempty"`
+	// When evaluation succeeds but the value does not match the draft's
+	// declared result type, preview is a display-only raw YAML value and error
+	// also carries the validation diagnostic. This lets clients teach from maps
+	// and lists without treating them as valid sortable cells.
+	Preview          *Cell             `protobuf:"bytes,3,opt,name=preview,proto3" json:"preview,omitempty"`
+	UsedSampleObject bool              `protobuf:"varint,4,opt,name=used_sample_object,json=usedSampleObject,proto3" json:"used_sample_object,omitempty"`
+	EvaluatedObject  *ResourceIdentity `protobuf:"bytes,5,opt,name=evaluated_object,json=evaluatedObject,proto3" json:"evaluated_object,omitempty"`
+	Error            *StructuredError  `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }

@@ -26,9 +26,19 @@ import (
 func TestGRPCGetObjectRequestsOptionalMetricsOnlyWhenIncluded(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Pod", "pods", "team-a", "api", "pod-uid")
-	provider := &recordingDetailMetricsProvider{values: []*kmgrv1.ResourceUsageValue{{
-		ResourceName: string(corev1.ResourceCPU), UsageAvailable: true, Used: 0.25,
-	}}}
+	value.Object["spec"] = map[string]any{"containers": []any{
+		map[string]any{"name": "app"},
+	}}
+	provider := &recordingDetailMetricsProvider{values: DetailMetrics{
+		Resources: []*kmgrv1.ResourceUsageValue{{
+			ResourceName: string(corev1.ResourceCPU), UsageAvailable: true, Used: 0.25,
+		}},
+		ContainerResources: map[string][]*kmgrv1.ResourceUsageValue{
+			"app": {{
+				ResourceName: string(corev1.ResourceCPU), UsageAvailable: true, Used: 0.2,
+			}},
+		},
+	}}
 	service, err := NewGRPCService(testReader(t, value), provider)
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +51,10 @@ func TestGRPCGetObjectRequestsOptionalMetricsOnlyWhenIncluded(t *testing.T) {
 	if provider.calls != 0 || len(withoutMetrics.GetMetrics()) != 0 {
 		t.Fatalf("excluded metrics: calls=%d values=%#v", provider.calls, withoutMetrics.GetMetrics())
 	}
+	if len(withoutMetrics.GetContainers()) != 1 ||
+		len(withoutMetrics.GetContainers()[0].GetMetrics()) != 0 {
+		t.Fatalf("base container detail = %#v", withoutMetrics.GetContainers())
+	}
 
 	withMetrics, err := service.GetObject(context.Background(), detailMetricsRequest(true))
 	if err != nil {
@@ -49,6 +63,11 @@ func TestGRPCGetObjectRequestsOptionalMetricsOnlyWhenIncluded(t *testing.T) {
 	if provider.calls != 1 || len(withMetrics.GetMetrics()) != 1 ||
 		withMetrics.GetMetrics()[0].GetUsed() != 0.25 {
 		t.Fatalf("included metrics: calls=%d values=%#v", provider.calls, withMetrics.GetMetrics())
+	}
+	if len(withMetrics.GetContainers()) != 1 ||
+		withMetrics.GetContainers()[0].GetName() != "app" ||
+		withMetrics.GetContainers()[0].GetMetrics()[0].GetUsed() != 0.2 {
+		t.Fatalf("container metrics = %#v", withMetrics.GetContainers())
 	}
 	if provider.object == nil || string(provider.object.GetUID()) != "pod-uid" {
 		t.Fatalf("provider object = %#v", provider.object)
@@ -139,7 +158,7 @@ func TestKubernetesDetailMetricsProviderAccountsPodAndPreservesExactResources(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	cpu := detailUsageByName(t, values, corev1.ResourceCPU)
+	cpu := detailUsageByName(t, values.Resources, corev1.ResourceCPU)
 	if !cpu.GetUsageAvailable() || !nearlyEqual(cpu.GetUsed(), 0.000004) ||
 		cpu.GetRequested() != 0.25 || cpu.GetLimit() != 1 || cpu.GetUnit() != "cores" ||
 		!nearlyEqual(cpu.GetSortValue(), 0.000004) ||
@@ -147,23 +166,40 @@ func TestKubernetesDetailMetricsProviderAccountsPodAndPreservesExactResources(t 
 		cpu.GetProvider() != metrics.MetricsAPIGroupVersion || cpu.GetMeasurementScope() != "pod containers" {
 		t.Fatalf("CPU detail metric = %#v", cpu)
 	}
-	memory := detailUsageByName(t, values, corev1.ResourceMemory)
+	memory := detailUsageByName(t, values.Resources, corev1.ResourceMemory)
 	if memory.GetUsed() != 5*1024*1024 || memory.GetRequested() != 64*1024*1024 ||
 		memory.GetLimit() != 128*1024*1024 || memory.GetUnit() != "bytes" ||
 		memory.GetSortValue() != 5*1024*1024 {
 		t.Fatalf("memory detail metric = %#v", memory)
 	}
-	hugePages := detailUsageByName(t, values, "hugepages-2Mi")
+	hugePages := detailUsageByName(t, values.Resources, "hugepages-2Mi")
 	if hugePages.GetUsageAvailable() || hugePages.GetRequested() != 1024*1024*1024 ||
 		hugePages.GetLimit() != 2*1024*1024*1024 || hugePages.GetUnit() != "bytes" ||
 		hugePages.GetSortValue() != 1024*1024*1024 {
 		t.Fatalf("huge-page detail metric = %#v", hugePages)
 	}
-	accelerator := detailUsageByName(t, values, "aliyun.com/ppu")
+	accelerator := detailUsageByName(t, values.Resources, "aliyun.com/ppu")
 	if accelerator.GetUsageAvailable() || accelerator.GetRequested() != 1 ||
 		accelerator.GetLimit() != 2 || accelerator.GetUnit() != "count" ||
 		accelerator.GetSortValue() != 1 {
 		t.Fatalf("accelerator detail metric = %#v", accelerator)
+	}
+	containerCPU := detailUsageByName(t, values.ContainerResources["app"], corev1.ResourceCPU)
+	if !containerCPU.GetUsageAvailable() || !nearlyEqual(containerCPU.GetUsed(), 0.0000015) ||
+		containerCPU.GetRequested() != 0.25 || containerCPU.GetLimit() != 1 ||
+		containerCPU.GetMeasurementScope() != "container app" {
+		t.Fatalf("container CPU detail metric = %#v", containerCPU)
+	}
+	containerMemory := detailUsageByName(
+		t, values.ContainerResources["app"], corev1.ResourceMemory,
+	)
+	if containerMemory.GetUsed() != 5*1024*1024 ||
+		containerMemory.GetRequested() != 64*1024*1024 ||
+		containerMemory.GetLimit() != 128*1024*1024 {
+		t.Fatalf("container memory detail metric = %#v", containerMemory)
+	}
+	if _, found := values.ContainerResources["sidecar"]; found {
+		t.Fatalf("metrics-only container entered authoritative detail: %#v", values.ContainerResources)
 	}
 }
 
@@ -206,12 +242,12 @@ func TestKubernetesDetailMetricsProviderUsesNodeAllocatableAsCapacity(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	cpu := detailUsageByName(t, values, corev1.ResourceCPU)
+	cpu := detailUsageByName(t, values.Resources, corev1.ResourceCPU)
 	if !nearlyEqual(cpu.GetUsed(), 0.0000015) || !nearlyEqual(cpu.GetCapacity(), 3.9) ||
 		cpu.GetRequested() != 0 || cpu.Requested != nil || !nearlyEqual(cpu.GetSortValue(), 0.0000015) {
 		t.Fatalf("Node CPU detail metric = %#v", cpu)
 	}
-	hugePages := detailUsageByName(t, values, "hugepages-1Gi")
+	hugePages := detailUsageByName(t, values.Resources, "hugepages-1Gi")
 	if hugePages.GetUsageAvailable() || hugePages.GetCapacity() != 2*1024*1024*1024 ||
 		hugePages.GetUnit() != "bytes" || hugePages.GetSortValue() != 2*1024*1024*1024 {
 		t.Fatalf("Node huge-page detail metric = %#v", hugePages)
@@ -263,13 +299,13 @@ func TestKubernetesDetailMetricsProviderSkipsGetForKnownMetricsAPIAbsence(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(values) != 2 || resolver.availabilityCalls != 1 || resolver.clientCalls != 0 {
+	if len(values.Resources) != 2 || resolver.availabilityCalls != 1 || resolver.clientCalls != 0 {
 		t.Fatalf(
 			"known-absent result: values=%#v availability calls=%d client calls=%d",
 			values, resolver.availabilityCalls, resolver.clientCalls,
 		)
 	}
-	for _, value := range values {
+	for _, value := range values.Resources {
 		if value.GetUsageAvailable() || value.Requested != nil || value.Limit != nil {
 			t.Fatalf("known-absent accounting should not invent quantities: %#v", value)
 		}
@@ -317,6 +353,16 @@ func TestGRPCGetObjectKeepsSchedulerAccountingWhenMeasuredUsageFails(t *testing.
 		hugePages.GetSortValue() != 1024*1024*1024 {
 		t.Fatalf("degraded scheduler accounting = %#v", response.GetMetrics())
 	}
+	if len(response.GetContainers()) != 1 {
+		t.Fatalf("degraded container detail = %#v", response.GetContainers())
+	}
+	containerCPU := detailUsageByName(
+		t, response.GetContainers()[0].GetMetrics(), corev1.ResourceCPU,
+	)
+	if containerCPU.GetUsageAvailable() || containerCPU.GetRequested() != 0.25 ||
+		containerCPU.GetSortValue() != 0.25 {
+		t.Fatalf("degraded container CPU = %#v", containerCPU)
+	}
 }
 
 func detailMetricsRequest(include bool) *kmgrv1.GetObjectRequest {
@@ -333,7 +379,7 @@ func detailMetricsRequest(include bool) *kmgrv1.GetObjectRequest {
 type recordingDetailMetricsProvider struct {
 	calls  int
 	object *unstructured.Unstructured
-	values []*kmgrv1.ResourceUsageValue
+	values DetailMetrics
 	err    error
 }
 
@@ -341,7 +387,7 @@ func (p *recordingDetailMetricsProvider) Metrics(
 	_ context.Context,
 	_ Identity,
 	object *unstructured.Unstructured,
-) ([]*kmgrv1.ResourceUsageValue, error) {
+) (DetailMetrics, error) {
 	p.calls++
 	p.object = object
 	return p.values, p.err

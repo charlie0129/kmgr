@@ -634,7 +634,8 @@ struct ClusterWorkspaceToolbarTests {
                     fieldID: "container:api",
                     label: "Container",
                     displayText: "api"
-                )]
+                )],
+                containers: [PodContainerDetail(name: "api", kind: .regular)]
             ))
         )
         controller.showWindow(nil)
@@ -657,7 +658,9 @@ struct ClusterWorkspaceToolbarTests {
             .compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Pod containers" })
         #expect(containerTable.numberOfRows == 1)
-        #expect(containerTable.tableColumns.map(\.title) == ["Container", "Type"])
+        #expect(containerTable.tableColumns.map(\.title) == [
+            "Container", "Type", "Status", "Ready", "Restarts", "CPU", "Memory", "Ports",
+        ])
         #expect(controller.contextualShortcutSnapshot?.contextID == "pod-containers")
     }
 
@@ -675,7 +678,8 @@ struct ClusterWorkspaceToolbarTests {
                     fieldID: "container:api",
                     label: "Container",
                     displayText: "api"
-                )]
+                )],
+                containers: [PodContainerDetail(name: "api", kind: .regular)]
             ))
         )
         controller.showWindow(nil)
@@ -748,7 +752,8 @@ struct ClusterWorkspaceToolbarTests {
                     fieldID: "container:api",
                     label: "Container",
                     displayText: "api"
-                )]
+                )],
+                containers: [PodContainerDetail(name: "api", kind: .regular)]
             ))
         )
         controller.showWindow(nil)
@@ -2545,7 +2550,8 @@ private func toolbarPodDetail(_ pod: ResourceIdentity) -> ObjectDetail {
         summaryFields: [ObjectSummaryField(
             sectionID: "containers", fieldID: "container:api",
             label: "Container", displayText: "api"
-        )]
+        )],
+        containers: [PodContainerDetail(name: "api", kind: .regular)]
     )
 }
 
