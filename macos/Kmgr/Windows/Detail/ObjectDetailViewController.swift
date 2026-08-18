@@ -1496,7 +1496,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         // Editing always starts from the complete authoritative YAML even when
         // managedFields were hidden in the read-only presentation. The backend
         // protects them from apply along with the other server-owned fields.
-        replaceYAMLText(with: yamlPresentation.completeYAML)
+        replaceYAMLText(with: String(decoding: originalYAML, as: UTF8.self))
         isEditingYAML = true
         editButton.isHidden = true
         managedFieldsButton.isHidden = true
@@ -1614,11 +1614,18 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         yamlPresentationGeneration &+= 1
         let generation = yamlPresentationGeneration
         pendingYAMLPresentation = (yamlUTF8, generation)
-        yamlPresentation = YAMLManagedFieldsPresentation(
-            unprocessedYAMLUTF8: yamlUTF8
-        )
-        managedFieldsButton.isHidden = true
-        if !isEditingYAML { showYAMLPresentation() }
+        // The first snapshot can be shown immediately while its managed-fields
+        // presentation is prepared. Once a coherent presentation exists,
+        // retain it until the replacement is ready. Installing raw YAML and
+        // hiding the toggle for every busy WATCH event makes the view alternate
+        // between raw and filtered states many times per second.
+        if yamlPresentation.completeYAML.isEmpty {
+            yamlPresentation = YAMLManagedFieldsPresentation(
+                unprocessedYAMLUTF8: yamlUTF8
+            )
+            managedFieldsButton.isHidden = true
+            if !isEditingYAML { showYAMLPresentation() }
+        }
 
         if let yamlPresentationTask {
             // The synchronous builder cannot be interrupted once it begins.
