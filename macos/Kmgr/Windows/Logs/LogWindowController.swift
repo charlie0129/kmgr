@@ -193,6 +193,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView
         )
+        NotificationCenter.default.removeObserver(
+            self,
+            name: NSView.frameDidChangeNotification,
+            object: textView
+        )
         stopStream()
         onClose?()
     }
@@ -240,6 +245,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         else { return }
         followsVisibleTail = isAtTail
         updateFollowButtonPresentation()
+    }
+
+    /// NSTextView can refine a noncontiguous document's height after the
+    /// initial tail render has returned. Keep Follow pinned across those late
+    /// frame corrections; a user scroll has already cleared
+    /// `followsVisibleTail` through the clip-view bounds observer above.
+    @objc private func logDocumentFrameDidChange(_ notification: Notification) {
+        guard !isClosing, tailTrackingSuppressionDepth == 0, followsVisibleTail
+        else { return }
+        scrollToTail()
     }
 
     func controlTextDidChange(_ obj: Notification) { scheduleRender() }
@@ -398,6 +413,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         TextDocumentGeometry.configureStreamingLog(
             textView,
             in: scrollView
+        )
+        textView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(logDocumentFrameDidChange(_:)),
+            name: NSView.frameDidChangeNotification,
+            object: textView
         )
         let clipView = scrollView.contentView
         lastObservedViewportOrigin = clipView.bounds.origin
@@ -1047,8 +1069,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func scrollToTail() {
-        withTailTrackingSuppressed {
-            TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
+        // Reflecting the first scroll can itself make TextKit publish a more
+        // accurate noncontiguous document height. Re-evaluate the arithmetic
+        // tail against that new frame before returning; later asynchronous
+        // corrections are handled by `logDocumentFrameDidChange`.
+        for _ in 0..<4 {
+            withTailTrackingSuppressed {
+                TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
+            }
+            if isAtTail { break }
         }
         followsVisibleTail = true
     }

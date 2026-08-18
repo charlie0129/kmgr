@@ -680,12 +680,13 @@ struct LogWindowControllerTests {
 
         // TextKit can refine a noncontiguous document extent after the
         // controller has scrolled. That correction is not a user scroll and
-        // must not silently disable follow on the next batch.
+        // must keep the current viewport pinned as well as preserve follow for
+        // the next batch.
         textView.setFrameSize(NSSize(
             width: textView.frame.width,
             height: textView.frame.height + 32
         ))
-        #expect(!isLogViewAtTail(textView, in: scrollView))
+        #expect(isLogViewAtTail(textView, in: scrollView))
 
         provider.emitRecords(
             generation: 1,
@@ -704,6 +705,67 @@ struct LogWindowControllerTests {
         ))
         try await waitForLogText(textView) { $0.contains("after-correction") }
         #expect(isLogViewAtTail(textView, in: scrollView))
+    }
+
+    @Test("large initial tail remains pinned after deferred layout")
+    func largeInitialTailRemainsPinnedAfterDeferredLayout() async throws {
+        let provider = OrderedLogWindowProvider()
+        let source = logSource(pod: "api", uid: "api-uid", container: "app")
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [source],
+            provider: provider,
+            displayConfiguration: LogDisplayConfiguration(renderBatchMilliseconds: 1)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let textView = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Pod logs" })
+        let scrollView = try #require(descendants(of: root)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "log-content-scroll" })
+        let follow = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Follow" })
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+
+        window.orderOut(nil)
+        provider.emitStreaming(generation: 1, sequence: 1)
+        let suffix = String(repeating: " value", count: 80)
+        provider.emitRecords(
+            generation: 1,
+            sequence: 2,
+            records: (0..<500).map { index in
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data("initial-\(index)\(suffix)".utf8),
+                    endsWithNewline: true
+                )
+            }
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        window.makeKeyAndOrderFront(nil)
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        try await waitForLogText(textView) { $0.contains("initial-499") }
+        #expect(isLogViewAtTail(textView, in: scrollView))
+
+        for _ in 0..<20 {
+            window.contentView?.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(follow.state == .on)
+        #expect(isLogViewAtTail(textView, in: scrollView),
+            "A deferred layout pass moved the initial tail away from the bottom")
     }
 
     @Test("viewport scrolling pauses and resumes tail following")
