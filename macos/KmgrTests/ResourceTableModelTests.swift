@@ -32,7 +32,7 @@ import Testing
     #expect(plan.contentUpdate == .reloadAll)
 }
 
-@Test func cellOnlyUpdatesReloadOnlyAffectedVisibleRows() {
+@Test func cellOnlyUpdatesRefreshOnlyChangedVisibleCells() {
     let a: ResourceUID = "a"
     let b: ResourceUID = "b"
     let hidden: ResourceUID = "hidden"
@@ -50,7 +50,9 @@ import Testing
     ), capture: capture)
 
     #expect(model.orderedVisibleUIDs == [a, b, d])
-    #expect(plan.contentUpdate == .reloadRows([1, 2]))
+    #expect(plan.contentUpdate == .refreshCells([
+        ResourceTableCellUpdate(rowIndex: 1, columnID: "status"),
+    ]))
     #expect(plan.selectedRowIndexes == [1])
     #expect(plan.scrollRestoration == ScrollRestorationPlan(
         uid: b,
@@ -60,7 +62,7 @@ import Testing
     ))
 }
 
-@Test func identicalReplacementOrderUsesCellOnlyReloadPath() {
+@Test func identicalReplacementOrderDoesNotRefreshCells() {
     let a: ResourceUID = "a"
     let b: ResourceUID = "b"
     var model = ResourceTableModel(rows: [row(a), row(b)])
@@ -70,7 +72,48 @@ import Testing
         visibleOrder: .replace([a, b])
     ))
 
-    #expect(plan.contentUpdate == .reloadRows([0]))
+    #expect(plan.contentUpdate == .refreshCells([]))
+}
+
+@Test func backgroundOnlyUsageChangesDoNotRefreshVisiblePresentation() {
+    let uid: ResourceUID = "node-a"
+    var model = ResourceTableModel(rows: [usageRow(
+        uid,
+        displayText: "0.05 / 0.10",
+        usage: 0.0492,
+        measuredAt: 1_000,
+        tooltip: "first exact sample"
+    )])
+
+    let plan = model.apply(ResourceRowBatch(upserts: [usageRow(
+        uid,
+        displayText: "0.05 / 0.10",
+        usage: 0.0494,
+        measuredAt: 2_000,
+        tooltip: "new exact sample"
+    )]))
+
+    #expect(plan.contentUpdate == .refreshCells([]))
+    #expect(model.rowByUID[uid]?["cpu"]?.tooltip == "new exact sample")
+}
+
+@Test func usagePressureChangeRefreshesOnlyItsCellWhenTextIsUnchanged() {
+    let uid: ResourceUID = "node-a"
+    var model = ResourceTableModel(rows: [usageRow(
+        uid,
+        displayText: "0.08 / 0.10",
+        usage: 0.0799
+    )])
+
+    let plan = model.apply(ResourceRowBatch(upserts: [usageRow(
+        uid,
+        displayText: "0.08 / 0.10",
+        usage: 0.081
+    )]))
+
+    #expect(plan.contentUpdate == .refreshCells([
+        ResourceTableCellUpdate(rowIndex: 0, columnID: "cpu"),
+    ]))
 }
 
 @Test func confirmedDeletionRemovesOnlyThatUIDFromSelection() {
@@ -356,6 +399,37 @@ import Testing
 
     trust.receiveDelta(upsertedUIDs: [], removedUIDs: [authoritative])
     #expect(!trust.permitsNetworkActions(for: [row(authoritative).identity]))
+}
+
+private func usageRow(
+    _ uid: ResourceUID,
+    displayText: String,
+    usage: Double,
+    measuredAt: Int64? = nil,
+    tooltip: String = ""
+) -> ResourceRow {
+    ResourceRow(
+        identity: identity(uid, resource: "nodes"),
+        cells: [
+            Cell(
+                columnID: "name",
+                displayText: uid.rawValue,
+                typedValue: .string(uid.rawValue)
+            ),
+            Cell(
+                columnID: "cpu",
+                displayText: displayText,
+                typedValue: .usage(ResourceUsageValue(
+                    usage: usage,
+                    request: 0.1,
+                    unit: "cores",
+                    resourceName: "cpu",
+                    measuredAtUnixMilliseconds: measuredAt
+                )),
+                tooltip: tooltip
+            ),
+        ]
+    )
 }
 
 private extension Collection {

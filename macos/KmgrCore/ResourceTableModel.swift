@@ -185,12 +185,25 @@ public struct ResourceTableUpdatePlan: Hashable, Sendable {
     }
 }
 
+/// One visible table cell whose rendered presentation changed without a row
+/// membership or ordering change. Column identity stays semantic here so the
+/// AppKit boundary can resolve the user's current column order.
+public struct ResourceTableCellUpdate: Hashable, Sendable {
+    public var rowIndex: Int
+    public var columnID: String
+
+    public init(rowIndex: Int, columnID: String) {
+        self.rowIndex = rowIndex
+        self.columnID = columnID
+    }
+}
+
 public enum ResourceTableContentUpdate: Hashable, Sendable {
     /// Row membership or ordering changed, so AppKit must rebuild its row map.
     case reloadAll
-    /// Membership and ordering are unchanged; only these visible rows need
-    /// their reusable cells refreshed. An empty array requires no data reload.
-    case reloadRows([Int])
+    /// Membership and ordering are unchanged. Existing visible views for only
+    /// these cells can be reconfigured in place; an empty array is a no-op.
+    case refreshCells([ResourceTableCellUpdate])
 }
 
 public struct SelectionCounts: Hashable, Sendable {
@@ -294,7 +307,15 @@ public struct ResourceTableModel: Hashable, Sendable {
             selectedUIDs.remove(uid)
             if selectionAnchorUID == uid { selectionAnchorUID = nil }
         }
+        var previousRowsByUID: [ResourceUID: ResourceRow] = [:]
+        previousRowsByUID.reserveCapacity(batch.upserts.count)
+        var upsertedUIDs: Set<ResourceUID> = []
+        upsertedUIDs.reserveCapacity(batch.upserts.count)
         for row in batch.upserts where !batch.removedUIDs.contains(row.identity.uid) {
+            let uid = row.identity.uid
+            if upsertedUIDs.insert(uid).inserted, let previous = rowByUID[uid] {
+                previousRowsByUID[uid] = previous
+            }
             rowByUID[row.identity.uid] = row
         }
 
@@ -349,7 +370,8 @@ public struct ResourceTableModel: Hashable, Sendable {
         return makeUpdatePlan(
             capture: capture,
             orderChanged: orderChanged,
-            upsertedUIDs: batch.upserts.lazy.map(\.identity.uid)
+            upsertedUIDs: upsertedUIDs,
+            previousRowsByUID: previousRowsByUID
         )
     }
 
@@ -517,7 +539,8 @@ public struct ResourceTableModel: Hashable, Sendable {
     private func makeUpdatePlan(
         capture: ResourceTableUpdateCapture,
         orderChanged: Bool,
-        upsertedUIDs: some Sequence<ResourceUID>
+        upsertedUIDs: Set<ResourceUID>,
+        previousRowsByUID: [ResourceUID: ResourceRow]
     ) -> ResourceTableUpdatePlan {
         let selectedRowIndexes = selectedUIDs.compactMap { visibleIndexByUID[$0] }.sorted()
         let scrollRestoration: ScrollRestorationPlan?
@@ -541,12 +564,107 @@ public struct ResourceTableModel: Hashable, Sendable {
         }
         let contentUpdate: ResourceTableContentUpdate = orderChanged
             ? .reloadAll
-            : .reloadRows(Array(Set(upsertedUIDs.compactMap { visibleIndexByUID[$0] })).sorted())
+            : .refreshCells(Self.cellUpdates(
+                for: upsertedUIDs,
+                previousRowsByUID: previousRowsByUID,
+                currentRowsByUID: rowByUID,
+                visibleIndexByUID: visibleIndexByUID
+            ))
         return ResourceTableUpdatePlan(
             selectedRowIndexes: selectedRowIndexes,
             scrollRestoration: scrollRestoration,
             contentUpdate: contentUpdate
         )
+    }
+
+    private static func cellUpdates(
+        for upsertedUIDs: Set<ResourceUID>,
+        previousRowsByUID: [ResourceUID: ResourceRow],
+        currentRowsByUID: [ResourceUID: ResourceRow],
+        visibleIndexByUID: [ResourceUID: Int]
+    ) -> [ResourceTableCellUpdate] {
+        var updates: Set<ResourceTableCellUpdate> = []
+        for uid in upsertedUIDs {
+            guard let rowIndex = visibleIndexByUID[uid],
+                let previous = previousRowsByUID[uid],
+                let current = currentRowsByUID[uid]
+            else { continue }
+            for columnID in changedRenderedColumnIDs(
+                from: previous,
+                to: current
+            ) {
+                updates.insert(ResourceTableCellUpdate(
+                    rowIndex: rowIndex,
+                    columnID: columnID
+                ))
+            }
+        }
+        return updates.sorted {
+            if $0.rowIndex != $1.rowIndex {
+                return $0.rowIndex < $1.rowIndex
+            }
+            return $0.columnID < $1.columnID
+        }
+    }
+
+    private static func changedRenderedColumnIDs(
+        from previous: ResourceRow,
+        to current: ResourceRow
+    ) -> Set<String> {
+        if previous.cells.count == current.cells.count {
+            var changed: Set<String> = []
+            for index in current.cells.indices {
+                let oldCell = previous.cells[index]
+                let newCell = current.cells[index]
+                guard oldCell.columnID == newCell.columnID else {
+                    return fallbackChangedRenderedColumnIDs(
+                        from: previous,
+                        to: current
+                    )
+                }
+                if ResourceTableCellRenderedPresentation(oldCell)
+                    != ResourceTableCellRenderedPresentation(newCell)
+                {
+                    changed.insert(newCell.columnID)
+                }
+            }
+            return changed
+        }
+        return fallbackChangedRenderedColumnIDs(from: previous, to: current)
+    }
+
+    private static func fallbackChangedRenderedColumnIDs(
+        from previous: ResourceRow,
+        to current: ResourceRow
+    ) -> Set<String> {
+        var previousByColumnID: [String: ResourceTableCellRenderedPresentation] = [:]
+        previousByColumnID.reserveCapacity(previous.cells.count)
+        for cell in previous.cells {
+            guard previousByColumnID.updateValue(
+                ResourceTableCellRenderedPresentation(cell),
+                forKey: cell.columnID
+            ) == nil else {
+                return Set(previous.cells.map(\.columnID) + current.cells.map(\.columnID))
+            }
+        }
+
+        var currentColumnIDs: Set<String> = []
+        currentColumnIDs.reserveCapacity(current.cells.count)
+        var changed: Set<String> = []
+        for cell in current.cells {
+            guard currentColumnIDs.insert(cell.columnID).inserted else {
+                return Set(previous.cells.map(\.columnID) + current.cells.map(\.columnID))
+            }
+            if previousByColumnID[cell.columnID]
+                != ResourceTableCellRenderedPresentation(cell)
+            {
+                changed.insert(cell.columnID)
+            }
+        }
+        changed.formUnion(previousByColumnID.keys.filter {
+            !currentColumnIDs.contains($0)
+        })
+        return changed
     }
 
     private static func indexes(for order: [ResourceUID]) -> [ResourceUID: Int] {
@@ -606,6 +724,48 @@ public struct ResourceTableModel: Hashable, Sendable {
             order.append(uid)
         }
         return (order, indexByUID)
+    }
+}
+
+/// The subset of `Cell` that changes pixels in the native table renderer.
+/// Exact typed values, measurement timestamps, accessibility prose, and
+/// tooltips deliberately do not participate: the model still stores their
+/// newest values, but a background-only change must not disturb an active
+/// hover. The next real presentation change or normal view reuse picks them up.
+private enum ResourceTableCellRenderedPresentation: Hashable {
+    case text(
+        value: String,
+        severity: CellSeverity
+    )
+    case usage(
+        value: String,
+        baseSeverity: CellSeverity,
+        accentSeverity: CellSeverity
+    )
+
+    init(_ cell: Cell) {
+        guard let usage = ResourceUsageCellPresentation(cell: cell) else {
+            self = .text(value: cell.displayText, severity: cell.severity)
+            return
+        }
+        let baseSeverity: CellSeverity = switch cell.severity {
+        case .informational, .muted: cell.severity
+        default: .normal
+        }
+        let accentSeverity: CellSeverity
+        if usage.currentUsageTextRange != nil,
+            usage.effectiveSeverity == .warning
+                || usage.effectiveSeverity == .critical
+        {
+            accentSeverity = usage.effectiveSeverity
+        } else {
+            accentSeverity = .normal
+        }
+        self = .usage(
+            value: usage.text,
+            baseSeverity: baseSeverity,
+            accentSeverity: accentSeverity
+        )
     }
 }
 

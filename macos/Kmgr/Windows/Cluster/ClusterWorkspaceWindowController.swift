@@ -3307,7 +3307,15 @@ private final class ResourceListViewController: NSViewController,
         ResourceTableAppKitProjection.apply(
             plan,
             visibleRowCount: model.orderedVisibleUIDs.count,
-            to: tableView
+            to: tableView,
+            updateVisibleCell: { [self] view, column, row in
+                configureResourceTableCell(
+                    in: tableView,
+                    tableColumn: column,
+                    row: row,
+                    reusing: view
+                ) === view
+            }
         )
         suppressSelectionCallbacks = wasSuppressingSelectionCallbacks
         tableSignposter.endInterval(
@@ -3339,9 +3347,10 @@ private final class ResourceListViewController: NSViewController,
         reloadVisibleCellPresentation(at: [], reloadAllVisibleCells: true)
     }
 
-    /// Reconfigures only reusable cells intersecting the current viewport.
-    /// Grouping by table column avoids the row/column cross-product that
-    /// `reloadData(forRowIndexes:columnIndexes:)` otherwise creates.
+    /// Updates only existing reusable cells intersecting the current viewport.
+    /// Highlight-only frames repaint the cell background directly; filter
+    /// emphasis reconfigures the same view. Neither path replaces the native
+    /// view or detaches an active tooltip.
     private func reloadVisibleCellPresentation(
         at addresses: Set<ResourceCellAddress>,
         reloadAllVisibleCells: Bool = false
@@ -3349,33 +3358,37 @@ private final class ResourceListViewController: NSViewController,
         guard isViewLoaded, !tableView.tableColumns.isEmpty else { return }
         let visibleRows = visibleTableRowIndexes()
         guard !visibleRows.isEmpty else { return }
-
-        if reloadAllVisibleCells {
-            tableView.reloadData(
-                forRowIndexes: visibleRows,
-                columnIndexes: IndexSet(integersIn: tableView.tableColumns.indices)
-            )
-            return
-        }
-        guard !addresses.isEmpty else { return }
-
+        guard reloadAllVisibleCells || !addresses.isEmpty else { return }
+        let now = ContinuousClock.now
         for columnIndex in tableView.tableColumns.indices {
+            let column = tableView.tableColumns[columnIndex]
             let columnID = tableView.tableColumns[columnIndex].identifier.rawValue
-            var affectedRows = IndexSet()
             for rowIndex in visibleRows {
                 let uid = model.orderedVisibleUIDs[rowIndex]
-                if addresses.contains(ResourceCellAddress(
+                let address = ResourceCellAddress(
                     uid: uid,
                     columnID: columnID
-                )) {
-                    affectedRows.insert(rowIndex)
-                }
-            }
-            if !affectedRows.isEmpty {
-                tableView.reloadData(
-                    forRowIndexes: affectedRows,
-                    columnIndexes: IndexSet(integer: columnIndex)
                 )
+                guard reloadAllVisibleCells || addresses.contains(address),
+                    let view = tableView.view(
+                        atColumn: columnIndex,
+                        row: rowIndex,
+                        makeIfNecessary: false
+                    )
+                else { continue }
+                if reloadAllVisibleCells {
+                    _ = configureResourceTableCell(
+                        in: tableView,
+                        tableColumn: column,
+                        row: rowIndex,
+                        reusing: view
+                    )
+                } else if let cell = view as? HighlightableResourceTableCellView {
+                    cell.setChangeHighlight(cellHighlightStore.presentation(
+                        for: address,
+                        at: now
+                    ))
+                }
             }
         }
     }
@@ -4454,7 +4467,24 @@ private final class ResourceListViewController: NSViewController,
         viewFor tableColumn: NSTableColumn?,
         row: Int
     ) -> NSView? {
-        guard model.orderedVisibleUIDs.indices.contains(row), let tableColumn else { return nil }
+        guard let tableColumn else { return nil }
+        return configureResourceTableCell(
+            in: tableView,
+            tableColumn: tableColumn,
+            row: row
+        )
+    }
+
+    /// Configures either a newly dequeued cell or an existing visible cell.
+    /// Returning nil for an incompatible existing view lets the AppKit seam
+    /// fall back to a targeted reload when a column changes renderer type.
+    private func configureResourceTableCell(
+        in tableView: NSTableView,
+        tableColumn: NSTableColumn,
+        row: Int,
+        reusing existingView: NSView? = nil
+    ) -> NSView? {
+        guard model.orderedVisibleUIDs.indices.contains(row) else { return nil }
         let columnID = tableColumn.identifier.rawValue
         let uid = model.orderedVisibleUIDs[row]
         let value = model.rowByUID[uid]?[columnID]
@@ -4468,10 +4498,17 @@ private final class ResourceListViewController: NSViewController,
         )
         if let value, let presentation = ResourceUsageCellPresentation(cell: value) {
             let identifier = NSUserInterfaceItemIdentifier("usage-cell.\(columnID)")
-            let cell = tableView.makeView(
-                withIdentifier: identifier,
-                owner: self
-            ) as? ResourceUsageTableCellView ?? ResourceUsageTableCellView()
+            let cell: ResourceUsageTableCellView
+            if let existingView {
+                guard let existingCell = existingView as? ResourceUsageTableCellView
+                else { return nil }
+                cell = existingCell
+            } else {
+                cell = tableView.makeView(
+                    withIdentifier: identifier,
+                    owner: self
+                ) as? ResourceUsageTableCellView ?? ResourceUsageTableCellView()
+            }
             cell.identifier = identifier
             cell.effectsPolicy = cellEffectsPolicy
             cell.configure(
@@ -4486,10 +4523,17 @@ private final class ResourceListViewController: NSViewController,
         }
 
         let identifier = NSUserInterfaceItemIdentifier("cell.\(columnID)")
-        let cell = tableView.makeView(
-            withIdentifier: identifier,
-            owner: self
-        ) as? ResourceTextTableCellView ?? ResourceTextTableCellView()
+        let cell: ResourceTextTableCellView
+        if let existingView {
+            guard let existingCell = existingView as? ResourceTextTableCellView
+            else { return nil }
+            cell = existingCell
+        } else {
+            cell = tableView.makeView(
+                withIdentifier: identifier,
+                owner: self
+            ) as? ResourceTextTableCellView ?? ResourceTextTableCellView()
+        }
         cell.identifier = identifier
         cell.effectsPolicy = cellEffectsPolicy
         cell.configure(

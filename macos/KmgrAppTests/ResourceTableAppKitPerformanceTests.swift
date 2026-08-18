@@ -8,6 +8,96 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Resource table AppKit harness")
 struct ResourceTableAppKitPerformanceTests {
+    @Test("targeted updates preserve changed and sibling cell identities")
+    func targetedUpdatesStayInPlace() throws {
+        let uid: ResourceUID = "node-a"
+        let dataSource = SyntheticResourceTableDataSource(
+            model: ResourceTableModel(rows: [syntheticRow(
+                uid,
+                status: "Pending"
+            )])
+        )
+        let tableView = NSTableView()
+        for columnID in ["name", "status"] {
+            let column = NSTableColumn(identifier: .init(columnID))
+            column.width = 180
+            tableView.addTableColumn(column)
+        }
+        tableView.delegate = dataSource
+        tableView.dataSource = dataSource
+
+        let scrollView = NSScrollView(
+            frame: NSRect(x: 0, y: 0, width: 400, height: 120)
+        )
+        scrollView.documentView = tableView
+        let window = NSWindow(
+            contentRect: scrollView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = scrollView
+        defer {
+            tableView.delegate = nil
+            tableView.dataSource = nil
+            window.contentView = NSView()
+            window.close()
+        }
+
+        tableView.reloadData()
+        window.contentView?.layoutSubtreeIfNeeded()
+        tableView.layoutSubtreeIfNeeded()
+        let nameView = try #require(tableView.view(
+            atColumn: 0,
+            row: 0,
+            makeIfNecessary: true
+        ))
+        let statusView = try #require(tableView.view(
+            atColumn: 1,
+            row: 0,
+            makeIfNecessary: true
+        ))
+        let requestCountBeforeUpdate = dataSource.requestedCellCount
+
+        let plan = dataSource.model.apply(ResourceRowBatch(upserts: [
+            syntheticRow(uid, status: "Ready"),
+        ]))
+        #expect(plan.contentUpdate == .refreshCells([
+            ResourceTableCellUpdate(rowIndex: 0, columnID: "status"),
+        ]))
+
+        var refreshedColumnIDs: [String] = []
+        ResourceTableAppKitProjection.apply(
+            plan,
+            visibleRowCount: 1,
+            to: tableView,
+            updateVisibleCell: { view, column, row in
+                refreshedColumnIDs.append(column.identifier.rawValue)
+                guard let cell = view as? NSTableCellView else { return false }
+                let uid = dataSource.model.orderedVisibleUIDs[row]
+                cell.textField?.stringValue = dataSource.model.rowByUID[uid]?[
+                    column.identifier.rawValue
+                ]?.displayText ?? "—"
+                return true
+            }
+        )
+
+        #expect(refreshedColumnIDs == ["status"])
+        #expect(dataSource.requestedCellCount == requestCountBeforeUpdate)
+        #expect(tableView.view(
+            atColumn: 0,
+            row: 0,
+            makeIfNecessary: false
+        ) === nameView)
+        #expect(tableView.view(
+            atColumn: 1,
+            row: 0,
+            makeIfNecessary: false
+        ) === statusView)
+        #expect((statusView as? NSTableCellView)?.textField?.stringValue == "Ready")
+    }
+
     @Test("100,000 rows keep UID selection and scroll while AppKit stays virtualized")
     func largeTableProjection() throws {
         let rowCount = 100_000
@@ -80,7 +170,7 @@ struct ResourceTableAppKitPerformanceTests {
             ResourceTableUpdatePlan(
                 selectedRowIndexes: selectedIndexes,
                 scrollRestoration: nil,
-                contentUpdate: .reloadRows([])
+                contentUpdate: .refreshCells([])
             ),
             visibleRowCount: rowCount,
             to: tableView
@@ -281,7 +371,8 @@ private final class SyntheticResourceTableDataSource: NSObject,
             return nil
         }
         requestedCellCount += 1
-        let identifier = NSUserInterfaceItemIdentifier("synthetic-name-cell")
+        let columnID = tableColumn.identifier.rawValue
+        let identifier = NSUserInterfaceItemIdentifier("synthetic-\(columnID)-cell")
         let cell = tableView.makeView(withIdentifier: identifier, owner: self)
             as? NSTableCellView ?? NSTableCellView()
         cell.identifier = identifier
@@ -293,7 +384,7 @@ private final class SyntheticResourceTableDataSource: NSObject,
             cell.textField = label
         }
         let uid = model.orderedVisibleUIDs[row]
-        cell.textField?.stringValue = model.rowByUID[uid]?["name"]?.displayText ?? "—"
+        cell.textField?.stringValue = model.rowByUID[uid]?[columnID]?.displayText ?? "—"
         return cell
     }
 }

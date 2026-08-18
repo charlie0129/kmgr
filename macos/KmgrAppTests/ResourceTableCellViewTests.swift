@@ -124,15 +124,28 @@ struct ResourceTableCellViewTests {
             equals: regressionTint.withAlphaComponent(0.25)
         )
 
-        let defaultRegression = ResourceTableCellEffectsPolicy(
+        let defaultPolicy = ResourceTableCellEffectsPolicy(
             reducesMotion: false
-        ).backgroundColor(for: ResourceCellHighlightPresentation(
-            emphasis: .regression,
-            strength: 1
-        ))
+        )
+        let defaultNeutral = defaultPolicy.backgroundColor(
+            for: ResourceCellHighlightPresentation(
+                emphasis: .neutral,
+                strength: 1
+            )
+        )
+        try expectColor(
+            defaultNeutral,
+            equals: NSColor.controlAccentColor.withAlphaComponent(0.28)
+        )
+        let defaultRegression = defaultPolicy.backgroundColor(
+            for: ResourceCellHighlightPresentation(
+                emphasis: .regression,
+                strength: 1
+            )
+        )
         try expectColor(
             defaultRegression,
-            equals: NSColor.systemRed.withAlphaComponent(0.2)
+            equals: NSColor.systemRed.withAlphaComponent(0.32)
         )
     }
 

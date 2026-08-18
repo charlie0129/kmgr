@@ -24,8 +24,8 @@ struct ResourceTableCellEffectsPolicy {
         reducesMotion: Bool,
         neutralTint: NSColor = .controlAccentColor,
         regressionTint: NSColor = .systemRed,
-        neutralMaximumOpacity: CGFloat = 0.16,
-        regressionMaximumOpacity: CGFloat = 0.20
+        neutralMaximumOpacity: CGFloat = 0.28,
+        regressionMaximumOpacity: CGFloat = 0.32
     ) {
         self.reducesMotion = reducesMotion
         self.neutralTint = neutralTint
@@ -130,8 +130,17 @@ class HighlightableResourceTableCellView: NSTableCellView {
         setAccessibilityLabel(nil)
         setAccessibilityValue(text)
         setAccessibilityHelp(toolTip)
-        currentChangeHighlight = changeHighlight
-        applyChangeHighlight(changeHighlight)
+        setChangeHighlight(changeHighlight)
+    }
+
+    /// Repaints the transient tint without rebuilding the cell or resetting
+    /// its tooltip tracking area. Highlight fade frames use this lightweight
+    /// path so an active hover remains attached to the same native view.
+    func setChangeHighlight(
+        _ presentation: ResourceCellHighlightPresentation?
+    ) {
+        currentChangeHighlight = presentation
+        applyChangeHighlight(presentation)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -161,8 +170,7 @@ class HighlightableResourceTableCellView: NSTableCellView {
         setAccessibilityLabel(nil)
         setAccessibilityValue(nil)
         setAccessibilityHelp(nil)
-        currentChangeHighlight = nil
-        applyChangeHighlight(nil)
+        setChangeHighlight(nil)
     }
 
     private func applyChangeHighlight(

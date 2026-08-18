@@ -92,6 +92,20 @@ struct ResourceListCellEffectsTests {
                 strength: 1
             ))
         #expect(restarts.renderedHighlightColor?.isEqual(expectedRegression) == true)
+        let initialOrdinaryOpacity = try #require(colorAlpha(
+            ordinary.renderedHighlightColor
+        ))
+        #expect(initialOrdinaryOpacity >= 0.27)
+
+        try await waitForCellEffects {
+            guard let current = try? highlightedCell(
+                in: table,
+                columnID: "status"
+            ), current === ordinary,
+                let opacity = colorAlpha(current.renderedHighlightColor)
+            else { return false }
+            return opacity > 0 && opacity < initialOrdinaryOpacity
+        }
 
         try await waitForCellEffects(timeout: .seconds(3)) {
             (try? highlightedCell(
@@ -103,6 +117,14 @@ struct ResourceListCellEffectsTests {
                     columnID: "cpu"
                 ).renderedHighlightColor) == nil
         }
+        #expect(try highlightedCell(
+            in: table,
+            columnID: "status"
+        ) === ordinary)
+        #expect(try highlightedCell(
+            in: table,
+            columnID: "cpu"
+        ) === usage)
 
         // Establish a live highlight, then replace the Pod with a same-name,
         // new-UID object. Reuse must not transfer UID-keyed transient state.
@@ -140,6 +162,65 @@ struct ResourceListCellEffectsTests {
                 columnID: columnID
             ).renderedHighlightColor == nil)
         }
+    }
+
+    @Test("background-only values leave hovered presentation untouched")
+    func backgroundOnlyUpdatePreservesVisibleCells() async throws {
+        let provider = ControlledCellEffectsWorkspaceProvider()
+        let controller = makeCellEffectsWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let table = try resourceTable(in: controller)
+
+        try await waitForCellEffects { provider.requestCount == 1 }
+        #expect(provider.yieldSnapshot(
+            rows: [cellEffectsRow(
+                uid: "pod-api",
+                status: "Pending",
+                restarts: 0,
+                cpuUsage: 0.1001,
+                cpuTooltip: "first exact metric",
+                measuredAt: 1_000
+            )],
+            first: true,
+            last: true
+        ))
+        try await waitForCellEffects {
+            text(in: table, columnID: "status") == "Pending"
+        }
+        let nameCell = try #require(tableViewCell(
+            in: table,
+            columnID: "name"
+        ))
+        let statusCell = try #require(tableViewCell(
+            in: table,
+            columnID: "status"
+        ))
+        let cpuCell = try #require(tableViewCell(
+            in: table,
+            columnID: "cpu"
+        ))
+        #expect(cpuCell.toolTip == "first exact metric")
+
+        // CPU's exact sample, timestamp, and tooltip all change, but its
+        // rounded text and pressure style remain identical. The visible
+        // Status change confirms that this delta has been applied.
+        #expect(provider.yieldDelta(upserts: [cellEffectsRow(
+            uid: "pod-api",
+            status: "Running",
+            restarts: 0,
+            cpuUsage: 0.1002,
+            cpuTooltip: "second exact metric",
+            measuredAt: 2_000
+        )]))
+        try await waitForCellEffects {
+            text(in: table, columnID: "status") == "Running"
+        }
+
+        #expect(tableViewCell(in: table, columnID: "name") === nameCell)
+        #expect(tableViewCell(in: table, columnID: "status") === statusCell)
+        #expect(tableViewCell(in: table, columnID: "cpu") === cpuCell)
+        #expect(cpuCell.toolTip == "first exact metric")
     }
 
     @Test("simple filter bold activates only after replacement snapshot completes")
@@ -368,7 +449,9 @@ private func cellEffectsRow(
     name: String = "api",
     status: String,
     restarts: Int64,
-    cpuUsage: Double
+    cpuUsage: Double,
+    cpuTooltip: String = "",
+    measuredAt: Int64? = nil
 ) -> ResourceRow {
     ResourceRow(
         identity: ResourceIdentity(
@@ -400,8 +483,10 @@ private func cellEffectsRow(
                     request: 0.5,
                     limit: 1,
                     unit: "cores",
-                    resourceName: "cpu"
-                ))
+                    resourceName: "cpu",
+                    measuredAtUnixMilliseconds: measuredAt
+                )),
+                tooltip: cpuTooltip
             ),
         ]
     )
@@ -468,6 +553,11 @@ private func attributedText(
 @MainActor
 private func containsBoldText(_ value: NSAttributedString) -> Bool {
     !boldRanges(in: value).isEmpty
+}
+
+@MainActor
+private func colorAlpha(_ color: NSColor?) -> CGFloat? {
+    color?.usingColorSpace(.deviceRGB)?.alphaComponent
 }
 
 @MainActor
