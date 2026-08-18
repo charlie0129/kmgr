@@ -94,7 +94,11 @@ import Testing
     #expect(!firstOpen.hasPreviousContext)
 }
 
-@Test func onlyLoadingColdEmptySnapshotPreservesRetainedRows() {
+@Test func stagedReconciliationKeepsRenderedRowsThroughRepeatedEmptyAndPartialPayloads() {
+    let oldRows = (0..<4).map { warmRow(index: $0, revision: "old") }
+    let replacementRows = (0..<4).map { warmRow(index: $0, revision: "new") }
+    var rendered = ResourceTableModel(rows: oldRows)
+    var staged = ResourceStagedReconciliation()
     let empty = ResourceSnapshotChunk(
         rows: [],
         first: true,
@@ -102,44 +106,60 @@ import Testing
         index: 0,
         estimatedTotalRows: 0
     )
-    let loading = ResourceViewStatus(freshness: .loading)
 
-    #expect(ResourceWarmRowPolicy.preservesRetainedRows(
-        for: empty,
-        backendStatus: loading,
-        isRetainingWarmRows: true,
-        isFirstSnapshotInStream: true
+    staged.receive(empty)
+    staged.receive(empty)
+    #expect(staged.visibleRowCount == 0)
+    #expect(rendered.orderedVisibleUIDs.count == 4)
+
+    staged.receive(ResourceRowDelta(
+        upserts: Array(replacementRows.prefix(2)),
+        orderedUIDs: replacementRows.prefix(2).map(\.identity.uid),
+        orderIsComplete: true
     ))
-    #expect(!ResourceWarmRowPolicy.preservesRetainedRows(
-        for: empty,
-        backendStatus: ResourceViewStatus(freshness: .watching),
-        isRetainingWarmRows: true,
-        isFirstSnapshotInStream: true
+    #expect(staged.visibleRowCount == 2)
+    #expect(rendered.orderedVisibleUIDs.count == 4)
+    #expect(rendered.rowByUID["pod-0"]?["name"]?.displayText == "old-0")
+
+    staged.receive(ResourceRowDelta(
+        upserts: Array(replacementRows.suffix(2)),
+        orderedUIDs: replacementRows.map(\.identity.uid),
+        orderIsComplete: true
     ))
-    #expect(!ResourceWarmRowPolicy.preservesRetainedRows(
-        for: ResourceSnapshotChunk(
-            rows: [warmRow()],
-            first: true,
-            last: true,
-            index: 0,
-            estimatedTotalRows: 1
-        ),
-        backendStatus: loading,
-        isRetainingWarmRows: true,
-        isFirstSnapshotInStream: true
+    let reconciliation = ResourceViewReconciliation(rowsVisible: 4)
+    #expect(staged.matches(reconciliation))
+    rendered.apply(staged.promotionBatch)
+    #expect(rendered.orderedVisibleUIDs.count == 4)
+    #expect(rendered.rowByUID["pod-0"]?["name"]?.displayText == "new-0")
+}
+
+@Test func authoritativeEmptyReconciliationClearsRetainedRowsAndSelection() {
+    let oldRows = (0..<2).map { warmRow(index: $0, revision: "old") }
+    var rendered = ResourceTableModel(
+        rows: oldRows,
+        selectedUIDs: ["pod-0"],
+        selectionAnchorUID: "pod-0"
+    )
+    var staged = ResourceStagedReconciliation()
+    staged.receive(ResourceSnapshotChunk(
+        rows: [],
+        first: true,
+        last: true,
+        index: 0,
+        estimatedTotalRows: 0
     ))
-    #expect(!ResourceWarmRowPolicy.preservesRetainedRows(
-        for: empty,
-        backendStatus: loading,
-        isRetainingWarmRows: false,
-        isFirstSnapshotInStream: true
+    staged.receive(ResourceRowDelta(
+        removedUIDs: Set(oldRows.map(\.identity.uid)),
+        orderedUIDs: [],
+        orderIsComplete: true
     ))
-    #expect(!ResourceWarmRowPolicy.preservesRetainedRows(
-        for: empty,
-        backendStatus: loading,
-        isRetainingWarmRows: true,
-        isFirstSnapshotInStream: false
-    ))
+
+    #expect(staged.matches(ResourceViewReconciliation(rowsVisible: 0)))
+    #expect(rendered.orderedVisibleUIDs.count == 2)
+    rendered.apply(staged.promotionBatch)
+    #expect(rendered.orderedVisibleUIDs.isEmpty)
+    #expect(rendered.rowByUID.isEmpty)
+    #expect(rendered.selectedUIDs.isEmpty)
 }
 
 @Test func retainedRowsPresentAsResumingUntilSnapshotReconciliation() {
@@ -159,18 +179,9 @@ import Testing
     #expect(result.fromWarmCache)
     #expect(result.showsProgress)
 
-    #expect(ResourceWarmRowPolicy.statusConfirmsAuthoritativeReconciliation(
-        ResourceViewStatus(freshness: .watching)
-    ))
-    #expect(ResourceWarmRowPolicy.statusConfirmsAuthoritativeReconciliation(
-        ResourceViewStatus(freshness: .complete)
-    ))
-    #expect(!ResourceWarmRowPolicy.statusConfirmsAuthoritativeReconciliation(
-        ResourceViewStatus(freshness: .loading)
-    ))
 }
 
-private func warmRow() -> ResourceRow {
+private func warmRow(index: Int = 0, revision: String = "old") -> ResourceRow {
     ResourceRow(
         identity: ResourceIdentity(
             clusterSessionID: "session-a",
@@ -178,9 +189,9 @@ private func warmRow() -> ResourceRow {
             version: "v1",
             resource: "pods",
             namespace: "default",
-            name: "api",
-            uid: "pod-api"
+            name: "pod-\(index)",
+            uid: ResourceUID("pod-\(index)")
         ),
-        cells: [Cell(columnID: "name", displayText: "api")]
+        cells: [Cell(columnID: "name", displayText: "\(revision)-\(index)")]
     )
 }

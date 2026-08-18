@@ -253,8 +253,8 @@ struct ResourceListCellEffectsTests {
         ))
         try await waitForCellEffects { provider.requestCount == 2 }
 
-        // Warm rows and progressive replacement rows remain unstyled until
-        // the backend has accepted the complete filtered projection.
+        // Warm rows remain visible and unstyled while the complete
+        // replacement projection is assembled off-screen.
         #expect(provider.yieldSnapshot(
             rows: [cellEffectsRow(
                 uid: "pod-api",
@@ -267,7 +267,7 @@ struct ResourceListCellEffectsTests {
             last: false
         ))
         try await waitForCellEffects {
-            text(in: table, columnID: "status") == "api-ready"
+            text(in: table, columnID: "status") == "Running"
         }
         #expect(!containsBoldText(try attributedText(
             in: table,
@@ -283,9 +283,12 @@ struct ResourceListCellEffectsTests {
         ).renderedHighlightColor == nil)
 
         #expect(provider.yieldSnapshot(rows: [], first: false, last: true))
+        #expect(text(in: table, columnID: "status") == "Running")
+        #expect(provider.yieldReconciled(rowsVisible: 1))
         try await waitForCellEffects {
-            (try? attributedText(in: table, columnID: "name"))
-                .map(containsBoldText) == true
+            text(in: table, columnID: "status") == "api-ready"
+                && (try? attributedText(in: table, columnID: "name"))
+                    .map(containsBoldText) == true
         }
         let nameText = try attributedText(in: table, columnID: "name")
         #expect(boldRanges(in: nameText) == [
@@ -401,6 +404,19 @@ private final class ControlledCellEffectsWorkspaceProvider:
                 orderedUIDs: orderedUIDs,
                 orderIsComplete: orderIsComplete
             )
+        ))
+        return true
+    }
+
+    @discardableResult
+    func yieldReconciled(rowsVisible: UInt64) -> Bool {
+        guard let emission = nextEmission() else { return false }
+        emission.state.continuation.yield(.reconciled(
+            cursor: StreamCursor(
+                generation: emission.state.request.generation,
+                sequence: emission.sequence
+            ),
+            reconciliation: ResourceViewReconciliation(rowsVisible: rowsVisible)
         ))
         return true
     }

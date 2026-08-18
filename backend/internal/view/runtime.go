@@ -752,6 +752,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	)
 	subscription.runtime = r
 	subscription.resource = entry
+	subscription.stageUntilReconciled = request.GetStageUntilReconciled()
 	subscription.scopeKey = deliveryIdentity.namespaceScope
 	subscription.deliveryState = attempt.deliveryState
 	acceleratorConfig := metrics.AcceleratorConfig{}
@@ -869,7 +870,11 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		r.canRetainWarmProjectionLocked(previous.resource)
 	r.mu.Unlock()
 
-	subscription.sealInitialUnlocked(initialStatus, warmRows)
+	subscription.sealInitialUnlocked(
+		initialStatus,
+		warmRows,
+		subscription.stageUntilReconciled && snapshotComplete,
+	)
 	if r.openHandoffHook != nil {
 		r.openHandoffHook()
 	}
@@ -2315,34 +2320,37 @@ type Subscription struct {
 	metrics       *metrics.Subscription
 	metricCancel  context.CancelFunc
 
-	mu                     sync.Mutex
-	generation             uint64
-	sequence               uint64
-	projector              *Projector
-	projectionCacheKey     projectionCacheKey
-	nodeAccountingRevision uint64
-	rows                   map[string]*kmgrv1.ResourceRow
-	order                  []string
-	pendingUpserts         map[string]*kmgrv1.ResourceRow
-	pendingRemoved         map[string]struct{}
-	pendingStatuses        []*kmgrv1.ViewStatus
-	pendingError           *kmgrv1.StructuredError
-	sealedInitial          []*kmgrv1.ViewEvent
-	optionalResourceHints  optionalResourceStreamHints
-	knownUIDs              map[string]bool
-	inFlightDelivery       *subscriptionDelivery
-	pendingObjects         map[string]*unstructured.Unstructured
-	removalOverflow        bool
-	projectionTimer        *time.Timer
-	projectionScheduled    bool
-	projectionRunning      bool
-	projectionResnapshot   bool
-	projectionRevision     uint64
-	projectionScheduleID   uint64
-	projectionPasses       uint64
-	projectedObjects       uint64
-	projectionContext      context.Context
-	cancelProjection       context.CancelFunc
+	mu                      sync.Mutex
+	generation              uint64
+	sequence                uint64
+	projector               *Projector
+	projectionCacheKey      projectionCacheKey
+	nodeAccountingRevision  uint64
+	rows                    map[string]*kmgrv1.ResourceRow
+	order                   []string
+	pendingUpserts          map[string]*kmgrv1.ResourceRow
+	pendingRemoved          map[string]struct{}
+	pendingStatuses         []*kmgrv1.ViewStatus
+	pendingError            *kmgrv1.StructuredError
+	sealedInitial           []*kmgrv1.ViewEvent
+	stageUntilReconciled    bool
+	pendingReconciliation   bool
+	reconciliationDelivered bool
+	optionalResourceHints   optionalResourceStreamHints
+	knownUIDs               map[string]bool
+	inFlightDelivery        *subscriptionDelivery
+	pendingObjects          map[string]*unstructured.Unstructured
+	removalOverflow         bool
+	projectionTimer         *time.Timer
+	projectionScheduled     bool
+	projectionRunning       bool
+	projectionResnapshot    bool
+	projectionRevision      uint64
+	projectionScheduleID    uint64
+	projectionPasses        uint64
+	projectedObjects        uint64
+	projectionContext       context.Context
+	cancelProjection        context.CancelFunc
 	// snapshotComplete permits raw-store absence to prove deletion. Cold and
 	// progressive LIST stores remain incomplete until their final page commits.
 	snapshotComplete bool
@@ -2705,16 +2713,24 @@ func (s *Subscription) reconcileKnownUIDsWithRawObjectsUnlocked(objects []*unstr
 // sealInitial snapshots the first cached delivery into immutable protobuf
 // events. Later LIST/WATCH/metrics work mutates only the ordinary mailbox and
 // can therefore never overtake or rewrite what the client first observes.
-func (s *Subscription) sealInitial(status *kmgrv1.ViewStatus, rows []*kmgrv1.ResourceRow) {
+func (s *Subscription) sealInitial(
+	status *kmgrv1.ViewStatus,
+	rows []*kmgrv1.ResourceRow,
+	reconciled bool,
+) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
-	s.sealInitialUnlocked(status, rows)
+	s.sealInitialUnlocked(status, rows, reconciled)
 }
 
-func (s *Subscription) sealInitialUnlocked(status *kmgrv1.ViewStatus, rows []*kmgrv1.ResourceRow) {
+func (s *Subscription) sealInitialUnlocked(
+	status *kmgrv1.ViewStatus,
+	rows []*kmgrv1.ResourceRow,
+	reconciled bool,
+) {
 	s.sealedInitial = nil
 	if status != nil {
 		copy := proto.Clone(status).(*kmgrv1.ViewStatus)
@@ -2751,7 +2767,26 @@ func (s *Subscription) sealInitialUnlocked(status *kmgrv1.ViewStatus, rows []*km
 			})
 		}
 	}
+	if reconciled {
+		s.sealedInitial = append(s.sealedInitial, &kmgrv1.ViewEvent{
+			Payload: &kmgrv1.ViewEvent_Reconciled{Reconciled: &kmgrv1.ViewReconciled{
+				RowsVisible: uint64(len(rows)),
+			}},
+		})
+		s.reconciliationDelivered = true
+	}
 	s.signalLocked(true)
+}
+
+// markReconciledLocked queues a generation-local commit barrier behind all
+// row payloads already present in the mailbox. The marker is emitted exactly
+// once because a retained client needs only the first complete replacement;
+// later WATCH updates apply directly to the promoted table.
+func (s *Subscription) markReconciledLocked() {
+	if !s.stageUntilReconciled || s.reconciliationDelivered || s.pendingReconciliation {
+		return
+	}
+	s.pendingReconciliation = true
 }
 
 func (s *Subscription) queueAuthoritativeResnapshot() {
@@ -2855,6 +2890,7 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 			RowsVisible:            uint64(len(s.rows)),
 			LastSynchronizedUnixMs: batch.SynchronizedAt.UnixMilli(),
 		})
+		s.markReconciledLocked()
 	}
 	s.signalLocked(batch.FromList)
 }
@@ -3494,6 +3530,11 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 		events = append(events, s.errorEventLocked(s.pendingError))
 		s.pendingError = nil
 	}
+	if s.pendingReconciliation {
+		events = append(events, s.reconciliationEventLocked())
+		s.pendingReconciliation = false
+		s.reconciliationDelivered = true
+	}
 	s.updateKnownUIDsLocked(events)
 	return events
 }
@@ -3501,7 +3542,7 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 func (s *Subscription) hasPendingDeliveryLocked() bool {
 	return len(s.pendingStatuses) != 0 || s.resnapshot || len(s.pendingUpserts) != 0 ||
 		len(s.pendingRemoved) != 0 || s.removalOverflow || s.orderDirty || s.pendingError != nil ||
-		s.optionalResourceHints.hasPendingLocked()
+		s.pendingReconciliation || s.optionalResourceHints.hasPendingLocked()
 }
 
 func (s *Subscription) pendingRemovalUIDsLocked() []string {
@@ -3592,6 +3633,15 @@ func (s *Subscription) deltaEventLocked(delta *kmgrv1.RowDelta) *kmgrv1.ViewEven
 
 func (s *Subscription) errorEventLocked(value *kmgrv1.StructuredError) *kmgrv1.ViewEvent {
 	return &kmgrv1.ViewEvent{Cursor: s.cursorLocked(), Payload: &kmgrv1.ViewEvent_Error{Error: value}}
+}
+
+func (s *Subscription) reconciliationEventLocked() *kmgrv1.ViewEvent {
+	return &kmgrv1.ViewEvent{
+		Cursor: s.cursorLocked(),
+		Payload: &kmgrv1.ViewEvent_Reconciled{Reconciled: &kmgrv1.ViewReconciled{
+			RowsVisible: uint64(len(s.order)),
+		}},
+	}
 }
 
 func (s *Subscription) close() {

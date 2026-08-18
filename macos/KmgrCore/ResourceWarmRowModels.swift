@@ -56,11 +56,80 @@ public struct ResourceWarmRowDecision: Hashable, Sendable {
     }
 }
 
+/// Builds a replacement table without mutating the table currently rendered
+/// by AppKit. Loading snapshots may be empty or contain only the LIST pages
+/// received so far; neither is a reason to remove retained rows before the
+/// engine's ordered reconciliation barrier arrives.
+public struct ResourceStagedReconciliation: Hashable, Sendable {
+    public private(set) var model = ResourceTableModel()
+    public private(set) var confirmedRemovedUIDs: Set<ResourceUID> = []
+    public private(set) var observedOptionalResourceKeys: Set<String> = []
+    public private(set) var observedOptionalResourceKeysTruncated = false
+    private var snapshotUIDs: [ResourceUID] = []
+
+    public init() {}
+
+    public mutating func receive(_ chunk: ResourceSnapshotChunk) {
+        if chunk.first {
+            snapshotUIDs.removeAll(keepingCapacity: true)
+        }
+        let chunkUIDs = chunk.rows.map(\.identity.uid)
+        snapshotUIDs.append(contentsOf: chunkUIDs)
+        model.apply(ResourceRowBatch(
+            upserts: chunk.rows,
+            visibleOrder: chunk.last ? .replace(snapshotUIDs) : .append(chunkUIDs)
+        ))
+        observe(
+            keys: chunk.observedOptionalResourceKeys,
+            truncated: chunk.observedOptionalResourceKeysTruncated
+        )
+    }
+
+    public mutating func receive(_ delta: ResourceRowDelta) {
+        confirmedRemovedUIDs.formUnion(delta.removedUIDs)
+        confirmedRemovedUIDs.subtract(delta.upserts.lazy
+            .map(\.identity.uid)
+            .filter { !delta.removedUIDs.contains($0) })
+        model.apply(ResourceRowBatch(
+            upserts: delta.upserts,
+            removedUIDs: delta.removedUIDs,
+            visibleOrder: delta.orderIsComplete
+                ? .replace(delta.orderedUIDs) : .unchanged
+        ))
+        observe(
+            keys: delta.observedOptionalResourceKeys,
+            truncated: delta.observedOptionalResourceKeysTruncated
+        )
+    }
+
+    public var visibleRowCount: Int { model.orderedVisibleUIDs.count }
+
+    public func matches(_ reconciliation: ResourceViewReconciliation) -> Bool {
+        UInt64(visibleRowCount) == reconciliation.rowsVisible
+    }
+
+    /// One mutation against the rendered model installs every staged cell and
+    /// the final visible order. Only explicit Kubernetes tombstones remove
+    /// hidden identities, preserving selection across filter changes.
+    public var promotionBatch: ResourceRowBatch {
+        ResourceRowBatch(
+            upserts: model.rowByUID.values.sorted {
+                $0.identity.uid.rawValue < $1.identity.uid.rawValue
+            },
+            removedUIDs: confirmedRemovedUIDs,
+            visibleOrder: .replace(model.orderedVisibleUIDs)
+        )
+    }
+
+    private mutating func observe(keys: Set<String>, truncated: Bool) {
+        observedOptionalResourceKeys.formUnion(keys)
+        observedOptionalResourceKeysTruncated =
+            observedOptionalResourceKeysTruncated || truncated
+    }
+}
+
 /// Pure policy for retaining the GUI's compact UID-keyed rows while a stopped
-/// same-view watch is reopened. The engine intentionally starts a cold view
-/// with one sealed empty snapshot while its asynchronous LIST is still
-/// loading; that transport baseline is not evidence that previously rendered
-/// Kubernetes objects disappeared.
+/// same-view watch is reopened.
 public enum ResourceWarmRowPolicy {
     public static func decision(
         existingRowCount: Int,
@@ -89,23 +158,6 @@ public enum ResourceWarmRowPolicy {
         ).canRetain
     }
 
-    /// Identifies only the engine's cold initial placeholder. A later empty
-    /// snapshot received after loading has advanced remains authoritative and
-    /// must clear rows when the Kubernetes result is genuinely empty.
-    public static func preservesRetainedRows(
-        for chunk: ResourceSnapshotChunk,
-        backendStatus: ResourceViewStatus?,
-        isRetainingWarmRows: Bool,
-        isFirstSnapshotInStream: Bool
-    ) -> Bool {
-        isRetainingWarmRows
-            && isFirstSnapshotInStream
-            && backendStatus?.freshness == .loading
-            && chunk.first
-            && chunk.last
-            && chunk.rows.isEmpty
-    }
-
     /// Keeps the retained row count and synchronization age honest while the
     /// replacement snapshot is pending. A backend `watching` status can arrive
     /// just before its authoritative snapshot, so it remains visually
@@ -126,20 +178,5 @@ public enum ResourceWarmRowPolicy {
         status.lastSynchronizedAt = status.lastSynchronizedAt ?? lastSynchronizedAt
         status.fromWarmCache = true
         return status
-    }
-
-    /// A reconciliation payload received while LIST/WATCH is authoritative
-    /// can end the locally retained presentation. Keeping this separate from
-    /// payload arrival handles either ordering: WATCHING then delta, or delta
-    /// followed by WATCHING.
-    public static func statusConfirmsAuthoritativeReconciliation(
-        _ status: ResourceViewStatus?
-    ) -> Bool {
-        switch status?.freshness {
-        case .watching, .complete:
-            true
-        default:
-            false
-        }
     }
 }

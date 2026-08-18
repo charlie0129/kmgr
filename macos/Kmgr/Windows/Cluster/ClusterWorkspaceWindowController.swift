@@ -2337,9 +2337,10 @@ private final class ResourceListViewController: NSViewController,
     private var suppressSortChanges = false
     private var snapshotUIDs: [ResourceUID] = []
     private var lastStreamContext: ResourceWarmRowContext?
-    private var isRetainingWarmRowsForCurrentStream = false
-    private var hasReceivedResourcePayloadForCurrentStream = false
-    private var hasReceivedWarmRowReconciliationPayload = false
+    private var stagedReconciliation: ResourceStagedReconciliation?
+    private var isRetainingWarmRowsForCurrentStream: Bool {
+        stagedReconciliation != nil
+    }
     private var backendResourceViewStatus: ResourceViewStatus?
     private var retainedRowsLastSynchronizedAt: Date?
     private var pendingScrollAnchor: ScrollAnchor?
@@ -2473,6 +2474,7 @@ private final class ResourceListViewController: NSViewController,
         case .status: "status"
         case .snapshot: "snapshot"
         case .delta: "delta"
+        case .reconciled: "reconciled"
         case .failure: "failure"
         }
     }
@@ -2754,6 +2756,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask = nil
         streamTask?.cancel()
         streamTask = nil
+        stagedReconciliation = nil
         cancelOptionalResourceDiscovery(selecting: nil)
         generationGate.reset()
         recoveredResourceTrust.requireValidation()
@@ -2774,6 +2777,7 @@ private final class ResourceListViewController: NSViewController,
         clearTransientCellPresentation()
         streamTask?.cancel()
         streamTask = nil
+        stagedReconciliation = nil
         cancelOptionalResourceDiscovery(selecting: nil)
         model = ResourceTableModel()
         tableView.reloadData()
@@ -2829,6 +2833,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask?.cancel()
         filterTask = nil
         cancelCurrentStream(reason: "suspend")
+        stagedReconciliation = nil
         cancelOptionalResourceDiscovery(selecting: nil)
     }
 
@@ -3252,9 +3257,8 @@ private final class ResourceListViewController: NSViewController,
             tableView.reloadData()
         }
         lastStreamContext = nextStreamContext
-        isRetainingWarmRowsForCurrentStream = canKeepWarmRows
-        hasReceivedResourcePayloadForCurrentStream = false
-        hasReceivedWarmRowReconciliationPayload = false
+        stagedReconciliation = canKeepWarmRows
+            ? ResourceStagedReconciliation() : nil
         backendResourceViewStatus = nil
         retainedRowsLastSynchronizedAt = canKeepWarmRows
             ? resourceViewStatus?.lastSynchronizedAt : nil
@@ -3287,7 +3291,8 @@ private final class ResourceListViewController: NSViewController,
                     columnID: columnID,
                     direction: descriptor.ascending ? .ascending : .descending
                 )
-            }
+            },
+            stageUntilReconciled: canKeepWarmRows
         )
         streamTask = Task { [weak self, provider] in
             do {
@@ -3380,33 +3385,37 @@ private final class ResourceListViewController: NSViewController,
                     + " local_rows=\(model.orderedVisibleUIDs.count)"
                     + " retaining=\(isRetainingWarmRowsForCurrentStream)"
                     + " from_warm_cache=\(status.fromWarmCache)"
-                    + " received_payload=\(hasReceivedResourcePayloadForCurrentStream)"
-                    + " received_reconciliation="
-                    + "\(hasReceivedWarmRowReconciliationPayload)"
+                    + " staged_rows=\(stagedReconciliation?.visibleRowCount ?? 0)"
             )
             backendResourceViewStatus = status
             if isRetainingWarmRowsForCurrentStream {
-                if !finishWarmRowRetentionIfReconciled() {
-                    installResourceViewStatus(ResourceWarmRowPolicy.refreshingStatus(
-                        backendStatus: status,
-                        retainedRowCount: model.orderedVisibleUIDs.count,
-                        lastSynchronizedAt: retainedRowsLastSynchronizedAt
-                    ))
-                }
+                installResourceViewStatus(ResourceWarmRowPolicy.refreshingStatus(
+                    backendStatus: status,
+                    retainedRowCount: model.orderedVisibleUIDs.count,
+                    lastSynchronizedAt: retainedRowsLastSynchronizedAt
+                ))
                 countLabel.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects"
             } else {
                 installResourceViewStatus(status)
                 countLabel.stringValue = "\(status.rowsVisible.formatted()) objects"
             }
         case .snapshot(_, let chunk):
-            let isInitialSnapshot = !hasReceivedResourcePayloadForCurrentStream
+            if var staged = stagedReconciliation {
+                let stagedRowsBefore = staged.visibleRowCount
+                staged.receive(chunk)
+                stagedReconciliation = staged
+                traceResourceCache(
+                    "event=snapshot_staged sequence=\(cursor.sequence)"
+                        + " index=\(chunk.index)"
+                        + " first=\(chunk.first) last=\(chunk.last)"
+                        + " chunk_rows=\(chunk.rows.count)"
+                        + " staged_rows_before=\(stagedRowsBefore)"
+                        + " staged_rows_after=\(staged.visibleRowCount)"
+                        + " retained_rows=\(model.orderedVisibleUIDs.count)"
+                )
+                break
+            }
             let rowsBeforeSnapshot = model.orderedVisibleUIDs.count
-            let preservesRetainedRows = ResourceWarmRowPolicy.preservesRetainedRows(
-                for: chunk,
-                backendStatus: backendResourceViewStatus,
-                isRetainingWarmRows: isRetainingWarmRowsForCurrentStream,
-                isFirstSnapshotInStream: isInitialSnapshot
-            )
             traceResourceCache(
                 "event=snapshot_received sequence=\(cursor.sequence)"
                     + " index=\(chunk.index)"
@@ -3414,28 +3423,15 @@ private final class ResourceListViewController: NSViewController,
                     + " chunk_rows=\(chunk.rows.count)"
                     + " estimated_rows=\(chunk.estimatedTotalRows)"
                     + " local_rows_before=\(rowsBeforeSnapshot)"
-                    + " initial_payload=\(isInitialSnapshot)"
-                    + " retaining=\(isRetainingWarmRowsForCurrentStream)"
                     + " backend_freshness="
                     + (backendResourceViewStatus.map {
                         String(describing: $0.freshness)
                     } ?? "none")
-                    + " preserve=\(preservesRetainedRows)"
                     + " first_row="
                     + resourceCacheIdentityDescription(chunk.rows.first?.identity)
                     + " last_row="
                     + resourceCacheIdentityDescription(chunk.rows.last?.identity)
             )
-            hasReceivedResourcePayloadForCurrentStream = true
-            if preservesRetainedRows {
-                snapshotUIDs.removeAll(keepingCapacity: true)
-                traceResourceCache(
-                    "event=snapshot_placeholder_preserved"
-                        + " sequence=\(cursor.sequence)"
-                        + " local_rows=\(model.orderedVisibleUIDs.count)"
-                )
-                break
-            }
             let metadata = message.resourceBatchSignpostMetadata!
             let interval = tableSignposter.beginInterval(
                 PerformanceSignpostCatalog.resourceModelApply,
@@ -3489,7 +3485,6 @@ private final class ResourceListViewController: NSViewController,
                     + " chunk_rows=\(chunk.rows.count)"
                     + " local_rows_before=\(rowsBeforeSnapshot)"
                     + " local_rows_after=\(model.orderedVisibleUIDs.count)"
-                    + " retaining=\(isRetainingWarmRowsForCurrentStream)"
             )
             if rowsBeforeSnapshot > 0, model.orderedVisibleUIDs.isEmpty {
                 traceResourceCache(
@@ -3504,8 +3499,6 @@ private final class ResourceListViewController: NSViewController,
                 )
             }
             if chunk.last {
-                hasReceivedWarmRowReconciliationPayload = true
-                finishWarmRowRetentionIfReconciled(force: true)
                 isChangeDetectionArmed = true
                 activateRequestedFilterHighlight()
             }
@@ -3521,9 +3514,23 @@ private final class ResourceListViewController: NSViewController,
                 shouldPublishContextualShortcuts = true
             }
         case .delta(_, let delta):
+            if var staged = stagedReconciliation {
+                let stagedRowsBefore = staged.visibleRowCount
+                staged.receive(delta)
+                stagedReconciliation = staged
+                traceResourceCache(
+                    "event=delta_staged sequence=\(cursor.sequence)"
+                        + " upserts=\(delta.upserts.count)"
+                        + " removals=\(delta.removedUIDs.count)"
+                        + " ordered=\(delta.orderedUIDs.count)"
+                        + " order_complete=\(delta.orderIsComplete)"
+                        + " staged_rows_before=\(stagedRowsBefore)"
+                        + " staged_rows_after=\(staged.visibleRowCount)"
+                        + " retained_rows=\(model.orderedVisibleUIDs.count)"
+                )
+                break
+            }
             let rowsBeforeDelta = model.orderedVisibleUIDs.count
-            let wasRetainingWarmRows = isRetainingWarmRowsForCurrentStream
-            hasReceivedResourcePayloadForCurrentStream = true
             let detectedChanges: [ResourceCellChange] = isChangeDetectionArmed
                 ? delta.upserts.flatMap { row -> [ResourceCellChange] in
                     guard !delta.removedUIDs.contains(row.identity.uid) else {
@@ -3572,8 +3579,6 @@ private final class ResourceListViewController: NSViewController,
                 ))
             }
             applyTablePlan(plan)
-            hasReceivedWarmRowReconciliationPayload = true
-            finishWarmRowRetentionIfReconciled()
             traceResourceCache(
                 "event=delta_applied sequence=\(cursor.sequence)"
                     + " upserts=\(delta.upserts.count)"
@@ -3582,8 +3587,6 @@ private final class ResourceListViewController: NSViewController,
                     + " order_complete=\(delta.orderIsComplete)"
                     + " local_rows_before=\(rowsBeforeDelta)"
                     + " local_rows_after=\(model.orderedVisibleUIDs.count)"
-                    + " retaining_before=\(wasRetainingWarmRows)"
-                    + " retaining_after=\(isRetainingWarmRowsForCurrentStream)"
                     + " first_upsert="
                     + resourceCacheIdentityDescription(delta.upserts.first?.identity)
             )
@@ -3605,6 +3608,11 @@ private final class ResourceListViewController: NSViewController,
                 delta.observedOptionalResourceKeys,
                 truncated: delta.observedOptionalResourceKeysTruncated
             )
+        case .reconciled(_, let reconciliation):
+            shouldPublishContextualShortcuts = promoteStagedReconciliation(
+                reconciliation,
+                sequence: cursor.sequence
+            )
         case .failure(_, let issue):
             traceResourceCache(
                 "event=stream_failure sequence=\(cursor.sequence)"
@@ -3623,36 +3631,87 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
-    /// Ends the locally retained presentation only after a real replacement
-    /// payload. `force` is reserved for a completed non-placeholder snapshot;
-    /// delta reconciliation waits for WATCHING/COMPLETE and therefore works
-    /// whether the status or delta arrives first.
     @discardableResult
-    private func finishWarmRowRetentionIfReconciled(
-        force: Bool = false
+    private func promoteStagedReconciliation(
+        _ reconciliation: ResourceViewReconciliation,
+        sequence: UInt64
     ) -> Bool {
-        guard isRetainingWarmRowsForCurrentStream,
-            hasReceivedWarmRowReconciliationPayload,
-            force || ResourceWarmRowPolicy.statusConfirmsAuthoritativeReconciliation(
-                backendResourceViewStatus
+        guard let staged = stagedReconciliation else {
+            traceResourceCache(
+                "event=reconciliation_ignored cause=no-staged-table"
+                    + " sequence=\(sequence)"
+                    + " expected_rows=\(reconciliation.rowsVisible)"
+                    + " local_rows=\(model.orderedVisibleUIDs.count)"
             )
-        else { return false }
+            return false
+        }
+        guard staged.matches(reconciliation) else {
+            traceResourceCache(
+                "event=reconciliation_rejected cause=row-count-mismatch"
+                    + " sequence=\(sequence)"
+                    + " expected_rows=\(reconciliation.rowsVisible)"
+                    + " staged_rows=\(staged.visibleRowCount)"
+                    + " retained_rows=\(model.orderedVisibleUIDs.count)"
+            )
+            logger.error(
+                "Rejected incomplete staged resource reconciliation: expected=\(reconciliation.rowsVisible) staged=\(staged.visibleRowCount)"
+            )
+            return false
+        }
 
+        let rowsBeforePromotion = model.orderedVisibleUIDs.count
+        var capture = captureUpdate()
+        if let pendingScrollAnchor {
+            capture = ResourceTableUpdateCapture(
+                selectedUIDs: capture.selectedUIDs,
+                selectionAnchorUID: capture.selectionAnchorUID,
+                previousOrder: capture.previousOrder,
+                scrollAnchor: pendingScrollAnchor
+            )
+            self.pendingScrollAnchor = nil
+        }
+        clearTransientCellPresentation(keepingRequestedFilterHighlight: true)
+        var plan = model.apply(staged.promotionBatch, capture: capture)
+        plan = restoringPendingSelection(in: plan, chunkIsComplete: true)
+        recoveredResourceTrust.receiveSnapshot(
+            uids: staged.model.orderedVisibleUIDs,
+            first: true,
+            last: true
+        )
+        stagedReconciliation = nil
+        snapshotUIDs.removeAll(keepingCapacity: true)
+        retainedRowsLastSynchronizedAt = nil
+        applyTablePlan(plan)
+        isChangeDetectionArmed = true
+        activateRequestedFilterHighlight()
+        observeOptionalResourceKeys(
+            staged.observedOptionalResourceKeys,
+            truncated: staged.observedOptionalResourceKeysTruncated
+        )
+        markBaseViewUsableForOptionalResourceDiscovery()
+        endProjectionRequest(outcome: "reconciled")
         traceResourceCache(
-            "event=warm_retention_finished force=\(force)"
-                + " rows=\(model.orderedVisibleUIDs.count)"
+            "event=reconciliation_promoted sequence=\(sequence)"
+                + " rows_before=\(rowsBeforePromotion)"
+                + " rows_after=\(model.orderedVisibleUIDs.count)"
+                + " confirmed_removals=\(staged.confirmedRemovedUIDs.count)"
                 + " backend_freshness="
                 + (backendResourceViewStatus.map {
                     String(describing: $0.freshness)
                 } ?? "none")
         )
-        isRetainingWarmRowsForCurrentStream = false
-        retainedRowsLastSynchronizedAt = nil
+        if rowsBeforePromotion > 0, model.orderedVisibleUIDs.isEmpty {
+            traceResourceCache(
+                "event=rows_cleared cause=authoritative-reconciliation"
+                    + " sequence=\(sequence)"
+            )
+        }
         var status = backendResourceViewStatus ?? ResourceViewStatus(
             freshness: .complete
         )
         status.rowsVisible = UInt64(model.orderedVisibleUIDs.count)
         installResourceViewStatus(status)
+        countLabel.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects"
         return true
     }
 
@@ -4610,6 +4669,7 @@ private final class ResourceListViewController: NSViewController,
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
+        stagedReconciliation = nil
         clearTransientCellPresentation()
         traceResourceCache(
             "event=rows_cleared cause=restored-resource-validation-rejected"

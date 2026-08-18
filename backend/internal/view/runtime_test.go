@@ -757,6 +757,66 @@ func TestSlowSubscriptionFallsBackToBoundedSnapshot(t *testing.T) {
 	}
 }
 
+func TestStagedSubscriptionEmitsReconciliationAfterCompleteReplacement(t *testing.T) {
+	projector := newRuntimeTestProjector(t, "", nil)
+	subscription := newSubscription(
+		viewKey{sessionID: "session", viewID: "view"},
+		1,
+		projector,
+		time.Hour,
+		100,
+		100,
+	)
+	subscription.stageUntilReconciled = true
+	subscription.resource = &resourceRuntime{store: store.New()}
+	subscription.sealInitial(
+		&kmgrv1.ViewStatus{Freshness: kmgrv1.ViewFreshness_VIEW_FRESHNESS_LOADING},
+		nil,
+		false,
+	)
+
+	initial := drainSubscription(t, subscription)
+	if len(initial) != 2 || initial[0].GetStatus() == nil || initial[1].GetSnapshot() == nil {
+		t.Fatalf("initial staged delivery = %#v, want loading status and empty snapshot", initial)
+	}
+	for _, event := range initial {
+		if event.GetReconciled() != nil {
+			t.Fatal("cold placeholder was incorrectly marked reconciled")
+		}
+	}
+
+	first := pod("uid-a", "ns", "a", "Running", 0, nil, time.Time{})
+	subscription.resource.store.Upsert(first)
+	subscription.applyBatch(watcher.Batch{
+		Upserts:       []*unstructured.Unstructured{first},
+		FromList:      true,
+		ObjectsListed: 1,
+	})
+	partial := drainSubscription(t, subscription)
+	for _, event := range partial {
+		if event.GetReconciled() != nil {
+			t.Fatal("partial LIST page was incorrectly marked reconciled")
+		}
+	}
+
+	second := pod("uid-b", "ns", "b", "Running", 0, nil, time.Time{})
+	subscription.resource.store.Upsert(second)
+	subscription.applyBatch(watcher.Batch{
+		Upserts:          []*unstructured.Unstructured{second},
+		FromList:         true,
+		ObjectsListed:    2,
+		SnapshotComplete: true,
+		SynchronizedAt:   time.Unix(100, 0),
+	})
+	complete := drainSubscription(t, subscription)
+	if len(complete) < 2 || complete[len(complete)-1].GetReconciled() == nil {
+		t.Fatalf("complete delivery = %#v, want reconciliation marker last", complete)
+	}
+	if got := complete[len(complete)-1].GetReconciled().GetRowsVisible(); got != 2 {
+		t.Fatalf("reconciled rows = %d, want 2", got)
+	}
+}
+
 func TestSubscriptionCapturesNowOnceForWatchBatch(t *testing.T) {
 	t.Parallel()
 	projector, err := NewProjector(ProjectionSpec{

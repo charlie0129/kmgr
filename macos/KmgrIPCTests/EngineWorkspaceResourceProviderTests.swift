@@ -122,7 +122,8 @@ struct EngineWorkspaceResourceProviderTests {
                     direction: .descending,
                     nullsFirst: true
                 ),
-            ]
+            ],
+            stageUntilReconciled: true
         )
 
         var messages: [ResourceViewMessage] = []
@@ -130,7 +131,7 @@ struct EngineWorkspaceResourceProviderTests {
             messages.append(message)
         }
 
-        #expect(messages.count == 4)
+        #expect(messages.count == 5)
         guard case .status(let statusCursor, let status) = messages[0] else {
             Issue.record("Expected status event")
             return
@@ -199,7 +200,15 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(delta.observedOptionalResourceKeys == ["aliyun.com/ppu"])
         #expect(delta.observedOptionalResourceKeysTruncated)
 
-        guard case .failure(_, let issue) = messages[3] else {
+        guard case .reconciled(let reconciledCursor, let reconciliation) = messages[3]
+        else {
+            Issue.record("Expected reconciliation event")
+            return
+        }
+        #expect(reconciledCursor == StreamCursor(generation: 7, sequence: 4))
+        #expect(reconciliation.rowsVisible == 1)
+
+        guard case .failure(_, let issue) = messages[4] else {
             Issue.record("Expected structured stream failure")
             return
         }
@@ -214,6 +223,7 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(captured?.context.deadlineUnixMs == 87_400_000)
         #expect(captured?.viewID == "view-pods")
         #expect(captured?.generation == 7)
+        #expect(captured?.stageUntilReconciled == true)
         #expect(captured?.spec.resource.resource == "pods")
         #expect(captured?.spec.namespaceScope.namespaces == ["apps"])
         #expect(captured?.spec.filterExpression == "status:Running")
@@ -361,15 +371,19 @@ struct EngineWorkspaceResourceProviderTests {
         delta.delta.observedOptionalResourceKeys = ["aliyun.com/ppu"]
         delta.delta.observedOptionalResourceKeysTruncated = true
 
+        var reconciled = Kmgr_V1_ViewEvent()
+        reconciled.cursor = cursor(sequence: 4)
+        reconciled.reconciled.rowsVisible = 1
+
         var failure = Kmgr_V1_ViewEvent()
-        failure.cursor = cursor(sequence: 4)
+        failure.cursor = cursor(sequence: 5)
         failure.error.category = .authorization
         failure.error.reason = "PodsForbidden"
         failure.error.message = "Watching Pods is forbidden."
         failure.error.httpStatusCode = 403
         failure.error.operation = "watch pods"
         failure.error.safeDetails = ["resource": "pods"]
-        return [status, snapshot, delta, failure]
+        return [status, snapshot, delta, reconciled, failure]
     }
 
     private static func cursor(sequence: UInt64) -> Kmgr_V1_StreamCursor {

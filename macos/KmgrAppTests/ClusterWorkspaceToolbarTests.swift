@@ -720,9 +720,14 @@ struct ClusterWorkspaceToolbarTests {
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
         #expect(freshness.stringValue != "Loading…")
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(resourceTable.numberOfRows == 993)
 
-        // Exercise the less convenient ordering: the complete order arrives
-        // before WATCHING confirms that it is authoritative.
+        provider.releasePartialRows()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(resourceTable.numberOfRows == 993)
+        #expect(freshness.stringValue.hasPrefix("Resuming…"))
+
         provider.releaseAuthoritativeRows()
         try await waitUntil {
             resourceTable.numberOfRows == 993
@@ -735,6 +740,66 @@ struct ClusterWorkspaceToolbarTests {
             resourceTable.numberOfRows == 0
                 && freshness.stringValue == "Watching"
                 && statusLine.stringValue.hasPrefix("0 objects")
+        }
+    }
+
+    @Test("Back atomically clears cached Pods only after an authoritative empty result")
+    func backPromotesAuthoritativeEmptyPodReconciliation() async throws {
+        let provider = DelayedWarmResumeWorkspaceResourceProvider(rowCount: 3)
+        let pod = provider.firstIdentity
+        let controller = makeWorkspace(
+            provider: provider,
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: pod,
+                resourceVersion: "rv-1",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "containers",
+                    fieldID: "container:api",
+                    label: "Container",
+                    displayText: "api"
+                )],
+                containers: [PodContainerDetail(name: "api", kind: .regular)]
+            ))
+        )
+        controller.showWindow(nil)
+        defer {
+            provider.finish()
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourceTable = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let freshness = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Resource freshness" })
+
+        try await waitUntil {
+            provider.streamRequestCount == 1
+                && resourceTable.numberOfRows == 3
+        }
+        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(resourceTable))
+        controller.enterResource(nil)
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSTableView }
+                .contains { $0.accessibilityLabel() == "Pod containers" }
+        }
+
+        controller.navigateBack(nil)
+        try await waitUntil {
+            provider.streamRequestCount == 2
+                && resourceTable.numberOfRows == 3
+                && freshness.stringValue.hasPrefix("Resuming…")
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(resourceTable.numberOfRows == 3)
+
+        provider.releaseAuthoritativeEmpty()
+        try await waitUntil {
+            resourceTable.numberOfRows == 0
+                && freshness.stringValue == "Watching"
         }
     }
 
@@ -2040,6 +2105,12 @@ private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResou
                     estimatedTotalRows: UInt64(rows.count)
                 )
             ))
+            continuation.yield(.reconciled(
+                cursor: StreamCursor(generation: request.generation, sequence: 3),
+                reconciliation: ResourceViewReconciliation(
+                    rowsVisible: UInt64(rows.count)
+                )
+            ))
         }
     }
 
@@ -2047,7 +2118,7 @@ private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResou
         let state = lock.withLock { (resumeGeneration, resumeContinuation) }
         guard let generation = state.0, let continuation = state.1 else { return }
         continuation.yield(.delta(
-            cursor: StreamCursor(generation: generation, sequence: 3),
+            cursor: StreamCursor(generation: generation, sequence: 4),
             delta: ResourceRowDelta(
                 upserts: rows,
                 orderedUIDs: rows.map { $0.identity.uid },
@@ -2055,7 +2126,7 @@ private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResou
             )
         ))
         continuation.yield(.status(
-            cursor: StreamCursor(generation: generation, sequence: 4),
+            cursor: StreamCursor(generation: generation, sequence: 5),
             status: ResourceViewStatus(
                 freshness: .watching,
                 rowsVisible: UInt64(rows.count)
@@ -2173,26 +2244,81 @@ private final class DelayedWarmResumeWorkspaceResourceProvider: WorkspaceResourc
                     estimatedTotalRows: 0
                 )
             ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 3),
+                status: ResourceViewStatus(freshness: .loading)
+            ))
+            continuation.yield(.snapshot(
+                cursor: StreamCursor(generation: request.generation, sequence: 4),
+                chunk: ResourceSnapshotChunk(
+                    rows: [],
+                    first: true,
+                    last: true,
+                    index: 0,
+                    estimatedTotalRows: 0
+                )
+            ))
         }
+    }
+
+    func releasePartialRows() {
+        let state = lock.withLock { (resumeGeneration, resumeContinuation) }
+        guard let generation = state.0, let continuation = state.1 else { return }
+        let partial = Array(rows.prefix(500))
+        continuation.yield(.delta(
+            cursor: StreamCursor(generation: generation, sequence: 5),
+            delta: ResourceRowDelta(
+                upserts: partial,
+                orderedUIDs: partial.map { $0.identity.uid },
+                orderIsComplete: true
+            )
+        ))
     }
 
     func releaseAuthoritativeRows() {
         let state = lock.withLock { (resumeGeneration, resumeContinuation) }
         guard let generation = state.0, let continuation = state.1 else { return }
-        continuation.yield(.delta(
-            cursor: StreamCursor(generation: generation, sequence: 3),
-            delta: ResourceRowDelta(
-                upserts: rows,
-                orderedUIDs: rows.map { $0.identity.uid },
-                orderIsComplete: true
-            )
-        ))
         continuation.yield(.status(
-            cursor: StreamCursor(generation: generation, sequence: 4),
+            cursor: StreamCursor(generation: generation, sequence: 6),
             status: ResourceViewStatus(
                 freshness: .watching,
                 rowsVisible: UInt64(rows.count)
             )
+        ))
+        continuation.yield(.delta(
+            cursor: StreamCursor(generation: generation, sequence: 7),
+            delta: ResourceRowDelta(
+                upserts: Array(rows.dropFirst(500)),
+                orderedUIDs: rows.map { $0.identity.uid },
+                orderIsComplete: true
+            )
+        ))
+        continuation.yield(.reconciled(
+            cursor: StreamCursor(generation: generation, sequence: 8),
+            reconciliation: ResourceViewReconciliation(
+                rowsVisible: UInt64(rows.count)
+            )
+        ))
+    }
+
+    func releaseAuthoritativeEmpty() {
+        let state = lock.withLock { (resumeGeneration, resumeContinuation) }
+        guard let generation = state.0, let continuation = state.1 else { return }
+        continuation.yield(.status(
+            cursor: StreamCursor(generation: generation, sequence: 5),
+            status: ResourceViewStatus(freshness: .watching, rowsVisible: 0)
+        ))
+        continuation.yield(.delta(
+            cursor: StreamCursor(generation: generation, sequence: 6),
+            delta: ResourceRowDelta(
+                removedUIDs: Set(rows.map { $0.identity.uid }),
+                orderedUIDs: [],
+                orderIsComplete: true
+            )
+        ))
+        continuation.yield(.reconciled(
+            cursor: StreamCursor(generation: generation, sequence: 7),
+            reconciliation: ResourceViewReconciliation(rowsVisible: 0)
         ))
     }
 
@@ -2200,7 +2326,7 @@ private final class DelayedWarmResumeWorkspaceResourceProvider: WorkspaceResourc
         let state = lock.withLock { (resumeGeneration, resumeContinuation) }
         guard let generation = state.0, let continuation = state.1 else { return }
         continuation.yield(.delta(
-            cursor: StreamCursor(generation: generation, sequence: 5),
+            cursor: StreamCursor(generation: generation, sequence: 9),
             delta: ResourceRowDelta(
                 removedUIDs: Set(rows.map { $0.identity.uid }),
                 orderedUIDs: [],
@@ -2344,6 +2470,17 @@ private struct NamespaceDrillDownWorkspaceResourceProvider: WorkspaceResourcePro
                 cursor: StreamCursor(generation: request.generation, sequence: 2),
                 status: ResourceViewStatus(freshness: .watching, rowsVisible: UInt64(rows.count))
             ))
+            if request.stageUntilReconciled {
+                continuation.yield(.reconciled(
+                    cursor: StreamCursor(
+                        generation: request.generation,
+                        sequence: 3
+                    ),
+                    reconciliation: ResourceViewReconciliation(
+                        rowsVisible: UInt64(rows.count)
+                    )
+                ))
+            }
             continuation.finish()
         }
     }
@@ -2386,6 +2523,17 @@ private struct SelectAllFilterWorkspaceResourceProvider: WorkspaceResourceProvid
                     rowsVisible: UInt64(rows.count)
                 )
             ))
+            if request.stageUntilReconciled {
+                continuation.yield(.reconciled(
+                    cursor: StreamCursor(
+                        generation: request.generation,
+                        sequence: 3
+                    ),
+                    reconciliation: ResourceViewReconciliation(
+                        rowsVisible: UInt64(rows.count)
+                    )
+                ))
+            }
             continuation.finish()
         }
     }
@@ -2440,6 +2588,15 @@ private struct ServiceWorkspaceResourceProvider: WorkspaceResourceProviding {
                     estimatedTotalRows: 1
                 )
             ))
+            if request.stageUntilReconciled {
+                continuation.yield(.reconciled(
+                    cursor: StreamCursor(
+                        generation: request.generation,
+                        sequence: 2
+                    ),
+                    reconciliation: ResourceViewReconciliation(rowsVisible: 1)
+                ))
+            }
             continuation.finish()
         }
     }

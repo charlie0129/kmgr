@@ -396,6 +396,14 @@ public struct Kmgr_V1_OpenViewRequest: @unchecked Sendable {
   /// Clears the value of `spec`. Subsequent reads from it will return its default value.
   public mutating func clearSpec() {_uniqueStorage()._spec = nil}
 
+  /// The client already has a compatible rendered table. The engine must emit
+  /// ViewReconciled only after every preceding payload needed to construct one
+  /// complete replacement presentation has been delivered.
+  public var stageUntilReconciled: Bool {
+    get {return _storage._stageUntilReconciled}
+    set {_uniqueStorage()._stageUntilReconciled = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -507,6 +515,22 @@ public struct Kmgr_V1_RowDelta: Sendable {
   public init() {}
 }
 
+/// A generation-local commit barrier. All snapshot/delta events preceding this
+/// event form one complete replacement presentation, including the empty case.
+/// Clients that requested stage_until_reconciled can build those payloads off
+/// screen and replace their retained table atomically when this event arrives.
+public struct Kmgr_V1_ViewReconciled: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var rowsVisible: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Kmgr_V1_ViewEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -555,6 +579,14 @@ public struct Kmgr_V1_ViewEvent: Sendable {
     set {payload = .error(newValue)}
   }
 
+  public var reconciled: Kmgr_V1_ViewReconciled {
+    get {
+      if case .reconciled(let v)? = payload {return v}
+      return Kmgr_V1_ViewReconciled()
+    }
+    set {payload = .reconciled(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -562,6 +594,7 @@ public struct Kmgr_V1_ViewEvent: Sendable {
     case delta(Kmgr_V1_RowDelta)
     case status(Kmgr_V1_ViewStatus)
     case error(Kmgr_V1_StructuredError)
+    case reconciled(Kmgr_V1_ViewReconciled)
 
   }
 
@@ -1313,13 +1346,14 @@ extension Kmgr_V1_ViewSpec: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
 
 extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".OpenViewRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{1}spec\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{1}spec\0\u{3}stage_until_reconciled\0")
 
   fileprivate class _StorageClass {
     var _context: Kmgr_V1_RequestContext? = nil
     var _viewID: String = String()
     var _generation: UInt64 = 0
     var _spec: Kmgr_V1_ViewSpec? = nil
+    var _stageUntilReconciled: Bool = false
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1334,6 +1368,7 @@ extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
       _viewID = source._viewID
       _generation = source._generation
       _spec = source._spec
+      _stageUntilReconciled = source._stageUntilReconciled
     }
   }
 
@@ -1356,6 +1391,7 @@ extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
         case 2: try { try decoder.decodeSingularStringField(value: &_storage._viewID) }()
         case 3: try { try decoder.decodeSingularUInt64Field(value: &_storage._generation) }()
         case 4: try { try decoder.decodeSingularMessageField(value: &_storage._spec) }()
+        case 5: try { try decoder.decodeSingularBoolField(value: &_storage._stageUntilReconciled) }()
         default: break
         }
       }
@@ -1380,6 +1416,9 @@ extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
       try { if let v = _storage._spec {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
       } }()
+      if _storage._stageUntilReconciled != false {
+        try visitor.visitSingularBoolField(value: _storage._stageUntilReconciled, fieldNumber: 5)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -1393,6 +1432,7 @@ extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
         if _storage._viewID != rhs_storage._viewID {return false}
         if _storage._generation != rhs_storage._generation {return false}
         if _storage._spec != rhs_storage._spec {return false}
+        if _storage._stageUntilReconciled != rhs_storage._stageUntilReconciled {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -1616,9 +1656,39 @@ extension Kmgr_V1_RowDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
   }
 }
 
+extension Kmgr_V1_ViewReconciled: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ViewReconciled"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}rows_visible\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.rowsVisible) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.rowsVisible != 0 {
+      try visitor.visitSingularUInt64Field(value: self.rowsVisible, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ViewReconciled, rhs: Kmgr_V1_ViewReconciled) -> Bool {
+    if lhs.rowsVisible != rhs.rowsVisible {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}snapshot\0\u{1}delta\0\u{1}status\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}snapshot\0\u{1}delta\0\u{1}status\0\u{1}error\0\u{1}reconciled\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1679,6 +1749,19 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
           self.payload = .error(v)
         }
       }()
+      case 6: try {
+        var v: Kmgr_V1_ViewReconciled?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .reconciled(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .reconciled(v)
+        }
+      }()
       default: break
       }
     }
@@ -1708,6 +1791,10 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
     case .error?: try {
       guard case .error(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    }()
+    case .reconciled?: try {
+      guard case .reconciled(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
     }()
     case nil: break
     }

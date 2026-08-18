@@ -117,6 +117,10 @@ public struct ResourceViewRequest: Hashable, Sendable {
     public var filterRevision: UInt64
     public var columnIDs: [String]
     public var sort: [ResourceSortDescriptor]
+    /// Keep a compatible rendered table visible while this generation builds
+    /// its replacement. The stream will emit `.reconciled` after all payloads
+    /// needed for one complete replacement have arrived.
+    public var stageUntilReconciled: Bool
 
     public init(
         sessionID: String,
@@ -128,7 +132,8 @@ public struct ResourceViewRequest: Hashable, Sendable {
         filterExpression: String = "",
         filterRevision: UInt64 = 0,
         columnIDs: [String] = [],
-        sort: [ResourceSortDescriptor] = []
+        sort: [ResourceSortDescriptor] = [],
+        stageUntilReconciled: Bool = false
     ) {
         self.sessionID = sessionID
         self.viewID = viewID
@@ -140,6 +145,7 @@ public struct ResourceViewRequest: Hashable, Sendable {
         self.filterRevision = filterRevision
         self.columnIDs = columnIDs
         self.sort = sort
+        self.stageUntilReconciled = stageUntilReconciled
     }
 }
 
@@ -161,13 +167,25 @@ public enum ResourceViewMessage: Hashable, Sendable {
     case status(cursor: StreamCursor, status: ResourceViewStatus)
     case snapshot(cursor: StreamCursor, chunk: ResourceSnapshotChunk)
     case delta(cursor: StreamCursor, delta: ResourceRowDelta)
+    case reconciled(cursor: StreamCursor, reconciliation: ResourceViewReconciliation)
     case failure(cursor: StreamCursor, issue: ClusterManagerIssue)
 
     public var cursor: StreamCursor {
         switch self {
         case .status(let cursor, _), .snapshot(let cursor, _),
-            .delta(let cursor, _), .failure(let cursor, _): cursor
+            .delta(let cursor, _), .reconciled(let cursor, _),
+            .failure(let cursor, _): cursor
         }
+    }
+}
+
+/// Marks the ordered end of a complete replacement presentation for one
+/// resource-view generation.
+public struct ResourceViewReconciliation: Hashable, Sendable {
+    public var rowsVisible: UInt64
+
+    public init(rowsVisible: UInt64) {
+        self.rowsVisible = rowsVisible
     }
 }
 
