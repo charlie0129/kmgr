@@ -1115,7 +1115,7 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil { table.numberOfRows == 1 }
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         #expect(window.makeFirstResponder(table))
-        controller.openResourceLogs(nil)
+        table.keyDown(with: try workspaceLetterKey("l"))
         try await waitUntil { opened != nil }
 
         let resolved = logs.resolvedResources
@@ -1124,7 +1124,45 @@ struct ClusterWorkspaceToolbarTests {
         #expect(request.resource == "pods")
         #expect(request.uid == ResourceUID("pod-api"))
         #expect(opened?.sources.map(\.container) == ["app", "sidecar"])
+        let logWindow = try #require(opened?.window)
+        let logRoot = try #require(logWindow.contentView)
+        let previous = try #require(descendants(of: logRoot)
+            .compactMap { $0 as? NSButton }
+            .first { $0.title == "Previous" })
+        #expect(previous.state == .off)
         #expect(window.attachedSheet == nil)
+    }
+
+    @Test("Shift-L opens logs from the previous container instance")
+    func previousPodLogsShortcut() async throws {
+        let logs = ResolvingToolbarLogProvider()
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            logProvider: logs
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        var opened: LogWindowController?
+        controller.onOpenLogWindow = { opened = $0 }
+
+        try await waitUntil { table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+        table.keyDown(with: try workspaceLetterKey("l", modifiers: [.shift]))
+        try await waitUntil { opened != nil }
+
+        let logWindow = try #require(opened?.window)
+        let logRoot = try #require(logWindow.contentView)
+        let previous = try #require(descendants(of: logRoot)
+            .compactMap { $0 as? NSButton }
+            .first { $0.title == "Previous" })
+        #expect(previous.state == .on)
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys)
+            .contains("\u{21E7}L") == true)
     }
 
     @Test("incompatible resource actions are hidden while valid actions remain")

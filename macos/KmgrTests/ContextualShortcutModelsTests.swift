@@ -22,6 +22,7 @@ struct ContextualShortcutModelsTests {
         #expect(snapshot.title == "Pods")
         #expect(snapshot.items.map(\.keys).contains("Return"))
         #expect(snapshot.items.map(\.keys).contains("L"))
+        #expect(snapshot.items.map(\.keys).contains("\u{21E7}L"))
         #expect(snapshot.items.map(\.keys).contains("S"))
         #expect(snapshot.items.map(\.keys).contains("\u{21E7}S"))
         #expect(snapshot.items.map(\.keys).contains("P"))
@@ -37,6 +38,7 @@ struct ContextualShortcutModelsTests {
             )
         )
         #expect(!incompatible.items.map(\.keys).contains("L"))
+        #expect(!incompatible.items.map(\.keys).contains("\u{21E7}L"))
         #expect(!incompatible.items.map(\.keys).contains("S"))
         #expect(!incompatible.items.map(\.keys).contains("P"))
         #expect(!incompatible.items.map(\.keys).contains("\u{2318}\u{232B}"))
@@ -56,7 +58,8 @@ struct ContextualShortcutModelsTests {
             canOpenTerminal: true,
             canStartPortForward: true
         ).items.map(\.keys) == [
-            "L / Return", "S", "\u{21E7}S", "P", "\u{21E7}\u{2318}N", "Escape",
+            "L / Return", "\u{21E7}L", "S", "\u{21E7}S", "P",
+            "\u{21E7}\u{2318}N", "Escape",
         ])
         #expect(ContextualShortcutCatalog.containerList(
             canOpenLogs: false,

@@ -449,6 +449,260 @@ struct LogWindowControllerTests {
         #expect(laidOutText.intersects(textView.visibleRect))
     }
 
+    @Test("long lines install a short preview while Save keeps the full line")
+    func longLinePreviewIsBoundedAndSaveIsLossless() async throws {
+        let provider = OrderedLogWindowProvider()
+        let writer = LogFileWriterProbe()
+        let source = logSource(pod: "api", uid: "api-uid", container: "app")
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [source],
+            provider: provider,
+            displayConfiguration: LogDisplayConfiguration(renderBatchMilliseconds: 1),
+            fileWriter: { value, url in
+                try writer.write(value, to: url, failure: nil)
+            }
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let textView = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Pod logs" })
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-status" })
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+
+        window.orderOut(nil)
+        provider.emitStreaming(generation: 1, sequence: 1)
+        let original = String(repeating: "x", count: 128 << 10)
+        provider.emitRecords(
+            generation: 1,
+            sequence: 2,
+            records: [LogRecord(
+                sourceID: source.sourceID,
+                data: Data(original.utf8),
+                startsLine: true,
+                endsWithNewline: true
+            )]
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        window.makeKeyAndOrderFront(nil)
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        try await waitForLogText(textView) {
+            $0.contains(LogTextRenderer.displayTruncationMarker)
+        }
+
+        #expect(textView.string.utf8.count < 5 << 10)
+        #expect(status.stringValue.contains("1 long line truncated"))
+        controller.saveVisibleBufferSnapshot(
+            to: URL(fileURLWithPath: "/tmp/kmgr-long-line-preview-test.txt")
+        )
+        try await waitForLogFileWrite(writer)
+        let saved = try #require(writer.snapshot)
+        #expect(saved.value.utf8.count == original.utf8.count + 1)
+        #expect(saved.value.last == "\n")
+        #expect(saved.value.dropLast().allSatisfy { $0 == "x" })
+        #expect(!saved.ranOnMainThread)
+    }
+
+    @Test("tail following survives a delayed document extent correction")
+    func continuousTailFollowDoesNotDependOnExactPriorGeometry() async throws {
+        let provider = OrderedLogWindowProvider()
+        let source = logSource(pod: "api", uid: "api-uid", container: "app")
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [source],
+            provider: provider,
+            displayConfiguration: LogDisplayConfiguration(renderBatchMilliseconds: 1)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let textView = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Pod logs" })
+        let scrollView = try #require(descendants(of: root)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "log-content-scroll" })
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+
+        window.orderOut(nil)
+        provider.emitStreaming(generation: 1, sequence: 1)
+        provider.emitRecords(
+            generation: 1,
+            sequence: 2,
+            records: (0..<200).map { index in
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data("initial-\(index)".utf8),
+                    endsWithNewline: true
+                )
+            }
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        window.makeKeyAndOrderFront(nil)
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        try await waitForLogText(textView) { $0.contains("initial-199") }
+        #expect(isLogViewAtTail(textView, in: scrollView))
+        try await Task.sleep(for: .milliseconds(20))
+
+        // TextKit can refine a noncontiguous document extent after the
+        // controller has scrolled. That correction is not a user scroll and
+        // must not silently disable follow on the next batch.
+        textView.setFrameSize(NSSize(
+            width: textView.frame.width,
+            height: textView.frame.height + 32
+        ))
+        #expect(!isLogViewAtTail(textView, in: scrollView))
+
+        provider.emitRecords(
+            generation: 1,
+            sequence: 3,
+            records: [LogRecord(
+                sourceID: source.sourceID,
+                data: Data("after-correction".utf8),
+                endsWithNewline: true
+            )]
+        )
+        try await Task.sleep(for: .milliseconds(20))
+        window.makeKeyAndOrderFront(nil)
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        try await waitForLogText(textView) { $0.contains("after-correction") }
+        #expect(isLogViewAtTail(textView, in: scrollView))
+    }
+
+    @Test("viewport scrolling pauses and resumes tail following")
+    func viewportPositionControlsTailFollowing() async throws {
+        let provider = OrderedLogWindowProvider()
+        let source = logSource(pod: "api", uid: "api-uid", container: "app")
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [source],
+            provider: provider,
+            displayConfiguration: LogDisplayConfiguration(renderBatchMilliseconds: 1)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let textView = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Pod logs" })
+        let scrollView = try #require(descendants(of: root)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "log-content-scroll" })
+        let follow = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Follow" })
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+
+        window.orderOut(nil)
+        provider.emitStreaming(generation: 1, sequence: 1)
+        provider.emitRecords(
+            generation: 1,
+            sequence: 2,
+            records: (0..<200).map { index in
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data("initial-\(index)".utf8),
+                    endsWithNewline: true
+                )
+            }
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        window.makeKeyAndOrderFront(nil)
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        try await waitForLogText(textView) { $0.contains("initial-199") }
+        #expect(isLogViewAtTail(textView, in: scrollView))
+        try await waitForLogWindowControl(follow, enabled: true)
+        #expect(follow.state == .on)
+
+        let clipView = scrollView.contentView
+        clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: 0))
+        scrollView.reflectScrolledClipView(clipView)
+        #expect(!isLogViewAtTail(textView, in: scrollView))
+        #expect(follow.state == .off)
+        let scrolledAwayOrigin = clipView.bounds.origin
+
+        provider.emitRecords(
+            generation: 1,
+            sequence: 3,
+            records: [LogRecord(
+                sourceID: source.sourceID,
+                data: Data("while-scrolled-away".utf8),
+                endsWithNewline: true
+            )]
+        )
+        try await Task.sleep(for: .milliseconds(20))
+        window.makeKeyAndOrderFront(nil)
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        try await waitForLogText(textView) { $0.contains("while-scrolled-away") }
+        #expect(!isLogViewAtTail(textView, in: scrollView))
+        #expect(clipView.bounds.origin == scrolledAwayOrigin)
+
+        follow.performClick(nil)
+        #expect(follow.state == .on)
+        #expect(isLogViewAtTail(textView, in: scrollView))
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(!provider.snapshot().contains("start:2"))
+
+        // Returning to the tail manually also re-arms the presentation.
+        clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: 0))
+        scrollView.reflectScrolledClipView(clipView)
+        #expect(follow.state == .off)
+        clipView.scroll(to: NSPoint(
+            x: clipView.bounds.origin.x,
+            y: max(0, textView.bounds.maxY - clipView.bounds.height)
+        ))
+        scrollView.reflectScrolledClipView(clipView)
+        #expect(isLogViewAtTail(textView, in: scrollView))
+        #expect(follow.state == .on)
+
+        provider.emitRecords(
+            generation: 1,
+            sequence: 4,
+            records: [LogRecord(
+                sourceID: source.sourceID,
+                data: Data("after-returning-to-tail".utf8),
+                endsWithNewline: true
+            )]
+        )
+        try await Task.sleep(for: .milliseconds(20))
+        window.makeKeyAndOrderFront(nil)
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        try await waitForLogText(textView) { $0.contains("after-returning-to-tail") }
+        #expect(isLogViewAtTail(textView, in: scrollView))
+    }
+
     @Test("failed replacement restores controls without retiring established stream")
     func failedReplacementRestoresAppliedConfiguration() async throws {
         let provider = OrderedLogWindowProvider()
@@ -723,6 +977,11 @@ private func milliseconds(_ duration: Duration) -> Double {
     let components = duration.components
     return Double(components.seconds) * 1_000
         + Double(components.attoseconds) / 1_000_000_000_000_000
+}
+
+@MainActor
+private func isLogViewAtTail(_ textView: NSTextView, in scrollView: NSScrollView) -> Bool {
+    scrollView.contentView.bounds.maxY >= textView.bounds.maxY - 4
 }
 
 @MainActor

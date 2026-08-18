@@ -75,6 +75,10 @@ private func podIdentity(_ name: String, uid: String) -> ResourceIdentity {
     )
     #expect(app.sources.map(\.container) == ["app"])
     #expect(app.availableSources.map(\.container) == ["app", "sidecar"])
+
+    #expect(!LogOpenRequest.allContainers(for: [pod]).previous)
+    #expect(LogOpenRequest.allContainers(for: [pod], previous: true).previous)
+    #expect(LogOpenRequest.namedContainer("app", in: pod, previous: true).previous)
 }
 
 @Test func defaultLogOpenRefusesAnOversizedAllContainerExpansion() throws {
@@ -222,9 +226,10 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     #expect(ring.droppedBytes == 6)
 }
 
-@Test func multiMegabyteLogicalLineUsesBoundedDisplayParagraphsAndLosslessExport() throws {
+@Test func multiMegabyteLogicalLineUsesBoundedPreviewAndLosslessExport() throws {
     let fragmentBytes = 64 << 10
     let payloadBytes = 8 << 20
+    let previewBytes = 4 << 10
     var ring = LogRecordRing(
         recordLimit: 1_024,
         byteLimit: payloadBytes + fragmentBytes,
@@ -248,21 +253,94 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
         sourceLabels: [:],
         showSourceLabels: false,
         filter: "",
-        maximumOutputUTF8Bytes: payloadBytes + fragmentBytes
+        maximumOutputUTF8Bytes: payloadBytes + fragmentBytes,
+        maximumDisplayedLineUTF8Bytes: previewBytes
     )
 
-    #expect(rendered.displayContinuationBreaks == records.count - 1)
+    #expect(rendered.displayContinuationBreaks == 0)
+    #expect(rendered.displayTruncatedLines == 1)
     #expect(rendered.text.utf8.count == payloadBytes + 1)
     #expect(!rendered.text.contains(LogTextRenderer.displayContinuationMarker))
-    #expect(rendered.displayOutputUTF8Bytes <= payloadBytes + fragmentBytes)
+    #expect(!rendered.text.contains(LogTextRenderer.displayTruncationMarker))
+    #expect(rendered.displayText.hasPrefix(String(repeating: "x", count: previewBytes)))
+    #expect(rendered.displayText.contains(LogTextRenderer.displayTruncationMarker))
+    #expect(rendered.displayOutputUTF8Bytes <= previewBytes + 64)
     let physicalLines = rendered.displayText.split(
         separator: "\n",
         omittingEmptySubsequences: false
     )
-    #expect(physicalLines.count == records.count + 1)
-    #expect(physicalLines.dropLast().allSatisfy {
-        $0.utf8.count <= fragmentBytes + "↪ ".utf8.count
-    })
+    #expect(physicalLines.count == 2)
+}
+
+@Test func linePreviewLimitResetsPerSourceLineAndStaysUnicodeSafe() throws {
+    let rendered = try LogTextRenderer.render(
+        records: [
+            LogRecord(
+                sourceID: "a", data: Data("12345".utf8),
+                startsLine: true, endsWithNewline: false
+            ),
+            LogRecord(
+                sourceID: "b", data: Data("worker".utf8),
+                startsLine: true, endsWithNewline: true
+            ),
+            LogRecord(
+                sourceID: "a", data: Data("🐈tail".utf8),
+                startsLine: false, endsWithNewline: true
+            ),
+            LogRecord(
+                sourceID: "a", data: Data("next".utf8),
+                startsLine: true, endsWithNewline: true
+            ),
+        ],
+        sourceLabels: ["a": "api", "b": "worker"],
+        showSourceLabels: true,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10,
+        maximumDisplayedLineUTF8Bytes: 6
+    )
+
+    #expect(rendered.text == "[api] 12345\n"
+        + "[worker] worker\n"
+        + "[api] … 🐈tail\n"
+        + "[api] next\n")
+    #expect(rendered.displayText == "[api] 12345\n"
+        + "[worker] worker\n"
+        + "[api] ↪ … [line truncated; Save preserves full line]\n"
+        + "[api] next\n")
+    #expect(rendered.displayTruncatedLines == 1)
+}
+
+@Test func hiddenLongLineSuffixDoesNotReinstallTheVisiblePreview() throws {
+    func record(_ value: String, startsLine: Bool, endsWithNewline: Bool = false) -> LogRecord {
+        LogRecord(
+            sourceID: "pod", data: Data(value.utf8),
+            startsLine: startsLine, endsWithNewline: endsWithNewline
+        )
+    }
+    let previous = try LogTextRenderer.render(
+        records: [record("0123456789", startsLine: true)],
+        sourceLabels: [:], showSourceLabels: false, filter: "",
+        maximumOutputUTF8Bytes: 1 << 10,
+        maximumDisplayedLineUTF8Bytes: 4
+    )
+    let current = try LogTextRenderer.render(
+        records: [
+            record("0123456789", startsLine: true),
+            record("hidden suffix", startsLine: false, endsWithNewline: true),
+        ],
+        sourceLabels: [:], showSourceLabels: false, filter: "",
+        maximumOutputUTF8Bytes: 1 << 10,
+        maximumDisplayedLineUTF8Bytes: 4
+    )
+
+    let plan = LogTextInstallPlanner.plan(
+        previousChunks: previous.displayChunks,
+        currentChunks: current.displayChunks
+    )
+    #expect(previous.displayText == current.displayText)
+    #expect(plan.removePrefixUTF16Length == 0)
+    #expect(plan.appendText.isEmpty)
+    #expect(current.text == "0123456789hidden suffix\n")
 }
 
 @Test func oversizedLineEvictionRetainsDisplaySuffixIncrementally() throws {

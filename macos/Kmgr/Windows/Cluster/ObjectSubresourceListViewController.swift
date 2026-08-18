@@ -41,6 +41,7 @@ enum ObjectSubresourceContent: Hashable, Sendable {
 
 enum ObjectSubresourceNetworkAction: Equatable {
     case openLogs
+    case openPreviousLogs
     case openAutomaticExec
     case configureExec
     case startPortForward
@@ -272,7 +273,7 @@ final class ObjectSubresourceListViewController: NSViewController,
     private var shortcutHint: String {
         switch content {
         case .containers:
-            "L/Return: logs · S: terminal · \u{21E7}S: configure · P: port-forward · Escape: back"
+            "L/Return: logs · \u{21E7}L: previous logs · S: terminal · \u{21E7}S: configure · P: port-forward · Escape: back"
         case .data: "Return: Data editor · Escape: back"
         }
     }
@@ -311,12 +312,16 @@ final class ObjectSubresourceListViewController: NSViewController,
     func perform(_ action: ObjectSubresourceNetworkAction) -> Bool {
         guard canPerform(action) else { return false }
         switch action {
-        case .openLogs:
+        case .openLogs, .openPreviousLogs:
             guard case .containers(let pod, _) = content,
                 let target = selectedContainerTarget(),
                 let container = target.preferredContainer
             else { return false }
-            onOpenLogs?(.namedContainer(container, in: pod))
+            onOpenLogs?(.namedContainer(
+                container,
+                in: pod,
+                previous: action == .openPreviousLogs
+            ))
         case .openAutomaticExec:
             guard let target = selectedContainerTarget() else { return false }
             onOpenExec?(target)
@@ -370,6 +375,8 @@ private final class ObjectSubresourceTableView: NSTableView {
         case ("l", _) where !hasUnsupportedModifier && !shifted,
             (_, 36) where modifiers.isEmpty:
             onPrimaryAction?()
+        case ("l", _) where !hasUnsupportedModifier && shifted:
+            onNetworkAction?(.openPreviousLogs)
         case ("s", _) where !hasUnsupportedModifier:
             onNetworkAction?(shifted ? .configureExec : .openAutomaticExec)
         case ("p", _) where !hasUnsupportedModifier && !shifted:

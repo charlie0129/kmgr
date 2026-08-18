@@ -53,11 +53,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var latestStreamDrops: UInt64 = 0
     private var latestRenderOmissions = 0
     private var latestDisplayContinuationBreaks = 0
+    private var latestDisplayTruncatedLines = 0
     private var latestStreamState: LogStreamState = .connecting
     private var renderedChunks: [String] = []
     private var renderedExportChunks: [String] = []
     private var renderedDisplayUTF16Length = 0
     private var textLayoutMetrics = LogTextLayoutMetrics.empty
+    private var followsVisibleTail = true
+    private var tailTrackingSuppressionDepth = 0
+    private var lastObservedViewportOrigin = NSPoint.zero
+    private var pendingFollowTailRestore: Bool?
     private var appliedContainerTitle = ""
     private var establishedConfiguration: AppliedStreamConfiguration?
     private let logSignposter = OSSignposter(
@@ -151,6 +156,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     func windowWillClose(_ notification: Notification) {
         isClosing = true
+        NotificationCenter.default.removeObserver(
+            self,
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
         stopStream()
         onClose?()
     }
@@ -169,10 +179,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func windowDidResize(_ notification: Notification) {
-        let wasAtTail = isAtTail
-        updateTextDocumentGeometry(followingTail: wasAtTail)
-        if wasAtTail { scrollToTail() }
-        scheduleLayoutMetricsReconciliation(preservingTail: wasAtTail)
+        let wasFollowingTail = followsVisibleTail
+        updateTextDocumentGeometry(followingTail: wasFollowingTail)
+        if wasFollowingTail { scrollToTail() }
+        scheduleLayoutMetricsReconciliation(preservingTail: wasFollowingTail)
     }
 
     /// A stream can deliver its first records between `showWindow` and the
@@ -183,6 +193,21 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         guard needsRenderWhenVisible else { return }
         keyVisibilityWakePending = true
         resumeRenderingIfVisible()
+    }
+
+    /// Tail-follow intent is a user interaction state, not a document-geometry
+    /// measurement. TextKit can revise a noncontiguous document's extent after
+    /// a render; only an actual viewport-origin change outside our own geometry
+    /// and scroll operations may pause or resume automatic tail following. A
+    /// viewport pause does not stop the already-established backend stream.
+    @objc private func logViewportBoundsDidChange(_ notification: Notification) {
+        let origin = scrollView.contentView.bounds.origin
+        defer { lastObservedViewportOrigin = origin }
+        guard !isClosing, tailTrackingSuppressionDepth == 0,
+            origin != lastObservedViewportOrigin
+        else { return }
+        followsVisibleTail = isAtTail
+        updateFollowButtonPresentation()
     }
 
     func controlTextDidChange(_ obj: Notification) { scheduleRender() }
@@ -234,7 +259,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         sinceField.widthAnchor.constraint(equalToConstant: 62).isActive = true
         configureContainerButton()
         wrapButton.state = .off
-        for button in [followButton, previousButton, timestampsButton] {
+        followButton.target = self
+        followButton.action = #selector(toggleFollow)
+        for button in [previousButton, timestampsButton] {
             button.target = self
             button.action = #selector(restartFromControls)
         }
@@ -306,6 +333,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             textView,
             in: scrollView
         )
+        let clipView = scrollView.contentView
+        lastObservedViewportOrigin = clipView.bounds.origin
+        clipView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(logViewportBoundsDidChange(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: clipView
+        )
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         sourceLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -361,7 +397,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
         sources = selectedSources
         appliedContainerTitle = selectedContainer
-        options.follow = followButton.state == .on
         options.previous = previousButton.state == .on
         options.timestamps = timestampsButton.state == .on
         options.since = nil
@@ -369,6 +404,33 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         options.tailLines = tail
         updateSourcePresentation()
         startStream()
+    }
+
+    @objc private func toggleFollow() {
+        guard pendingGeneration == nil else { return }
+        let requestedFollow = followButton.state == .on
+        if requestedFollow {
+            let previousTailState = followsVisibleTail
+            followsVisibleTail = true
+            scrollToTail()
+            guard !options.follow else {
+                updateFollowButtonPresentation()
+                return
+            }
+            pendingFollowTailRestore = previousTailState
+            options.follow = true
+            startStream()
+        } else {
+            let previousTailState = followsVisibleTail
+            followsVisibleTail = false
+            guard options.follow else {
+                updateFollowButtonPresentation()
+                return
+            }
+            pendingFollowTailRestore = previousTailState
+            options.follow = false
+            startStream()
+        }
     }
 
     private func configureContainerButton() {
@@ -407,7 +469,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func restoreAppliedStreamControls() {
-        followButton.state = options.follow ? .on : .off
+        updateFollowButtonPresentation()
         previousButton.state = options.previous ? .on : .off
         timestampsButton.state = options.timestamps ? .on : .off
         containerButton.selectItem(withTitle: appliedContainerTitle)
@@ -416,12 +478,23 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func restoreEstablishedStreamConfiguration() {
+        restorePendingFollowTailState()
         guard let establishedConfiguration else { return }
         sources = establishedConfiguration.sources
         options = establishedConfiguration.options
         appliedContainerTitle = establishedConfiguration.containerTitle
         restoreAppliedStreamControls()
         updateSourcePresentation()
+    }
+
+    private func restorePendingFollowTailState() {
+        guard let pendingFollowTailRestore else { return }
+        followsVisibleTail = pendingFollowTailRestore
+        self.pendingFollowTailRestore = nil
+    }
+
+    private func updateFollowButtonPresentation() {
+        followButton.state = options.follow && followsVisibleTail ? .on : .off
     }
 
     private func setStreamControlsEnabled(_ enabled: Bool) {
@@ -508,6 +581,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                             options: request.options,
                             containerTitle: self?.appliedContainerTitle ?? ""
                         )
+                        if !request.options.follow {
+                            self?.followsVisibleTail = false
+                            self?.updateFollowButtonPresentation()
+                        }
+                        self?.pendingFollowTailRestore = nil
                         self?.pendingGeneration = nil
                         self?.setStreamControlsEnabled(true)
                         self?.streamGate.begin(generation: activeGeneration)
@@ -654,10 +732,20 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         if latestDisplayContinuationBreaks > 0 {
             parts.append("long lines segmented for display")
         }
+        if latestDisplayTruncatedLines > 0 {
+            parts.append(latestDisplayTruncatedLines == 1
+                ? "1 long line truncated"
+                : "\(latestDisplayTruncatedLines.formatted()) long lines truncated")
+        }
         statusLabel.stringValue = parts.joined(separator: " · ")
-        statusLabel.toolTip = latestDisplayContinuationBreaks > 0
-            ? "Continuation arrows and line breaks are display-only; Save preserves logical lines."
-            : nil
+        switch (latestDisplayContinuationBreaks > 0, latestDisplayTruncatedLines > 0) {
+        case (_, true):
+            statusLabel.toolTip = "Long lines show at most 4 KiB. Display markers and breaks are not included when saving."
+        case (true, false):
+            statusLabel.toolTip = "Continuation arrows and line breaks are display-only; Save preserves logical lines."
+        case (false, false):
+            statusLabel.toolTip = nil
+        }
     }
 
     /// Coalesce detached formatting and incremental text installation to at
@@ -698,7 +786,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func render() async {
-        let wasAtTail = isAtTail
         let selectedRange = textView.selectedRange()
         let filter = searchField.stringValue
         let showLabels = availableSources.count > 1
@@ -765,10 +852,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             needsRenderWhenVisible = true
             return
         }
+        let shouldFollowTail = followsVisibleTail
         let installInterval = logSignposter.beginInterval(
             PerformanceSignpostCatalog.logTextInstall,
-            "logical_output_bytes=\(result.rendered.outputUTF8Bytes) display_output_bytes=\(result.rendered.displayOutputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendText.utf8.count)"
+            "logical_output_bytes=\(result.rendered.outputUTF8Bytes) display_output_bytes=\(result.rendered.displayOutputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) truncated_lines=\(result.rendered.displayTruncatedLines) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendText.utf8.count)"
         )
+        tailTrackingSuppressionDepth += 1
+        defer { tailTrackingSuppressionDepth -= 1 }
         let storage = textView.textStorage!
         if storage.length == result.install.previousUTF16Length {
             storage.beginEditing()
@@ -807,10 +897,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         textLayoutMetrics = result.layoutMetrics
         latestRenderOmissions = result.rendered.omittedRecords
         latestDisplayContinuationBreaks = result.rendered.displayContinuationBreaks
+        latestDisplayTruncatedLines = result.rendered.displayTruncatedLines
         updateStatusLabel()
         textView.setSelectedRange(result.install.remapSelection(selectedRange))
-        updateTextDocumentGeometry(followingTail: wasAtTail)
-        if wasAtTail { scrollToTail() }
+        updateTextDocumentGeometry(followingTail: shouldFollowTail)
+        if shouldFollowTail { scrollToTail() }
         needsRenderWhenVisible = false
         keyVisibilityWakePending = false
         logSignposter.endInterval(
@@ -831,22 +922,24 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     @objc private func toggleWrap() {
-        let wasAtTail = isAtTail
+        let wasFollowingTail = followsVisibleTail
         let enabled = wrapButton.state == .on
         scrollView.hasHorizontalScroller = !enabled
-        updateTextDocumentGeometry(followingTail: wasAtTail)
-        if wasAtTail { scrollToTail() }
-        scheduleLayoutMetricsReconciliation(preservingTail: wasAtTail)
+        updateTextDocumentGeometry(followingTail: wasFollowingTail)
+        if wasFollowingTail { scrollToTail() }
+        scheduleLayoutMetricsReconciliation(preservingTail: wasFollowingTail)
     }
 
     private func updateTextDocumentGeometry(followingTail: Bool = false) {
-        TextDocumentGeometry.updateStreamingLog(
-            textView,
-            in: scrollView,
-            wrapsToViewport: wrapButton.state == .on,
-            metrics: textLayoutMetrics,
-            followingTail: followingTail
-        )
+        withTailTrackingSuppressed {
+            TextDocumentGeometry.updateStreamingLog(
+                textView,
+                in: scrollView,
+                wrapsToViewport: wrapButton.state == .on,
+                metrics: textLayoutMetrics,
+                followingTail: followingTail
+            )
+        }
     }
 
     /// Resizes and Wrap can arrive in rapid bursts. Re-measure immutable
@@ -879,7 +972,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             // but an intervening user scroll revokes that stale intent.
             let shouldPreserveTail = LogTailReconciliationPolicy.shouldPreserveTail(
                 requestedAtScheduleTime: preservingTail,
-                currentlyAtTail: isAtTail
+                currentlyAtTail: followsVisibleTail
             )
             textLayoutMetrics = metrics
             updateTextDocumentGeometry(followingTail: shouldPreserveTail)
@@ -888,7 +981,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func scrollToTail() {
-        TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
+        withTailTrackingSuppressed {
+            TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
+        }
+        followsVisibleTail = true
+    }
+
+    private func withTailTrackingSuppressed<T>(_ operation: () throws -> T) rethrows -> T {
+        tailTrackingSuppressionDepth += 1
+        defer { tailTrackingSuppressionDepth -= 1 }
+        return try operation()
     }
 
     private func cancelLayoutMetricsReconciliation() {
@@ -908,6 +1010,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             latestStoreDrops = 0
             latestRenderOmissions = 0
             latestDisplayContinuationBreaks = 0
+            latestDisplayTruncatedLines = 0
             updateStatusLabel()
         }
         textView.string = ""
@@ -915,6 +1018,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         renderedExportChunks.removeAll(keepingCapacity: true)
         renderedDisplayUTF16Length = 0
         textLayoutMetrics = .empty
+        followsVisibleTail = true
+        updateFollowButtonPresentation()
         cancelLayoutMetricsReconciliation()
         updateTextDocumentGeometry()
     }

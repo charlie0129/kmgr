@@ -108,6 +108,11 @@ public enum ContextualShortcutCatalog {
         }
         if availability.canOpenLogs {
             items.append(item("resource.logs", "L", "Open logs"))
+            items.append(item(
+                "resource.logs.previous",
+                "\u{21E7}L",
+                "Open previous container logs"
+            ))
         }
         if availability.canOpenTerminal {
             items.append(item("resource.terminal", "S", "Open Pod terminal"))
@@ -156,6 +161,11 @@ public enum ContextualShortcutCatalog {
                 "container.logs",
                 "L / Return",
                 "Open selected container logs"
+            ))
+            items.append(item(
+                "container.logs.previous",
+                "\u{21E7}L",
+                "Open previous logs for selected container"
             ))
         }
         if canOpenTerminal {

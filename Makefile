@@ -22,6 +22,10 @@ test-swift:
 app:
 	./scripts/build-app.sh
 
+install: app
+	rm -rf /Applications/Kmgr.app
+	cp -R build/Kmgr.app /Applications/Kmgr.app
+
 run: app
 	open build/Kmgr.app
 

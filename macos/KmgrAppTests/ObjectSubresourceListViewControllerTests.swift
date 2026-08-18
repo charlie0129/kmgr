@@ -32,7 +32,7 @@ struct ObjectSubresourceListViewControllerTests {
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         #expect(controller.contextualShortcutSnapshot.items.map(\.keys)
             == [
-                "L / Return", "S", "\u{21E7}S", "P",
+                "L / Return", "\u{21E7}L", "S", "\u{21E7}S", "P",
                 "\u{21E7}\u{2318}N", "Escape",
             ])
         let button = try #require(subresourceDescendants(of: controller.view)
@@ -42,6 +42,10 @@ struct ObjectSubresourceListViewControllerTests {
 
         #expect(opened == .namedContainer("migrate", in: pod))
         #expect(table.tableColumns.map(\.title) == ["Container", "Type"])
+
+        opened = nil
+        table.keyDown(with: try subresourceKey("l", modifiers: [.shift]))
+        #expect(opened == .namedContainer("migrate", in: pod, previous: true))
 
         table.keyDown(with: try subresourceKey("s"))
         table.keyDown(with: try subresourceKey("s", modifiers: [.shift]))
@@ -80,9 +84,11 @@ struct ObjectSubresourceListViewControllerTests {
         table.keyDown(with: try subresourceKey("s"))
         table.keyDown(with: try subresourceKey("s", modifiers: [.shift]))
         table.keyDown(with: try subresourceKey("p"))
+        table.keyDown(with: try subresourceKey("l", modifiers: [.shift]))
         #expect(automaticExec == nil)
         #expect(configuredExec == nil)
         #expect(forwarded == nil)
+        #expect(opened == nil)
     }
 
     @Test("data list exposes metadata without retaining or rendering values")

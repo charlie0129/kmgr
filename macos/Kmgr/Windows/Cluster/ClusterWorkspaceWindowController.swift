@@ -400,7 +400,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                     sources: plan.sources,
                     availableSources: plan.availableSources,
                     provider: logProvider,
-                    options: LogOptions(),
+                    options: LogOptions(previous: request.previous),
                     displayConfiguration: logDisplayConfiguration,
                     staticWorkloadSnapshot: plan.staticWorkloadSnapshot
                 )
@@ -4661,10 +4661,13 @@ private final class ResourceListViewController: NSViewController,
                 identity.resource == "pods" || identity.resource == "services"
             else { return }
             onStartPortForward?(identity)
-        case .openLogs:
+        case .openLogs, .openPreviousLogs:
             guard LogResourceCompatibility.supportsSelection(selected)
             else { NSSound.beep(); return }
-            onOpenLogs?(.allContainers(for: selected))
+            onOpenLogs?(.allContainers(
+                for: selected,
+                previous: command == .openPreviousLogs
+            ))
         case .openExec:
             guard let identity = selected.only,
                 identity.group.isEmpty, identity.version == "v1", identity.resource == "pods"
@@ -4803,7 +4806,7 @@ private final class ResourceListViewController: NSViewController,
                 && ResourceDrillDownPlanner.hasPotentialTarget(selected[0])
         case .open, .openYAML, .openEvents:
             return selected.count == 1
-        case .openLogs:
+        case .openLogs, .openPreviousLogs:
             return LogResourceCompatibility.supportsSelection(selected)
         case .openExec, .configureExec:
             return selected.count == 1 && selected[0].group.isEmpty
@@ -4832,7 +4835,8 @@ private final class ResourceListViewController: NSViewController,
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, enter, open, openYAML, openEvents, openLogs, openExec, configureExec
+    case focusFilter, enter, open, openYAML, openEvents, openLogs, openPreviousLogs
+    case openExec, configureExec
     case startPortForward, selectAll, delete, scale, restart, editMetadata
     case copyName, copyNamespacedName, copyReference, moveUp, moveDown, extendUp, extendDown
 }
@@ -4841,6 +4845,7 @@ private extension ResourceTableCommand {
     var subresourceNetworkAction: ObjectSubresourceNetworkAction? {
         switch self {
         case .openLogs: .openLogs
+        case .openPreviousLogs: .openPreviousLogs
         case .openExec: .openAutomaticExec
         case .configureExec: .configureExec
         case .startPortForward: .startPortForward
@@ -4922,7 +4927,12 @@ private final class ResourceTableView: NSTableView {
         case (_, 36, false): onCommand?(.enter)
         case ("y", _, false), ("Y", _, false): onCommand?(.openYAML)
         case ("e", _, false), ("E", _, false): onCommand?(.openEvents)
-        case ("l", _, false), ("L", _, false): onCommand?(.openLogs)
+        case ("l", _, false), ("L", _, false):
+            guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
+                super.keyDown(with: event)
+                return
+            }
+            onCommand?(event.modifierFlags.contains(.shift) ? .openPreviousLogs : .openLogs)
         case ("s", _, false), ("S", _, false):
             guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
                 super.keyDown(with: event)

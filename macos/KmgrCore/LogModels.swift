@@ -80,26 +80,39 @@ public enum PodLogContainerSelection: Hashable, Sendable {
 public struct LogOpenRequest: Hashable, Sendable {
     public var resources: [ResourceIdentity]
     public var containerSelection: PodLogContainerSelection
+    public var previous: Bool
 
     public init(
         resources: [ResourceIdentity],
-        containerSelection: PodLogContainerSelection = .all
+        containerSelection: PodLogContainerSelection = .all,
+        previous: Bool = false
     ) {
         self.resources = resources
         self.containerSelection = containerSelection
+        self.previous = previous
     }
 
     public static func allContainers(
-        for resources: [ResourceIdentity]
+        for resources: [ResourceIdentity],
+        previous: Bool = false
     ) -> Self {
-        Self(resources: resources, containerSelection: .all)
+        Self(
+            resources: resources,
+            containerSelection: .all,
+            previous: previous
+        )
     }
 
     public static func namedContainer(
         _ name: String,
-        in pod: ResourceIdentity
+        in pod: ResourceIdentity,
+        previous: Bool = false
     ) -> Self {
-        Self(resources: [pod], containerSelection: .named(name))
+        Self(
+            resources: [pod],
+            containerSelection: .named(name),
+            previous: previous
+        )
     }
 }
 
@@ -683,6 +696,7 @@ public struct RenderedLogText: Hashable, Sendable {
     public var outputUTF8Bytes: Int
     public var displayOutputUTF8Bytes: Int
     public var displayContinuationBreaks: Int
+    public var displayTruncatedLines: Int
 
     public init(
         chunks: [String],
@@ -692,7 +706,8 @@ public struct RenderedLogText: Hashable, Sendable {
         omittedSourceBytes: UInt64,
         outputUTF8Bytes: Int,
         displayOutputUTF8Bytes: Int,
-        displayContinuationBreaks: Int
+        displayContinuationBreaks: Int,
+        displayTruncatedLines: Int
     ) {
         self.chunks = chunks
         self.displayChunks = displayChunks
@@ -702,6 +717,7 @@ public struct RenderedLogText: Hashable, Sendable {
         self.outputUTF8Bytes = outputUTF8Bytes
         self.displayOutputUTF8Bytes = displayOutputUTF8Bytes
         self.displayContinuationBreaks = displayContinuationBreaks
+        self.displayTruncatedLines = displayTruncatedLines
     }
 
     public var text: String { chunks.joined() }
@@ -797,10 +813,16 @@ public enum LogTextInstallPlanner {
 /// newest matching records when source labels or UTF-8 replacement expansion
 /// would exceed the configured visible-text budget.
 public enum LogTextRenderer {
+    /// Keep the native text surface small even when an application writes a
+    /// JSON document, stack dump, or binary-like payload as one logical line.
+    /// Save continues to use the lossless logical projection.
+    public static let defaultMaximumDisplayedLineUTF8Bytes = 4 << 10
+
     /// Every bounded continuation fragment gets an independent display
     /// paragraph. The marker makes the projection unambiguous when Wrap is
     /// disabled; the logical/export projection omits it.
     public static let displayContinuationMarker = "↪ "
+    public static let displayTruncationMarker = "… [line truncated; Save preserves full line]"
 
     private struct Candidate {
         var record: LogRecord
@@ -808,6 +830,12 @@ public enum LogTextRenderer {
         var recordIndex: Int
         var sourcePrefix: String
         var timestampPrefix: String
+        var decodedUTF8Bytes: Int
+    }
+
+    private struct DisplayLineState {
+        var displayedUTF8Bytes = 0
+        var truncated = false
     }
 
     public static func render(
@@ -815,9 +843,10 @@ public enum LogTextRenderer {
         sourceLabels: [String: String],
         showSourceLabels: Bool,
         filter: String,
-        maximumOutputUTF8Bytes: Int
+        maximumOutputUTF8Bytes: Int,
+        maximumDisplayedLineUTF8Bytes: Int = defaultMaximumDisplayedLineUTF8Bytes
     ) throws -> RenderedLogText {
-        precondition(maximumOutputUTF8Bytes > 0)
+        precondition(maximumOutputUTF8Bytes > 0 && maximumDisplayedLineUTF8Bytes > 0)
         let foldedFilter = filter.lowercased()
         var candidates: [Candidate] = []
         candidates.reserveCapacity(min(records.count, 4_096))
@@ -838,6 +867,7 @@ public enum LogTextRenderer {
             if offset & 63 == 0 { try Task.checkCancellation() }
             let record = records[index]
             let decoded = String(decoding: record.data, as: UTF8.self)
+            let decodedUTF8Bytes = decoded.utf8.count
             if !foldedFilter.isEmpty && !decoded.lowercased().contains(foldedFilter) {
                 continue
             }
@@ -871,7 +901,7 @@ public enum LogTextRenderer {
             // conservatively bounds both projections.
             let estimate = sourcePrefix.utf8.count + timestampPrefix.utf8.count
                 + (record.startsLine ? 0 : "… ".utf8.count)
-                + decoded.utf8.count
+                + decodedUTF8Bytes
                 // Reserve both a visual separator before a disjoint segment
                 // and the record's own newline. Most records use only one;
                 // the conservative bound keeps interleaving byte-safe.
@@ -886,7 +916,8 @@ public enum LogTextRenderer {
                 decoded: decoded,
                 recordIndex: index,
                 sourcePrefix: sourcePrefix,
-                timestampPrefix: timestampPrefix
+                timestampPrefix: timestampPrefix,
+                decodedUTF8Bytes: decodedUTF8Bytes
             ))
             estimatedOutputBytes += estimate
         }
@@ -898,6 +929,8 @@ public enum LogTextRenderer {
         var outputBytes = 0
         var displayOutputBytes = 0
         var displayContinuationBreaks = 0
+        var displayTruncatedLines = 0
+        var displayLineStates: [String: DisplayLineState] = [:]
         var previousVisibleSourceID: String?
         var previousVisibleIndex = -1
         var previousVisibleLineOpen = false
@@ -922,18 +955,49 @@ public enum LogTextRenderer {
             outputBytes += logicalPrefix.utf8.count + candidate.decoded.utf8.count
                 + (record.endsWithNewline ? 1 : 0)
 
-            // Unlike the logical projection, each record's display depends
-            // only on that record. Evicting an old fragment therefore leaves
-            // the retained suffix byte-for-byte stable and lets the AppKit
-            // installer remove/append instead of replacing the whole buffer.
-            let displayPrefix = candidate.sourcePrefix + candidate.timestampPrefix
-                + (record.startsLine ? "" : displayContinuationMarker)
-            if !displayPrefix.isEmpty { displayChunks.append(displayPrefix) }
-            displayChunks.append(candidate.decoded)
-            displayChunks.append("\n")
-            displayOutputBytes += displayPrefix.utf8.count + candidate.decoded.utf8.count + 1
-            if !record.startsLine {
-                displayContinuationBreaks += 1
+            // The logical/export projection above remains complete. The
+            // TextKit-facing projection is capped independently per source
+            // line, so one pathological line cannot dominate NSTextStorage.
+            // Once the static truncation marker is installed, later hidden
+            // fragments leave the display chunks unchanged and streaming
+            // updates stay incremental.
+            var displayState = record.startsLine
+                ? DisplayLineState()
+                : displayLineStates[record.sourceID] ?? DisplayLineState()
+            if !displayState.truncated {
+                let remaining = max(
+                    0,
+                    maximumDisplayedLineUTF8Bytes - displayState.displayedUTF8Bytes
+                )
+                let truncatesRecord = candidate.decodedUTF8Bytes > remaining
+                let displayed = truncatesRecord
+                    ? utf8Prefix(candidate.decoded, maximumBytes: remaining)
+                    : candidate.decoded
+                let displayedBytes = displayed.utf8.count
+                let displayPrefix = candidate.sourcePrefix + candidate.timestampPrefix
+                    + (record.startsLine ? "" : displayContinuationMarker)
+                if !displayPrefix.isEmpty { displayChunks.append(displayPrefix) }
+                if !displayed.isEmpty { displayChunks.append(displayed) }
+                if truncatesRecord {
+                    if !displayed.isEmpty { displayChunks.append(" ") }
+                    displayChunks.append(displayTruncationMarker)
+                    displayState.truncated = true
+                    displayTruncatedLines += 1
+                }
+                displayChunks.append("\n")
+                displayOutputBytes += displayPrefix.utf8.count + displayedBytes
+                    + (truncatesRecord ? displayTruncationMarker.utf8.count : 0)
+                    + (truncatesRecord && !displayed.isEmpty ? 1 : 0)
+                    + 1
+                displayState.displayedUTF8Bytes += displayedBytes
+                if !record.startsLine {
+                    displayContinuationBreaks += 1
+                }
+            }
+            if record.endsWithNewline {
+                displayLineStates.removeValue(forKey: record.sourceID)
+            } else {
+                displayLineStates[record.sourceID] = displayState
             }
             previousVisibleSourceID = record.sourceID
             previousVisibleIndex = candidate.recordIndex
@@ -947,8 +1011,21 @@ public enum LogTextRenderer {
             omittedSourceBytes: omittedBytes,
             outputUTF8Bytes: outputBytes,
             displayOutputUTF8Bytes: displayOutputBytes,
-            displayContinuationBreaks: displayContinuationBreaks
+            displayContinuationBreaks: displayContinuationBreaks,
+            displayTruncatedLines: displayTruncatedLines
         )
+    }
+
+    private static func utf8Prefix(_ value: String, maximumBytes: Int) -> String {
+        guard maximumBytes > 0 else { return "" }
+        let utf8 = value.utf8
+        guard utf8.count > maximumBytes else { return value }
+        var end = utf8.index(utf8.startIndex, offsetBy: maximumBytes)
+        while end > utf8.startIndex, String.Index(end, within: value) == nil {
+            end = utf8.index(before: end)
+        }
+        guard let stringEnd = String.Index(end, within: value) else { return "" }
+        return String(value[..<stringEnd])
     }
 
     private static func displaySafeLabel(_ value: String) -> String {

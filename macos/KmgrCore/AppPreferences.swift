@@ -427,6 +427,7 @@ public struct KeyboardShortcutReference: Hashable, Sendable {
         Self(keys: "Y", action: "Open YAML for one object"),
         Self(keys: "E", action: "Open Events for one object"),
         Self(keys: "L", action: "Open logs"),
+        Self(keys: "\u{21E7}L", action: "Open previous container logs"),
         Self(keys: "S", action: "Open Pod shell"),
         Self(keys: "P", action: "Start a Pod or Service port-forward"),
         Self(keys: "⌘⌫", action: "Delete selection"),

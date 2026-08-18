@@ -163,13 +163,14 @@ import Testing
     for keys in [
         "⌘N", "⌘K", "/", "↑ / ↓ or K / J", "⇧↑ / ⇧↓ or ⇧-click",
         "⌘-click", "⌘A", "Return", "⌘Return", "⌘[ / ⌘]", "Escape", "Y", "E",
-        "L", "S", "P", "⌘⌫", "⌘S",
+        "L", "⇧L", "S", "P", "⌘⌫", "⌘S",
     ] {
         #expect(shortcuts[keys] != nil, "Missing shortcut reference for \(keys)")
     }
     #expect(shortcuts["Return"]?.contains("subresource") == true)
     #expect(shortcuts["⌘Return"] == "Open selected object details")
     #expect(shortcuts["E"] == "Open Events for one object")
+    #expect(shortcuts["⇧L"] == "Open previous container logs")
 }
 
 @Test func confirmationPreferencesControlOnlyRestartAndScalingPrompts() {

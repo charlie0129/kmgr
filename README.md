@@ -104,9 +104,9 @@ app-wide Port Forwards window.
   follow, previous logs, timestamps, tail, and since remain adjustable in the
   live window toolbar alongside filtering, pause, copy, and explicit save. The
   context and exact source labels remain visible above the bounded log buffer.
-  Oversized logical lines are divided into marked, display-only 64 KiB
-  continuations so TextKit never lays out a multi-megabyte paragraph; Save
-  preserves the exact logical line without those markers or breaks.
+  Oversized logical lines show only a marked 4 KiB preview by default, so
+  TextKit never installs or lays out a multi-megabyte line. Save preserves the
+  buffered logical line without display-only truncation markers or breaks.
 - Pod exec uses a SwiftTerm window and direct argv transport. `S` automatically
   chooses the annotated/default regular container and probes `/bin/bash` then
   `/bin/sh`; Shift-S opens configuration for choosing a container or running an
@@ -161,6 +161,7 @@ focus, and hides when no supported context is active.
 | `Y` | Open a read-only YAML snapshot window for one object |
 | `E` | Open Events for one object |
 | `L` | Tail all containers for compatible selected Pods or workloads |
+| Shift-L | Show logs from the previous container instance for compatible selected Pods or workloads |
 | `S` | Open a terminal for one Pod using automatic container and shell defaults |
 | Shift-S | Configure the container, shell, or executable for one Pod |
 | `P` | Configure a port-forward for one Pod or Service |
@@ -176,8 +177,9 @@ available. In the editable YAML tab, unmodified letters always enter YAML and
 standard Command shortcuts provide find, copy, paste, undo, and redo.
 
 In a Pod's Containers subresource, `L`/Return opens the selected container's
-logs, `S` opens its terminal, Shift-S configures its terminal, and `P` starts a
-port-forward for the UID-pinned parent Pod.
+current logs, Shift-L opens its previous container instance's logs, `S` opens
+its terminal, Shift-S configures its terminal, and `P` starts a port-forward
+for the UID-pinned parent Pod.
 
 ## Programmable columns and filtering
 
