@@ -1,6 +1,13 @@
 import AppKit
 import KmgrCore
 
+@MainActor
+struct ResourceTableTextAccent {
+    var utf16Range: Range<Int>
+    var font: NSFont
+    var color: NSColor
+}
+
 /// AppKit policy for transient resource-table effects. The cell never starts
 /// an animation: callers supply the current monotonic highlight presentation
 /// and decide when to repaint. Reduced motion converts the supplied fade into
@@ -105,7 +112,8 @@ class HighlightableResourceTableCellView: NSTableCellView {
         alignment: NSTextAlignment,
         toolTip: String?,
         emphasizedTerm: String?,
-        changeHighlight: ResourceCellHighlightPresentation?
+        changeHighlight: ResourceCellHighlightPresentation?,
+        textAccent: ResourceTableTextAccent? = nil
     ) {
         valueLabel.font = baseFont
         valueLabel.textColor = textColor
@@ -113,7 +121,8 @@ class HighlightableResourceTableCellView: NSTableCellView {
             text,
             baseFont: baseFont,
             textColor: textColor,
-            emphasizedTerm: emphasizedTerm
+            emphasizedTerm: emphasizedTerm,
+            textAccent: textAccent
         )
         valueLabel.alignment = alignment
         valueLabel.toolTip = toolTip
@@ -167,7 +176,8 @@ class HighlightableResourceTableCellView: NSTableCellView {
         _ text: String,
         baseFont: NSFont,
         textColor: NSColor,
-        emphasizedTerm: String?
+        emphasizedTerm: String?,
+        textAccent: ResourceTableTextAccent?
     ) -> NSAttributedString {
         let result = NSMutableAttributedString(
             string: text,
@@ -176,6 +186,22 @@ class HighlightableResourceTableCellView: NSTableCellView {
                 .foregroundColor: textColor,
             ]
         )
+        if let textAccent {
+            let lowerBound = max(0, textAccent.utf16Range.lowerBound)
+            let upperBound = min(result.length, textAccent.utf16Range.upperBound)
+            if lowerBound < upperBound {
+                result.addAttributes(
+                    [
+                        .font: textAccent.font,
+                        .foregroundColor: textAccent.color,
+                    ],
+                    range: NSRange(
+                        location: lowerBound,
+                        length: upperBound - lowerBound
+                    )
+                )
+            }
+        }
         guard let emphasizedTerm, !emphasizedTerm.isEmpty, !text.isEmpty else {
             return result
         }

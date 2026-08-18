@@ -18,6 +18,7 @@ struct ResourceUsageCellPresentationTests {
         )))
 
         #expect(presentation.text == "420m / 500m / 1")
+        #expect(presentation.currentUsageTextRange == 0..<4)
         #expect(presentation.primaryComponent == .usage)
         #expect(presentation.fillRatio == 0.42)
         #expect(presentation.markers == [
@@ -46,6 +47,7 @@ struct ResourceUsageCellPresentationTests {
         )))
 
         #expect(presentation.primaryComponent == .request)
+        #expect(presentation.currentUsageTextRange == nil)
         #expect(presentation.fillRatio == 0.75)
         #expect(presentation.markers == [
             .init(component: .request, ratio: 0.75),
@@ -55,6 +57,21 @@ struct ResourceUsageCellPresentationTests {
         #expect(presentation.accessibilityLabel == "Memory resource allocation")
         #expect(presentation.accessibilityValue ==
             "Memory, request 1.5 gibibytes, capacity 2 gibibytes")
+    }
+
+    @Test("current usage range handles compact separators and Unicode")
+    func currentUsageRange() {
+        let compact = ResourceUsageCellPresentation(
+            displayText: "90/100/100",
+            value: ResourceUsageValue(usage: 90, limit: 100, unit: "count")
+        )
+        #expect(compact.currentUsageTextRange == 0..<2)
+
+        let unicode = ResourceUsageCellPresentation(
+            displayText: "🔥90 / 100",
+            value: ResourceUsageValue(usage: 90, limit: 100, unit: "count")
+        )
+        #expect(unicode.currentUsageTextRange == 0..<4)
     }
 
     @Test("overflow remains explicit and is never clamped")

@@ -260,24 +260,34 @@ keeps the table column ID `gpu` while accounting the exact Kubernetes resource
   type: resourceUsage
 ```
 
-Built-in values include `name`, `namespace`, `kind`, `status`, `node`,
-`ready`, `restarts`, `age`, `created`, and `resourceVersion`; the documented
-Pod-qualified forms such as `pod.status` resolve to the same optimized
-extractors. Metric values include `cpu`, `memory`, `ephemeral-storage`, Node
-request/limit and Pod-count variants, and `resource:<exact-resource-name>`.
-The documented qualified forms such as `pod.cpu.usageRequestLimit` are also accepted.
-Native result types are part of that contract: `ready` is `string`, `restarts`
-is `integer`, `age` is `duration`, `created` is `timestamp`, and metric values
-are `resourceUsage`; other metadata/status built-ins are `string`.
+Built-in values include `name`, `namespace`, `kind`, `status`, `replicas`,
+`node`, `ready`, `restarts`, `age`, `created`, and `resourceVersion`; the
+documented Pod-qualified forms such as `pod.status` resolve to the same
+optimized extractors. Metric values include `cpu`, `memory`,
+`ephemeral-storage`, Node request/limit and Pod-count variants, and
+`resource:<exact-resource-name>`. The documented qualified forms such as
+`pod.cpu.usageRequestLimit` are also accepted. Native result types are part of
+that contract: `ready` and `replicas` are `string`, `restarts` is `integer`,
+`age` is `duration`, `created` is `timestamp`, and metric values are
+`resourceUsage`; other metadata/status built-ins are `string`.
 Source, value, result type, and resource-kind compatibility are validated when
 the configuration is compiled. CEL columns cannot declare `value`, and native
 columns cannot declare a CEL expression.
+
+The `replicas` built-in is enabled by default for `apps/v1` Deployments,
+StatefulSets, DaemonSets, and ReplicaSets, plus core/v1 ReplicationControllers.
+It renders `available/ready/total`; its tooltip labels all three values and
+also includes the controller's desired replica count when Kubernetes exposes
+one. A mismatch is shown as a warning while the controller converges.
 
 Pod and Node views use the built-in IDs `cpu`, `memory`, and
 `ephemeral-storage`. Pods render actual usage / effective request / effective
 limit; Nodes render actual usage / allocatable, with physical capacity in the
 tooltip. These cells remain typed `resourceUsage` values even when actual usage
 is unavailable, so scheduler accounting is not confused with measured usage.
+When usage pressure reaches the warning or critical threshold, only the actual
+usage component is colored and emphasized; request, limit, and allocatable
+values keep the normal contextual style.
 CPU display values consistently use cores with adaptive precision: values of
 ten or more use one fractional digit, ordinary fractions use two, and tiny
 values preserve the leading fractional zeroes plus roughly three significant

@@ -52,6 +52,25 @@ import Testing
     #expect(nodes.first(where: { $0.value == "ephemeral-storage" })?.isEnabled == false)
     #expect(!nodes.contains(where: { $0.value == "ready" || $0.value == "node" }))
 
+    let deployments = NativeColumnCatalog.defaultDefinitions(
+        group: "apps", version: "v1", resource: "deployments", namespaced: true
+    )
+    #expect(deployments.map(\.value) == [
+        "namespace", "name", "replicas", "status", "age",
+    ])
+    #expect(deployments.first(where: { $0.value == "replicas" })?.type == .string)
+
+    for resource in [
+        "statefulsets", "daemonsets", "replicasets",
+    ] {
+        #expect(NativeColumnCatalog.defaultDefinitions(
+            group: "apps", version: "v1", resource: resource, namespaced: true
+        ).contains(where: { $0.value == "replicas" }))
+    }
+    #expect(NativeColumnCatalog.defaultDefinitions(
+        group: "", version: "v1", resource: "replicationcontrollers", namespaced: true
+    ).contains(where: { $0.value == "replicas" }))
+
     let custom = NativeColumnCatalog.defaultDefinitions(
         group: "example.test", version: "v1", resource: "pods", namespaced: true
     )
@@ -112,11 +131,18 @@ import Testing
     #expect(nodeValues.contains("pod-count"))
     #expect(!nodeValues.contains("ready"))
 
+    let deploymentValues = Set(NativeColumnCatalog.items(
+        group: "apps", version: "v1", resource: "deployments", existingColumns: []
+    ).map(\.descriptor.value))
+    #expect(deploymentValues.contains("replicas"))
+    #expect(!deploymentValues.contains("ready"))
+
     let customValues = Set(NativeColumnCatalog.items(
         group: "example.test", version: "v1", resource: "widgets", existingColumns: []
     ).map(\.descriptor.value))
     #expect(customValues.contains("name"))
     #expect(!customValues.contains("cpu"))
+    #expect(!customValues.contains("replicas"))
 }
 
 @Test func exactResourceDefinitionsValidateAndPreserveFullQualifiedIdentity() throws {

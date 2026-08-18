@@ -96,6 +96,7 @@ var builtinExtractors = map[string]columns.ResultType{
 	"name":            columns.ResultString,
 	"kind":            columns.ResultString,
 	"status":          columns.ResultString,
+	"replicas":        columns.ResultString,
 	"node":            columns.ResultString,
 	"ready":           columns.ResultString,
 	"restarts":        columns.ResultInteger,
@@ -189,9 +190,21 @@ func builtinSupportedForResource(key resourceKey, value string) bool {
 	switch value {
 	case "node", "ready", "restarts":
 		return isCoreResource(key, "pods")
+	case "replicas":
+		return isReplicaWorkload(key)
 	default:
 		return true
 	}
+}
+
+func isReplicaWorkload(key resourceKey) bool {
+	if key.group == "apps" && key.version == "v1" {
+		switch key.resource {
+		case "deployments", "statefulsets", "daemonsets", "replicasets":
+			return true
+		}
+	}
+	return isCoreResource(key, "replicationcontrollers")
 }
 
 func metricValue(value string) (string, bool) {

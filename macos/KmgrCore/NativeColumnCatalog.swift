@@ -6,6 +6,7 @@ public enum NativeColumnResourceScope: Hashable, Sendable {
     case pods
     case nodes
     case podsAndNodes
+    case replicaWorkloads
 
     public func supports(group: String, version: String, resource: String) -> Bool {
         let isPod = group.isEmpty && version == "v1" && resource == "pods"
@@ -15,7 +16,28 @@ public enum NativeColumnResourceScope: Hashable, Sendable {
         case .pods: isPod
         case .nodes: isNode
         case .podsAndNodes: isPod || isNode
+        case .replicaWorkloads:
+            Self.isReplicaWorkload(
+                group: group,
+                version: version,
+                resource: resource
+            )
         }
+    }
+
+    private static func isReplicaWorkload(
+        group: String,
+        version: String,
+        resource: String
+    ) -> Bool {
+        guard version == "v1" else { return false }
+        if group == "apps" {
+            return switch resource {
+            case "deployments", "statefulsets", "daemonsets", "replicasets": true
+            default: false
+            }
+        }
+        return group.isEmpty && resource == "replicationcontrollers"
     }
 }
 
@@ -99,6 +121,10 @@ public enum NativeColumnCatalog {
         builtin("name", "Name", .string, .leading, 280, .any),
         builtin("kind", "Kind", .string, .leading, 120, .any),
         builtin("status", "Status", .string, .leading, 130, .any),
+        builtin(
+            "replicas", "Replicas (A/R/T)", .string, .center, 120,
+            .replicaWorkloads
+        ),
         builtin("node", "Node", .string, .leading, 180, .pods),
         builtin("ready", "Ready", .string, .center, 70, .pods),
         builtin("restarts", "Restarts", .integer, .trailing, 75, .pods),
@@ -215,6 +241,12 @@ public enum NativeColumnCatalog {
             ]
         } else if group.isEmpty && version == "v1" && resource == "nodes" {
             values += ["status", "cpu", "memory", "ephemeral-storage", "age"]
+        } else if NativeColumnResourceScope.replicaWorkloads.supports(
+            group: group,
+            version: version,
+            resource: resource
+        ) {
+            values += ["replicas", "status", "age"]
         } else {
             values += ["status", "age"]
         }

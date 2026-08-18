@@ -7,7 +7,7 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Resource usage AppKit cell")
 struct ResourceUsageTableCellViewTests {
-    @Test("configures warning text tooltip and accessibility")
+    @Test("configures warning on current usage only, with tooltip and accessibility")
     func configuresCell() {
         let presentation = ResourceUsageCellPresentation(
             displayText: "420m / 500m / 1",
@@ -29,11 +29,23 @@ struct ResourceUsageTableCellViewTests {
 
         #expect(cell.textField?.stringValue == "420m / 500m / 1")
         #expect(cell.textField?.alignment == .right)
-        #expect(cell.textField?.textColor == .systemOrange)
-        #expect(cell.textField?.font == .systemFont(
+        let attributed = cell.textField?.attributedStringValue
+        #expect(attributed?.attribute(
+            .foregroundColor, at: 0, effectiveRange: nil
+        ) as? NSColor == .systemOrange)
+        #expect(attributed?.attribute(
+            .font, at: 0, effectiveRange: nil
+        ) as? NSFont == .systemFont(
             ofSize: NSFont.systemFontSize,
             weight: .semibold
         ))
+        let requestIndex = (attributed?.string as? NSString)?.range(of: "500m").location ?? 0
+        #expect(attributed?.attribute(
+            .foregroundColor, at: requestIndex, effectiveRange: nil
+        ) as? NSColor == .labelColor)
+        #expect(attributed?.attribute(
+            .font, at: requestIndex, effectiveRange: nil
+        ) as? NSFont == .systemFont(ofSize: NSFont.systemFontSize))
         #expect(cell.toolTip == "Resource: cpu")
         #expect(cell.subviews.count == 1)
         #expect(cell.subviews.first === cell.textField)
@@ -62,11 +74,23 @@ struct ResourceUsageTableCellViewTests {
             textColor: .secondaryLabelColor
         )
 
-        #expect(cell.textField?.textColor == .systemRed)
-        #expect(cell.textField?.font == .systemFont(
+        var attributed = cell.textField?.attributedStringValue
+        #expect(attributed?.attribute(
+            .foregroundColor, at: 0, effectiveRange: nil
+        ) as? NSColor == .systemRed)
+        #expect(attributed?.attribute(
+            .font, at: 0, effectiveRange: nil
+        ) as? NSFont == .systemFont(
             ofSize: NSFont.systemFontSize,
             weight: .semibold
         ))
+        let capacityIndex = (attributed?.string as? NSString)?.range(of: "100").location ?? 0
+        #expect(attributed?.attribute(
+            .foregroundColor, at: capacityIndex, effectiveRange: nil
+        ) as? NSColor == .secondaryLabelColor)
+        #expect(attributed?.attribute(
+            .font, at: capacityIndex, effectiveRange: nil
+        ) as? NSFont == .systemFont(ofSize: NSFont.systemFontSize))
         #expect(cell.accessibilityValue() as? String ==
             "Critical, Pods, usage 90 pods, capacity 100 pods")
 
@@ -85,8 +109,15 @@ struct ResourceUsageTableCellViewTests {
             textColor: .secondaryLabelColor
         )
 
-        #expect(cell.textField?.textColor == .secondaryLabelColor)
-        #expect(cell.textField?.font == .systemFont(ofSize: NSFont.systemFontSize))
+        attributed = cell.textField?.attributedStringValue
+        for index in 0..<(attributed?.length ?? 0) {
+            #expect(attributed?.attribute(
+                .foregroundColor, at: index, effectiveRange: nil
+            ) as? NSColor == .secondaryLabelColor)
+            #expect(attributed?.attribute(
+                .font, at: index, effectiveRange: nil
+            ) as? NSFont == .systemFont(ofSize: NSFont.systemFontSize))
+        }
         #expect(cell.accessibilityValue() as? String ==
             "Pods, usage 10 pods, capacity 100 pods")
     }
@@ -132,14 +163,42 @@ struct ResourceUsageTableCellViewTests {
             ofSize: NSFont.systemFontSize,
             weight: .semibold
         ))
+        #expect(attributed.attribute(
+            .foregroundColor, at: 0, effectiveRange: nil
+        ) as? NSColor == .systemOrange)
+        #expect(attributed.attribute(
+            .foregroundColor, at: match.location, effectiveRange: nil
+        ) as? NSColor == .labelColor)
+        #expect(cell.renderedHighlightColor != nil)
+    }
+
+    @Test("warning without measured usage does not color allocation context")
+    func noUsageHasNoPressureAccent() throws {
+        let cell = ResourceUsageTableCellView()
+        cell.configure(
+            presentation: ResourceUsageCellPresentation(
+                displayText: "80 / 100",
+                value: ResourceUsageValue(
+                    request: 80,
+                    capacity: 100,
+                    unit: "count"
+                ),
+                cellSeverity: .warning
+            ),
+            toolTip: nil,
+            alignment: .right,
+            textColor: .labelColor
+        )
+
+        let attributed = try #require(cell.textField?.attributedStringValue)
         for index in 0..<attributed.length {
             #expect(attributed.attribute(
-                .foregroundColor,
-                at: index,
-                effectiveRange: nil
-            ) as? NSColor == .systemOrange)
+                .foregroundColor, at: index, effectiveRange: nil
+            ) as? NSColor == .labelColor)
+            #expect(attributed.attribute(
+                .font, at: index, effectiveRange: nil
+            ) as? NSFont == .systemFont(ofSize: NSFont.systemFontSize))
         }
-        #expect(cell.renderedHighlightColor != nil)
     }
 
 }

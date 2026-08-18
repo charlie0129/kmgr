@@ -4470,7 +4470,7 @@ private final class ResourceListViewController: NSViewController,
                 presentation: presentation,
                 toolTip: value.tooltip.isEmpty ? nil : value.tooltip,
                 alignment: textAlignment(alignment),
-                textColor: textColor(value.severity),
+                textColor: resourceUsageBaseTextColor(value.severity),
                 emphasizedTerm: emphasizedTerm,
                 changeHighlight: changeHighlight
             )
@@ -4501,10 +4501,8 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
-    private func textColor(_ severity: CellSeverity?) -> NSColor {
+    private func resourceUsageBaseTextColor(_ severity: CellSeverity?) -> NSColor {
         switch severity {
-        case .warning: .systemOrange
-        case .critical: .systemRed
         case .informational: .systemBlue
         case .muted: .secondaryLabelColor
         default: .labelColor

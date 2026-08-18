@@ -482,6 +482,32 @@ func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID stri
 		status := statusText(object)
 		setStringCell(cell, status)
 		cell.Severity = statusSeverity(status)
+	case "replicas":
+		state, supported := replicaStateFor(p.spec.Resource, object)
+		if !supported {
+			setStringCell(cell, DefaultMissingCell)
+			cell.Tooltip = "Replica state is not available for this resource"
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+			break
+		}
+		cell.DisplayText = fmt.Sprintf(
+			"%d/%d/%d", state.available, state.ready, state.total,
+		)
+		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: cell.DisplayText}
+		cell.Tooltip = fmt.Sprintf(
+			"Available replicas: %d\nReady replicas: %d\nTotal replicas: %d",
+			state.available, state.ready, state.total,
+		)
+		if state.desired != nil {
+			cell.Tooltip += fmt.Sprintf("\nDesired replicas: %d", *state.desired)
+		}
+		target := state.total
+		if state.desired != nil {
+			target = *state.desired
+		}
+		if state.available != target || state.ready != target || state.total != target {
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
+		}
 	case "node":
 		value, _, _ := unstructured.NestedString(object.Object, "spec", "nodeName")
 		setStringCell(cell, valueOrMissing(value))
@@ -1100,10 +1126,74 @@ func defaultColumns(resource ResourceType) []string {
 		columns = append(columns, "ready", "status", "restarts", "node", PodCPUColumn, PodMemoryColumn)
 	} else if strings.EqualFold(resource.Kind, "Node") || resource.Resource == "nodes" {
 		columns = append(columns, "status", NodeCPUUsageColumn, NodeMemoryUsageColumn)
+	} else if isReplicaWorkloadResource(resource) {
+		columns = append(columns, "replicas", "status")
 	} else {
 		columns = append(columns, "status")
 	}
 	return append(columns, "age")
+}
+
+type replicaState struct {
+	available int64
+	ready     int64
+	total     int64
+	desired   *int64
+}
+
+func replicaStateFor(
+	resource ResourceType,
+	object *unstructured.Unstructured,
+) (replicaState, bool) {
+	if object == nil || !isReplicaWorkloadResource(resource) {
+		return replicaState{}, false
+	}
+	state := replicaState{}
+	if resource.Group == "apps" && resource.Version == "v1" &&
+		resource.Resource == "daemonsets" {
+		state.available, _, _ = unstructured.NestedInt64(
+			object.Object, "status", "numberAvailable",
+		)
+		state.ready, _, _ = unstructured.NestedInt64(
+			object.Object, "status", "numberReady",
+		)
+		state.total, _, _ = unstructured.NestedInt64(
+			object.Object, "status", "currentNumberScheduled",
+		)
+		if desired, found, _ := unstructured.NestedInt64(
+			object.Object, "status", "desiredNumberScheduled",
+		); found {
+			state.desired = &desired
+		}
+		return state, true
+	}
+
+	state.available, _, _ = unstructured.NestedInt64(
+		object.Object, "status", "availableReplicas",
+	)
+	state.ready, _, _ = unstructured.NestedInt64(
+		object.Object, "status", "readyReplicas",
+	)
+	state.total, _, _ = unstructured.NestedInt64(
+		object.Object, "status", "replicas",
+	)
+	if desired, found, _ := unstructured.NestedInt64(
+		object.Object, "spec", "replicas",
+	); found {
+		state.desired = &desired
+	}
+	return state, true
+}
+
+func isReplicaWorkloadResource(resource ResourceType) bool {
+	if resource.Group == "apps" && resource.Version == "v1" {
+		switch resource.Resource {
+		case "deployments", "statefulsets", "daemonsets", "replicasets":
+			return true
+		}
+	}
+	return resource.Group == "" && resource.Version == "v1" &&
+		resource.Resource == "replicationcontrollers"
 }
 
 func setStringCell(cell *kmgrv1.Cell, value string) {

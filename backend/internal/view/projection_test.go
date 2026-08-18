@@ -316,6 +316,126 @@ func TestProjectionSliceReadersPreserveMalformedFieldFallbacks(t *testing.T) {
 	}
 }
 
+func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		resource     ResourceType
+		spec         map[string]any
+		status       map[string]any
+		want         string
+		wantSeverity kmgrv1.CellSeverity
+	}{
+		{
+			name: "Deployment progressing",
+			resource: ResourceType{
+				Group: "apps", Version: "v1", Resource: "deployments",
+				Kind: "Deployment", Namespaced: true,
+			},
+			spec: map[string]any{"replicas": int64(3)},
+			status: map[string]any{
+				"availableReplicas": int64(2), "readyReplicas": int64(3),
+				"replicas": int64(4),
+			},
+			want: "2/3/4", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+		},
+		{
+			name: "StatefulSet ready",
+			resource: ResourceType{
+				Group: "apps", Version: "v1", Resource: "statefulsets",
+				Kind: "StatefulSet", Namespaced: true,
+			},
+			spec: map[string]any{"replicas": int64(3)},
+			status: map[string]any{
+				"availableReplicas": int64(3), "readyReplicas": int64(3),
+				"replicas": int64(3),
+			},
+			want: "3/3/3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+		},
+		{
+			name: "DaemonSet progressing",
+			resource: ResourceType{
+				Group: "apps", Version: "v1", Resource: "daemonsets",
+				Kind: "DaemonSet", Namespaced: true,
+			},
+			status: map[string]any{
+				"numberAvailable": int64(4), "numberReady": int64(5),
+				"currentNumberScheduled": int64(5), "desiredNumberScheduled": int64(5),
+			},
+			want: "4/5/5", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+		},
+		{
+			name: "ReplicaSet ready",
+			resource: ResourceType{
+				Group: "apps", Version: "v1", Resource: "replicasets",
+				Kind: "ReplicaSet", Namespaced: true,
+			},
+			spec: map[string]any{"replicas": int64(2)},
+			status: map[string]any{
+				"availableReplicas": int64(2), "readyReplicas": int64(2),
+				"replicas": int64(2),
+			},
+			want: "2/2/2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+		},
+		{
+			name: "ReplicationController progressing",
+			resource: ResourceType{
+				Version: "v1", Resource: "replicationcontrollers",
+				Kind: "ReplicationController", Namespaced: true,
+			},
+			spec: map[string]any{"replicas": int64(2)},
+			status: map[string]any{
+				"availableReplicas": int64(1), "readyReplicas": int64(2),
+				"replicas": int64(2),
+			},
+			want: "1/2/2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			projector, err := NewProjector(ProjectionSpec{
+				ClusterSessionID: "session-a",
+				Resource:         test.resource,
+				NamespaceScope:   NamespaceScope{All: true},
+				ColumnIDs:        []string{"replicas"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			object := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": test.resource.Kind,
+				"metadata": map[string]any{
+					"uid": "uid-workload", "namespace": "team-a", "name": "api",
+				},
+				"spec": test.spec, "status": test.status,
+			}}
+			row, visible := projector.ProjectOne(object)
+			if !visible {
+				t.Fatal("replica workload was unexpectedly hidden")
+			}
+			cell := cellByID(row, "replicas")
+			if cell.GetDisplayText() != test.want || cell.GetStringValue() != test.want ||
+				cell.GetSeverity() != test.wantSeverity {
+				t.Fatalf("replica cell = %#v, want %q severity %v", cell, test.want, test.wantSeverity)
+			}
+			for _, text := range []string{
+				"Available replicas:", "Ready replicas:", "Total replicas:",
+			} {
+				if !strings.Contains(cell.GetTooltip(), text) {
+					t.Errorf("tooltip %q omits %q", cell.GetTooltip(), text)
+				}
+			}
+			if !strings.Contains(cell.GetTooltip(), "Desired replicas:") {
+				t.Errorf("tooltip %q omits desired replica target", cell.GetTooltip())
+			}
+			if !slices.Contains(defaultColumns(test.resource), "replicas") {
+				t.Errorf("default columns omit replica state: %v", defaultColumns(test.resource))
+			}
+		})
+	}
+}
+
 func TestProjectorEvaluatesCompiledCELAndSortsByTypedResult(t *testing.T) {
 	t.Parallel()
 	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)

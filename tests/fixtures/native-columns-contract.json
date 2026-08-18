@@ -38,6 +38,12 @@
         {"id": "pod-count", "title": "Pods", "source": "metric", "value": "pod-count", "type": "resourceUsage"}
       ],
       "match": {"group": "", "version": "v1", "resource": "nodes"}
+    },
+    {
+      "columns": [
+        {"id": "replicas", "title": "Replicas (A/R/T)", "source": "builtin", "value": "replicas", "type": "string"}
+      ],
+      "match": {"group": "apps", "version": "v1", "resource": "deployments"}
     }
   ]
 }

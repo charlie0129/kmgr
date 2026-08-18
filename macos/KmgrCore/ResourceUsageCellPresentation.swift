@@ -30,6 +30,10 @@ public struct ResourceUsageCellPresentation: Hashable, Sendable {
     }
 
     public var text: String
+    /// UTF-16 offsets for the measured, current-usage component at the start
+    /// of `text`. Native attributed-string renderers use this range to apply
+    /// pressure styling without coloring the request/limit/capacity context.
+    public var currentUsageTextRange: Range<Int>?
     public var primaryComponent: Component?
     public var fillRatio: Double?
     public var markers: [Marker]
@@ -53,6 +57,9 @@ public struct ResourceUsageCellPresentation: Hashable, Sendable {
         cellSeverity: CellSeverity = .normal
     ) {
         text = displayText.isEmpty ? "—" : displayText
+        currentUsageTextRange = value.usage == nil
+            ? nil
+            : Self.firstComponentUTF16Range(in: text)
         primaryComponent = Self.primaryComponent(value)
         pressure = Self.pressure(value)
         effectiveSeverity = Self.effectiveSeverity(
@@ -115,6 +122,19 @@ public struct ResourceUsageCellPresentation: Hashable, Sendable {
         if let limit = value.limit { result[.limit] = limit }
         if let capacity = value.capacity { result[.capacity] = capacity }
         return result
+    }
+
+    private static func firstComponentUTF16Range(
+        in text: String
+    ) -> Range<Int>? {
+        var end = text.firstIndex(of: "/") ?? text.endIndex
+        while end > text.startIndex {
+            let previous = text.index(before: end)
+            guard text[previous].isWhitespace else { break }
+            end = previous
+        }
+        let length = text[..<end].utf16.count
+        return length > 0 ? 0..<length : nil
     }
 
     private static func primaryComponent(_ value: ResourceUsageValue) -> Component? {

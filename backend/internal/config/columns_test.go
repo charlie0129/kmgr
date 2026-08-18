@@ -389,6 +389,37 @@ func TestParseColumnsCompileValidatesSourceValueContracts(t *testing.T) {
 	}
 }
 
+func TestReplicaBuiltinSupportsStandardReplicaControllersOnly(t *testing.T) {
+	t.Parallel()
+	definition := ColumnConfiguration{
+		ID: "replicas", Title: "Replicas", Source: "builtin",
+		Value: "replicas", Type: columns.ResultString,
+	}
+	valid := []resourceKey{
+		{group: "apps", version: "v1", resource: "deployments"},
+		{group: "apps", version: "v1", resource: "statefulsets"},
+		{group: "apps", version: "v1", resource: "daemonsets"},
+		{group: "apps", version: "v1", resource: "replicasets"},
+		{version: "v1", resource: "replicationcontrollers"},
+	}
+	for _, key := range valid {
+		if got, err := validateExtractor(key, definition); err != nil || got != "replicas" {
+			t.Errorf("validateExtractor(%#v) = %q, %v", key, got, err)
+		}
+	}
+	invalid := []resourceKey{
+		{version: "v1", resource: "pods"},
+		{group: "apps", version: "v1", resource: "controllerrevisions"},
+		{group: "apps", version: "v1beta1", resource: "deployments"},
+		{group: "example.test", version: "v1", resource: "deployments"},
+	}
+	for _, key := range invalid {
+		if _, err := validateExtractor(key, definition); err == nil {
+			t.Errorf("validateExtractor(%#v) accepted replica state", key)
+		}
+	}
+}
+
 func TestParseColumnsRejectsUnknownFieldsEnvironmentAndDuplicateIDs(t *testing.T) {
 	t.Parallel()
 	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
