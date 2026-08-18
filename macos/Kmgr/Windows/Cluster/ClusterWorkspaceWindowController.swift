@@ -730,7 +730,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             guard pendingRestorationState == nil else { return }
             invalidateObjectOpenTask()
             showResourceList(resume: false)
-            contentController.open(resource: resource, scope: selectedNamespaceScope())
+            contentController.open(
+                resource: resource,
+                scope: selectedNamespaceScope(),
+                reason: .sidebarSelection
+            )
             checkpointRestoration()
             view.window?.makeFirstResponder(contentController.tableResponder)
         }
@@ -1323,7 +1327,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             guard let self else { return }
             invalidateObjectOpenTask()
             showResourceList(resume: false)
-            contentController.open(resource: resource, scope: selectedNamespaceScope())
+            contentController.open(
+                resource: resource,
+                scope: selectedNamespaceScope(),
+                reason: .commandPaletteSelection
+            )
             checkpointRestoration()
             view.window?.makeFirstResponder(contentController.tableResponder)
         }
@@ -1466,7 +1474,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.open(
             resource: target,
             scope: query.namespaceScope,
-            initialFilter: query.filterExpression
+            initialFilter: query.filterExpression,
+            reason: .resourceDrillDown
         )
         sidebarController.selectResource(matching: target.id)
         checkpointRestoration()
@@ -2229,12 +2238,36 @@ private final class ResourceSidebarViewController: NSViewController,
     }
 }
 
+private enum ResourceStreamOpenReason: String {
+    case sidebarSelection = "sidebar-selection"
+    case commandPaletteSelection = "command-palette-selection"
+    case resourceDrillDown = "resource-drill-down"
+    case namespaceChange = "namespace-change"
+    case engineRecovery = "engine-recovery"
+    case resumeAfterDetail = "resume-after-detail"
+    case programmaticFilter = "programmatic-filter"
+    case debouncedFilter = "debounced-filter"
+    case committedFilter = "committed-filter"
+    case optionalResourceColumns = "optional-resource-columns"
+    case loadedColumnConfiguration = "loaded-column-configuration"
+    case appliedColumns = "applied-columns"
+    case restoration = "restoration"
+    case historyRestore = "history-restore"
+    case sortChange = "sort-change"
+}
+
 @MainActor
 private final class ResourceListViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate
 {
     private static let autoWidthPolicy = TableColumnAutoWidthPolicy()
     private static let maxPendingOptionalResourceKeys = 256
+    private static let resourceCacheDiagnosticsEnabled: Bool = {
+        guard let raw = ProcessInfo.processInfo.environment[
+            "KMGR_RESOURCE_CACHE_DIAGNOSTICS"
+        ] else { return false }
+        return ["1", "true", "yes"].contains(raw.lowercased())
+    }()
 
     private var session: OpenedClusterSession
     private var isAuthenticated: Bool
@@ -2325,6 +2358,10 @@ private final class ResourceListViewController: NSViewController,
     /// group/version/resource).
     private(set) var resourceCatalogValidated: Bool
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "resource-table")
+    private let resourceCacheLogger = Logger(
+        subsystem: Product.bundleIdentifier,
+        category: "resource-cache"
+    )
     private let tableSignposter = OSSignposter(
         subsystem: PerformanceSignpostCatalog.subsystem,
         category: PerformanceSignpostCatalog.resourceTableCategory
@@ -2344,6 +2381,101 @@ private final class ResourceListViewController: NSViewController,
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: (() -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
+
+    private func traceResourceCache(
+        _ event: @autoclosure () -> String,
+        generation loggedGeneration: UInt64? = nil
+    ) {
+        guard Self.resourceCacheDiagnosticsEnabled else { return }
+        let traceViewID = String(viewID.prefix(8))
+        let generation = loggedGeneration ?? self.generation
+        let message = event()
+        resourceCacheLogger.notice(
+            "view=\(traceViewID, privacy: .public) generation=\(generation, privacy: .public) \(message, privacy: .public)"
+        )
+    }
+
+    private func resourceCacheContextDescription(
+        _ context: ResourceWarmRowContext?
+    ) -> String {
+        guard let context else { return "none" }
+        return "session:\(resourceCacheSessionTag(context.sessionID)),"
+            + "gvr:\(resourceCacheGVRDescription(context.gvr)),"
+            + "scope:\(resourceCacheScopeDescription(context.namespaceSelection))"
+    }
+
+    private func resourceCacheSessionTag(_ sessionID: String) -> String {
+        sessionID.isEmpty ? "none" : String(sessionID.prefix(12))
+    }
+
+    private func resourceCacheGVRDescription(_ gvr: GVR) -> String {
+        let group = gvr.group.isEmpty ? "core" : gvr.group
+        return "\(group)/\(gvr.version)/\(gvr.resource)"
+    }
+
+    private func resourceCacheScopeDescription(_ selection: NamespaceSelection) -> String {
+        if selection.allNamespaces { return "*" }
+        return selection.namespaces.isEmpty
+            ? "none" : selection.namespaces.joined(separator: ",")
+    }
+
+    private func resourceCacheIdentityDescription(_ identity: ResourceIdentity?) -> String {
+        guard let identity else { return "none" }
+        let namespace = identity.namespace.isEmpty ? "_cluster" : identity.namespace
+        let gvr = GVR(
+            group: identity.group,
+            version: identity.version,
+            resource: identity.resource
+        )
+        return "\(resourceCacheGVRDescription(gvr)):\(namespace)/\(identity.name)"
+    }
+
+    private func resourceCacheDestinationDescription(
+        _ destination: WorkspaceDestination?
+    ) -> String {
+        guard let destination else { return "none" }
+        switch destination {
+        case .resource(let state):
+            return "resource:"
+                + resourceCacheGVRDescription(GVR(
+                    group: state.group,
+                    version: state.version,
+                    resource: state.resource
+                ))
+                + ":scope:\(resourceCacheScopeDescription(state.namespaceSelection))"
+        case .object(let identity, _):
+            return "object:\(resourceCacheIdentityDescription(identity))"
+        case .subresource(let identity, _):
+            return "subresource:\(resourceCacheIdentityDescription(identity))"
+        }
+    }
+
+    private func resourceCacheRejectionDescription(
+        _ decision: ResourceWarmRowDecision
+    ) -> String {
+        var reasons: [String] = []
+        if !decision.hasExistingRows { reasons.append("no-visible-rows") }
+        if !decision.hasPreviousContext { reasons.append("no-previous-context") }
+        if decision.hasPreviousContext, !decision.sameSession {
+            reasons.append("session-changed")
+        }
+        if decision.hasPreviousContext, !decision.sameResource {
+            reasons.append("resource-changed")
+        }
+        if decision.hasPreviousContext, !decision.sameNamespaceSelection {
+            reasons.append("namespace-scope-changed")
+        }
+        return reasons.isEmpty ? "none" : reasons.joined(separator: ",")
+    }
+
+    private func resourceCacheMessageKind(_ message: ResourceViewMessage) -> String {
+        switch message {
+        case .status: "status"
+        case .snapshot: "snapshot"
+        case .delta: "delta"
+        case .failure: "failure"
+        }
+    }
 
     var contextualShortcutSnapshot: ContextualShortcutSnapshot {
         if isFilterShortcutContextActive {
@@ -2539,8 +2671,17 @@ private final class ResourceListViewController: NSViewController,
     func open(
         resource: DiscoveredResource,
         scope: NamespaceSelection,
-        initialFilter: String? = nil
+        initialFilter: String? = nil,
+        reason: ResourceStreamOpenReason
     ) {
+        traceResourceCache(
+            "event=open_resource reason=\(reason.rawValue) target_gvr="
+                + resourceCacheGVRDescription(resourceGVR(for: resource))
+                + " target_scope=\(resourceCacheScopeDescription(scope))"
+                + " rows=\(model.orderedVisibleUIDs.count)"
+                + " previous_destination="
+                + resourceCacheDestinationDescription(history.current)
+        )
         if case .resource = history.current, let current = navigationState() {
             history.replaceCurrent(with: .resource(current))
         }
@@ -2565,12 +2706,17 @@ private final class ResourceListViewController: NSViewController,
         )
         history.navigate(to: .resource(state))
         configureColumns(for: resource)
-        openStream()
+        openStream(reason: reason)
         publishContextualShortcutsIfChanged()
     }
 
     func changeNamespaceScope(_ scope: NamespaceSelection) {
         guard self.scope != scope else { return }
+        traceResourceCache(
+            "event=namespace_change from=\(resourceCacheScopeDescription(self.scope))"
+                + " to=\(resourceCacheScopeDescription(scope))"
+                + " rows=\(model.orderedVisibleUIDs.count)"
+        )
         if case .resource = history.current, let current = navigationState() {
             history.replaceCurrent(with: .resource(current))
         }
@@ -2580,7 +2726,7 @@ private final class ResourceListViewController: NSViewController,
             state.namespaceSelection = scope
             history.navigate(to: .resource(state))
         }
-        openStream()
+        openStream(reason: .namespaceChange)
     }
 
     func stop() {
@@ -2598,6 +2744,10 @@ private final class ResourceListViewController: NSViewController,
     /// A new helper generation receives a fresh session and opens a new view;
     /// the stale session is never reused for mutations.
     func engineDidDisconnect() {
+        traceResourceCache(
+            "event=engine_disconnected rows=\(model.orderedVisibleUIDs.count)"
+                + " destination=\(resourceCacheDestinationDescription(history.current))"
+        )
         endProjectionRequest(outcome: "engine-disconnected")
         clearTransientCellPresentation()
         filterTask?.cancel()
@@ -2616,6 +2766,10 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func showDisconnected(_ message: String, toolTip: String? = nil) {
+        traceResourceCache(
+            "event=rows_cleared cause=show_disconnected"
+                + " rows_before=\(model.orderedVisibleUIDs.count)"
+        )
         endProjectionRequest(outcome: "disconnected")
         clearTransientCellPresentation()
         streamTask?.cancel()
@@ -2635,6 +2789,15 @@ private final class ResourceListViewController: NSViewController,
     ) {
         clearTransientCellPresentation()
         let sessionChanged = self.session.sessionID != session.sessionID
+        traceResourceCache(
+            "event=engine_recovery old_session="
+                + resourceCacheSessionTag(self.session.sessionID)
+                + " new_session=\(resourceCacheSessionTag(session.sessionID))"
+                + " session_changed=\(sessionChanged)"
+                + " opens_current=\(opensCurrentResource)"
+                + " rows=\(model.orderedVisibleUIDs.count)"
+                + " destination=\(resourceCacheDestinationDescription(history.current))"
+        )
         self.session = session
         isAuthenticated = true
         resourceCatalogValidated = opensCurrentResource
@@ -2647,10 +2810,17 @@ private final class ResourceListViewController: NSViewController,
             clearOptionalResourceOverlay()
             if let resource { installEffectiveColumns(for: resource) }
         }
-        if opensCurrentResource, resource != nil { openStream() }
+        if opensCurrentResource, resource != nil {
+            openStream(reason: .engineRecovery)
+        }
     }
 
     func suspend() {
+        traceResourceCache(
+            "event=suspend rows=\(model.orderedVisibleUIDs.count)"
+                + " destination=\(resourceCacheDestinationDescription(history.current))"
+                + " context=\(resourceCacheContextDescription(lastStreamContext))"
+        )
         endProjectionRequest(outcome: "cancelled")
         clearTransientCellPresentation()
         stopFreshnessAgeUpdates()
@@ -2658,12 +2828,17 @@ private final class ResourceListViewController: NSViewController,
         freshnessProgressIndicator.isHidden = true
         filterTask?.cancel()
         filterTask = nil
-        cancelCurrentStream()
+        cancelCurrentStream(reason: "suspend")
         cancelOptionalResourceDiscovery(selecting: nil)
     }
 
     func resume() {
-        openStream()
+        traceResourceCache(
+            "event=resume rows=\(model.orderedVisibleUIDs.count)"
+                + " destination=\(resourceCacheDestinationDescription(history.current))"
+                + " context=\(resourceCacheContextDescription(lastStreamContext))"
+        )
+        openStream(reason: .resumeAfterDetail)
     }
 
     var tableResponder: NSResponder { tableView }
@@ -2796,7 +2971,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask?.cancel()
         filterField.stringValue = value
         rememberCurrentFilter()
-        openStream()
+        openStream(reason: .programmaticFilter)
         onRestorationChanged?()
         setFilterShortcutContextActive(true)
         view.window?.makeFirstResponder(filterField)
@@ -2807,6 +2982,11 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func navigateToObject(_ identity: ResourceIdentity, returnState: ResourceNavigationState) {
+        traceResourceCache(
+            "event=navigate_to_object target="
+                + resourceCacheIdentityDescription(identity)
+                + " rows=\(model.orderedVisibleUIDs.count)"
+        )
         if case .resource = history.current {
             history.replaceCurrent(with: .resource(returnState))
         }
@@ -2817,6 +2997,11 @@ private final class ResourceListViewController: NSViewController,
         _ identity: ResourceIdentity,
         returnState: ResourceNavigationState
     ) {
+        traceResourceCache(
+            "event=navigate_to_subresource target="
+                + resourceCacheIdentityDescription(identity)
+                + " rows=\(model.orderedVisibleUIDs.count)"
+        )
         if case .resource = history.current {
             history.replaceCurrent(with: .resource(returnState))
         }
@@ -2824,17 +3009,31 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func goBack() -> WorkspaceDestination? {
+        let previous = history.current
         if case .resource = history.current, let current = navigationState() {
             history.replaceCurrent(with: .resource(current))
         }
-        return history.goBack()
+        let destination = history.goBack()
+        traceResourceCache(
+            "event=history_back from=\(resourceCacheDestinationDescription(previous))"
+                + " to=\(resourceCacheDestinationDescription(destination))"
+                + " rows=\(model.orderedVisibleUIDs.count)"
+        )
+        return destination
     }
 
     func goForward() -> WorkspaceDestination? {
+        let previous = history.current
         if case .resource = history.current, let current = navigationState() {
             history.replaceCurrent(with: .resource(current))
         }
-        return history.goForward()
+        let destination = history.goForward()
+        traceResourceCache(
+            "event=history_forward from=\(resourceCacheDestinationDescription(previous))"
+                + " to=\(resourceCacheDestinationDescription(destination))"
+                + " rows=\(model.orderedVisibleUIDs.count)"
+        )
+        return destination
     }
 
     @objc func showCommandPalette() {
@@ -2889,7 +3088,7 @@ private final class ResourceListViewController: NSViewController,
         filterRevision &+= 1
         filterTask?.cancel()
         endProjectionRequest(outcome: "filter-revision")
-        cancelCurrentStream()
+        cancelCurrentStream(reason: "filter-revision")
         hideInlineIssue()
         installFreshnessText(
             model.orderedVisibleUIDs.isEmpty
@@ -2900,7 +3099,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled, self?.filterRevision == revision else { return }
-            self?.openStream()
+            self?.openStream(reason: .debouncedFilter)
             self?.onRestorationChanged?()
         }
         filterCompletionTrigger.textDidChange(
@@ -2953,7 +3152,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask?.cancel()
         filterTask = nil
         rememberCurrentFilter()
-        openStream()
+        openStream(reason: .committedFilter)
         onRestorationChanged?()
         setFilterShortcutContextActive(false)
         view.window?.makeFirstResponder(tableView)
@@ -2975,12 +3174,27 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func openStream(
+        reason: ResourceStreamOpenReason,
         preservingOptionalResourceDiscoveryState: Bool = false
     ) {
-        guard isAuthenticated, resourceCatalogValidated else { return }
-        guard let resource else { return }
+        guard isAuthenticated, resourceCatalogValidated else {
+            traceResourceCache(
+                "event=open_stream_blocked reason=\(reason.rawValue)"
+                    + " authenticated=\(isAuthenticated)"
+                    + " catalog_validated=\(resourceCatalogValidated)"
+                    + " rows=\(model.orderedVisibleUIDs.count)"
+            )
+            return
+        }
+        guard let resource else {
+            traceResourceCache(
+                "event=open_stream_blocked reason=\(reason.rawValue)"
+                    + " cause=no-resource rows=\(model.orderedVisibleUIDs.count)"
+            )
+            return
+        }
         endProjectionRequest(outcome: "superseded")
-        cancelCurrentStream()
+        cancelCurrentStream(reason: "open-stream:\(reason.rawValue)")
         clearTransientCellPresentation()
         requestedFilterHighlight = ResourceFilterHighlightParser.parse(
             filterField.stringValue
@@ -2998,16 +3212,42 @@ private final class ResourceListViewController: NSViewController,
             gvr: resourceGVR(for: resource),
             namespaceSelection: scope
         )
-        let sameDataContext = lastStreamContext == nextStreamContext
-        let canKeepWarmRows = ResourceWarmRowPolicy.canRetain(
-            existingRowCount: model.orderedVisibleUIDs.count,
-            previousContext: lastStreamContext,
+        let previousStreamContext = lastStreamContext
+        let rowsBeforeOpen = model.orderedVisibleUIDs.count
+        let retentionDecision = ResourceWarmRowPolicy.decision(
+            existingRowCount: rowsBeforeOpen,
+            previousContext: previousStreamContext,
             nextContext: nextStreamContext
+        )
+        let sameDataContext = lastStreamContext == nextStreamContext
+        let canKeepWarmRows = retentionDecision.canRetain
+        traceResourceCache(
+            "event=open_stream reason=\(reason.rawValue)"
+                + " previous=\(resourceCacheContextDescription(previousStreamContext))"
+                + " next=\(resourceCacheContextDescription(nextStreamContext))"
+                + " destination=\(resourceCacheDestinationDescription(history.current))"
+                + " rows_before=\(rowsBeforeOpen)"
+                + " has_previous=\(retentionDecision.hasPreviousContext)"
+                + " same_session=\(retentionDecision.sameSession)"
+                + " same_resource=\(retentionDecision.sameResource)"
+                + " same_scope=\(retentionDecision.sameNamespaceSelection)"
+                + " retain=\(canKeepWarmRows)"
+                + " rejection=\(resourceCacheRejectionDescription(retentionDecision))"
+                + " filter_revision=\(filterRevision)"
+                + " filter_length=\(filterField.stringValue.count)"
+                + " columns=\(columnIDs.count)"
+                + " sorts=\(tableView.sortDescriptors.count)"
         )
         if !sameDataContext {
             hasLastUsableResourceViewStatus = false
         }
         if !canKeepWarmRows {
+            traceResourceCache(
+                "event=rows_cleared cause=open-stream-retention-rejected"
+                    + " reason=\(reason.rawValue)"
+                    + " rows_before=\(rowsBeforeOpen)"
+                    + " rejection=\(resourceCacheRejectionDescription(retentionDecision))"
+            )
             model = ResourceTableModel()
             tableView.reloadData()
         }
@@ -3055,8 +3295,21 @@ private final class ResourceListViewController: NSViewController,
                     guard !Task.isCancelled else { return }
                     self?.receive(message)
                 }
+                guard !Task.isCancelled else { return }
+                self?.traceResourceCache(
+                    "event=stream_finished request_generation=\(request.generation)"
+                        + " current_generation=\(self?.generation ?? 0)"
+                        + " rows=\(self?.model.orderedVisibleUIDs.count ?? 0)",
+                    generation: request.generation
+                )
             } catch {
                 guard !Task.isCancelled else { return }
+                self?.traceResourceCache(
+                    "event=stream_error request_generation=\(request.generation)"
+                        + " error=\(String(describing: type(of: error)))"
+                        + " detail=\(error.localizedDescription)",
+                    generation: request.generation
+                )
                 self?.endProjectionRequest(outcome: "failed")
                 self?.show(error: error)
             }
@@ -3067,11 +3320,22 @@ private final class ResourceListViewController: NSViewController,
     /// debounce delays only creation of its replacement. Duplicate cancellation
     /// calls for the same generation are suppressed because `openStream()` also
     /// crosses this boundary after the debounce.
-    private func cancelCurrentStream() {
+    private func cancelCurrentStream(reason: String) {
         streamTask?.cancel()
         streamTask = nil
         let generation = generation
-        guard generation > 0, generation != lastCancelledGeneration else { return }
+        guard generation > 0, generation != lastCancelledGeneration else {
+            traceResourceCache(
+                "event=cancel_stream_skipped reason=\(reason)"
+                    + " last_cancelled=\(lastCancelledGeneration)",
+                generation: generation
+            )
+            return
+        }
+        traceResourceCache(
+            "event=cancel_stream reason=\(reason) rows=\(model.orderedVisibleUIDs.count)",
+            generation: generation
+        )
         lastCancelledGeneration = generation
         Task { [provider, session, viewID] in
             await provider.cancelView(
@@ -3084,13 +3348,42 @@ private final class ResourceListViewController: NSViewController,
 
     private func receive(_ message: ResourceViewMessage) {
         let cursor = message.cursor
-        guard cursor.generation == generation else { return }
+        guard cursor.generation == generation else {
+            traceResourceCache(
+                "event=message_ignored cause=generation-mismatch"
+                    + " kind=\(resourceCacheMessageKind(message))"
+                    + " message_generation=\(cursor.generation)"
+                    + " current_generation=\(generation)"
+                    + " sequence=\(cursor.sequence)",
+                generation: cursor.generation
+            )
+            return
+        }
         let disposition = generationGate.accept(cursor)
-        guard disposition == .acceptedNewGeneration || disposition == .acceptedNextSequence else { return }
+        guard disposition == .acceptedNewGeneration || disposition == .acceptedNextSequence else {
+            traceResourceCache(
+                "event=message_ignored cause=sequence-gate"
+                    + " kind=\(resourceCacheMessageKind(message))"
+                    + " sequence=\(cursor.sequence)"
+                    + " disposition=\(String(describing: disposition))"
+            )
+            return
+        }
         var shouldPublishContextualShortcuts = false
 
         switch message {
         case .status(_, let status):
+            traceResourceCache(
+                "event=status sequence=\(cursor.sequence)"
+                    + " freshness=\(String(describing: status.freshness))"
+                    + " backend_rows=\(status.rowsVisible)"
+                    + " local_rows=\(model.orderedVisibleUIDs.count)"
+                    + " retaining=\(isRetainingWarmRowsForCurrentStream)"
+                    + " from_warm_cache=\(status.fromWarmCache)"
+                    + " received_payload=\(hasReceivedResourcePayloadForCurrentStream)"
+                    + " received_reconciliation="
+                    + "\(hasReceivedWarmRowReconciliationPayload)"
+            )
             backendResourceViewStatus = status
             if isRetainingWarmRowsForCurrentStream {
                 if !finishWarmRowRetentionIfReconciled() {
@@ -3107,14 +3400,40 @@ private final class ResourceListViewController: NSViewController,
             }
         case .snapshot(_, let chunk):
             let isInitialSnapshot = !hasReceivedResourcePayloadForCurrentStream
-            hasReceivedResourcePayloadForCurrentStream = true
-            if ResourceWarmRowPolicy.preservesRetainedRows(
+            let rowsBeforeSnapshot = model.orderedVisibleUIDs.count
+            let preservesRetainedRows = ResourceWarmRowPolicy.preservesRetainedRows(
                 for: chunk,
                 backendStatus: backendResourceViewStatus,
                 isRetainingWarmRows: isRetainingWarmRowsForCurrentStream,
                 isFirstSnapshotInStream: isInitialSnapshot
-            ) {
+            )
+            traceResourceCache(
+                "event=snapshot_received sequence=\(cursor.sequence)"
+                    + " index=\(chunk.index)"
+                    + " first=\(chunk.first) last=\(chunk.last)"
+                    + " chunk_rows=\(chunk.rows.count)"
+                    + " estimated_rows=\(chunk.estimatedTotalRows)"
+                    + " local_rows_before=\(rowsBeforeSnapshot)"
+                    + " initial_payload=\(isInitialSnapshot)"
+                    + " retaining=\(isRetainingWarmRowsForCurrentStream)"
+                    + " backend_freshness="
+                    + (backendResourceViewStatus.map {
+                        String(describing: $0.freshness)
+                    } ?? "none")
+                    + " preserve=\(preservesRetainedRows)"
+                    + " first_row="
+                    + resourceCacheIdentityDescription(chunk.rows.first?.identity)
+                    + " last_row="
+                    + resourceCacheIdentityDescription(chunk.rows.last?.identity)
+            )
+            hasReceivedResourcePayloadForCurrentStream = true
+            if preservesRetainedRows {
                 snapshotUIDs.removeAll(keepingCapacity: true)
+                traceResourceCache(
+                    "event=snapshot_placeholder_preserved"
+                        + " sequence=\(cursor.sequence)"
+                        + " local_rows=\(model.orderedVisibleUIDs.count)"
+                )
                 break
             }
             let metadata = message.resourceBatchSignpostMetadata!
@@ -3163,6 +3482,27 @@ private final class ResourceListViewController: NSViewController,
                 "visible_rows=\(self.model.orderedVisibleUIDs.count) stored_rows=\(self.model.rowByUID.count) selected_rows=\(plan.selectedRowIndexes.count)"
             )
             applyTablePlan(plan)
+            traceResourceCache(
+                "event=snapshot_applied sequence=\(cursor.sequence)"
+                    + " index=\(chunk.index)"
+                    + " first=\(chunk.first) last=\(chunk.last)"
+                    + " chunk_rows=\(chunk.rows.count)"
+                    + " local_rows_before=\(rowsBeforeSnapshot)"
+                    + " local_rows_after=\(model.orderedVisibleUIDs.count)"
+                    + " retaining=\(isRetainingWarmRowsForCurrentStream)"
+            )
+            if rowsBeforeSnapshot > 0, model.orderedVisibleUIDs.isEmpty {
+                traceResourceCache(
+                    "event=rows_cleared cause=snapshot"
+                        + " sequence=\(cursor.sequence)"
+                        + " first=\(chunk.first) last=\(chunk.last)"
+                        + " chunk_rows=\(chunk.rows.count)"
+                        + " backend_freshness="
+                        + (backendResourceViewStatus.map {
+                            String(describing: $0.freshness)
+                        } ?? "none")
+                )
+            }
             if chunk.last {
                 hasReceivedWarmRowReconciliationPayload = true
                 finishWarmRowRetentionIfReconciled(force: true)
@@ -3181,6 +3521,8 @@ private final class ResourceListViewController: NSViewController,
                 shouldPublishContextualShortcuts = true
             }
         case .delta(_, let delta):
+            let rowsBeforeDelta = model.orderedVisibleUIDs.count
+            let wasRetainingWarmRows = isRetainingWarmRowsForCurrentStream
             hasReceivedResourcePayloadForCurrentStream = true
             let detectedChanges: [ResourceCellChange] = isChangeDetectionArmed
                 ? delta.upserts.flatMap { row -> [ResourceCellChange] in
@@ -3232,6 +3574,27 @@ private final class ResourceListViewController: NSViewController,
             applyTablePlan(plan)
             hasReceivedWarmRowReconciliationPayload = true
             finishWarmRowRetentionIfReconciled()
+            traceResourceCache(
+                "event=delta_applied sequence=\(cursor.sequence)"
+                    + " upserts=\(delta.upserts.count)"
+                    + " removals=\(delta.removedUIDs.count)"
+                    + " ordered=\(delta.orderedUIDs.count)"
+                    + " order_complete=\(delta.orderIsComplete)"
+                    + " local_rows_before=\(rowsBeforeDelta)"
+                    + " local_rows_after=\(model.orderedVisibleUIDs.count)"
+                    + " retaining_before=\(wasRetainingWarmRows)"
+                    + " retaining_after=\(isRetainingWarmRowsForCurrentStream)"
+                    + " first_upsert="
+                    + resourceCacheIdentityDescription(delta.upserts.first?.identity)
+            )
+            if rowsBeforeDelta > 0, model.orderedVisibleUIDs.isEmpty {
+                traceResourceCache(
+                    "event=rows_cleared cause=delta"
+                        + " sequence=\(cursor.sequence)"
+                        + " removals=\(delta.removedUIDs.count)"
+                        + " order_complete=\(delta.orderIsComplete)"
+                )
+            }
             reloadVisibleCellPresentation(at: affectedCellAddresses)
             scheduleCellHighlightRefresh()
             recoveredResourceTrust.receiveDelta(
@@ -3243,6 +3606,14 @@ private final class ResourceListViewController: NSViewController,
                 truncated: delta.observedOptionalResourceKeysTruncated
             )
         case .failure(_, let issue):
+            traceResourceCache(
+                "event=stream_failure sequence=\(cursor.sequence)"
+                    + " category=\(String(describing: issue.category))"
+                    + " reason=\(issue.reason)"
+                    + " operation=\(issue.operation)"
+                    + " local_rows=\(model.orderedVisibleUIDs.count)"
+                    + " retaining=\(isRetainingWarmRowsForCurrentStream)"
+            )
             endProjectionRequest(outcome: "failed")
             show(error: issue)
         }
@@ -3267,6 +3638,14 @@ private final class ResourceListViewController: NSViewController,
             )
         else { return false }
 
+        traceResourceCache(
+            "event=warm_retention_finished force=\(force)"
+                + " rows=\(model.orderedVisibleUIDs.count)"
+                + " backend_freshness="
+                + (backendResourceViewStatus.map {
+                    String(describing: $0.freshness)
+                } ?? "none")
+        )
         isRetainingWarmRowsForCurrentStream = false
         retainedRowsLastSynchronizedAt = nil
         var status = backendResourceViewStatus ?? ResourceViewStatus(
@@ -3749,7 +4128,10 @@ private final class ResourceListViewController: NSViewController,
         let enabled = enabledColumnDefinitions(in: effective)
         installColumns(effective)
         if enabled != previousEnabled {
-            openStream(preservingOptionalResourceDiscoveryState: true)
+            openStream(
+                reason: .optionalResourceColumns,
+                preservingOptionalResourceDiscoveryState: true
+            )
             updateStatusLine()
             onRestorationChanged?()
         } else {
@@ -3927,7 +4309,7 @@ private final class ResourceListViewController: NSViewController,
             if installedColumnDefinitions != previous
                 || currentSortPresentation != previousSort
             {
-                openStream()
+                openStream(reason: .loadedColumnConfiguration)
             }
             updateStatusLine()
             onRestorationChanged?()
@@ -3960,7 +4342,7 @@ private final class ResourceListViewController: NSViewController,
         if installedColumnDefinitions != previousEffective
             || currentSortPresentation != previousSort
         {
-            openStream()
+            openStream(reason: .appliedColumns)
         }
         updateStatusLine()
         onRestorationChanged?()
@@ -4205,7 +4587,7 @@ private final class ResourceListViewController: NSViewController,
             scrollAnchor: restoration.scrollAnchor
         )
         history = WorkspaceNavigationHistory(initial: .resource(nav))
-        openStream()
+        openStream(reason: .restoration)
         return true
     }
 
@@ -4229,6 +4611,10 @@ private final class ResourceListViewController: NSViewController,
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
         clearTransientCellPresentation()
+        traceResourceCache(
+            "event=rows_cleared cause=restored-resource-validation-rejected"
+                + " rows_before=\(model.orderedVisibleUIDs.count)"
+        )
         model = ResourceTableModel()
         tableView.reloadData()
         titleLabel.stringValue = "Resources"
@@ -4280,6 +4666,21 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func restoreResource(_ state: ResourceNavigationState) {
+        traceResourceCache(
+            "event=restore_resource target_gvr="
+                + resourceCacheGVRDescription(GVR(
+                    group: state.group,
+                    version: state.version,
+                    resource: state.resource
+                ))
+                + " target_scope="
+                + resourceCacheScopeDescription(state.namespaceSelection)
+                + " rows=\(model.orderedVisibleUIDs.count)"
+                + " current_context="
+                + resourceCacheContextDescription(lastStreamContext)
+                + " selected_uids=\(state.selectedUIDs.count)"
+                + " filter_length=\(state.filter.count)"
+        )
         rememberCurrentFilter()
         resource = DiscoveredResource(
             group: state.group, version: state.version, resource: state.resource,
@@ -4307,7 +4708,7 @@ private final class ResourceListViewController: NSViewController,
         configureColumns(for: resource!)
         applyDeferredColumnPresentation(deferredPresentation)
         suppressPresentationCheckpoint = false
-        openStream()
+        openStream(reason: .historyRestore)
     }
 
     private func installFilterForNavigation(_ filter: String, resourceGVR: GVR) {
@@ -4640,7 +5041,7 @@ private final class ResourceListViewController: NSViewController,
         } else {
             logger.debug("Cleared backend table sort")
         }
-        openStream()
+        openStream(reason: .sortChange)
         onRestorationChanged?()
     }
 

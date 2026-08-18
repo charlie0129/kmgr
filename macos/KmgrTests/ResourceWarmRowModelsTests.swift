@@ -50,6 +50,50 @@ import Testing
     }
 }
 
+@Test func warmRowDecisionReportsEveryRetentionInput() {
+    let pods = ResourceWarmRowContext(
+        sessionID: "session-a",
+        gvr: GVR(group: "", version: "v1", resource: "pods"),
+        namespaceSelection: NamespaceSelection()
+    )
+
+    let accepted = ResourceWarmRowPolicy.decision(
+        existingRowCount: 42,
+        previousContext: pods,
+        nextContext: pods
+    )
+    #expect(accepted.canRetain)
+    #expect(accepted.hasExistingRows)
+    #expect(accepted.hasPreviousContext)
+    #expect(accepted.sameSession)
+    #expect(accepted.sameResource)
+    #expect(accepted.sameNamespaceSelection)
+
+    let rejected = ResourceWarmRowPolicy.decision(
+        existingRowCount: 0,
+        previousContext: ResourceWarmRowContext(
+            sessionID: "session-before-restart",
+            gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
+            namespaceSelection: .namespace("payments")
+        ),
+        nextContext: pods
+    )
+    #expect(!rejected.canRetain)
+    #expect(!rejected.hasExistingRows)
+    #expect(rejected.hasPreviousContext)
+    #expect(!rejected.sameSession)
+    #expect(!rejected.sameResource)
+    #expect(!rejected.sameNamespaceSelection)
+
+    let firstOpen = ResourceWarmRowPolicy.decision(
+        existingRowCount: 42,
+        previousContext: nil,
+        nextContext: pods
+    )
+    #expect(!firstOpen.canRetain)
+    #expect(!firstOpen.hasPreviousContext)
+}
+
 @Test func onlyLoadingColdEmptySnapshotPreservesRetainedRows() {
     let empty = ResourceSnapshotChunk(
         rows: [],

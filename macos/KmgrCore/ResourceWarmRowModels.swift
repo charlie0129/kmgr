@@ -22,18 +22,71 @@ public struct ResourceWarmRowContext: Hashable, Sendable {
     }
 }
 
+/// Explains the exact local decision made before a replacement resource
+/// stream opens. Keeping the comparison structured lets diagnostics identify
+/// which context component rejected retention without logging opaque equality
+/// results or duplicating the policy in the AppKit layer.
+public struct ResourceWarmRowDecision: Hashable, Sendable {
+    public var hasExistingRows: Bool
+    public var hasPreviousContext: Bool
+    public var sameSession: Bool
+    public var sameResource: Bool
+    public var sameNamespaceSelection: Bool
+
+    public init(
+        hasExistingRows: Bool,
+        hasPreviousContext: Bool,
+        sameSession: Bool,
+        sameResource: Bool,
+        sameNamespaceSelection: Bool
+    ) {
+        self.hasExistingRows = hasExistingRows
+        self.hasPreviousContext = hasPreviousContext
+        self.sameSession = sameSession
+        self.sameResource = sameResource
+        self.sameNamespaceSelection = sameNamespaceSelection
+    }
+
+    public var canRetain: Bool {
+        hasExistingRows
+            && hasPreviousContext
+            && sameSession
+            && sameResource
+            && sameNamespaceSelection
+    }
+}
+
 /// Pure policy for retaining the GUI's compact UID-keyed rows while a stopped
 /// same-view watch is reopened. The engine intentionally starts a cold view
 /// with one sealed empty snapshot while its asynchronous LIST is still
 /// loading; that transport baseline is not evidence that previously rendered
 /// Kubernetes objects disappeared.
 public enum ResourceWarmRowPolicy {
+    public static func decision(
+        existingRowCount: Int,
+        previousContext: ResourceWarmRowContext?,
+        nextContext: ResourceWarmRowContext
+    ) -> ResourceWarmRowDecision {
+        ResourceWarmRowDecision(
+            hasExistingRows: existingRowCount > 0,
+            hasPreviousContext: previousContext != nil,
+            sameSession: previousContext?.sessionID == nextContext.sessionID,
+            sameResource: previousContext?.gvr == nextContext.gvr,
+            sameNamespaceSelection:
+                previousContext?.namespaceSelection == nextContext.namespaceSelection
+        )
+    }
+
     public static func canRetain(
         existingRowCount: Int,
         previousContext: ResourceWarmRowContext?,
         nextContext: ResourceWarmRowContext
     ) -> Bool {
-        existingRowCount > 0 && previousContext == nextContext
+        decision(
+            existingRowCount: existingRowCount,
+            previousContext: previousContext,
+            nextContext: nextContext
+        ).canRetain
     }
 
     /// Identifies only the engine's cold initial placeholder. A later empty
