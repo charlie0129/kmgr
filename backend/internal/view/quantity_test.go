@@ -18,8 +18,9 @@ func TestFormatResourceQuantityUsesReadableSemanticUnits(t *testing.T) {
 		{name: "nil", resourceName: corev1.ResourceCPU, want: DefaultMissingCell},
 		{name: "zero CPU", resourceName: corev1.ResourceCPU, quantity: "0", want: "0"},
 		{name: "sub-core CPU", resourceName: corev1.ResourceCPU, quantity: "123400u", want: "0.12"},
+		{name: "small CPU rounds to two digits", resourceName: corev1.ResourceCPU, quantity: "49200u", want: "0.05"},
 		{name: "sub-millicore CPU rounds to zero", resourceName: corev1.ResourceCPU, quantity: "123u", want: "0"},
-		{name: "one millicore remains visible", resourceName: corev1.ResourceCPU, quantity: "1m", want: "0.001"},
+		{name: "one millicore rounds to zero", resourceName: corev1.ResourceCPU, quantity: "1m", want: "0"},
 		{name: "multi-core CPU", resourceName: corev1.ResourceCPU, quantity: "12345678900n", want: "12.3"},
 		{name: "fractional core CPU", resourceName: corev1.ResourceCPU, quantity: "1500m", want: "1.5"},
 		{name: "large Ki memory", resourceName: corev1.ResourceMemory, quantity: "17576384Ki", want: "16.76Gi"},
@@ -45,16 +46,18 @@ func TestFormatResourceQuantityUsesReadableSemanticUnits(t *testing.T) {
 	}
 }
 
-func TestAdaptiveDecimalBalancesDensityAndSmallValues(t *testing.T) {
+func TestAdaptiveDecimalUsesAtMostTwoFractionalDigits(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		value float64
 		want  string
 	}{
 		{value: 0, want: "0"},
-		{value: 0.000123, want: "0.000123"},
-		{value: -0.000123, want: "-0.000123"},
-		{value: 0.01234, want: "0.0123"},
+		{value: 0.000123, want: "0"},
+		{value: -0.000123, want: "0"},
+		{value: 0.01234, want: "0.01"},
+		{value: 0.0492, want: "0.05"},
+		{value: -0.0492, want: "-0.05"},
 		{value: 0.1234, want: "0.12"},
 		{value: 1.234, want: "1.23"},
 		{value: 12.3456789, want: "12.3"},

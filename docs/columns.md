@@ -288,10 +288,9 @@ is unavailable, so scheduler accounting is not confused with measured usage.
 When usage pressure reaches the warning or critical threshold, only the actual
 usage component is colored and emphasized; request, limit, and allocatable
 values keep the normal contextual style.
-CPU display values consistently use cores with adaptive precision: values of
-ten or more use one fractional digit, ordinary fractions use two, and tiny
-values preserve the leading fractional zeroes plus roughly three significant
-digits. Memory, ephemeral storage, and each exact huge-page resource use the
+CPU display values consistently use cores with compact precision: values of
+ten or more use one fractional digit, while smaller values use at most two.
+Memory, ephemeral storage, and each exact huge-page resource use the
 largest readable binary unit (`Ki`, `Mi`, `Gi`, and so on), with up to two
 fractional digits. Tooltips retain the exact canonical Kubernetes Quantity,
 and sorting continues to use the unformatted typed numeric value.

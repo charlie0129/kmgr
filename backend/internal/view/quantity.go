@@ -79,23 +79,17 @@ func compactDecimal(value float64, fractionalDigits int) string {
 	return text
 }
 
-// adaptiveDecimal keeps resource cells dense without erasing small, real
-// values. Ordinary fractions get two decimal places, values of ten or more
-// get one, and values below one tenth retain roughly three significant digits
-// after their leading fractional zeroes. Kubernetes quantities are bounded to
-// nanounit precision, but cap the formatter as a defensive UI bound.
+// adaptiveDecimal keeps resource cells dense with at most two fractional
+// digits. Values of ten or more retain their existing one-digit presentation;
+// smaller values round to two digits instead of expanding precision after
+// leading fractional zeroes.
 func adaptiveDecimal(value float64) string {
 	if !math.IsNaN(value) && !math.IsInf(value, 0) && value == 0 {
 		return "0"
 	}
-	abs := math.Abs(value)
 	fractionalDigits := 2
-	switch {
-	case abs >= 10:
+	if math.Abs(value) >= 10 {
 		fractionalDigits = 1
-	case abs < 0.1:
-		exponent := math.Floor(math.Log10(abs))
-		fractionalDigits = min(12, max(2, int(-exponent)+2))
 	}
 	return compactDecimal(value, fractionalDigits)
 }
