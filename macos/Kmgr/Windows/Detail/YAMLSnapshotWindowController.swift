@@ -27,6 +27,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
 
     private let scrollView: NSScrollView
     private let textView: NSTextView
+    private var syntaxHighlighter: YAMLSyntaxHighlighter?
     private let targetLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "Ready")
     private let byteCountLabel = NSTextField(labelWithString: "No bytes received")
@@ -367,6 +368,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
         ])
         window?.contentView = root
+        syntaxHighlighter = YAMLSyntaxHighlighter(textView: textView, scrollView: scrollView)
         updateEditingControls()
     }
 
@@ -549,6 +551,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         if !restoredRanges.isEmpty { textView.selectedRanges = restoredRanges }
         scrollView.contentView.scroll(to: visibleOrigin)
         scrollView.reflectScrolledClipView(scrollView.contentView)
+        syntaxHighlighter?.invalidate()
     }
 
     @objc func saveDocument(_ sender: Any?) {

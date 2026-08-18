@@ -170,6 +170,28 @@ These timings isolate AppKit projection after the compact model update. The
 harness prints model-apply timing separately and does not classify it as table
 reload latency.
 
+## Large YAML highlighting harness
+
+`YAMLSyntaxHighlighterTests` installs a synthetic 2 MiB YAML document in the
+same factory-created `NSTextView` used by both YAML surfaces. It verifies that
+one highlighting refresh scans only a bounded visible neighborhood, uses
+temporary layout attributes, and does not place syntax colors in the YAML text
+storage.
+
+Run the Release diagnostic and opt-in one-frame lexer/apply budget with:
+
+```sh
+KMGR_PERF_DIAGNOSTICS=1 KMGR_PERF_BUDGETS=1 \
+  swift test --package-path macos -c release --no-parallel \
+  --filter YAMLSyntaxHighlighterTests
+```
+
+The generated document deliberately uses dense `key: value` lines so the
+bounded range produces more temporary attribute runs than a typical visible
+Kubernetes object. The timing excludes the one-time installation of the 2 MiB
+document and initial styling; it measures a syntax refresh after a one-character
+edit on the main actor.
+
 ## Native accessibility contracts
 
 Targeted AppKit tests assert that the workspace resource outline and table

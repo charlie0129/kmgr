@@ -327,6 +327,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
         return textView
     }()
+    private var yamlSyntaxHighlighter: YAMLSyntaxHighlighter?
     private let yamlContainerView = NSView()
     private let secretYAMLEncodingNotice = NSTextField(labelWithString:
         "Secret data values in YAML use Kubernetes base64 encoding. Use Data to edit decoded values."
@@ -843,6 +844,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             ))
         }
         NSLayoutConstraint.activate(constraints)
+        yamlSyntaxHighlighter = YAMLSyntaxHighlighter(
+            textView: yamlTextView,
+            scrollView: yamlScrollView
+        )
     }
 
     private func configureDataEditor() {
@@ -1725,6 +1730,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         if !restoredRanges.isEmpty { yamlTextView.selectedRanges = restoredRanges }
         yamlScrollView.contentView.scroll(to: visibleOrigin)
         yamlScrollView.reflectScrolledClipView(yamlScrollView.contentView)
+        yamlSyntaxHighlighter?.invalidate()
     }
 
     override func cancelOperation(_ sender: Any?) {

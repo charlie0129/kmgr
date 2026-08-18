@@ -96,6 +96,10 @@ app-wide Port Forwards window.
   material JSON Patch before the semantic diff is shown. UID/resourceVersion
   test operations prevent retargeting or stale writes, unchanged unknown fields
   are preserved, and force field ownership is unsupported.
+- YAML viewing and editing use lightweight visible-range syntax colors for
+  common keys, strings, numbers, booleans, nulls, and comments. Highlighting
+  reads TextKit's existing backing store and caps each refresh independently of
+  total document size.
 - ConfigMap and Secret keys support text and raw binary values. Secret bytes
   are decoded/encoded by the engine and concealed by default in the UI.
 - Logs support one or many UID-pinned Pods plus Deployments, StatefulSets,
