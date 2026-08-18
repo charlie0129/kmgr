@@ -1,0 +1,4 @@
+- No need to keep config backwards compatibility. Reset to default if invalid config is detected.
+- This is a prototype, not production app. So you can do radical changes to the codebase.
+- Commit your code when a feature is done. Commit message format: "<type>(<scope>): <description>"
+- If you face some decision making, please discuss it with me before implementing it.
