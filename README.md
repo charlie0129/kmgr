@@ -313,6 +313,31 @@ profiler; it is absent from Release helpers and is documented with the
 performance harness in
 [docs/performance.md](docs/performance.md).
 
+Resource-list cache diagnostics are separately opt-in because they include the
+resource GVR, namespace scope, and the first/last object names in received
+snapshots. They never include UIDs, object contents, filter text, kubeconfig
+data, or credentials. Quit any already-running Kmgr process, then launch the
+diagnostic build directly from a terminal:
+
+```sh
+KMGR_RESOURCE_CACHE_DIAGNOSTICS=1 build/Kmgr.app/Contents/MacOS/Kmgr
+```
+
+After reproducing, export only the dedicated unified-log category:
+
+```sh
+/usr/bin/log show \
+  --last 15m \
+  --style compact \
+  --info --debug \
+  --predicate 'process == "Kmgr" AND subsystem == "com.pktium.kmgr" AND category == "resource-cache"' \
+  > "$HOME/Desktop/kmgr-resource-cache.log"
+```
+
+The trace records navigation and reopen reasons, context comparisons, retained
+row counts, every status/snapshot/delta decision, and the exact operation that
+replaced a non-empty table with zero rows.
+
 ## Testing
 
 `make test` requires no real Kubernetes cluster. It uses fake clients,

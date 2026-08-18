@@ -79,6 +79,10 @@ message OpenViewRequest {
   string view_id = 2;
   uint64 generation = 3;
   ViewSpec spec = 4;
+  // The client already has a compatible rendered table. The engine must emit
+  // ViewReconciled only after every preceding payload needed to construct one
+  // complete replacement presentation has been delivered.
+  bool stage_until_reconciled = 5;
 }
 
 message CancelViewRequest {
@@ -138,6 +142,14 @@ message RowDelta {
   bool observed_optional_resource_keys_truncated = 6;
 }
 
+// A generation-local commit barrier. All snapshot/delta events preceding this
+// event form one complete replacement presentation, including the empty case.
+// Clients that requested stage_until_reconciled can build those payloads off
+// screen and replace their retained table atomically when this event arrives.
+message ViewReconciled {
+  uint64 rows_visible = 1;
+}
+
 message ViewEvent {
   StreamCursor cursor = 1;
   oneof payload {
@@ -145,6 +157,7 @@ message ViewEvent {
     RowDelta delta = 3;
     ViewStatus status = 4;
     StructuredError error = 5;
+    ViewReconciled reconciled = 6;
   }
 }
 

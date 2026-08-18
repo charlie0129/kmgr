@@ -1238,6 +1238,15 @@ private final class ColumnPropagationWorkspaceProvider: WorkspaceResourceProvidi
                     estimatedTotalRows: 1
                 )
             ))
+            if request.stageUntilReconciled {
+                continuation.yield(.reconciled(
+                    cursor: StreamCursor(
+                        generation: request.generation,
+                        sequence: 2
+                    ),
+                    reconciliation: ResourceViewReconciliation(rowsVisible: 1)
+                ))
+            }
             continuation.finish()
         }
     }
@@ -1334,6 +1343,17 @@ private final class ColdOptionalResourceWorkspaceProvider: WorkspaceResourceProv
                         rows.isEmpty ? [] : ["hugepages-2Mi"]
                 )
             ))
+            if request.stageUntilReconciled {
+                continuation.yield(.reconciled(
+                    cursor: StreamCursor(
+                        generation: request.generation,
+                        sequence: 2
+                    ),
+                    reconciliation: ResourceViewReconciliation(
+                        rowsVisible: UInt64(rows.count)
+                    )
+                ))
+            }
         }
     }
 

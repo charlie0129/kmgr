@@ -384,6 +384,7 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         )
         rpcRequest.viewID = request.viewID
         rpcRequest.generation = request.generation
+        rpcRequest.stageUntilReconciled = request.stageUntilReconciled
 
         var resource = Kmgr_V1_ResourceType()
         resource.group = request.resource.group
@@ -494,6 +495,13 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
                     ),
                     observedOptionalResourceKeysTruncated:
                         delta.observedOptionalResourceKeysTruncated
+                )
+            )
+        case .reconciled(let reconciliation):
+            return .reconciled(
+                cursor: cursor,
+                reconciliation: ResourceViewReconciliation(
+                    rowsVisible: reconciliation.rowsVisible
                 )
             )
         case .error(let error):
