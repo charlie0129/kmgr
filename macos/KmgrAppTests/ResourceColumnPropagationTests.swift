@@ -7,7 +7,7 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Shared resource columns", .serialized)
 struct ResourceColumnPropagationTests {
-    @Test("Pod column rebuild retains sort and a third header click clears it")
+    @Test("switching Pod columns keeps one sort and a third header click clears it")
     func podColumnRebuildRetainsThreeStateSort() async throws {
         let fixture = try ColumnPropagationFixture()
         defer { fixture.remove() }
@@ -48,12 +48,32 @@ struct ResourceColumnPropagationTests {
             )]
         }
 
-        let ascending = table.sortDescriptors
-        table.sortDescriptors = [NSSortDescriptor(key: "name", ascending: false)]
-        table.dataSource?.tableView?(table, sortDescriptorsDidChange: ascending)
+        // A native click on another header retains the old descriptor as a
+        // secondary key. Resource tables intentionally expose one-column
+        // sorting, so the header cycle must discard that retained key.
+        let nameAscending = table.sortDescriptors
+        table.sortDescriptors = [
+            NSSortDescriptor(key: acceleratorID, ascending: true),
+            NSSortDescriptor(key: "name", ascending: true),
+        ]
+        table.dataSource?.tableView?(table, sortDescriptorsDidChange: nameAscending)
+        try await waitUntil {
+            table.sortDescriptors.count == 1
+                && provider.streamRequests.last?.sort == [ResourceSortDescriptor(
+                    columnID: acceleratorID,
+                    direction: .ascending
+                )]
+        }
+
+        let acceleratorAscending = table.sortDescriptors
+        table.sortDescriptors = [NSSortDescriptor(key: acceleratorID, ascending: false)]
+        table.dataSource?.tableView?(
+            table,
+            sortDescriptorsDidChange: acceleratorAscending
+        )
         try await waitUntil {
             provider.streamRequests.last?.sort == [ResourceSortDescriptor(
-                columnID: "name",
+                columnID: acceleratorID,
                 direction: .descending
             )]
         }
@@ -67,14 +87,14 @@ struct ResourceColumnPropagationTests {
             columnsRequest.defaultColumns + columnsRequest.discoveredColumns
         )
         try await waitUntil {
-            table.sortDescriptors.first?.key == "name"
+            table.sortDescriptors.first?.key == acceleratorID
                 && table.sortDescriptors.first?.ascending == false
         }
 
         // AppKit's next native proposal wraps descending back to ascending.
         // The resource table interprets that third click as no sort.
         let descending = table.sortDescriptors
-        table.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
+        table.sortDescriptors = [NSSortDescriptor(key: acceleratorID, ascending: true)]
         table.dataSource?.tableView?(table, sortDescriptorsDidChange: descending)
         try await waitUntil {
             table.sortDescriptors.isEmpty

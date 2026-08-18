@@ -920,7 +920,7 @@ func TestProjectorEmitsPodResourceUsageWithEffectiveAccounting(t *testing.T) {
 	}
 	accelerator := cellByID(row, metricColumnID("nvidia.com/gpu")).GetUsage()
 	if accelerator.GetUsageAvailable() || accelerator.GetRequested() != 1 || accelerator.GetLimit() != 2 ||
-		accelerator.GetResourceName() != "nvidia.com/gpu" || accelerator.SortValue != nil {
+		accelerator.GetResourceName() != "nvidia.com/gpu" || accelerator.GetSortValue() != 1 {
 		t.Fatalf("accelerator accounting invented usage or lost identity: %#v", accelerator)
 	}
 }
@@ -1185,6 +1185,50 @@ func TestProjectorEmitsNodeUsageOverAllocatableAndSortsCurrentUsage(t *testing.T
 	}
 }
 
+func TestProjectorNodeUsageSortFallsBackToRawRequest(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
+		ColumnIDs:        []string{"name", NodeCPUUsageColumn},
+		Sort:             []SortDescriptor{{ColumnID: NodeCPUUsageColumn, Descending: true}},
+		NodeAccounting: NodeAccountingSnapshot{Active: true, Ready: true, Nodes: map[string]metrics.NodeAccounting{
+			"node-high-ratio": {
+				Name: "node-high-ratio",
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+				Requested: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			"node-high-raw": {
+				Name: "node-high-raw",
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("100"),
+				},
+				Requested: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("10"),
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := projector.Project([]*unstructured.Unstructured{
+		nodeObject("uid-raw", "node-high-raw", corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("100"),
+		}, nil),
+		nodeObject("uid-ratio", "node-high-ratio", corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("2"),
+		}, nil),
+	})
+	if got := rows[0].GetIdentity().GetName(); got != "node-high-raw" {
+		t.Fatalf("raw request fallback sort put %q first", got)
+	}
+}
+
 func TestProjectorEmitsNodeSchedulerAccountingAndExactResources(t *testing.T) {
 	t.Parallel()
 	accounting := metrics.NodeAccounting{
@@ -1234,8 +1278,8 @@ func TestProjectorEmitsNodeSchedulerAccountingAndExactResources(t *testing.T) {
 	if !visible {
 		t.Fatal("Node row was not visible")
 	}
-	if usage := cellByID(row, NodeCPUUsageColumn).GetUsage(); usage.GetRequested() != 1.5 || usage.GetLimit() != 3 ||
-		usage.SortValue != nil {
+	if usage := cellByID(row, NodeCPUUsageColumn).GetUsage(); usage.GetRequested() != 1.5 ||
+		usage.GetLimit() != 3 || usage.GetSortValue() != 1.5 {
 		t.Fatalf("base CPU accounting = %#v", usage)
 	}
 	if usage := cellByID(row, NodeCPURequestsColumn).GetUsage(); usage.GetRequested() != 1.5 ||
@@ -1421,8 +1465,10 @@ func TestExactResourceCellsDistinguishAbsentFromPresentZero(t *testing.T) {
 	if value, available := usageSortValue(&kmgrv1.ResourceUsageValue{ResourceName: "nvidia.com/gpu"}); available || value != 0 {
 		t.Fatalf("absent usage components produced a sort value = %v, %v", value, available)
 	}
-	if value, available := usageSortValue(&kmgrv1.ResourceUsageValue{Capacity: numberPointer(0)}); available || value != 0 {
-		t.Fatalf("context-only capacity produced a sort value = %v, %v", value, available)
+	capacityOnly := &kmgrv1.ResourceUsageValue{Capacity: numberPointer(0)}
+	setUsageSortValue(capacityOnly)
+	if value, available := usageSortValue(capacityOnly); !available || value != 0 {
+		t.Fatalf("present zero capacity sort value = %v, %v", value, available)
 	}
 
 	podProjector, err := NewProjector(ProjectionSpec{
@@ -1510,6 +1556,69 @@ func TestProjectorNodeAccountingSurvivesMetricsFailure(t *testing.T) {
 	}
 }
 
+func TestSetUsageSortValueUsesRawFallbackOrder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		value     *kmgrv1.ResourceUsageValue
+		want      float64
+		available bool
+	}{
+		{
+			name: "current usage",
+			value: &kmgrv1.ResourceUsageValue{
+				Used: 4, UsageAvailable: true, Requested: numberPointer(3),
+				Limit: numberPointer(2), Capacity: numberPointer(1),
+			},
+			want: 4, available: true,
+		},
+		{
+			name: "request",
+			value: &kmgrv1.ResourceUsageValue{
+				Requested: numberPointer(3), Limit: numberPointer(2), Capacity: numberPointer(1),
+			},
+			want: 3, available: true,
+		},
+		{
+			name: "limit",
+			value: &kmgrv1.ResourceUsageValue{
+				Limit: numberPointer(2), Capacity: numberPointer(1),
+			},
+			want: 2, available: true,
+		},
+		{
+			name: "capacity",
+			value: &kmgrv1.ResourceUsageValue{
+				Capacity: numberPointer(1),
+			},
+			want: 1, available: true,
+		},
+		{
+			name: "explicit zero request",
+			value: &kmgrv1.ResourceUsageValue{
+				Requested: numberPointer(0), Limit: numberPointer(2),
+			},
+			want: 0, available: true,
+		},
+		{
+			name: "missing",
+			value: &kmgrv1.ResourceUsageValue{
+				SortValue: numberPointer(99),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			setUsageSortValue(test.value)
+			got, available := usageSortValue(test.value)
+			if got != test.want || available != test.available {
+				t.Fatalf("sort value = %v, %v; want %v, %v", got, available, test.want, test.available)
+			}
+		})
+	}
+}
+
 func TestCompareUsageCellsUsesTypedValuesNotDisplayText(t *testing.T) {
 	t.Parallel()
 	left := &kmgrv1.Cell{TypedValue: &kmgrv1.Cell_Usage{Usage: &kmgrv1.ResourceUsageValue{
@@ -1526,8 +1635,9 @@ func TestCompareUsageCellsUsesTypedValuesNotDisplayText(t *testing.T) {
 	allocationOnly := &kmgrv1.Cell{TypedValue: &kmgrv1.Cell_Usage{Usage: &kmgrv1.ResourceUsageValue{
 		Requested: numberPointer(1_000), Limit: numberPointer(2_000),
 	}}, DisplayText: "1000 / 2000"}
-	if compareCells(allocationOnly, right, true) >= 0 {
-		t.Fatal("missing current usage fell back to request or limit")
+	setUsageSortValue(allocationOnly.GetUsage())
+	if compareCells(allocationOnly, right, false) <= 0 {
+		t.Fatal("resource usage sort did not fall back to the raw request")
 	}
 	zero := resource.MustParse("0")
 	if quantityNumeric(corev1.ResourceCPU, zero) != 0 {

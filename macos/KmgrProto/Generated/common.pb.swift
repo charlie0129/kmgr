@@ -498,10 +498,9 @@ public struct Kmgr_V1_ResourceUsageValue: Sendable {
 
   public var usageAvailable: Bool = false
 
-  /// Authoritative scalar for this cell's sort semantics. Usage columns set
-  /// current usage only; explicit allocation columns set their named value.
-  /// Absence means the cell is null for sorting even if contextual request,
-  /// limit, or capacity components are present.
+  /// Authoritative raw scalar for this cell's sort semantics. Resource cells
+  /// prefer current usage, then request, limit, and capacity. Absence means
+  /// none of those components is available.
   public var sortValue: Double {
     get {return _sortValue ?? 0}
     set {_sortValue = newValue}

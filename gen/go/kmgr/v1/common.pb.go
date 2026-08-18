@@ -1005,10 +1005,9 @@ type ResourceUsageValue struct {
 	Provider         string                 `protobuf:"bytes,8,opt,name=provider,proto3" json:"provider,omitempty"`
 	MeasurementScope string                 `protobuf:"bytes,9,opt,name=measurement_scope,json=measurementScope,proto3" json:"measurement_scope,omitempty"`
 	UsageAvailable   bool                   `protobuf:"varint,10,opt,name=usage_available,json=usageAvailable,proto3" json:"usage_available,omitempty"`
-	// Authoritative scalar for this cell's sort semantics. Usage columns set
-	// current usage only; explicit allocation columns set their named value.
-	// Absence means the cell is null for sorting even if contextual request,
-	// limit, or capacity components are present.
+	// Authoritative raw scalar for this cell's sort semantics. Resource cells
+	// prefer current usage, then request, limit, and capacity. Absence means
+	// none of those components is available.
 	SortValue     *float64 `protobuf:"fixed64,11,opt,name=sort_value,json=sortValue,proto3,oneof" json:"sort_value,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

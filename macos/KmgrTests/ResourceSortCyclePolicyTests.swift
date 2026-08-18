@@ -20,21 +20,21 @@ func resourceHeaderSortCycle() {
     ).isEmpty)
 }
 
-@Test("resource sort cycle does not reinterpret other descriptor changes")
-func resourceHeaderSortCyclePreservesOtherChanges() {
-    let previous = [SortDescriptorState(columnID: "name", ascending: false)]
-    let changedColumn = [SortDescriptorState(columnID: "namespace", ascending: true)]
-    let multiple = [
-        SortDescriptorState(columnID: "name", ascending: true),
-        SortDescriptorState(columnID: "namespace", ascending: false),
+@Test("resource sort cycle drops AppKit's retained secondary columns")
+func resourceHeaderSortCycleKeepsOnlyPrimaryColumn() {
+    let name = SortDescriptorState(columnID: "name", ascending: true)
+    let namespace = SortDescriptorState(columnID: "namespace", ascending: true)
+    let proposed = [
+        namespace,
+        name,
     ]
 
     #expect(ResourceSortCyclePolicy.applyingHeaderClickCycle(
-        previous: previous,
-        proposed: changedColumn
-    ) == changedColumn)
+        previous: [name],
+        proposed: proposed
+    ) == [namespace])
     #expect(ResourceSortCyclePolicy.applyingHeaderClickCycle(
-        previous: previous,
-        proposed: multiple
-    ) == multiple)
+        previous: [SortDescriptorState(columnID: "namespace", ascending: false), name],
+        proposed: proposed
+    ).isEmpty)
 }

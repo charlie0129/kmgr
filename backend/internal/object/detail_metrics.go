@@ -277,9 +277,7 @@ func resourceUsageValuesWithNames(
 			ResourceName: string(name), Unit: detailResourceUnit(name),
 		}
 		if quantity, found := usage[name]; found {
-			used := detailQuantityNumeric(quantity)
-			item.Used = used
-			item.SortValue = detailNumberPointer(used)
+			item.Used = detailQuantityNumeric(quantity)
 			item.UsageAvailable = true
 			item.MeasuredAtUnixMs = measuredAt
 			item.Provider = provider
@@ -294,6 +292,7 @@ func resourceUsageValuesWithNames(
 		if quantity, found := capacity[name]; found {
 			item.Capacity = detailNumberPointer(detailQuantityNumeric(quantity))
 		}
+		setDetailUsageSortValue(item)
 		result = append(result, item)
 	}
 	return result
@@ -330,3 +329,20 @@ func detailQuantityNumeric(quantity resource.Quantity) float64 {
 }
 
 func detailNumberPointer(value float64) *float64 { return &value }
+
+func setDetailUsageSortValue(value *kmgrv1.ResourceUsageValue) {
+	if value == nil {
+		return
+	}
+	value.SortValue = nil
+	switch {
+	case value.GetUsageAvailable():
+		value.SortValue = detailNumberPointer(value.GetUsed())
+	case value.Requested != nil:
+		value.SortValue = detailNumberPointer(value.GetRequested())
+	case value.Limit != nil:
+		value.SortValue = detailNumberPointer(value.GetLimit())
+	case value.Capacity != nil:
+		value.SortValue = detailNumberPointer(value.GetCapacity())
+	}
+}

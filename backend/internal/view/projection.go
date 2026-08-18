@@ -865,7 +865,6 @@ func (p *Projector) nodeAllocationCell(
 		if value != nil {
 			numeric := quantityNumeric(resourceName, *value)
 			usage.Limit = numberPointer(numeric)
-			usage.SortValue = numberPointer(numeric)
 		}
 		label = "Summed effective limits"
 	} else {
@@ -873,12 +872,12 @@ func (p *Projector) nodeAllocationCell(
 		if value != nil {
 			numeric := quantityNumeric(resourceName, *value)
 			usage.Requested = numberPointer(numeric)
-			usage.SortValue = numberPointer(numeric)
 		}
 	}
 	if hasAllocatable {
 		usage.Capacity = numberPointer(quantityNumeric(resourceName, allocatable))
 	}
+	setUsageSortValue(usage)
 	cell.DisplayText = formatResourceQuantity(resourceName, value) + " / " +
 		formatResourceQuantity(resourceName, optionalQuantity(allocatable, hasAllocatable))
 	parts := []string{"Resource: " + string(resourceName), label + ": " + exactQuantityDisplay(value)}
@@ -923,10 +922,10 @@ func (p *Projector) nodePodCountCell(object *unstructured.Unstructured, columnID
 	capacity, hasCapacity := accounting.Capacity[corev1.ResourcePods]
 	podCount := float64(accounting.PodCount)
 	usage.Requested = numberPointer(podCount)
-	usage.SortValue = numberPointer(podCount)
 	if hasAllocatable {
 		usage.Capacity = numberPointer(quantityNumeric(corev1.ResourcePods, allocatable))
 	}
+	setUsageSortValue(usage)
 	cell.DisplayText = strconv.FormatInt(accounting.PodCount, 10) + " / " +
 		exactQuantityDisplay(optionalQuantity(allocatable, hasAllocatable))
 	parts := []string{"Bound non-terminal Pods: " + strconv.FormatInt(accounting.PodCount, 10)}
@@ -951,7 +950,6 @@ func setUsageQuantities(
 	if measurement.HasValue() {
 		used := quantityNumeric(name, measurement.Quantity)
 		value.Used = used
-		value.SortValue = numberPointer(used)
 		value.MeasuredAtUnixMs = measurement.Timestamp.UnixMilli()
 		value.Provider = measurement.Provider
 		value.MeasurementScope = measurement.Scope
@@ -964,6 +962,24 @@ func setUsageQuantities(
 	}
 	if allocatable != nil {
 		value.Capacity = numberPointer(quantityNumeric(name, *allocatable))
+	}
+	setUsageSortValue(value)
+}
+
+func setUsageSortValue(value *kmgrv1.ResourceUsageValue) {
+	if value == nil {
+		return
+	}
+	value.SortValue = nil
+	switch {
+	case value.GetUsageAvailable():
+		value.SortValue = numberPointer(value.GetUsed())
+	case value.Requested != nil:
+		value.SortValue = numberPointer(value.GetRequested())
+	case value.Limit != nil:
+		value.SortValue = numberPointer(value.GetLimit())
+	case value.Capacity != nil:
+		value.SortValue = numberPointer(value.GetCapacity())
 	}
 }
 

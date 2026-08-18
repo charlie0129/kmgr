@@ -156,12 +156,13 @@ func TestKubernetesDetailMetricsProviderAccountsPodAndPreservesExactResources(t 
 	hugePages := detailUsageByName(t, values, "hugepages-2Mi")
 	if hugePages.GetUsageAvailable() || hugePages.GetRequested() != 1024*1024*1024 ||
 		hugePages.GetLimit() != 2*1024*1024*1024 || hugePages.GetUnit() != "bytes" ||
-		hugePages.SortValue != nil {
+		hugePages.GetSortValue() != 1024*1024*1024 {
 		t.Fatalf("huge-page detail metric = %#v", hugePages)
 	}
 	accelerator := detailUsageByName(t, values, "aliyun.com/ppu")
 	if accelerator.GetUsageAvailable() || accelerator.GetRequested() != 1 ||
-		accelerator.GetLimit() != 2 || accelerator.GetUnit() != "count" || accelerator.SortValue != nil {
+		accelerator.GetLimit() != 2 || accelerator.GetUnit() != "count" ||
+		accelerator.GetSortValue() != 1 {
 		t.Fatalf("accelerator detail metric = %#v", accelerator)
 	}
 }
@@ -212,7 +213,7 @@ func TestKubernetesDetailMetricsProviderUsesNodeAllocatableAsCapacity(t *testing
 	}
 	hugePages := detailUsageByName(t, values, "hugepages-1Gi")
 	if hugePages.GetUsageAvailable() || hugePages.GetCapacity() != 2*1024*1024*1024 ||
-		hugePages.GetUnit() != "bytes" || hugePages.SortValue != nil {
+		hugePages.GetUnit() != "bytes" || hugePages.GetSortValue() != 2*1024*1024*1024 {
 		t.Fatalf("Node huge-page detail metric = %#v", hugePages)
 	}
 }
@@ -309,10 +310,11 @@ func TestGRPCGetObjectKeepsSchedulerAccountingWhenMeasuredUsageFails(t *testing.
 	cpu := detailUsageByName(t, response.GetMetrics(), corev1.ResourceCPU)
 	memory := detailUsageByName(t, response.GetMetrics(), corev1.ResourceMemory)
 	hugePages := detailUsageByName(t, response.GetMetrics(), "hugepages-2Mi")
-	if cpu.GetUsageAvailable() || cpu.GetRequested() != 0.25 || cpu.SortValue != nil ||
+	if cpu.GetUsageAvailable() || cpu.GetRequested() != 0.25 || cpu.GetSortValue() != 0.25 ||
 		memory.GetUsageAvailable() || memory.GetRequested() != 64*1024*1024 ||
-		memory.SortValue != nil || hugePages.GetUsageAvailable() ||
-		hugePages.GetRequested() != 1024*1024*1024 || hugePages.SortValue != nil {
+		memory.GetSortValue() != 64*1024*1024 || hugePages.GetUsageAvailable() ||
+		hugePages.GetRequested() != 1024*1024*1024 ||
+		hugePages.GetSortValue() != 1024*1024*1024 {
 		t.Fatalf("degraded scheduler accounting = %#v", response.GetMetrics())
 	}
 }
