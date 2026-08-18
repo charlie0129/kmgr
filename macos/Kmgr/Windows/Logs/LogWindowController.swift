@@ -11,9 +11,33 @@ enum LogTailReconciliationPolicy {
     }
 }
 
+enum LogWindowShortcut: Equatable {
+    case focusFilter
+    case toggleFollow
+    case togglePause
+    case toggleWrap
+
+    static func action(
+        characters: String?,
+        modifiers: NSEvent.ModifierFlags,
+        textIsEditable: Bool
+    ) -> Self? {
+        guard !textIsEditable,
+            modifiers.intersection([.command, .control, .option]).isEmpty
+        else { return nil }
+        return switch characters?.lowercased() {
+        case "/": .focusFilter
+        case "f": .toggleFollow
+        case "p": .togglePause
+        case "w": .toggleWrap
+        default: nil
+        }
+    }
+}
+
 @MainActor
 final class LogWindowController: NSWindowController, NSWindowDelegate,
-    NSSearchFieldDelegate
+    NSSearchFieldDelegate, ContextualShortcutProviding
 {
     private struct AppliedStreamConfiguration {
         var sources: [LogSource]
@@ -86,6 +110,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private let pauseButton = NSButton(title: "Pause", target: nil, action: nil)
 
     var onClose: (() -> Void)?
+    var contextualShortcutsDidChange: (() -> Void)?
+
+    var contextualShortcutSnapshot: ContextualShortcutSnapshot? {
+        ContextualShortcutCatalog.logs
+    }
 
     init(
         session: OpenedClusterSession,
@@ -121,7 +150,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         self.maximumRenderedUTF8Bytes = min(displayConfiguration.byteLimit, 32 << 20)
         self.sourceLabels = LogSourcePresentation.prefixLabels(for: allSources)
         let titleSources = LogSourcePresentation.titleSummary(for: sources)
-        let window = NSWindow(
+        let window = LogShortcutWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -137,6 +166,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         window.isRestorable = false
         super.init(window: window)
         window.delegate = self
+        window.keyDownHandler = { [weak self] event in
+            self?.performLogShortcut(event) ?? false
+        }
         configureContent(in: window)
         establishedConfiguration = AppliedStreamConfiguration(
             sources: sources,
@@ -211,6 +243,40 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func controlTextDidChange(_ obj: Notification) { scheduleRender() }
+
+    /// Route unmodified log-window accelerators through the same actions as
+    /// their controls. AppKit field editors retain every key while the user is
+    /// changing a filter or stream option.
+    @discardableResult
+    func performLogShortcut(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+            let action = LogWindowShortcut.action(
+                characters: event.charactersIgnoringModifiers,
+                modifiers: event.modifierFlags,
+                textIsEditable: (window?.firstResponder as? NSTextView)?.isEditable == true
+            )
+        else { return false }
+        guard !event.isARepeat else { return true }
+
+        switch action {
+        case .focusFilter:
+            guard searchField.isEnabled else { return true }
+            window?.makeFirstResponder(searchField)
+            searchField.selectText(nil)
+        case .toggleFollow:
+            guard followButton.isEnabled else { return true }
+            followButton.state = followButton.state == .on ? .off : .on
+            toggleFollow()
+        case .togglePause:
+            guard pauseButton.isEnabled else { return true }
+            togglePause()
+        case .toggleWrap:
+            guard wrapButton.isEnabled else { return true }
+            wrapButton.state = wrapButton.state == .on ? .off : .on
+            toggleWrap()
+        }
+        return true
+    }
 
     /// Applies saved limits to an existing log window without interrupting its
     /// stream. Resizes are serialized so rapid preference saves cannot leave
@@ -1095,5 +1161,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 statusLabel.textColor = .systemRed
             }
         }
+    }
+}
+
+/// Intercepts only log accelerators before the focused read-only text view
+/// receives them. Every unrecognized key continues through AppKit unchanged.
+private final class LogShortcutWindow: NSWindow {
+    var keyDownHandler: ((NSEvent) -> Bool)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, keyDownHandler?(event) == true { return }
+        super.sendEvent(event)
     }
 }

@@ -257,6 +257,123 @@ struct LogWindowControllerTests {
         #expect(!window.isRestorable)
     }
 
+    @Test("log shortcuts drive controls without stealing editable text")
+    func logWindowShortcuts() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session",
+                contextName: "production",
+                clusterName: "cluster",
+                serverHostname: "example.invalid",
+                defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let views = descendants(of: root)
+        let textView = try #require(views.compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Pod logs" })
+        let scrollView = try #require(views.compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "log-content-scroll" })
+        let follow = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.title == "Follow" })
+        let wrap = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.title == "Wrap" })
+        let pause = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.title == "Pause" })
+        let search = try #require(views.compactMap { $0 as? NSSearchField }.first)
+        let tail = try #require(views.compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-tail-lines" })
+        let since = try #require(views.compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-since-seconds" })
+
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitStreaming(generation: 1, sequence: 1)
+        try await waitForLogWindowControl(follow, enabled: true)
+        #expect(controller.contextualShortcutSnapshot == ContextualShortcutCatalog.logs)
+        #expect(window.makeFirstResponder(textView))
+
+        try sendLogWindowKey("p", to: window)
+        #expect(pause.title == "Resume")
+        try sendLogWindowKey("p", isARepeat: true, to: window)
+        #expect(pause.title == "Resume")
+        try sendLogWindowKey("p", to: window)
+        #expect(pause.title == "Pause")
+
+        try sendLogWindowKey("w", to: window)
+        #expect(wrap.state == .on)
+        #expect(!scrollView.hasHorizontalScroller)
+        try sendLogWindowKey("w", to: window)
+        #expect(wrap.state == .off)
+        #expect(scrollView.hasHorizontalScroller)
+
+        try sendLogWindowKey("/", to: window)
+        #expect(window.firstResponder === search.currentEditor())
+        let editableF = try #require(logWindowKeyEvent("f", window: window))
+        for field in [search, tail, since] {
+            field.selectText(nil)
+            #expect((window.firstResponder as? NSTextView)?.isEditable == true)
+            #expect(!controller.performLogShortcut(editableF))
+        }
+
+        #expect(window.makeFirstResponder(textView))
+        try sendLogWindowKey("f", isARepeat: true, to: window)
+        #expect(follow.state == .on)
+        #expect(!provider.snapshot().contains("start:2"))
+
+        try sendLogWindowKey("f", to: window)
+        #expect(follow.state == .off)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        #expect(provider.request(generation: 2)?.options.follow == false)
+
+        // A replacement stream disables its controls. A second press is
+        // consumed without mutating the checkbox or starting another stream.
+        try sendLogWindowKey("f", to: window)
+        #expect(follow.state == .off)
+        #expect(!provider.snapshot().contains("start:3"))
+
+        provider.emitStreaming(generation: 2, sequence: 1)
+        try await waitForLogWindowControl(follow, enabled: true)
+        try sendLogWindowKey("F", modifiers: .shift, to: window)
+        #expect(follow.state == .on)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:3") }
+        #expect(provider.request(generation: 3)?.options.follow == true)
+    }
+
+    @Test("log shortcut matching rejects modified and editable input")
+    func logShortcutMatching() {
+        #expect(LogWindowShortcut.action(
+            characters: "F",
+            modifiers: .shift,
+            textIsEditable: false
+        ) == .toggleFollow)
+        #expect(LogWindowShortcut.action(
+            characters: "p",
+            modifiers: .command,
+            textIsEditable: false
+        ) == nil)
+        #expect(LogWindowShortcut.action(
+            characters: "w",
+            modifiers: .control,
+            textIsEditable: false
+        ) == nil)
+        #expect(LogWindowShortcut.action(
+            characters: "/",
+            modifiers: .option,
+            textIsEditable: false
+        ) == nil)
+        #expect(LogWindowShortcut.action(
+            characters: "f",
+            modifiers: [],
+            textIsEditable: true
+        ) == nil)
+    }
+
     @Test("exact context and every source remain visible above the buffer")
     func exactSourcesRemainVisible() throws {
         let sources = [
@@ -973,6 +1090,42 @@ private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
 }
 
+@MainActor
+private func sendLogWindowKey(
+    _ characters: String,
+    modifiers: NSEvent.ModifierFlags = [],
+    isARepeat: Bool = false,
+    to window: NSWindow
+) throws {
+    window.sendEvent(try #require(logWindowKeyEvent(
+        characters,
+        modifiers: modifiers,
+        isARepeat: isARepeat,
+        window: window
+    )))
+}
+
+@MainActor
+private func logWindowKeyEvent(
+    _ characters: String,
+    modifiers: NSEvent.ModifierFlags = [],
+    isARepeat: Bool = false,
+    window: NSWindow
+) -> NSEvent? {
+    NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: modifiers,
+        timestamp: 0,
+        windowNumber: window.windowNumber,
+        context: nil,
+        characters: characters,
+        charactersIgnoringModifiers: characters.lowercased(),
+        isARepeat: isARepeat,
+        keyCode: 0
+    )
+}
+
 private func milliseconds(_ duration: Duration) -> Double {
     let components = duration.components
     return Double(components.seconds) * 1_000
@@ -1008,6 +1161,7 @@ private struct NoopLogWindowProvider: LogStreamProviding {
 private final class OrderedLogWindowProvider: LogStreamProviding, @unchecked Sendable {
     private let lock = NSLock()
     private var recordedEvents: [String] = []
+    private var recordedRequests: [LogStreamRequest] = []
     private var continuations: [UInt64: AsyncThrowingStream<LogStreamMessage, Error>.Continuation] = [:]
 
     func streamLogs(request: LogStreamRequest)
@@ -1015,6 +1169,7 @@ private final class OrderedLogWindowProvider: LogStreamProviding, @unchecked Sen
         return AsyncThrowingStream { continuation in
             lock.withLock {
                 continuations[request.generation] = continuation
+                recordedRequests.append(request)
                 recordedEvents.append("start:\(request.generation)")
             }
             continuation.onTermination = { [weak self] _ in
@@ -1083,6 +1238,10 @@ private final class OrderedLogWindowProvider: LogStreamProviding, @unchecked Sen
 
     func snapshot() -> [String] {
         lock.withLock { recordedEvents }
+    }
+
+    func request(generation: UInt64) -> LogStreamRequest? {
+        lock.withLock { recordedRequests.first { $0.generation == generation } }
     }
 }
 

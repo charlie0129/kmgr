@@ -71,6 +71,13 @@ struct ContextualShortcutModelsTests {
             .items.map(\.keys) == ["Return", "\u{21E7}\u{2318}N", "Escape"])
     }
 
+    @Test("log help advertises its window-wide controls")
+    func logs() {
+        #expect(ContextualShortcutCatalog.logs.items.map(\.keys) == [
+            "/", "F", "P", "W", "\u{2318}W",
+        ])
+    }
+
     @Test("unknown dialogs never advertise resource table letters")
     func genericDialog() {
         let keys = ContextualShortcutCatalog.genericDialog.items.map(\.keys)
