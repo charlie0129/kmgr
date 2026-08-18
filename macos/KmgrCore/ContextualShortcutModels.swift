@@ -101,7 +101,16 @@ public enum ContextualShortcutCatalog {
             items.append(item("resource.details", "\u{2318}Return", "Open selected object details"))
         }
         if availability.canOpenYAML {
-            items.append(item("resource.yaml", "Y", "Open selected object YAML"))
+            items.append(item(
+                "resource.yaml",
+                "Y",
+                "Open selected object YAML in Details"
+            ))
+            items.append(item(
+                "resource.yaml.window",
+                "\u{21E7}Y",
+                "Open selected object YAML in a new window"
+            ))
         }
         if availability.canOpenEvents {
             items.append(item("resource.events", "E", "Open selected object events"))

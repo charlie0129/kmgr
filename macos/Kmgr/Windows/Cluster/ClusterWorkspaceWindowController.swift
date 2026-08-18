@@ -192,7 +192,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onOpenLogs = { [weak self] request in
             self?.openLogs(request)
         }
-        workspaceController.onOpenYAML = { [weak self] identity in
+        workspaceController.onOpenYAMLSnapshot = { [weak self] identity in
             self?.showYAMLSnapshot(identity)
         }
         workspaceController.onOpenExec = { [weak self] target in
@@ -565,6 +565,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func enterResource(_ sender: Any?) { workspaceController.enterResource(sender) }
     @objc func openResourceDetails(_ sender: Any?) { workspaceController.openResourceDetails(sender) }
     @objc func openResourceYAML(_ sender: Any?) { workspaceController.openResourceYAML(sender) }
+    @objc func openResourceYAMLSnapshot(_ sender: Any?) {
+        workspaceController.openResourceYAMLSnapshot(sender)
+    }
     @objc func openResourceEvents(_ sender: Any?) { workspaceController.openResourceEvents(sender) }
     @objc func openResourceLogs(_ sender: Any?) { workspaceController.openResourceLogs(sender) }
     @objc func openResourceExec(_ sender: Any?) { workspaceController.openResourceExec(sender) }
@@ -596,6 +599,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(enterResource(_:)): command = .enter
         case #selector(openResourceDetails(_:)): command = .open
         case #selector(openResourceYAML(_:)): command = .openYAML
+        case #selector(openResourceYAMLSnapshot(_:)): command = .openYAMLSnapshot
         case #selector(openResourceEvents(_:)): command = .openEvents
         case #selector(openResourceLogs(_:)): command = .openLogs
         case #selector(openResourceExec(_:)): command = .openExec
@@ -656,7 +660,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var pendingRestorationState: ClusterWindowRestorationState?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
-    var onOpenYAML: ((ResourceIdentity) -> Void)?
+    var onOpenYAMLSnapshot: ((ResourceIdentity) -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((PodExecTarget) -> Void)?
     var onConfigureExec: ((PodExecTarget) -> Void)?
@@ -739,11 +743,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onOpenObject = { [weak self] identity, tab in
             self?.showObject(identity, initialTab: tab)
         }
-        contentController.onOpenYAML = { [weak self] identity in
+        contentController.onOpenYAMLSnapshot = { [weak self] identity in
             guard let self else { return }
             invalidateObjectOpenTask()
             Task { [recentObjectStore] in await recentObjectStore.record(identity) }
-            onOpenYAML?(identity)
+            onOpenYAMLSnapshot?(identity)
         }
         contentController.onEnterObject = { [weak self] identity in
             self?.enterObject(identity)
@@ -1204,6 +1208,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func enterResource(_ sender: Any?) { contentController.performCommand(.enter) }
     @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
     @objc func openResourceYAML(_ sender: Any?) { contentController.performCommand(.openYAML) }
+    @objc func openResourceYAMLSnapshot(_ sender: Any?) {
+        contentController.performCommand(.openYAMLSnapshot)
+    }
     @objc func openResourceEvents(_ sender: Any?) { contentController.performCommand(.openEvents) }
     @objc func openResourceLogs(_ sender: Any?) { performNetworkCommand(.openLogs) }
     @objc func openResourceExec(_ sender: Any?) { performNetworkCommand(.openExec) }
@@ -2327,7 +2334,7 @@ private final class ResourceListViewController: NSViewController,
     var onShowCommandPalette: (() -> Void)?
     var onEnterObject: ((ResourceIdentity) -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
-    var onOpenYAML: ((ResourceIdentity) -> Void)?
+    var onOpenYAMLSnapshot: ((ResourceIdentity) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
@@ -2754,7 +2761,8 @@ private final class ResourceListViewController: NSViewController,
         addGroup([
             ("Enter Subresource", .enter),
             ("Open Details", .open),
-            ("Open YAML", .openYAML),
+            ("Open YAML in Details", .openYAML),
+            ("Open YAML in New Window", .openYAMLSnapshot),
             ("Open Events", .openEvents),
         ])
         addGroup([
@@ -4648,8 +4656,10 @@ private final class ResourceListViewController: NSViewController,
                 openSelectedObject(initialTab: .automatic, identities: selected)
             }
         case .openYAML:
+            openSelectedObject(initialTab: .yaml, identities: selected)
+        case .openYAMLSnapshot:
             guard let identity = selected.only else { return }
-            onOpenYAML?(identity)
+            onOpenYAMLSnapshot?(identity)
         case .openEvents:
             openSelectedObject(initialTab: .events, identities: selected)
         case .startPortForward:
@@ -4802,7 +4812,7 @@ private final class ResourceListViewController: NSViewController,
         case .enter:
             return selected.count == 1
                 && ResourceDrillDownPlanner.hasPotentialTarget(selected[0])
-        case .open, .openYAML, .openEvents:
+        case .open, .openYAML, .openYAMLSnapshot, .openEvents:
             return selected.count == 1
         case .openLogs, .openPreviousLogs:
             return LogResourceCompatibility.supportsSelection(selected)
@@ -4833,7 +4843,8 @@ private final class ResourceListViewController: NSViewController,
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, enter, open, openYAML, openEvents, openLogs, openPreviousLogs
+    case focusFilter, enter, open, openYAML, openYAMLSnapshot, openEvents
+    case openLogs, openPreviousLogs
     case openExec, configureExec
     case startPortForward, selectAll, delete, scale, restart, editMetadata
     case copyName, copyNamespacedName, copyReference, moveUp, moveDown, extendUp, extendDown
@@ -4923,7 +4934,13 @@ private final class ResourceTableView: NSTableView {
         case ("j", _, false): onCommand?(.moveDown)
         case ("k", _, false): onCommand?(.moveUp)
         case (_, 36, false): onCommand?(.enter)
-        case ("y", _, false), ("Y", _, false): onCommand?(.openYAML)
+        case ("y", _, false), ("Y", _, false):
+            guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
+                super.keyDown(with: event)
+                return
+            }
+            onCommand?(event.modifierFlags.contains(.shift)
+                ? .openYAMLSnapshot : .openYAML)
         case ("e", _, false), ("E", _, false): onCommand?(.openEvents)
         case ("l", _, false), ("L", _, false):
             guard event.modifierFlags.intersection([.control, .option]).isEmpty else {

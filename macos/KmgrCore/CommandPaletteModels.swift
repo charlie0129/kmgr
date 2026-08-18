@@ -286,7 +286,7 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
     public var title: String {
         switch self {
         case .openDetails: "Open Details"
-        case .openYAML: "Open YAML"
+        case .openYAML: "Open YAML in Details"
         case .openEvents: "Open Events"
         case .openLogs: "Open Logs…"
         case .openExec: "Open Terminal"

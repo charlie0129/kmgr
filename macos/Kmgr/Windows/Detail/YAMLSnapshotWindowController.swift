@@ -1,21 +1,27 @@
 import AppKit
 import KmgrCore
 
-/// A deliberately small, independent YAML rendering path.
+/// A deliberately small, independent YAML document window.
 ///
-/// The object-detail editor has richer presentation and mutation behavior. This
-/// window instead installs the server's UTF-8 bytes directly in AppKit's
-/// factory-created plain document text view. It does not use Yams, a custom
-/// ruler, or `TextDocumentGeometry`.
+/// It installs the server's UTF-8 bytes directly in AppKit's factory-created
+/// plain document text view. Editing uses the same backend validation and
+/// optimistic apply contract as the Details YAML tab, without adding Yams, a
+/// custom ruler, or `TextDocumentGeometry` to this presentation path.
 @MainActor
-final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
+final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
+    NSMenuItemValidation
+{
     private(set) var identity: ResourceIdentity
     private var session: OpenedClusterSession
     private let provider: any ObjectDetailProviding
     private var refreshTask: Task<Void, Never>?
+    private var operationTask: Task<Void, Never>?
     private var refreshRevision: UInt64 = 0
     private var hasRequestedSnapshot = false
+    private var displayedDetail: ObjectDetail?
     private var displayedYAMLUTF8: Data?
+    private var editingBasis: ObjectDetail?
+    private var isEditingYAML = false
     private var isConnected = true
     private var isClosing = false
 
@@ -25,8 +31,10 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
     private let statusLabel = NSTextField(labelWithString: "Ready")
     private let byteCountLabel = NSTextField(labelWithString: "No bytes received")
     private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
+    private let editButton = NSButton(title: "Edit", target: nil, action: nil)
+    private let saveButton = NSButton(title: "Save", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
-    private let searchField = NSSearchField()
 
     var onClose: (() -> Void)?
 
@@ -49,7 +57,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         self.scrollView = scrollView
         self.textView = textView
 
-        let window = YAMLSnapshotWindow(
+        let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 860, height: 680),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -61,16 +69,16 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        window.readOnlyKeyDownHandler = { [weak self] event in
-            self?.performReadOnlySearchShortcut(event) ?? false
-        }
         configureWindow()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
-    deinit { refreshTask?.cancel() }
+    deinit {
+        refreshTask?.cancel()
+        operationTask?.cancel()
+    }
 
     override func showWindow(_ sender: Any?) {
         let firstPresentation = !hasRequestedSnapshot
@@ -95,7 +103,9 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         refreshRevision &+= 1
         refreshTask?.cancel()
         refreshTask = nil
-        refreshButton.isEnabled = false
+        operationTask?.cancel()
+        operationTask = nil
+        updateEditingControls()
     }
 
     /// Invalidates every request made with the old helper session while
@@ -105,12 +115,16 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         refreshRevision &+= 1
         refreshTask?.cancel()
         refreshTask = nil
-        refreshButton.isEnabled = false
+        operationTask?.cancel()
+        operationTask = nil
         statusLabel.stringValue = displayedYAMLUTF8 == nil
             ? "Engine disconnected · no YAML snapshot available"
-            : "Engine disconnected · YAML snapshot preserved"
+            : isEditingYAML
+                ? "Engine disconnected · local YAML edit preserved"
+                : "Engine disconnected · YAML snapshot preserved"
         statusLabel.textColor = .systemOrange
         statusLabel.toolTip = nil
+        updateEditingControls()
     }
 
     /// Rebinds the same UID to a newly authenticated helper session and
@@ -122,15 +136,21 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         refreshTask = nil
         session = recoveredSession
         identity.clusterSessionID = recoveredSession.sessionID
+        if var editingBasis {
+            editingBasis.identity.clusterSessionID = recoveredSession.sessionID
+            self.editingBasis = editingBasis
+        }
         isConnected = true
         updateIdentityPresentation()
-        refresh()
+        refresh(preservingLocalEdit: isEditingYAML)
     }
 
     @objc private func refreshPressed(_ sender: Any?) { refresh() }
 
-    private func refresh() {
-        guard isConnected, refreshTask == nil, !isClosing else { return }
+    private func refresh(preservingLocalEdit: Bool = false) {
+        guard isConnected, refreshTask == nil, operationTask == nil, !isClosing,
+            !isEditingYAML || preservingLocalEdit
+        else { return }
         guard identity.clusterSessionID == session.sessionID else {
             installFailure(ClusterManagerIssue(
                 category: .conflict,
@@ -157,7 +177,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
             defer {
                 if refreshRevision == revision {
                     refreshTask = nil
-                    refreshButton.isEnabled = isConnected && !isClosing
+                    updateEditingControls()
                 }
             }
             do {
@@ -181,6 +201,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
                 installFailure(error)
             }
         }
+        updateEditingControls()
     }
 
     private func install(_ detail: ObjectDetail) {
@@ -205,19 +226,26 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
                 statusLabel.textColor = .systemOrange
                 statusLabel.toolTip = "The object response succeeded but contained zero YAML bytes."
             }
+            updateEditingControls()
             return
         }
 
+        displayedDetail = detail
         displayedYAMLUTF8 = yamlUTF8
         // Decode the received bytes directly. In particular, do not parse,
         // normalize, serialize, or remove managedFields before first display.
-        textView.string = String(decoding: yamlUTF8, as: UTF8.self)
+        if !isEditingYAML {
+            replaceYAMLText(with: String(decoding: yamlUTF8, as: UTF8.self))
+        }
         emptyStateLabel.isHidden = true
-        statusLabel.stringValue = detail.resourceVersion.isEmpty
-            ? "YAML snapshot"
-            : "YAML snapshot · resource version \(detail.resourceVersion)"
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.toolTip = nil
+        if isEditingYAML {
+            statusLabel.stringValue = "Server YAML refreshed · local edit preserved"
+            statusLabel.textColor = .systemOrange
+            statusLabel.toolTip = "Saving still uses the resource version from the start of this local edit."
+        } else {
+            installSnapshotStatus()
+        }
+        updateEditingControls()
     }
 
     private func installFailure(_ error: Error) {
@@ -225,11 +253,11 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         statusLabel.stringValue = presentation.inlineText
         statusLabel.toolTip = presentation.detailedText
         statusLabel.textColor = .systemRed
-        refreshButton.isEnabled = isConnected && refreshTask == nil && !isClosing
         if displayedYAMLUTF8 == nil {
             emptyStateLabel.stringValue = "YAML could not be loaded."
             emptyStateLabel.isHidden = false
         }
+        updateEditingControls()
     }
 
     private func configureWindow() {
@@ -242,6 +270,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         textView.usesFindBar = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
+        textView.allowsUndo = true
         textView.textContainerInset = NSSize(width: 10, height: 10)
         textView.setAccessibilityLabel("Kubernetes YAML snapshot")
 
@@ -274,24 +303,34 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         refreshButton.identifier = .init("yaml-snapshot-refresh")
         refreshButton.toolTip = "Fetch a fresh snapshot of this exact UID."
 
-        searchField.identifier = .init("yaml-snapshot-search")
-        searchField.placeholderString = "Find (/)"
-        searchField.sendsSearchStringImmediately = false
-        searchField.sendsWholeSearchString = true
-        searchField.target = self
-        searchField.action = #selector(searchSubmitted(_:))
-        searchField.toolTip = "Press / to focus search. Press Return, then use n and N for the next and previous match."
-        searchField.widthAnchor.constraint(equalToConstant: 190).isActive = true
+        editButton.target = self
+        editButton.action = #selector(beginYAMLEdit)
+        editButton.identifier = .init("yaml-snapshot-edit")
+        editButton.toolTip = "Edit this exact UID-pinned object."
+        saveButton.target = self
+        saveButton.action = #selector(saveYAML)
+        saveButton.identifier = .init("yaml-snapshot-save")
+        saveButton.toolTip = "Validate and apply this YAML edit."
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelYAMLEdit)
+        cancelButton.identifier = .init("yaml-snapshot-cancel")
+        cancelButton.toolTip = "Discard the local edit and restore the latest snapshot."
+        saveButton.isHidden = true
+        cancelButton.isHidden = true
 
         let spacer = NSView()
-        let header = NSStackView(views: [targetLabel, spacer, searchField, refreshButton])
+        let header = NSStackView(views: [
+            targetLabel, spacer, editButton, saveButton, cancelButton, refreshButton,
+        ])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
         header.translatesAutoresizingMaskIntoConstraints = false
         targetLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         refreshButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-        searchField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        for button in [editButton, saveButton, cancelButton] {
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
 
         let statusSpacer = NSView()
         let footer = NSStackView(views: [statusLabel, statusSpacer, byteCountLabel])
@@ -328,6 +367,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
         ])
         window?.contentView = root
+        updateEditingControls()
     }
 
     private func updateIdentityPresentation() {
@@ -342,70 +382,189 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
         targetLabel.toolTip = cluster.targetDetails(identity)
     }
 
-    /// Search accelerators are intentionally scoped to a read-only YAML text
-    /// responder. The find field and any future editable mode receive ordinary
-    /// key events, so entering a query (or YAML) never loses `n`, `N`, or `/`.
-    @discardableResult
-    func performReadOnlySearchShortcut(_ event: NSEvent) -> Bool {
-        guard window?.firstResponder === textView,
-            let action = YAMLSnapshotSearchShortcut.action(
-                characters: event.characters,
-                modifiers: event.modifierFlags,
-                textIsEditable: textView.isEditable
-            )
-        else { return false }
-        switch action {
-        case .focusSearch:
-            window?.makeFirstResponder(searchField)
-            searchField.selectText(nil)
-        case .next:
-            selectSearchMatch(forward: true)
-        case .previous:
-            selectSearchMatch(forward: false)
+    @objc private func beginYAMLEdit() {
+        guard let displayedDetail, !displayedDetail.yamlUTF8.isEmpty,
+            isConnected, refreshTask == nil, operationTask == nil, !isClosing
+        else { return }
+        editingBasis = displayedDetail
+        isEditingYAML = true
+        statusLabel.stringValue = displayedDetail.resourceVersion.isEmpty
+            ? "Editing local YAML"
+            : "Editing local YAML · resource version \(displayedDetail.resourceVersion)"
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.toolTip = "Save validates this edit against the exact resource version shown."
+        updateEditingControls()
+        window?.makeFirstResponder(textView)
+    }
+
+    @objc private func cancelYAMLEdit() {
+        guard isEditingYAML, operationTask == nil, refreshTask == nil else { return }
+        finishYAMLEdit()
+        installSnapshotStatus()
+    }
+
+    @objc private func saveYAML() {
+        guard let editingBasis, isEditingYAML, isConnected,
+            operationTask == nil, refreshTask == nil, !isClosing
+        else { return }
+        let edited = Data(textView.string.utf8)
+        statusLabel.stringValue = "Validating…"
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.toolTip = nil
+        operationTask = Task { [weak self, provider, identity] in
+            guard let self else { return }
+            var refreshAfterSuccess = false
+            defer {
+                operationTask = nil
+                if refreshAfterSuccess {
+                    refresh()
+                } else {
+                    updateEditingControls()
+                }
+            }
+            do {
+                let prepared = try await provider.prepareYAML(
+                    identity: identity,
+                    yamlUTF8: edited,
+                    expectedResourceVersion: editingBasis.resourceVersion,
+                    forceFieldOwnership: false
+                )
+                guard confirm(diff: prepared.diff) else {
+                    statusLabel.stringValue = "Save cancelled"
+                    return
+                }
+                let stream = try await provider.applyYAML(
+                    identity: identity,
+                    yamlUTF8: prepared.normalizedYAMLUTF8,
+                    expectedResourceVersion: editingBasis.resourceVersion,
+                    forceFieldOwnership: false
+                )
+                var reachedTerminalState = false
+                for try await progress in stream {
+                    guard !Task.isCancelled else { return }
+                    statusLabel.stringValue =
+                        "Saving… \(progress.completedItems)/\(progress.totalItems)"
+                    guard progress.state.isTerminal else { continue }
+                    reachedTerminalState = true
+                    guard progress.state == .succeeded else {
+                        throw progress.issue ?? ClusterManagerIssue(
+                            category: .conflict,
+                            reason: "YAMLApplyFailed",
+                            message: "The YAML edit was not applied. Your local edit is still open.",
+                            operation: "apply YAML"
+                        )
+                    }
+                    displayedYAMLUTF8 = prepared.normalizedYAMLUTF8
+                    if var detail = displayedDetail {
+                        detail.yamlUTF8 = prepared.normalizedYAMLUTF8
+                        displayedDetail = detail
+                    }
+                    byteCountLabel.stringValue = Self.receivedByteText(
+                        prepared.normalizedYAMLUTF8.count
+                    )
+                    finishYAMLEdit()
+                    refreshAfterSuccess = true
+                    break
+                }
+                guard reachedTerminalState else {
+                    throw ClusterManagerIssue(
+                        category: .unavailable,
+                        reason: "YAMLApplyEnded",
+                        message: "The YAML apply stream ended without a final result. Your local edit is still open.",
+                        retryable: true,
+                        operation: "apply YAML"
+                    )
+                }
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled else { return }
+                let presentation = UserFacingErrorPresentation(error)
+                statusLabel.stringValue = presentation.inlineText
+                statusLabel.toolTip = presentation.detailedText
+                statusLabel.textColor = .systemRed
+            }
+        }
+        updateEditingControls()
+    }
+
+    private func confirm(diff: [SemanticDiffEntry]) -> Bool {
+        guard !diff.isEmpty else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Apply \(diff.count) YAML change\(diff.count == 1 ? "" : "s")?"
+        let changes = diff.prefix(12).map {
+            "\($0.path): \($0.beforeSummary) → \($0.afterSummary)"
+        }.joined(separator: "\n")
+        let target = ClusterIdentityPresentation(session: session).targetDetails(identity)
+        alert.informativeText = "\(target)\n\nChanges:\n\(changes)"
+        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "Keep Editing")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func finishYAMLEdit() {
+        isEditingYAML = false
+        editingBasis = nil
+        if let displayedYAMLUTF8 {
+            replaceYAMLText(with: String(decoding: displayedYAMLUTF8, as: UTF8.self))
+        }
+        textView.undoManager?.removeAllActions()
+        updateEditingControls()
+    }
+
+    private func updateEditingControls() {
+        let idle = refreshTask == nil && operationTask == nil
+        editButton.isHidden = isEditingYAML
+        saveButton.isHidden = !isEditingYAML
+        cancelButton.isHidden = !isEditingYAML
+        editButton.isEnabled = !isEditingYAML && idle && isConnected && !isClosing
+            && displayedDetail?.yamlUTF8.isEmpty == false
+        saveButton.isEnabled = isEditingYAML && idle && isConnected && !isClosing
+        cancelButton.isEnabled = isEditingYAML && idle && !isClosing
+        refreshButton.isEnabled = !isEditingYAML && idle && isConnected && !isClosing
+        textView.isEditable = isEditingYAML && idle && isConnected && !isClosing
+    }
+
+    private func installSnapshotStatus() {
+        statusLabel.stringValue = displayedDetail?.resourceVersion.isEmpty == false
+            ? "YAML snapshot · resource version \(displayedDetail?.resourceVersion ?? "")"
+            : "YAML snapshot"
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.toolTip = nil
+    }
+
+    private func replaceYAMLText(with text: String) {
+        guard textView.string != text else { return }
+        let selectedRanges = textView.selectedRanges
+        let visibleOrigin = scrollView.contentView.bounds.origin
+        textView.string = text
+        let length = (text as NSString).length
+        let restoredRanges = selectedRanges.compactMap { value -> NSValue? in
+            let range = value.rangeValue
+            guard range.location <= length else { return nil }
+            return NSValue(range: NSRange(
+                location: range.location,
+                length: min(range.length, length - range.location)
+            ))
+        }
+        if !restoredRanges.isEmpty { textView.selectedRanges = restoredRanges }
+        scrollView.contentView.scroll(to: visibleOrigin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    @objc func saveDocument(_ sender: Any?) {
+        if isEditingYAML { saveYAML() }
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(NSDocument.save(_:)) {
+            return saveButton.isEnabled
         }
         return true
     }
 
-    @objc private func searchSubmitted(_ sender: Any?) {
-        guard !textView.isEditable else { return }
-        selectSearchMatch(forward: true)
-        // Hand the responder back after Return so n/N navigate matches instead
-        // of becoming additional query characters. Clicking the field allows
-        // the operator to revise the query at any time.
-        window?.makeFirstResponder(textView)
-    }
-
-    private func selectSearchMatch(forward: Bool) {
-        let query = searchField.stringValue
-        guard !query.isEmpty, !textView.string.isEmpty else {
-            NSSound.beep()
-            return
-        }
-        let source = textView.string as NSString
-        let selection = textView.selectedRange()
-        let options: NSString.CompareOptions = forward ? [] : [.backwards]
-        let primaryRange: NSRange
-        let wrappedRange: NSRange
-        if forward {
-            let start = min(NSMaxRange(selection), source.length)
-            primaryRange = NSRange(location: start, length: source.length - start)
-            wrappedRange = NSRange(location: 0, length: start)
-        } else {
-            let end = min(selection.location, source.length)
-            primaryRange = NSRange(location: 0, length: end)
-            wrappedRange = NSRange(location: end, length: source.length - end)
-        }
-        var match = source.range(of: query, options: options, range: primaryRange)
-        if match.location == NSNotFound {
-            match = source.range(of: query, options: options, range: wrappedRange)
-        }
-        guard match.location != NSNotFound else {
-            NSSound.beep()
-            return
-        }
-        textView.setSelectedRange(match)
-        textView.scrollRangeToVisible(match)
-        textView.showFindIndicator(for: match)
+    override func cancelOperation(_ sender: Any?) {
+        if isEditingYAML { cancelYAMLEdit() }
+        else { super.cancelOperation(sender) }
     }
 
     static func receivedByteText(_ count: Int) -> String {
@@ -414,46 +573,5 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate {
 
     private static func byteText(_ count: Int) -> String {
         "\(count.formatted()) \(count == 1 ? "byte" : "bytes")"
-    }
-}
-
-enum YAMLSnapshotSearchAction: Equatable {
-    case focusSearch
-    case next
-    case previous
-}
-
-enum YAMLSnapshotSearchShortcut {
-    static func action(
-        characters: String?,
-        modifiers: NSEvent.ModifierFlags,
-        textIsEditable: Bool
-    ) -> YAMLSnapshotSearchAction? {
-        guard !textIsEditable, let characters else { return nil }
-        let significantModifiers = modifiers.intersection([.command, .control, .option, .shift])
-        switch (characters, significantModifiers) {
-        case ("/", []):
-            return .focusSearch
-        case ("n", []):
-            return .next
-        case ("N", [.shift]):
-            return .previous
-        case ("\r", []), ("\n", []):
-            return .next
-        default:
-            return nil
-        }
-    }
-}
-
-/// Intercepts only the handful of read-only YAML accelerators before AppKit
-/// dispatches a key-down event to the plain text view. All other events follow
-/// the normal responder chain unchanged.
-private final class YAMLSnapshotWindow: NSWindow {
-    var readOnlyKeyDownHandler: ((NSEvent) -> Bool)?
-
-    override func sendEvent(_ event: NSEvent) {
-        if event.type == .keyDown, readOnlyKeyDownHandler?(event) == true { return }
-        super.sendEvent(event)
     }
 }

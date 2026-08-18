@@ -162,13 +162,15 @@ import Testing
     )
     for keys in [
         "⌘N", "⌘K", "/", "↑ / ↓ or K / J", "⇧↑ / ⇧↓ or ⇧-click",
-        "⌘-click", "⌘A", "Return", "⌘Return", "⌘[ / ⌘]", "Escape", "Y", "E",
+        "⌘-click", "⌘A", "Return", "⌘Return", "⌘[ / ⌘]", "Escape", "Y", "⇧Y", "E",
         "L", "⇧L", "S", "P", "⌘⌫", "⌘S",
     ] {
         #expect(shortcuts[keys] != nil, "Missing shortcut reference for \(keys)")
     }
     #expect(shortcuts["Return"]?.contains("subresource") == true)
     #expect(shortcuts["⌘Return"] == "Open selected object details")
+    #expect(shortcuts["Y"] == "Open selected object YAML in Details")
+    #expect(shortcuts["⇧Y"] == "Open selected object YAML in a new window")
     #expect(shortcuts["E"] == "Open Events for one object")
     #expect(shortcuts["⇧L"] == "Open previous container logs")
 }

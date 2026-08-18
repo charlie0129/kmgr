@@ -87,9 +87,9 @@ app-wide Port Forwards window.
   and watch updates do not retarget a selection by row index.
 - Details provide Summary, YAML, Events, Relationships, Metrics where
   meaningful, and a Data editor for ConfigMaps and Secrets.
-- `Y` opens an independent, UID-pinned, read-only YAML snapshot window with an
-  exact received-byte count and explicit refresh. The YAML tab inside Details
-  remains the editable surface.
+- `Y` opens the selected object's editable YAML tab inside Details. Shift-Y
+  opens an independent, UID-pinned YAML window with an exact received-byte
+  count, explicit refresh, and the same validated edit/apply workflow.
 - YAML edits are parsed in Go, identity-checked, and dry-run as an exact
   material JSON Patch before the semantic diff is shown. UID/resourceVersion
   test operations prevent retargeting or stale writes, unchanged unknown fields
@@ -158,7 +158,8 @@ focus, and hides when no supported context is active.
 | Command-Return | Open details for exactly one object |
 | Command-[ / Command-] | Back / Forward |
 | Escape | Clear selection or return focus to the table |
-| `Y` | Open a read-only YAML snapshot window for one object |
+| `Y` | Open the YAML tab in Details for one object |
+| Shift-Y | Open YAML for one object in an independent window |
 | `E` | Open Events for one object |
 | `L` | Tail all containers for compatible selected Pods or workloads |
 | Shift-L | Show logs from the previous container instance for compatible selected Pods or workloads |
@@ -171,10 +172,9 @@ focus, and hides when no supported context is active.
 Standard AppKit text editing, copy, undo/redo, find, and window behavior remain
 with the focused native control.
 
-In a read-only YAML snapshot window, `/` focuses search, Return selects the
-next match, and `n` / `N` move to the next / previous match. Command-F remains
-available. In the editable YAML tab, unmodified letters always enter YAML and
-standard Command shortcuts provide find, copy, paste, undo, and redo.
+Both YAML surfaces use the native Command-F find bar. While editing YAML,
+unmodified letters always enter the document and standard Command shortcuts
+provide find, copy, paste, undo, redo, and save.
 
 In a Pod's Containers subresource, `L`/Return opens the selected container's
 current logs, Shift-L opens its previous container instance's logs, `S` opens

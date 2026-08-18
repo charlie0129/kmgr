@@ -909,6 +909,49 @@ struct ClusterWorkspaceToolbarTests {
         #expect(window.attachedSheet?.title == "test-cluster — test-context — Configure Terminal")
     }
 
+    @Test("Y opens the Details YAML tab and Shift-Y opens a dedicated window")
+    func yamlShortcutsHaveDistinctDestinations() async throws {
+        let pod = toolbarPodIdentity()
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: toolbarPodDetail(pod)
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        try await waitUntil { table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+
+        table.keyDown(with: try workspaceLetterKey("y"))
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSSegmentedControl }
+                .contains { control in
+                    control.segmentCount > 1
+                        && control.label(forSegment: 1) == "YAML"
+                        && control.selectedSegment == 1
+                }
+                && descendants(of: root).compactMap { $0 as? NSTextView }
+                    .contains { $0.accessibilityLabel() == "Kubernetes object YAML"
+                        && $0.string.contains("kind: Pod") }
+        }
+        #expect(controller.openYAMLSnapshotWindows.isEmpty)
+
+        controller.navigateBack(nil)
+        try await waitUntil { table.window === window }
+        #expect(window.makeFirstResponder(table))
+        table.keyDown(with: try workspaceLetterKey("y", modifiers: [.shift]))
+        try await waitUntil { controller.openYAMLSnapshotWindows.count == 1 }
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("Y") == true)
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys)
+            .contains("\u{21E7}Y") == true)
+    }
+
     @Test("a slower Enter cannot replace a newer dedicated YAML window")
     func explicitDetailSupersedesPendingDrillDown() async throws {
         let pod = toolbarPodIdentity()
@@ -936,7 +979,7 @@ struct ClusterWorkspaceToolbarTests {
 
         controller.enterResource(nil)
         try await waitUntilAsync { await gate.requestCount == 1 }
-        controller.openResourceYAML(nil)
+        controller.openResourceYAMLSnapshot(nil)
         try await waitUntilAsync { await gate.requestCount == 2 }
         await gate.releaseAll()
 

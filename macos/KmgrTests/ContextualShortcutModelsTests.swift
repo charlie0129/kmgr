@@ -21,6 +21,8 @@ struct ContextualShortcutModelsTests {
 
         #expect(snapshot.title == "Pods")
         #expect(snapshot.items.map(\.keys).contains("Return"))
+        #expect(snapshot.items.map(\.keys).contains("Y"))
+        #expect(snapshot.items.map(\.keys).contains("\u{21E7}Y"))
         #expect(snapshot.items.map(\.keys).contains("L"))
         #expect(snapshot.items.map(\.keys).contains("\u{21E7}L"))
         #expect(snapshot.items.map(\.keys).contains("S"))

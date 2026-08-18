@@ -156,6 +156,18 @@ struct NativeMainMenuBuilderTests {
                 String(UnicodeScalar(NSDownArrowFunctionKey)!),
                 NSEvent.ModifierFlags.shift
             ),
+            (
+                "Open YAML in Details",
+                #selector(ClusterWorkspaceWindowController.openResourceYAML(_:)),
+                "y",
+                NSEvent.ModifierFlags()
+            ),
+            (
+                "Open YAML in New Window",
+                #selector(ClusterWorkspaceWindowController.openResourceYAMLSnapshot(_:)),
+                "y",
+                NSEvent.ModifierFlags.shift
+            ),
         ] {
             let item = try #require(resource.item(withTitle: title))
             expectResponderItem(

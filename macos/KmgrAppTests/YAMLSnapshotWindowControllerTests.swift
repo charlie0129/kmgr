@@ -25,7 +25,8 @@ struct YAMLSnapshotWindowControllerTests {
         controller.showWindow(nil)
         defer { controller.close() }
 
-        let root = try #require(controller.window?.contentView)
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
         let scroll = try #require(yamlSnapshotDescendants(of: root)
             .compactMap { $0 as? NSScrollView }
             .first { $0.identifier?.rawValue == "yaml-snapshot-scroll" })
@@ -212,8 +213,8 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(status.toolTip?.contains("UID-pinned") == true)
     }
 
-    @Test("read-only search keys route only from the YAML responder")
-    func searchShortcutRouting() throws {
+    @Test("snapshot search uses AppKit's native Command-F find bar")
+    func nativeFindBar() throws {
         let identity = yamlSnapshotIdentity()
         let controller = YAMLSnapshotWindowController(
             session: yamlSnapshotSession(),
@@ -225,56 +226,80 @@ struct YAMLSnapshotWindowControllerTests {
         let textView = try #require(yamlSnapshotDescendants(of: root)
             .compactMap { $0 as? NSTextView }
             .first { $0.accessibilityLabel() == "Kubernetes YAML snapshot" })
-        let refresh = try #require(yamlSnapshotDescendants(of: root)
-            .compactMap { $0 as? NSButton }
-            .first { $0.identifier?.rawValue == "yaml-snapshot-refresh" })
-        let search = try #require(yamlSnapshotDescendants(of: root)
-            .compactMap { $0 as? NSSearchField }
-            .first { $0.identifier?.rawValue == "yaml-snapshot-search" })
-        let window = try #require(controller.window)
-        textView.string = "alpha beta alpha"
-        #expect(window.makeFirstResponder(textView))
+        #expect(textView.usesFindBar)
+        #expect(yamlSnapshotDescendants(of: root).contains { $0 is NSSearchField } == false)
+    }
 
-        let slash = try #require(yamlSnapshotKeyEvent(characters: "/"))
-        #expect(controller.performReadOnlySearchShortcut(slash))
-        #expect(window.firstResponder === search.currentEditor())
-
-        search.stringValue = "alpha"
-        search.performClick(nil)
-        #expect(window.firstResponder === textView)
-        #expect(textView.selectedRange() == NSRange(location: 0, length: 5))
-
-        let next = try #require(yamlSnapshotKeyEvent(characters: "n"))
-        #expect(controller.performReadOnlySearchShortcut(next))
-        #expect(textView.selectedRange() == NSRange(location: 11, length: 5))
-
-        let previous = try #require(yamlSnapshotKeyEvent(
-            characters: "N",
-            modifiers: .shift
+    @Test("dedicated YAML edits preserve drafts across failure and refresh after success")
+    func yamlEditLifecycle() async throws {
+        let identity = yamlSnapshotIdentity()
+        let source = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: settings\n"
+        let edited = source + "data:\n  enabled: true\n"
+        let provider = YAMLSnapshotEditProvider(detail: ObjectDetail(
+            identity: identity,
+            resourceVersion: "rv-1",
+            yamlUTF8: Data(source.utf8)
         ))
-        #expect(controller.performReadOnlySearchShortcut(previous))
-        #expect(textView.selectedRange() == NSRange(location: 0, length: 5))
+        let controller = YAMLSnapshotWindowController(
+            session: yamlSnapshotSession(),
+            identity: identity,
+            provider: provider
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
 
-        let returnKey = try #require(yamlSnapshotKeyEvent(characters: "\r"))
-        #expect(controller.performReadOnlySearchShortcut(returnKey))
-        #expect(textView.selectedRange() == NSRange(location: 11, length: 5))
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let views = yamlSnapshotDescendants(of: root)
+        let editor = try #require(views.compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Kubernetes YAML snapshot" })
+        let edit = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "yaml-snapshot-edit" })
+        let save = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "yaml-snapshot-save" })
+        let cancel = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "yaml-snapshot-cancel" })
+        let saveMenuItem = NSMenuItem(
+            title: "Save",
+            action: #selector(NSDocument.save(_:)),
+            keyEquivalent: "s"
+        )
 
-        for character in ["f", "c", "v"] {
-            let commandKey = try #require(yamlSnapshotKeyEvent(
-                characters: character,
-                modifiers: .command
-            ))
-            #expect(controller.performReadOnlySearchShortcut(commandKey) == false)
+        try await yamlSnapshotWaitUntil { editor.string == source && edit.isEnabled }
+        #expect(!controller.validateMenuItem(saveMenuItem))
+        edit.performClick(nil)
+        #expect(editor.isEditable)
+        #expect(edit.isHidden)
+        #expect(!save.isHidden && !cancel.isHidden)
+        #expect(controller.validateMenuItem(saveMenuItem))
+        editor.string = edited
+        cancel.performClick(nil)
+        #expect(editor.string == source)
+        #expect(!editor.isEditable)
+
+        edit.performClick(nil)
+        editor.string = edited
+        #expect(window.tryToPerform(#selector(NSDocument.save(_:)), with: nil))
+        try await yamlSnapshotWaitUntil { await provider.applyCallCount() == 1 }
+        #expect(!editor.isEditable)
+        #expect(!save.isEnabled)
+        #expect(await provider.lastExpectedResourceVersion() == "rv-1")
+        #expect(await provider.lastPreparedYAML() == Data(edited.utf8))
+
+        await provider.failCurrentApply()
+        try await yamlSnapshotWaitUntil { editor.isEditable && save.isEnabled }
+        #expect(editor.string == edited)
+
+        save.performClick(nil)
+        try await yamlSnapshotWaitUntil { await provider.applyCallCount() == 2 }
+        await provider.succeedCurrentApply()
+        try await yamlSnapshotWaitUntil {
+            let objectCalls = await provider.getObjectCallCount()
+            return editor.string == edited && !editor.isEditable && edit.isEnabled
+                && objectCalls == 2
         }
-
-        textView.isEditable = true
-        let editableN = try #require(yamlSnapshotKeyEvent(characters: "n"))
-        #expect(controller.performReadOnlySearchShortcut(editableN) == false)
-        textView.isEditable = false
-
-        #expect(window.makeFirstResponder(refresh))
-        let unfocusedN = try #require(yamlSnapshotKeyEvent(characters: "n"))
-        #expect(controller.performReadOnlySearchShortcut(unfocusedN) == false)
+        #expect(save.isHidden)
+        #expect(cancel.isHidden)
     }
 
     @Test("watch omissions retain YAML and Data failures do not blank the standard detail tab")
@@ -495,6 +520,141 @@ private actor SnapshotObjectDetailProvider: ObjectDetailProviding {
     func getObjectCallCount() -> Int { objectCalls }
 }
 
+private actor YAMLSnapshotEditProvider: ObjectDetailProviding {
+    private var detail: ObjectDetail
+    private var objectCalls = 0
+    private var applyCalls = 0
+    private var preparedYAML: Data?
+    private var expectedResourceVersion: String?
+    private var applyingYAML: Data?
+    private var applyContinuation:
+        AsyncThrowingStream<OperationProgress, Error>.Continuation?
+
+    init(detail: ObjectDetail) { self.detail = detail }
+
+    func getObject(identity: ResourceIdentity) async throws -> ObjectDetail {
+        objectCalls += 1
+        return detail
+    }
+
+    nonisolated func watchObject(
+        identity: ResourceIdentity,
+        resourceVersion: String
+    ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
+        -> [KubernetesObjectEvent]
+    {
+        []
+    }
+
+    func getRelationships(
+        identity: ResourceIdentity,
+        includeChildren: Bool
+    ) async throws -> ObjectRelationships {
+        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
+    }
+
+    nonisolated func scanRelationships(
+        identity: ResourceIdentity
+    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func cancelRelationshipScan(
+        sessionID: String,
+        scanID: String,
+        generation: UInt64
+    ) async {}
+
+    func getData(identity: ResourceIdentity) async throws -> ObjectData {
+        throw CancellationError()
+    }
+
+    func prepareYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> PreparedYAMLEdit {
+        preparedYAML = yamlUTF8
+        self.expectedResourceVersion = expectedResourceVersion
+        return PreparedYAMLEdit(
+            normalizedYAMLUTF8: yamlUTF8,
+            currentResourceVersion: expectedResourceVersion,
+            diff: []
+        )
+    }
+
+    func applyYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        let pair = AsyncThrowingStream<OperationProgress, Error>.makeStream()
+        applyCalls += 1
+        applyingYAML = yamlUTF8
+        applyContinuation = pair.continuation
+        return pair.stream
+    }
+
+    func updateData(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String,
+        mutations: [DataMutationKind]
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func failCurrentApply() {
+        applyContinuation?.yield(OperationProgress(
+            cursor: StreamCursor(generation: UInt64(applyCalls), sequence: 1),
+            operationID: "yaml-snapshot-save-\(applyCalls)",
+            state: .failed,
+            completedItems: 0,
+            totalItems: 1,
+            itemResults: [],
+            issue: ClusterManagerIssue(
+                category: .conflict,
+                reason: "Conflict",
+                message: "The object changed on the server.",
+                operation: "apply YAML"
+            )
+        ))
+        finishCurrentApply()
+    }
+
+    func succeedCurrentApply() {
+        if let applyingYAML {
+            detail.yamlUTF8 = applyingYAML
+            detail.resourceVersion = "rv-2"
+        }
+        applyContinuation?.yield(OperationProgress(
+            cursor: StreamCursor(generation: UInt64(applyCalls), sequence: 1),
+            operationID: "yaml-snapshot-save-\(applyCalls)",
+            state: .succeeded,
+            completedItems: 1,
+            totalItems: 1,
+            itemResults: []
+        ))
+        finishCurrentApply()
+    }
+
+    private func finishCurrentApply() {
+        applyContinuation?.finish()
+        applyContinuation = nil
+        applyingYAML = nil
+    }
+
+    func getObjectCallCount() -> Int { objectCalls }
+    func applyCallCount() -> Int { applyCalls }
+    func lastPreparedYAML() -> Data? { preparedYAML }
+    func lastExpectedResourceVersion() -> String? { expectedResourceVersion }
+}
+
 private func yamlSnapshotSession() -> OpenedClusterSession {
     OpenedClusterSession(
         sessionID: "yaml-session",
@@ -520,24 +680,6 @@ private func yamlSnapshotIdentity() -> ResourceIdentity {
 @MainActor
 private func yamlSnapshotDescendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(yamlSnapshotDescendants(of:))
-}
-
-private func yamlSnapshotKeyEvent(
-    characters: String,
-    modifiers: NSEvent.ModifierFlags = []
-) -> NSEvent? {
-    NSEvent.keyEvent(
-        with: .keyDown,
-        location: .zero,
-        modifierFlags: modifiers,
-        timestamp: 0,
-        windowNumber: 0,
-        context: nil,
-        characters: characters,
-        charactersIgnoringModifiers: characters.lowercased(),
-        isARepeat: false,
-        keyCode: characters == "\r" ? 36 : 0
-    )
 }
 
 @MainActor
