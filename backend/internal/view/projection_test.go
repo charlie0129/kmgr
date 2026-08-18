@@ -337,7 +337,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"availableReplicas": int64(2), "readyReplicas": int64(3),
 				"replicas": int64(4),
 			},
-			want: "2/3/4", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			want: "2 / 3 / 4", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
 		},
 		{
 			name: "StatefulSet ready",
@@ -350,7 +350,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"availableReplicas": int64(3), "readyReplicas": int64(3),
 				"replicas": int64(3),
 			},
-			want: "3/3/3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			want: "3 / 3 / 3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		},
 		{
 			name: "DaemonSet progressing",
@@ -362,7 +362,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"numberAvailable": int64(4), "numberReady": int64(5),
 				"currentNumberScheduled": int64(5), "desiredNumberScheduled": int64(5),
 			},
-			want: "4/5/5", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			want: "4 / 5 / 5", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
 		},
 		{
 			name: "ReplicaSet ready",
@@ -375,7 +375,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"availableReplicas": int64(2), "readyReplicas": int64(2),
 				"replicas": int64(2),
 			},
-			want: "2/2/2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			want: "2 / 2 / 2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		},
 		{
 			name: "ReplicationController progressing",
@@ -388,7 +388,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"availableReplicas": int64(1), "readyReplicas": int64(2),
 				"replicas": int64(2),
 			},
-			want: "1/2/2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			want: "1 / 2 / 2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
 		},
 	}
 	for _, test := range tests {

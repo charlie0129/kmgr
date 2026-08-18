@@ -491,7 +491,7 @@ func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID stri
 			break
 		}
 		cell.DisplayText = fmt.Sprintf(
-			"%d/%d/%d", state.available, state.ready, state.total,
+			"%d / %d / %d", state.available, state.ready, state.total,
 		)
 		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: cell.DisplayText}
 		cell.Tooltip = fmt.Sprintf(
