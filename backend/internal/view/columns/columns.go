@@ -17,6 +17,7 @@ import (
 	"github.com/google/cel-go/common/types/traits"
 	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	sigyaml "sigs.k8s.io/yaml"
 )
 
 const (
@@ -80,14 +81,14 @@ type Value struct {
 // PreviewValue is the human-readable result of evaluating a CEL expression
 // before it is coerced to the column's declared type. It is intentionally
 // separate from Value: a draft such as `object.metadata` is useful to inspect
-// even when the column is currently declared as a string and therefore cannot
-// be saved. Available is false only when CEL produced an unknown/error result
-// for which there is no value to show.
+// as complete YAML even when the column is currently declared as a string and
+// therefore cannot be saved. Available is false only when CEL produced an
+// unknown/error result for which there is no value to show.
 type PreviewValue struct {
 	Display   string
 	Type      string
+	Format    string
 	Available bool
-	Truncated bool
 }
 
 type RuntimeError struct {
@@ -334,29 +335,104 @@ func previewValue(result ref.Val) PreviewValue {
 	if result == nil || types.IsUnknownOrError(result) {
 		return PreviewValue{}
 	}
+	if optional, ok := result.(*types.Optional); ok && optional.HasValue() {
+		result = optional.GetValue()
+	}
 	typeName := ""
 	if result.Type() != nil {
 		typeName = result.Type().TypeName()
 	}
 	display := types.Format(result)
+	format := "cel"
+	if native, err := previewNativeValue(result); err == nil {
+		if yamlBytes, err := sigyaml.Marshal(native); err == nil {
+			display = strings.TrimSuffix(string(yamlBytes), "\n")
+			format = "yaml"
+		}
+	}
 	if !utf8.ValidString(display) {
 		return PreviewValue{}
 	}
-	truncated := false
-	if len(display) > MaxDisplayBytes {
-		// Keep the preview bounded even when an expression returns a complete
-		// Kubernetes object or a very large list. Trim only at a valid UTF-8
-		// boundary and make truncation explicit to the editor.
-		limit := MaxDisplayBytes - len("…")
-		for limit > 0 && !utf8.ValidString(display[:limit]) {
-			limit--
-		}
-		display = display[:limit] + "…"
-		truncated = true
-	}
 	return PreviewValue{
-		Display: display, Type: typeName, Available: true, Truncated: truncated,
+		Display: display, Type: typeName, Format: format, Available: true,
 	}
+}
+
+func previewNativeValue(value ref.Val) (any, error) {
+	if value == nil || types.IsUnknownOrError(value) {
+		return nil, errors.New("CEL preview value is unavailable")
+	}
+	if optional, ok := value.(*types.Optional); ok {
+		if !optional.HasValue() {
+			return nil, nil
+		}
+		return previewNativeValue(optional.GetValue())
+	}
+
+	switch value.Type() {
+	case types.NullType:
+		return nil, nil
+	case types.BoolType, types.BytesType, types.DoubleType, types.IntType,
+		types.StringType, types.UintType:
+		return value.Value(), nil
+	case types.TimestampType:
+		native, err := value.ConvertToNative(reflect.TypeFor[time.Time]())
+		if err != nil {
+			return nil, err
+		}
+		return native.(time.Time).Format(time.RFC3339Nano), nil
+	case types.DurationType:
+		native, err := value.ConvertToNative(reflect.TypeFor[time.Duration]())
+		if err != nil {
+			return nil, err
+		}
+		return native.(time.Duration).String(), nil
+	}
+
+	if list, ok := value.(traits.Lister); ok {
+		size, ok := list.Size().(types.Int)
+		if !ok || size < 0 {
+			return nil, errors.New("CEL preview list has no valid size")
+		}
+		result := make([]any, int(size))
+		for index := range result {
+			native, err := previewNativeValue(list.Get(types.Int(index)))
+			if err != nil {
+				return nil, err
+			}
+			result[index] = native
+		}
+		return result, nil
+	}
+	if mapping, ok := value.(traits.Mapper); ok {
+		size, ok := mapping.Size().(types.Int)
+		if !ok || size < 0 {
+			return nil, errors.New("CEL preview map has no valid size")
+		}
+		result := make(map[string]any, int(size))
+		iterator := mapping.Iterator()
+		for iterator.HasNext() == types.True {
+			key := iterator.Next()
+			keyText := types.Format(key)
+			if text, ok := key.(types.String); ok {
+				keyText = string(text)
+			}
+			if _, duplicate := result[keyText]; duplicate {
+				return nil, fmt.Errorf("CEL preview map has duplicate rendered key %q", keyText)
+			}
+			mapped, found := mapping.Find(key)
+			if !found {
+				return nil, fmt.Errorf("CEL preview map key %q disappeared", keyText)
+			}
+			native, err := previewNativeValue(mapped)
+			if err != nil {
+				return nil, err
+			}
+			result[keyText] = native
+		}
+		return result, nil
+	}
+	return value.Value(), nil
 }
 
 func (p *Program) coerce(result ref.Val) (Value, error) {

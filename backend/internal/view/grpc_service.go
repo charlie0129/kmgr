@@ -312,8 +312,8 @@ func rawCellForCELValue(columnID string, value viewcolumns.PreviewValue) *kmgrv1
 	if value.Type != "" {
 		tooltip += " · type " + value.Type
 	}
-	if value.Truncated {
-		tooltip += " · truncated"
+	if value.Format == "yaml" {
+		tooltip += " · YAML"
 	}
 	return &kmgrv1.Cell{
 		ColumnId: columnID, DisplayText: value.Display, Tooltip: tooltip,

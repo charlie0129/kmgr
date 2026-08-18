@@ -110,8 +110,8 @@ func TestCompilePreviewRetainsRawValueForDeclaredTypeMismatch(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "result type is map") {
 		t.Fatalf("preview mismatch error = %v", err)
 	}
-	if !preview.Available || preview.Type != "map" ||
-		!strings.Contains(preview.Display, `"name": "sample"`) {
+	if !preview.Available || preview.Type != "map" || preview.Format != "yaml" ||
+		!strings.Contains(preview.Display, "name: sample") {
 		t.Fatalf("raw preview = %#v", preview)
 	}
 
@@ -122,7 +122,7 @@ func TestCompilePreviewRetainsRawValueForDeclaredTypeMismatch(t *testing.T) {
 	}
 }
 
-func TestPreviewValueIsBoundedAtDisplayLimit(t *testing.T) {
+func TestPreviewValueRetainsCompleteYAML(t *testing.T) {
 	t.Parallel()
 	compiler := newCompiler(t, DefaultCostLimit)
 	program, err := compiler.CompilePreview(Definition{
@@ -137,8 +137,34 @@ func TestPreviewValueIsBoundedAtDisplayLimit(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "declared integer") {
 		t.Fatalf("large preview mismatch error = %v", err)
 	}
-	if !preview.Available || !preview.Truncated || len(preview.Display) != MaxDisplayBytes {
-		t.Fatalf("bounded preview = %#v (len %d)", preview, len(preview.Display))
+	if !preview.Available || preview.Format != "yaml" ||
+		strings.Count(preview.Display, "x") != MaxDisplayBytes+100 {
+		t.Fatalf("complete preview = %#v (len %d)", preview, len(preview.Display))
+	}
+}
+
+func TestPreviewValueFormatsNestedYAMLWithoutLosingLargeIntegers(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	program, err := compiler.CompilePreview(Definition{
+		ID: "structured", Expression: "object.value", ResultType: ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, preview, err := program.EvaluatePreviewContext(context.Background(), Activation{
+		Object: map[string]any{"value": map[string]any{
+			"generation": int64(9_007_199_254_740_993),
+			"owners":     []any{"alpha", "beta"},
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "result type is map") {
+		t.Fatalf("structured preview mismatch error = %v", err)
+	}
+	if !preview.Available || preview.Format != "yaml" ||
+		!strings.Contains(preview.Display, "generation: 9007199254740993") ||
+		!strings.Contains(preview.Display, "owners:\n- alpha\n- beta") {
+		t.Fatalf("structured preview = %#v", preview)
 	}
 }
 

@@ -95,10 +95,11 @@ func TestPreviewColumnRetainsRawValueForDeclaredTypeMismatch(t *testing.T) {
 	}
 	preview := response.GetPreview()
 	if preview == nil || preview.GetTypedValue() != nil ||
-		!strings.Contains(preview.GetDisplayText(), `"name": "sample"`) ||
-		!strings.Contains(preview.GetDisplayText(), `"namespace": "default"`) ||
+		!strings.Contains(preview.GetDisplayText(), "name: sample") ||
+		!strings.Contains(preview.GetDisplayText(), "namespace: default") ||
+		!strings.Contains(preview.GetDisplayText(), "\n") ||
 		preview.GetSeverity() != kmgrv1.CellSeverity_CELL_SEVERITY_WARNING ||
-		!strings.Contains(preview.GetTooltip(), "type map") {
+		!strings.Contains(preview.GetTooltip(), "type map · YAML") {
 		t.Fatalf("raw metadata preview = %#v", preview)
 	}
 }

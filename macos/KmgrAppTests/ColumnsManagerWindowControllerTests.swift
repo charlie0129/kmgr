@@ -152,8 +152,14 @@ struct ColumnsManagerWindowControllerTests {
         let width = try #require(
             view(accessibilityLabel: "Column width", beneath: root)
         )
-        let examples = try #require(
-            view(accessibilityLabel: "CEL examples and preview source", beneath: root)
+        let examplesButton = try #require(
+            view(accessibilityLabel: "Show CEL examples", beneath: root) as? NSButton
+        )
+        let preview = try #require(
+            view(accessibilityLabel: "CEL preview value", beneath: root) as? NSTextView
+        )
+        let selectionTip = try #require(
+            view(accessibilityLabel: "CEL preview selection tip", beneath: root)
                 as? NSTextField
         )
 
@@ -176,8 +182,14 @@ struct ColumnsManagerWindowControllerTests {
 
         #expect(expression.isEditable)
         #expect(expression.isSelectable)
-        #expect(examples.stringValue.contains("object.metadata"))
-        #expect(examples.stringValue.contains("Preview input: safe sample"))
+        #expect(examplesButton.bezelStyle == .helpButton)
+        #expect(examplesButton.action != nil)
+        #expect(selectionTip.stringValue.contains("Select one"))
+        #expect(selectionTip.stringValue.contains("safe sample object"))
+        #expect(!selectionTip.isHidden)
+        #expect(!preview.isEditable)
+        #expect(preview.isSelectable)
+        #expect(frame(of: preview, in: root).height <= 160)
         #expect(titleField.nextKeyView === expression)
         #expect(expression.nextKeyView === resultType)
         #expect(panel.makeFirstResponder(expression))

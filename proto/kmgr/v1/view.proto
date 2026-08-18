@@ -41,9 +41,9 @@ message PreviewColumnResponse {
   string request_id = 1;
   string cel_environment = 2;
   // When evaluation succeeds but the value does not match the draft's
-  // declared result type, preview is a display-only raw value and error also
-  // carries the validation diagnostic. This lets clients teach from maps and
-  // lists without treating them as valid sortable cells.
+  // declared result type, preview is a display-only raw YAML value and error
+  // also carries the validation diagnostic. This lets clients teach from maps
+  // and lists without treating them as valid sortable cells.
   Cell preview = 3;
   bool used_sample_object = 4;
   ResourceIdentity evaluated_object = 5;

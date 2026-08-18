@@ -243,12 +243,14 @@ disabled for deliberate review, or validate and add an exact Kubernetes
 resource name such as `nvidia.com/gpu`. The CEL editor compiles each current
 revision through the engine and previews it against the selected table object
 when exactly one is selected, otherwise against a bounded sample object. Only
-the latest successful validation can be committed. The editor shows common
-starting expressions (`object.metadata.name`,
+the latest successful validation can be committed. A `?` help popover shows
+common starting expressions (`object.metadata.name`,
 `object.metadata.namespace`, `object.metadata.labels`, `object.metadata`,
-`context.kind`, and `now`) and says which object supplies the preview. If an
-expression evaluates successfully but has the wrong declared type, the raw
-value remains visible beside the validation error; this is useful for
+`context.kind`, and `now`). If no row was selected before the window opened,
+the editor explains that it is using a safe sample and suggests selecting one
+item for a live-object preview. If an expression evaluates successfully but
+has the wrong declared type, its complete raw value remains visible as YAML in
+a bounded, scrollable preview beside the validation error; this is useful for
 exploring maps and lists before choosing a scalar transformation.
 
 ## Built-in resource usage columns

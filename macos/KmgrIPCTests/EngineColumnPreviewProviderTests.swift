@@ -285,9 +285,9 @@ struct EngineColumnPreviewProviderTests {
     func mapsInvalidValueWithPreview() async throws {
         var response = Self.successfulResponse()
         response.preview.columnID = "metadata"
-        response.preview.displayText = "{\"name\": \"sample\"}"
+        response.preview.displayText = "name: sample\nnamespace: default"
         response.preview.typedValue = nil
-        response.preview.tooltip = "Evaluated CEL value · type map"
+        response.preview.tooltip = "Evaluated CEL value · type map · YAML"
         response.preview.severity = .warning
         response.error.category = .validation
         response.error.reason = "CELEvaluationFailed"

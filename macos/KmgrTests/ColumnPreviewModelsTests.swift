@@ -46,7 +46,7 @@ import Testing
         reason: "CELEvaluationFailed",
         message: "column \"metadata\": result type is map, declared string"
     )
-    let result = previewResult(text: "{\"name\": \"sample\"}", issue: issue)
+    let result = previewResult(text: "name: sample\nnamespace: default", issue: issue)
     var state = ColumnPreviewValidationState()
     let revision = state.beginRevision()
 

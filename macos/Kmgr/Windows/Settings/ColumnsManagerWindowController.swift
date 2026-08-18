@@ -975,14 +975,17 @@ final class CELColumnEditorWindowController: NSWindowController,
     private let missingField = NSTextField()
     private let widthField = NSTextField()
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
-    private let examplesLabel = NSTextField(wrappingLabelWithString: "")
+    private let examplesButton = NSButton()
+    private let noSelectionTipLabel = NSTextField(wrappingLabelWithString: "")
     private let previewStateLabel = NSTextField(labelWithString: "")
-    private let previewValueLabel = NSTextField(wrappingLabelWithString: "")
+    private let previewValueView = NSTextView()
+    private let previewValueScroll = NSScrollView()
     private let previewSourceLabel = NSTextField(labelWithString: "")
     private let previewEnvironmentLabel = NSTextField(labelWithString: "")
     private let commitButton = NSButton(title: "Add", target: nil, action: nil)
     private var previewValidation = ColumnPreviewValidationState()
     private var previewTask: Task<Void, Never>?
+    private var examplesPopover: NSPopover?
 
     var onCommit: ((ColumnDefinition) -> Void)?
     var onDismiss: (() -> Void)?
@@ -998,13 +1001,13 @@ final class CELColumnEditorWindowController: NSWindowController,
         self.previewProvider = previewProvider
         self.previewContext = previewContext
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 700),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         panel.title = definition == nil ? "Add CEL Column" : "Edit CEL Column"
-        panel.minSize = NSSize(width: 520, height: 700)
+        panel.minSize = NSSize(width: 520, height: 640)
         panel.isReleasedWhenClosed = false
         super.init(window: panel)
         panel.delegate = self
@@ -1106,27 +1109,56 @@ final class CELColumnEditorWindowController: NSWindowController,
         )
         help.textColor = .secondaryLabelColor
         help.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        help.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        examplesButton.bezelStyle = .helpButton
+        examplesButton.title = ""
+        examplesButton.target = self
+        examplesButton.action = #selector(showExamples(_:))
+        examplesButton.toolTip = "Show CEL variables and expression examples"
+        examplesButton.setAccessibilityLabel("Show CEL examples")
+        let helpRow = NSStackView(views: [help, NSView(), examplesButton])
+        helpRow.orientation = .horizontal
+        helpRow.alignment = .centerY
+        helpRow.spacing = 8
 
-        examplesLabel.stringValue = Self.examplesText(for: previewContext)
-        examplesLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        examplesLabel.textColor = .secondaryLabelColor
-        examplesLabel.maximumNumberOfLines = 0
-        examplesLabel.lineBreakMode = .byWordWrapping
-        examplesLabel.setAccessibilityLabel("CEL examples and preview source")
-        examplesLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        noSelectionTipLabel.stringValue = Self.noSelectionTipText(for: previewContext)
+        noSelectionTipLabel.textColor = .secondaryLabelColor
+        noSelectionTipLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        noSelectionTipLabel.maximumNumberOfLines = 2
+        noSelectionTipLabel.isHidden = previewContext.selectedObject != nil
+        noSelectionTipLabel.setAccessibilityLabel("CEL preview selection tip")
+        noSelectionTipLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         previewStateLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        previewValueLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        previewValueLabel.maximumNumberOfLines = 6
-        previewValueLabel.lineBreakMode = .byTruncatingTail
-        previewValueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        previewValueView.frame = NSRect(x: 0, y: 0, width: 560, height: 140)
+        previewValueView.isEditable = false
+        previewValueView.isSelectable = true
+        previewValueView.isRichText = false
+        previewValueView.drawsBackground = false
+        previewValueView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        previewValueView.textContainerInset = NSSize(width: 6, height: 6)
+        previewValueView.isVerticallyResizable = true
+        previewValueView.isHorizontallyResizable = true
+        previewValueView.autoresizingMask = [.width]
+        previewValueView.textContainer?.widthTracksTextView = false
+        previewValueView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        previewValueView.setAccessibilityLabel("CEL preview value")
+        previewValueScroll.documentView = previewValueView
+        previewValueScroll.hasVerticalScroller = true
+        previewValueScroll.hasHorizontalScroller = true
+        previewValueScroll.autohidesScrollers = true
+        previewValueScroll.borderType = .bezelBorder
+        previewValueScroll.heightAnchor.constraint(equalToConstant: 140).isActive = true
         previewSourceLabel.textColor = .secondaryLabelColor
         previewSourceLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         previewEnvironmentLabel.textColor = .tertiaryLabelColor
         previewEnvironmentLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         let previewStack = NSStackView(views: [
             previewStateLabel,
-            previewValueLabel,
+            previewValueScroll,
             previewSourceLabel,
             previewEnvironmentLabel,
         ])
@@ -1137,6 +1169,10 @@ final class CELColumnEditorWindowController: NSWindowController,
         previewStack.wantsLayer = true
         previewStack.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         previewStack.layer?.cornerRadius = 6
+        previewValueScroll.widthAnchor.constraint(
+            equalTo: previewStack.widthAnchor,
+            constant: -20
+        ).isActive = true
 
         errorLabel.textColor = .systemRed
         errorLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -1152,14 +1188,16 @@ final class CELColumnEditorWindowController: NSWindowController,
         footer.alignment = .centerY
         footer.spacing = 8
 
-        let stack = NSStackView(views: [form, help, examplesLabel, previewStack, footer])
+        let stack = NSStackView(views: [
+            form, helpRow, noSelectionTipLabel, previewStack, footer,
+        ])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
         form.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        help.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        examplesLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        helpRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        noSelectionTipLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         previewStack.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         footer.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
@@ -1218,18 +1256,66 @@ final class CELColumnEditorWindowController: NSWindowController,
             source = "Preview input: safe sample " + resourceName
                 + " object. Select one row before opening Columns to use its live fields."
         }
-        return source + """
-        Try these (the preview can show maps/lists while you explore):
-          object.apiVersion            → string
-          object.kind                  → string
-          object.metadata.name       → string (for example, "sample")
-          object.metadata.namespace  → string (for example, "default")
-          object.metadata.labels["app"] → string (when present)
-          object.metadata            → map (inspect all metadata fields; index a key for a string column)
-          context.kind               → string
-          now                        → timestamp
+        return source + "\n\n" + """
+        Try these (maps/lists stay visible while you explore):
+          object.apiVersion              → string
+          object.kind                    → string
+          object.metadata.name           → string (for example, "sample")
+          object.metadata.namespace      → string (for example, "default")
+          object.metadata.labels["app"]  → string (when present)
+          object.metadata                → map (inspect its YAML, then index a key)
+          context.kind                   → string
+          now                            → timestamp
         Map/list values remain visible in the preview when temporarily invalid; transform them to a scalar before saving.
         """
+    }
+
+    private static func noSelectionTipText(for context: ColumnPreviewContext) -> String {
+        let resourceName = context.resource.kind.isEmpty
+            ? context.resource.resource : context.resource.kind
+        return "Tip: Select one " + resourceName
+            + " item before opening Columns to preview against its live values. "
+            + "This editor is using a safe sample object."
+    }
+
+    @objc private func showExamples(_ sender: NSButton) {
+        if let popover = examplesPopover, popover.isShown {
+            popover.close()
+            examplesPopover = nil
+            return
+        }
+
+        let label = NSTextField(wrappingLabelWithString: Self.examplesText(
+            for: previewContext
+        ))
+        label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        label.textColor = .labelColor
+        label.maximumNumberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.setAccessibilityLabel("CEL examples and preview source")
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 570, height: 250))
+        root.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
+            label.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
+            label.topAnchor.constraint(equalTo: root.topAnchor, constant: 14),
+            label.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -14),
+        ])
+
+        let content = NSViewController()
+        content.view = root
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentSize = root.frame.size
+        popover.contentViewController = content
+        examplesPopover = popover
+        popover.show(
+            relativeTo: sender.bounds,
+            of: sender,
+            preferredEdge: .maxY
+        )
     }
 
     private func install(_ definition: ColumnDefinition?) {
@@ -1348,8 +1434,8 @@ final class CELColumnEditorWindowController: NSWindowController,
             previewStateLabel.textColor = .labelColor
             errorLabel.stringValue = ""
             previewStateLabel.stringValue = "Preview"
-            previewValueLabel.stringValue = ""
-            previewValueLabel.toolTip = nil
+            previewValueView.string = ""
+            previewValueView.toolTip = nil
             previewSourceLabel.stringValue = ""
             previewEnvironmentLabel.stringValue = ""
         case .localFailure(let message):
@@ -1357,8 +1443,8 @@ final class CELColumnEditorWindowController: NSWindowController,
             previewStateLabel.textColor = .secondaryLabelColor
             errorLabel.stringValue = message
             previewStateLabel.stringValue = "Preview unavailable"
-            previewValueLabel.stringValue = ""
-            previewValueLabel.toolTip = nil
+            previewValueView.string = ""
+            previewValueView.toolTip = nil
             previewSourceLabel.stringValue = ""
             previewEnvironmentLabel.stringValue = ""
         case .validating:
@@ -1366,8 +1452,8 @@ final class CELColumnEditorWindowController: NSWindowController,
             previewStateLabel.textColor = .secondaryLabelColor
             errorLabel.stringValue = ""
             previewStateLabel.stringValue = "Validating…"
-            previewValueLabel.stringValue = ""
-            previewValueLabel.toolTip = nil
+            previewValueView.string = ""
+            previewValueView.toolTip = nil
             previewSourceLabel.stringValue = previewContext.selectedObject == nil
                 ? "Using sample object for this preview"
                 : "Using selected object (fresh UID-pinned lookup)"
@@ -1377,8 +1463,8 @@ final class CELColumnEditorWindowController: NSWindowController,
             previewStateLabel.textColor = .systemRed
             errorLabel.stringValue = message
             previewStateLabel.stringValue = "Preview failed"
-            previewValueLabel.stringValue = ""
-            previewValueLabel.toolTip = nil
+            previewValueView.string = ""
+            previewValueView.toolTip = nil
             previewSourceLabel.stringValue = ""
             previewEnvironmentLabel.stringValue = ""
         case .succeeded(let result):
@@ -1394,10 +1480,11 @@ final class CELColumnEditorWindowController: NSWindowController,
                 errorLabel.stringValue = ""
             }
             previewStateLabel.stringValue = invalid ? "Preview (invalid result)" : "Preview"
-            previewValueLabel.stringValue = result.preview.displayText.isEmpty
+            previewValueView.string = result.preview.displayText.isEmpty
                 ? "(empty value)" : result.preview.displayText
-            previewValueLabel.toolTip = result.preview.tooltip.isEmpty
+            previewValueView.toolTip = result.preview.tooltip.isEmpty
                 ? result.preview.displayText : result.preview.tooltip
+            previewValueView.scrollRangeToVisible(NSRange(location: 0, length: 0))
             if result.usedSampleObject {
                 previewSourceLabel.stringValue = "Using sample object"
             } else if let identity = result.evaluatedObject {
@@ -1425,6 +1512,8 @@ final class CELColumnEditorWindowController: NSWindowController,
         else { return }
         previewTask?.cancel()
         previewTask = nil
+        examplesPopover?.close()
+        examplesPopover = nil
         onCommit?(definition)
         parent.endSheet(sheet, returnCode: .OK)
     }
@@ -1433,6 +1522,8 @@ final class CELColumnEditorWindowController: NSWindowController,
         guard let sheet = window, let parent = sheet.sheetParent else { return }
         previewTask?.cancel()
         previewTask = nil
+        examplesPopover?.close()
+        examplesPopover = nil
         parent.endSheet(sheet, returnCode: .cancel)
     }
 
@@ -1440,6 +1531,8 @@ final class CELColumnEditorWindowController: NSWindowController,
         if let parent = sender.sheetParent {
             previewTask?.cancel()
             previewTask = nil
+            examplesPopover?.close()
+            examplesPopover = nil
             parent.endSheet(sender, returnCode: .cancel)
             return false
         }
