@@ -80,6 +80,44 @@ func TestPreviewColumnReturnsCompileAndEvaluationErrorsInline(t *testing.T) {
 	}
 }
 
+func TestPreviewColumnRetainsRawValueForDeclaredTypeMismatch(t *testing.T) {
+	t.Parallel()
+	service := newPreviewService(t, &fakeResourceSource{authority: "authority", client: newSearchClient()})
+
+	response, err := service.PreviewColumn(context.Background(), previewRequest(
+		"object.metadata", "string", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetError().GetReason() != "CELEvaluationFailed" {
+		t.Fatalf("metadata mismatch error = %#v", response.GetError())
+	}
+	preview := response.GetPreview()
+	if preview == nil || preview.GetTypedValue() != nil ||
+		!strings.Contains(preview.GetDisplayText(), `"name": "sample"`) ||
+		!strings.Contains(preview.GetDisplayText(), `"namespace": "default"`) ||
+		preview.GetSeverity() != kmgrv1.CellSeverity_CELL_SEVERITY_WARNING ||
+		!strings.Contains(preview.GetTooltip(), "type map") {
+		t.Fatalf("raw metadata preview = %#v", preview)
+	}
+}
+
+func TestPreviewColumnEvaluatesStaticMismatchForDraftInspection(t *testing.T) {
+	t.Parallel()
+	service := newPreviewService(t, &fakeResourceSource{authority: "authority", client: newSearchClient()})
+
+	response, err := service.PreviewColumn(context.Background(), previewRequest("1", "string", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetError().GetReason() != "CELEvaluationFailed" ||
+		response.GetPreview().GetDisplayText() != "1" ||
+		response.GetPreview().GetTypedValue() != nil {
+		t.Fatalf("static mismatch preview = %#v", response)
+	}
+}
+
 func TestPreviewColumnFreshGetsSelectedUIDAndNeverExposesSecretData(t *testing.T) {
 	t.Parallel()
 	secret := &unstructured.Unstructured{Object: map[string]any{

@@ -278,6 +278,30 @@ struct EngineColumnPreviewProviderTests {
         }
     }
 
+    @Test("keeps a raw value beside a declared-type validation failure")
+    func mapsInvalidValueWithPreview() async throws {
+        var response = Self.successfulResponse()
+        response.preview.columnID = "metadata"
+        response.preview.displayText = "{\"name\": \"sample\"}"
+        response.preview.typedValue = nil
+        response.preview.tooltip = "Evaluated CEL value · type map"
+        response.preview.severity = .warning
+        response.error.category = .validation
+        response.error.reason = "CELEvaluationFailed"
+        response.error.message = "column \"metadata\": result type is map, declared string"
+        response.error.operation = "evaluate CEL column"
+
+        let result = try await deterministicProvider(
+            rpc: FakeColumnPreviewRPC(response: response)
+        ).previewColumn(Self.request())
+
+        #expect(result.preview.displayText.contains("sample"))
+        #expect(result.preview.typedValue == nil)
+        #expect(result.preview.severity == .warning)
+        #expect(result.validationIssue?.reason == "CELEvaluationFailed")
+        #expect(result.validationIssue?.message.contains("declared string") == true)
+    }
+
     private func deterministicProvider(
         rpc: FakeColumnPreviewRPC
     ) -> EngineColumnPreviewProvider {

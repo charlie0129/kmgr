@@ -152,6 +152,10 @@ struct ColumnsManagerWindowControllerTests {
         let width = try #require(
             view(accessibilityLabel: "Column width", beneath: root)
         )
+        let examples = try #require(
+            view(accessibilityLabel: "CEL examples and preview source", beneath: root)
+                as? NSTextField
+        )
 
         for control in [idField, titleField, resultType, alignment, missing, width] {
             let controlFrame = frame(of: control, in: root)
@@ -172,6 +176,8 @@ struct ColumnsManagerWindowControllerTests {
 
         #expect(expression.isEditable)
         #expect(expression.isSelectable)
+        #expect(examples.stringValue.contains("object.metadata"))
+        #expect(examples.stringValue.contains("Preview input: safe sample"))
         #expect(titleField.nextKeyView === expression)
         #expect(expression.nextKeyView === resultType)
         #expect(panel.makeFirstResponder(expression))

@@ -40,11 +40,35 @@ import Testing
     #expect(!state.canCommit)
 }
 
-private func previewResult(text: String) -> ColumnPreviewResult {
+@Test func columnPreviewKeepsRawValueVisibleButBlocksInvalidResult() {
+    let issue = ClusterManagerIssue(
+        category: .validation,
+        reason: "CELEvaluationFailed",
+        message: "column \"metadata\": result type is map, declared string"
+    )
+    let result = previewResult(text: "{\"name\": \"sample\"}", issue: issue)
+    var state = ColumnPreviewValidationState()
+    let revision = state.beginRevision()
+
+    let accepted = state.accept(result, for: revision)
+    #expect(accepted)
+    #expect(state.phase == .succeeded(result))
+    #expect(!state.canCommit)
+    if case .succeeded(let accepted) = state.phase {
+        #expect(accepted.preview.displayText.contains("sample"))
+        #expect(accepted.validationIssue == issue)
+    }
+}
+
+private func previewResult(
+    text: String,
+    issue: ClusterManagerIssue? = nil
+) -> ColumnPreviewResult {
     ColumnPreviewResult(
         requestID: UUID().uuidString,
         celEnvironment: ColumnConfigurationSchema.celEnvironment,
         preview: Cell(columnID: "team", displayText: text),
-        usedSampleObject: true
+        usedSampleObject: true,
+        validationIssue: issue
     )
 }

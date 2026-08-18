@@ -85,7 +85,10 @@ func (s *GRPCService) PreviewColumn(
 		return nil, status.Error(codes.InvalidArgument, "resource version and name are required")
 	}
 	definition := request.GetColumn()
-	program, err := s.compiler.Compile(viewcolumns.Definition{
+	// Preview compilation deliberately permits a temporary declared-type
+	// mismatch. The editor needs to inspect the value first (for example,
+	// `object.metadata`), then decide which result type to declare.
+	program, err := s.compiler.CompilePreview(viewcolumns.Definition{
 		ID: definition.GetId(), Title: definition.GetTitle(),
 		Expression: definition.GetExpression(), ResultType: viewcolumns.ResultType(definition.GetResultType()),
 		Missing: definition.GetMissing(), ListJoiner: definition.GetListJoiner(),
@@ -106,13 +109,16 @@ func (s *GRPCService) PreviewColumn(
 	response.UsedSampleObject = sample
 	response.EvaluatedObject = identity
 	isSecret := resource.GetGroup() == "" && resource.GetVersion() == "v1" && resource.GetResource() == "secrets"
-	value, err := program.Evaluate(viewcolumns.Activation{
+	value, raw, err := program.EvaluatePreviewContext(operationContext, viewcolumns.Activation{
 		Object:  viewcolumns.SanitizeObjectActivation(object.Object, isSecret),
 		Metrics: map[string]any{},
 		Context: previewContext(request),
 		Now:     time.Now(),
 	})
 	if err != nil {
+		if raw.Available {
+			response.Preview = rawCellForCELValue(definition.GetId(), raw)
+		}
 		response.Error = previewColumnError("CELEvaluationFailed", err, "evaluate CEL column")
 		return response, nil
 	}
@@ -251,7 +257,10 @@ func samplePreviewObject(resource *kmgrv1.ResourceType) *unstructured.Unstructur
 		"kind":       resource.GetKind(),
 		"metadata": map[string]any{
 			"name": "sample", "namespace": "default",
-			"labels": map[string]any{}, "annotations": map[string]any{},
+			// Keep the sample small but concrete enough that the examples in
+			// the CEL editor immediately produce inspectable scalar values.
+			"labels":      map[string]any{"app": "sample"},
+			"annotations": map[string]any{"example": "sample"},
 		},
 	}}
 	if !resource.GetNamespaced() {
@@ -293,6 +302,23 @@ func cellForCELValue(columnID string, value viewcolumns.Value) *kmgrv1.Cell {
 		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: value.Duration.Seconds()}
 	}
 	return cell
+}
+
+// rawCellForCELValue carries a successfully evaluated but not-yet-coerced
+// value. Cell intentionally permits a display-only value, so maps and lists
+// can be shown without pretending they are valid sortable column values.
+func rawCellForCELValue(columnID string, value viewcolumns.PreviewValue) *kmgrv1.Cell {
+	tooltip := "Evaluated CEL value"
+	if value.Type != "" {
+		tooltip += " · type " + value.Type
+	}
+	if value.Truncated {
+		tooltip += " · truncated"
+	}
+	return &kmgrv1.Cell{
+		ColumnId: columnID, DisplayText: value.Display, Tooltip: tooltip,
+		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+	}
 }
 
 func previewColumnError(reason string, err error, operation string) *kmgrv1.StructuredError {

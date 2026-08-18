@@ -60,19 +60,25 @@ public struct ColumnPreviewResult: Hashable, Sendable {
     public var preview: Cell
     public var usedSampleObject: Bool
     public var evaluatedObject: ResourceIdentity?
+    /// A preview can contain a useful raw value while still failing the
+    /// declared result-type contract. The editor renders this issue beside
+    /// the value and keeps Add/Apply disabled until a later draft succeeds.
+    public var validationIssue: ClusterManagerIssue?
 
     public init(
         requestID: String,
         celEnvironment: String,
         preview: Cell,
         usedSampleObject: Bool,
-        evaluatedObject: ResourceIdentity? = nil
+        evaluatedObject: ResourceIdentity? = nil,
+        validationIssue: ClusterManagerIssue? = nil
     ) {
         self.requestID = requestID
         self.celEnvironment = celEnvironment
         self.preview = preview
         self.usedSampleObject = usedSampleObject
         self.evaluatedObject = evaluatedObject
+        self.validationIssue = validationIssue
     }
 }
 
@@ -132,7 +138,9 @@ public struct ColumnPreviewValidationState: Hashable, Sendable {
     }
 
     public var canCommit: Bool {
-        if case .succeeded = phase { return true }
+        if case .succeeded(let result) = phase {
+            return result.validationIssue == nil
+        }
         return false
     }
 }

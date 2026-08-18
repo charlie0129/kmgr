@@ -80,8 +80,15 @@ public struct EngineColumnPreviewProvider: ColumnPreviewProviding {
                     operation: "preview CEL column"
                 )
             }
-            if response.hasError {
-                throw EngineClusterContextProvider.issue(from: response.error)
+            // The engine may return both a display-only raw cell and a
+            // validation error when the expression evaluated but does not
+            // match the draft's declared type. Preserve both so the editor
+            // can teach the user from the value instead of replacing it with
+            // an opaque failure banner.
+            let validationIssue = response.hasError
+                ? EngineClusterContextProvider.issue(from: response.error) : nil
+            if let validationIssue, !response.hasPreview {
+                throw validationIssue
             }
             guard response.hasPreview else {
                 throw ClusterManagerIssue(
@@ -97,7 +104,8 @@ public struct EngineColumnPreviewProvider: ColumnPreviewProviding {
                 preview: Self.cell(from: response.preview),
                 usedSampleObject: response.usedSampleObject,
                 evaluatedObject: response.hasEvaluatedObject
-                    ? Self.identity(from: response.evaluatedObject) : nil
+                    ? Self.identity(from: response.evaluatedObject) : nil,
+                validationIssue: validationIssue
             )
         } catch {
             throw EngineClusterContextProvider.issue(

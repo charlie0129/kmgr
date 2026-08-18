@@ -93,6 +93,55 @@ func TestCompileRejectsStaticTypeMismatchAndInvalidExpression(t *testing.T) {
 	}
 }
 
+func TestCompilePreviewRetainsRawValueForDeclaredTypeMismatch(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	program, err := compiler.CompilePreview(Definition{
+		ID: "metadata", Expression: "object.metadata", ResultType: ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, preview, err := program.EvaluatePreviewContext(context.Background(), Activation{
+		Object: map[string]any{
+			"metadata": map[string]any{"name": "sample"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "result type is map") {
+		t.Fatalf("preview mismatch error = %v", err)
+	}
+	if !preview.Available || preview.Type != "map" ||
+		!strings.Contains(preview.Display, `"name": "sample"`) {
+		t.Fatalf("raw preview = %#v", preview)
+	}
+
+	if _, err := compiler.Compile(Definition{
+		ID: "literal", Expression: "1", ResultType: ResultString,
+	}); err == nil {
+		t.Fatal("strict compiler accepted the static mismatch")
+	}
+}
+
+func TestPreviewValueIsBoundedAtDisplayLimit(t *testing.T) {
+	t.Parallel()
+	compiler := newCompiler(t, DefaultCostLimit)
+	program, err := compiler.CompilePreview(Definition{
+		ID: "large", Expression: "object.value", ResultType: ResultInteger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, preview, err := program.EvaluatePreviewContext(context.Background(), Activation{
+		Object: map[string]any{"value": strings.Repeat("x", MaxDisplayBytes+100)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "declared integer") {
+		t.Fatalf("large preview mismatch error = %v", err)
+	}
+	if !preview.Available || !preview.Truncated || len(preview.Display) != MaxDisplayBytes {
+		t.Fatalf("bounded preview = %#v (len %d)", preview, len(preview.Display))
+	}
+}
+
 func TestDeclaredRuntimeTypeIsEnforcedForDynamicObject(t *testing.T) {
 	t.Parallel()
 	compiler := newCompiler(t, DefaultCostLimit)

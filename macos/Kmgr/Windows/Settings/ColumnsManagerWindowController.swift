@@ -975,6 +975,7 @@ final class CELColumnEditorWindowController: NSWindowController,
     private let missingField = NSTextField()
     private let widthField = NSTextField()
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private let examplesLabel = NSTextField(wrappingLabelWithString: "")
     private let previewStateLabel = NSTextField(labelWithString: "")
     private let previewValueLabel = NSTextField(wrappingLabelWithString: "")
     private let previewSourceLabel = NSTextField(labelWithString: "")
@@ -997,13 +998,13 @@ final class CELColumnEditorWindowController: NSWindowController,
         self.previewProvider = previewProvider
         self.previewContext = previewContext
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 650),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 760),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         panel.title = definition == nil ? "Add CEL Column" : "Edit CEL Column"
-        panel.minSize = NSSize(width: 520, height: 600)
+        panel.minSize = NSSize(width: 520, height: 700)
         panel.isReleasedWhenClosed = false
         super.init(window: panel)
         panel.delegate = self
@@ -1101,14 +1102,22 @@ final class CELColumnEditorWindowController: NSWindowController,
         })
 
         let help = NSTextField(wrappingLabelWithString:
-            "The Go engine compiles CEL against \(ColumnConfigurationSchema.celEnvironment) before activation. Invalid external edits leave the last valid compiled configuration active."
+            "The Go engine compiles CEL against \(ColumnConfigurationSchema.celEnvironment) before activation. Live preview keeps showing the evaluated value while you fix a temporary type or expression mismatch."
         )
         help.textColor = .secondaryLabelColor
         help.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
 
+        examplesLabel.stringValue = Self.examplesText(for: previewContext)
+        examplesLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        examplesLabel.textColor = .secondaryLabelColor
+        examplesLabel.maximumNumberOfLines = 0
+        examplesLabel.lineBreakMode = .byWordWrapping
+        examplesLabel.setAccessibilityLabel("CEL examples and preview source")
+        examplesLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         previewStateLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
         previewValueLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        previewValueLabel.maximumNumberOfLines = 3
+        previewValueLabel.maximumNumberOfLines = 6
         previewValueLabel.lineBreakMode = .byTruncatingTail
         previewValueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         previewSourceLabel.textColor = .secondaryLabelColor
@@ -1143,13 +1152,14 @@ final class CELColumnEditorWindowController: NSWindowController,
         footer.alignment = .centerY
         footer.spacing = 8
 
-        let stack = NSStackView(views: [form, help, previewStack, footer])
+        let stack = NSStackView(views: [form, help, examplesLabel, previewStack, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
         form.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         help.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        examplesLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         previewStack.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         footer.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
@@ -1193,6 +1203,33 @@ final class CELColumnEditorWindowController: NSWindowController,
         row.distribution = .fillEqually
         row.spacing = 12
         return row
+    }
+
+    private static func examplesText(for context: ColumnPreviewContext) -> String {
+        let resourceName = context.resource.kind.isEmpty
+            ? context.resource.resource : context.resource.kind
+        let source: String
+        if let selected = context.selectedObject {
+            let name = selected.namespace.isEmpty
+                ? selected.name : selected.namespace + "/" + selected.name
+            source = "Preview input: selected object " + name
+                + ". It is fetched again by UID as you type."
+        } else {
+            source = "Preview input: safe sample " + resourceName
+                + " object. Select one row before opening Columns to use its live fields."
+        }
+        return source + """
+        Try these (the preview can show maps/lists while you explore):
+          object.apiVersion            → string
+          object.kind                  → string
+          object.metadata.name       → string (for example, "sample")
+          object.metadata.namespace  → string (for example, "default")
+          object.metadata.labels["app"] → string (when present)
+          object.metadata            → map (inspect all metadata fields; index a key for a string column)
+          context.kind               → string
+          now                        → timestamp
+        Map/list values remain visible in the preview when temporarily invalid; transform them to a scalar before saving.
+        """
     }
 
     private func install(_ definition: ColumnDefinition?) {
@@ -1307,48 +1344,75 @@ final class CELColumnEditorWindowController: NSWindowController,
         commitButton.isEnabled = previewValidation.canCommit
         switch previewValidation.phase {
         case .idle:
+            errorLabel.textColor = .systemRed
+            previewStateLabel.textColor = .labelColor
             errorLabel.stringValue = ""
             previewStateLabel.stringValue = "Preview"
             previewValueLabel.stringValue = ""
+            previewValueLabel.toolTip = nil
             previewSourceLabel.stringValue = ""
             previewEnvironmentLabel.stringValue = ""
         case .localFailure(let message):
+            errorLabel.textColor = .systemRed
+            previewStateLabel.textColor = .secondaryLabelColor
             errorLabel.stringValue = message
             previewStateLabel.stringValue = "Preview unavailable"
             previewValueLabel.stringValue = ""
+            previewValueLabel.toolTip = nil
             previewSourceLabel.stringValue = ""
             previewEnvironmentLabel.stringValue = ""
         case .validating:
+            errorLabel.textColor = .systemRed
+            previewStateLabel.textColor = .secondaryLabelColor
             errorLabel.stringValue = ""
             previewStateLabel.stringValue = "Validating…"
             previewValueLabel.stringValue = ""
+            previewValueLabel.toolTip = nil
             previewSourceLabel.stringValue = previewContext.selectedObject == nil
-                ? "Source: Sample object"
-                : "Source: Selected object (fresh UID-pinned lookup)"
+                ? "Using sample object for this preview"
+                : "Using selected object (fresh UID-pinned lookup)"
             previewEnvironmentLabel.stringValue = ""
         case .failed(let message):
+            errorLabel.textColor = .systemRed
+            previewStateLabel.textColor = .systemRed
             errorLabel.stringValue = message
             previewStateLabel.stringValue = "Preview failed"
             previewValueLabel.stringValue = ""
+            previewValueLabel.toolTip = nil
             previewSourceLabel.stringValue = ""
             previewEnvironmentLabel.stringValue = ""
         case .succeeded(let result):
-            errorLabel.stringValue = ""
-            previewStateLabel.stringValue = "Preview"
+            let issue = result.validationIssue
+            let invalid = issue != nil
+            errorLabel.textColor = invalid ? .systemOrange : .systemRed
+            previewStateLabel.textColor = invalid ? .systemOrange : .labelColor
+            if let issue {
+                let metadata = issue.presentationMetadata
+                let suffix = metadata.isEmpty ? "" : " · \(metadata)"
+                errorLabel.stringValue = "Result is not valid for this column: \(issue.message)\(suffix)"
+            } else {
+                errorLabel.stringValue = ""
+            }
+            previewStateLabel.stringValue = invalid ? "Preview (invalid result)" : "Preview"
             previewValueLabel.stringValue = result.preview.displayText.isEmpty
                 ? "(empty value)" : result.preview.displayText
             previewValueLabel.toolTip = result.preview.tooltip.isEmpty
                 ? result.preview.displayText : result.preview.tooltip
             if result.usedSampleObject {
-                previewSourceLabel.stringValue = "Source: Sample object"
+                previewSourceLabel.stringValue = "Using sample object"
             } else if let identity = result.evaluatedObject {
                 let name = identity.namespace.isEmpty
                     ? identity.name : "\(identity.namespace)/\(identity.name)"
-                previewSourceLabel.stringValue = "Source: Selected \(name)"
+                previewSourceLabel.stringValue = "Using selected object: \(name)"
             } else {
-                previewSourceLabel.stringValue = "Source: Selected object"
+                previewSourceLabel.stringValue = "Using selected object"
             }
-            previewEnvironmentLabel.stringValue = "CEL environment: \(result.celEnvironment)"
+            if invalid, !result.preview.tooltip.isEmpty {
+                previewEnvironmentLabel.stringValue =
+                    "CEL environment: \(result.celEnvironment) · \(result.preview.tooltip)"
+            } else {
+                previewEnvironmentLabel.stringValue = "CEL environment: \(result.celEnvironment)"
+            }
         }
     }
 

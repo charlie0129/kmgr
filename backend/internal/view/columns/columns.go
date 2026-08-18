@@ -77,6 +77,19 @@ type Value struct {
 	Duration *time.Duration
 }
 
+// PreviewValue is the human-readable result of evaluating a CEL expression
+// before it is coerced to the column's declared type. It is intentionally
+// separate from Value: a draft such as `object.metadata` is useful to inspect
+// even when the column is currently declared as a string and therefore cannot
+// be saved. Available is false only when CEL produced an unknown/error result
+// for which there is no value to show.
+type PreviewValue struct {
+	Display   string
+	Type      string
+	Available bool
+	Truncated bool
+}
+
 type RuntimeError struct {
 	ColumnID string
 	Err      error
@@ -154,6 +167,19 @@ func NewCompiler(costLimit uint64) (*Compiler, error) {
 }
 
 func (c *Compiler) Compile(definition Definition) (*Program, error) {
+	return c.compile(definition, true)
+}
+
+// CompilePreview compiles a draft for the editor without requiring the
+// expression's static CEL type to match its declared display type. The
+// resulting Program still applies the normal runtime coercion, so callers can
+// report the validation error while retaining the evaluated value as a
+// preview. Persisted columns must continue to use Compile.
+func (c *Compiler) CompilePreview(definition Definition) (*Program, error) {
+	return c.compile(definition, false)
+}
+
+func (c *Compiler) compile(definition Definition, validateDeclaredType bool) (*Program, error) {
 	if strings.TrimSpace(definition.ID) == "" {
 		return nil, errors.New("column ID must not be empty")
 	}
@@ -174,8 +200,10 @@ func (c *Compiler) Compile(definition Definition) (*Program, error) {
 	if err := issues.Err(); err != nil {
 		return nil, fmt.Errorf("compile column %q: %w", definition.ID, err)
 	}
-	if err := validateStaticType(ast.OutputType(), definition.ResultType); err != nil {
-		return nil, fmt.Errorf("column %q: %w", definition.ID, err)
+	if validateDeclaredType {
+		if err := validateStaticType(ast.OutputType(), definition.ResultType); err != nil {
+			return nil, fmt.Errorf("column %q: %w", definition.ID, err)
+		}
 	}
 	program, err := c.environment.Program(
 		ast,
@@ -246,8 +274,40 @@ func (p *Program) Evaluate(activation Activation) (Value, error) {
 // in RuntimeError so callers retain the column identity and can still use
 // errors.Is to distinguish context cancellation from a cell-local CEL error.
 func (p *Program) EvaluateContext(ctx context.Context, activation Activation) (Value, error) {
-	if err := ctx.Err(); err != nil {
+	result, err := p.evaluateContext(ctx, activation)
+	if err != nil {
+		return Value{}, err
+	}
+	value, err := p.coerce(result)
+	if err != nil {
 		return Value{}, &RuntimeError{ColumnID: p.definition.ID, Err: err}
+	}
+	return value, nil
+}
+
+// EvaluatePreviewContext returns both the normally coerced value and the raw
+// value produced by CEL. A coercion error still returns PreviewValue when CEL
+// itself evaluated successfully; this is what allows the editor to show a map
+// or list alongside the "declared string" validation message.
+func (p *Program) EvaluatePreviewContext(
+	ctx context.Context,
+	activation Activation,
+) (Value, PreviewValue, error) {
+	result, err := p.evaluateContext(ctx, activation)
+	if err != nil {
+		return Value{}, PreviewValue{}, err
+	}
+	raw := previewValue(result)
+	value, err := p.coerce(result)
+	if err != nil {
+		return Value{}, raw, &RuntimeError{ColumnID: p.definition.ID, Err: err}
+	}
+	return value, raw, nil
+}
+
+func (p *Program) evaluateContext(ctx context.Context, activation Activation) (ref.Val, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, &RuntimeError{ColumnID: p.definition.ID, Err: err}
 	}
 	if activation.Object == nil {
 		activation.Object = map[string]any{}
@@ -265,13 +325,38 @@ func (p *Program) EvaluateContext(ctx context.Context, activation Activation) (V
 		"now":     activation.Now,
 	})
 	if err != nil {
-		return Value{}, &RuntimeError{ColumnID: p.definition.ID, Err: err}
+		return nil, &RuntimeError{ColumnID: p.definition.ID, Err: err}
 	}
-	value, err := p.coerce(result)
-	if err != nil {
-		return Value{}, &RuntimeError{ColumnID: p.definition.ID, Err: err}
+	return result, nil
+}
+
+func previewValue(result ref.Val) PreviewValue {
+	if result == nil || types.IsUnknownOrError(result) {
+		return PreviewValue{}
 	}
-	return value, nil
+	typeName := ""
+	if result.Type() != nil {
+		typeName = result.Type().TypeName()
+	}
+	display := types.Format(result)
+	if !utf8.ValidString(display) {
+		return PreviewValue{}
+	}
+	truncated := false
+	if len(display) > MaxDisplayBytes {
+		// Keep the preview bounded even when an expression returns a complete
+		// Kubernetes object or a very large list. Trim only at a valid UTF-8
+		// boundary and make truncation explicit to the editor.
+		limit := MaxDisplayBytes - len("…")
+		for limit > 0 && !utf8.ValidString(display[:limit]) {
+			limit--
+		}
+		display = display[:limit] + "…"
+		truncated = true
+	}
+	return PreviewValue{
+		Display: display, Type: typeName, Available: true, Truncated: truncated,
+	}
 }
 
 func (p *Program) coerce(result ref.Val) (Value, error) {
