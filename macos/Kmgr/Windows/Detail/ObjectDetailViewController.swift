@@ -58,8 +58,16 @@ enum ObjectDetailSummaryPresentation {
     static let maximumVisibleKeyCharacters = 120
     static let maximumVisibleValueCharacters = 180
 
-    static func sections(for detail: ObjectDetail) -> [ObjectDetailSummarySection] {
-        let fields = detail.summaryFields.map(summaryRow)
+    static func sections(
+        for detail: ObjectDetail,
+        conditionTimeZone: TimeZone = .current
+    ) -> [ObjectDetailSummarySection] {
+        let conditionTimestamps = detail.summaryFields.contains {
+            $0.sectionID == "conditions"
+        } ? ConditionTimestampFormatting(timeZone: conditionTimeZone) : nil
+        let fields = detail.summaryFields.map {
+            summaryRow($0, conditionTimestamps: conditionTimestamps)
+        }
             + metadataRows(sectionID: "labels", values: detail.labels)
             + metadataRows(sectionID: "annotations", values: detail.annotations)
         var sectionOrder: [String] = []
@@ -85,9 +93,15 @@ enum ObjectDetailSummaryPresentation {
         }.joined(separator: "\n")
     }
 
-    private static func summaryRow(_ field: ObjectSummaryField) -> ObjectDetailSummaryRow {
+    private static func summaryRow(
+        _ field: ObjectSummaryField,
+        conditionTimestamps: ConditionTimestampFormatting?
+    ) -> ObjectDetailSummaryRow {
         let label = normalizedText(field.label)
-        let value = normalizedText(field.displayText)
+        let normalizedValue = normalizedText(field.displayText)
+        let value = field.sectionID == "conditions"
+            ? conditionTimestamps?.localized(normalizedValue) ?? normalizedValue
+            : normalizedValue
         let shortened = value.count > maximumVisibleValueCharacters
         return ObjectDetailSummaryRow(
             sectionID: field.sectionID,
@@ -170,6 +184,46 @@ enum ObjectDetailSummaryPresentation {
     private static func looksLikeJSON(_ value: String) -> Bool {
         (value.hasPrefix("{") && value.hasSuffix("}"))
             || (value.hasPrefix("[") && value.hasSuffix("]"))
+    }
+
+    static func localizedConditionText(_ value: String, timeZone: TimeZone) -> String {
+        ConditionTimestampFormatting(timeZone: timeZone).localized(value)
+    }
+
+    private struct ConditionTimestampFormatting {
+        private let wholeSeconds: ISO8601DateFormatter
+        private let fractionalSeconds: ISO8601DateFormatter
+        private let local: DateFormatter
+
+        init(timeZone: TimeZone) {
+            wholeSeconds = ISO8601DateFormatter()
+            wholeSeconds.formatOptions = [.withInternetDateTime]
+            fractionalSeconds = ISO8601DateFormatter()
+            fractionalSeconds.formatOptions = [
+                .withInternetDateTime, .withFractionalSeconds,
+            ]
+            local = DateFormatter()
+            local.locale = Locale(identifier: "en_US_POSIX")
+            local.calendar = Calendar(identifier: .gregorian)
+            local.timeZone = timeZone
+            local.dateFormat = "yyyy-MM-dd HH:mm:ss XXX"
+        }
+
+        func localized(_ value: String) -> String {
+            let marker: Range<String.Index>
+            if value.hasPrefix("since ") {
+                marker = value.startIndex..<value.index(value.startIndex, offsetBy: 6)
+            } else if let range = value.range(of: " · since ", options: .backwards) {
+                marker = range
+            } else {
+                return value
+            }
+            let timestamp = String(value[marker.upperBound...])
+            guard let date = wholeSeconds.date(from: timestamp)
+                ?? fractionalSeconds.date(from: timestamp)
+            else { return value }
+            return String(value[..<marker.upperBound]) + local.string(from: date)
+        }
     }
 
     private static func copyHint(forCharacterCount count: Int) -> String {

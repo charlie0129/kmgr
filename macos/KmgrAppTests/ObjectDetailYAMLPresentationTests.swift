@@ -755,6 +755,11 @@ struct ObjectDetailYAMLPresentationTests {
             uid: ResourceUID("uid")
         )
         let longJSON = "{\"payload\":\"\(String(repeating: "x", count: 2_000))\"}"
+        let serverCondition = "True · NewReplicaSetAvailable · since 2026-08-17T10:49:45Z"
+        let localCondition = ObjectDetailSummaryPresentation.localizedConditionText(
+            serverCondition,
+            timeZone: .current
+        )
         let detail = ObjectDetail(
             identity: identity,
             resourceVersion: "rv-1",
@@ -769,7 +774,7 @@ struct ObjectDetailYAMLPresentationTests {
                     sectionID: "conditions",
                     fieldID: "condition:0",
                     label: "Progressing",
-                    displayText: "True · NewReplicaSetAvailable"
+                    displayText: serverCondition
                 ),
             ],
             labels: ["tier": "frontend", "app": "api"],
@@ -808,7 +813,7 @@ struct ObjectDetailYAMLPresentationTests {
         ])
         #expect(sections.flatMap(\.rows).map { "\($0.label)\t\($0.displayText)" } == [
             "Available\tTrue",
-            "Progressing\tTrue · NewReplicaSetAvailable",
+            "Progressing\t\(localCondition)",
             "app\tapi",
             "tier\tfrontend",
             "example.test/note\tfirst second",
@@ -829,7 +834,7 @@ struct ObjectDetailYAMLPresentationTests {
             ($0 as? NSTextField)?.stringValue == "Progressing"
         })
         #expect(descendants(of: conditionValue).contains {
-            ($0 as? NSTextField)?.stringValue == "True · NewReplicaSetAvailable"
+            ($0 as? NSTextField)?.stringValue == localCondition
         })
 
         let annotationField = try #require(table.view(
@@ -862,6 +867,45 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(NSPasteboard.general.string(forType: .string)
             == "Annotations\texample.test/payload\t\(longJSON)")
         NSPasteboard.general.clearContents()
+    }
+
+    @Test("Summary condition timestamps use local time")
+    func summaryConditionLocalTime() throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let timeZone = try #require(TimeZone(secondsFromGMT: 8 * 60 * 60))
+        let serverValue = "True · message since startup · since 2026-08-17T10:49:45.123Z"
+        let sections = ObjectDetailSummaryPresentation.sections(
+            for: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-1",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "conditions",
+                    fieldID: "condition:0",
+                    label: "Ready",
+                    displayText: serverValue
+                )]
+            ),
+            conditionTimeZone: timeZone
+        )
+        let condition = try #require(sections.first?.rows.first)
+
+        #expect(condition.displayText
+            == "True · message since startup · since 2026-08-17 18:49:45 +08:00")
+        #expect(condition.copyValue == condition.displayText)
+        #expect(ObjectDetailSummaryPresentation.copyText(for: [condition])
+            == "Conditions\tReady\tTrue · message since startup · since 2026-08-17 18:49:45 +08:00")
+        #expect(ObjectDetailSummaryPresentation.localizedConditionText(
+            "True · since not-a-timestamp",
+            timeZone: timeZone
+        ) == "True · since not-a-timestamp")
     }
 
     @Test("Summary omits long JSON and bounds metadata entry counts")
