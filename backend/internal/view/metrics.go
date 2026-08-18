@@ -14,19 +14,12 @@ import (
 )
 
 const (
-	PodCPUColumn                       = "cpu"
-	PodMemoryColumn                    = "memory"
-	PodEphemeralStorageColumn          = "ephemeral-storage"
-	NodeCPUUsageColumn                 = "cpu"
-	NodeMemoryUsageColumn              = "memory"
-	NodeEphemeralStorageUsageColumn    = "ephemeral-storage"
-	NodeCPURequestsColumn              = "cpu-requests"
-	NodeCPULimitsColumn                = "cpu-limits"
-	NodeMemoryRequestsColumn           = "memory-requests"
-	NodeMemoryLimitsColumn             = "memory-limits"
-	NodeEphemeralStorageRequestsColumn = "ephemeral-storage-requests"
-	NodeEphemeralStorageLimitsColumn   = "ephemeral-storage-limits"
-	NodePodCountColumn                 = "pod-count"
+	PodCPUColumn                    = "cpu"
+	PodMemoryColumn                 = "memory"
+	PodEphemeralStorageColumn       = "ephemeral-storage"
+	NodeCPUUsageColumn              = "cpu"
+	NodeMemoryUsageColumn           = "memory"
+	NodeEphemeralStorageUsageColumn = "ephemeral-storage"
 
 	metricResourceColumnPrefix = "resource:"
 
@@ -261,77 +254,6 @@ func metricColumnResource(resource ResourceType, columnID string) (corev1.Resour
 	return "", false
 }
 
-type nodeAllocationField uint8
-
-const (
-	nodeRequested nodeAllocationField = iota
-	nodeLimited
-)
-
-func isNodeResource(resource ResourceType) bool {
-	return resource.Group == "" && resource.Version == "v1" && resource.Resource == "nodes"
-}
-
-func nodeAllocationColumn(
-	resource ResourceType,
-	columnID string,
-) (corev1.ResourceName, nodeAllocationField, bool) {
-	if !isNodeResource(resource) {
-		return "", 0, false
-	}
-	switch columnID {
-	case NodeCPURequestsColumn:
-		return corev1.ResourceCPU, nodeRequested, true
-	case NodeCPULimitsColumn:
-		return corev1.ResourceCPU, nodeLimited, true
-	case NodeMemoryRequestsColumn:
-		return corev1.ResourceMemory, nodeRequested, true
-	case NodeMemoryLimitsColumn:
-		return corev1.ResourceMemory, nodeLimited, true
-	case NodeEphemeralStorageRequestsColumn:
-		return corev1.ResourceEphemeralStorage, nodeRequested, true
-	case NodeEphemeralStorageLimitsColumn:
-		return corev1.ResourceEphemeralStorage, nodeLimited, true
-	}
-	if exact, found := strings.CutPrefix(columnID, metricResourceColumnPrefix); found && exact != "" {
-		return corev1.ResourceName(exact), nodeRequested, true
-	}
-	return "", 0, false
-}
-
-func needsNodeAccounting(projector *Projector) bool {
-	if projector == nil || !isNodeResource(projector.spec.Resource) {
-		return false
-	}
-	for _, displayID := range projector.spec.ColumnIDs {
-		if program := projector.spec.CELPrograms[displayID]; program != nil {
-			if program.UsesMetrics() {
-				return true
-			}
-			continue
-		}
-		columnID := projector.extractorID(displayID)
-		if source := projector.extractorSource(displayID); source != "" && source != "metric" {
-			continue
-		}
-		if columnID == NodePodCountColumn {
-			return true
-		}
-		if _, _, allocation := nodeAllocationColumn(projector.spec.Resource, columnID); allocation {
-			return true
-		}
-		// Node usage cells include summed Pod requests and limits in their
-		// tooltips. Start the shared accounting dependency for these ordinary
-		// columns as well as for allocation-only columns; Runtime attaches it only
-		// after publishing the base Node view, so Metrics API and allocatable data
-		// remain available while the cluster-wide Pod snapshot loads.
-		if _, usage := metricColumnResource(projector.spec.Resource, columnID); usage {
-			return true
-		}
-	}
-	return false
-}
-
 func metricColumnID(resourceName corev1.ResourceName) string {
 	return metricResourceColumnPrefix + string(resourceName)
 }
@@ -354,13 +276,9 @@ func needsMetricProvider(projector *Projector) bool {
 		if source := projector.extractorSource(displayID); source != "" && source != "metric" {
 			continue
 		}
-		if _, _, allocation := nodeAllocationColumn(projector.spec.Resource, columnID); allocation ||
-			columnID == NodePodCountColumn {
-			continue
-		}
 		// Exact huge-page and extended-resource columns are scheduler
-		// allocations. Metrics Server does not supply their utilization, so an
-		// otherwise allocation-only view must not wake that optional provider.
+		// values sourced from the row object. Metrics Server does not supply their
+		// utilization, so an exact-resource-only view must not wake that provider.
 		if _, found := exactResourceColumn(columnID); found {
 			continue
 		}

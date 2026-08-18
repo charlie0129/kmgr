@@ -5,7 +5,6 @@ enum ObjectDetailInitialTab {
     case automatic
     case summary
     case yaml
-    case events
     case relationships
     case metrics
     case data
@@ -13,19 +12,17 @@ enum ObjectDetailInitialTab {
     func segment(supportsDataEditor: Bool, supportsMetrics: Bool) -> Int {
         switch self {
         case .automatic:
-            supportsDataEditor ? 5 : 0
+            supportsDataEditor ? 4 : 0
         case .summary:
             0
         case .yaml:
             1
-        case .events:
-            2
         case .relationships:
-            3
+            2
         case .metrics:
-            supportsMetrics ? 4 : 0
+            supportsMetrics ? 3 : 0
         case .data:
-            supportsDataEditor ? 5 : 0
+            supportsDataEditor ? 4 : 0
         }
     }
 }
@@ -295,7 +292,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let yamlPresentationBuilder:
         @Sendable (Data) -> YAMLManagedFieldsPresentation
     private let segmented = NSSegmentedControl(
-        labels: ["Summary", "YAML", "Events", "Relationships", "Metrics", "Data"],
+        labels: ["Summary", "YAML", "Relationships", "Metrics", "Data"],
         trackingMode: .selectOne,
         target: nil,
         action: nil
@@ -304,8 +301,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let contentContainer = NSView()
     private let summaryTable = CopyableSummaryTableView()
     private let summaryScrollView = NSScrollView()
-    private let eventsTable = NSTableView()
-    private let eventsScrollView = NSScrollView()
     private let relationshipsTable = NSTableView()
     private let relationshipsScrollView = NSScrollView()
     private let relationshipsContainerView = NSView()
@@ -364,7 +359,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var yamlPresentationGeneration: UInt64 = 0
     private var loadTask: Task<Void, Never>?
     private var watchTask: Task<Void, Never>?
-    private var eventsTask: Task<Void, Never>?
     private var relationshipsTask: Task<Void, Never>?
     private var relationshipScanTask: Task<Void, Never>?
     private var activeRelationshipScan: (id: String, generation: UInt64)?
@@ -386,9 +380,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var isInstallingDataEditorState = false
     private var isEditingYAML = false
     private var summaryItems: [ObjectDetailSummaryTableItem] = []
-    private var events: [KubernetesObjectEvent] = []
     private var relationships: [ObjectRelationship] = []
-    private var eventsLoaded = false
     private var relationshipsLoaded = false
     private var childrenPotentiallyIncomplete = true
     private var watchGate = GenerationSequenceGate()
@@ -428,7 +420,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     deinit {
         loadTask?.cancel()
         watchTask?.cancel()
-        eventsTask?.cancel()
         relationshipsTask?.cancel()
         relationshipScanTask?.cancel()
         operationTask?.cancel()
@@ -451,8 +442,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         segmented.selectedSegment = initialSegment
         segmented.target = self
         segmented.action = #selector(tabChanged)
-        if !supportsMetrics { segmented.setEnabled(false, forSegment: 4) }
-        if !supportsDataEditor { segmented.setEnabled(false, forSegment: 5) }
+        if !supportsMetrics { segmented.setEnabled(false, forSegment: 3) }
+        if !supportsDataEditor { segmented.setEnabled(false, forSegment: 4) }
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
 
@@ -474,7 +465,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             contentContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
         configureSummary()
-        configureEvents()
         configureRelationships()
         configureMetrics()
         configureYAML()
@@ -516,7 +506,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     func stop() {
         loadTask?.cancel()
         watchTask?.cancel()
-        eventsTask?.cancel()
         relationshipsTask?.cancel()
         relationshipScanTask?.cancel()
         operationTask?.cancel()
@@ -538,8 +527,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         loadTask = nil
         watchTask?.cancel()
         watchTask = nil
-        eventsTask?.cancel()
-        eventsTask = nil
         relationshipsTask?.cancel()
         relationshipsTask = nil
         relationshipScanTask?.cancel()
@@ -679,21 +666,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         summaryScrollView.hasHorizontalScroller = false
         summaryScrollView.autohidesScrollers = true
         summaryScrollView.identifier = .init("object-detail-summary-scroll")
-    }
-
-    private func configureEvents() {
-        configureTable(
-            eventsTable,
-            columns: [
-                ("type", "Type", 80), ("reason", "Reason", 150),
-                ("message", "Message", 420), ("last", "Last Seen", 150),
-                ("count", "Count", 70),
-            ]
-        )
-        eventsTable.setAccessibilityLabel("Kubernetes object events")
-        eventsScrollView.documentView = eventsTable
-        eventsScrollView.hasVerticalScroller = true
-        eventsScrollView.hasHorizontalScroller = true
     }
 
     private func configureRelationships() {
@@ -1041,7 +1013,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
         startObjectWatch(resourceVersion: detail.resourceVersion)
         if initialTab == .automatic, supportsDataEditor {
-            segmented.selectedSegment = 5
+            segmented.selectedSegment = 4
             tabChanged()
         }
     }
@@ -1130,7 +1102,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         watchTask?.cancel()
         watchTask = nil
         startObjectWatch(resourceVersion: updatedDetail.resourceVersion)
-        eventsLoaded = false
         relationshipsLoaded = false
         tabChanged()
         updateDataEditorControls()
@@ -1242,14 +1213,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         case 1:
             show(yamlContainerView)
         case 2:
-            show(eventsScrollView)
-            loadEventsIfNeeded()
-        case 3:
             show(relationshipsContainerView)
             loadRelationshipsIfNeeded()
-        case 4 where supportsMetrics:
+        case 3 where supportsMetrics:
             show(metricsScrollView)
-        case 5 where supportsDataEditor:
+        case 4 where supportsDataEditor:
             show(dataSplitView)
         default:
             show(summaryScrollView)
@@ -1342,28 +1310,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             button.isEnabled = false
         }
         dataValueTextView.isEditable = false
-    }
-
-    private func loadEventsIfNeeded() {
-        guard !eventsLoaded, eventsTask == nil else { return }
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = "Loading events…"
-        eventsTask = Task { [weak self, provider, identity] in
-            guard let self else { return }
-            defer { eventsTask = nil }
-            do {
-                events = try await provider.getEvents(identity: identity, limit: 200)
-                guard !Task.isCancelled else { return }
-                eventsLoaded = true
-                eventsTable.reloadData()
-                statusLabel.stringValue = events.isEmpty
-                    ? "No recent events" : "\(events.count) recent event\(events.count == 1 ? "" : "s")"
-                statusLabel.textColor = .secondaryLabelColor
-            } catch {
-                guard !Task.isCancelled else { return }
-                show(error: error)
-            }
-        }
     }
 
     private func loadRelationshipsIfNeeded() {
@@ -1747,7 +1693,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     /// active it first ends text entry and retains the in-memory key draft.
     /// A subsequent Escape from the key table may navigate back normally.
     private func leaveDataValueEditorIfActive() -> Bool {
-        guard supportsDataEditor, segmented.selectedSegment == 5,
+        guard supportsDataEditor, segmented.selectedSegment == 4,
             let window = view.window,
             let responderView = window.firstResponder as? NSView,
             responderView === dataValueTextView
@@ -1782,7 +1728,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     func numberOfRows(in tableView: NSTableView) -> Int {
         switch tableView {
         case summaryTable: summaryItems.count
-        case eventsTable: events.count
         case relationshipsTable: relationships.count
         default: dataEditorRows.count
         }
@@ -1820,20 +1765,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 label.isSelectable = true
                 return label
             }
-        }
-        if tableView === eventsTable {
-            guard events.indices.contains(row), let tableColumn else { return nil }
-            let event = events[row]
-            let value: String
-            switch tableColumn.identifier.rawValue {
-            case "type": value = event.type
-            case "reason": value = event.reason
-            case "message": value = event.message
-            case "last": value = event.lastObservedAt.map(Self.dateFormatter.string) ?? "—"
-            case "count": value = event.count.formatted()
-            default: value = ""
-            }
-            return textCell(value, table: tableView, column: tableColumn)
         }
         if tableView === relationshipsTable {
             guard relationships.indices.contains(row), let tableColumn else { return nil }

@@ -185,7 +185,6 @@ func TestRuntimeCloseReleasesWarmStores(t *testing.T) {
 		key:         resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods"},
 		store:       store.New(),
 		subscribers: make(map[*Subscription]struct{}),
-		dependents:  make(map[*Subscription]struct{}),
 		state:       resourceIdle,
 	}
 	entry.store.Upsert(pod("uid-warm", "ns", "warm", "Running", 0, nil, time.Time{}))

@@ -1278,6 +1278,41 @@ struct ClusterWorkspaceToolbarTests {
             .contains("\u{21E7}L") == true)
     }
 
+    @Test("Open Events navigates to UID-filtered Events and preserves Back history")
+    func openEventsNavigatesToFilteredResourceList() async throws {
+        let provider = EventsNavigationWorkspaceResourceProvider()
+        let controller = makeWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { provider.streamRequests.count == 1 && table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+        controller.openResourceEvents(nil)
+
+        try await waitUntil { provider.streamRequests.count == 2 }
+        var requests = provider.streamRequests
+        let events = requests[1]
+        #expect(events.resource.group.isEmpty)
+        #expect(events.resource.version == "v1")
+        #expect(events.resource.resource == "events")
+        #expect(!events.allNamespaces)
+        #expect(events.namespaces == ["default"])
+        #expect(events.filterExpression == "field:involvedObject.uid==pod-api")
+
+        controller.navigateBack(nil)
+        try await waitUntil { provider.streamRequests.count == 3 }
+        requests = provider.streamRequests
+        #expect(requests[2].resource.id == requests[0].resource.id)
+        #expect(requests[2].allNamespaces == requests[0].allNamespaces)
+        #expect(requests[2].namespaces == requests[0].namespaces)
+        #expect(requests[2].filterExpression == requests[0].filterExpression)
+    }
+
     @Test("incompatible resource actions are hidden while valid actions remain")
     func incompatibleMenuActionsAreHidden() async throws {
         let controller = makeWorkspace(provider: ServiceWorkspaceResourceProvider())
@@ -2422,6 +2457,72 @@ private final class FilterValidationWorkspaceResourceProvider: WorkspaceResource
     func closeSession(sessionID: String) async {}
 }
 
+private final class EventsNavigationWorkspaceResourceProvider: WorkspaceResourceProviding,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var storedStreamRequests: [ResourceViewRequest] = []
+
+    var streamRequests: [ResourceViewRequest] {
+        lock.withLock { storedStreamRequests }
+    }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        .init(resources: [
+            DiscoveredResource(
+                group: "", version: "v1", resource: "pods", kind: "Pod",
+                namespaced: true, verbs: ["list", "watch"]
+            ),
+            DiscoveredResource(
+                group: "", version: "v1", resource: "events", kind: "Event",
+                namespaced: true, verbs: ["list", "watch"]
+            ),
+        ])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { ["default"] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        lock.withLock { storedStreamRequests.append(request) }
+        return AsyncThrowingStream { continuation in
+            let rows: [ResourceRow]
+            if request.resource.resource == "pods" {
+                let identity = ResourceIdentity(
+                    clusterSessionID: request.sessionID,
+                    group: "", version: "v1", resource: "pods",
+                    namespace: "default", name: "api", uid: "pod-api"
+                )
+                rows = [ResourceRow(identity: identity, cells: [
+                    Cell(columnID: "name", displayText: "api", typedValue: .string("api")),
+                ])]
+            } else {
+                rows = []
+            }
+            continuation.yield(.snapshot(
+                cursor: StreamCursor(generation: request.generation, sequence: 1),
+                chunk: ResourceSnapshotChunk(
+                    rows: rows, first: true, last: true, index: 0,
+                    estimatedTotalRows: UInt64(rows.count)
+                )
+            ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                status: ResourceViewStatus(
+                    freshness: .watching, rowsVisible: UInt64(rows.count)
+                )
+            ))
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
 private struct NamespaceDrillDownWorkspaceResourceProvider: WorkspaceResourceProviding {
     var namespace: ResourceIdentity
 
@@ -2811,8 +2912,6 @@ private struct NoopToolbarObjectDetailProvider: ObjectDetailProviding {
         -> AsyncThrowingStream<ObjectWatchEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }
-    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
-        -> [KubernetesObjectEvent] { [] }
     func getRelationships(identity: ResourceIdentity, includeChildren: Bool) async throws
         -> ObjectRelationships { .init(values: [], childrenPotentiallyIncomplete: true) }
     func scanRelationships(identity: ResourceIdentity)

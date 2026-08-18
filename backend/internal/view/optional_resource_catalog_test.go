@@ -192,7 +192,7 @@ func optionalResourceRequest(resourceName string) *kmgrv1.DiscoverOptionalResour
 
 func cachedCatalogRuntime(complete bool, objects ...*unstructured.Unstructured) *resourceRuntime {
 	entry := cachedSearchRuntime(objects...)
-	entry.accountingReady = complete
+	entry.snapshotComplete = complete
 	return entry
 }
 

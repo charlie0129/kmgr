@@ -62,57 +62,6 @@ func TestEffectivePodResourcesRegularInitSidecarAndOverhead(t *testing.T) {
 	})
 }
 
-func TestAggregateNodeAllocationFiltersPodsAndKeepsExactKeys(t *testing.T) {
-	nodeA := node("node-a", resourceList(
-		corev1.ResourceCPU, "8", corev1.ResourceMemory, "16Gi", corev1.ResourceEphemeralStorage, "100Gi",
-		"hugepages-2Mi", "128Mi", "hugepages-1Gi", "4Gi", "nvidia.com/gpu", "4", "aliyun.com/ppu", "8",
-	), resourceList(
-		corev1.ResourceCPU, "7500m", corev1.ResourceMemory, "15Gi", corev1.ResourceEphemeralStorage, "90Gi",
-		"hugepages-2Mi", "96Mi", "hugepages-1Gi", "3Gi", "nvidia.com/gpu", "3", "aliyun.com/ppu", "6",
-	))
-	nodeB := node("node-b", resourceList(corev1.ResourceCPU, "4"), resourceList(corev1.ResourceCPU, "3800m"))
-
-	pods := []*corev1.Pod{
-		boundPod("running", "node-a", corev1.PodRunning, resourceList(
-			corev1.ResourceCPU, "1", corev1.ResourceMemory, "1Gi", corev1.ResourceEphemeralStorage, "2Gi",
-			"hugepages-2Mi", "10Mi", "hugepages-1Gi", "1Gi", "nvidia.com/gpu", "1", "aliyun.com/ppu", "2",
-		), resourceList(
-			corev1.ResourceCPU, "2", corev1.ResourceMemory, "2Gi", corev1.ResourceEphemeralStorage, "4Gi",
-			"hugepages-2Mi", "12Mi", "hugepages-1Gi", "2Gi", "nvidia.com/gpu", "1", "aliyun.com/ppu", "3",
-		)),
-		boundPod("pending", "node-a", corev1.PodPending, resourceList(
-			corev1.ResourceCPU, "500m", corev1.ResourceMemory, "512Mi", corev1.ResourceEphemeralStorage, "1Gi",
-			"hugepages-2Mi", "6Mi", "nvidia.com/gpu", "1",
-		), resourceList(
-			corev1.ResourceCPU, "1", corev1.ResourceMemory, "1Gi", corev1.ResourceEphemeralStorage, "2Gi",
-			"hugepages-2Mi", "8Mi", "nvidia.com/gpu", "1",
-		)),
-		boundPod("succeeded", "node-a", corev1.PodSucceeded, resourceList(corev1.ResourceCPU, "7", "nvidia.com/gpu", "9"), nil),
-		boundPod("failed", "node-a", corev1.PodFailed, resourceList(corev1.ResourceMemory, "9Gi", "aliyun.com/ppu", "9"), nil),
-		boundPod("other", "node-b", corev1.PodRunning, resourceList(corev1.ResourceCPU, "250m"), resourceList(corev1.ResourceCPU, "500m")),
-		boundPod("unknown-node", "missing", corev1.PodRunning, resourceList(corev1.ResourceCPU, "20"), nil),
-		boundPod("unbound", "", corev1.PodPending, resourceList(corev1.ResourceCPU, "20"), nil),
-	}
-
-	actual := AggregateNodes([]*corev1.Node{nodeA, nodeB}, pods, nil)
-	if actual["node-a"].PodCount != 2 || actual["node-b"].PodCount != 1 {
-		t.Fatalf("unexpected relevant pod counts: node-a=%d node-b=%d", actual["node-a"].PodCount, actual["node-b"].PodCount)
-	}
-	assertResources(t, actual["node-a"].Requested, map[corev1.ResourceName]string{
-		corev1.ResourceCPU: "1500m", corev1.ResourceMemory: "1536Mi", corev1.ResourceEphemeralStorage: "3Gi",
-		"hugepages-2Mi": "16Mi", "hugepages-1Gi": "1Gi", "nvidia.com/gpu": "2", "aliyun.com/ppu": "2",
-	})
-	assertResources(t, actual["node-a"].Limited, map[corev1.ResourceName]string{
-		corev1.ResourceCPU: "3", corev1.ResourceMemory: "3Gi", corev1.ResourceEphemeralStorage: "6Gi",
-		"hugepages-2Mi": "20Mi", "hugepages-1Gi": "2Gi", "nvidia.com/gpu": "2", "aliyun.com/ppu": "3",
-	})
-	assertResources(t, actual["node-b"].Requested, map[corev1.ResourceName]string{corev1.ResourceCPU: "250m"})
-
-	// The denominators and physical capacities come from distinct Node fields.
-	assertQuantity(t, actual["node-a"].Allocatable, "nvidia.com/gpu", "3")
-	assertQuantity(t, actual["node-a"].Capacity, "nvidia.com/gpu", "4")
-}
-
 func TestDiscoverHugePagesPreservesPageSizeIdentity(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -141,15 +90,6 @@ func TestDiscoverHugePagesPreservesPageSizeIdentity(t *testing.T) {
 				t.Fatalf("huge-page keys = %q; want %q", got, test.want)
 			}
 		})
-	}
-
-	pod := boundPod("pod", "node", corev1.PodRunning,
-		resourceList("hugepages-2Mi", "10Mi", "hugepages-1Gi", "2Gi"), nil)
-	accounting := AccountNode(node("node", nil, nil), []*corev1.Pod{pod}, nil)
-	assertQuantity(t, accounting.Requested, "hugepages-2Mi", "10Mi")
-	assertQuantity(t, accounting.Requested, "hugepages-1Gi", "2Gi")
-	if len(accounting.Requested) != 2 {
-		t.Fatalf("resource keys were unexpectedly merged: %#v", accounting.Requested)
 	}
 }
 
@@ -184,19 +124,6 @@ func TestDiscoverAcceleratorsExactKeysAndConfiguredResources(t *testing.T) {
 		AcceleratorDisplayName("custom.example/fpga-card", config) != "FPGA" ||
 		AcceleratorDisplayName("vendor.example/fpga", config) != "vendor.example/fpga" {
 		t.Fatal("unexpected accelerator display-name mapping")
-	}
-
-	accounting := AccountNode(node("node", nil, nil), []*corev1.Pod{
-		boundPod("pod-a", "node", corev1.PodRunning,
-			resourceList("nvidia.com/gpu", "1", "another.example/gpu", "2", "aliyun.com/ppu", "3"), nil),
-		boundPod("pod-b", "node", corev1.PodRunning,
-			resourceList("nvidia.com/gpu", "4", "another.example/gpu", "5", "aliyun.com/ppu", "6"), nil),
-	}, nil)
-	assertQuantity(t, accounting.Requested, "nvidia.com/gpu", "5")
-	assertQuantity(t, accounting.Requested, "another.example/gpu", "7")
-	assertQuantity(t, accounting.Requested, "aliyun.com/ppu", "9")
-	if len(accounting.Requested) != 3 {
-		t.Fatalf("incomparable accelerators were merged: %#v", accounting.Requested)
 	}
 }
 
@@ -253,36 +180,6 @@ func TestMeasurementStatesDistinguishUnavailableZeroForbiddenAndStale(t *testing
 	absent := measurements.For("nvidia.com/gpu")
 	if absent.State != MeasurementUnavailable || absent.HasValue() {
 		t.Fatalf("absent accelerator utilization = %#v; want unavailable", absent)
-	}
-}
-
-func TestIsRelevantBoundPod(t *testing.T) {
-	deleting := metav1.NewTime(time.Now())
-	tests := []struct {
-		name string
-		pod  *corev1.Pod
-		want bool
-	}{
-		{name: "nil"},
-		{name: "unbound", pod: boundPod("pod", "", corev1.PodPending, nil, nil)},
-		{name: "other node", pod: boundPod("pod", "node-b", corev1.PodRunning, nil, nil)},
-		{name: "pending bound", pod: boundPod("pod", "node-a", corev1.PodPending, nil, nil), want: true},
-		{name: "running", pod: boundPod("pod", "node-a", corev1.PodRunning, nil, nil), want: true},
-		{name: "unknown", pod: boundPod("pod", "node-a", corev1.PodUnknown, nil, nil), want: true},
-		{name: "succeeded", pod: boundPod("pod", "node-a", corev1.PodSucceeded, nil, nil)},
-		{name: "failed", pod: boundPod("pod", "node-a", corev1.PodFailed, nil, nil)},
-		{name: "terminating nonterminal", pod: func() *corev1.Pod {
-			pod := boundPod("pod", "node-a", corev1.PodRunning, nil, nil)
-			pod.DeletionTimestamp = &deleting
-			return pod
-		}(), want: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := IsRelevantBoundPod(test.pod, "node-a"); got != test.want {
-				t.Fatalf("IsRelevantBoundPod() = %t; want %t", got, test.want)
-			}
-		})
 	}
 }
 

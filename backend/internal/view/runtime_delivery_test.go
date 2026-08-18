@@ -323,8 +323,8 @@ func TestRuntimeCompatibleReplacementReconcilesPriorInFlightIdentity(t *testing.
 	key := resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"}
 	entry := &resourceRuntime{
 		key: key, store: store.New(), client: client, state: resourceRunning,
-		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
-		accountingReady: true,
+		subscribers:      make(map[*Subscription]struct{}),
+		snapshotComplete: true,
 	}
 	entry.store.SetResourceVersion("rv-1")
 	runtime.mu.Lock()
@@ -384,7 +384,7 @@ func TestRuntimeOpenCatchupUsesSnapshotCompletionThatWonPublicationRace(t *testi
 	key := resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"}
 	entry := &resourceRuntime{
 		key: key, store: store.New(), client: client, state: resourceRunning, runNumber: 7,
-		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+		subscribers: make(map[*Subscription]struct{}),
 	}
 	runtime.mu.Lock()
 	runtime.resources[key] = entry

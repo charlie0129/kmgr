@@ -13,7 +13,7 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(ObjectDetailInitialTab.automatic.segment(
             supportsDataEditor: true,
             supportsMetrics: false
-        ) == 5)
+        ) == 4)
         #expect(ObjectDetailInitialTab.automatic.segment(
             supportsDataEditor: false,
             supportsMetrics: false
@@ -24,8 +24,8 @@ struct ObjectDetailYAMLPresentationTests {
         ) == 0)
     }
 
-    @Test("Events and Relationships tables expose distinct accessibility labels")
-    func eventAndRelationshipTableAccessibilityLabels() throws {
+    @Test("Relationships table exposes its accessibility label")
+    func relationshipTableAccessibilityLabel() throws {
         let identity = ResourceIdentity(
             clusterSessionID: "session",
             group: "apps",
@@ -35,19 +35,6 @@ struct ObjectDetailYAMLPresentationTests {
             name: "api",
             uid: ResourceUID("uid")
         )
-        let eventsController = ObjectDetailViewController(
-            identity: identity,
-            provider: NoopObjectDetailProvider(),
-            initialTab: .events
-        )
-        eventsController.loadView()
-        let eventsTable = try #require(descendants(of: eventsController.view)
-            .compactMap { $0 as? NSTableView }
-            .first)
-
-        #expect(eventsTable.accessibilityRole() == .table)
-        #expect(eventsTable.accessibilityLabel() == "Kubernetes object events")
-
         let relationshipsController = ObjectDetailViewController(
             identity: identity,
             provider: NoopObjectDetailProvider(),
@@ -642,7 +629,7 @@ struct ObjectDetailYAMLPresentationTests {
         controller.view.layoutSubtreeIfNeeded()
         #expect(summaryDocument.frame.width <= summaryScroll.contentSize.width + 1)
 
-        segmented.selectedSegment = 5
+        segmented.selectedSegment = 4
         _ = segmented.sendAction(segmented.action, to: segmented.target)
         controller.view.layoutSubtreeIfNeeded()
         let keysTable = try #require(descendants(of: controller.view)
@@ -1289,12 +1276,6 @@ private actor YAMLSaveObjectDetailProvider: ObjectDetailProviding {
         AsyncThrowingStream { $0.finish() }
     }
 
-    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
-        -> [KubernetesObjectEvent]
-    {
-        []
-    }
-
     func getRelationships(
         identity: ResourceIdentity,
         includeChildren: Bool
@@ -1473,12 +1454,6 @@ private struct NoopObjectDetailProvider: ObjectDetailProviding {
         AsyncThrowingStream { $0.finish() }
     }
 
-    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
-        -> [KubernetesObjectEvent]
-    {
-        []
-    }
-
     func getRelationships(
         identity: ResourceIdentity,
         includeChildren: Bool
@@ -1541,12 +1516,6 @@ private struct LoadedObjectDetailProvider: ObjectDetailProviding {
         resourceVersion: String
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
         objectWatch
-    }
-
-    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
-        -> [KubernetesObjectEvent]
-    {
-        []
     }
 
     func getRelationships(

@@ -138,13 +138,6 @@ func TestProjectionCacheKeyIgnoresMandatoryRefreshInputs(t *testing.T) {
 				State:   metrics.MeasurementCurrent, UpdatedAt: time.Unix(100, 0), Err: errors.New("refresh failed"),
 			}
 		}},
-		{name: "node accounting", mutate: func(spec *ProjectionSpec) {
-			spec.NodeAccounting = NodeAccountingSnapshot{
-				Active: true, Ready: true, Err: errors.New("refresh failed"),
-				Nodes:      map[string]metrics.NodeAccounting{"node-a": {Name: "node-a", PodCount: 3}},
-				Discovered: metrics.DiscoveredResources{EphemeralStorage: true},
-			}
-		}},
 		{name: "now", mutate: func(spec *ProjectionSpec) { spec.Now = time.Unix(200, 0) }},
 	}
 

@@ -9,6 +9,10 @@ public enum ColumnSource: String, Codable, CaseIterable, Hashable, Sendable {
     case cel
     case builtin
     case metric
+    /// A column supplied by Kubernetes' `metav1.Table` representation.
+    /// Server columns are evaluated by the apiserver and arrive with every
+    /// row; they therefore have neither a CEL expression nor a local value.
+    case server
 }
 
 public enum ColumnResultType: String, Codable, CaseIterable, Hashable, Sendable {
@@ -196,6 +200,13 @@ public struct ColumnsConfigurationDocument: Codable, Hashable, Sendable {
                     }
                     if column.expression?.isEmpty == false {
                         issues.append(.init(path: "\(path).expression", message: "Built-in and metric columns cannot declare CEL."))
+                    }
+                case .server:
+                    if column.value?.isEmpty == false || column.expression?.isEmpty == false {
+                        issues.append(.init(
+                            path: path,
+                            message: "Server Table columns cannot declare a value or CEL expression."
+                        ))
                     }
                 }
             }

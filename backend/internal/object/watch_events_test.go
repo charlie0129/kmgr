@@ -3,19 +3,15 @@ package object
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -347,119 +343,6 @@ func TestWatchObjectRejectsSameNameRecreationInStream(t *testing.T) {
 		events[1].GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT ||
 		events[1].GetError().GetContextName() != "production" {
 		t.Fatalf("recreation event = %#v", events)
-	}
-}
-
-func TestGetEventsFiltersMapsSortsAndClampsLimit(t *testing.T) {
-	t.Parallel()
-	pod := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "pod-uid")
-	early := eventObject("early", "event-early", "pod-uid", time.Unix(10, 0), time.Unix(20, 0))
-	late := eventObject("late", "event-late", "pod-uid", time.Unix(11, 0), time.Unix(30, 0))
-	other := eventObject("other", "event-other", "other-uid", time.Unix(12, 0), time.Unix(40, 0))
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	client := dynamicfake.NewSimpleDynamicClient(scheme, pod, early, late, other)
-	var listRestrictions clienttesting.ListRestrictions
-	client.PrependReactor("list", "events", func(action clienttesting.Action) (bool, runtime.Object, error) {
-		listRestrictions = action.(clienttesting.ListAction).GetListRestrictions()
-		// Let the fake tracker return all values to verify the defensive UID filter.
-		return false, nil, nil
-	})
-	reader, _ := NewReader(fakeResolver{client: client})
-	service, _ := NewGRPCService(reader)
-	request := &kmgrv1.GetEventsRequest{
-		Context: requestContext(), Identity: protoIdentity("pods", "pod", "pod-uid"), Limit: MaximumEventLimit + 1,
-	}
-	response, err := service.GetEvents(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.GetError() != nil || len(response.GetEvents()) != 2 {
-		t.Fatalf("events response = %#v", response)
-	}
-	if listRestrictions.Fields.String() != "involvedObject.uid=pod-uid" {
-		t.Fatalf("event selector = %q", listRestrictions.Fields.String())
-	}
-	if response.GetEvents()[0].GetIdentity().GetName() != "late" ||
-		response.GetEvents()[0].GetLastObservedUnixMs() != 30_000 ||
-		response.GetEvents()[0].GetCount() != 7 ||
-		response.GetEvents()[0].GetReportingController() != "example/controller" ||
-		response.GetEvents()[1].GetIdentity().GetName() != "early" {
-		t.Fatalf("mapped events = %#v", response.GetEvents())
-	}
-	listActions := 0
-	for _, action := range client.Actions() {
-		if action.Matches("list", "events") {
-			listActions++
-			restrictions := action.(clienttesting.ListAction).GetListRestrictions()
-			if restrictions.Fields.String() != "involvedObject.uid=pod-uid" {
-				t.Errorf("recorded selector = %q", restrictions.Fields.String())
-			}
-		}
-	}
-	if listActions != 1 {
-		t.Fatalf("list event actions = %d", listActions)
-	}
-}
-
-func TestKubernetesEventBoundsUntrustedDisplayTextByUTF8Bytes(t *testing.T) {
-	t.Parallel()
-	value := corev1.Event{
-		Reason:  string([]byte{0xff}) + strings.Repeat("界\n", maximumEventReasonBytes),
-		Message: string([]byte{0xfe}) + strings.Repeat("failure detail \x00🙂\n", maximumEventMessageBytes),
-	}
-	mapped := kubernetesEvent("session", value)
-	for field, test := range map[string]struct {
-		value   string
-		maximum int
-	}{
-		"reason":  {mapped.Reason, maximumEventReasonBytes},
-		"message": {mapped.Message, maximumEventMessageBytes},
-	} {
-		if !utf8.ValidString(test.value) {
-			t.Errorf("%s is not valid UTF-8: %q", field, test.value)
-		}
-		if len(test.value) > test.maximum {
-			t.Errorf("%s uses %d bytes, maximum %d", field, len(test.value), test.maximum)
-		}
-		if !strings.HasSuffix(test.value, "…") {
-			t.Errorf("%s was not visibly truncated: %q", field, test.value)
-		}
-		if strings.ContainsAny(test.value, "\n\x00") {
-			t.Errorf("%s retained control text: %q", field, test.value)
-		}
-	}
-}
-
-func TestGetEventsRejectsRecreatedTargetBeforeListing(t *testing.T) {
-	t.Parallel()
-	pod := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "new-uid")
-	reader := testReader(t, pod)
-	service, _ := NewGRPCService(reader)
-	response, err := service.GetEvents(context.Background(), &kmgrv1.GetEventsRequest{
-		Context: requestContext(), Identity: protoIdentity("pods", "pod", "old-uid"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.GetError().GetReason() != "ObjectRecreated" {
-		t.Fatalf("structured error = %#v", response.GetError())
-	}
-}
-
-func eventObject(name, uid, involvedUID string, first, last time.Time) *corev1.Event {
-	return &corev1.Event{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Event"},
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ns", Name: name, UID: types.UID(uid), ResourceVersion: "rv-" + name,
-		},
-		InvolvedObject: corev1.ObjectReference{UID: types.UID(involvedUID)},
-		Type:           "Warning", Reason: "Example", Message: "safe message",
-		FirstTimestamp: metav1.NewTime(first), LastTimestamp: metav1.NewTime(last),
-		Count: 3, Series: &corev1.EventSeries{Count: 7, LastObservedTime: metav1.NewMicroTime(last)},
-		ReportingController: "example/controller",
 	}
 }
 

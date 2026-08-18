@@ -91,38 +91,16 @@ type resourceKey struct {
 	resource string
 }
 
-var builtinExtractors = map[string]columns.ResultType{
-	"namespace":       columns.ResultString,
-	"name":            columns.ResultString,
-	"kind":            columns.ResultString,
-	"status":          columns.ResultString,
-	"roles":           columns.ResultString,
-	"taints":          columns.ResultInteger,
-	"ip":              columns.ResultString,
-	"replicas":        columns.ResultString,
-	"node":            columns.ResultString,
-	"ready":           columns.ResultString,
-	"restarts":        columns.ResultInteger,
-	"age":             columns.ResultDuration,
-	"created":         columns.ResultTimestamp,
-	"resourceVersion": columns.ResultString,
-}
+var builtinExtractors = func() map[string]columns.ResultType {
+	result := make(map[string]columns.ResultType, len(columns.NativeExtractorDefinitions))
+	for value, definition := range columns.NativeExtractorDefinitions {
+		result[value] = definition.Type
+	}
+	return result
+}()
 
 var metricExtractors = map[string]struct{}{
 	"cpu": {}, "memory": {}, "ephemeral-storage": {},
-	"cpu-requests": {}, "cpu-limits": {},
-	"memory-requests": {}, "memory-limits": {},
-	"ephemeral-storage-requests": {},
-	"ephemeral-storage-limits":   {},
-	"pod-count":                  {},
-}
-
-var nodeOnlyMetricExtractors = map[string]struct{}{
-	"cpu-requests": {}, "cpu-limits": {},
-	"memory-requests": {}, "memory-limits": {},
-	"ephemeral-storage-requests": {},
-	"ephemeral-storage-limits":   {},
-	"pod-count":                  {},
 }
 
 func validateExtractor(key resourceKey, definition ColumnConfiguration) (string, error) {
@@ -190,26 +168,7 @@ func builtinValue(value string) (string, bool) {
 }
 
 func builtinSupportedForResource(key resourceKey, value string) bool {
-	switch value {
-	case "node", "ready", "restarts":
-		return isCoreResource(key, "pods")
-	case "roles", "taints", "ip":
-		return isCoreResource(key, "nodes")
-	case "replicas":
-		return isReplicaWorkload(key)
-	default:
-		return true
-	}
-}
-
-func isReplicaWorkload(key resourceKey) bool {
-	if key.group == "apps" && key.version == "v1" {
-		switch key.resource {
-		case "deployments", "statefulsets", "daemonsets", "replicasets":
-			return true
-		}
-	}
-	return isCoreResource(key, "replicationcontrollers")
+	return columns.NativeExtractorSupports(value, key.group, key.version, key.resource)
 }
 
 func metricValue(value string) (string, bool) {
@@ -241,9 +200,6 @@ func validateMetricResource(key resourceKey, value string) error {
 		return fmt.Errorf("metric value %q is only supported for core/v1 Pods and Nodes", value)
 	}
 	if key.resource == "pods" {
-		if _, nodeOnly := nodeOnlyMetricExtractors[value]; nodeOnly {
-			return fmt.Errorf("metric value %q is not supported for Pods", value)
-		}
 		switch value {
 		case "cpu", "memory", "ephemeral-storage":
 			return nil
@@ -290,7 +246,6 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 			document.CELEnvironment, columns.EnvironmentVersion,
 		)
 	}
-	normalizeLegacyNativeColumnTypes(&document)
 	if err := validateAcceleratorConfiguration(document.Accelerators); err != nil {
 		return nil, err
 	}
@@ -363,6 +318,17 @@ func ParseColumns(data []byte, compiler *columns.Compiler) (*CompiledColumns, er
 				entry.extractors[definition.ID] = columns.Extractor{
 					Source: definition.Source, Value: extractor,
 				}
+			case "server":
+				if strings.TrimSpace(definition.Expression) != "" || strings.TrimSpace(definition.Value) != "" {
+					return nil, fmt.Errorf("column %q source %q does not allow expression or value", definition.ID, definition.Source)
+				}
+				switch definition.Type {
+				case columns.ResultString, columns.ResultInteger, columns.ResultNumber,
+					columns.ResultBoolean, columns.ResultQuantity, columns.ResultTimestamp,
+					columns.ResultDuration:
+				default:
+					return nil, fmt.Errorf("column %q has unsupported server result type %q", definition.ID, definition.Type)
+				}
 			case "":
 				return nil, fmt.Errorf("column %q source must not be empty", definition.ID)
 			default:
@@ -401,30 +367,6 @@ func isExtendedResourceName(name string) bool {
 		!strings.Contains(name, corev1.ResourceDefaultNamespacePrefix) &&
 		!strings.HasPrefix(name, corev1.DefaultResourceRequestsPrefix) &&
 		len(k8svalidation.IsQualifiedName(corev1.DefaultResourceRequestsPrefix+name)) == 0
-}
-
-// normalizeLegacyNativeColumnTypes accepts the two incorrect declared types
-// emitted by older native macOS default layouts. The migration is deliberately
-// restricted to the exact built-in IDs and values that Kmgr wrote; unrelated
-// invalid custom definitions must continue to fail validation.
-func normalizeLegacyNativeColumnTypes(document *ColumnsDocument) {
-	if document == nil {
-		return
-	}
-	for viewIndex := range document.Views {
-		for columnIndex := range document.Views[viewIndex].Columns {
-			definition := &document.Views[viewIndex].Columns[columnIndex]
-			if definition.Source != "builtin" || definition.ID != definition.Value {
-				continue
-			}
-			switch {
-			case definition.Value == "ready" && definition.Type == columns.ResultNumber:
-				definition.Type = columns.ResultString
-			case definition.Value == "age" && definition.Type == columns.ResultTimestamp:
-				definition.Type = columns.ResultDuration
-			}
-		}
-	}
 }
 
 func EmptyColumns() *CompiledColumns {

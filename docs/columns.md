@@ -105,15 +105,21 @@ Each column supports:
 | --- | --- | --- |
 | `id` | yes | Stable, case-sensitive table/protocol identity; non-empty and unique within this view. It need not equal a native extractor's `value`. |
 | `title` | yes | Non-empty native table heading. |
-| `source` | yes | Exactly `cel`, `builtin`, or `metric`. |
-| `expression` | for `cel` | CEL source. It is forbidden for `builtin` and `metric`. |
-| `value` | for `builtin`/`metric` | Validated native extractor. It is forbidden for `cel`. |
-| `type` | yes | Declared typed value. CEL supports `string`, `integer`, `number`, `boolean`, `quantity`, `timestamp`, or `duration`; native metric extractors require `resourceUsage`; built-ins require their documented native type. |
+| `source` | yes | Exactly `cel`, `builtin`, `metric`, or `server`. `server` identifies a column supplied by a Kubernetes `metav1.Table` response. |
+| `expression` | for `cel` | CEL source. It is forbidden for `builtin`, `metric`, and `server`. |
+| `value` | for `builtin`/`metric` | Validated native extractor. It is forbidden for `cel` and `server`. |
+| `type` | yes | Declared typed value. CEL and server columns support `string`, `integer`, `number`, `boolean`, `quantity`, `timestamp`, or `duration`; native metric extractors require `resourceUsage`; built-ins require their catalog type. |
 | `alignment` | no | `leading`, `center`, or `trailing`; omission uses leading alignment. |
 | `missing` | no | CEL-only missing/null/empty-optional text; omission or an empty value uses `—`. |
 | `width` | no | Initial width in points; omit for the extractor/default width. If present, it must be finite and non-negative. Per-window width restoration may override it. |
 | `listJoiner` | no | CEL-only separator when a `string` column directly returns a scalar list; omission or an empty value uses `, `. |
 | `enabled` | no | Whether the definition is normally visible. Omission means `true`; a disabled definition remains available to the Columns window. |
+
+`server` definitions are normally discovered rather than handwritten. Kmgr
+persists them when the user changes a server column's visibility, order, or
+width. Their stable `id` must continue to match the ID announced by the current
+Table schema; they have neither `value` nor `expression` and cannot use the
+`resourceUsage` result type.
 
 `accelerators.autoDetectSuffixes` performs an exact, case-sensitive suffix
 test on Kubernetes resource names. Omitting it uses `[/gpu, /ppu, /dcu]`; an
@@ -155,20 +161,25 @@ For Pod and Node views, `metrics` has this stable dynamic shape:
 | `provider` | `string` | Actual-usage provider identity (`metrics.k8s.io/v1beta1`). |
 | `resources` | `map<string, number>` | Actual usage keyed by exact resource name; CPU is nanocores, byte resources are bytes, and generic resources are counts. |
 | `measuredAt` | `timestamp`, optional | Provider sample timestamp. |
-| `accountingAvailable` | `bool` | Scheduler accounting could be calculated for this object/revision. |
-| `requests` | `map<string, number>` | Effective Pod requests or aggregate Node requests, keyed by exact resource name. |
-| `limits` | `map<string, number>` | Effective Pod limits or aggregate Node limits, keyed by exact resource name. |
+| `accountingAvailable` | `bool` | The current Pod or Node object could be decoded for object-local resource accounting. |
+| `requests` | `map<string, number>` | Effective Pod requests keyed by exact resource name. This map is empty for Nodes. |
+| `limits` | `map<string, number>` | Effective Pod limits keyed by exact resource name. This map is empty for Nodes. |
 | `allocatable` | `map<string, number>` | Node allocatable resources; present on Node views. |
 | `capacity` | `map<string, number>` | Node physical capacity; present on Node views. |
-| `podCount` | `integer` | Relevant bound Pod count; present when Node accounting is ready. |
 
-Scheduler-map CPU values are cores, memory/storage/huge-page values are bytes,
-and extended resources are counts. Pod requests and limits use Kubernetes'
+Object-local scheduler-map CPU values are cores,
+memory/storage/huge-page values are bytes, and extended resources are counts.
+Pod requests and limits use Kubernetes'
 effective scheduling formula, including regular containers, restartable init
 containers, non-restartable init containers, Pod-level resources, and Pod
 overhead. Exact keys such as `hugepages-2Mi`, `hugepages-1Gi`,
 `nvidia.com/gpu`, and `aliyun.com/ppu` are independent map entries and are
 never summed together.
+
+Node activation deliberately does not aggregate Pods. It exposes only the
+Node object's `status.allocatable` and `status.capacity` plus optional actual
+usage from Metrics API. Consequently, opening a Node view never starts a Pod
+LIST/WATCH.
 
 CEL optional syntax is enabled. For example:
 
@@ -235,6 +246,29 @@ Evaluation is deterministic and side-effect free. Each evaluation has a runtime 
 
 Sorting uses the typed result retained alongside display text. It never reparses formatted display text.
 
+## Kubernetes server Table columns
+
+For a resource without a curated native layout—most importantly a custom
+resource—Kmgr negotiates the Kubernetes `meta.k8s.io/v1` (or v1beta1)
+`metav1.Table` representation. The request sets `includeObject=Object`, so one
+paginated LIST and its subsequent WATCH provide both:
+
+- the CRD's `additionalPrinterColumns`/server printer values; and
+- each full object required for selection, actions, filtering, CEL, and object
+  details.
+
+This is one stream for the requested GVR, not a companion discovery stream.
+If Table negotiation is unsupported or a response is malformed, Kmgr disables
+Table mode for that client and continues with the ordinary JSON LIST/WATCH for
+the same GVR. It never opens a second resource merely to fill a column.
+
+Kubernetes `Name`, `Namespace`, and `Age` Table columns are deduplicated against
+Kmgr's native identity columns. Every remaining server column gets a stable,
+collision-free `server-…` ID and a typed value based on its OpenAPI type and
+format. Priority `0` columns are visible by default; higher-priority columns
+are installed disabled but remain available in the Columns window. A changed
+server schema is revisioned and applied without reopening the resource stream.
+
 ## Columns window
 
 The native built-in/metric picker is filtered to the current resource GVR and
@@ -272,41 +306,50 @@ keeps the table column ID `gpu` while accounting the exact Kubernetes resource
   type: resourceUsage
 ```
 
-Built-in values include `name`, `namespace`, `kind`, `status`, `replicas`,
-`node`, `ready`, `restarts`, `roles`, `taints`, `ip`, `age`, `created`, and
-`resourceVersion`; the
-documented Pod-qualified forms such as `pod.status` resolve to the same
-optimized extractors. Metric values include `cpu`, `memory`,
-`ephemeral-storage`, Node request/limit and Pod-count variants, and
-`resource:<exact-resource-name>`. The documented qualified forms such as
-`pod.cpu.usageRequestLimit` are also accepted. Native result types are part of
-that contract: `ready` and `replicas` are `string`, `restarts` and `taints` are `integer`,
-`age` is `duration`, `created` is `timestamp`, and metric values are
-`resourceUsage`; other metadata/status built-ins are `string`.
+Built-ins are validated against the exact GVR. Common metadata values are
+`namespace`, `name`, `kind`, `labels`, `age`, `created`, and
+`resourceVersion`. Resource-specific examples include Pod `ready`, `status`,
+`restarts`, `pod-ip`, and `node`; Node `roles`, `taints`, `internal-ip`, and
+`kubelet-version`; workload `desired`, `current`, `ready-count`, `up-to-date`,
+and `available`; and the storage, networking, RBAC, CRD, and Event fields shown
+by the Columns window. The resource-filtered native picker is the authoritative
+catalog.
+
+Metric values are `cpu`, `memory`, `ephemeral-storage`, and
+`resource:<exact-resource-name>` for core/v1 Pods and Nodes. Qualified aliases
+such as `pod.cpu.usageRequestLimit` and `node.cpu.usageAllocatable` resolve to
+those same extractors. There are no Node request, limit, or Pod-count
+extractors because those values would require watching Pods.
+
+Native result types are part of the contract: counts such as `restarts`,
+`taints`, `desired`, and `ready-count` are exact integers; `age` is a duration;
+absolute time fields are timestamps; quantities retain Kubernetes Quantity
+semantics; and metric values are `resourceUsage`.
 Source, value, result type, and resource-kind compatibility are validated when
 the configuration is compiled. CEL columns cannot declare `value`, and native
 columns cannot declare a CEL expression.
 
-The `replicas` built-in is enabled by default for `apps/v1` Deployments,
-StatefulSets, DaemonSets, and ReplicaSets, plus core/v1 ReplicationControllers.
-It renders `available/ready/total`; its tooltip labels all three values and
-also includes the controller's desired replica count when Kubernetes exposes
-one. A mismatch is shown as a warning while the controller converges.
+Curated layouts follow the resource's operational question instead of using a
+generic replica summary. Deployments show Ready, Up-to-date, and Available;
+StatefulSets show Ready and Service; DaemonSets show Desired, Current, Ready,
+Up-to-date, and Available; ReplicaSets and ReplicationControllers show Desired,
+Current, and Ready. Selector, container, and image fields remain available but
+are hidden by default.
 
 The Node-only `roles` column sorts the suffixes of every
 `node-role.kubernetes.io/<role>` label key and joins them with commas. `taints`
 is the number of entries in `spec.taints`. A Node whose
 `spec.unschedulable` is true appends `Unschedulable` to its readiness status,
-for example `Ready,Unschedulable`. The `ip` column shows every unique
-`InternalIP` in Kubernetes' reported address order, so dual-stack Nodes show
-both IPv4 and IPv6; it uses unique `ExternalIP` values only when no internal
-address is reported.
+for example `Ready,Unschedulable`. `internal-ip` and `external-ip` are separate
+columns so an external address never silently substitutes for an internal
+one. OS Image, architecture, kernel version, external IP, and ephemeral
+storage are useful secondary Node fields and are hidden by default.
 
 Pod and Node views use the built-in IDs `cpu`, `memory`, and
 `ephemeral-storage`. Pods render actual usage / effective request / effective
 limit; Nodes render actual usage / allocatable, with physical capacity in the
 tooltip. These cells remain typed `resourceUsage` values even when actual usage
-is unavailable, so scheduler accounting is not confused with measured usage.
+is unavailable. Node request and limit components are intentionally absent.
 When usage pressure reaches the warning or critical threshold, only the actual
 usage component is colored and emphasized; request, limit, and allocatable
 values keep the normal contextual style.

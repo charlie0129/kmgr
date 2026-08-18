@@ -80,11 +80,10 @@ func TestNewFilterRevisionCancelsStaleProjectionAndPublishesOnlyNewestFilter(t *
 		state:       resourceRunning,
 		runNumber:   1,
 		subscribers: make(map[*Subscription]struct{}),
-		dependents:  make(map[*Subscription]struct{}),
 		lastStatus: watcher.Status{
 			Phase: watcher.PhaseWatching, ResourceVersion: "rv-filter",
 		},
-		accountingReady: true,
+		snapshotComplete: true,
 	}
 	entry.store.Upsert(pod("uid-alpha", "ns", "alpha", "Running", 0, nil, time.Time{}))
 	entry.store.Upsert(pod("uid-beta", "ns", "beta", "Running", 0, nil, time.Time{}))

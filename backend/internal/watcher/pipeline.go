@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	rand "math/rand/v2"
+	"reflect"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -71,6 +72,15 @@ type Batch struct {
 	SnapshotComplete bool
 	Bookmark         bool
 	SynchronizedAt   time.Time
+	Table            *TableData
+}
+
+// TableData is presentation metadata extracted from the same response as the
+// full objects in this Batch. Cells are keyed by authoritative object UID.
+type TableData struct {
+	Columns  []metav1.TableColumnDefinition
+	Cells    map[types.UID][]any
+	Disabled bool
 }
 
 // RetryDelay returns the delay before a zero-based retry attempt. Tests can
@@ -107,6 +117,7 @@ type Pipeline struct {
 	retryDelay       RetryDelay
 	onStatus         func(Status)
 	onBatch          func(Batch)
+	tableColumns     []metav1.TableColumnDefinition
 	running          atomic.Bool
 }
 
@@ -292,14 +303,48 @@ func (p *Pipeline) list(ctx context.Context) (listResult, error) {
 	objects := 0
 
 	for {
-		page, err := p.client.List(ctx, options)
-		if err != nil {
-			return listResult{}, err
+		var (
+			pageObjects         []*unstructured.Unstructured
+			pageResourceVersion string
+			continueToken       string
+			tableData           *TableData
+		)
+		if tableClient, ok := p.client.(TableListerWatcher); ok {
+			page, err := tableClient.ListTable(ctx, options)
+			if err != nil {
+				return listResult{}, err
+			}
+			if page == nil {
+				return listResult{}, errors.New("server returned a nil list")
+			}
+			pageObjects = page.Objects
+			pageResourceVersion = page.ResourceVersion
+			continueToken = page.Continue
+			if page.ServerTable {
+				if len(p.tableColumns) != 0 && !reflect.DeepEqual(p.tableColumns, page.Columns) {
+					return listResult{}, errors.New("Table column definitions changed between list pages")
+				}
+				p.tableColumns = append([]metav1.TableColumnDefinition(nil), page.Columns...)
+				tableData = &TableData{Columns: p.tableColumns, Cells: page.Cells}
+			} else {
+				p.tableColumns = nil
+				tableData = &TableData{Disabled: true}
+			}
+		} else {
+			page, err := p.client.List(ctx, options)
+			if err != nil {
+				return listResult{}, err
+			}
+			if page == nil {
+				return listResult{}, errors.New("server returned a nil list")
+			}
+			pageResourceVersion = page.GetResourceVersion()
+			continueToken = page.GetContinue()
+			pageObjects = make([]*unstructured.Unstructured, 0, len(page.Items))
+			for index := range page.Items {
+				pageObjects = append(pageObjects, &page.Items[index])
+			}
 		}
-		if page == nil {
-			return listResult{}, errors.New("server returned a nil list")
-		}
-		pageResourceVersion := page.GetResourceVersion()
 		if pageResourceVersion == "" {
 			return listResult{}, errors.New("list page has no resourceVersion")
 		}
@@ -314,18 +359,17 @@ func (p *Pipeline) list(ctx context.Context) (listResult, error) {
 		}
 
 		// Validate the complete page before publishing any part of it.
-		for i := range page.Items {
-			if page.Items[i].GetUID() == "" {
+		for i, object := range pageObjects {
+			if object == nil || object.GetUID() == "" {
 				return listResult{}, fmt.Errorf("list page item %d has no UID", i)
 			}
 		}
 
 		pages++
-		objects += len(page.Items)
-		upserts := make([]*unstructured.Unstructured, 0, len(page.Items))
+		objects += len(pageObjects)
+		upserts := make([]*unstructured.Unstructured, 0, len(pageObjects))
 		removed := make([]types.UID, 0)
-		for i := range page.Items {
-			object := &page.Items[i]
+		for _, object := range pageObjects {
 			present[object.GetUID()] = struct{}{}
 			change := p.store.Upsert(object)
 			if change.ReplacedUID != "" {
@@ -334,7 +378,6 @@ func (p *Pipeline) list(ctx context.Context) (listResult, error) {
 			upserts = append(upserts, object)
 		}
 
-		continueToken := page.GetContinue()
 		complete := continueToken == ""
 		var synchronizedAt time.Time
 		if complete {
@@ -351,6 +394,7 @@ func (p *Pipeline) list(ctx context.Context) (listResult, error) {
 			ObjectsListed:    objects,
 			SnapshotComplete: complete,
 			SynchronizedAt:   synchronizedAt,
+			Table:            tableData,
 		})
 		if complete {
 			return listResult{
@@ -390,7 +434,13 @@ func (p *Pipeline) watch(ctx context.Context, resourceVersion string, watching S
 	}
 	options.TimeoutSeconds = &timeoutSeconds
 
-	stream, err := p.client.Watch(ctx, options)
+	var stream watch.Interface
+	var err error
+	if tableClient, ok := p.client.(TableListerWatcher); ok {
+		stream, err = tableClient.WatchTable(ctx, options)
+	} else {
+		stream, err = p.client.Watch(ctx, options)
+	}
 	if err != nil {
 		return watchResult{err: err, expired: isExpired(err)}
 	}
@@ -418,6 +468,7 @@ func (p *Pipeline) watch(ctx context.Context, resourceVersion string, watching S
 			}
 			if err := p.applyWatchEvent(event, &result); err != nil {
 				result.err = err
+				result.expired = errors.Is(err, errTableSchemaChanged)
 				return result
 			}
 		}
@@ -425,6 +476,9 @@ func (p *Pipeline) watch(ctx context.Context, resourceVersion string, watching S
 }
 
 func (p *Pipeline) applyWatchEvent(event watch.Event, result *watchResult) error {
+	if table, ok := event.Object.(*metav1.Table); ok {
+		return p.applyTableWatchEvent(event.Type, table, result)
+	}
 	accessor, err := meta.Accessor(event.Object)
 	if err != nil {
 		return fmt.Errorf("read %s event metadata: %w", event.Type, err)
@@ -481,6 +535,99 @@ func (p *Pipeline) applyWatchEvent(event watch.Event, result *watchResult) error
 	result.progressed = true
 	result.lastSynchronized = synchronizedAt
 	return nil
+}
+
+var errTableSchemaChanged = errors.New("Table column definitions changed")
+
+func (p *Pipeline) applyTableWatchEvent(
+	eventType watch.EventType,
+	table *metav1.Table,
+	result *watchResult,
+) error {
+	if table == nil {
+		return p.disableMalformedTable("watch event contains a nil Table")
+	}
+	if len(table.ColumnDefinitions) != 0 {
+		if len(p.tableColumns) != 0 && !reflect.DeepEqual(p.tableColumns, table.ColumnDefinitions) {
+			return errTableSchemaChanged
+		}
+		p.tableColumns = append([]metav1.TableColumnDefinition(nil), table.ColumnDefinitions...)
+	}
+	resourceVersion := table.GetResourceVersion()
+	if eventType == watch.Bookmark {
+		if resourceVersion == "" {
+			return p.disableMalformedTable("Table BOOKMARK has no resourceVersion")
+		}
+		synchronizedAt := time.Now()
+		p.store.SetResourceVersion(resourceVersion)
+		p.emitBatch(Batch{
+			ResourceVersion: resourceVersion, Bookmark: true, SynchronizedAt: synchronizedAt,
+		})
+		result.progressed = true
+		result.lastSynchronized = synchronizedAt
+		return nil
+	}
+	if eventType != watch.Added && eventType != watch.Modified && eventType != watch.Deleted {
+		return p.disableMalformedTable(fmt.Sprintf("unsupported Table watch event type %q", eventType))
+	}
+	if len(table.Rows) != 1 {
+		return p.disableMalformedTable(fmt.Sprintf("Table %s event has %d rows; want 1", eventType, len(table.Rows)))
+	}
+	row := &table.Rows[0]
+	if len(row.Cells) != len(p.tableColumns) {
+		return p.disableMalformedTable(fmt.Sprintf(
+			"Table %s event has %d cells for %d columns",
+			eventType, len(row.Cells), len(p.tableColumns),
+		))
+	}
+	object, err := decodeTableObject(row)
+	if err != nil {
+		return p.disableMalformedTable(fmt.Sprintf("decode Table %s object: %v", eventType, err))
+	}
+	if object.GetUID() == "" {
+		return p.disableMalformedTable(fmt.Sprintf("Table %s object has no UID", eventType))
+	}
+	if resourceVersion == "" {
+		resourceVersion = object.GetResourceVersion()
+	}
+	if resourceVersion == "" {
+		return p.disableMalformedTable(fmt.Sprintf("Table %s event has no resourceVersion", eventType))
+	}
+	synchronizedAt := time.Now()
+	batch := Batch{
+		ResourceVersion: resourceVersion, SynchronizedAt: synchronizedAt,
+		Table: &TableData{
+			Columns: append([]metav1.TableColumnDefinition(nil), p.tableColumns...),
+			Cells:   map[types.UID][]any{object.GetUID(): append([]any(nil), row.Cells...)},
+		},
+	}
+	switch eventType {
+	case watch.Added, watch.Modified:
+		change := p.store.Upsert(object)
+		batch.Upserts = []*unstructured.Unstructured{object}
+		if change.ReplacedUID != "" {
+			batch.RemovedUIDs = []types.UID{change.ReplacedUID}
+		}
+	case watch.Deleted:
+		p.store.Delete(object.GetUID())
+		batch.RemovedUIDs = []types.UID{object.GetUID()}
+	}
+	p.store.SetResourceVersion(resourceVersion)
+	p.emitBatch(batch)
+	result.progressed = true
+	result.lastSynchronized = synchronizedAt
+	return nil
+}
+
+func (p *Pipeline) disableMalformedTable(message string) error {
+	if tableClient, ok := p.client.(TableListerWatcher); ok {
+		tableClient.DisableTable()
+	}
+	p.tableColumns = nil
+	p.emitBatch(Batch{
+		ResourceVersion: p.store.ResourceVersion(), Table: &TableData{Disabled: true},
+	})
+	return errors.New(message)
 }
 
 func (p *Pipeline) emitStatus(status Status) {

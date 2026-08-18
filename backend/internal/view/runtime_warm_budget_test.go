@@ -321,9 +321,8 @@ func newWarmBudgetEntry(authority, resourceName, payload string) *resourceRuntim
 	entryStore.Upsert(object)
 	entryStore.SetResourceVersion("rv")
 	return &resourceRuntime{
-		key: key, store: entryStore, state: resourceIdle, accountingReady: true,
+		key: key, store: entryStore, state: resourceIdle, snapshotComplete: true,
 		subscribers: make(map[*Subscription]struct{}),
-		dependents:  make(map[*Subscription]struct{}),
 		lastStatus:  watcher.Status{ResourceVersion: "rv"},
 	}
 }

@@ -10,7 +10,6 @@ option swift_prefix = "Kmgr_V1_";
 service ObjectService {
   rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
   rpc WatchObject(WatchObjectRequest) returns (stream ObjectEvent);
-  rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
   rpc GetRelationships(GetRelationshipsRequest) returns (GetRelationshipsResponse);
   rpc ScanRelationships(ScanRelationshipsRequest) returns (stream RelationshipScanEvent);
   rpc CancelRelationshipScan(CancelRelationshipScanRequest) returns (Acknowledgement);
@@ -89,29 +88,6 @@ message ObjectEvent {
   ObjectEventType type = 2;
   GetObjectResponse object = 3;
   StructuredError error = 4;
-}
-
-message GetEventsRequest {
-  RequestContext context = 1;
-  ResourceIdentity identity = 2;
-  uint32 limit = 3;
-}
-
-message KubernetesEvent {
-  ResourceIdentity identity = 1;
-  string type = 2;
-  string reason = 3;
-  string message = 4;
-  int64 first_observed_unix_ms = 5;
-  int64 last_observed_unix_ms = 6;
-  int32 count = 7;
-  string reporting_controller = 8;
-}
-
-message GetEventsResponse {
-  string request_id = 1;
-  repeated KubernetesEvent events = 2;
-  StructuredError error = 3;
 }
 
 message GetRelationshipsRequest {

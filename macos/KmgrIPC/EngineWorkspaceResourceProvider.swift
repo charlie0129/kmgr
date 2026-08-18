@@ -464,6 +464,25 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         }
 
         switch event.payload {
+        case .schema(let schema):
+            return .schema(
+                cursor: cursor,
+                schema: ResourceViewSchema(
+                    columns: schema.columns.map { column in
+                        ColumnDefinition(
+                            id: column.id,
+                            title: column.title,
+                            source: .server,
+                            type: ColumnResultType(rawValue: column.resultType) ?? .string,
+                            alignment: ColumnAlignment(rawValue: column.alignment),
+                            width: column.width > 0 ? column.width : nil,
+                            enabled: column.defaultVisible
+                        )
+                    },
+                    serverTable: schema.serverTable,
+                    revision: schema.revision
+                )
+            )
         case .status(let status):
             return .status(cursor: cursor, status: statusValue(from: status))
         case .snapshot(let snapshot):

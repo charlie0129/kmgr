@@ -55,7 +55,6 @@ func TestEngineServiceHandshakeAndHealth(t *testing.T) {
 		"logs.stream",
 		"object.data",
 		"object.details",
-		"object.events",
 		"object.relationships",
 		"operation.mutations",
 		"port-forward.manager",

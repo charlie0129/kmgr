@@ -77,7 +77,7 @@ public extension ResourceViewMessage {
                 orderCount: delta.orderedUIDs.count,
                 replacesOrder: delta.orderIsComplete
             )
-        case .status, .reconciled, .failure:
+        case .schema, .status, .reconciled, .failure:
             nil
         }
     }

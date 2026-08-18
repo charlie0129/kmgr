@@ -747,6 +747,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onOpenObject = { [weak self] identity, tab in
             self?.showObject(identity, initialTab: tab)
         }
+        contentController.onOpenEvents = { [weak self] identity in
+            self?.openEvents(for: identity)
+        }
         contentController.onOpenYAMLSnapshot = { [weak self] identity in
             guard let self else { return }
             invalidateObjectOpenTask()
@@ -1475,6 +1478,30 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             resource: target,
             scope: query.namespaceScope,
             initialFilter: query.filterExpression,
+            reason: .resourceDrillDown
+        )
+        sidebarController.selectResource(matching: target.id)
+        checkpointRestoration()
+        view.window?.makeFirstResponder(contentController.tableResponder)
+    }
+
+    private func openEvents(for identity: ResourceIdentity) {
+        guard let target = resources.first(where: {
+            $0.group.isEmpty && $0.version == "v1" && $0.resource == "events"
+                && $0.verbs.contains("list")
+        }) else {
+            NSSound.beep()
+            return
+        }
+        let targetScope = identity.namespace.isEmpty
+            ? NamespaceSelection() : .namespace(identity.namespace)
+        invalidateObjectOpenTask()
+        showResourceList(resume: false)
+        applyNamespaceScopeSelection(targetScope)
+        contentController.open(
+            resource: target,
+            scope: targetScope,
+            initialFilter: "field:involvedObject.uid==\(identity.uid.rawValue)",
             reason: .resourceDrillDown
         )
         sidebarController.selectResource(matching: target.id)
@@ -2327,6 +2354,7 @@ private final class ResourceListViewController: NSViewController,
     private var columnIDs: [String] = []
     private var columnDefinitionsByID: [String: ColumnDefinition] = [:]
     private var columnDefinitionsByResourceID: [String: [ColumnDefinition]] = [:]
+    private var serverSchemaByResourceID: [String: ResourceViewSchema] = [:]
     private var provisionalDefaultColumnResourceIDs: Set<String> = []
     private var columnsConfigurationCache = ColumnConfigurationCacheState()
     private var columnsConfigurationLoadTask: Task<Void, Never>?
@@ -2372,6 +2400,7 @@ private final class ResourceListViewController: NSViewController,
     var onShowCommandPalette: (() -> Void)?
     var onEnterObject: ((ResourceIdentity) -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
+    var onOpenEvents: ((ResourceIdentity) -> Void)?
     var onOpenYAMLSnapshot: ((ResourceIdentity) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
@@ -2471,6 +2500,7 @@ private final class ResourceListViewController: NSViewController,
 
     private func resourceCacheMessageKind(_ message: ResourceViewMessage) -> String {
         switch message {
+        case .schema: "schema"
         case .status: "status"
         case .snapshot: "snapshot"
         case .delta: "delta"
@@ -2727,6 +2757,9 @@ private final class ResourceListViewController: NSViewController,
         if var state = navigationState() {
             state.namespaceSelection = scope
             history.navigate(to: .resource(state))
+        }
+        if let resource {
+            installEffectiveColumns(for: resource)
         }
         openStream(reason: .namespaceChange)
     }
@@ -3050,10 +3083,12 @@ private final class ResourceListViewController: NSViewController,
         guard let resource else { return }
         let resourceID = resource.id
         let resourceGVR = resourceGVR(for: resource)
-        let discoveredColumns = optionalResourceOverlayState.applies(
+        let optionalColumns = optionalResourceOverlayState.applies(
             sessionID: session.sessionID,
             gvr: resourceGVR
         ) ? optionalResourceOverlayState.overlay.definitions : []
+        let discoveredColumns = optionalColumns
+            + (serverSchemaByResourceID[resource.id]?.columns ?? [])
         onShowColumns?(ResourceColumnsRequest(
             resourceTitle: resource.kind.isEmpty ? resource.resource : resource.kind,
             match: ColumnResourceMatch(
@@ -3377,6 +3412,8 @@ private final class ResourceListViewController: NSViewController,
         var shouldPublishContextualShortcuts = false
 
         switch message {
+        case .schema(_, let schema):
+            installServerSchema(schema)
         case .status(_, let status):
             traceResourceCache(
                 "event=status sequence=\(cursor.sequence)"
@@ -4525,11 +4562,17 @@ private final class ResourceListViewController: NSViewController,
         persistedDefinitions: [ColumnDefinition],
         resource: DiscoveredResource
     ) -> [ColumnDefinition] {
-        optionalResourceOverlayState.applying(
+        var definitions = optionalResourceOverlayState.applying(
             to: persistedDefinitions,
             sessionID: session.sessionID,
             gvr: resourceGVR(for: resource)
         )
+        if resource.namespaced && !scope.allNamespaces && scope.namespaces.count == 1 {
+            for index in definitions.indices where definitions[index].value == "namespace" {
+                definitions[index].enabled = false
+            }
+        }
+        return definitions
     }
 
     private func enabledColumnDefinitions(
@@ -4546,12 +4589,60 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func defaultColumnDefinitions(for resource: DiscoveredResource) -> [ColumnDefinition] {
-        NativeColumnCatalog.defaultDefinitions(
+        var definitions = NativeColumnCatalog.defaultDefinitions(
             group: resource.group,
             version: resource.version,
             resource: resource.resource,
-            namespaced: resource.namespaced
+            namespaced: resource.namespaced,
+            showNamespace: scope.allNamespaces || scope.namespaces.count != 1
         )
+        guard !NativeColumnCatalog.hasCuratedDefinitions(
+            group: resource.group,
+            version: resource.version,
+            resource: resource.resource
+        ), let schema = serverSchemaByResourceID[resource.id], schema.serverTable
+        else { return definitions }
+
+        let insertion = definitions.firstIndex(where: { $0.value == "age" })
+            ?? definitions.count
+        definitions.insert(contentsOf: schema.columns, at: insertion)
+        return definitions
+    }
+
+    private func installServerSchema(_ schema: ResourceViewSchema) {
+        guard let resource else { return }
+        if schema.serverTable {
+            guard serverSchemaByResourceID[resource.id]?.revision != schema.revision else {
+                return
+            }
+            serverSchemaByResourceID[resource.id] = schema
+        } else {
+            serverSchemaByResourceID.removeValue(forKey: resource.id)
+        }
+
+        let match = ColumnResourceMatch(
+            group: resource.group,
+            version: resource.version,
+            resource: resource.resource
+        )
+        let configured = columnsConfigurationCache.document?.views.first {
+            $0.match == match
+        }?.columns
+        if let configured {
+            columnDefinitionsByResourceID[resource.id] = configured
+            installColumns(effectiveColumnDefinitions(
+                persistedDefinitions: configured,
+                resource: resource
+            ), preservingCurrentPresentation: true)
+            return
+        }
+
+        let defaults = defaultColumnDefinitions(for: resource)
+        columnDefinitionsByResourceID[resource.id] = defaults
+        installColumns(effectiveColumnDefinitions(
+            persistedDefinitions: defaults,
+            resource: resource
+        ), preservingCurrentPresentation: true)
     }
 
     private func navigationState() -> ResourceNavigationState? {
@@ -5196,7 +5287,8 @@ private final class ResourceListViewController: NSViewController,
             guard let identity = selected.only else { return }
             onOpenYAMLSnapshot?(identity)
         case .openEvents:
-            openSelectedObject(initialTab: .events, identities: selected)
+            guard let identity = selected.only else { return }
+            onOpenEvents?(identity)
         case .startPortForward:
             guard let identity = selected.only,
                 identity.group.isEmpty,

@@ -458,6 +458,54 @@ public struct Kmgr_V1_ViewStatus: Sendable {
   public init() {}
 }
 
+/// ViewSchema carries resource-specific columns discovered from the same
+/// Kubernetes stream as the rows. For custom resources these definitions come
+/// from metav1.Table; no secondary discovery LIST/WATCH is opened.
+public struct Kmgr_V1_ResourceColumnSchema: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var id: String = String()
+
+  public var title: String = String()
+
+  /// Uses the ColumnResultType wire spellings used by columns.yaml.
+  public var resultType: String = String()
+
+  public var alignment: String = String()
+
+  public var width: Double = 0
+
+  public var defaultVisible: Bool = false
+
+  public var priority: Int32 = 0
+
+  public var format: String = String()
+
+  public var description_p: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Kmgr_V1_ViewSchema: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var columns: [Kmgr_V1_ResourceColumnSchema] = []
+
+  public var serverTable: Bool = false
+
+  public var revision: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Kmgr_V1_SnapshotChunk: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -587,6 +635,14 @@ public struct Kmgr_V1_ViewEvent: Sendable {
     set {payload = .reconciled(newValue)}
   }
 
+  public var schema: Kmgr_V1_ViewSchema {
+    get {
+      if case .schema(let v)? = payload {return v}
+      return Kmgr_V1_ViewSchema()
+    }
+    set {payload = .schema(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -595,6 +651,7 @@ public struct Kmgr_V1_ViewEvent: Sendable {
     case status(Kmgr_V1_ViewStatus)
     case error(Kmgr_V1_StructuredError)
     case reconciled(Kmgr_V1_ViewReconciled)
+    case schema(Kmgr_V1_ViewSchema)
 
   }
 
@@ -1541,6 +1598,116 @@ extension Kmgr_V1_ViewStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
+extension Kmgr_V1_ResourceColumnSchema: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ResourceColumnSchema"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}title\0\u{3}result_type\0\u{1}alignment\0\u{1}width\0\u{3}default_visible\0\u{1}priority\0\u{1}format\0\u{1}description\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.resultType) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.alignment) }()
+      case 5: try { try decoder.decodeSingularDoubleField(value: &self.width) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.defaultVisible) }()
+      case 7: try { try decoder.decodeSingularInt32Field(value: &self.priority) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.format) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.description_p) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 2)
+    }
+    if !self.resultType.isEmpty {
+      try visitor.visitSingularStringField(value: self.resultType, fieldNumber: 3)
+    }
+    if !self.alignment.isEmpty {
+      try visitor.visitSingularStringField(value: self.alignment, fieldNumber: 4)
+    }
+    if self.width.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.width, fieldNumber: 5)
+    }
+    if self.defaultVisible != false {
+      try visitor.visitSingularBoolField(value: self.defaultVisible, fieldNumber: 6)
+    }
+    if self.priority != 0 {
+      try visitor.visitSingularInt32Field(value: self.priority, fieldNumber: 7)
+    }
+    if !self.format.isEmpty {
+      try visitor.visitSingularStringField(value: self.format, fieldNumber: 8)
+    }
+    if !self.description_p.isEmpty {
+      try visitor.visitSingularStringField(value: self.description_p, fieldNumber: 9)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ResourceColumnSchema, rhs: Kmgr_V1_ResourceColumnSchema) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.resultType != rhs.resultType {return false}
+    if lhs.alignment != rhs.alignment {return false}
+    if lhs.width != rhs.width {return false}
+    if lhs.defaultVisible != rhs.defaultVisible {return false}
+    if lhs.priority != rhs.priority {return false}
+    if lhs.format != rhs.format {return false}
+    if lhs.description_p != rhs.description_p {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_ViewSchema: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ViewSchema"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}columns\0\u{3}server_table\0\u{1}revision\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.columns) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.serverTable) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.revision) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.columns.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.columns, fieldNumber: 1)
+    }
+    if self.serverTable != false {
+      try visitor.visitSingularBoolField(value: self.serverTable, fieldNumber: 2)
+    }
+    if !self.revision.isEmpty {
+      try visitor.visitSingularStringField(value: self.revision, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ViewSchema, rhs: Kmgr_V1_ViewSchema) -> Bool {
+    if lhs.columns != rhs.columns {return false}
+    if lhs.serverTable != rhs.serverTable {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Kmgr_V1_SnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SnapshotChunk"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}rows\0\u{3}first_chunk\0\u{3}last_chunk\0\u{3}chunk_index\0\u{3}estimated_total_rows\0\u{3}observed_optional_resource_keys\0\u{3}observed_optional_resource_keys_truncated\0")
@@ -1688,7 +1855,7 @@ extension Kmgr_V1_ViewReconciled: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}snapshot\0\u{1}delta\0\u{1}status\0\u{1}error\0\u{1}reconciled\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}snapshot\0\u{1}delta\0\u{1}status\0\u{1}error\0\u{1}reconciled\0\u{1}schema\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1762,6 +1929,19 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
           self.payload = .reconciled(v)
         }
       }()
+      case 7: try {
+        var v: Kmgr_V1_ViewSchema?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .schema(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .schema(v)
+        }
+      }()
       default: break
       }
     }
@@ -1795,6 +1975,10 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
     case .reconciled?: try {
       guard case .reconciled(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    }()
+    case .schema?: try {
+      guard case .schema(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
     }()
     case nil: break
     }

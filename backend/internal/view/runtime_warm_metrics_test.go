@@ -22,8 +22,6 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 		request   func() *kmgrv1.OpenViewRequest
 		warm      func() *unstructured.Unstructured
 		current   func() *unstructured.Unstructured
-		configure func(*Projector) *Projector
-		pods      func() []*unstructured.Unstructured
 		validate  func(*testing.T, *kmgrv1.Cell) bool
 		resource  string
 		namespace string
@@ -41,7 +39,6 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 			current: func() *unstructured.Unstructured {
 				return warmMetricPod("750m", "2")
 			},
-			configure: func(projector *Projector) *Projector { return projector },
 			validate: func(t *testing.T, cell *kmgrv1.Cell) bool {
 				t.Helper()
 				usage := cell.GetUsage()
@@ -76,23 +73,6 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 					corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("12")},
 				)
 			},
-			configure: func(projector *Projector) *Projector {
-				return projector.WithNodeAccounting(NodeAccountingSnapshot{
-					Active: true, Ready: true,
-					Nodes: map[string]metrics.NodeAccounting{"node-a": {
-						Name:        "node-a",
-						Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-						Capacity:    corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8")},
-						Requested:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
-						Limited:     corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
-					}},
-				})
-			},
-			pods: func() []*unstructured.Unstructured {
-				bound := warmMetricPod("1500m", "3")
-				bound.Object["spec"].(map[string]any)["nodeName"] = "node-a"
-				return []*unstructured.Unstructured{bound}
-			},
 			validate: func(t *testing.T, cell *kmgrv1.Cell) bool {
 				t.Helper()
 				usage := cell.GetUsage()
@@ -101,13 +81,8 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 					!strings.Contains(cell.GetTooltip(), "Physical capacity: 12") {
 					t.Fatalf("warm measurement hid fresh Node capacity: %#v", cell)
 				}
-				if usage.Requested == nil || usage.Limit == nil {
-					return false
-				}
-				if usage.GetRequested() != 1.5 || usage.GetLimit() != 3 ||
-					!strings.Contains(cell.GetTooltip(), "Effective request: 1500m") ||
-					!strings.Contains(cell.GetTooltip(), "Effective limit: 3") {
-					t.Fatalf("warm measurement hid fresh Node accounting: %#v", cell)
+				if usage.Requested != nil || usage.Limit != nil {
+					t.Fatalf("Node usage included cross-resource accounting: %#v", cell)
 				}
 				return true
 			},
@@ -133,30 +108,18 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 					Resources:  map[string]int64{"cpu": 250_000_000},
 				}},
 			}
-			projector = test.configure(projector.WithMetrics(warmMetricState))
+			projector = projector.WithMetrics(warmMetricState)
 			warmRows := projector.Project([]*unstructured.Unstructured{warmObject})
 			if len(warmRows) != 1 || !cellByID(warmRows[0], PodCPUColumn).GetUsage().GetUsageAvailable() {
 				t.Fatalf("warm fixture did not contain CPU usage: %#v", warmRows)
 			}
 
 			baseClient := newScriptedResource()
-			accountingPods := newScriptedResource()
-			if test.pods != nil {
-				accountingPods.listPages = []*unstructured.UnstructuredList{
-					listPage("pods-rv", "", test.pods()...),
-				}
-			}
 			source := &gvrResourceSource{
 				authority: "cluster-a",
 				clients: map[string]watcher.ListerWatcher{
 					test.resource: baseClient,
-					"pods":        accountingPods,
 				},
-			}
-			// A Pod view uses the base Pod client rather than the otherwise empty
-			// Node-accounting dependency fixture.
-			if test.resource == "pods" {
-				source.clients["pods"] = baseClient
 			}
 			fetcher := &runtimeBlockingMetricFetcher{
 				started: make(chan struct{}, 1),
@@ -190,9 +153,8 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 			}
 			entry := &resourceRuntime{
 				key: key, store: entryStore, client: baseClient,
-				state: resourceIdle, accountingReady: true,
+				state: resourceIdle, snapshotComplete: true,
 				subscribers: make(map[*Subscription]struct{}),
-				dependents:  make(map[*Subscription]struct{}),
 				lastStatus: watcher.Status{
 					Phase: watcher.PhaseResuming, Stale: true,
 					ResourceVersion: "rv-warm", LastSynchronized: time.Unix(100, 0),
@@ -232,9 +194,9 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 			// Every same-UID row emitted in this interval must retain the warm
 			// usage presentation.
 			observedCatchup := false
-			observedFreshAccounting := false
+			observedFreshObjectState := false
 			deadline := time.Now().Add(time.Second)
-			for (!observedCatchup || !observedFreshAccounting) && time.Now().Before(deadline) {
+			for (!observedCatchup || !observedFreshObjectState) && time.Now().Before(deadline) {
 				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 				events, nextErr := subscription.Next(ctx)
 				cancel()
@@ -258,15 +220,15 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 						if !cell.GetUsage().GetUsageAvailable() || cell.GetUsage().GetUsed() != 0.25 {
 							t.Fatalf("same-UID warm catch-up regressed usage: %#v", row)
 						}
-						observedFreshAccounting = test.validate(t, cell) || observedFreshAccounting
+						observedFreshObjectState = test.validate(t, cell) || observedFreshObjectState
 					}
 				}
 			}
 			if !observedCatchup {
 				t.Fatal("warm raw-store catch-up did not publish a row")
 			}
-			if !observedFreshAccounting {
-				t.Fatal("fresh scheduler accounting did not publish while metrics were blocked")
+			if !observedFreshObjectState {
+				t.Fatal("fresh object state did not publish while metrics were blocked")
 			}
 
 			// An explicit unavailable provider result is authoritative and must

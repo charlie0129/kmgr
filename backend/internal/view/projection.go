@@ -48,24 +48,10 @@ type ProjectionSpec struct {
 	CELPrograms                        map[string]*viewcolumns.Program
 	ColumnExtractors                   map[string]viewcolumns.Extractor
 	Metrics                            metrics.Snapshot
-	NodeAccounting                     NodeAccountingSnapshot
 	Now                                time.Time
 	// WorkerLimit bounds concurrent row projection for large snapshots. Zero
 	// selects a conservative process-wide default capped below GOMAXPROCS.
 	WorkerLimit int
-}
-
-// NodeAccountingSnapshot is an immutable scheduler-allocation revision for a
-// Nodes projection. Ready remains false while the shared cluster-wide Pod
-// snapshot is loading or when any source object could not be decoded. Err
-// records an optional dependency or completeness failure without affecting the
-// base Node LIST/WATCH or Metrics API enrichment.
-type NodeAccountingSnapshot struct {
-	Active     bool
-	Ready      bool
-	Err        error
-	Nodes      map[string]metrics.NodeAccounting
-	Discovered metrics.DiscoveredResources
 }
 
 type ResourceType struct {
@@ -112,51 +98,6 @@ func (p *Projector) WithMetrics(snapshot metrics.Snapshot) *Projector {
 	copy.spec = p.spec
 	copy.spec.Metrics = snapshot
 	return &copy
-}
-
-// WithNodeAccounting returns an immutable projection revision for scheduler
-// allocation derived from the current Node and Pod stores.
-func (p *Projector) WithNodeAccounting(snapshot NodeAccountingSnapshot) *Projector {
-	if p == nil {
-		return nil
-	}
-	copy := *p
-	copy.spec = p.spec
-	copy.spec.NodeAccounting = cloneNodeAccountingSnapshot(snapshot)
-	return &copy
-}
-
-func cloneNodeAccountingSnapshot(snapshot NodeAccountingSnapshot) NodeAccountingSnapshot {
-	result := NodeAccountingSnapshot{Active: snapshot.Active, Ready: snapshot.Ready, Err: snapshot.Err}
-	result.Discovered.EphemeralStorage = snapshot.Discovered.EphemeralStorage
-	result.Discovered.HugePages = slices.Clone(snapshot.Discovered.HugePages)
-	result.Discovered.Accelerators = slices.Clone(snapshot.Discovered.Accelerators)
-	if snapshot.Discovered.Present != nil {
-		result.Discovered.Present = make(map[corev1.ResourceName]bool, len(snapshot.Discovered.Present))
-		for name, present := range snapshot.Discovered.Present {
-			result.Discovered.Present[name] = present
-		}
-	}
-	if snapshot.Nodes == nil {
-		return result
-	}
-	result.Nodes = make(map[string]metrics.NodeAccounting, len(snapshot.Nodes))
-	for name, accounting := range snapshot.Nodes {
-		accounting.Capacity = accounting.Capacity.DeepCopy()
-		accounting.Allocatable = accounting.Allocatable.DeepCopy()
-		accounting.Requested = accounting.Requested.DeepCopy()
-		accounting.Limited = accounting.Limited.DeepCopy()
-		if accounting.Usage != nil {
-			usage := make(metrics.ResourceMeasurements, len(accounting.Usage))
-			for resourceName, measurement := range accounting.Usage {
-				measurement.Quantity = measurement.Quantity.DeepCopy()
-				usage[resourceName] = measurement
-			}
-			accounting.Usage = usage
-		}
-		result.Nodes[name] = accounting
-	}
-	return result
 }
 
 func NewProjector(spec ProjectionSpec) (*Projector, error) {
@@ -234,6 +175,17 @@ func (p *Projector) Project(objects []*unstructured.Unstructured) []*kmgrv1.Reso
 // and stops stale projection work when ctx is canceled. CEL runtime failures
 // remain error cells; only context cancellation aborts the complete batch.
 func (p *Projector) ProjectContext(ctx context.Context, objects []*unstructured.Unstructured) ([]*kmgrv1.ResourceRow, error) {
+	return p.ProjectContextWithAdditionalCells(ctx, objects, nil)
+}
+
+// ProjectContextWithAdditionalCells merges server Table cells before filter
+// and sort evaluation. The cells came from the same API response as each full
+// object and therefore never represent a cross-resource dependency.
+func (p *Projector) ProjectContextWithAdditionalCells(
+	ctx context.Context,
+	objects []*unstructured.Unstructured,
+	additional map[string][]*kmgrv1.Cell,
+) ([]*kmgrv1.ResourceRow, error) {
 	if ctx == nil {
 		return nil, errors.New("projection context must not be nil")
 	}
@@ -251,7 +203,12 @@ func (p *Projector) ProjectContext(ctx context.Context, objects []*unstructured.
 	}
 	projected := make([]result, len(objects))
 	err := projectBoundedContext(ctx, len(objects), batch.workerLimit, func(index int) error {
-		row, visible, err := batch.projectOneAdmitted(ctx, objects[index])
+		object := objects[index]
+		var cells []*kmgrv1.Cell
+		if object != nil {
+			cells = additional[string(object.GetUID())]
+		}
+		row, visible, err := batch.projectOneAdmittedWithCells(ctx, object, cells)
 		if err != nil {
 			return err
 		}
@@ -371,16 +328,31 @@ func (p *Projector) beginBatch() *Projector {
 }
 
 func (p *Projector) projectOne(object *unstructured.Unstructured) (*kmgrv1.ResourceRow, bool) {
+	return p.projectOneWithCells(object, nil)
+}
+
+func (p *Projector) projectOneWithCells(
+	object *unstructured.Unstructured,
+	additional []*kmgrv1.Cell,
+) (*kmgrv1.ResourceRow, bool) {
 	var row *kmgrv1.ResourceRow
 	var visible bool
 	_ = runProjectionWorker(context.Background(), func() error {
-		row, visible, _ = p.projectOneAdmitted(context.Background(), object)
+		row, visible, _ = p.projectOneAdmittedWithCells(context.Background(), object, additional)
 		return nil
 	})
 	return row, visible
 }
 
 func (p *Projector) projectOneAdmitted(ctx context.Context, object *unstructured.Unstructured) (*kmgrv1.ResourceRow, bool, error) {
+	return p.projectOneAdmittedWithCells(ctx, object, nil)
+}
+
+func (p *Projector) projectOneAdmittedWithCells(
+	ctx context.Context,
+	object *unstructured.Unstructured,
+	additional []*kmgrv1.Cell,
+) (*kmgrv1.ResourceRow, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
@@ -388,12 +360,22 @@ func (p *Projector) projectOneAdmitted(ctx context.Context, object *unstructured
 		return nil, false, nil
 	}
 
-	cells := make([]*kmgrv1.Cell, 0, len(p.spec.ColumnIDs))
-	visibleText := make([]string, 0, len(p.spec.ColumnIDs))
+	cells := make([]*kmgrv1.Cell, 0, len(p.spec.ColumnIDs)+len(additional))
+	visibleText := make([]string, 0, len(p.spec.ColumnIDs)+len(additional))
+	additionalByID := make(map[string]*kmgrv1.Cell, len(additional))
+	for _, cell := range additional {
+		if cell != nil && cell.GetColumnId() != "" {
+			additionalByID[cell.GetColumnId()] = cell
+		}
+	}
+	usedAdditional := make(map[string]struct{}, len(additionalByID))
 	var celActivation *viewcolumns.Activation
 	for _, columnID := range p.spec.ColumnIDs {
 		var cell *kmgrv1.Cell
-		if program := p.spec.CELPrograms[columnID]; program != nil {
+		if serverCell := additionalByID[columnID]; serverCell != nil {
+			cell = serverCell
+			usedAdditional[columnID] = struct{}{}
+		} else if program := p.spec.CELPrograms[columnID]; program != nil {
 			if celActivation == nil {
 				activation := p.celActivationForObject(object)
 				celActivation = &activation
@@ -405,6 +387,16 @@ func (p *Projector) projectOneAdmitted(ctx context.Context, object *unstructured
 			}
 		} else {
 			cell = p.builtinCell(object, columnID)
+		}
+		cells = append(cells, cell)
+		visibleText = append(visibleText, cell.GetDisplayText())
+	}
+	for _, cell := range additional {
+		if cell == nil {
+			continue
+		}
+		if _, used := usedAdditional[cell.GetColumnId()]; used {
+			continue
 		}
 		cells = append(cells, cell)
 		visibleText = append(visibleText, cell.GetDisplayText())
@@ -457,137 +449,18 @@ func (p *Projector) includesNamespace(namespace string) bool {
 
 func (p *Projector) builtinCell(object *unstructured.Unstructured, columnID string) *kmgrv1.Cell {
 	extractorID := p.extractorID(columnID)
-	if extractorID == NodePodCountColumn && isNodeResource(p.spec.Resource) {
-		return p.nodePodCountCell(object, columnID)
-	}
-	if resourceName, field, allocationColumn := nodeAllocationColumn(p.spec.Resource, extractorID); allocationColumn {
-		return p.nodeAllocationCell(object, columnID, resourceName, field)
-	}
 	if resourceName, metricColumn := metricColumnResource(p.spec.Resource, extractorID); metricColumn {
 		return p.resourceUsageCell(object, columnID, resourceName)
 	}
-	cell := &kmgrv1.Cell{ColumnId: columnID, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL}
-	switch extractorID {
-	case "namespace":
-		setStringCell(cell, valueOrMissing(object.GetNamespace()))
-	case "name":
-		setStringCell(cell, valueOrMissing(object.GetName()))
-	case "kind":
-		kind := object.GetKind()
-		if kind == "" {
-			kind = p.spec.Resource.Kind
-		}
-		setStringCell(cell, valueOrMissing(kind))
-	case "status":
-		status := statusText(object)
-		setStringCell(cell, status)
-		cell.Severity = statusSeverity(status)
-	case "roles":
-		roles := nodeRoles(object)
-		if len(roles) == 0 {
-			setStringCell(cell, DefaultMissingCell)
-			cell.Tooltip = "No node-role.kubernetes.io/* labels are present"
-			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		} else {
-			setStringCell(cell, strings.Join(roles, ", "))
-			cell.Tooltip = "Roles from node-role.kubernetes.io/* label keys"
-		}
-	case "taints":
-		count := int64(len(nestedSliceNoCopy(object.Object, "spec", "taints")))
-		cell.DisplayText = strconv.FormatInt(count, 10)
-		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: float64(count)}
-		cell.Tooltip = fmt.Sprintf("%d configured Node taint(s)", count)
-	case "ip":
-		addresses, addressType := nodeIPAddresses(object)
-		if len(addresses) == 0 {
-			setStringCell(cell, DefaultMissingCell)
-			cell.Tooltip = "No InternalIP or ExternalIP address is reported"
-			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		} else {
-			setStringCell(cell, strings.Join(addresses, ", "))
-			cell.Tooltip = addressType + ": " + strings.Join(
-				addresses, "\n"+addressType+": ",
-			)
-		}
-	case "replicas":
-		state, supported := replicaStateFor(p.spec.Resource, object)
-		if !supported {
-			setStringCell(cell, DefaultMissingCell)
-			cell.Tooltip = "Replica state is not available for this resource"
-			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-			break
-		}
-		cell.DisplayText = fmt.Sprintf(
-			"%d / %d / %d", state.available, state.ready, state.total,
-		)
-		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: cell.DisplayText}
-		cell.Tooltip = fmt.Sprintf(
-			"Available replicas: %d\nReady replicas: %d\nTotal replicas: %d",
-			state.available, state.ready, state.total,
-		)
-		if state.desired != nil {
-			cell.Tooltip += fmt.Sprintf("\nDesired replicas: %d", *state.desired)
-		}
-		target := state.total
-		if state.desired != nil {
-			target = *state.desired
-		}
-		if state.available != target || state.ready != target || state.total != target {
-			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
-		}
-	case "node":
-		value, _, _ := unstructured.NestedString(object.Object, "spec", "nodeName")
-		setStringCell(cell, valueOrMissing(value))
-	case "ready":
-		ready, total := readyContainers(object)
-		if total == 0 {
-			setStringCell(cell, DefaultMissingCell)
-		} else {
-			text := fmt.Sprintf("%d/%d", ready, total)
-			cell.DisplayText = text
-			cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: float64(ready) / float64(total)}
-			if ready != total {
-				cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
-			}
-		}
-	case "restarts":
-		restarts := restartCount(object)
-		cell.DisplayText = strconv.FormatInt(restarts, 10)
-		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: float64(restarts)}
-		if restarts > 0 {
-			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
-		}
-	case "age":
-		created := object.GetCreationTimestamp().Time
-		if created.IsZero() {
-			setStringCell(cell, DefaultMissingCell)
-		} else {
-			cell.DisplayText = formatAge(p.spec.Now.Sub(created))
-			cell.TypedValue = &kmgrv1.Cell_TimestampUnixMs{TimestampUnixMs: created.UnixMilli()}
-			cell.Tooltip = created.Format(time.RFC3339)
-		}
-	case "created":
-		created := object.GetCreationTimestamp().Time
-		if created.IsZero() {
-			setStringCell(cell, DefaultMissingCell)
-		} else {
-			cell.DisplayText = created.Local().Format("2006-01-02 15:04:05")
-			cell.TypedValue = &kmgrv1.Cell_TimestampUnixMs{TimestampUnixMs: created.UnixMilli()}
-			cell.Tooltip = created.Format(time.RFC3339)
-		}
-	case "resourceVersion":
-		setStringCell(cell, valueOrMissing(object.GetResourceVersion()))
-	default:
-		// Unknown IDs are intentionally visible as missing values. Later column
-		// registries can replace them with CEL/metric extractors without ever
-		// exposing raw objects to Swift.
-		setStringCell(cell, DefaultMissingCell)
-		cell.Tooltip = fmt.Sprintf("Column %q is not available for this resource", columnID)
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+	if cell, supported := p.nativeObjectCell(object, columnID, extractorID); supported {
+		return cell
 	}
+	// Unknown IDs remain visible as missing values. A server Table cell with
+	// the same ID is merged before this fallback is reached.
+	cell := newNativeCell(columnID)
+	setMissingCell(cell, fmt.Sprintf("Column %q is not available for this resource", columnID))
 	return cell
 }
-
 func (p *Projector) extractorID(columnID string) string {
 	if p != nil {
 		if extractor := p.spec.ColumnExtractors[columnID]; extractor.Value != "" {
@@ -695,20 +568,20 @@ func (p *Projector) metricsForObject(object *unstructured.Unstructured) map[stri
 		activation["limits"] = resourceListActivation(accounting.Limits)
 		return activation
 	}
-	accounting, ready := p.nodeAccountingFor(object)
-	activation["accountingAvailable"] = ready
-	if !ready {
+	var node corev1.Node
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &node); err != nil {
+		activation["accountingAvailable"] = false
 		activation["requests"] = map[string]any{}
 		activation["limits"] = map[string]any{}
 		activation["allocatable"] = map[string]any{}
 		activation["capacity"] = map[string]any{}
 		return activation
 	}
-	activation["requests"] = resourceListActivation(accounting.Requested)
-	activation["limits"] = resourceListActivation(accounting.Limited)
-	activation["allocatable"] = resourceListActivation(accounting.Allocatable)
-	activation["capacity"] = resourceListActivation(accounting.Capacity)
-	activation["podCount"] = accounting.PodCount
+	activation["accountingAvailable"] = true
+	activation["requests"] = map[string]any{}
+	activation["limits"] = map[string]any{}
+	activation["allocatable"] = resourceListActivation(node.Status.Allocatable)
+	activation["capacity"] = resourceListActivation(node.Status.Capacity)
 	return activation
 }
 
@@ -803,166 +676,28 @@ func (p *Projector) resourceUsageCell(
 		}
 		allocatable, hasAllocatable := node.Status.Allocatable[resourceName]
 		capacity, hasCapacity := node.Status.Capacity[resourceName]
-		var request, limit *resource.Quantity
-		if accounting, ready := p.nodeAccountingFor(object); ready {
-			requested, hasRequest := accounting.Requested[resourceName]
-			limited, hasLimit := accounting.Limited[resourceName]
-			request = optionalQuantity(requested, hasRequest)
-			limit = optionalQuantity(limited, hasLimit)
+		if _, exact := exactResourceColumn(p.extractorID(columnID)); exact &&
+			!hasAllocatable && !hasCapacity && !measurement.HasValue() {
+			cell.DisplayText = DefaultMissingCell
+			cell.TypedValue = nil
+			cell.Tooltip = "Exact resource " + string(resourceName) + " is not present on this Node"
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+			return cell
 		}
-		setUsageQuantities(usage, measurement, request, limit, optionalQuantity(allocatable, hasAllocatable))
+		setUsageQuantities(usage, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable))
 		cell.DisplayText = formatUsageDisplay(
 			resourceName, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
 		)
 		cell.Tooltip = formatUsageTooltip(
-			resourceName, measurement, request, limit, optionalQuantity(allocatable, hasAllocatable),
+			resourceName, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
 			optionalQuantity(capacity, hasCapacity), p.spec.Now,
 		)
-		if p.spec.NodeAccounting.Err != nil {
-			cell.Tooltip += "\nScheduler accounting: unavailable (" + p.spec.NodeAccounting.Err.Error() + ")"
-		}
 	}
 	if measurement.State == metrics.MeasurementStale {
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
 	} else if !measurement.HasValue() {
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
 	}
-	return cell
-}
-
-func (p *Projector) nodeAccountingFor(object *unstructured.Unstructured) (metrics.NodeAccounting, bool) {
-	if p == nil || object == nil || !p.spec.NodeAccounting.Active || !p.spec.NodeAccounting.Ready {
-		return metrics.NodeAccounting{}, false
-	}
-	accounting, found := p.spec.NodeAccounting.Nodes[object.GetName()]
-	return accounting, found
-}
-
-func (p *Projector) nodeAllocationCell(
-	object *unstructured.Unstructured,
-	columnID string,
-	resourceName corev1.ResourceName,
-	field nodeAllocationField,
-) *kmgrv1.Cell {
-	cell := &kmgrv1.Cell{
-		ColumnId: columnID,
-		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
-	}
-	usage := &kmgrv1.ResourceUsageValue{
-		ResourceName: string(resourceName),
-		Unit:         resourceUnit(resourceName),
-	}
-	cell.TypedValue = &kmgrv1.Cell_Usage{Usage: usage}
-	if !p.spec.NodeAccounting.Active || (!p.spec.NodeAccounting.Ready && p.spec.NodeAccounting.Err == nil) {
-		cell.DisplayText = "Calculating…"
-		cell.Tooltip = "Summing effective requests and limits from bound, non-terminal Pods"
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		return cell
-	}
-	if p.spec.NodeAccounting.Err != nil && !p.spec.NodeAccounting.Ready {
-		cell.DisplayText = DefaultMissingCell
-		cell.TypedValue = nil
-		cell.Tooltip = "Scheduler accounting is unavailable: " + p.spec.NodeAccounting.Err.Error()
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		return cell
-	}
-	accounting, found := p.nodeAccountingFor(object)
-	if !found {
-		cell.DisplayText = DefaultMissingCell
-		cell.Tooltip = "Node scheduler accounting is unavailable"
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		return cell
-	}
-	allocatable, hasAllocatable := accounting.Allocatable[resourceName]
-	capacity, hasCapacity := accounting.Capacity[resourceName]
-	requested, hasRequest := accounting.Requested[resourceName]
-	limited, hasLimit := accounting.Limited[resourceName]
-	if _, exact := exactResourceColumn(p.extractorID(columnID)); exact &&
-		!hasAllocatable && !hasCapacity && !hasRequest && !hasLimit {
-		cell.DisplayText = DefaultMissingCell
-		cell.TypedValue = nil
-		cell.Tooltip = "Exact resource " + string(resourceName) + " is not present on this Node"
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		return cell
-	}
-	var value *resource.Quantity
-	label := "Summed effective requests"
-	if field == nodeLimited {
-		value = optionalQuantity(limited, hasLimit)
-		if value != nil {
-			numeric := quantityNumeric(resourceName, *value)
-			usage.Limit = numberPointer(numeric)
-		}
-		label = "Summed effective limits"
-	} else {
-		value = optionalQuantity(requested, hasRequest)
-		if value != nil {
-			numeric := quantityNumeric(resourceName, *value)
-			usage.Requested = numberPointer(numeric)
-		}
-	}
-	if hasAllocatable {
-		usage.Capacity = numberPointer(quantityNumeric(resourceName, allocatable))
-	}
-	setUsageSortValue(usage)
-	cell.DisplayText = formatResourceQuantity(resourceName, value) + " / " +
-		formatResourceQuantity(resourceName, optionalQuantity(allocatable, hasAllocatable))
-	parts := []string{"Resource: " + string(resourceName), label + ": " + exactQuantityDisplay(value)}
-	if field == nodeRequested && hasLimit {
-		parts = append(parts, "Summed effective limits: "+limited.String())
-	}
-	if hasAllocatable {
-		parts = append(parts, "Allocatable: "+allocatable.String())
-	}
-	if hasCapacity {
-		parts = append(parts, "Physical capacity: "+capacity.String())
-	}
-	cell.Tooltip = strings.Join(parts, "\n")
-	return cell
-}
-
-func (p *Projector) nodePodCountCell(object *unstructured.Unstructured, columnID string) *kmgrv1.Cell {
-	cell := &kmgrv1.Cell{ColumnId: columnID, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL}
-	usage := &kmgrv1.ResourceUsageValue{ResourceName: string(corev1.ResourcePods), Unit: "count"}
-	cell.TypedValue = &kmgrv1.Cell_Usage{Usage: usage}
-	if !p.spec.NodeAccounting.Active || (!p.spec.NodeAccounting.Ready && p.spec.NodeAccounting.Err == nil) {
-		cell.DisplayText = "Calculating…"
-		cell.Tooltip = "Counting bound, non-terminal Pods"
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		return cell
-	}
-	if p.spec.NodeAccounting.Err != nil && !p.spec.NodeAccounting.Ready {
-		cell.DisplayText = DefaultMissingCell
-		cell.TypedValue = nil
-		cell.Tooltip = "Pod counting is unavailable: " + p.spec.NodeAccounting.Err.Error()
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		return cell
-	}
-	accounting, found := p.nodeAccountingFor(object)
-	if !found {
-		cell.DisplayText = DefaultMissingCell
-		cell.Tooltip = "Node Pod accounting is unavailable"
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		return cell
-	}
-	allocatable, hasAllocatable := accounting.Allocatable[corev1.ResourcePods]
-	capacity, hasCapacity := accounting.Capacity[corev1.ResourcePods]
-	podCount := float64(accounting.PodCount)
-	usage.Requested = numberPointer(podCount)
-	if hasAllocatable {
-		usage.Capacity = numberPointer(quantityNumeric(corev1.ResourcePods, allocatable))
-	}
-	setUsageSortValue(usage)
-	cell.DisplayText = strconv.FormatInt(accounting.PodCount, 10) + " / " +
-		exactQuantityDisplay(optionalQuantity(allocatable, hasAllocatable))
-	parts := []string{"Bound non-terminal Pods: " + strconv.FormatInt(accounting.PodCount, 10)}
-	if hasAllocatable {
-		parts = append(parts, "Allocatable Pod capacity: "+allocatable.String())
-	}
-	if hasCapacity {
-		parts = append(parts, "Physical Pod capacity: "+capacity.String())
-	}
-	cell.Tooltip = strings.Join(parts, "\n")
 	return cell
 }
 
@@ -1177,95 +912,12 @@ func defaultColumns(resource ResourceType) []string {
 		columns = append(columns, "namespace")
 	}
 	columns = append(columns, "name")
-	if strings.EqualFold(resource.Kind, "Pod") || resource.Resource == "pods" {
-		columns = append(columns, "ready", "status", "restarts", "node", PodCPUColumn, PodMemoryColumn)
-	} else if strings.EqualFold(resource.Kind, "Node") || resource.Resource == "nodes" {
-		columns = append(
-			columns, "status", "roles", "taints", "ip",
-			NodeCPUUsageColumn, NodeMemoryUsageColumn,
-		)
-	} else if isReplicaWorkloadResource(resource) {
-		columns = append(columns, "replicas", "status")
-	} else {
-		columns = append(columns, "status")
+	if native := viewcolumns.DefaultNativeColumns(
+		resource.Group, resource.Version, resource.Resource,
+	); len(native) != 0 {
+		return append(columns, native...)
 	}
 	return append(columns, "age")
-}
-
-type replicaState struct {
-	available int64
-	ready     int64
-	total     int64
-	desired   *int64
-}
-
-func replicaStateFor(
-	resource ResourceType,
-	object *unstructured.Unstructured,
-) (replicaState, bool) {
-	if object == nil || !isReplicaWorkloadResource(resource) {
-		return replicaState{}, false
-	}
-	state := replicaState{}
-	if resource.Group == "apps" && resource.Version == "v1" &&
-		resource.Resource == "daemonsets" {
-		state.available, _, _ = unstructured.NestedInt64(
-			object.Object, "status", "numberAvailable",
-		)
-		state.ready, _, _ = unstructured.NestedInt64(
-			object.Object, "status", "numberReady",
-		)
-		state.total, _, _ = unstructured.NestedInt64(
-			object.Object, "status", "currentNumberScheduled",
-		)
-		if desired, found, _ := unstructured.NestedInt64(
-			object.Object, "status", "desiredNumberScheduled",
-		); found {
-			state.desired = &desired
-		}
-		return state, true
-	}
-
-	state.available, _, _ = unstructured.NestedInt64(
-		object.Object, "status", "availableReplicas",
-	)
-	state.ready, _, _ = unstructured.NestedInt64(
-		object.Object, "status", "readyReplicas",
-	)
-	state.total, _, _ = unstructured.NestedInt64(
-		object.Object, "status", "replicas",
-	)
-	if desired, found, _ := unstructured.NestedInt64(
-		object.Object, "spec", "replicas",
-	); found {
-		state.desired = &desired
-	}
-	return state, true
-}
-
-func isReplicaWorkloadResource(resource ResourceType) bool {
-	if resource.Group == "apps" && resource.Version == "v1" {
-		switch resource.Resource {
-		case "deployments", "statefulsets", "daemonsets", "replicasets":
-			return true
-		}
-	}
-	return resource.Group == "" && resource.Version == "v1" &&
-		resource.Resource == "replicationcontrollers"
-}
-
-func setStringCell(cell *kmgrv1.Cell, value string) {
-	cell.DisplayText = value
-	if value != DefaultMissingCell {
-		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: value}
-	}
-}
-
-func valueOrMissing(value string) string {
-	if value == "" {
-		return DefaultMissingCell
-	}
-	return value
 }
 
 func statusText(object *unstructured.Unstructured) string {
@@ -1292,6 +944,9 @@ func statusText(object *unstructured.Unstructured) string {
 	if value, found, _ := unstructured.NestedString(object.Object, "status", "phase"); found && value != "" {
 		return value
 	}
+	if kind == "job" {
+		return jobStatusText(object)
+	}
 	if kind == "deployment" || kind == "statefulset" || kind == "daemonset" || kind == "replicaset" {
 		ready, _, _ := unstructured.NestedInt64(object.Object, "status", "readyReplicas")
 		desired, _, _ := unstructured.NestedInt64(object.Object, "spec", "replicas")
@@ -1310,6 +965,41 @@ func statusText(object *unstructured.Unstructured) string {
 		return value
 	}
 	return "Active"
+}
+
+func jobStatusText(object *unstructured.Unstructured) string {
+	for _, raw := range nestedSliceNoCopy(object.Object, "status", "conditions") {
+		condition, _ := raw.(map[string]any)
+		if condition["status"] != "True" {
+			continue
+		}
+		switch condition["type"] {
+		case "Complete":
+			return "Complete"
+		case "Failed":
+			return "Failed"
+		case "Suspended":
+			return "Suspended"
+		}
+	}
+	if suspended, _, _ := unstructured.NestedBool(object.Object, "spec", "suspend"); suspended {
+		return "Suspended"
+	}
+	if active, _, _ := unstructured.NestedInt64(object.Object, "status", "active"); active > 0 {
+		return "Running"
+	}
+	succeeded, _, _ := unstructured.NestedInt64(object.Object, "status", "succeeded")
+	completions, found, _ := unstructured.NestedInt64(object.Object, "spec", "completions")
+	if !found {
+		completions = 1
+	}
+	if succeeded >= completions {
+		return "Complete"
+	}
+	if failed, _, _ := unstructured.NestedInt64(object.Object, "status", "failed"); failed > 0 {
+		return "Failed"
+	}
+	return "Pending"
 }
 
 func nodeSchedulingStatus(
@@ -1352,37 +1042,6 @@ func nodeRoles(object *unstructured.Unstructured) []string {
 	}
 	slices.Sort(roles)
 	return roles
-}
-
-func nodeIPAddresses(object *unstructured.Unstructured) ([]string, string) {
-	internal := make([]string, 0, 2)
-	external := make([]string, 0, 2)
-	seenInternal := make(map[string]struct{}, 2)
-	seenExternal := make(map[string]struct{}, 2)
-	for _, raw := range nestedSliceNoCopy(object.Object, "status", "addresses") {
-		address, _ := raw.(map[string]any)
-		value, _ := address["address"].(string)
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		switch address["type"] {
-		case string(corev1.NodeInternalIP):
-			if _, duplicate := seenInternal[value]; !duplicate {
-				seenInternal[value] = struct{}{}
-				internal = append(internal, value)
-			}
-		case string(corev1.NodeExternalIP):
-			if _, duplicate := seenExternal[value]; !duplicate {
-				seenExternal[value] = struct{}{}
-				external = append(external, value)
-			}
-		}
-	}
-	if len(internal) != 0 {
-		return internal, string(corev1.NodeInternalIP)
-	}
-	return external, string(corev1.NodeExternalIP)
 }
 
 func readyContainers(object *unstructured.Unstructured) (ready, total int) {

@@ -8,18 +8,23 @@ import Testing
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .appendingPathComponent("tests/fixtures/native-columns-contract.json")
-    let fixture = try JSONDecoder().decode(
-        ColumnsConfigurationDocument.self,
-        from: Data(contentsOf: fixtureURL)
-    )
+    struct Fixture: Decodable {
+        struct Column: Decodable {
+            var source: ColumnSource
+            var value: String
+            var type: ColumnResultType
+        }
+        var columns: [Column]
+    }
+    let fixture = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: fixtureURL))
 
     struct Contract: Hashable {
         var source: ColumnSource
         var value: String
         var type: ColumnResultType
     }
-    let fixtureContracts = Set(fixture.views.flatMap(\.columns).compactMap { column in
-        column.value.map { Contract(source: column.source, value: $0, type: column.type) }
+    let fixtureContracts = Set(fixture.columns.map { column in
+        Contract(source: column.source, value: column.value, type: column.type)
     })
     let catalogContracts = Set(NativeColumnCatalog.descriptors.map {
         Contract(source: $0.source, value: $0.value, type: $0.type)
@@ -48,67 +53,39 @@ import Testing
     let nodes = NativeColumnCatalog.defaultDefinitions(
         group: "", version: "v1", resource: "nodes", namespaced: false
     )
-    #expect(nodes.map(\.value) == [
-        "name", "status", "roles", "taints", "ip",
-        "cpu", "memory", "ephemeral-storage", "age",
+    #expect(nodes.filter(\.isEnabled).map(\.value) == [
+        "name", "status", "roles", "taints", "internal-ip", "kubelet-version",
+        "cpu", "memory", "age",
     ])
     #expect(nodes.first(where: { $0.value == "roles" })?.type == .string)
     #expect(nodes.first(where: { $0.value == "taints" })?.type == .integer)
-    #expect(nodes.first(where: { $0.value == "ip" })?.type == .string)
+    #expect(nodes.first(where: { $0.value == "internal-ip" })?.type == .string)
     #expect(nodes.contains(where: { $0.value == "cpu" && $0.type == .resourceUsage }))
     #expect(nodes.first(where: { $0.value == "ephemeral-storage" })?.isEnabled == false)
+    #expect(nodes.first(where: { $0.value == "os-image" })?.isEnabled == false)
     #expect(!nodes.contains(where: { $0.value == "ready" || $0.value == "node" }))
 
     let deployments = NativeColumnCatalog.defaultDefinitions(
         group: "apps", version: "v1", resource: "deployments", namespaced: true
     )
-    #expect(deployments.map(\.value) == [
-        "namespace", "name", "replicas", "status", "age",
+    #expect(deployments.filter(\.isEnabled).map(\.value) == [
+        "namespace", "name", "ready", "up-to-date", "available", "age",
     ])
-    #expect(deployments.first(where: { $0.value == "replicas" })?.type == .string)
-
-    for resource in [
-        "statefulsets", "daemonsets", "replicasets",
-    ] {
-        #expect(NativeColumnCatalog.defaultDefinitions(
-            group: "apps", version: "v1", resource: resource, namespaced: true
-        ).contains(where: { $0.value == "replicas" }))
-    }
-    #expect(NativeColumnCatalog.defaultDefinitions(
-        group: "", version: "v1", resource: "replicationcontrollers", namespaced: true
-    ).contains(where: { $0.value == "replicas" }))
+    #expect(deployments.first(where: { $0.value == "selector" })?.isEnabled == false)
 
     let custom = NativeColumnCatalog.defaultDefinitions(
-        group: "example.test", version: "v1", resource: "pods", namespaced: true
+        group: "example.test", version: "v1", resource: "widgets", namespaced: true
     )
-    #expect(custom.map(\.value) == ["namespace", "name", "status", "age"])
-}
+    #expect(custom.filter(\.isEnabled).map(\.value) == ["namespace", "name", "age"])
+    #expect(!NativeColumnCatalog.hasCuratedDefinitions(
+        group: "example.test", version: "v1", resource: "widgets"
+    ))
 
-@Test func legacyNativeTypeMigrationIsNarrowAndIdempotent() {
-    var document = ColumnsConfigurationDocument(views: [
-        ResourceColumnConfiguration(
-            match: ColumnResourceMatch(version: "v1", resource: "pods"),
-            columns: [
-                ColumnDefinition(
-                    id: "ready", title: "Ready", source: .builtin,
-                    value: "ready", type: .number
-                ),
-                ColumnDefinition(
-                    id: "age", title: "Age", source: .builtin,
-                    value: "age", type: .timestamp
-                ),
-                ColumnDefinition(
-                    id: "custom-ready", title: "Custom", source: .builtin,
-                    value: "ready", type: .number
-                ),
-            ]
-        ),
-    ])
-    #expect(NativeColumnCatalog.normalizeLegacyTypes(in: &document))
-    #expect(document.views[0].columns[0].type == .string)
-    #expect(document.views[0].columns[1].type == .duration)
-    #expect(document.views[0].columns[2].type == .number)
-    #expect(!NativeColumnCatalog.normalizeLegacyTypes(in: &document))
+    let oneNamespace = NativeColumnCatalog.defaultDefinitions(
+        group: "", version: "v1", resource: "pods", namespaced: true,
+        showNamespace: false
+    )
+    #expect(oneNamespace.first(where: { $0.value == "namespace" })?.isEnabled == false)
 }
 
 @Test func nativePickerCatalogFiltersByExactGVRAndMarksExtractorDuplicates() {
@@ -135,22 +112,22 @@ import Testing
     let nodeValues = Set(NativeColumnCatalog.items(
         group: "", version: "v1", resource: "nodes", existingColumns: []
     ).map(\.descriptor.value))
-    #expect(nodeValues.contains("pod-count"))
-    #expect(nodeValues.isSuperset(of: ["roles", "taints", "ip"]))
+    #expect(!nodeValues.contains("pod-count"))
+    #expect(nodeValues.isSuperset(of: ["roles", "taints", "internal-ip", "os-image"]))
     #expect(!nodeValues.contains("ready"))
 
     let deploymentValues = Set(NativeColumnCatalog.items(
         group: "apps", version: "v1", resource: "deployments", existingColumns: []
     ).map(\.descriptor.value))
-    #expect(deploymentValues.contains("replicas"))
-    #expect(!deploymentValues.contains("ready"))
+    #expect(deploymentValues.contains("ready"))
+    #expect(!deploymentValues.contains("replicas"))
 
     let customValues = Set(NativeColumnCatalog.items(
         group: "example.test", version: "v1", resource: "widgets", existingColumns: []
     ).map(\.descriptor.value))
     #expect(customValues.contains("name"))
     #expect(!customValues.contains("cpu"))
-    #expect(!customValues.contains("replicas"))
+    #expect(!customValues.contains("desired"))
 }
 
 @Test func exactResourceDefinitionsValidateAndPreserveFullQualifiedIdentity() throws {

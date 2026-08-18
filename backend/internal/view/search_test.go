@@ -13,9 +13,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -1428,114 +1426,6 @@ func TestOverflowedSharedListDropsStoreAfterViewCloses(t *testing.T) {
 	if err := <-searchDone; err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestSharedNodeListFinalPageRecomputesReadyPodAccounting(t *testing.T) {
-	t.Parallel()
-	nodes := newSearchClient()
-	nodes.pages = []*unstructured.UnstructuredList{
-		listPage("nodes-rv", "next", nodeObject(
-			"node-a", "node-a", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		)),
-		listPage("nodes-rv", "", nodeObject(
-			"node-b", "node-b", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		)),
-	}
-	nodes.secondPageGate = make(chan struct{})
-	pods := newScriptedResource()
-	bound := pod("pod", "ns", "api", "Running", 0, nil, time.Time{})
-	bound.Object["spec"].(map[string]any)["nodeName"] = "node-b"
-	bound.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
-		"requests": map[string]any{"cpu": "500m"},
-	}
-	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "", bound)}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: &gvrResourceSource{authority: "cluster", clients: map[string]watcher.ListerWatcher{
-			"nodes": nodes, "pods": pods,
-		}}, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	first := make(chan struct{})
-	searchDone := make(chan error, 1)
-	query := SearchQuery{
-		SessionID: "session", Resource: ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		NamespaceScope: NamespaceScope{}, Query: "node", AllowPaginatedList: true,
-	}
-	go func() {
-		searchDone <- runtime.Search(context.Background(), query, func(batch SearchBatch) error {
-			if batch.Examined == 1 {
-				close(first)
-			}
-			return nil
-		})
-	}()
-	<-first
-	view, err := runtime.Open(openNodeView("session", "nodes", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer view.Close()
-	eventually(t, time.Second, func() bool { return pods.watchCalls.Load() == 1 })
-	close(nodes.secondPageGate)
-	if err := <-searchDone; err != nil {
-		t.Fatal(err)
-	}
-	waitForNodeAccounting(t, view, "node-b", NodeCPURequestsColumn, 0.5)
-}
-
-func TestSharedPodListFinalPageRecomputesNodeDependent(t *testing.T) {
-	t.Parallel()
-	nodes := newScriptedResource()
-	nodes.listPages = []*unstructured.UnstructuredList{listPage("nodes-rv", "", nodeObject(
-		"node", "node-a", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-	))}
-	pods := newSearchClient()
-	bound := pod("pod", "ns", "api", "Running", 0, nil, time.Time{})
-	bound.Object["spec"].(map[string]any)["nodeName"] = "node-a"
-	bound.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
-		"requests": map[string]any{"cpu": "500m"},
-	}
-	pods.pages = []*unstructured.UnstructuredList{
-		listPage("pods-rv", "next"), listPage("pods-rv", "", bound),
-	}
-	pods.secondPageGate = make(chan struct{})
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: &gvrResourceSource{authority: "cluster", clients: map[string]watcher.ListerWatcher{
-			"nodes": nodes, "pods": pods,
-		}}, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	searchDone := make(chan error, 1)
-	go func() {
-		searchDone <- runtime.Search(context.Background(), inProgressSearchQuery("api"), func(batch SearchBatch) error {
-			return nil
-		})
-	}()
-	eventually(t, time.Second, func() bool { return pods.listCalls.Load() == 2 })
-	view, err := runtime.Open(openView("session", "pods", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer view.Close()
-	nodeView, err := runtime.Open(openNodeView("session", "nodes", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer nodeView.Close()
-	close(pods.secondPageGate)
-	if err := <-searchDone; err != nil {
-		t.Fatal(err)
-	}
-	waitForNodeAccounting(t, nodeView, "node", NodeCPURequestsColumn, 0.5)
 }
 
 func TestCompletedSearchSnapshotCanonicalizesNamespaceOrder(t *testing.T) {

@@ -164,6 +164,7 @@ public struct ResourceSortDescriptor: Hashable, Sendable {
 }
 
 public enum ResourceViewMessage: Hashable, Sendable {
+    case schema(cursor: StreamCursor, schema: ResourceViewSchema)
     case status(cursor: StreamCursor, status: ResourceViewStatus)
     case snapshot(cursor: StreamCursor, chunk: ResourceSnapshotChunk)
     case delta(cursor: StreamCursor, delta: ResourceRowDelta)
@@ -172,7 +173,7 @@ public enum ResourceViewMessage: Hashable, Sendable {
 
     public var cursor: StreamCursor {
         switch self {
-        case .status(let cursor, _), .snapshot(let cursor, _),
+        case .schema(let cursor, _), .status(let cursor, _), .snapshot(let cursor, _),
             .delta(let cursor, _), .reconciled(let cursor, _),
             .failure(let cursor, _): cursor
         }
@@ -186,6 +187,22 @@ public struct ResourceViewReconciliation: Hashable, Sendable {
 
     public init(rowsVisible: UInt64) {
         self.rowsVisible = rowsVisible
+    }
+}
+
+public struct ResourceViewSchema: Hashable, Sendable {
+    public var columns: [ColumnDefinition]
+    public var serverTable: Bool
+    public var revision: String
+
+    public init(
+        columns: [ColumnDefinition],
+        serverTable: Bool,
+        revision: String
+    ) {
+        self.columns = columns
+        self.serverTable = serverTable
+        self.revision = revision
     }
 }
 

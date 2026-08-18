@@ -149,7 +149,7 @@ struct ColumnConfigurationFileStore: Sendable {
         }
 
         let normalized = try JSONSerialization.data(withJSONObject: root)
-        var document: ColumnsConfigurationDocument
+        let document: ColumnsConfigurationDocument
         do {
             document = try JSONDecoder().decode(ColumnsConfigurationDocument.self, from: normalized)
         } catch {
@@ -157,7 +157,6 @@ struct ColumnConfigurationFileStore: Sendable {
                 "The column configuration does not match \(ColumnConfigurationSchema.apiVersion): \(error.localizedDescription)"
             )
         }
-        NativeColumnCatalog.normalizeLegacyTypes(in: &document)
         let issues = document.validationIssues()
         guard issues.isEmpty else {
             throw ColumnConfigurationFileIssue(Self.issueSummary(issues))

@@ -1,4 +1,4 @@
-// Package metrics contains scheduler resource accounting and optional usage
+// Package metrics contains Pod resource accounting and optional usage
 // enrichment for Pods and Nodes.
 package metrics
 
@@ -118,88 +118,6 @@ func EffectivePodResources(pod *corev1.Pod) (requests, limits corev1.ResourceLis
 func AccountPod(pod *corev1.Pod, usage ResourceMeasurements) PodAccounting {
 	requests, limits := EffectivePodResources(pod)
 	return PodAccounting{Requests: requests, Limits: limits, Usage: usage.deepCopy()}
-}
-
-// NodeAccounting contains allocation totals for relevant Pods bound to a Node.
-// Capacity and Allocatable are copied from Node status. Requested and Limited
-// are summed independently for every exact resource key.
-type NodeAccounting struct {
-	Name        string
-	Capacity    corev1.ResourceList
-	Allocatable corev1.ResourceList
-	Requested   corev1.ResourceList
-	Limited     corev1.ResourceList
-	Usage       ResourceMeasurements
-	PodCount    int64
-}
-
-// UsageFor returns actual utilization for an exact resource name.
-func (a NodeAccounting) UsageFor(name corev1.ResourceName) Measurement {
-	return a.Usage.For(name)
-}
-
-// IsRelevantBoundPod reports whether a Pod still consumes scheduler allocation
-// on nodeName. Bound Pending, Running, and Unknown Pods are relevant; terminal
-// Succeeded and Failed Pods and unbound Pods are not. A terminating Pod remains
-// relevant until it becomes terminal or disappears from the API.
-func IsRelevantBoundPod(pod *corev1.Pod, nodeName string) bool {
-	if pod == nil || nodeName == "" || pod.Spec.NodeName != nodeName {
-		return false
-	}
-	return pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed
-}
-
-// AggregateNodes computes allocation for all supplied Nodes in one pass over
-// the Pods. Pods bound to an unknown Node are ignored.
-func AggregateNodes(nodes []*corev1.Node, pods []*corev1.Pod, usageByNode map[string]ResourceMeasurements) map[string]NodeAccounting {
-	result := make(map[string]NodeAccounting, len(nodes))
-	for _, node := range nodes {
-		if node == nil || node.Name == "" {
-			continue
-		}
-		result[node.Name] = NodeAccounting{
-			Name: node.Name, Capacity: node.Status.Capacity.DeepCopy(),
-			Allocatable: node.Status.Allocatable.DeepCopy(), Requested: make(corev1.ResourceList),
-			Limited: make(corev1.ResourceList), Usage: usageByNode[node.Name].deepCopy(),
-		}
-	}
-
-	for _, pod := range pods {
-		if pod == nil {
-			continue
-		}
-		accounting, found := result[pod.Spec.NodeName]
-		if !found || !IsRelevantBoundPod(pod, accounting.Name) {
-			continue
-		}
-		requests, limits := EffectivePodResources(pod)
-		addResourceList(accounting.Requested, requests)
-		addResourceList(accounting.Limited, limits)
-		accounting.PodCount++
-		result[accounting.Name] = accounting
-	}
-	return result
-}
-
-// AccountNode computes allocation for one Node.
-func AccountNode(node *corev1.Node, pods []*corev1.Pod, usage ResourceMeasurements) NodeAccounting {
-	if node == nil {
-		return NodeAccounting{Requested: corev1.ResourceList{}, Limited: corev1.ResourceList{}}
-	}
-	accounting := AggregateNodes([]*corev1.Node{node}, pods, map[string]ResourceMeasurements{node.Name: usage})
-	return accounting[node.Name]
-}
-
-func addResourceList(total, values corev1.ResourceList) {
-	for name, quantity := range values {
-		current, found := total[name]
-		if !found {
-			total[name] = quantity.DeepCopy()
-			continue
-		}
-		current.Add(quantity)
-		total[name] = current
-	}
 }
 
 var defaultAcceleratorSuffixes = [...]string{"/gpu", "/ppu", "/dcu"}

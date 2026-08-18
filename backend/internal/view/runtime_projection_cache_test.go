@@ -290,44 +290,6 @@ func TestRuntimeConcurrentCompatibleWarmOpensBothBypassAdmission(t *testing.T) {
 	}
 }
 
-func TestNodeAccountingDependencyDropsWarmPodProjection(t *testing.T) {
-	nodes := newScriptedResource()
-	pods := newScriptedResource()
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: &gvrResourceSource{
-			authority: "cluster-a",
-			clients: map[string]watcher.ListerWatcher{
-				"nodes": nodes,
-				"pods":  pods,
-			},
-		},
-		BatchDelay: time.Millisecond,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	podEntry := warmProjectionBudgetEntry("cluster-a", "pods", 4096)
-	podEntry.client = pods
-	admitWarmBudgetEntry(runtime, podEntry)
-	if podEntry.warmProjection == nil {
-		t.Fatal("Pod warm projection fixture was not retained")
-	}
-
-	nodeView, err := runtime.Open(openNodeView("session", "nodes", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer nodeView.Close()
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		_, warm := runtime.getWarmLocked(podEntry.key)
-		_, dependent := podEntry.dependents[nodeView]
-		return dependent && !warm && podEntry.warmProjection == nil
-	})
-}
-
 func TestRuntimeIncompatibleWarmProjectionUsesNormalProjection(t *testing.T) {
 	client := newScriptedResource()
 	var projectionCalls atomic.Int64
@@ -800,39 +762,6 @@ func TestRuntimeDifferentResourceReplacementCapturesAfterPeerClose(t *testing.T)
 	}
 }
 
-func TestRuntimeDifferentResourceReplacementDoesNotRetainRowsWithDependent(t *testing.T) {
-	services := newScriptedResource()
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: &gvrResourceSource{
-			authority: "cluster-a",
-			clients:   map[string]watcher.ListerWatcher{"services": services},
-		},
-		ReleaseDelay: time.Hour,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	oldEntry, replacing, peer := installTwoManualSubscriptions(t, runtime)
-	peer.Close()
-	dependent := &Subscription{}
-	runtime.mu.Lock()
-	oldEntry.dependents[dependent] = struct{}{}
-	runtime.mu.Unlock()
-
-	replacementRequest := openView("session", replacing.key.viewID, 2)
-	replacementRequest.Spec.Resource.Resource = "services"
-	replacementRequest.Spec.Resource.Kind = "Service"
-	replacement, err := runtime.Open(replacementRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer replacement.Close()
-	if oldEntry.warmProjection != nil {
-		t.Fatal("different-resource replacement retained rows on a dependency-active raw entry")
-	}
-}
-
 func TestWarmProjectionCaptureSkipsRawStoreAlreadyAtByteCeiling(t *testing.T) {
 	entry := newWarmBudgetEntry("cluster-a", "pods", string(make([]byte, 64<<10)))
 	rawBytes := entry.store.RetainedBytes()
@@ -1026,12 +955,11 @@ func installWarmProjectionFixture(
 			labels:      request.GetSpec().GetLabelSelector(),
 			fields:      request.GetSpec().GetFieldSelector(),
 		},
-		store:           store.New(),
-		client:          client,
-		state:           resourceIdle,
-		accountingReady: complete,
-		subscribers:     make(map[*Subscription]struct{}),
-		dependents:      make(map[*Subscription]struct{}),
+		store:            store.New(),
+		client:           client,
+		state:            resourceIdle,
+		snapshotComplete: complete,
+		subscribers:      make(map[*Subscription]struct{}),
 	}
 	for _, object := range objects {
 		entry.store.Upsert(object)
@@ -1096,12 +1024,11 @@ func installTwoManualSubscriptions(
 		t.Fatal(err)
 	}
 	entry := &resourceRuntime{
-		key:             resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
-		store:           store.New(),
-		state:           resourceIdle,
-		accountingReady: true,
-		subscribers:     make(map[*Subscription]struct{}),
-		dependents:      make(map[*Subscription]struct{}),
+		key:              resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
+		store:            store.New(),
+		state:            resourceIdle,
+		snapshotComplete: true,
+		subscribers:      make(map[*Subscription]struct{}),
 	}
 	entry.store.Upsert(object)
 	entry.store.SetResourceVersion("rv")

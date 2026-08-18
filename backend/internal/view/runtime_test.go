@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -264,7 +263,7 @@ func TestRuntimeAcceptsMatchingLateBatchWhilePipelineStopping(t *testing.T) {
 	entry := &resourceRuntime{
 		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
 		store: store.New(), client: client, state: resourceStopping, runNumber: 9,
-		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+		subscribers: make(map[*Subscription]struct{}),
 	}
 	subscription := newSubscription(viewKey{sessionID: "session", viewID: "view"}, 1, projector, time.Hour, 100, 100)
 	subscription.resource = entry
@@ -540,9 +539,9 @@ func TestRuntimeCancelledWarmRelistReopensWithForcedList(t *testing.T) {
 		return true
 	})
 	if interrupted.Complete || interrupted.ResourceVersion != "" ||
-		interrupted.Value.store.ResourceVersion() != "" || interrupted.Value.accountingReady {
+		interrupted.Value.store.ResourceVersion() != "" || interrupted.Value.snapshotComplete {
 		t.Fatalf("interrupted relist admitted as complete: %#v, storeRV=%q ready=%t",
-			interrupted, interrupted.Value.store.ResourceVersion(), interrupted.Value.accountingReady)
+			interrupted, interrupted.Value.store.ResourceVersion(), interrupted.Value.snapshotComplete)
 	}
 
 	client.mu.Lock()
@@ -694,7 +693,7 @@ func TestRuntimeLastSynchronizedSurvivesWarmResumeRelistAndWatch(t *testing.T) {
 		defer runtime.mu.Unlock()
 		return third.resource.lastStatus.Phase == watcher.PhaseListing &&
 			third.resource.lastStatus.LastSynchronized.Equal(watchedAt) &&
-			third.resource.store.ResourceVersion() == "" && !third.resource.accountingReady
+			third.resource.store.ResourceVersion() == "" && !third.resource.snapshotComplete
 	})
 	time.Sleep(time.Millisecond)
 	close(relistGate)
@@ -1774,7 +1773,7 @@ func TestRuntimeWarmOpenProjectionDoesNotHoldLifecycleMutex(t *testing.T) {
 	entry := &resourceRuntime{
 		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
 		store: store.New(), client: client,
-		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+		subscribers: make(map[*Subscription]struct{}),
 	}
 	entry.store.Upsert(pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}))
 	entry.store.SetResourceVersion("rv-warm")
@@ -1832,7 +1831,7 @@ func TestRuntimeOpenSealsInitialSnapshotAndCatchesUpAfterProjectionRace(t *testi
 	entry := &resourceRuntime{
 		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
 		store: store.New(), client: client, state: resourceRunning, runNumber: 7,
-		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+		subscribers: make(map[*Subscription]struct{}),
 	}
 	entry.store.Upsert(pod("uid-old", "ns", "old", "Running", 0, nil, time.Time{}))
 	entry.store.SetResourceVersion("rv-old")
@@ -1906,8 +1905,8 @@ func TestRuntimeOpenDeliversDeleteRaceAfterSealedSnapshot(t *testing.T) {
 	entry := &resourceRuntime{
 		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
 		store: store.New(), client: client, state: resourceRunning, runNumber: 5,
-		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
-		accountingReady: true,
+		subscribers:      make(map[*Subscription]struct{}),
+		snapshotComplete: true,
 	}
 	entry.store.Upsert(pod("uid-delete", "ns", "delete", "Running", 0, nil, time.Time{}))
 	entry.store.SetResourceVersion("rv-before")
@@ -1980,7 +1979,7 @@ func TestRuntimeOpenCompletesUnderContinuousWatchChurn(t *testing.T) {
 	entry := &resourceRuntime{
 		key:   resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods", namespace: "ns"},
 		store: store.New(), client: client, state: resourceRunning, runNumber: 11,
-		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
+		subscribers: make(map[*Subscription]struct{}),
 	}
 	entry.store.Upsert(pod("uid-base", "ns", "base", "Running", 0, nil, time.Time{}))
 	entry.store.SetResourceVersion("rv-base")
@@ -2431,7 +2430,7 @@ func TestRuntimeMetricsFailureKeepsBaseRows(t *testing.T) {
 	}
 }
 
-func TestRuntimeDefaultNodeUsageStartsAccountingWithoutBlockingBaseRows(t *testing.T) {
+func TestRuntimeDefaultNodeUsageDoesNotOpenPodResource(t *testing.T) {
 	t.Parallel()
 	nodes := newScriptedResource()
 	nodes.listPages = []*unstructured.UnstructuredList{listPage(
@@ -2442,15 +2441,6 @@ func TestRuntimeDefaultNodeUsageStartsAccountingWithoutBlockingBaseRows(t *testi
 		),
 	)}
 	pods := newScriptedResource()
-	podGate := make(chan struct{})
-	pods.beforeListPage = map[int]chan struct{}{0: podGate}
-	bound := pod("pod-uid", "ns", "api", "Running", 0, nil, time.Time{})
-	bound.Object["spec"].(map[string]any)["nodeName"] = "node-a"
-	bound.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
-		"requests": map[string]any{"cpu": "500m"},
-		"limits":   map[string]any{"cpu": "1"},
-	}
-	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "", bound)}
 	runtime, err := NewRuntime(RuntimeConfig{
 		Source: &gvrResourceSource{authority: "cluster-a", clients: map[string]watcher.ListerWatcher{
 			"nodes": nodes, "pods": pods,
@@ -2470,550 +2460,17 @@ func TestRuntimeDefaultNodeUsageStartsAccountingWithoutBlockingBaseRows(t *testi
 	}
 	defer subscription.Close()
 
-	// The Pod dependency is deliberately blocked. The default Node row and its
-	// allocatable CPU value must still arrive independently.
 	base := waitForRow(t, subscription, "node-uid")
 	baseCPU := cellByID(base, NodeCPUUsageColumn)
-	if baseCPU == nil || baseCPU.GetDisplayText() == "Calculating…" ||
-		baseCPU.GetUsage().GetCapacity() != 4 || baseCPU.GetUsage().Requested != nil ||
-		strings.Contains(baseCPU.GetTooltip(), "Effective request:") {
-		t.Fatalf("base default Node CPU before Pod accounting = %#v", baseCPU)
+	if baseCPU == nil || baseCPU.GetUsage().GetCapacity() != 4 ||
+		baseCPU.GetUsage().Requested != nil || baseCPU.GetUsage().Limit != nil {
+		t.Fatalf("default Node CPU included cross-resource accounting: %#v", baseCPU)
 	}
-	eventually(t, time.Second, func() bool { return pods.listCalls.Load() == 1 })
-
-	close(podGate)
-	updated := waitForNodeAccounting(t, subscription, "node-uid", NodeCPUUsageColumn, 0.5)
-	usage := updated.GetUsage()
-	if usage.GetLimit() != 1 || usage.GetCapacity() != 4 ||
-		!strings.Contains(updated.GetTooltip(), "Effective request: 500m") ||
-		!strings.Contains(updated.GetTooltip(), "Effective limit: 1") {
-		t.Fatalf("default Node CPU after Pod accounting = %#v", updated)
+	if got := pods.listCalls.Load(); got != 0 {
+		t.Fatalf("default Node view opened %d Pod LIST calls", got)
 	}
-}
-
-func TestComputeNodeAccountingMarksDecodeFailuresIncompleteAndKeepsValidTotals(t *testing.T) {
-	t.Parallel()
-	validNode := nodeObject(
-		"node-uid", "node-a",
-		corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8")},
-	)
-	invalidNode := nodeObject("invalid-node-uid", "node-b", nil, nil)
-	invalidNode.Object["spec"] = map[string]any{"unschedulable": "not-a-boolean"}
-	validPod := pod("pod-uid", "ns", "api", "Running", 0, nil, time.Time{})
-	validPod.Object["spec"].(map[string]any)["nodeName"] = "node-a"
-	validPod.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
-		"requests": map[string]any{"cpu": "500m"},
-	}
-	invalidPod := pod("invalid-pod-uid", "ns", "invalid", "Running", 0, nil, time.Time{})
-	invalidPod.Object["spec"].(map[string]any)["nodeName"] = []any{"node-a"}
-
-	snapshot := computeNodeAccounting(
-		[]*unstructured.Unstructured{validNode, invalidNode},
-		[]*unstructured.Unstructured{validPod, invalidPod},
-		metrics.AcceleratorConfig{},
-		true,
-		nil,
-	)
-	if snapshot.Ready || snapshot.Err == nil {
-		t.Fatalf("decode failure accounting state = ready %t, error %v", snapshot.Ready, snapshot.Err)
-	}
-	var decodeErr *nodeAccountingDecodeError
-	if !errors.As(snapshot.Err, &decodeErr) || decodeErr.nodes != 1 || decodeErr.pods != 1 {
-		t.Fatalf("decode failure = %#v", snapshot.Err)
-	}
-	accounting, found := snapshot.Nodes["node-a"]
-	request := accounting.Requested[corev1.ResourceCPU]
-	if !found || len(snapshot.Nodes) != 1 || accounting.PodCount != 1 || request.MilliValue() != 500 {
-		t.Fatalf("valid partial accounting was discarded: %#v", snapshot.Nodes)
-	}
-
-	projector, err := NewProjector(ProjectionSpec{
-		ClusterSessionID: "session-a",
-		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		NodeAccounting:   snapshot,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	row, visible := projector.ProjectOne(validNode)
-	if !visible {
-		t.Fatal("valid base Node row was hidden by an accounting decode failure")
-	}
-	cpu := cellByID(row, NodeCPUUsageColumn)
-	if cpu == nil || cpu.GetUsage().GetCapacity() != 4 || cpu.GetUsage().Requested != nil ||
-		!strings.Contains(cpu.GetTooltip(), "scheduler accounting is incomplete") {
-		t.Fatalf("base Node usage did not surface incomplete accounting safely: %#v", cpu)
-	}
-}
-
-func TestRuntimeNodeAccountingIsAsyncSharedAndUpdatesFromPods(t *testing.T) {
-	t.Parallel()
-	nodes := newScriptedResource()
-	node := nodeObject(
-		"node-uid", "node-a",
-		corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4"), corev1.ResourcePods: resource.MustParse("100")},
-		corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8"), corev1.ResourcePods: resource.MustParse("110")},
-	)
-	nodes.listPages = []*unstructured.UnstructuredList{listPage("nodes-rv", "", node)}
-	pods := newScriptedResource()
-	podGate := make(chan struct{})
-	pods.beforeListPage = map[int]chan struct{}{0: podGate}
-	bound := pod("pod-uid", "ns", "api", "Running", 0, nil, time.Time{})
-	bound.Object["spec"].(map[string]any)["nodeName"] = "node-a"
-	bound.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
-		"requests": map[string]any{"cpu": "500m"}, "limits": map[string]any{"cpu": "1"},
-	}
-	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "", bound)}
-	source := &gvrResourceSource{authority: "cluster-a", clients: map[string]watcher.ListerWatcher{
-		"nodes": nodes, "pods": pods,
-	}}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: source, ReleaseDelay: 25 * time.Millisecond, BatchDelay: time.Millisecond,
-		PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	var computations atomic.Int64
-	runtime.nodeAccountingComputer = func(
-		nodeObjects, podObjects []*unstructured.Unstructured,
-		accelerators metrics.AcceleratorConfig,
-		ready bool,
-		dependencyErr error,
-	) NodeAccountingSnapshot {
-		computations.Add(1)
-		return computeNodeAccounting(nodeObjects, podObjects, accelerators, ready, dependencyErr)
-	}
-
-	first, err := runtime.Open(openNodeView("session-1", "nodes-1", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := waitForRow(t, first, "node-uid")
-	if got := cellByID(base, NodeCPURequestsColumn).GetDisplayText(); got != "Calculating…" {
-		t.Fatalf("base Node accounting = %q", got)
-	}
-	second, err := runtime.Open(openNodeView("session-2", "nodes-2", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		entry := runtime.resources[resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods"}]
-		return pods.listCalls.Load() == 1 && entry != nil && len(entry.dependents) == 2
-	})
-	close(podGate)
-	updated := waitForNodeAccounting(t, first, "node-uid", NodeCPURequestsColumn, 0.5)
-	if updated.GetUsage().GetCapacity() != 4 {
-		t.Fatalf("CPU accounting = %#v", updated.GetUsage())
-	}
-	waitForNodeAccounting(t, second, "node-uid", NodeCPURequestsColumn, 0.5)
-	if got := computations.Load(); got != 1 {
-		t.Fatalf("initial accounting computations = %d, want one shared revision", got)
-	}
-	if pods.watchCalls.Load() != 1 {
-		t.Fatalf("Pod watch calls = %d, want shared watcher", pods.watchCalls.Load())
-	}
-
-	added := pod("pod-2", "ns", "worker", "Running", 0, nil, time.Time{})
-	added.Object["spec"].(map[string]any)["nodeName"] = "node-a"
-	added.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
-		"requests": map[string]any{"cpu": "250m"},
-	}
-	added.SetResourceVersion("pods-rv-2")
-	pods.lastWatch().channel <- watch.Event{Type: watch.Added, Object: added}
-	waitForNodeAccounting(t, first, "node-uid", NodeCPURequestsColumn, 0.75)
-	eventually(t, time.Second, func() bool { return computations.Load() == 2 })
-	terminal := bound.DeepCopy()
-	terminal.SetResourceVersion("pods-rv-3")
-	terminal.Object["status"].(map[string]any)["phase"] = "Succeeded"
-	pods.lastWatch().channel <- watch.Event{Type: watch.Modified, Object: terminal}
-	waitForNodeAccounting(t, first, "node-uid", NodeCPURequestsColumn, 0.25)
-	eventually(t, time.Second, func() bool { return computations.Load() == 3 })
-
-	first.Close()
-	if pods.lastWatch().stopped.Load() {
-		t.Fatal("Pod watcher stopped while another Node view depended on it")
-	}
-	second.Close()
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		return pods.lastWatch().stopped.Load() && len(runtime.nodeAccounting) == 0
-	})
-}
-
-func TestRuntimeVisiblePodViewRetainsNodeAccountingWatcher(t *testing.T) {
-	t.Parallel()
-	nodes := newScriptedResource()
-	nodes.listPages = []*unstructured.UnstructuredList{listPage(
-		"nodes-rv", "", nodeObject(
-			"node-uid", "node-a", corev1.ResourceList{corev1.ResourcePods: resource.MustParse("100")},
-			corev1.ResourceList{corev1.ResourcePods: resource.MustParse("110")},
-		),
-	)}
-	pods := newScriptedResource()
-	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "")}
-	source := &gvrResourceSource{authority: "cluster-a", clients: map[string]watcher.ListerWatcher{
-		"nodes": nodes, "pods": pods,
-	}}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: source, ReleaseDelay: 20 * time.Millisecond, BatchDelay: time.Millisecond,
-		PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	nodeView, err := runtime.Open(openNodeView("session", "nodes", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, time.Second, func() bool { return pods.watchCalls.Load() == 1 })
-	podRequest := openView("session", "pods", 1)
-	podRequest.Spec.NamespaceScope = &kmgrv1.NamespaceScope{AllNamespaces: true}
-	podView, err := runtime.Open(podRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		return len(runtime.resources[resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods"}].subscribers) == 1
-	})
-	if pods.watchCalls.Load() != 1 {
-		t.Fatalf("visible Pod view opened a second watch: %d", pods.watchCalls.Load())
-	}
-	nodeView.Close()
-	time.Sleep(30 * time.Millisecond)
-	if pods.lastWatch().stopped.Load() {
-		t.Fatal("visible Pod view did not retain shared Pod watcher")
-	}
-	podView.Close()
-	eventually(t, time.Second, func() bool { return pods.lastWatch().stopped.Load() })
-}
-
-func TestRuntimeNodeAccountingDoesNotHoldRuntimeLockWhileComputing(t *testing.T) {
-	t.Parallel()
-	nodes := newScriptedResource()
-	nodes.listPages = []*unstructured.UnstructuredList{listPage(
-		"nodes-rv", "", nodeObject(
-			"node-uid", "node-a",
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		),
-	)}
-	pods := newScriptedResource()
-	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "")}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: &gvrResourceSource{authority: "cluster-a", clients: map[string]watcher.ListerWatcher{
-			"nodes": nodes, "pods": pods,
-		}},
-		ReleaseDelay: time.Hour, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	computeStarted := make(chan struct{})
-	releaseCompute := make(chan struct{})
-	var once sync.Once
-	runtime.nodeAccountingComputer = func(
-		nodeObjects, podObjects []*unstructured.Unstructured,
-		accelerators metrics.AcceleratorConfig,
-		ready bool,
-		dependencyErr error,
-	) NodeAccountingSnapshot {
-		once.Do(func() { close(computeStarted) })
-		<-releaseCompute
-		return computeNodeAccounting(nodeObjects, podObjects, accelerators, ready, dependencyErr)
-	}
-
-	subscription, err := runtime.Open(openNodeView("session", "nodes", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-computeStarted:
-	case <-time.After(time.Second):
-		t.Fatal("accounting computation did not start")
-	}
-
-	canceled := make(chan bool, 1)
-	go func() { canceled <- runtime.Cancel("session", "nodes", 1) }()
-	select {
-	case ok := <-canceled:
-		if !ok {
-			t.Fatal("Cancel did not find the subscription")
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Cancel blocked behind Node accounting computation")
-	}
-	close(releaseCompute)
-	select {
-	case <-subscription.done:
-	case <-time.After(time.Second):
-		t.Fatal("subscription did not close")
-	}
-}
-
-func TestRuntimeNodeAccountingCoalescesBurstAcrossManyDependents(t *testing.T) {
-	t.Parallel()
-	nodes := newScriptedResource()
-	nodes.listPages = []*unstructured.UnstructuredList{listPage(
-		"nodes-rv", "", nodeObject(
-			"node-uid", "node-a",
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		),
-	)}
-	pods := newScriptedResource()
-	podGate := make(chan struct{})
-	pods.beforeListPage = map[int]chan struct{}{0: podGate}
-	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "")}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: &gvrResourceSource{authority: "cluster-a", clients: map[string]watcher.ListerWatcher{
-			"nodes": nodes, "pods": pods,
-		}},
-		ReleaseDelay: 10 * time.Millisecond, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	computeStarted := make(chan struct{})
-	releaseFirstCompute := make(chan struct{})
-	var computations atomic.Int64
-	runtime.nodeAccountingComputer = func(
-		nodeObjects, podObjects []*unstructured.Unstructured,
-		accelerators metrics.AcceleratorConfig,
-		ready bool,
-		dependencyErr error,
-	) NodeAccountingSnapshot {
-		if computations.Add(1) == 1 {
-			close(computeStarted)
-			<-releaseFirstCompute
-		}
-		return computeNodeAccounting(nodeObjects, podObjects, accelerators, ready, dependencyErr)
-	}
-
-	const dependentCount = 12
-	views := make([]*Subscription, 0, dependentCount)
-	for index := range dependentCount {
-		view, openErr := runtime.Open(openNodeView(fmt.Sprintf("session-%d", index), fmt.Sprintf("nodes-%d", index), 1))
-		if openErr != nil {
-			t.Fatal(openErr)
-		}
-		views = append(views, view)
-	}
-	waitForSnapshotUID(t, views[0], "node-uid")
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		entry := runtime.resources[resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods"}]
-		return entry != nil && len(entry.dependents) == dependentCount
-	})
-	close(podGate)
-	select {
-	case <-computeStarted:
-	case <-time.After(time.Second):
-		t.Fatal("initial shared accounting computation did not start")
-	}
-
-	const burst = 20
-	for index := range burst {
-		value := pod(fmt.Sprintf("pod-%d", index), "ns", fmt.Sprintf("pod-%d", index), "Running", 0, nil, time.Time{})
-		value.Object["spec"].(map[string]any)["nodeName"] = "node-a"
-		value.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"] = map[string]any{
-			"requests": map[string]any{"cpu": "10m"},
-		}
-		value.SetResourceVersion(fmt.Sprintf("pods-rv-%d", index+1))
-		pods.lastWatch().channel <- watch.Event{Type: watch.Added, Object: value}
-	}
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		entry := runtime.resources[resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods"}]
-		work := runtime.nodeAccounting[nodeAccountingKey{nodes: views[0].resource, pods: entry}]
-		return entry != nil && entry.store.Len() == burst && work != nil && work.revision >= burst+1
-	})
-	close(releaseFirstCompute)
-	for _, view := range views {
-		waitForNodeAccounting(t, view, "node-uid", NodeCPURequestsColumn, 0.2)
-	}
-	if got := computations.Load(); got != 2 {
-		t.Fatalf("burst accounting computations = %d, want initial plus one coalesced revision", got)
-	}
-
-	for _, view := range views {
-		view.Close()
-	}
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		return pods.lastWatch().stopped.Load() && len(runtime.nodeAccounting) == 0
-	})
-}
-
-func TestRuntimeNodeAccountingConstructionErrorLeavesCalculating(t *testing.T) {
-	t.Parallel()
-	nodes := newScriptedResource()
-	nodes.listPages = []*unstructured.UnstructuredList{listPage(
-		"nodes-rv", "", nodeObject(
-			"node-uid", "node-a",
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		),
-	)}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source:       &nilPodResourceSource{authority: "cluster-a", nodes: nodes},
-		ReleaseDelay: time.Hour, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-
-	subscription, err := runtime.Open(openNodeView("session", "nodes", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	row := waitForNodeAccountingUnavailable(t, subscription, "node-uid", NodeCPURequestsColumn)
-	cell := cellByID(row, NodeCPURequestsColumn)
-	if cell.GetDisplayText() == "Calculating…" || !strings.Contains(cell.GetTooltip(), "unavailable") {
-		t.Fatalf("construction failure cell = %#v", cell)
-	}
-}
-
-func TestRuntimeLateNodeDependentReusesPublishedAccountingRevision(t *testing.T) {
-	t.Parallel()
-	nodes := newScriptedResource()
-	nodes.listPages = []*unstructured.UnstructuredList{listPage(
-		"nodes-rv", "", nodeObject(
-			"node-uid", "node-a",
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		),
-	)}
-	pods := newScriptedResource()
-	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "")}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: &gvrResourceSource{authority: "cluster-a", clients: map[string]watcher.ListerWatcher{
-			"nodes": nodes, "pods": pods,
-		}},
-		ReleaseDelay: time.Hour, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	var computations atomic.Int64
-	runtime.nodeAccountingComputer = func(
-		nodeObjects, podObjects []*unstructured.Unstructured,
-		accelerators metrics.AcceleratorConfig,
-		ready bool,
-		dependencyErr error,
-	) NodeAccountingSnapshot {
-		computations.Add(1)
-		return computeNodeAccounting(nodeObjects, podObjects, accelerators, ready, dependencyErr)
-	}
-
-	first, err := runtime.Open(openNodeView("session-1", "nodes-1", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer first.Close()
-	waitForNodeAccounting(t, first, "node-uid", NodeCPURequestsColumn, 0)
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		for _, work := range runtime.nodeAccounting {
-			if work != nil && !work.running && work.published != nil && work.published.revision == work.revision {
-				return true
-			}
-		}
-		return false
-	})
-	before := computations.Load()
-
-	second, err := runtime.Open(openNodeView("session-2", "nodes-2", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer second.Close()
-	waitForNodeAccounting(t, second, "node-uid", NodeCPURequestsColumn, 0)
-	eventually(t, time.Second, func() bool {
-		runtime.mu.Lock()
-		defer runtime.mu.Unlock()
-		entry := runtime.resources[resourceKey{authorityID: "cluster-a", version: "v1", resource: "pods"}]
-		return entry != nil && len(entry.dependents) == 2
-	})
-	if got := computations.Load(); got != before {
-		t.Fatalf("late dependent recomputed published accounting revision: before=%d after=%d", before, got)
-	}
-	if got := pods.watchCalls.Load(); got != 1 {
-		t.Fatalf("late dependent Pod watches = %d, want 1", got)
-	}
-}
-
-func TestRuntimeNodeAccountingWorkerDropsLateResultAfterClose(t *testing.T) {
-	t.Parallel()
-	nodes := newScriptedResource()
-	nodes.listPages = []*unstructured.UnstructuredList{listPage(
-		"nodes-rv", "", nodeObject(
-			"node-uid", "node-a",
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-			corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		),
-	)}
-	pods := newScriptedResource()
-	pods.listPages = []*unstructured.UnstructuredList{listPage("pods-rv", "")}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: &gvrResourceSource{authority: "cluster-a", clients: map[string]watcher.ListerWatcher{
-			"nodes": nodes, "pods": pods,
-		}},
-		ReleaseDelay: time.Hour, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	computeStarted := make(chan struct{})
-	releaseCompute := make(chan struct{})
-	computeDone := make(chan struct{})
-	runtime.nodeAccountingComputer = func(
-		nodeObjects, podObjects []*unstructured.Unstructured,
-		accelerators metrics.AcceleratorConfig,
-		ready bool,
-		dependencyErr error,
-	) NodeAccountingSnapshot {
-		close(computeStarted)
-		<-releaseCompute
-		defer close(computeDone)
-		return computeNodeAccounting(nodeObjects, podObjects, accelerators, ready, dependencyErr)
-	}
-
-	if _, err := runtime.Open(openNodeView("session", "nodes", 1)); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-computeStarted:
-	case <-time.After(time.Second):
-		t.Fatal("accounting computation did not start")
-	}
-	runtime.Close()
-	close(releaseCompute)
-	select {
-	case <-computeDone:
-	case <-time.After(time.Second):
-		t.Fatal("accounting computation did not finish after runtime close")
-	}
-	runtime.mu.Lock()
-	defer runtime.mu.Unlock()
-	if len(runtime.nodeAccounting) != 0 || len(runtime.views) != 0 {
-		t.Fatalf("late worker repopulated closed runtime: works=%d views=%d", len(runtime.nodeAccounting), len(runtime.views))
+	if got := pods.watchCalls.Load(); got != 0 {
+		t.Fatalf("default Node view opened %d Pod WATCH calls", got)
 	}
 }
 
@@ -3245,7 +2702,7 @@ func openNodeView(sessionID, viewID string, generation uint64) *kmgrv1.OpenViewR
 		Generation: generation,
 		Spec: &kmgrv1.ViewSpec{
 			Resource:  &kmgrv1.ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-			ColumnIds: []string{"name", NodeCPURequestsColumn, NodePodCountColumn},
+			ColumnIds: []string{"name", NodeCPUUsageColumn, NodeMemoryUsageColumn},
 		},
 	}
 }
@@ -3350,78 +2807,6 @@ func waitForUsageAvailable(
 		}
 	}
 	t.Fatalf("never observed available usage for %q/%q", uid, columnID)
-	return nil
-}
-
-func waitForNodeAccounting(
-	t *testing.T,
-	subscription *Subscription,
-	uid, columnID string,
-	want float64,
-) *kmgrv1.Cell {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		events, err := subscription.Next(ctx)
-		cancel()
-		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatal(err)
-		}
-		if err == nil {
-			if acknowledgeErr := subscription.AcknowledgeDelivery(events); acknowledgeErr != nil {
-				t.Fatal(acknowledgeErr)
-			}
-		}
-		for _, event := range events {
-			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
-				if row.GetIdentity().GetUid() != uid {
-					continue
-				}
-				cell := cellByID(row, columnID)
-				if cell.GetUsage().GetRequested() == want && cell.GetDisplayText() != "Calculating…" {
-					return cell
-				}
-			}
-		}
-	}
-	t.Fatalf("never observed scheduler accounting %q/%q = %v", uid, columnID, want)
-	return nil
-}
-
-func waitForNodeAccountingUnavailable(
-	t *testing.T,
-	subscription *Subscription,
-	uid, columnID string,
-) *kmgrv1.ResourceRow {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		events, err := subscription.Next(ctx)
-		cancel()
-		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatal(err)
-		}
-		if err == nil {
-			if acknowledgeErr := subscription.AcknowledgeDelivery(events); acknowledgeErr != nil {
-				t.Fatal(acknowledgeErr)
-			}
-		}
-		for _, event := range events {
-			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
-				if row.GetIdentity().GetUid() != uid {
-					continue
-				}
-				cell := cellByID(row, columnID)
-				if cell.GetDisplayText() != "Calculating…" &&
-					strings.Contains(cell.GetTooltip(), "unavailable") {
-					return row
-				}
-			}
-		}
-	}
-	t.Fatalf("never observed unavailable scheduler accounting for %q/%q", uid, columnID)
 	return nil
 }
 

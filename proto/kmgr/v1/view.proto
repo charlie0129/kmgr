@@ -112,6 +112,28 @@ message ViewStatus {
   string resource_version_hint = 6;
 }
 
+// ViewSchema carries resource-specific columns discovered from the same
+// Kubernetes stream as the rows. For custom resources these definitions come
+// from metav1.Table; no secondary discovery LIST/WATCH is opened.
+message ResourceColumnSchema {
+  string id = 1;
+  string title = 2;
+  // Uses the ColumnResultType wire spellings used by columns.yaml.
+  string result_type = 3;
+  string alignment = 4;
+  double width = 5;
+  bool default_visible = 6;
+  int32 priority = 7;
+  string format = 8;
+  string description = 9;
+}
+
+message ViewSchema {
+  repeated ResourceColumnSchema columns = 1;
+  bool server_table = 2;
+  string revision = 3;
+}
+
 message SnapshotChunk {
   repeated ResourceRow rows = 1;
   bool first_chunk = 2;
@@ -158,6 +180,7 @@ message ViewEvent {
     ViewStatus status = 4;
     StructuredError error = 5;
     ViewReconciled reconciled = 6;
+    ViewSchema schema = 7;
   }
 }
 

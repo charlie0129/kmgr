@@ -11,8 +11,6 @@ public protocol ObjectDetailRPC: Sendable {
         timeout: Duration,
         receive: @escaping @Sendable (Kmgr_V1_ObjectEvent) throws -> Void
     ) async throws
-    func getEvents(_ request: Kmgr_V1_GetEventsRequest, timeout: Duration) async throws
-        -> Kmgr_V1_GetEventsResponse
     func getRelationships(
         _ request: Kmgr_V1_GetRelationshipsRequest,
         timeout: Duration
@@ -68,13 +66,6 @@ public struct EngineObjectDetailRPC: ObjectDetailRPC {
         ) { response in
             for try await event in response.messages { try receive(event) }
         }
-    }
-
-    public func getEvents(
-        _ request: Kmgr_V1_GetEventsRequest,
-        timeout: Duration
-    ) async throws -> Kmgr_V1_GetEventsResponse {
-        try await connection.objectClient().getEvents(request, options: callOptions(timeout))
     }
 
     public func getRelationships(
@@ -271,35 +262,6 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                 }
             }
             continuation.onTermination = { @Sendable _ in task.cancel() }
-        }
-    }
-
-    public func getEvents(
-        identity: ResourceIdentity,
-        limit: UInt32 = 200
-    ) async throws -> [KubernetesObjectEvent] {
-        var request = Kmgr_V1_GetEventsRequest()
-        request.context = context(identity.clusterSessionID, timeout: unaryTimeout)
-        request.identity = Self.protoIdentity(identity)
-        request.limit = max(1, min(limit, 500))
-        do {
-            let response = try await rpc.getEvents(request, timeout: unaryTimeout)
-            try Self.validate(response.requestID, expected: request.context.requestID)
-            if response.hasError { throw EngineClusterContextProvider.issue(from: response.error) }
-            return response.events.map { value in
-                KubernetesObjectEvent(
-                    identity: Self.identity(value.identity),
-                    type: value.type,
-                    reason: value.reason,
-                    message: value.message,
-                    firstObservedAt: Self.date(value.firstObservedUnixMs),
-                    lastObservedAt: Self.date(value.lastObservedUnixMs),
-                    count: value.count,
-                    reportingController: value.reportingController
-                )
-            }
-        } catch {
-            throw Self.issue(error, operation: "get object events")
         }
     }
 

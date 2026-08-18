@@ -193,8 +193,8 @@ func TestStreamViewAcknowledgesOnlyCompleteSuccessfulSendBatch(t *testing.T) {
 	}
 	entry := &resourceRuntime{
 		key: key, store: store.New(), client: client, state: resourceRunning,
-		subscribers: make(map[*Subscription]struct{}), dependents: make(map[*Subscription]struct{}),
-		accountingReady: true,
+		subscribers:      make(map[*Subscription]struct{}),
+		snapshotComplete: true,
 	}
 	entry.store.Upsert(pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}))
 	entry.store.SetResourceVersion("rv-1")

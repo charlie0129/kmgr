@@ -590,7 +590,7 @@ func (r *Runtime) finishTransientView(
 	}
 	r.mu.Lock()
 	if r.closed || r.resources[view.key] != view || view.transientSearchList != nil ||
-		len(view.subscribers)+len(view.dependents) == 0 {
+		len(view.subscribers) == 0 {
 		if !r.closed && r.resources[view.key] == view && view.transientSearchList == nil {
 			r.scheduleReleaseLocked(view)
 		}

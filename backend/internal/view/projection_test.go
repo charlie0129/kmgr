@@ -208,7 +208,7 @@ func TestProjectorFiltersAndSortsTypedValues(t *testing.T) {
 	if !slices.Equal(got, []string{"uid-b", "uid-a"}) {
 		t.Fatalf("UID order = %v", got)
 	}
-	if rows[0].GetCells()[2].GetNumberValue() != 9 {
+	if rows[0].GetCells()[2].GetIntegerValue() != 9 {
 		t.Fatalf("restart typed value = %v", rows[0].GetCells()[2].GetTypedValue())
 	}
 	if rows[0].GetCells()[4].GetTimestampUnixMs() == 0 {
@@ -244,7 +244,7 @@ func TestProjectionSliceReadersDoNotMutateOrAliasRawObjects(t *testing.T) {
 	if ready := cellByID(podRow, "ready"); ready.GetDisplayText() != "1/1" {
 		t.Fatalf("projected ready cell aliased raw status: %#v", ready)
 	}
-	if restarts := cellByID(podRow, "restarts"); restarts.GetNumberValue() != 7 {
+	if restarts := cellByID(podRow, "restarts"); restarts.GetIntegerValue() != 7 {
 		t.Fatalf("projected restart cell aliased raw status: %#v", restarts)
 	}
 	if phase := cellByID(podRow, "status"); phase.GetDisplayText() != "Running" {
@@ -321,7 +321,7 @@ func TestProjectorShowsNodeSchedulingRolesTaintsAndDualStackIPs(t *testing.T) {
 	projector, err := NewProjector(ProjectionSpec{
 		ClusterSessionID: "session-a",
 		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		ColumnIDs:        []string{"status", "roles", "taints", "ip"},
+		ColumnIDs:        []string{"status", "roles", "taints", "internal-ip"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -339,35 +339,18 @@ func TestProjectorShowsNodeSchedulingRolesTaintsAndDualStackIPs(t *testing.T) {
 		t.Fatalf("Node roles = %#v", roles)
 	}
 	if taints := cellByID(row, "taints"); taints.GetDisplayText() != "2" ||
-		taints.GetNumberValue() != 2 {
+		taints.GetIntegerValue() != 2 {
 		t.Fatalf("Node taints = %#v", taints)
 	}
-	if ip := cellByID(row, "ip"); ip.GetDisplayText() != "fd00::10, 10.0.0.10" ||
+	if ip := cellByID(row, "internal-ip"); ip.GetDisplayText() != "10.0.0.10, fd00::10" ||
 		strings.Contains(ip.GetDisplayText(), "203.0.113.10") ||
-		!strings.Contains(ip.GetTooltip(), "InternalIP") {
+		ip.GetStringValue() != "10.0.0.10, fd00::10" {
 		t.Fatalf("Node IP = %#v", ip)
 	}
-	for _, columnID := range []string{"roles", "taints", "ip"} {
+	for _, columnID := range []string{"roles", "taints", "internal-ip"} {
 		if !slices.Contains(defaultColumns(projector.spec.Resource), columnID) {
 			t.Errorf("default Node columns omit %q", columnID)
 		}
-	}
-}
-
-func TestNodeIPAddressesFallBackToUniqueExternalAddresses(t *testing.T) {
-	t.Parallel()
-	object := &unstructured.Unstructured{Object: map[string]any{
-		"status": map[string]any{"addresses": []any{
-			map[string]any{"type": "Hostname", "address": "worker-a"},
-			map[string]any{"type": "ExternalIP", "address": "203.0.113.10"},
-			map[string]any{"type": "ExternalIP", "address": "2001:db8::10"},
-			map[string]any{"type": "ExternalIP", "address": "203.0.113.10"},
-		}},
-	}}
-	addresses, addressType := nodeIPAddresses(object)
-	if addressType != string(corev1.NodeExternalIP) ||
-		!slices.Equal(addresses, []string{"203.0.113.10", "2001:db8::10"}) {
-		t.Fatalf("external fallback = %q %v", addressType, addresses)
 	}
 }
 
@@ -405,13 +388,14 @@ func TestProjectionSliceReadersPreserveMalformedFieldFallbacks(t *testing.T) {
 	}
 }
 
-func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
+func TestProjectorProjectsCuratedWorkloadCounts(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name         string
 		resource     ResourceType
 		spec         map[string]any
 		status       map[string]any
+		columnID     string
 		want         string
 		wantSeverity kmgrv1.CellSeverity
 	}{
@@ -426,7 +410,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"availableReplicas": int64(2), "readyReplicas": int64(3),
 				"replicas": int64(4),
 			},
-			want: "2 / 3 / 4", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			columnID: "ready", want: "3/3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		},
 		{
 			name: "StatefulSet ready",
@@ -439,7 +423,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"availableReplicas": int64(3), "readyReplicas": int64(3),
 				"replicas": int64(3),
 			},
-			want: "3 / 3 / 3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			columnID: "ready", want: "3/3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		},
 		{
 			name: "DaemonSet progressing",
@@ -451,7 +435,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"numberAvailable": int64(4), "numberReady": int64(5),
 				"currentNumberScheduled": int64(5), "desiredNumberScheduled": int64(5),
 			},
-			want: "4 / 5 / 5", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			columnID: "ready-count", want: "5", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		},
 		{
 			name: "ReplicaSet ready",
@@ -464,7 +448,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"availableReplicas": int64(2), "readyReplicas": int64(2),
 				"replicas": int64(2),
 			},
-			want: "2 / 2 / 2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			columnID: "ready-count", want: "2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		},
 		{
 			name: "ReplicationController progressing",
@@ -477,7 +461,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				"availableReplicas": int64(1), "readyReplicas": int64(2),
 				"replicas": int64(2),
 			},
-			want: "1 / 2 / 2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			columnID: "ready-count", want: "2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		},
 	}
 	for _, test := range tests {
@@ -487,7 +471,7 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 				ClusterSessionID: "session-a",
 				Resource:         test.resource,
 				NamespaceScope:   NamespaceScope{All: true},
-				ColumnIDs:        []string{"replicas"},
+				ColumnIDs:        []string{test.columnID},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -503,23 +487,12 @@ func TestProjectorProjectsReplicaAvailabilityReadinessAndTotal(t *testing.T) {
 			if !visible {
 				t.Fatal("replica workload was unexpectedly hidden")
 			}
-			cell := cellByID(row, "replicas")
-			if cell.GetDisplayText() != test.want || cell.GetStringValue() != test.want ||
-				cell.GetSeverity() != test.wantSeverity {
+			cell := cellByID(row, test.columnID)
+			if cell.GetDisplayText() != test.want || cell.GetSeverity() != test.wantSeverity {
 				t.Fatalf("replica cell = %#v, want %q severity %v", cell, test.want, test.wantSeverity)
 			}
-			for _, text := range []string{
-				"Available replicas:", "Ready replicas:", "Total replicas:",
-			} {
-				if !strings.Contains(cell.GetTooltip(), text) {
-					t.Errorf("tooltip %q omits %q", cell.GetTooltip(), text)
-				}
-			}
-			if !strings.Contains(cell.GetTooltip(), "Desired replicas:") {
-				t.Errorf("tooltip %q omits desired replica target", cell.GetTooltip())
-			}
-			if !slices.Contains(defaultColumns(test.resource), "replicas") {
-				t.Errorf("default columns omit replica state: %v", defaultColumns(test.resource))
+			if !slices.Contains(defaultColumns(test.resource), test.columnID) {
+				t.Errorf("default columns omit %q: %v", test.columnID, defaultColumns(test.resource))
 			}
 		})
 	}
@@ -844,7 +817,7 @@ func TestProjectorRejectsInvalidFilterWithoutTouchingObjects(t *testing.T) {
 	}
 }
 
-func TestDefaultPodAndNodeColumnsActivateRequiredDependencies(t *testing.T) {
+func TestDefaultPodAndNodeColumnsActivateMetrics(t *testing.T) {
 	t.Parallel()
 	for _, resourceType := range []ResourceType{
 		{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
@@ -859,10 +832,6 @@ func TestDefaultPodAndNodeColumnsActivateRequiredDependencies(t *testing.T) {
 		if !slices.Contains(projector.spec.ColumnIDs, PodCPUColumn) ||
 			!slices.Contains(projector.spec.ColumnIDs, PodMemoryColumn) || !needsMetricProvider(projector) {
 			t.Fatalf("default %s columns do not activate CPU/memory metrics: %v", resourceType.Resource, projector.spec.ColumnIDs)
-		}
-		if got, want := needsNodeAccounting(projector), resourceType.Resource == "nodes"; got != want {
-			t.Fatalf("default %s Node accounting dependency = %t, want %t: %v",
-				resourceType.Resource, got, want, projector.spec.ColumnIDs)
 		}
 	}
 }
@@ -929,9 +898,8 @@ func TestConfiguredExtractorAliasesPreserveDependencyLaziness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if needsMetricProvider(nodeGPU) || !needsNodeAccounting(nodeGPU) {
-		t.Fatalf("aliased Node exact resource dependencies = metrics %t, accounting %t",
-			needsMetricProvider(nodeGPU), needsNodeAccounting(nodeGPU))
+	if needsMetricProvider(nodeGPU) {
+		t.Fatal("aliased exact Node resource activated Metrics API")
 	}
 }
 
@@ -1274,253 +1242,6 @@ func TestProjectorEmitsNodeUsageOverAllocatableAndSortsCurrentUsage(t *testing.T
 	}
 }
 
-func TestProjectorNodeUsageSortFallsBackToRawRequest(t *testing.T) {
-	t.Parallel()
-	projector, err := NewProjector(ProjectionSpec{
-		ClusterSessionID: "session-a",
-		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		ColumnIDs:        []string{"name", NodeCPUUsageColumn},
-		Sort:             []SortDescriptor{{ColumnID: NodeCPUUsageColumn, Descending: true}},
-		NodeAccounting: NodeAccountingSnapshot{Active: true, Ready: true, Nodes: map[string]metrics.NodeAccounting{
-			"node-high-ratio": {
-				Name: "node-high-ratio",
-				Allocatable: corev1.ResourceList{
-					corev1.ResourceCPU: resource.MustParse("2"),
-				},
-				Requested: corev1.ResourceList{
-					corev1.ResourceCPU: resource.MustParse("1"),
-				},
-			},
-			"node-high-raw": {
-				Name: "node-high-raw",
-				Allocatable: corev1.ResourceList{
-					corev1.ResourceCPU: resource.MustParse("100"),
-				},
-				Requested: corev1.ResourceList{
-					corev1.ResourceCPU: resource.MustParse("10"),
-				},
-			},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows := projector.Project([]*unstructured.Unstructured{
-		nodeObject("uid-raw", "node-high-raw", corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("100"),
-		}, nil),
-		nodeObject("uid-ratio", "node-high-ratio", corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("2"),
-		}, nil),
-	})
-	if got := rows[0].GetIdentity().GetName(); got != "node-high-raw" {
-		t.Fatalf("raw request fallback sort put %q first", got)
-	}
-}
-
-func TestProjectorEmitsNodeSchedulerAccountingAndExactResources(t *testing.T) {
-	t.Parallel()
-	accounting := metrics.NodeAccounting{
-		Name: "node-a",
-		Capacity: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("8"), corev1.ResourceMemory: resource.MustParse("32Gi"),
-			corev1.ResourcePods: resource.MustParse("110"), "hugepages-2Mi": resource.MustParse("2Gi"),
-			"hugepages-1Gi": resource.MustParse("4Gi"), "nvidia.com/gpu": resource.MustParse("8"),
-			"aliyun.com/ppu": resource.MustParse("16"),
-		},
-		Allocatable: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("7500m"), corev1.ResourceMemory: resource.MustParse("30Gi"),
-			corev1.ResourcePods: resource.MustParse("100"), "hugepages-2Mi": resource.MustParse("1Gi"),
-			"hugepages-1Gi": resource.MustParse("3Gi"), "nvidia.com/gpu": resource.MustParse("7"),
-			"aliyun.com/ppu": resource.MustParse("15"),
-		},
-		Requested: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("1500m"), corev1.ResourceMemory: resource.MustParse("3Gi"),
-			"hugepages-2Mi": resource.MustParse("512Mi"), "hugepages-1Gi": resource.MustParse("1Gi"),
-			"nvidia.com/gpu": resource.MustParse("2"), "aliyun.com/ppu": resource.MustParse("3"),
-		},
-		Limited: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("6Gi"),
-			"hugepages-2Mi": resource.MustParse("1Gi"), "nvidia.com/gpu": resource.MustParse("4"),
-		},
-		PodCount: 12,
-	}
-	columns := []string{
-		NodeCPUUsageColumn, NodeCPURequestsColumn, NodeCPULimitsColumn,
-		NodeMemoryRequestsColumn, NodeMemoryLimitsColumn, NodePodCountColumn,
-		metricColumnID("hugepages-2Mi"), metricColumnID("hugepages-1Gi"),
-		metricColumnID("nvidia.com/gpu"), metricColumnID("aliyun.com/ppu"),
-	}
-	projector, err := NewProjector(ProjectionSpec{
-		ClusterSessionID: "session-a",
-		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		ColumnIDs:        columns,
-		NodeAccounting: NodeAccountingSnapshot{
-			Active: true, Ready: true, Nodes: map[string]metrics.NodeAccounting{"node-a": accounting},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	value := nodeObject("uid-a", "node-a", accounting.Allocatable, accounting.Capacity)
-	row, visible := projector.ProjectOne(value)
-	if !visible {
-		t.Fatal("Node row was not visible")
-	}
-	if usage := cellByID(row, NodeCPUUsageColumn).GetUsage(); usage.GetRequested() != 1.5 ||
-		usage.GetLimit() != 3 || usage.GetSortValue() != 1.5 {
-		t.Fatalf("base CPU accounting = %#v", usage)
-	}
-	if usage := cellByID(row, NodeCPURequestsColumn).GetUsage(); usage.GetRequested() != 1.5 ||
-		usage.GetCapacity() != 7.5 || usage.GetSortValue() != 1.5 {
-		t.Fatalf("CPU requests = %#v", usage)
-	}
-	if usage := cellByID(row, NodeCPULimitsColumn).GetUsage(); usage.GetLimit() != 3 ||
-		usage.GetCapacity() != 7.5 || usage.GetSortValue() != 3 {
-		t.Fatalf("CPU limits = %#v", usage)
-	}
-	if usage := cellByID(row, NodePodCountColumn).GetUsage(); usage.GetRequested() != 12 ||
-		usage.GetCapacity() != 100 || usage.GetSortValue() != 12 {
-		t.Fatalf("Pod count = %#v", usage)
-	}
-	for id, want := range map[string]float64{
-		metricColumnID("hugepages-2Mi"):  512 * 1024 * 1024,
-		metricColumnID("hugepages-1Gi"):  1024 * 1024 * 1024,
-		metricColumnID("nvidia.com/gpu"): 2,
-		metricColumnID("aliyun.com/ppu"): 3,
-	} {
-		usage := cellByID(row, id).GetUsage()
-		if usage.GetResourceName() != strings.TrimPrefix(id, metricResourceColumnPrefix) ||
-			usage.GetRequested() != want || usage.GetSortValue() != want {
-			t.Fatalf("exact resource %q = %#v", id, usage)
-		}
-		if tooltip := cellByID(row, id).GetTooltip(); !strings.Contains(
-			tooltip, "Resource: "+strings.TrimPrefix(id, metricResourceColumnPrefix),
-		) {
-			t.Fatalf("exact resource %q tooltip = %q", id, tooltip)
-		}
-	}
-}
-
-func TestProjectorFormatsNodeUsageAllocationAndExactByteResources(t *testing.T) {
-	t.Parallel()
-	accounting := metrics.NodeAccounting{
-		Name: "node-readable",
-		Capacity: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("64"), corev1.ResourceMemory: resource.MustParse("128Gi"),
-			corev1.ResourceEphemeralStorage: resource.MustParse("2Ti"), "hugepages-2Mi": resource.MustParse("1Gi"),
-		},
-		Allocatable: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("63500m"), corev1.ResourceMemory: resource.MustParse("128Gi"),
-			corev1.ResourceEphemeralStorage: resource.MustParse("17576384Ki"), "hugepages-2Mi": resource.MustParse("768Mi"),
-		},
-		Requested: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("23256m"), corev1.ResourceMemory: resource.MustParse("17576384Ki"),
-			corev1.ResourceEphemeralStorage: resource.MustParse("134217728000"), "hugepages-2Mi": resource.MustParse("131072Ki"),
-		},
-	}
-	projector, err := NewProjector(ProjectionSpec{
-		ClusterSessionID: "session-a",
-		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		ColumnIDs: []string{
-			NodeCPUUsageColumn, NodeCPURequestsColumn, NodeMemoryUsageColumn, NodeMemoryRequestsColumn,
-			NodeEphemeralStorageUsageColumn, NodeEphemeralStorageRequestsColumn, metricColumnID("hugepages-2Mi"),
-		},
-		Metrics: metrics.Snapshot{State: metrics.MeasurementCurrent, Samples: map[string]metrics.Sample{
-			"node-readable": {Resources: map[string]int64{
-				string(corev1.ResourceCPU):              23_256_000_000,
-				string(corev1.ResourceMemory):           17_576_384 * 1024,
-				string(corev1.ResourceEphemeralStorage): 134_217_728_000,
-			}},
-		}},
-		NodeAccounting: NodeAccountingSnapshot{
-			Active: true, Ready: true, Nodes: map[string]metrics.NodeAccounting{"node-readable": accounting},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	row, visible := projector.ProjectOne(nodeObject("node-readable", "node-readable", accounting.Allocatable, accounting.Capacity))
-	if !visible {
-		t.Fatal("Node row was not visible")
-	}
-	for id, want := range map[string]string{
-		NodeCPUUsageColumn:                 "23.3 / 63.5",
-		NodeCPURequestsColumn:              "23.3 / 63.5",
-		NodeMemoryUsageColumn:              "16.76Gi / 128Gi",
-		NodeMemoryRequestsColumn:           "16.76Gi / 128Gi",
-		NodeEphemeralStorageUsageColumn:    "125Gi / 16.76Gi",
-		NodeEphemeralStorageRequestsColumn: "125Gi / 16.76Gi",
-		metricColumnID("hugepages-2Mi"):    "128Mi / 768Mi",
-	} {
-		if got := cellByID(row, id).GetDisplayText(); got != want {
-			t.Errorf("%s display = %q; want %q", id, got, want)
-		}
-	}
-	requestedCPU := cellByID(row, NodeCPURequestsColumn).GetUsage()
-	if requestedCPU.GetRequested() != 23.256 || requestedCPU.GetCapacity() != 63.5 {
-		t.Fatalf("Node CPU typed values changed during formatting: %#v", requestedCPU)
-	}
-	if tooltip := cellByID(row, NodeCPURequestsColumn).GetTooltip(); !strings.Contains(tooltip, "Summed effective requests: 23256m") || !strings.Contains(tooltip, "Allocatable: 63500m") {
-		t.Fatalf("Node CPU tooltip lost exact Kubernetes quantities: %q", tooltip)
-	}
-}
-
-func TestProjectorShowsCalculatingBeforeNodePodSnapshot(t *testing.T) {
-	t.Parallel()
-	projector, err := NewProjector(ProjectionSpec{
-		ClusterSessionID: "session-a",
-		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		ColumnIDs:        []string{NodeCPUUsageColumn, NodeCPURequestsColumn, NodePodCountColumn},
-		NodeAccounting:   NodeAccountingSnapshot{Active: true},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	row, _ := projector.ProjectOne(nodeObject(
-		"uid-a", "node-a", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8")},
-	))
-	if got := cellByID(row, NodeCPUUsageColumn).GetDisplayText(); got == "Calculating…" {
-		t.Fatalf("ordinary Node usage waited for Pod accounting: %q", got)
-	}
-	for _, id := range []string{NodeCPURequestsColumn, NodePodCountColumn} {
-		if got := cellByID(row, id).GetDisplayText(); got != "Calculating…" {
-			t.Fatalf("%s display = %q", id, got)
-		}
-	}
-}
-
-func TestNodeLimitColumnsSortByRawLimitValue(t *testing.T) {
-	t.Parallel()
-	projector, err := NewProjector(ProjectionSpec{
-		ClusterSessionID: "session-a",
-		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		ColumnIDs:        []string{"name", NodeCPULimitsColumn},
-		Sort:             []SortDescriptor{{ColumnID: NodeCPULimitsColumn, Descending: true}},
-		NodeAccounting: NodeAccountingSnapshot{Active: true, Ready: true, Nodes: map[string]metrics.NodeAccounting{
-			"node-high-ratio": {
-				Name: "node-high-ratio", Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
-				Limited: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
-			},
-			"node-high-raw": {
-				Name: "node-high-raw", Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100")},
-				Limited: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10")},
-			},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows := projector.Project([]*unstructured.Unstructured{
-		nodeObject("uid-raw", "node-high-raw", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100")}, nil),
-		nodeObject("uid-ratio", "node-high-ratio", corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}, nil),
-	})
-	if got := rows[0].GetIdentity().GetName(); got != "node-high-raw" {
-		t.Fatalf("raw limit sort put %q first", got)
-	}
-}
-
 func TestExactResourceCellsDistinguishAbsentFromPresentZero(t *testing.T) {
 	t.Parallel()
 	id := metricColumnID("nvidia.com/gpu")
@@ -1528,14 +1249,6 @@ func TestExactResourceCellsDistinguishAbsentFromPresentZero(t *testing.T) {
 		ClusterSessionID: "session-a",
 		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
 		ColumnIDs:        []string{id},
-		NodeAccounting: NodeAccountingSnapshot{Active: true, Ready: true, Nodes: map[string]metrics.NodeAccounting{
-			"absent": {Name: "absent", Capacity: corev1.ResourceList{}, Allocatable: corev1.ResourceList{}, Requested: corev1.ResourceList{}, Limited: corev1.ResourceList{}},
-			"zero": {
-				Name: "zero", Capacity: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("0")},
-				Allocatable: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("0")},
-				Requested:   corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("0")}, Limited: corev1.ResourceList{},
-			},
-		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1546,7 +1259,8 @@ func TestExactResourceCellsDistinguishAbsentFromPresentZero(t *testing.T) {
 	if cell := cellByID(absent, id); cell.GetTypedValue() != nil || cell.GetDisplayText() != DefaultMissingCell {
 		t.Fatalf("absent exact Node resource = %#v", cell)
 	}
-	if cell := cellByID(zero, id); cell.GetTypedValue() == nil || cell.GetUsage().GetRequested() != 0 {
+	if cell := cellByID(zero, id); cell.GetTypedValue() == nil ||
+		cell.GetUsage().Capacity == nil || cell.GetUsage().GetCapacity() != 0 {
 		t.Fatalf("present zero exact Node resource = %#v", cell)
 	} else if value, available := usageSortValue(cell.GetUsage()); !available || value != 0 {
 		t.Fatalf("present zero sort value = %v, %v", value, available)
@@ -1577,71 +1291,6 @@ func TestExactResourceCellsDistinguishAbsentFromPresentZero(t *testing.T) {
 	zeroRow, _ := podProjector.ProjectOne(zeroPod)
 	if cellByID(absentRow, id).GetTypedValue() != nil || cellByID(zeroRow, id).GetTypedValue() == nil {
 		t.Fatalf("Pod exact presence: absent=%#v zero=%#v", cellByID(absentRow, id), cellByID(zeroRow, id))
-	}
-}
-
-func TestNodeCELMetricsActivationIncludesSchedulerAccounting(t *testing.T) {
-	t.Parallel()
-	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	program, err := compiler.Compile(viewcolumns.Definition{
-		ID: "gpu-request", Title: "GPU request",
-		Expression: `metrics.requests["nvidia.com/gpu"]`, ResultType: viewcolumns.ResultNumber,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	projector, err := NewProjector(ProjectionSpec{
-		ClusterSessionID: "session-a",
-		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		ColumnIDs:        []string{"gpu-request"}, CELPrograms: map[string]*viewcolumns.Program{"gpu-request": program},
-		NodeAccounting: NodeAccountingSnapshot{Active: true, Ready: true, Nodes: map[string]metrics.NodeAccounting{
-			"node-a": {
-				Name: "node-a", Requested: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("2")},
-				Limited:     corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("4")},
-				Allocatable: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")},
-			},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	row, _ := projector.ProjectOne(nodeObject("uid-a", "node-a", nil, nil))
-	if got := cellByID(row, "gpu-request").GetNumberValue(); got != 2 {
-		t.Fatalf("Node CEL scheduler accounting = %v", got)
-	}
-}
-
-func TestProjectorNodeAccountingSurvivesMetricsFailure(t *testing.T) {
-	t.Parallel()
-	accounting := metrics.NodeAccounting{
-		Name:        "node-a",
-		Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
-		Capacity:    corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8")},
-		Requested:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
-		Limited:     corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
-	}
-	projector, err := NewProjector(ProjectionSpec{
-		ClusterSessionID: "session-a",
-		Resource:         ResourceType{Version: "v1", Resource: "nodes", Kind: "Node"},
-		ColumnIDs:        []string{NodeCPUUsageColumn, NodeCPURequestsColumn},
-		Metrics:          metrics.Snapshot{State: metrics.MeasurementUnavailable, Err: metrics.ErrMetricsAPIForbidden},
-		NodeAccounting: NodeAccountingSnapshot{
-			Active: true, Ready: true, Nodes: map[string]metrics.NodeAccounting{"node-a": accounting},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	row, _ := projector.ProjectOne(nodeObject("uid-a", "node-a", accounting.Allocatable, accounting.Capacity))
-	usage := cellByID(row, NodeCPUUsageColumn).GetUsage()
-	if usage.GetUsageAvailable() || usage.GetRequested() != 1 || usage.GetLimit() != 2 {
-		t.Fatalf("Node usage lost scheduler accounting after metrics failure: %#v", usage)
-	}
-	if got := cellByID(row, NodeCPURequestsColumn).GetUsage().GetRequested(); got != 1 {
-		t.Fatalf("allocation-only column after metrics failure = %v", got)
 	}
 }
 

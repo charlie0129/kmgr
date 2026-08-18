@@ -8,7 +8,6 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     var object = Kmgr_V1_GetObjectResponse()
     var objectRequest: Kmgr_V1_GetObjectRequest?
     var watched: [Kmgr_V1_ObjectEvent] = []
-    var events = Kmgr_V1_GetEventsResponse()
     var relationships = Kmgr_V1_GetRelationshipsResponse()
     var relationshipScan: [Kmgr_V1_RelationshipScanEvent] = []
     var watchRequest: Kmgr_V1_WatchObjectRequest?
@@ -36,15 +35,6 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     ) async throws {
         watchRequest = request
         for value in watched { try receive(value) }
-    }
-
-    func getEvents(
-        _ request: Kmgr_V1_GetEventsRequest,
-        timeout: Duration
-    ) async throws -> Kmgr_V1_GetEventsResponse {
-        var value = events
-        value.requestID = request.context.requestID
-        return value
     }
 
     func getRelationships(
@@ -130,7 +120,6 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     func installWatch(_ values: [Kmgr_V1_ObjectEvent]) { watched = values }
     func installObject(_ value: Kmgr_V1_GetObjectResponse) { object = value }
     func capturedObject() -> Kmgr_V1_GetObjectRequest? { objectRequest }
-    func installEvents(_ value: Kmgr_V1_GetEventsResponse) { events = value }
     func installRelationships(_ value: Kmgr_V1_GetRelationshipsResponse) {
         relationships = value
     }
@@ -338,19 +327,8 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(await rpc.capturedOperationCancel() == nil)
 }
 
-@Test func objectDetailProviderMapsEventsAndAuthoritativeOwners() async throws {
+@Test func objectDetailProviderMapsAuthoritativeOwners() async throws {
     let rpc = ObjectDetailRPCCapture()
-    var eventResponse = Kmgr_V1_GetEventsResponse()
-    var event = Kmgr_V1_KubernetesEvent()
-    event.identity = protoIdentity(resource: "events", name: "scheduled", uid: "event-1")
-    event.type = "Normal"
-    event.reason = "Scheduled"
-    event.message = "Assigned to node-a"
-    event.lastObservedUnixMs = 1_500
-    event.count = 2
-    eventResponse.events = [event]
-    await rpc.installEvents(eventResponse)
-
     var relationshipResponse = Kmgr_V1_GetRelationshipsResponse()
     var owner = Kmgr_V1_ResourceRelationship()
     owner.kind = .owner
@@ -363,14 +341,11 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
 
     let provider = EngineObjectDetailProvider(rpc: rpc, identifier: { "request" })
     let target = identity(name: "api-abc", uid: "pod-1")
-    let events = try await provider.getEvents(identity: target, limit: 100)
     let relationships = try await provider.getRelationships(
         identity: target,
         includeChildren: false
     )
 
-    #expect(events.first?.reason == "Scheduled")
-    #expect(events.first?.lastObservedAt == Date(timeIntervalSince1970: 1.5))
     #expect(relationships.values.first?.kind == .owner)
     #expect(relationships.values.first?.identity.uid == "deploy-1")
     #expect(relationships.childrenPotentiallyIncomplete)

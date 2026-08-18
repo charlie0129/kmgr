@@ -46,19 +46,6 @@ public enum Kmgr_V1_ObjectService: Sendable {
                 type: .serverStreaming
             )
         }
-        /// Namespace for "GetEvents" metadata.
-        public enum GetEvents: Sendable {
-            /// Request type for "GetEvents".
-            public typealias Input = Kmgr_V1_GetEventsRequest
-            /// Response type for "GetEvents".
-            public typealias Output = Kmgr_V1_GetEventsResponse
-            /// Descriptor for "GetEvents".
-            public static let descriptor = GRPCCore.MethodDescriptor(
-                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ObjectService"),
-                method: "GetEvents",
-                type: .unary
-            )
-        }
         /// Namespace for "GetRelationships" metadata.
         public enum GetRelationships: Sendable {
             /// Request type for "GetRelationships".
@@ -115,7 +102,6 @@ public enum Kmgr_V1_ObjectService: Sendable {
         public static let descriptors: [GRPCCore.MethodDescriptor] = [
             GetObject.descriptor,
             WatchObject.descriptor,
-            GetEvents.descriptor,
             GetRelationships.descriptor,
             ScanRelationships.descriptor,
             CancelRelationshipScan.descriptor,
@@ -175,25 +161,6 @@ extension Kmgr_V1_ObjectService {
             deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ObjectEvent>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_ObjectEvent>) async throws -> Result
-        ) async throws -> Result where Result: Sendable
-
-        /// Call the "GetEvents" method.
-        ///
-        /// - Parameters:
-        ///   - request: A request containing a single `Kmgr_V1_GetEventsRequest` message.
-        ///   - serializer: A serializer for `Kmgr_V1_GetEventsRequest` messages.
-        ///   - deserializer: A deserializer for `Kmgr_V1_GetEventsResponse` messages.
-        ///   - options: Options to apply to this RPC.
-        ///   - handleResponse: A closure which handles the response, the result of which is
-        ///       returned to the caller. Returning from the closure will cancel the RPC if it
-        ///       hasn't already finished.
-        /// - Returns: The result of `handleResponse`.
-        func getEvents<Result>(
-            request: GRPCCore.ClientRequest<Kmgr_V1_GetEventsRequest>,
-            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_GetEventsRequest>,
-            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_GetEventsResponse>,
-            options: GRPCCore.CallOptions,
-            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_GetEventsResponse>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "GetRelationships" method.
@@ -340,36 +307,6 @@ extension Kmgr_V1_ObjectService {
             try await self.client.serverStreaming(
                 request: request,
                 descriptor: Kmgr_V1_ObjectService.Method.WatchObject.descriptor,
-                serializer: serializer,
-                deserializer: deserializer,
-                options: options,
-                onResponse: handleResponse
-            )
-        }
-
-        /// Call the "GetEvents" method.
-        ///
-        /// - Parameters:
-        ///   - request: A request containing a single `Kmgr_V1_GetEventsRequest` message.
-        ///   - serializer: A serializer for `Kmgr_V1_GetEventsRequest` messages.
-        ///   - deserializer: A deserializer for `Kmgr_V1_GetEventsResponse` messages.
-        ///   - options: Options to apply to this RPC.
-        ///   - handleResponse: A closure which handles the response, the result of which is
-        ///       returned to the caller. Returning from the closure will cancel the RPC if it
-        ///       hasn't already finished.
-        /// - Returns: The result of `handleResponse`.
-        public func getEvents<Result>(
-            request: GRPCCore.ClientRequest<Kmgr_V1_GetEventsRequest>,
-            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_GetEventsRequest>,
-            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_GetEventsResponse>,
-            options: GRPCCore.CallOptions = .defaults,
-            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_GetEventsResponse>) async throws -> Result = { response in
-                try response.message
-            }
-        ) async throws -> Result where Result: Sendable {
-            try await self.client.unary(
-                request: request,
-                descriptor: Kmgr_V1_ObjectService.Method.GetEvents.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -548,31 +485,6 @@ extension Kmgr_V1_ObjectService.ClientProtocol {
         )
     }
 
-    /// Call the "GetEvents" method.
-    ///
-    /// - Parameters:
-    ///   - request: A request containing a single `Kmgr_V1_GetEventsRequest` message.
-    ///   - options: Options to apply to this RPC.
-    ///   - handleResponse: A closure which handles the response, the result of which is
-    ///       returned to the caller. Returning from the closure will cancel the RPC if it
-    ///       hasn't already finished.
-    /// - Returns: The result of `handleResponse`.
-    public func getEvents<Result>(
-        request: GRPCCore.ClientRequest<Kmgr_V1_GetEventsRequest>,
-        options: GRPCCore.CallOptions = .defaults,
-        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_GetEventsResponse>) async throws -> Result = { response in
-            try response.message
-        }
-    ) async throws -> Result where Result: Sendable {
-        try await self.getEvents(
-            request: request,
-            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_GetEventsRequest>(),
-            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_GetEventsResponse>(),
-            options: options,
-            onResponse: handleResponse
-        )
-    }
-
     /// Call the "GetRelationships" method.
     ///
     /// - Parameters:
@@ -725,35 +637,6 @@ extension Kmgr_V1_ObjectService.ClientProtocol {
             metadata: metadata
         )
         return try await self.watchObject(
-            request: request,
-            options: options,
-            onResponse: handleResponse
-        )
-    }
-
-    /// Call the "GetEvents" method.
-    ///
-    /// - Parameters:
-    ///   - message: request message to send.
-    ///   - metadata: Additional metadata to send, defaults to empty.
-    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
-    ///   - handleResponse: A closure which handles the response, the result of which is
-    ///       returned to the caller. Returning from the closure will cancel the RPC if it
-    ///       hasn't already finished.
-    /// - Returns: The result of `handleResponse`.
-    public func getEvents<Result>(
-        _ message: Kmgr_V1_GetEventsRequest,
-        metadata: GRPCCore.Metadata = [:],
-        options: GRPCCore.CallOptions = .defaults,
-        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_GetEventsResponse>) async throws -> Result = { response in
-            try response.message
-        }
-    ) async throws -> Result where Result: Sendable {
-        let request = GRPCCore.ClientRequest<Kmgr_V1_GetEventsRequest>(
-            message: message,
-            metadata: metadata
-        )
-        return try await self.getEvents(
             request: request,
             options: options,
             onResponse: handleResponse

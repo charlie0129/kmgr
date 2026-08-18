@@ -213,12 +213,6 @@ private struct LoadedMutationDetailProvider: ObjectDetailProviding {
         AsyncThrowingStream { $0.finish() }
     }
 
-    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
-        -> [KubernetesObjectEvent]
-    {
-        []
-    }
-
     func getRelationships(
         identity: ResourceIdentity,
         includeChildren: Bool

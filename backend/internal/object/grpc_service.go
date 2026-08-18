@@ -314,39 +314,6 @@ func retryableObjectWatchError(err error) bool {
 	return true
 }
 
-func (s *GRPCService) GetEvents(
-	ctx context.Context,
-	request *kmgrv1.GetEventsRequest,
-) (*kmgrv1.GetEventsResponse, error) {
-	requestID, operationContext, cancel, err := objectRequestContext(ctx, request.GetContext())
-	if err != nil {
-		return nil, err
-	}
-	defer cancel()
-	identity, err := identityFromProto(request.GetIdentity(), request.GetContext().GetClusterSessionId())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	values, err := s.reader.Events(operationContext, identity, request.GetLimit())
-	response := &kmgrv1.GetEventsResponse{RequestId: requestID}
-	if err != nil {
-		response.Error = structuredObjectError(
-			err, request.GetIdentity(), "get-events", s.contextName(request.GetContext()),
-		)
-		return response, nil
-	}
-	response.Events = make([]*kmgrv1.KubernetesEvent, 0, len(values))
-	for _, value := range values {
-		response.Events = append(response.Events, &kmgrv1.KubernetesEvent{
-			Identity: identityToProto(value.Identity), Type: value.Type, Reason: value.Reason,
-			Message: value.Message, FirstObservedUnixMs: unixMilliseconds(value.FirstObserved),
-			LastObservedUnixMs: unixMilliseconds(value.LastObserved), Count: value.Count,
-			ReportingController: value.ReportingController,
-		})
-	}
-	return response, nil
-}
-
 func (s *GRPCService) GetRelationships(
 	ctx context.Context,
 	request *kmgrv1.GetRelationshipsRequest,

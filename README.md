@@ -383,10 +383,10 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
 9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
 10. View both Pod and Node metrics, then compare their behavior with Metrics API
-    available and unavailable. Enable configured Node request/limit and
-    exact-resource columns, verify discovered huge-page/accelerator columns
-    appear after the base snapshot, and confirm asynchronous Pod accounting
-    does not block that snapshot.
+    available and unavailable. Verify Nodes show actual usage against their
+    object-local allocatable/capacity values, exact huge-page/accelerator
+    columns appear after the base snapshot, and opening Nodes starts no Pod
+    LIST/WATCH.
 11. In Relationships, verify cached results are labeled potentially incomplete;
     run **Scan All Resources…** only against a cluster where that read load is
     acceptable.

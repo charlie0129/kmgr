@@ -12,37 +12,35 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/view/columns"
 )
 
-func TestSharedNativeColumnContractCoversEveryExtractorAndParses(t *testing.T) {
+func TestSharedNativeColumnContractCoversEveryExtractor(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "native-columns-contract.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
-	if err != nil {
-		t.Fatal(err)
+	var fixture struct {
+		Columns []struct {
+			Source string             `json:"source"`
+			Value  string             `json:"value"`
+			Type   columns.ResultType `json:"type"`
+		} `json:"columns"`
 	}
-	if _, err := ParseColumns(data, compiler); err != nil {
-		t.Fatalf("shared native-column contract is not accepted by Go: %v", err)
-	}
-
-	var document ColumnsDocument
-	if err := json.Unmarshal(data, &document); err != nil {
+	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}
 	seenBuiltins := make(map[string]columns.ResultType)
 	seenMetrics := make(map[string]struct{})
-	for _, view := range document.Views {
-		for _, definition := range view.Columns {
-			switch definition.Source {
-			case "builtin":
-				if existing, found := seenBuiltins[definition.Value]; found && existing != definition.Type {
-					t.Fatalf("builtin %q has conflicting fixture types %q and %q", definition.Value, existing, definition.Type)
-				}
-				seenBuiltins[definition.Value] = definition.Type
-			case "metric":
-				seenMetrics[definition.Value] = struct{}{}
+	for _, definition := range fixture.Columns {
+		switch definition.Source {
+		case "builtin":
+			if existing, found := seenBuiltins[definition.Value]; found && existing != definition.Type {
+				t.Fatalf("builtin %q has conflicting fixture types %q and %q", definition.Value, existing, definition.Type)
 			}
+			seenBuiltins[definition.Value] = definition.Type
+		case "metric":
+			seenMetrics[definition.Value] = struct{}{}
+		default:
+			t.Fatalf("unsupported fixture source %q", definition.Source)
 		}
 	}
 	if len(seenBuiltins) != len(builtinExtractors) {
@@ -72,13 +70,13 @@ func sortedKeys[M ~map[string]V, V any](values M) []string {
 	return result
 }
 
-func TestParseColumnsMigratesOnlyLegacyGUIBuiltinTypes(t *testing.T) {
+func TestParseColumnsRejectsLegacyNativeTypes(t *testing.T) {
 	t.Parallel()
 	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := ParseColumns([]byte(`
+	_, err = ParseColumns([]byte(`
 apiVersion: kmgr.charlie0129.dev/v1alpha1
 celEnvironment: kmgr.cel/v1
 views:
@@ -87,27 +85,8 @@ views:
   - {id: ready, title: Ready, source: builtin, value: ready, type: number}
   - {id: age, title: Age, source: builtin, value: age, type: timestamp}
 `), compiler)
-	if err != nil {
-		t.Fatalf("legacy GUI defaults were not migrated: %v", err)
-	}
-	view, found := compiled.View("", "v1", "pods")
-	if !found || len(view.Columns) != 2 || view.Columns[0].Type != columns.ResultString ||
-		view.Columns[1].Type != columns.ResultDuration {
-		t.Fatalf("migrated definitions = %#v", view.Columns)
-	}
-
-	for name, definition := range map[string]string{
-		"renamed ready": `{id: pod-readiness, title: Ready, source: builtin, value: ready, type: number}`,
-		"renamed age":   `{id: pod-age, title: Age, source: builtin, value: age, type: timestamp}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			input := "apiVersion: kmgr.charlie0129.dev/v1alpha1\n" +
-				"celEnvironment: kmgr.cel/v1\nviews:\n" +
-				"- match: {version: v1, resource: pods}\n  columns:\n  - " + definition + "\n"
-			if _, err := ParseColumns([]byte(input), compiler); err == nil {
-				t.Fatal("non-legacy invalid definition was silently migrated")
-			}
-		})
+	if err == nil {
+		t.Fatal("legacy native types were silently migrated")
 	}
 }
 
@@ -389,11 +368,11 @@ func TestParseColumnsCompileValidatesSourceValueContracts(t *testing.T) {
 	}
 }
 
-func TestReplicaBuiltinSupportsStandardReplicaControllersOnly(t *testing.T) {
+func TestDesiredBuiltinSupportsStandardReplicaControllersOnly(t *testing.T) {
 	t.Parallel()
 	definition := ColumnConfiguration{
-		ID: "replicas", Title: "Replicas", Source: "builtin",
-		Value: "replicas", Type: columns.ResultString,
+		ID: "desired", Title: "Desired", Source: "builtin",
+		Value: "desired", Type: columns.ResultInteger,
 	}
 	valid := []resourceKey{
 		{group: "apps", version: "v1", resource: "deployments"},
@@ -403,7 +382,7 @@ func TestReplicaBuiltinSupportsStandardReplicaControllersOnly(t *testing.T) {
 		{version: "v1", resource: "replicationcontrollers"},
 	}
 	for _, key := range valid {
-		if got, err := validateExtractor(key, definition); err != nil || got != "replicas" {
+		if got, err := validateExtractor(key, definition); err != nil || got != "desired" {
 			t.Errorf("validateExtractor(%#v) = %q, %v", key, got, err)
 		}
 	}
@@ -415,7 +394,7 @@ func TestReplicaBuiltinSupportsStandardReplicaControllersOnly(t *testing.T) {
 	}
 	for _, key := range invalid {
 		if _, err := validateExtractor(key, definition); err == nil {
-			t.Errorf("validateExtractor(%#v) accepted replica state", key)
+			t.Errorf("validateExtractor(%#v) accepted desired replica count", key)
 		}
 	}
 }
@@ -425,7 +404,7 @@ func TestNodeMetadataBuiltinsSupportCoreNodesOnly(t *testing.T) {
 	definitions := []ColumnConfiguration{
 		{ID: "roles", Title: "Roles", Source: "builtin", Value: "roles", Type: columns.ResultString},
 		{ID: "taints", Title: "Taints", Source: "builtin", Value: "taints", Type: columns.ResultInteger},
-		{ID: "ip", Title: "IP", Source: "builtin", Value: "ip", Type: columns.ResultString},
+		{ID: "internal-ip", Title: "Internal IP", Source: "builtin", Value: "internal-ip", Type: columns.ResultString},
 	}
 	for _, definition := range definitions {
 		if got, err := validateExtractor(

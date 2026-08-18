@@ -1,52 +1,584 @@
 {
-  "accelerators": {
-    "autoDetectSuffixes": [],
-    "resources": {}
-  },
-  "apiVersion": "kmgr.charlie0129.dev/v1alpha1",
-  "celEnvironment": "kmgr.cel/v1",
-  "views": [
+  "columns": [
     {
-      "columns": [
-        {"id": "namespace", "title": "Namespace", "source": "builtin", "value": "namespace", "type": "string"},
-        {"id": "name", "title": "Name", "source": "builtin", "value": "name", "type": "string"},
-        {"id": "kind", "title": "Kind", "source": "builtin", "value": "kind", "type": "string"},
-        {"id": "status", "title": "Status", "source": "builtin", "value": "status", "type": "string"},
-        {"id": "node", "title": "Node", "source": "builtin", "value": "node", "type": "string"},
-        {"id": "ready", "title": "Ready", "source": "builtin", "value": "ready", "type": "string"},
-        {"id": "restarts", "title": "Restarts", "source": "builtin", "value": "restarts", "type": "integer"},
-        {"id": "age", "title": "Age", "source": "builtin", "value": "age", "type": "duration"},
-        {"id": "created", "title": "Created", "source": "builtin", "value": "created", "type": "timestamp"},
-        {"id": "resource-version", "title": "Resource Version", "source": "builtin", "value": "resourceVersion", "type": "string"},
-        {"id": "cpu", "title": "CPU", "source": "metric", "value": "cpu", "type": "resourceUsage"},
-        {"id": "memory", "title": "Memory", "source": "metric", "value": "memory", "type": "resourceUsage"},
-        {"id": "ephemeral-storage", "title": "Ephemeral Storage", "source": "metric", "value": "ephemeral-storage", "type": "resourceUsage"}
-      ],
-      "match": {"group": "", "version": "v1", "resource": "pods"}
+      "source": "builtin",
+      "value": "access-modes",
+      "type": "string"
     },
     {
-      "columns": [
-        {"id": "roles", "title": "Roles", "source": "builtin", "value": "roles", "type": "string"},
-        {"id": "taints", "title": "Taints", "source": "builtin", "value": "taints", "type": "integer"},
-        {"id": "ip", "title": "IP", "source": "builtin", "value": "ip", "type": "string"},
-        {"id": "cpu", "title": "CPU", "source": "metric", "value": "cpu", "type": "resourceUsage"},
-        {"id": "memory", "title": "Memory", "source": "metric", "value": "memory", "type": "resourceUsage"},
-        {"id": "ephemeral-storage", "title": "Ephemeral Storage", "source": "metric", "value": "ephemeral-storage", "type": "resourceUsage"},
-        {"id": "cpu-requests", "title": "CPU Requests", "source": "metric", "value": "cpu-requests", "type": "resourceUsage"},
-        {"id": "cpu-limits", "title": "CPU Limits", "source": "metric", "value": "cpu-limits", "type": "resourceUsage"},
-        {"id": "memory-requests", "title": "Memory Requests", "source": "metric", "value": "memory-requests", "type": "resourceUsage"},
-        {"id": "memory-limits", "title": "Memory Limits", "source": "metric", "value": "memory-limits", "type": "resourceUsage"},
-        {"id": "ephemeral-storage-requests", "title": "Ephemeral Storage Requests", "source": "metric", "value": "ephemeral-storage-requests", "type": "resourceUsage"},
-        {"id": "ephemeral-storage-limits", "title": "Ephemeral Storage Limits", "source": "metric", "value": "ephemeral-storage-limits", "type": "resourceUsage"},
-        {"id": "pod-count", "title": "Pods", "source": "metric", "value": "pod-count", "type": "resourceUsage"}
-      ],
-      "match": {"group": "", "version": "v1", "resource": "nodes"}
+      "source": "builtin",
+      "value": "active",
+      "type": "integer"
     },
     {
-      "columns": [
-        {"id": "replicas", "title": "Replicas (A/R/T)", "source": "builtin", "value": "replicas", "type": "string"}
-      ],
-      "match": {"group": "apps", "version": "v1", "resource": "deployments"}
+      "source": "builtin",
+      "value": "address",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "addresses",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "age",
+      "type": "duration"
+    },
+    {
+      "source": "builtin",
+      "value": "allow-expansion",
+      "type": "boolean"
+    },
+    {
+      "source": "builtin",
+      "value": "architecture",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "available",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "binding-mode",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "capacity",
+      "type": "quantity"
+    },
+    {
+      "source": "builtin",
+      "value": "categories",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "claim",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "cluster-ip",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "completions",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "conditions",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "containers",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "crd-group",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "crd-kind",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "created",
+      "type": "timestamp"
+    },
+    {
+      "source": "builtin",
+      "value": "current",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "current-healthy",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "current-replicas",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "data-key-count",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "desired",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "desired-healthy",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "disruptions-allowed",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "duration",
+      "type": "duration"
+    },
+    {
+      "source": "builtin",
+      "value": "egress-rules",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "endpoint-count",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "event-count",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "event-name",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "event-source",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "event-type",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "expected-pods",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "external-address",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "external-ip",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "external-traffic-policy",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "failed",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "first-seen",
+      "type": "timestamp"
+    },
+    {
+      "source": "builtin",
+      "value": "hosts",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "image-pull-secret-refs",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "images",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "ingress-class",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "ingress-rules",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "internal-ip",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "internal-traffic-policy",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "involved-object",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "ip-families",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "kernel-version",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "key-count",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "kind",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "kubelet-version",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "labels",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "last-restart",
+      "type": "timestamp"
+    },
+    {
+      "source": "builtin",
+      "value": "last-schedule",
+      "type": "timestamp"
+    },
+    {
+      "source": "builtin",
+      "value": "last-seen",
+      "type": "timestamp"
+    },
+    {
+      "source": "builtin",
+      "value": "last-successful",
+      "type": "timestamp"
+    },
+    {
+      "source": "builtin",
+      "value": "max-unavailable",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "maximum",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "message",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "min-available",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "minimum",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "name",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "namespace",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "node",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "nominated-node",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "os-image",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "parameters",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "pod-ip",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "pod-selector",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "policy-types",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "ports",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "provisioner",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "qos-class",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "readiness-gates",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "ready",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "ready-count",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "reason",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "reclaim-policy",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "reference",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "resourceVersion",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "restarts",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "role-ref",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "roles",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "rule-count",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "rules-summary",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "schedule",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "scope",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "secret-refs",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "secret-type",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "selector",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "served-versions",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "service",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "service-account",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "service-selector",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "service-type",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "session-affinity",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "short-names",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "status",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "storage-class",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "subject-kinds",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "subjects",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "subobject",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "succeeded",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "suspended",
+      "type": "boolean"
+    },
+    {
+      "source": "builtin",
+      "value": "taints",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "targets",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "time-zone",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "tls",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "up-to-date",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "updated",
+      "type": "integer"
+    },
+    {
+      "source": "builtin",
+      "value": "volume",
+      "type": "string"
+    },
+    {
+      "source": "builtin",
+      "value": "volume-mode",
+      "type": "string"
+    },
+    {
+      "source": "metric",
+      "value": "cpu",
+      "type": "resourceUsage"
+    },
+    {
+      "source": "metric",
+      "value": "ephemeral-storage",
+      "type": "resourceUsage"
+    },
+    {
+      "source": "metric",
+      "value": "memory",
+      "type": "resourceUsage"
     }
   ]
 }

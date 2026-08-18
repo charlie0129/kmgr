@@ -1,0 +1,70 @@
+package view
+
+import (
+	"slices"
+	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+func TestProjectTableSchemaPreservesPriorityAndDeduplicatesIdentityColumns(t *testing.T) {
+	t.Parallel()
+	columns := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name"},
+		{Name: "Namespace", Type: "string"},
+		{Name: "Age", Type: "string"},
+		{Name: "Status", Type: "string", Description: "Current state"},
+		{Name: "Replicas", Type: "integer", Priority: 1},
+		{Name: "Replicas", Type: "integer", Priority: 2},
+		{Name: "Capacity", Type: "string", Format: "quantity"},
+	}
+	schema, projected := projectTableSchema(columns)
+	if schema == nil || !schema.GetServerTable() || schema.GetRevision() == "" {
+		t.Fatalf("schema = %#v", schema)
+	}
+	if len(schema.GetColumns()) != 4 || len(projected) != 4 {
+		t.Fatalf("projected columns = %d/%d, want four after Name/Namespace/Age deduplication", len(schema.GetColumns()), len(projected))
+	}
+	titles := make([]string, 0, len(schema.GetColumns()))
+	ids := make([]string, 0, len(schema.GetColumns()))
+	for _, column := range schema.GetColumns() {
+		titles = append(titles, column.GetTitle())
+		ids = append(ids, column.GetId())
+	}
+	if !slices.Equal(titles, []string{"Status", "Replicas", "Replicas", "Capacity"}) {
+		t.Fatalf("titles = %v", titles)
+	}
+	if ids[1] == ids[2] || ids[1] == "" || ids[2] == "" {
+		t.Fatalf("duplicate server column IDs = %v", ids)
+	}
+	if !schema.GetColumns()[0].GetDefaultVisible() || schema.GetColumns()[0].GetPriority() != 0 {
+		t.Fatalf("priority-zero column = %#v", schema.GetColumns()[0])
+	}
+	if schema.GetColumns()[1].GetDefaultVisible() || schema.GetColumns()[1].GetPriority() != 1 ||
+		schema.GetColumns()[2].GetDefaultVisible() || schema.GetColumns()[2].GetPriority() != 2 {
+		t.Fatalf("secondary columns = %#v", schema.GetColumns()[1:3])
+	}
+	if schema.GetColumns()[3].GetResultType() != "quantity" || schema.GetColumns()[3].GetAlignment() != "trailing" {
+		t.Fatalf("quantity schema = %#v", schema.GetColumns()[3])
+	}
+}
+
+func TestProjectTableCellsUsesTypedServerValues(t *testing.T) {
+	t.Parallel()
+	columns := []metav1.TableColumnDefinition{
+		{Name: "Count", Type: "integer"},
+		{Name: "Ratio", Type: "number"},
+		{Name: "Enabled", Type: "boolean"},
+		{Name: "Capacity", Type: "string", Format: "quantity"},
+		{Name: "Updated", Type: "date"},
+	}
+	_, projected := projectTableSchema(columns)
+	updated := "2026-08-18T08:00:00Z"
+	cells := projectTableCells(projected, []any{float64(7), "0.75", true, "1500m", updated}, time.Unix(0, 0))
+	if len(cells) != 5 || cells[0].GetIntegerValue() != 7 || cells[1].GetNumberValue() != 0.75 ||
+		!cells[2].GetBoolValue() || cells[3].GetQuantityValue().GetExact() != "1500m" ||
+		cells[4].GetTimestampUnixMs() != time.Date(2026, 8, 18, 8, 0, 0, 0, time.UTC).UnixMilli() {
+		t.Fatalf("typed Table cells = %#v", cells)
+	}
+}

@@ -94,39 +94,6 @@ public struct ObjectDetail: Hashable, Sendable {
     }
 }
 
-public struct KubernetesObjectEvent: Hashable, Sendable, Identifiable {
-    public var identity: ResourceIdentity
-    public var type: String
-    public var reason: String
-    public var message: String
-    public var firstObservedAt: Date?
-    public var lastObservedAt: Date?
-    public var count: Int32
-    public var reportingController: String
-
-    public init(
-        identity: ResourceIdentity,
-        type: String,
-        reason: String,
-        message: String,
-        firstObservedAt: Date? = nil,
-        lastObservedAt: Date? = nil,
-        count: Int32 = 0,
-        reportingController: String = ""
-    ) {
-        self.identity = identity
-        self.type = type
-        self.reason = reason
-        self.message = message
-        self.firstObservedAt = firstObservedAt
-        self.lastObservedAt = lastObservedAt
-        self.count = count
-        self.reportingController = reportingController
-    }
-
-    public var id: ResourceUID { identity.uid }
-}
-
 public enum ObjectRelationshipKind: String, Hashable, Sendable {
     case owner
     case child
@@ -451,8 +418,6 @@ public protocol ObjectDetailProviding: Sendable {
         identity: ResourceIdentity,
         resourceVersion: String
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error>
-    func getEvents(identity: ResourceIdentity, limit: UInt32) async throws
-        -> [KubernetesObjectEvent]
     func getRelationships(
         identity: ResourceIdentity,
         includeChildren: Bool
