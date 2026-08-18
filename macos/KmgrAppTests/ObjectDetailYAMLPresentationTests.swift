@@ -572,13 +572,27 @@ struct ObjectDetailYAMLPresentationTests {
         let summaryScroll = try #require(descendants(of: controller.view)
             .compactMap { $0 as? NSScrollView }
             .first { $0.identifier?.rawValue == "object-detail-summary-scroll" })
-        let summaryDocument = try #require(summaryScroll.documentView)
+        let summaryDocument = try #require(summaryScroll.documentView as? NSTableView)
         #expect(summaryScroll.contentSize.width > 100)
         #expect(summaryDocument.frame.width > 100)
         #expect(summaryDocument.frame.height > 0)
-        #expect(descendants(of: summaryDocument).contains {
-            ($0 as? NSTextField)?.stringValue == "Name:  settings"
+        #expect(summaryDocument.accessibilityLabel() == "Kubernetes object summary")
+        #expect(summaryDocument.numberOfRows == 2)
+        let summaryField = try #require(summaryDocument.view(
+            atColumn: 0, row: 1, makeIfNecessary: true
+        ))
+        let summaryValue = try #require(summaryDocument.view(
+            atColumn: 1, row: 1, makeIfNecessary: true
+        ))
+        #expect(descendants(of: summaryField).contains {
+            ($0 as? NSTextField)?.stringValue == "Name"
         })
+        #expect(descendants(of: summaryValue).contains {
+            ($0 as? NSTextField)?.stringValue == "settings"
+        })
+        controller.view.setFrameSize(NSSize(width: 520, height: 600))
+        controller.view.layoutSubtreeIfNeeded()
+        #expect(summaryDocument.frame.width <= summaryScroll.contentSize.width + 1)
 
         segmented.selectedSegment = 5
         _ = segmented.sendAction(segmented.action, to: segmented.target)
@@ -729,7 +743,7 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(notice.stringValue.contains("Data"))
     }
 
-    @Test("Summary visibly renders sorted labels and annotations from object metadata")
+    @Test("Summary uses copyable sectioned rows for conditions and metadata")
     func summaryMetadataRendering() async throws {
         let identity = ResourceIdentity(
             clusterSessionID: "session",
@@ -740,17 +754,29 @@ struct ObjectDetailYAMLPresentationTests {
             name: "api",
             uid: ResourceUID("uid")
         )
+        let longJSON = "{\"payload\":\"\(String(repeating: "x", count: 2_000))\"}"
         let detail = ObjectDetail(
             identity: identity,
             resourceVersion: "rv-1",
-            summaryFields: [ObjectSummaryField(
-                sectionID: "status",
-                fieldID: "available",
-                label: "Available",
-                displayText: "True"
-            )],
+            summaryFields: [
+                ObjectSummaryField(
+                    sectionID: "status",
+                    fieldID: "available",
+                    label: "Available",
+                    displayText: "True"
+                ),
+                ObjectSummaryField(
+                    sectionID: "conditions",
+                    fieldID: "condition:0",
+                    label: "Progressing",
+                    displayText: "True · NewReplicaSetAvailable"
+                ),
+            ],
             labels: ["tier": "frontend", "app": "api"],
-            annotations: ["example.test/note": "first\n  second"]
+            annotations: [
+                "example.test/note": "first\n  second",
+                "example.test/payload": longJSON,
+            ]
         )
         let controller = ObjectDetailViewController(
             identity: identity,
@@ -769,28 +795,76 @@ struct ObjectDetailYAMLPresentationTests {
         controller.viewDidAppear()
         defer { controller.stop() }
 
-        try await waitUntil {
-            descendants(of: controller.view).contains {
-                ($0 as? NSTextField)?.stringValue == "example.test/note:  first second"
-            }
-        }
-        let headings = descendants(of: controller.view).compactMap { $0 as? NSTextField }
-            .filter { $0.identifier?.rawValue == "object-detail-summary-section" }
-            .map(\.stringValue)
-        let fields = descendants(of: controller.view).compactMap { $0 as? NSTextField }
-            .filter { $0.identifier?.rawValue == "object-detail-summary-field" }
-            .map(\.stringValue)
+        let table = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes object summary" })
+        try await waitUntil { table.numberOfRows == 10 }
+        #expect(table.tableColumns.map(\.title) == ["Field", "Value"])
+        #expect(table is CopyableSummaryTableView)
 
-        #expect(headings == ["Status", "Labels", "Annotations"])
-        #expect(fields == [
-            "Available:  True",
-            "app:  api",
-            "tier:  frontend",
-            "example.test/note:  first second",
+        let sections = ObjectDetailSummaryPresentation.sections(for: detail)
+        #expect(sections.map(\.title) == [
+            "Status", "Conditions", "Labels", "Annotations",
         ])
+        #expect(sections.flatMap(\.rows).map { "\($0.label)\t\($0.displayText)" } == [
+            "Available\tTrue",
+            "Progressing\tTrue · NewReplicaSetAvailable",
+            "app\tapi",
+            "tier\tfrontend",
+            "example.test/note\tfirst second",
+            "example.test/payload\tJSON value omitted · \(longJSON.count.formatted()) characters",
+        ])
+
+        let conditionsHeading = try #require(table.view(
+            atColumn: 0, row: 2, makeIfNecessary: true
+        ) as? NSTextField)
+        let conditionField = try #require(table.view(
+            atColumn: 0, row: 3, makeIfNecessary: true
+        ))
+        let conditionValue = try #require(table.view(
+            atColumn: 1, row: 3, makeIfNecessary: true
+        ))
+        #expect(conditionsHeading.stringValue == "Conditions")
+        #expect(descendants(of: conditionField).contains {
+            ($0 as? NSTextField)?.stringValue == "Progressing"
+        })
+        #expect(descendants(of: conditionValue).contains {
+            ($0 as? NSTextField)?.stringValue == "True · NewReplicaSetAvailable"
+        })
+
+        let annotationField = try #require(table.view(
+            atColumn: 0, row: 8, makeIfNecessary: true
+        ))
+        let annotationValue = try #require(table.view(
+            atColumn: 1, row: 8, makeIfNecessary: true
+        ))
+        #expect(descendants(of: annotationField).compactMap { $0 as? NSTextField }
+            .contains { $0.stringValue == "example.test/note" && $0.isSelectable })
+        #expect(descendants(of: annotationValue).compactMap { $0 as? NSTextField }
+            .contains { $0.stringValue == "first second" && $0.isSelectable })
+
+        let payloadValue = try #require(table.view(
+            atColumn: 1, row: 9, makeIfNecessary: true
+        ))
+        #expect(descendants(of: payloadValue).compactMap { $0 as? NSTextField }
+            .contains {
+                $0.stringValue == "JSON value omitted · \(longJSON.count.formatted()) characters"
+                    && $0.maximumNumberOfLines == 1
+            })
+        controller.view.setFrameSize(NSSize(width: 520, height: 500))
+        controller.view.layoutSubtreeIfNeeded()
+        let summaryScroll = try #require(table.enclosingScrollView)
+        #expect(table.frame.width <= summaryScroll.contentSize.width + 1)
+
+        let copyableTable = try #require(table as? CopyableSummaryTableView)
+        copyableTable.selectRowIndexes(IndexSet(integer: 9), byExtendingSelection: false)
+        #expect(copyableTable.tryToPerform(#selector(NSText.copy(_:)), with: nil))
+        #expect(NSPasteboard.general.string(forType: .string)
+            == "Annotations\texample.test/payload\t\(longJSON)")
+        NSPasteboard.general.clearContents()
     }
 
-    @Test("Summary metadata output is bounded and reports omitted entries")
+    @Test("Summary omits long JSON and bounds metadata entry counts")
     func boundedSummaryMetadata() throws {
         let identity = ResourceIdentity(
             clusterSessionID: "session",
@@ -805,22 +879,26 @@ struct ObjectDetailYAMLPresentationTests {
             (0..<(ObjectDetailSummaryPresentation.maximumMetadataEntriesPerSection + 10))
                 .map { (String(format: "key-%03d", $0), "value-\($0)") }
         )
-        let fields = ObjectDetailSummaryPresentation.fields(for: ObjectDetail(
+        let longJSON = "{\"payload\":\"\(String(repeating: "x", count: 2_000))\"}"
+        let sections = ObjectDetailSummaryPresentation.sections(for: ObjectDetail(
             identity: identity,
             resourceVersion: "rv-1",
             labels: labels,
-            annotations: ["long": String(repeating: "x", count: 2_000)]
+            annotations: ["long": longJSON]
         ))
-        let labelFields = fields.filter { $0.sectionID == "labels" }
-        let annotation = try #require(fields.first { $0.sectionID == "annotations" })
+        let labelFields = try #require(sections.first { $0.id == "labels" }).rows
+        let annotation = try #require(sections.first { $0.id == "annotations" }?.rows.first)
 
         #expect(labelFields.count
             == ObjectDetailSummaryPresentation.maximumMetadataEntriesPerSection + 1)
         #expect(labelFields.last?.displayText == "10 not shown")
-        #expect(annotation.displayText.count
-            == ObjectDetailSummaryPresentation.maximumMetadataValueCharacters)
-        #expect(annotation.displayText.hasSuffix("…"))
-        #expect(annotation.tooltip.contains("truncated"))
+        #expect(annotation.displayText
+            == "JSON value omitted · \(longJSON.count.formatted()) characters")
+        #expect(!annotation.displayText.contains(String(repeating: "x", count: 100)))
+        #expect(annotation.tooltip.contains("Command-C"))
+        #expect(annotation.copyValue == longJSON)
+        #expect(ObjectDetailSummaryPresentation.copyText(for: [annotation])
+            == "Annotations\tlong\t\(longJSON)")
     }
 
     @Test("Summary metadata removes control characters")
@@ -834,13 +912,13 @@ struct ObjectDetailYAMLPresentationTests {
             name: "api",
             uid: ResourceUID("uid")
         )
-        let fields = ObjectDetailSummaryPresentation.fields(for: ObjectDetail(
+        let sections = ObjectDetailSummaryPresentation.sections(for: ObjectDetail(
             identity: identity,
             resourceVersion: "rv-1",
             labels: ["unsafe\u{0000}key": "first\u{0007}\nsecond"],
             annotations: [:]
         ))
-        let label = try #require(fields.first { $0.sectionID == "labels" })
+        let label = try #require(sections.first { $0.id == "labels" }?.rows.first)
 
         #expect(label.label == "unsafe key")
         #expect(label.displayText == "first second")

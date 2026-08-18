@@ -85,8 +85,10 @@ app-wide Port Forwards window.
 
 - Resource tables use UID-stable native multi-selection. Sorting, filtering,
   and watch updates do not retarget a selection by row index.
-- Details provide Summary, YAML, Events, Relationships, Metrics where
-  meaningful, and a Data editor for ConfigMaps and Secrets.
+- Details provide a structured, copyable Summary table, plus YAML, Events,
+  Relationships, Metrics where meaningful, and a Data editor for ConfigMaps
+  and Secrets. Oversized Summary values stay available through row copy while
+  their inline presentation remains bounded.
 - `Y` opens the selected object's editable YAML tab inside Details. Shift-Y
   opens an independent, UID-pinned YAML window with an exact received-byte
   count, explicit refresh, and the same validated edit/apply workflow.

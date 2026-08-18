@@ -30,58 +30,157 @@ enum ObjectDetailInitialTab {
     }
 }
 
+struct ObjectDetailSummaryRow: Hashable, Sendable {
+    var sectionID: String
+    var fieldID: String
+    var label: String
+    var displayText: String
+    var copyLabel: String
+    var copyValue: String
+    var tooltip: String
+    var severity: CellSeverity
+}
+
+struct ObjectDetailSummarySection: Hashable, Sendable {
+    var id: String
+    var title: String
+    var rows: [ObjectDetailSummaryRow]
+}
+
+enum ObjectDetailSummaryTableItem: Hashable, Sendable {
+    case section(ObjectDetailSummarySection)
+    case row(ObjectDetailSummaryRow)
+    case empty
+}
+
 enum ObjectDetailSummaryPresentation {
     static let maximumMetadataEntriesPerSection = 64
-    static let maximumMetadataKeyCharacters = 320
-    static let maximumMetadataValueCharacters = 256
+    static let maximumVisibleKeyCharacters = 120
+    static let maximumVisibleValueCharacters = 180
 
-    static func fields(for detail: ObjectDetail) -> [ObjectSummaryField] {
-        detail.summaryFields
-            + metadataFields(sectionID: "labels", values: detail.labels)
-            + metadataFields(sectionID: "annotations", values: detail.annotations)
+    static func sections(for detail: ObjectDetail) -> [ObjectDetailSummarySection] {
+        let fields = detail.summaryFields.map(summaryRow)
+            + metadataRows(sectionID: "labels", values: detail.labels)
+            + metadataRows(sectionID: "annotations", values: detail.annotations)
+        var sectionOrder: [String] = []
+        var rowsBySection: [String: [ObjectDetailSummaryRow]] = [:]
+        for field in fields {
+            if rowsBySection[field.sectionID] == nil {
+                sectionOrder.append(field.sectionID)
+            }
+            rowsBySection[field.sectionID, default: []].append(field)
+        }
+        return sectionOrder.map { sectionID in
+            ObjectDetailSummarySection(
+                id: sectionID,
+                title: sectionTitle(sectionID),
+                rows: rowsBySection[sectionID] ?? []
+            )
+        }
     }
 
-    private static func metadataFields(
+    static func copyText(for rows: [ObjectDetailSummaryRow]) -> String {
+        rows.map { row in
+            "\(sectionTitle(row.sectionID))\t\(row.copyLabel)\t\(row.copyValue)"
+        }.joined(separator: "\n")
+    }
+
+    private static func summaryRow(_ field: ObjectSummaryField) -> ObjectDetailSummaryRow {
+        let label = normalizedText(field.label)
+        let value = normalizedText(field.displayText)
+        let shortened = value.count > maximumVisibleValueCharacters
+        return ObjectDetailSummaryRow(
+            sectionID: field.sectionID,
+            fieldID: field.fieldID,
+            label: bounded(label, maximumCharacters: maximumVisibleKeyCharacters),
+            displayText: visibleValue(value),
+            copyLabel: label,
+            copyValue: value,
+            tooltip: shortened
+                ? copyHint(forCharacterCount: value.count)
+                : field.tooltip,
+            severity: field.severity
+        )
+    }
+
+    private static func metadataRows(
         sectionID: String,
         values: [String: String]
-    ) -> [ObjectSummaryField] {
+    ) -> [ObjectDetailSummaryRow] {
         let ordered = values.sorted { $0.key < $1.key }
         let visible = ordered.prefix(maximumMetadataEntriesPerSection)
-        var fields = visible.map { key, value in
-            let normalized = normalizedMetadataText(value)
-            let display = bounded(normalized, maximumCharacters: maximumMetadataValueCharacters)
-            let truncated = display != normalized
-            return ObjectSummaryField(
+        var rows = visible.map { key, value in
+            let normalizedKey = normalizedText(key)
+            let normalizedValue = normalizedText(value)
+            let omitValue = sectionID == "annotations"
+                && normalizedValue.count > maximumVisibleValueCharacters
+            let displayText: String
+            if omitValue {
+                let description = looksLikeJSON(normalizedValue) ? "JSON value" : "Long value"
+                displayText = "\(description) omitted · \(normalizedValue.count.formatted()) characters"
+            } else {
+                displayText = visibleValue(normalizedValue)
+            }
+            let shortened = omitValue || normalizedValue.count > maximumVisibleValueCharacters
+            return ObjectDetailSummaryRow(
                 sectionID: sectionID,
                 fieldID: key,
                 label: bounded(
-                    normalizedMetadataText(key),
-                    maximumCharacters: maximumMetadataKeyCharacters
+                    normalizedKey,
+                    maximumCharacters: maximumVisibleKeyCharacters
                 ),
-                displayText: display.isEmpty ? "—" : display,
-                tooltip: truncated
-                    ? "Value truncated after \(maximumMetadataValueCharacters) characters."
-                    : ""
+                displayText: displayText,
+                copyLabel: normalizedKey,
+                copyValue: normalizedValue,
+                tooltip: shortened
+                    ? copyHint(forCharacterCount: normalizedValue.count)
+                    : "",
+                severity: .normal
             )
         }
         let omitted = ordered.count - visible.count
         if omitted > 0 {
-            fields.append(ObjectSummaryField(
+            rows.append(ObjectDetailSummaryRow(
                 sectionID: sectionID,
                 fieldID: "additionalEntries",
                 label: "Additional Entries",
-                displayText: "\(omitted) not shown"
+                displayText: "\(omitted) not shown",
+                copyLabel: "Additional Entries",
+                copyValue: "\(omitted) not shown",
+                tooltip: "",
+                severity: .normal
             ))
         }
-        return fields
+        return rows
     }
 
-    private static func normalizedMetadataText(_ value: String) -> String {
+    private static func visibleValue(_ value: String) -> String {
+        guard !value.isEmpty else { return "—" }
+        return bounded(value, maximumCharacters: maximumVisibleValueCharacters)
+    }
+
+    private static func normalizedText(_ value: String) -> String {
         value.unicodeScalars
             .map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }
             .joined()
             .split(whereSeparator: \Character.isWhitespace)
             .joined(separator: " ")
+    }
+
+    private static func looksLikeJSON(_ value: String) -> Bool {
+        (value.hasPrefix("{") && value.hasSuffix("}"))
+            || (value.hasPrefix("[") && value.hasSuffix("]"))
+    }
+
+    private static func copyHint(forCharacterCount count: Int) -> String {
+        "Value shortened in Summary (\(count.formatted()) characters). Select the row and press Command-C to copy it."
+    }
+
+    private static func sectionTitle(_ sectionID: String) -> String {
+        sectionID
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .capitalized
     }
 
     private static func bounded(_ value: String, maximumCharacters: Int) -> String {
@@ -149,7 +248,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     )
     private let statusLabel = NSTextField(labelWithString: "Loading…")
     private let contentContainer = NSView()
-    private let summaryStack = NSStackView()
+    private let summaryTable = CopyableSummaryTableView()
     private let summaryScrollView = NSScrollView()
     private let eventsTable = NSTableView()
     private let eventsScrollView = NSScrollView()
@@ -231,6 +330,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var selectedDataCanEditText = false
     private var isInstallingDataEditorState = false
     private var isEditingYAML = false
+    private var summaryItems: [ObjectDetailSummaryTableItem] = []
     private var events: [KubernetesObjectEvent] = []
     private var relationships: [ObjectRelationship] = []
     private var eventsLoaded = false
@@ -338,7 +438,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     override func viewDidLayout() {
         super.viewDidLayout()
         updateVisibleTextDocumentGeometry()
-        resizeStackDocument(summaryStack, in: summaryScrollView)
+        updateSummaryTableGeometry()
         resizeStackDocument(metricsStack, in: metricsScrollView)
     }
 
@@ -348,6 +448,14 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             in: dataValueScroll,
             wrapsToViewport: true
         )
+    }
+
+    private func updateSummaryTableGeometry() {
+        let width = max(1, summaryScrollView.contentSize.width)
+        if abs(summaryTable.frame.width - width) > 0.5 {
+            summaryTable.setFrameSize(NSSize(width: width, height: summaryTable.frame.height))
+        }
+        summaryTable.sizeLastColumnToFit()
     }
 
     func stop() {
@@ -487,14 +595,34 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func configureSummary() {
-        summaryStack.orientation = .vertical
-        summaryStack.alignment = .leading
-        summaryStack.spacing = 7
-        summaryStack.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
-        summaryStack.frame = NSRect(x: 0, y: 0, width: 640, height: 1)
-        summaryStack.autoresizingMask = [.width]
-        summaryScrollView.documentView = summaryStack
+        configureTable(
+            summaryTable,
+            columns: [("field", "Field", 220), ("value", "Value", 520)]
+        )
+        summaryTable.identifier = .init("object-detail-summary-table")
+        summaryTable.setAccessibilityLabel("Kubernetes object summary")
+        summaryTable.allowsMultipleSelection = true
+        summaryTable.allowsEmptySelection = true
+        summaryTable.rowHeight = 24
+        summaryTable.intercellSpacing = NSSize(width: 1, height: 1)
+        summaryTable.gridStyleMask = [.solidHorizontalGridLineMask]
+        summaryTable.copyTextForRows = { [weak self] indexes in
+            self?.summaryCopyText(for: indexes)
+        }
+        summaryTable.toolTip = "Select one or more rows and press Command-C to copy them."
+        let summaryMenu = NSMenu()
+        let copyRowsItem = NSMenuItem(
+            title: "Copy Rows",
+            action: #selector(NSText.copy(_:)),
+            keyEquivalent: ""
+        )
+        copyRowsItem.target = summaryTable
+        summaryMenu.addItem(copyRowsItem)
+        summaryTable.menu = summaryMenu
+        summaryScrollView.documentView = summaryTable
         summaryScrollView.hasVerticalScroller = true
+        summaryScrollView.hasHorizontalScroller = false
+        summaryScrollView.autohidesScrollers = true
         summaryScrollView.identifier = .init("object-detail-summary-scroll")
     }
 
@@ -957,29 +1085,37 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func renderSummary(_ detail: ObjectDetail) {
-        clear(summaryStack)
-        let fields = ObjectDetailSummaryPresentation.fields(for: detail)
-        var lastSection = ""
-        for field in fields {
-            if field.sectionID != lastSection {
-                let heading = NSTextField(labelWithString: field.sectionID.capitalized)
-                heading.identifier = NSUserInterfaceItemIdentifier("object-detail-summary-section")
-                heading.font = .systemFont(ofSize: 13, weight: .semibold)
-                summaryStack.addArrangedSubview(heading)
-                lastSection = field.sectionID
-            }
-            let label = NSTextField(labelWithString: "\(field.label):  \(field.displayText)")
-            label.identifier = NSUserInterfaceItemIdentifier("object-detail-summary-field")
-            label.toolTip = field.tooltip
-            label.textColor = field.severity == .critical ? .systemRed : .labelColor
-            summaryStack.addArrangedSubview(label)
+        let selectedIDs = Set(summaryTable.selectedRowIndexes.compactMap { index -> String? in
+            guard summaryItems.indices.contains(index),
+                case .row(let row) = summaryItems[index]
+            else { return nil }
+            return "\(row.sectionID)\u{0}\(row.fieldID)"
+        })
+        let sections = ObjectDetailSummaryPresentation.sections(for: detail)
+        summaryItems = sections.flatMap { section in
+            [.section(section)] + section.rows.map(ObjectDetailSummaryTableItem.row)
         }
-        if fields.isEmpty {
-            let label = NSTextField(labelWithString: "No summary fields are available.")
-            label.textColor = .secondaryLabelColor
-            summaryStack.addArrangedSubview(label)
+        if summaryItems.isEmpty { summaryItems = [.empty] }
+        summaryTable.reloadData()
+        updateSummaryTableGeometry()
+        let restored = IndexSet(summaryItems.indices.filter { index in
+            guard case .row(let row) = summaryItems[index] else { return false }
+            return selectedIDs.contains("\(row.sectionID)\u{0}\(row.fieldID)")
+        })
+        if !restored.isEmpty {
+            summaryTable.selectRowIndexes(restored, byExtendingSelection: false)
         }
-        resizeStackDocument(summaryStack, in: summaryScrollView)
+    }
+
+    private func summaryCopyText(for indexes: IndexSet) -> String? {
+        let rows = indexes.compactMap { index -> ObjectDetailSummaryRow? in
+            guard summaryItems.indices.contains(index),
+                case .row(let row) = summaryItems[index]
+            else { return nil }
+            return row
+        }
+        guard !rows.isEmpty else { return nil }
+        return ObjectDetailSummaryPresentation.copyText(for: rows)
     }
 
     private func renderMetrics(_ metrics: [ResourceUsageValue]) {
@@ -1578,6 +1714,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     func numberOfRows(in tableView: NSTableView) -> Int {
         switch tableView {
+        case summaryTable: summaryItems.count
         case eventsTable: events.count
         case relationshipsTable: relationships.count
         default: dataEditorRows.count
@@ -1589,6 +1726,34 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         viewFor tableColumn: NSTableColumn?,
         row: Int
     ) -> NSView? {
+        if tableView === summaryTable {
+            guard summaryItems.indices.contains(row) else { return nil }
+            switch summaryItems[row] {
+            case .section(let section):
+                let heading = NSTextField(labelWithString: section.title)
+                heading.identifier = .init("object-detail-summary-section")
+                heading.font = .systemFont(ofSize: 13, weight: .semibold)
+                heading.textColor = .secondaryLabelColor
+                return heading
+            case .row(let item):
+                guard let tableColumn else { return nil }
+                let isValue = tableColumn.identifier.rawValue == "value"
+                return summaryTextCell(
+                    isValue ? item.displayText : item.label,
+                    table: tableView,
+                    column: tableColumn,
+                    tooltip: summaryCellTooltip(item, valueColumn: isValue),
+                    color: isValue
+                        ? summaryValueColor(item.severity) : .labelColor
+                )
+            case .empty:
+                let label = NSTextField(labelWithString: "No summary fields are available.")
+                label.identifier = .init("object-detail-summary-empty")
+                label.textColor = .secondaryLabelColor
+                label.isSelectable = true
+                return label
+            }
+        }
         if tableView === eventsTable {
             guard events.indices.contains(row), let tableColumn else { return nil }
             let event = events[row]
@@ -1663,6 +1828,48 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         return cell
     }
 
+    private func summaryCellTooltip(
+        _ row: ObjectDetailSummaryRow,
+        valueColumn: Bool
+    ) -> String {
+        if valueColumn {
+            return row.tooltip.isEmpty ? row.displayText : row.tooltip
+        }
+        guard row.label != row.copyLabel else { return row.label }
+        return "Field name shortened in Summary. Select the row and press Command-C to copy it."
+    }
+
+    private func summaryValueColor(_ severity: CellSeverity) -> NSColor {
+        switch severity {
+        case .warning: .systemOrange
+        case .critical: .systemRed
+        case .muted: .secondaryLabelColor
+        case .normal, .informational: .labelColor
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+        guard tableView === summaryTable, summaryItems.indices.contains(row),
+            case .section = summaryItems[row]
+        else { return false }
+        return true
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        guard tableView === summaryTable else { return true }
+        guard summaryItems.indices.contains(row), case .row = summaryItems[row] else {
+            return false
+        }
+        return true
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard tableView === summaryTable, summaryItems.indices.contains(row),
+            case .section = summaryItems[row]
+        else { return tableView.rowHeight }
+        return 30
+    }
+
     /// Produces a short-lived preview from decoded bytes. Neither this helper
     /// nor `DataValuePreviewPresentation` retains the source value; draft and
     /// entry copies are wiped immediately after the presentation is built.
@@ -1724,6 +1931,48 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 hasConflict: true
             )
         }
+    }
+
+    private func summaryTextCell(
+        _ value: String,
+        table: NSTableView,
+        column: NSTableColumn,
+        tooltip: String,
+        color: NSColor
+    ) -> NSTableCellView {
+        let identifier = NSUserInterfaceItemIdentifier(
+            "summary.\(column.identifier.rawValue)"
+        )
+        let cell = table.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
+            ?? NSTableCellView()
+        cell.identifier = identifier
+        if cell.textField == nil {
+            let label = NSTextField(labelWithString: "")
+            label.identifier = .init(
+                column.identifier.rawValue == "value"
+                    ? "object-detail-summary-value"
+                    : "object-detail-summary-field"
+            )
+            label.isSelectable = true
+            label.isEditable = false
+            label.lineBreakMode = .byTruncatingTail
+            label.maximumNumberOfLines = 1
+            label.focusRingType = .none
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            cell.textField = label
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+        }
+        cell.textField?.stringValue = value
+        cell.textField?.toolTip = tooltip.isEmpty ? nil : tooltip
+        cell.textField?.textColor = color
+        cell.setAccessibilityLabel(column.title)
+        cell.setAccessibilityValue(value)
+        return cell
     }
 
     private func textCell(
@@ -2525,4 +2774,19 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         formatter.timeStyle = .medium
         return formatter
     }()
+}
+
+@MainActor
+final class CopyableSummaryTableView: NSTableView {
+    var copyTextForRows: ((IndexSet) -> String?)?
+
+    @objc func copy(_ sender: Any?) {
+        guard let value = copyTextForRows?(selectedRowIndexes), !value.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(value, forType: .string)
+    }
 }
