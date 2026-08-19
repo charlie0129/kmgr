@@ -9,7 +9,7 @@ extension AppKitTestHarness {
 @Suite("Columns manager windows", .serialized)
 struct ColumnsManagerWindowControllerTests {
     @Test("Close button dismisses the columns sheet exactly once")
-    func closeButtonDismissesSheet() throws {
+    func closeButtonDismissesSheet() async throws {
         let parent = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
             styleMask: [.titled],
@@ -33,6 +33,8 @@ struct ColumnsManagerWindowControllerTests {
         let root = try #require(manager.window?.contentView)
         let closeButton = try #require(button(titled: "Close", beneath: root))
         closeButton.performClick(nil)
+
+        try await waitUntil { endSheetCount == 1 }
 
         #expect(endSheetCount == 1)
         #expect(endedSheet === manager.window)
@@ -252,6 +254,175 @@ struct ColumnsManagerWindowControllerTests {
         #expect(!remove.isEnabled)
     }
 
+    @Test("edits auto-save without a Save button and disabled rows stay readable")
+    func autoSaveAndReadableDisabledRows() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-columns-auto-save-\(UUID().uuidString)")
+        let path = directory.appendingPathComponent("columns.yaml").path
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let disabled = ColumnDefinition(
+            id: "team", title: "Team", source: .cel,
+            expression: #"object.metadata.labels["team"]"#,
+            type: .string,
+            enabled: false
+        )
+        try ColumnConfigurationFileStore(path: path).save(
+            ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+                columns: [disabled]
+            )])
+        )
+        let manager = makeColumnsManager(configurationPath: path)
+        let root = try #require(manager.window?.contentView)
+        #expect(button(titled: "Save", beneath: root) == nil)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Columns for Pods" })
+        try await waitUntil { table.numberOfRows == 1 && table.isEnabled }
+        let titleColumn = try #require(table.tableColumns.firstIndex {
+            $0.identifier.rawValue == "column-title"
+        })
+        let titleCell = try #require(table.view(
+            atColumn: titleColumn, row: 0, makeIfNecessary: true
+        ) as? NSTableCellView)
+        #expect(titleCell.textField?.textColor == .labelColor)
+
+        let enabledColumn = try #require(table.tableColumns.firstIndex {
+            $0.identifier.rawValue == "column-enabled"
+        })
+        let toggle = try #require(table.view(
+            atColumn: enabledColumn, row: 0, makeIfNecessary: true
+        ) as? NSButton)
+        toggle.state = NSControl.StateValue.on
+        _ = toggle.sendAction(toggle.action, to: toggle.target)
+
+        try await waitUntil {
+            (try? ColumnConfigurationFileStore(path: path).load()
+                .views.first?.columns.first?.isEnabled) == true
+        }
+        #expect(button(titled: "Save", beneath: root) == nil)
+    }
+
+    @Test("Escape closes only after a pending auto-save is durable")
+    func escapeFlushesAutoSave() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-columns-escape-save-\(UUID().uuidString)")
+        let path = directory.appendingPathComponent("columns.yaml").path
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let disabled = ColumnDefinition(
+            id: "name", title: "Name", source: .builtin,
+            value: "name", type: .string, enabled: false
+        )
+        try ColumnConfigurationFileStore(path: path).save(
+            ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+                columns: [disabled]
+            )])
+        )
+        var closeCount = 0
+        let manager = makeColumnsManager(
+            configurationPath: path,
+            windowDismissal: .init(
+                sheetParent: { _ in nil },
+                endSheet: { _, _ in Issue.record("Unexpected sheet dismissal") },
+                close: { _ in closeCount += 1 }
+            )
+        )
+        let root = try #require(manager.window?.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Columns for Pods" })
+        try await waitUntil { table.numberOfRows == 1 && table.isEnabled }
+        let enabledColumn = try #require(table.tableColumns.firstIndex {
+            $0.identifier.rawValue == "column-enabled"
+        })
+        let toggle = try #require(table.view(
+            atColumn: enabledColumn, row: 0, makeIfNecessary: true
+        ) as? NSButton)
+        toggle.state = NSControl.StateValue.on
+        _ = toggle.sendAction(toggle.action, to: toggle.target)
+
+        manager.window?.cancelOperation(nil)
+        #expect(closeCount == 0)
+        try await waitUntil { closeCount == 1 }
+        #expect(try ColumnConfigurationFileStore(path: path).load()
+            .views.first?.columns.first?.isEnabled == true)
+    }
+
+    @Test("external file conflicts preserve the draft and block implicit discard")
+    func externalConflictRequiresReloadBeforeClosing() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-columns-conflict-\(UUID().uuidString)")
+        let path = directory.appendingPathComponent("columns.yaml").path
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let match = ColumnResourceMatch(group: "", version: "v1", resource: "pods")
+        let original = ColumnDefinition(
+            id: "name", title: "Name", source: .builtin,
+            value: "name", type: .string, enabled: false
+        )
+        try ColumnConfigurationFileStore(path: path).save(
+            ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: match,
+                columns: [original]
+            )])
+        )
+        var closeCount = 0
+        let manager = makeColumnsManager(
+            configurationPath: path,
+            windowDismissal: .init(
+                sheetParent: { _ in nil },
+                endSheet: { _, _ in Issue.record("Unexpected sheet dismissal") },
+                close: { _ in closeCount += 1 }
+            )
+        )
+        let root = try #require(manager.window?.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Columns for Pods" })
+        let status = try #require(
+            view(accessibilityLabel: "Columns status", beneath: root) as? NSTextField
+        )
+        try await waitUntil { table.numberOfRows == 1 && table.isEnabled }
+
+        var external = original
+        external.title = "Name from external edit"
+        try ColumnConfigurationFileStore(path: path).save(
+            ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: match,
+                columns: [external]
+            )])
+        )
+        let enabledColumn = try #require(table.tableColumns.firstIndex {
+            $0.identifier.rawValue == "column-enabled"
+        })
+        let toggle = try #require(table.view(
+            atColumn: enabledColumn, row: 0, makeIfNecessary: true
+        ) as? NSButton)
+        toggle.state = .on
+        _ = toggle.sendAction(toggle.action, to: toggle.target)
+
+        try await waitUntil {
+            !table.isEnabled && status.stringValue.contains("changed outside this window")
+        }
+        manager.window?.cancelOperation(nil)
+        #expect(closeCount == 0)
+        #expect(status.stringValue.contains("Reload the file before closing"))
+        #expect(try ColumnConfigurationFileStore(path: path).load()
+            .views.first?.columns.first == external)
+
+        let reload = try #require(button(titled: "Reload File", beneath: root))
+        #expect(reload.isEnabled)
+        reload.performClick(nil)
+        try await waitUntil { table.isEnabled && table.numberOfRows == 1 }
+        let titleColumn = try #require(table.tableColumns.firstIndex {
+            $0.identifier.rawValue == "column-title"
+        })
+        let title = try #require(table.view(
+            atColumn: titleColumn, row: 0, makeIfNecessary: true
+        ) as? NSTableCellView)
+        #expect(title.textField?.stringValue == external.title)
+
+        manager.window?.cancelOperation(nil)
+        try await waitUntil { closeCount == 1 }
+    }
+
     @Test("discovered disabled resources merge without overriding configured identity")
     func discoveredColumnsMerge() {
         let configured = ColumnDefinition(
@@ -316,6 +487,7 @@ private struct NoopColumnPreviewProvider: ColumnPreviewProviding {
 
 @MainActor
 private func makeColumnsManager(
+    configurationPath: String? = nil,
     windowDismissal: ColumnsManagerWindowController.WindowDismissal = .appKit
 ) -> ColumnsManagerWindowController {
     ColumnsManagerWindowController(
@@ -324,10 +496,9 @@ private func makeColumnsManager(
         defaultColumns: [],
         previewProvider: NoopColumnPreviewProvider(),
         previewContext: testPreviewContext(),
-        configurationPath: FileManager.default.temporaryDirectory
+        configurationPath: configurationPath ?? FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
-            .appendingPathComponent("columns.yaml")
-            .path,
+            .appendingPathComponent("columns.yaml").path,
         windowDismissal: windowDismissal
     )
 }

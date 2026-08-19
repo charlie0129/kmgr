@@ -45,10 +45,15 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private var configurationReady = false
     private var customColumnIDs: Set<String> = []
     private var fileOperationTask: Task<Void, Never>?
+    private var autoSaveTask: Task<Void, Never>?
+    private var draftRevision: UInt64 = 0
+    private var dismissalRequested = false
+    private var isPerformingDismissal = false
     private var dirty = false
     private var didFinishDismissal = false
     private var editorController: CELColumnEditorWindowController?
     private var catalogController: NativeColumnPickerWindowController?
+    private var pendingSelectionIndex: Int?
 
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
@@ -61,8 +66,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private let resetButton = NSButton(title: "Reset to Defaults", target: nil, action: nil)
     private let reloadButton = NSButton(title: "Reload File", target: nil, action: nil)
     private let openButton = NSButton(title: "Open in Editor", target: nil, action: nil)
-    private let saveButton = NSButton(title: "Save", target: nil, action: nil)
     private var tableLayoutBinding: TableLayoutBinding?
+
+    private static let autoSaveDelay: Duration = .milliseconds(250)
 
     /// Called after every safe draft change so a resource table can preview
     /// the new order and enabled state before it is persisted.
@@ -101,7 +107,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         lastAppliedColumns = mergedDefaults
         persistenceAvailable = false
 
-        let window = NSWindow(
+        let window = ColumnsManagerWindow(
             contentRect: NSRect(x: 0, y: 0, width: 880, height: 570),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -113,6 +119,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
+        window.onCancelOperation = { [weak self] in
+            self?.requestDismissal()
+        }
         configureContent(in: window)
         tableView.reloadData()
         updateActionAvailability()
@@ -122,6 +131,11 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
+
+    deinit {
+        autoSaveTask?.cancel()
+        fileOperationTask?.cancel()
+    }
 
     /// Adds cache-discovered native columns to a configured/default layout
     /// without overriding a user's display ID or exact extractor identity.
@@ -170,7 +184,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
             ?? makeTextCell(identifier: identifier)
         guard let label = cell.textField else { return cell }
-        label.textColor = definition.isEnabled ? .labelColor : .tertiaryLabelColor
+        // Disabled means "not shown in the resource table", not invalid.
+        // Keep the definition readable so users can inspect and re-enable it.
+        label.textColor = .labelColor
         label.toolTip = nil
         switch tableColumn.identifier {
         case .columnTitle:
@@ -199,55 +215,54 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard !dirty else {
-            approveDismissal { [weak self, weak sender] in
-                guard let self, let sender else { return }
-                self.windowDismissal.dismiss(sender)
-            }
-            return false
-        }
-        if let parent = sender.sheetParent {
-            parent.endSheet(sender, returnCode: .cancel)
-            return false
-        }
-        return true
+        if isPerformingDismissal { return true }
+        requestDismissal(for: sender)
+        return false
     }
 
     func windowWillClose(_ notification: Notification) {
         finishDismissal()
     }
 
-    private func approveDismissal(_ completion: @escaping @MainActor () -> Void) {
-        guard dirty else {
-            completion()
+    private func requestDismissal(for sender: NSWindow? = nil) {
+        guard !didFinishDismissal else { return }
+        dismissalRequested = true
+
+        if fileOperationTask != nil {
+            showStatus("Finishing column configuration work before closing…", error: false)
             return
         }
-        guard fileOperationTask == nil else {
-            showStatus("Wait for the current column file operation to finish before closing.", error: true)
+
+        if dirty, persistenceAvailable, configurationReady {
+            autoSaveTask?.cancel()
+            autoSaveTask = nil
+            persistDraft()
+            return
+        }
+
+        // Never turn Escape into an implicit discard after an external-file
+        // conflict or I/O failure. Reload is the explicit discard/reconcile
+        // action, and re-enables editing once the strict file boundary is safe.
+        if dirty {
+            dismissalRequested = false
+            showStatus(
+                "Column changes could not be saved. Reload the file before closing.",
+                error: true
+            )
             NSSound.beep()
             return
         }
-        let alert = NSAlert()
-        alert.messageText = "Save column changes?"
-        alert.informativeText = "Unsaved changes for \(resourceTitle) will otherwise be discarded."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Discard")
-        alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            persistDraft(onSuccess: completion)
-        case .alertSecondButtonReturn:
-            onDraftChanged?(lastAppliedColumns)
-            dirty = false
-            completion()
-        default:
-            break
-        }
+        let target = sender ?? window
+        guard let target else { return }
+        isPerformingDismissal = true
+        windowDismissal.dismiss(target)
     }
 
     private func finishDismissal() {
         guard !didFinishDismissal else { return }
         didFinishDismissal = true
+        autoSaveTask?.cancel()
+        autoSaveTask = nil
         fileOperationTask?.cancel()
         fileOperationTask = nil
         onClose?()
@@ -330,14 +345,15 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         statusLabel.maximumNumberOfLines = 2
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.identifier = .init("columns-manager-status")
+        statusLabel.setAccessibilityLabel("Columns status")
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let closeButton = NSButton(title: "Close", target: self, action: #selector(closeWindow))
-        saveButton.target = self
-        saveButton.action = #selector(save)
-        saveButton.keyEquivalent = "\r"
+        closeButton.keyEquivalent = "\u{1b}"
+        closeButton.setAccessibilityLabel("Close Columns")
         let footer = NSStackView(views: [
-            statusLabel, NSView(), reloadButton, openButton, closeButton, saveButton,
+            statusLabel, NSView(), reloadButton, openButton, closeButton,
         ])
         footer.orientation = .horizontal
         footer.alignment = .centerY
@@ -408,7 +424,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     }
 
     private func updateActionAvailability() {
-        let idle = configurationReady && fileOperationTask == nil
+        let idle = configurationReady && persistenceAvailable && fileOperationTask == nil
         let index = selectedIndex
         tableView.isEnabled = idle
         addNativeButton.isEnabled = idle
@@ -420,13 +436,18 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         moveUpButton.isEnabled = idle && (index.map { $0 > 0 } ?? false)
         moveDownButton.isEnabled = idle && (index.map { $0 + 1 < draft.columns.count } ?? false)
         resetButton.isEnabled = idle
+        // During the short debounce, reloading would silently replace a draft
+        // that has not reached disk yet. A failed/conflicting save deliberately
+        // re-enables Reload so it becomes the explicit reconciliation action.
         reloadButton.isEnabled = fileOperationTask == nil
+            && (!dirty || !persistenceAvailable)
         openButton.isEnabled = fileOperationTask == nil
-        saveButton.isEnabled = idle && persistenceAvailable && dirty
     }
 
     private func markChanged(selecting index: Int? = nil) {
+        draftRevision &+= 1
         dirty = draft.columns != lastAppliedColumns
+        pendingSelectionIndex = index
         tableView.reloadData()
         if let index, draft.columns.indices.contains(index) {
             tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
@@ -434,7 +455,29 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         }
         updateActionAvailability()
         onDraftChanged?(draft.columns)
-        showStatus(dirty ? "Unsaved changes · \(scopeDescription)" : scopeDescription, error: false)
+        showStatus(dirty ? "Saving changes… · \(scopeDescription)" : scopeDescription, error: false)
+        scheduleAutoSave()
+    }
+
+    private func scheduleAutoSave() {
+        autoSaveTask?.cancel()
+        guard dirty, persistenceAvailable, configurationReady else { return }
+        autoSaveTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: Self.autoSaveDelay)
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.autoSaveTask = nil
+            guard self.fileOperationTask == nil else {
+                self.showStatus("Saving column configuration…", error: false)
+                // The active file operation's completion path will schedule a
+                // fresh debounce (or flush immediately when closing).
+                return
+            }
+            self.persistDraft()
+        }
     }
 
     private func showStatus(_ message: String, error: Bool) {
@@ -599,9 +642,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
                 configurationReady = true
                 showStatus(error.localizedDescription, error: true)
             }
-            guard let self else { return }
-            fileOperationTask = nil
-            updateActionAvailability()
+            self?.completeFileOperation()
         }
         updateActionAvailability()
     }
@@ -624,17 +665,12 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
             } catch {
                 self?.showStatus(error.localizedDescription, error: true)
             }
-            self?.fileOperationTask = nil
-            self?.updateActionAvailability()
+            self?.completeFileOperation()
         }
         updateActionAvailability()
     }
 
-    @objc private func save() {
-        persistDraft()
-    }
-
-    private func persistDraft(onSuccess: (@MainActor () -> Void)? = nil) {
+    private func persistDraft() {
         guard configurationReady, fileOperationTask == nil, persistenceAvailable else {
             showStatus("Reload a valid configuration before saving.", error: true)
             return
@@ -650,6 +686,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         }
         showStatus("Saving column configuration…", error: false)
         let fileStore = fileStore
+        let saveRevision = draftRevision
         fileOperationTask = Task { [weak self] in
             do {
                 let currentOnDisk = try await fileStore.loadOffMain()
@@ -664,35 +701,77 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
                 try Task.checkCancellation()
                 guard let self else { return }
                 configurationDocument = updated
+                let isLatest = saveRevision == draftRevision
                 lastAppliedColumns = columns
-                dirty = false
+                dirty = !isLatest
                 persistenceAvailable = true
-                showStatus("Saved \(columns.count.formatted()) columns · \(scopeDescription)", error: false)
-                onSaved?(columns)
-                onSuccess?()
+                if isLatest {
+                    let selection = pendingSelectionIndex
+                    pendingSelectionIndex = nil
+                    showStatus("Saved \(columns.count.formatted()) columns · \(scopeDescription)", error: false)
+                    onSaved?(columns)
+                    if let selection, draft.columns.indices.contains(selection) {
+                        tableView.selectRowIndexes(
+                            IndexSet(integer: selection),
+                            byExtendingSelection: false
+                        )
+                    }
+                } else {
+                    showStatus("Saving latest column changes…", error: false)
+                }
             } catch is CancellationError {
                 return
             } catch {
-                self?.showStatus(error.localizedDescription, error: true)
+                guard let self else { return }
+                persistenceAvailable = false
+                // A requested close waits only for a successful durable save.
+                // Keep the window and draft alive so Reload can reconcile an
+                // external edit or retry after an I/O problem is corrected.
+                dismissalRequested = false
+                showStatus(error.localizedDescription, error: true)
             }
-            self?.fileOperationTask = nil
-            self?.updateActionAvailability()
+            guard let self else { return }
+            completeFileOperation()
         }
         updateActionAvailability()
     }
 
-    @objc private func closeWindow() {
-        guard let window else { return }
-        approveDismissal { [weak self, weak window] in
-            guard let self, let window else { return }
-            self.windowDismissal.dismiss(window)
+    /// One completion gate prevents an unrelated file operation (for example,
+    /// opening columns.yaml in an editor during the debounce) from stranding a
+    /// dirty draft. Dismissal has priority and flushes without another delay.
+    private func completeFileOperation() {
+        fileOperationTask = nil
+        updateActionAvailability()
+        if dismissalRequested {
+            requestDismissal()
+        } else if dirty, persistenceAvailable {
+            scheduleAutoSave()
         }
+    }
+
+    @objc private func closeWindow() {
+        requestDismissal()
     }
 
     fileprivate static func resultTypeTitle(_ type: ColumnResultType) -> String {
         switch type {
         case .resourceUsage: "Resource usage"
         default: type.rawValue.capitalized
+        }
+    }
+}
+
+/// Routes Escape through the manager's auto-save-aware dismissal path even
+/// when the current first responder is the table or another nested control.
+@MainActor
+private final class ColumnsManagerWindow: NSWindow {
+    var onCancelOperation: (() -> Void)?
+
+    override func cancelOperation(_ sender: Any?) {
+        if let onCancelOperation {
+            onCancelOperation()
+        } else {
+            super.cancelOperation(sender)
         }
     }
 }
