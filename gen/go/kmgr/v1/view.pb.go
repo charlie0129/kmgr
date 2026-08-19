@@ -189,6 +189,67 @@ func (OptionalResourceCategory) EnumDescriptor() ([]byte, []int) {
 	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{2}
 }
 
+// Selection tokens are immutable, opaque capabilities scoped to one cluster
+// session and logical view. Each gesture produces a new token with a fixed
+// expiry; consuming a token never extends that expiry.
+type SelectionGestureKind int32
+
+const (
+	SelectionGestureKind_SELECTION_GESTURE_KIND_UNSPECIFIED    SelectionGestureKind = 0
+	SelectionGestureKind_SELECTION_GESTURE_KIND_REPLACE        SelectionGestureKind = 1
+	SelectionGestureKind_SELECTION_GESTURE_KIND_COMMAND_TOGGLE SelectionGestureKind = 2
+	SelectionGestureKind_SELECTION_GESTURE_KIND_SHIFT_EXTEND   SelectionGestureKind = 3
+	SelectionGestureKind_SELECTION_GESTURE_KIND_COMMAND_ALL    SelectionGestureKind = 4
+	SelectionGestureKind_SELECTION_GESTURE_KIND_CLEAR          SelectionGestureKind = 5
+)
+
+// Enum value maps for SelectionGestureKind.
+var (
+	SelectionGestureKind_name = map[int32]string{
+		0: "SELECTION_GESTURE_KIND_UNSPECIFIED",
+		1: "SELECTION_GESTURE_KIND_REPLACE",
+		2: "SELECTION_GESTURE_KIND_COMMAND_TOGGLE",
+		3: "SELECTION_GESTURE_KIND_SHIFT_EXTEND",
+		4: "SELECTION_GESTURE_KIND_COMMAND_ALL",
+		5: "SELECTION_GESTURE_KIND_CLEAR",
+	}
+	SelectionGestureKind_value = map[string]int32{
+		"SELECTION_GESTURE_KIND_UNSPECIFIED":    0,
+		"SELECTION_GESTURE_KIND_REPLACE":        1,
+		"SELECTION_GESTURE_KIND_COMMAND_TOGGLE": 2,
+		"SELECTION_GESTURE_KIND_SHIFT_EXTEND":   3,
+		"SELECTION_GESTURE_KIND_COMMAND_ALL":    4,
+		"SELECTION_GESTURE_KIND_CLEAR":          5,
+	}
+)
+
+func (x SelectionGestureKind) Enum() *SelectionGestureKind {
+	p := new(SelectionGestureKind)
+	*p = x
+	return p
+}
+
+func (x SelectionGestureKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SelectionGestureKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_kmgr_v1_view_proto_enumTypes[3].Descriptor()
+}
+
+func (SelectionGestureKind) Type() protoreflect.EnumType {
+	return &file_kmgr_v1_view_proto_enumTypes[3]
+}
+
+func (x SelectionGestureKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SelectionGestureKind.Descriptor instead.
+func (SelectionGestureKind) EnumDescriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{3}
+}
+
 // PreviewColumn compiles one draft CEL definition in the authoritative Go
 // environment and evaluates it against either the selected object (after a
 // fresh UID-pinned GET) or a deterministic, non-sensitive sample object.
@@ -2406,6 +2467,764 @@ func (x *DiscoverOptionalResourcesResponse) GetError() *StructuredError {
 	return nil
 }
 
+type SelectionGesture struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Kind  SelectionGestureKind   `protobuf:"varint,1,opt,name=kind,proto3,enum=kmgr.v1.SelectionGestureKind" json:"kind,omitempty"`
+	// Absolute row index in the request's generation/index revision. Ignored
+	// only by command-all and clear gestures.
+	Index uint64 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+	// Command-Shift range extension. Invalid for every other gesture kind.
+	Additive      bool `protobuf:"varint,3,opt,name=additive,proto3" json:"additive,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SelectionGesture) Reset() {
+	*x = SelectionGesture{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SelectionGesture) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SelectionGesture) ProtoMessage() {}
+
+func (x *SelectionGesture) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SelectionGesture.ProtoReflect.Descriptor instead.
+func (*SelectionGesture) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *SelectionGesture) GetKind() SelectionGestureKind {
+	if x != nil {
+		return x.Kind
+	}
+	return SelectionGestureKind_SELECTION_GESTURE_KIND_UNSPECIFIED
+}
+
+func (x *SelectionGesture) GetIndex() uint64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *SelectionGesture) GetAdditive() bool {
+	if x != nil {
+		return x.Additive
+	}
+	return false
+}
+
+type SelectionAnchor struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Index         uint64                 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	Uid           string                 `protobuf:"bytes,2,opt,name=uid,proto3" json:"uid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SelectionAnchor) Reset() {
+	*x = SelectionAnchor{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SelectionAnchor) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SelectionAnchor) ProtoMessage() {}
+
+func (x *SelectionAnchor) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SelectionAnchor.ProtoReflect.Descriptor instead.
+func (*SelectionAnchor) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *SelectionAnchor) GetIndex() uint64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *SelectionAnchor) GetUid() string {
+	if x != nil {
+		return x.Uid
+	}
+	return ""
+}
+
+type SelectionState struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Token           string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Generation      uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	IndexRevision   uint64                 `protobuf:"varint,3,opt,name=index_revision,json=indexRevision,proto3" json:"index_revision,omitempty"`
+	SelectedCount   uint64                 `protobuf:"varint,4,opt,name=selected_count,json=selectedCount,proto3" json:"selected_count,omitempty"`
+	Anchor          *SelectionAnchor       `protobuf:"bytes,5,opt,name=anchor,proto3" json:"anchor,omitempty"`
+	ExpiresAtUnixMs int64                  `protobuf:"varint,6,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SelectionState) Reset() {
+	*x = SelectionState{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SelectionState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SelectionState) ProtoMessage() {}
+
+func (x *SelectionState) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SelectionState.ProtoReflect.Descriptor instead.
+func (*SelectionState) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *SelectionState) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *SelectionState) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *SelectionState) GetIndexRevision() uint64 {
+	if x != nil {
+		return x.IndexRevision
+	}
+	return 0
+}
+
+func (x *SelectionState) GetSelectedCount() uint64 {
+	if x != nil {
+		return x.SelectedCount
+	}
+	return 0
+}
+
+func (x *SelectionState) GetAnchor() *SelectionAnchor {
+	if x != nil {
+		return x.Anchor
+	}
+	return nil
+}
+
+func (x *SelectionState) GetExpiresAtUnixMs() int64 {
+	if x != nil {
+		return x.ExpiresAtUnixMs
+	}
+	return 0
+}
+
+// ApplySelectionGesture pins numeric input to the complete authoritative
+// ordering identified by generation/index_revision. A previous token from a
+// different revision remains valid but is not rebound; the gesture starts a
+// fresh selection on the requested ordering.
+type ApplySelectionGestureRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	ViewId        string                 `protobuf:"bytes,2,opt,name=view_id,json=viewId,proto3" json:"view_id,omitempty"`
+	Generation    uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	IndexRevision uint64                 `protobuf:"varint,4,opt,name=index_revision,json=indexRevision,proto3" json:"index_revision,omitempty"`
+	PreviousToken string                 `protobuf:"bytes,5,opt,name=previous_token,json=previousToken,proto3" json:"previous_token,omitempty"`
+	Gesture       *SelectionGesture      `protobuf:"bytes,6,opt,name=gesture,proto3" json:"gesture,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApplySelectionGestureRequest) Reset() {
+	*x = ApplySelectionGestureRequest{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApplySelectionGestureRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApplySelectionGestureRequest) ProtoMessage() {}
+
+func (x *ApplySelectionGestureRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApplySelectionGestureRequest.ProtoReflect.Descriptor instead.
+func (*ApplySelectionGestureRequest) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ApplySelectionGestureRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *ApplySelectionGestureRequest) GetViewId() string {
+	if x != nil {
+		return x.ViewId
+	}
+	return ""
+}
+
+func (x *ApplySelectionGestureRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *ApplySelectionGestureRequest) GetIndexRevision() uint64 {
+	if x != nil {
+		return x.IndexRevision
+	}
+	return 0
+}
+
+func (x *ApplySelectionGestureRequest) GetPreviousToken() string {
+	if x != nil {
+		return x.PreviousToken
+	}
+	return ""
+}
+
+func (x *ApplySelectionGestureRequest) GetGesture() *SelectionGesture {
+	if x != nil {
+		return x.Gesture
+	}
+	return nil
+}
+
+type ApplySelectionGestureResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Selection     *SelectionState        `protobuf:"bytes,2,opt,name=selection,proto3" json:"selection,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApplySelectionGestureResponse) Reset() {
+	*x = ApplySelectionGestureResponse{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApplySelectionGestureResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApplySelectionGestureResponse) ProtoMessage() {}
+
+func (x *ApplySelectionGestureResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApplySelectionGestureResponse.ProtoReflect.Descriptor instead.
+func (*ApplySelectionGestureResponse) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *ApplySelectionGestureResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *ApplySelectionGestureResponse) GetSelection() *SelectionState {
+	if x != nil {
+		return x.Selection
+	}
+	return nil
+}
+
+// ProjectSelectionRange maps an immutable token to one bounded range of the
+// current view by UID. The numeric range is pinned to generation/index_revision
+// and is rejected if the current ordering has changed.
+type ProjectSelectionRangeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	ViewId        string                 `protobuf:"bytes,2,opt,name=view_id,json=viewId,proto3" json:"view_id,omitempty"`
+	Generation    uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	IndexRevision uint64                 `protobuf:"varint,4,opt,name=index_revision,json=indexRevision,proto3" json:"index_revision,omitempty"`
+	StartIndex    uint64                 `protobuf:"varint,5,opt,name=start_index,json=startIndex,proto3" json:"start_index,omitempty"`
+	Length        uint32                 `protobuf:"varint,6,opt,name=length,proto3" json:"length,omitempty"`
+	Token         string                 `protobuf:"bytes,7,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProjectSelectionRangeRequest) Reset() {
+	*x = ProjectSelectionRangeRequest{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProjectSelectionRangeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProjectSelectionRangeRequest) ProtoMessage() {}
+
+func (x *ProjectSelectionRangeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProjectSelectionRangeRequest.ProtoReflect.Descriptor instead.
+func (*ProjectSelectionRangeRequest) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *ProjectSelectionRangeRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *ProjectSelectionRangeRequest) GetViewId() string {
+	if x != nil {
+		return x.ViewId
+	}
+	return ""
+}
+
+func (x *ProjectSelectionRangeRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *ProjectSelectionRangeRequest) GetIndexRevision() uint64 {
+	if x != nil {
+		return x.IndexRevision
+	}
+	return 0
+}
+
+func (x *ProjectSelectionRangeRequest) GetStartIndex() uint64 {
+	if x != nil {
+		return x.StartIndex
+	}
+	return 0
+}
+
+func (x *ProjectSelectionRangeRequest) GetLength() uint32 {
+	if x != nil {
+		return x.Length
+	}
+	return 0
+}
+
+func (x *ProjectSelectionRangeRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+type ProjectSelectionRangeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	ViewId        string                 `protobuf:"bytes,2,opt,name=view_id,json=viewId,proto3" json:"view_id,omitempty"`
+	Generation    uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	IndexRevision uint64                 `protobuf:"varint,4,opt,name=index_revision,json=indexRevision,proto3" json:"index_revision,omitempty"`
+	StartIndex    uint64                 `protobuf:"varint,5,opt,name=start_index,json=startIndex,proto3" json:"start_index,omitempty"`
+	RowsVisible   uint64                 `protobuf:"varint,6,opt,name=rows_visible,json=rowsVisible,proto3" json:"rows_visible,omitempty"`
+	Selection     *SelectionState        `protobuf:"bytes,7,opt,name=selection,proto3" json:"selection,omitempty"`
+	Selected      []bool                 `protobuf:"varint,8,rep,packed,name=selected,proto3" json:"selected,omitempty"`
+	// Offset inside selected when the token's anchor is present in this range.
+	AnchorOffset  *uint32 `protobuf:"varint,9,opt,name=anchor_offset,json=anchorOffset,proto3,oneof" json:"anchor_offset,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProjectSelectionRangeResponse) Reset() {
+	*x = ProjectSelectionRangeResponse{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProjectSelectionRangeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProjectSelectionRangeResponse) ProtoMessage() {}
+
+func (x *ProjectSelectionRangeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProjectSelectionRangeResponse.ProtoReflect.Descriptor instead.
+func (*ProjectSelectionRangeResponse) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *ProjectSelectionRangeResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *ProjectSelectionRangeResponse) GetViewId() string {
+	if x != nil {
+		return x.ViewId
+	}
+	return ""
+}
+
+func (x *ProjectSelectionRangeResponse) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *ProjectSelectionRangeResponse) GetIndexRevision() uint64 {
+	if x != nil {
+		return x.IndexRevision
+	}
+	return 0
+}
+
+func (x *ProjectSelectionRangeResponse) GetStartIndex() uint64 {
+	if x != nil {
+		return x.StartIndex
+	}
+	return 0
+}
+
+func (x *ProjectSelectionRangeResponse) GetRowsVisible() uint64 {
+	if x != nil {
+		return x.RowsVisible
+	}
+	return 0
+}
+
+func (x *ProjectSelectionRangeResponse) GetSelection() *SelectionState {
+	if x != nil {
+		return x.Selection
+	}
+	return nil
+}
+
+func (x *ProjectSelectionRangeResponse) GetSelected() []bool {
+	if x != nil {
+		return x.Selected
+	}
+	return nil
+}
+
+func (x *ProjectSelectionRangeResponse) GetAnchorOffset() uint32 {
+	if x != nil && x.AnchorOffset != nil {
+		return *x.AnchorOffset
+	}
+	return 0
+}
+
+type SelectionPageItem struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Absolute index in the immutable ordering retained by the token.
+	PinnedIndex   uint64            `protobuf:"varint,1,opt,name=pinned_index,json=pinnedIndex,proto3" json:"pinned_index,omitempty"`
+	Identity      *ResourceIdentity `protobuf:"bytes,2,opt,name=identity,proto3" json:"identity,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SelectionPageItem) Reset() {
+	*x = SelectionPageItem{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SelectionPageItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SelectionPageItem) ProtoMessage() {}
+
+func (x *SelectionPageItem) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SelectionPageItem.ProtoReflect.Descriptor instead.
+func (*SelectionPageItem) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *SelectionPageItem) GetPinnedIndex() uint64 {
+	if x != nil {
+		return x.PinnedIndex
+	}
+	return 0
+}
+
+func (x *SelectionPageItem) GetIdentity() *ResourceIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+// Offset is a rank in the selected set rather than a table row index. Paging
+// remains valid after the source view changes revision or closes.
+type FetchSelectionPageRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	ViewId        string                 `protobuf:"bytes,2,opt,name=view_id,json=viewId,proto3" json:"view_id,omitempty"`
+	Token         string                 `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
+	Offset        uint64                 `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
+	Limit         uint32                 `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FetchSelectionPageRequest) Reset() {
+	*x = FetchSelectionPageRequest{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FetchSelectionPageRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FetchSelectionPageRequest) ProtoMessage() {}
+
+func (x *FetchSelectionPageRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FetchSelectionPageRequest.ProtoReflect.Descriptor instead.
+func (*FetchSelectionPageRequest) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *FetchSelectionPageRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *FetchSelectionPageRequest) GetViewId() string {
+	if x != nil {
+		return x.ViewId
+	}
+	return ""
+}
+
+func (x *FetchSelectionPageRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *FetchSelectionPageRequest) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *FetchSelectionPageRequest) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type FetchSelectionPageResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Selection     *SelectionState        `protobuf:"bytes,2,opt,name=selection,proto3" json:"selection,omitempty"`
+	Offset        uint64                 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
+	Items         []*SelectionPageItem   `protobuf:"bytes,4,rep,name=items,proto3" json:"items,omitempty"`
+	NextOffset    uint64                 `protobuf:"varint,5,opt,name=next_offset,json=nextOffset,proto3" json:"next_offset,omitempty"`
+	Done          bool                   `protobuf:"varint,6,opt,name=done,proto3" json:"done,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FetchSelectionPageResponse) Reset() {
+	*x = FetchSelectionPageResponse{}
+	mi := &file_kmgr_v1_view_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FetchSelectionPageResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FetchSelectionPageResponse) ProtoMessage() {}
+
+func (x *FetchSelectionPageResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_view_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FetchSelectionPageResponse.ProtoReflect.Descriptor instead.
+func (*FetchSelectionPageResponse) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_view_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *FetchSelectionPageResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *FetchSelectionPageResponse) GetSelection() *SelectionState {
+	if x != nil {
+		return x.Selection
+	}
+	return nil
+}
+
+func (x *FetchSelectionPageResponse) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *FetchSelectionPageResponse) GetItems() []*SelectionPageItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *FetchSelectionPageResponse) GetNextOffset() uint64 {
+	if x != nil {
+		return x.NextOffset
+	}
+	return 0
+}
+
+func (x *FetchSelectionPageResponse) GetDone() bool {
+	if x != nil {
+		return x.Done
+	}
+	return false
+}
+
 var File_kmgr_v1_view_proto protoreflect.FileDescriptor
 
 const file_kmgr_v1_view_proto_rawDesc = "" +
@@ -2617,7 +3436,80 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"\x17nodes_snapshot_complete\x18\x05 \x01(\bR\x15nodesSnapshotComplete\x124\n" +
 	"\x16pods_snapshot_complete\x18\x06 \x01(\bR\x14podsSnapshotComplete\x125\n" +
 	"\x16potentially_incomplete\x18\a \x01(\bR\x15potentiallyIncomplete\x12.\n" +
-	"\x05error\x18\b \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error*l\n" +
+	"\x05error\x18\b \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"w\n" +
+	"\x10SelectionGesture\x121\n" +
+	"\x04kind\x18\x01 \x01(\x0e2\x1d.kmgr.v1.SelectionGestureKindR\x04kind\x12\x14\n" +
+	"\x05index\x18\x02 \x01(\x04R\x05index\x12\x1a\n" +
+	"\badditive\x18\x03 \x01(\bR\badditive\"9\n" +
+	"\x0fSelectionAnchor\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x10\n" +
+	"\x03uid\x18\x02 \x01(\tR\x03uid\"\xf3\x01\n" +
+	"\x0eSelectionState\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x04R\n" +
+	"generation\x12%\n" +
+	"\x0eindex_revision\x18\x03 \x01(\x04R\rindexRevision\x12%\n" +
+	"\x0eselected_count\x18\x04 \x01(\x04R\rselectedCount\x120\n" +
+	"\x06anchor\x18\x05 \x01(\v2\x18.kmgr.v1.SelectionAnchorR\x06anchor\x12+\n" +
+	"\x12expires_at_unix_ms\x18\x06 \x01(\x03R\x0fexpiresAtUnixMs\"\x8d\x02\n" +
+	"\x1cApplySelectionGestureRequest\x121\n" +
+	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x17\n" +
+	"\aview_id\x18\x02 \x01(\tR\x06viewId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x03 \x01(\x04R\n" +
+	"generation\x12%\n" +
+	"\x0eindex_revision\x18\x04 \x01(\x04R\rindexRevision\x12%\n" +
+	"\x0eprevious_token\x18\x05 \x01(\tR\rpreviousToken\x123\n" +
+	"\agesture\x18\x06 \x01(\v2\x19.kmgr.v1.SelectionGestureR\agesture\"u\n" +
+	"\x1dApplySelectionGestureResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x125\n" +
+	"\tselection\x18\x02 \x01(\v2\x17.kmgr.v1.SelectionStateR\tselection\"\x80\x02\n" +
+	"\x1cProjectSelectionRangeRequest\x121\n" +
+	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x17\n" +
+	"\aview_id\x18\x02 \x01(\tR\x06viewId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x03 \x01(\x04R\n" +
+	"generation\x12%\n" +
+	"\x0eindex_revision\x18\x04 \x01(\x04R\rindexRevision\x12\x1f\n" +
+	"\vstart_index\x18\x05 \x01(\x04R\n" +
+	"startIndex\x12\x16\n" +
+	"\x06length\x18\x06 \x01(\rR\x06length\x12\x14\n" +
+	"\x05token\x18\a \x01(\tR\x05token\"\xf5\x02\n" +
+	"\x1dProjectSelectionRangeResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
+	"\aview_id\x18\x02 \x01(\tR\x06viewId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x03 \x01(\x04R\n" +
+	"generation\x12%\n" +
+	"\x0eindex_revision\x18\x04 \x01(\x04R\rindexRevision\x12\x1f\n" +
+	"\vstart_index\x18\x05 \x01(\x04R\n" +
+	"startIndex\x12!\n" +
+	"\frows_visible\x18\x06 \x01(\x04R\vrowsVisible\x125\n" +
+	"\tselection\x18\a \x01(\v2\x17.kmgr.v1.SelectionStateR\tselection\x12\x1e\n" +
+	"\bselected\x18\b \x03(\bB\x02\x10\x01R\bselected\x12(\n" +
+	"\ranchor_offset\x18\t \x01(\rH\x00R\fanchorOffset\x88\x01\x01B\x10\n" +
+	"\x0e_anchor_offset\"m\n" +
+	"\x11SelectionPageItem\x12!\n" +
+	"\fpinned_index\x18\x01 \x01(\x04R\vpinnedIndex\x125\n" +
+	"\bidentity\x18\x02 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\"\xab\x01\n" +
+	"\x19FetchSelectionPageRequest\x121\n" +
+	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x17\n" +
+	"\aview_id\x18\x02 \x01(\tR\x06viewId\x12\x14\n" +
+	"\x05token\x18\x03 \x01(\tR\x05token\x12\x16\n" +
+	"\x06offset\x18\x04 \x01(\x04R\x06offset\x12\x14\n" +
+	"\x05limit\x18\x05 \x01(\rR\x05limit\"\xf1\x01\n" +
+	"\x1aFetchSelectionPageResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x125\n" +
+	"\tselection\x18\x02 \x01(\v2\x17.kmgr.v1.SelectionStateR\tselection\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x04R\x06offset\x120\n" +
+	"\x05items\x18\x04 \x03(\v2\x1a.kmgr.v1.SelectionPageItemR\x05items\x12\x1f\n" +
+	"\vnext_offset\x18\x05 \x01(\x04R\n" +
+	"nextOffset\x12\x12\n" +
+	"\x04done\x18\x06 \x01(\bR\x04done*l\n" +
 	"\rSortDirection\x12\x1e\n" +
 	"\x1aSORT_DIRECTION_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18SORT_DIRECTION_ASCENDING\x10\x01\x12\x1d\n" +
@@ -2636,12 +3528,22 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"&OPTIONAL_RESOURCE_CATEGORY_UNSPECIFIED\x10\x00\x120\n" +
 	",OPTIONAL_RESOURCE_CATEGORY_EPHEMERAL_STORAGE\x10\x01\x12(\n" +
 	"$OPTIONAL_RESOURCE_CATEGORY_HUGE_PAGE\x10\x02\x12*\n" +
-	"&OPTIONAL_RESOURCE_CATEGORY_ACCELERATOR\x10\x032\xf7\x05\n" +
+	"&OPTIONAL_RESOURCE_CATEGORY_ACCELERATOR\x10\x03*\x80\x02\n" +
+	"\x14SelectionGestureKind\x12&\n" +
+	"\"SELECTION_GESTURE_KIND_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eSELECTION_GESTURE_KIND_REPLACE\x10\x01\x12)\n" +
+	"%SELECTION_GESTURE_KIND_COMMAND_TOGGLE\x10\x02\x12'\n" +
+	"#SELECTION_GESTURE_KIND_SHIFT_EXTEND\x10\x03\x12&\n" +
+	"\"SELECTION_GESTURE_KIND_COMMAND_ALL\x10\x04\x12 \n" +
+	"\x1cSELECTION_GESTURE_KIND_CLEAR\x10\x052\xa6\b\n" +
 	"\vViewService\x12<\n" +
 	"\n" +
 	"StreamView\x12\x18.kmgr.v1.OpenViewRequest\x1a\x12.kmgr.v1.ViewEvent0\x01\x12Q\n" +
 	"\x0eFetchViewRange\x12\x1e.kmgr.v1.FetchViewRangeRequest\x1a\x1f.kmgr.v1.FetchViewRangeResponse\x12V\n" +
-	"\x14UpdateMetricInterest\x12$.kmgr.v1.UpdateMetricInterestRequest\x1a\x18.kmgr.v1.Acknowledgement\x12B\n" +
+	"\x14UpdateMetricInterest\x12$.kmgr.v1.UpdateMetricInterestRequest\x1a\x18.kmgr.v1.Acknowledgement\x12f\n" +
+	"\x15ApplySelectionGesture\x12%.kmgr.v1.ApplySelectionGestureRequest\x1a&.kmgr.v1.ApplySelectionGestureResponse\x12f\n" +
+	"\x15ProjectSelectionRange\x12%.kmgr.v1.ProjectSelectionRangeRequest\x1a&.kmgr.v1.ProjectSelectionRangeResponse\x12]\n" +
+	"\x12FetchSelectionPage\x12\".kmgr.v1.FetchSelectionPageRequest\x1a#.kmgr.v1.FetchSelectionPageResponse\x12B\n" +
 	"\n" +
 	"CancelView\x12\x1a.kmgr.v1.CancelViewRequest\x1a\x18.kmgr.v1.Acknowledgement\x12N\n" +
 	"\rPreviewColumn\x12\x1d.kmgr.v1.PreviewColumnRequest\x1a\x1e.kmgr.v1.PreviewColumnResponse\x12r\n" +
@@ -2662,118 +3564,146 @@ func file_kmgr_v1_view_proto_rawDescGZIP() []byte {
 	return file_kmgr_v1_view_proto_rawDescData
 }
 
-var file_kmgr_v1_view_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_kmgr_v1_view_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
+var file_kmgr_v1_view_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_kmgr_v1_view_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_kmgr_v1_view_proto_goTypes = []any{
 	(SortDirection)(0),                        // 0: kmgr.v1.SortDirection
 	(ViewFreshness)(0),                        // 1: kmgr.v1.ViewFreshness
 	(OptionalResourceCategory)(0),             // 2: kmgr.v1.OptionalResourceCategory
-	(*PreviewColumnRequest)(nil),              // 3: kmgr.v1.PreviewColumnRequest
-	(*CELColumnDefinition)(nil),               // 4: kmgr.v1.CELColumnDefinition
-	(*PreviewColumnResponse)(nil),             // 5: kmgr.v1.PreviewColumnResponse
-	(*SortDescriptor)(nil),                    // 6: kmgr.v1.SortDescriptor
-	(*ViewSpec)(nil),                          // 7: kmgr.v1.ViewSpec
-	(*OpenViewRequest)(nil),                   // 8: kmgr.v1.OpenViewRequest
-	(*CancelViewRequest)(nil),                 // 9: kmgr.v1.CancelViewRequest
-	(*ViewStatus)(nil),                        // 10: kmgr.v1.ViewStatus
-	(*ResourceColumnSchema)(nil),              // 11: kmgr.v1.ResourceColumnSchema
-	(*ViewSchema)(nil),                        // 12: kmgr.v1.ViewSchema
-	(*ViewInvalidation)(nil),                  // 13: kmgr.v1.ViewInvalidation
-	(*FetchViewRangeRequest)(nil),             // 14: kmgr.v1.FetchViewRangeRequest
-	(*FetchViewRangeResponse)(nil),            // 15: kmgr.v1.FetchViewRangeResponse
-	(*UpdateMetricInterestRequest)(nil),       // 16: kmgr.v1.UpdateMetricInterestRequest
-	(*ViewReconciled)(nil),                    // 17: kmgr.v1.ViewReconciled
-	(*ViewEvent)(nil),                         // 18: kmgr.v1.ViewEvent
-	(*SearchObjectsRequest)(nil),              // 19: kmgr.v1.SearchObjectsRequest
-	(*SearchCachedObjectsRequest)(nil),        // 20: kmgr.v1.SearchCachedObjectsRequest
-	(*SearchCachedObjectsResponse)(nil),       // 21: kmgr.v1.SearchCachedObjectsResponse
-	(*SearchResult)(nil),                      // 22: kmgr.v1.SearchResult
-	(*SearchProgress)(nil),                    // 23: kmgr.v1.SearchProgress
-	(*SearchObjectsEvent)(nil),                // 24: kmgr.v1.SearchObjectsEvent
-	(*CancelSearchRequest)(nil),               // 25: kmgr.v1.CancelSearchRequest
-	(*DiscoverOptionalResourcesRequest)(nil),  // 26: kmgr.v1.DiscoverOptionalResourcesRequest
-	(*OptionalResource)(nil),                  // 27: kmgr.v1.OptionalResource
-	(*DiscoverOptionalResourcesResponse)(nil), // 28: kmgr.v1.DiscoverOptionalResourcesResponse
-	(*RequestContext)(nil),                    // 29: kmgr.v1.RequestContext
-	(*ResourceType)(nil),                      // 30: kmgr.v1.ResourceType
-	(*NamespaceScope)(nil),                    // 31: kmgr.v1.NamespaceScope
-	(*ResourceIdentity)(nil),                  // 32: kmgr.v1.ResourceIdentity
-	(*Cell)(nil),                              // 33: kmgr.v1.Cell
-	(*StructuredError)(nil),                   // 34: kmgr.v1.StructuredError
-	(*ResourceRow)(nil),                       // 35: kmgr.v1.ResourceRow
-	(*StreamCursor)(nil),                      // 36: kmgr.v1.StreamCursor
-	(*Acknowledgement)(nil),                   // 37: kmgr.v1.Acknowledgement
+	(SelectionGestureKind)(0),                 // 3: kmgr.v1.SelectionGestureKind
+	(*PreviewColumnRequest)(nil),              // 4: kmgr.v1.PreviewColumnRequest
+	(*CELColumnDefinition)(nil),               // 5: kmgr.v1.CELColumnDefinition
+	(*PreviewColumnResponse)(nil),             // 6: kmgr.v1.PreviewColumnResponse
+	(*SortDescriptor)(nil),                    // 7: kmgr.v1.SortDescriptor
+	(*ViewSpec)(nil),                          // 8: kmgr.v1.ViewSpec
+	(*OpenViewRequest)(nil),                   // 9: kmgr.v1.OpenViewRequest
+	(*CancelViewRequest)(nil),                 // 10: kmgr.v1.CancelViewRequest
+	(*ViewStatus)(nil),                        // 11: kmgr.v1.ViewStatus
+	(*ResourceColumnSchema)(nil),              // 12: kmgr.v1.ResourceColumnSchema
+	(*ViewSchema)(nil),                        // 13: kmgr.v1.ViewSchema
+	(*ViewInvalidation)(nil),                  // 14: kmgr.v1.ViewInvalidation
+	(*FetchViewRangeRequest)(nil),             // 15: kmgr.v1.FetchViewRangeRequest
+	(*FetchViewRangeResponse)(nil),            // 16: kmgr.v1.FetchViewRangeResponse
+	(*UpdateMetricInterestRequest)(nil),       // 17: kmgr.v1.UpdateMetricInterestRequest
+	(*ViewReconciled)(nil),                    // 18: kmgr.v1.ViewReconciled
+	(*ViewEvent)(nil),                         // 19: kmgr.v1.ViewEvent
+	(*SearchObjectsRequest)(nil),              // 20: kmgr.v1.SearchObjectsRequest
+	(*SearchCachedObjectsRequest)(nil),        // 21: kmgr.v1.SearchCachedObjectsRequest
+	(*SearchCachedObjectsResponse)(nil),       // 22: kmgr.v1.SearchCachedObjectsResponse
+	(*SearchResult)(nil),                      // 23: kmgr.v1.SearchResult
+	(*SearchProgress)(nil),                    // 24: kmgr.v1.SearchProgress
+	(*SearchObjectsEvent)(nil),                // 25: kmgr.v1.SearchObjectsEvent
+	(*CancelSearchRequest)(nil),               // 26: kmgr.v1.CancelSearchRequest
+	(*DiscoverOptionalResourcesRequest)(nil),  // 27: kmgr.v1.DiscoverOptionalResourcesRequest
+	(*OptionalResource)(nil),                  // 28: kmgr.v1.OptionalResource
+	(*DiscoverOptionalResourcesResponse)(nil), // 29: kmgr.v1.DiscoverOptionalResourcesResponse
+	(*SelectionGesture)(nil),                  // 30: kmgr.v1.SelectionGesture
+	(*SelectionAnchor)(nil),                   // 31: kmgr.v1.SelectionAnchor
+	(*SelectionState)(nil),                    // 32: kmgr.v1.SelectionState
+	(*ApplySelectionGestureRequest)(nil),      // 33: kmgr.v1.ApplySelectionGestureRequest
+	(*ApplySelectionGestureResponse)(nil),     // 34: kmgr.v1.ApplySelectionGestureResponse
+	(*ProjectSelectionRangeRequest)(nil),      // 35: kmgr.v1.ProjectSelectionRangeRequest
+	(*ProjectSelectionRangeResponse)(nil),     // 36: kmgr.v1.ProjectSelectionRangeResponse
+	(*SelectionPageItem)(nil),                 // 37: kmgr.v1.SelectionPageItem
+	(*FetchSelectionPageRequest)(nil),         // 38: kmgr.v1.FetchSelectionPageRequest
+	(*FetchSelectionPageResponse)(nil),        // 39: kmgr.v1.FetchSelectionPageResponse
+	(*RequestContext)(nil),                    // 40: kmgr.v1.RequestContext
+	(*ResourceType)(nil),                      // 41: kmgr.v1.ResourceType
+	(*NamespaceScope)(nil),                    // 42: kmgr.v1.NamespaceScope
+	(*ResourceIdentity)(nil),                  // 43: kmgr.v1.ResourceIdentity
+	(*Cell)(nil),                              // 44: kmgr.v1.Cell
+	(*StructuredError)(nil),                   // 45: kmgr.v1.StructuredError
+	(*ResourceRow)(nil),                       // 46: kmgr.v1.ResourceRow
+	(*StreamCursor)(nil),                      // 47: kmgr.v1.StreamCursor
+	(*Acknowledgement)(nil),                   // 48: kmgr.v1.Acknowledgement
 }
 var file_kmgr_v1_view_proto_depIdxs = []int32{
-	29, // 0: kmgr.v1.PreviewColumnRequest.context:type_name -> kmgr.v1.RequestContext
-	30, // 1: kmgr.v1.PreviewColumnRequest.resource:type_name -> kmgr.v1.ResourceType
-	31, // 2: kmgr.v1.PreviewColumnRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
-	4,  // 3: kmgr.v1.PreviewColumnRequest.column:type_name -> kmgr.v1.CELColumnDefinition
-	32, // 4: kmgr.v1.PreviewColumnRequest.selected_object:type_name -> kmgr.v1.ResourceIdentity
-	33, // 5: kmgr.v1.PreviewColumnResponse.preview:type_name -> kmgr.v1.Cell
-	32, // 6: kmgr.v1.PreviewColumnResponse.evaluated_object:type_name -> kmgr.v1.ResourceIdentity
-	34, // 7: kmgr.v1.PreviewColumnResponse.error:type_name -> kmgr.v1.StructuredError
+	40, // 0: kmgr.v1.PreviewColumnRequest.context:type_name -> kmgr.v1.RequestContext
+	41, // 1: kmgr.v1.PreviewColumnRequest.resource:type_name -> kmgr.v1.ResourceType
+	42, // 2: kmgr.v1.PreviewColumnRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
+	5,  // 3: kmgr.v1.PreviewColumnRequest.column:type_name -> kmgr.v1.CELColumnDefinition
+	43, // 4: kmgr.v1.PreviewColumnRequest.selected_object:type_name -> kmgr.v1.ResourceIdentity
+	44, // 5: kmgr.v1.PreviewColumnResponse.preview:type_name -> kmgr.v1.Cell
+	43, // 6: kmgr.v1.PreviewColumnResponse.evaluated_object:type_name -> kmgr.v1.ResourceIdentity
+	45, // 7: kmgr.v1.PreviewColumnResponse.error:type_name -> kmgr.v1.StructuredError
 	0,  // 8: kmgr.v1.SortDescriptor.direction:type_name -> kmgr.v1.SortDirection
-	30, // 9: kmgr.v1.ViewSpec.resource:type_name -> kmgr.v1.ResourceType
-	31, // 10: kmgr.v1.ViewSpec.namespace_scope:type_name -> kmgr.v1.NamespaceScope
-	6,  // 11: kmgr.v1.ViewSpec.sort:type_name -> kmgr.v1.SortDescriptor
-	29, // 12: kmgr.v1.OpenViewRequest.context:type_name -> kmgr.v1.RequestContext
-	7,  // 13: kmgr.v1.OpenViewRequest.spec:type_name -> kmgr.v1.ViewSpec
-	29, // 14: kmgr.v1.CancelViewRequest.context:type_name -> kmgr.v1.RequestContext
+	41, // 9: kmgr.v1.ViewSpec.resource:type_name -> kmgr.v1.ResourceType
+	42, // 10: kmgr.v1.ViewSpec.namespace_scope:type_name -> kmgr.v1.NamespaceScope
+	7,  // 11: kmgr.v1.ViewSpec.sort:type_name -> kmgr.v1.SortDescriptor
+	40, // 12: kmgr.v1.OpenViewRequest.context:type_name -> kmgr.v1.RequestContext
+	8,  // 13: kmgr.v1.OpenViewRequest.spec:type_name -> kmgr.v1.ViewSpec
+	40, // 14: kmgr.v1.CancelViewRequest.context:type_name -> kmgr.v1.RequestContext
 	1,  // 15: kmgr.v1.ViewStatus.freshness:type_name -> kmgr.v1.ViewFreshness
-	11, // 16: kmgr.v1.ViewSchema.columns:type_name -> kmgr.v1.ResourceColumnSchema
-	29, // 17: kmgr.v1.FetchViewRangeRequest.context:type_name -> kmgr.v1.RequestContext
-	35, // 18: kmgr.v1.FetchViewRangeResponse.rows:type_name -> kmgr.v1.ResourceRow
-	29, // 19: kmgr.v1.UpdateMetricInterestRequest.context:type_name -> kmgr.v1.RequestContext
-	36, // 20: kmgr.v1.ViewEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	10, // 21: kmgr.v1.ViewEvent.status:type_name -> kmgr.v1.ViewStatus
-	34, // 22: kmgr.v1.ViewEvent.error:type_name -> kmgr.v1.StructuredError
-	17, // 23: kmgr.v1.ViewEvent.reconciled:type_name -> kmgr.v1.ViewReconciled
-	12, // 24: kmgr.v1.ViewEvent.schema:type_name -> kmgr.v1.ViewSchema
-	13, // 25: kmgr.v1.ViewEvent.invalidation:type_name -> kmgr.v1.ViewInvalidation
-	29, // 26: kmgr.v1.SearchObjectsRequest.context:type_name -> kmgr.v1.RequestContext
-	30, // 27: kmgr.v1.SearchObjectsRequest.resource:type_name -> kmgr.v1.ResourceType
-	31, // 28: kmgr.v1.SearchObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
-	29, // 29: kmgr.v1.SearchCachedObjectsRequest.context:type_name -> kmgr.v1.RequestContext
-	31, // 30: kmgr.v1.SearchCachedObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
-	30, // 31: kmgr.v1.SearchCachedObjectsRequest.resource_filters:type_name -> kmgr.v1.ResourceType
-	22, // 32: kmgr.v1.SearchCachedObjectsResponse.results:type_name -> kmgr.v1.SearchResult
-	34, // 33: kmgr.v1.SearchCachedObjectsResponse.error:type_name -> kmgr.v1.StructuredError
-	32, // 34: kmgr.v1.SearchResult.identity:type_name -> kmgr.v1.ResourceIdentity
-	36, // 35: kmgr.v1.SearchObjectsEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	22, // 36: kmgr.v1.SearchObjectsEvent.results:type_name -> kmgr.v1.SearchResult
-	23, // 37: kmgr.v1.SearchObjectsEvent.progress:type_name -> kmgr.v1.SearchProgress
-	34, // 38: kmgr.v1.SearchObjectsEvent.error:type_name -> kmgr.v1.StructuredError
-	29, // 39: kmgr.v1.CancelSearchRequest.context:type_name -> kmgr.v1.RequestContext
-	29, // 40: kmgr.v1.DiscoverOptionalResourcesRequest.context:type_name -> kmgr.v1.RequestContext
-	30, // 41: kmgr.v1.DiscoverOptionalResourcesRequest.applicable_resource:type_name -> kmgr.v1.ResourceType
+	12, // 16: kmgr.v1.ViewSchema.columns:type_name -> kmgr.v1.ResourceColumnSchema
+	40, // 17: kmgr.v1.FetchViewRangeRequest.context:type_name -> kmgr.v1.RequestContext
+	46, // 18: kmgr.v1.FetchViewRangeResponse.rows:type_name -> kmgr.v1.ResourceRow
+	40, // 19: kmgr.v1.UpdateMetricInterestRequest.context:type_name -> kmgr.v1.RequestContext
+	47, // 20: kmgr.v1.ViewEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	11, // 21: kmgr.v1.ViewEvent.status:type_name -> kmgr.v1.ViewStatus
+	45, // 22: kmgr.v1.ViewEvent.error:type_name -> kmgr.v1.StructuredError
+	18, // 23: kmgr.v1.ViewEvent.reconciled:type_name -> kmgr.v1.ViewReconciled
+	13, // 24: kmgr.v1.ViewEvent.schema:type_name -> kmgr.v1.ViewSchema
+	14, // 25: kmgr.v1.ViewEvent.invalidation:type_name -> kmgr.v1.ViewInvalidation
+	40, // 26: kmgr.v1.SearchObjectsRequest.context:type_name -> kmgr.v1.RequestContext
+	41, // 27: kmgr.v1.SearchObjectsRequest.resource:type_name -> kmgr.v1.ResourceType
+	42, // 28: kmgr.v1.SearchObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
+	40, // 29: kmgr.v1.SearchCachedObjectsRequest.context:type_name -> kmgr.v1.RequestContext
+	42, // 30: kmgr.v1.SearchCachedObjectsRequest.namespace_scope:type_name -> kmgr.v1.NamespaceScope
+	41, // 31: kmgr.v1.SearchCachedObjectsRequest.resource_filters:type_name -> kmgr.v1.ResourceType
+	23, // 32: kmgr.v1.SearchCachedObjectsResponse.results:type_name -> kmgr.v1.SearchResult
+	45, // 33: kmgr.v1.SearchCachedObjectsResponse.error:type_name -> kmgr.v1.StructuredError
+	43, // 34: kmgr.v1.SearchResult.identity:type_name -> kmgr.v1.ResourceIdentity
+	47, // 35: kmgr.v1.SearchObjectsEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	23, // 36: kmgr.v1.SearchObjectsEvent.results:type_name -> kmgr.v1.SearchResult
+	24, // 37: kmgr.v1.SearchObjectsEvent.progress:type_name -> kmgr.v1.SearchProgress
+	45, // 38: kmgr.v1.SearchObjectsEvent.error:type_name -> kmgr.v1.StructuredError
+	40, // 39: kmgr.v1.CancelSearchRequest.context:type_name -> kmgr.v1.RequestContext
+	40, // 40: kmgr.v1.DiscoverOptionalResourcesRequest.context:type_name -> kmgr.v1.RequestContext
+	41, // 41: kmgr.v1.DiscoverOptionalResourcesRequest.applicable_resource:type_name -> kmgr.v1.ResourceType
 	2,  // 42: kmgr.v1.OptionalResource.category:type_name -> kmgr.v1.OptionalResourceCategory
-	30, // 43: kmgr.v1.OptionalResource.applicable_resource:type_name -> kmgr.v1.ResourceType
-	27, // 44: kmgr.v1.DiscoverOptionalResourcesResponse.resources:type_name -> kmgr.v1.OptionalResource
-	34, // 45: kmgr.v1.DiscoverOptionalResourcesResponse.error:type_name -> kmgr.v1.StructuredError
-	8,  // 46: kmgr.v1.ViewService.StreamView:input_type -> kmgr.v1.OpenViewRequest
-	14, // 47: kmgr.v1.ViewService.FetchViewRange:input_type -> kmgr.v1.FetchViewRangeRequest
-	16, // 48: kmgr.v1.ViewService.UpdateMetricInterest:input_type -> kmgr.v1.UpdateMetricInterestRequest
-	9,  // 49: kmgr.v1.ViewService.CancelView:input_type -> kmgr.v1.CancelViewRequest
-	3,  // 50: kmgr.v1.ViewService.PreviewColumn:input_type -> kmgr.v1.PreviewColumnRequest
-	26, // 51: kmgr.v1.ViewService.DiscoverOptionalResources:input_type -> kmgr.v1.DiscoverOptionalResourcesRequest
-	20, // 52: kmgr.v1.ViewService.SearchCachedObjects:input_type -> kmgr.v1.SearchCachedObjectsRequest
-	19, // 53: kmgr.v1.ViewService.SearchObjects:input_type -> kmgr.v1.SearchObjectsRequest
-	25, // 54: kmgr.v1.ViewService.CancelSearch:input_type -> kmgr.v1.CancelSearchRequest
-	18, // 55: kmgr.v1.ViewService.StreamView:output_type -> kmgr.v1.ViewEvent
-	15, // 56: kmgr.v1.ViewService.FetchViewRange:output_type -> kmgr.v1.FetchViewRangeResponse
-	37, // 57: kmgr.v1.ViewService.UpdateMetricInterest:output_type -> kmgr.v1.Acknowledgement
-	37, // 58: kmgr.v1.ViewService.CancelView:output_type -> kmgr.v1.Acknowledgement
-	5,  // 59: kmgr.v1.ViewService.PreviewColumn:output_type -> kmgr.v1.PreviewColumnResponse
-	28, // 60: kmgr.v1.ViewService.DiscoverOptionalResources:output_type -> kmgr.v1.DiscoverOptionalResourcesResponse
-	21, // 61: kmgr.v1.ViewService.SearchCachedObjects:output_type -> kmgr.v1.SearchCachedObjectsResponse
-	24, // 62: kmgr.v1.ViewService.SearchObjects:output_type -> kmgr.v1.SearchObjectsEvent
-	37, // 63: kmgr.v1.ViewService.CancelSearch:output_type -> kmgr.v1.Acknowledgement
-	55, // [55:64] is the sub-list for method output_type
-	46, // [46:55] is the sub-list for method input_type
-	46, // [46:46] is the sub-list for extension type_name
-	46, // [46:46] is the sub-list for extension extendee
-	0,  // [0:46] is the sub-list for field type_name
+	41, // 43: kmgr.v1.OptionalResource.applicable_resource:type_name -> kmgr.v1.ResourceType
+	28, // 44: kmgr.v1.DiscoverOptionalResourcesResponse.resources:type_name -> kmgr.v1.OptionalResource
+	45, // 45: kmgr.v1.DiscoverOptionalResourcesResponse.error:type_name -> kmgr.v1.StructuredError
+	3,  // 46: kmgr.v1.SelectionGesture.kind:type_name -> kmgr.v1.SelectionGestureKind
+	31, // 47: kmgr.v1.SelectionState.anchor:type_name -> kmgr.v1.SelectionAnchor
+	40, // 48: kmgr.v1.ApplySelectionGestureRequest.context:type_name -> kmgr.v1.RequestContext
+	30, // 49: kmgr.v1.ApplySelectionGestureRequest.gesture:type_name -> kmgr.v1.SelectionGesture
+	32, // 50: kmgr.v1.ApplySelectionGestureResponse.selection:type_name -> kmgr.v1.SelectionState
+	40, // 51: kmgr.v1.ProjectSelectionRangeRequest.context:type_name -> kmgr.v1.RequestContext
+	32, // 52: kmgr.v1.ProjectSelectionRangeResponse.selection:type_name -> kmgr.v1.SelectionState
+	43, // 53: kmgr.v1.SelectionPageItem.identity:type_name -> kmgr.v1.ResourceIdentity
+	40, // 54: kmgr.v1.FetchSelectionPageRequest.context:type_name -> kmgr.v1.RequestContext
+	32, // 55: kmgr.v1.FetchSelectionPageResponse.selection:type_name -> kmgr.v1.SelectionState
+	37, // 56: kmgr.v1.FetchSelectionPageResponse.items:type_name -> kmgr.v1.SelectionPageItem
+	9,  // 57: kmgr.v1.ViewService.StreamView:input_type -> kmgr.v1.OpenViewRequest
+	15, // 58: kmgr.v1.ViewService.FetchViewRange:input_type -> kmgr.v1.FetchViewRangeRequest
+	17, // 59: kmgr.v1.ViewService.UpdateMetricInterest:input_type -> kmgr.v1.UpdateMetricInterestRequest
+	33, // 60: kmgr.v1.ViewService.ApplySelectionGesture:input_type -> kmgr.v1.ApplySelectionGestureRequest
+	35, // 61: kmgr.v1.ViewService.ProjectSelectionRange:input_type -> kmgr.v1.ProjectSelectionRangeRequest
+	38, // 62: kmgr.v1.ViewService.FetchSelectionPage:input_type -> kmgr.v1.FetchSelectionPageRequest
+	10, // 63: kmgr.v1.ViewService.CancelView:input_type -> kmgr.v1.CancelViewRequest
+	4,  // 64: kmgr.v1.ViewService.PreviewColumn:input_type -> kmgr.v1.PreviewColumnRequest
+	27, // 65: kmgr.v1.ViewService.DiscoverOptionalResources:input_type -> kmgr.v1.DiscoverOptionalResourcesRequest
+	21, // 66: kmgr.v1.ViewService.SearchCachedObjects:input_type -> kmgr.v1.SearchCachedObjectsRequest
+	20, // 67: kmgr.v1.ViewService.SearchObjects:input_type -> kmgr.v1.SearchObjectsRequest
+	26, // 68: kmgr.v1.ViewService.CancelSearch:input_type -> kmgr.v1.CancelSearchRequest
+	19, // 69: kmgr.v1.ViewService.StreamView:output_type -> kmgr.v1.ViewEvent
+	16, // 70: kmgr.v1.ViewService.FetchViewRange:output_type -> kmgr.v1.FetchViewRangeResponse
+	48, // 71: kmgr.v1.ViewService.UpdateMetricInterest:output_type -> kmgr.v1.Acknowledgement
+	34, // 72: kmgr.v1.ViewService.ApplySelectionGesture:output_type -> kmgr.v1.ApplySelectionGestureResponse
+	36, // 73: kmgr.v1.ViewService.ProjectSelectionRange:output_type -> kmgr.v1.ProjectSelectionRangeResponse
+	39, // 74: kmgr.v1.ViewService.FetchSelectionPage:output_type -> kmgr.v1.FetchSelectionPageResponse
+	48, // 75: kmgr.v1.ViewService.CancelView:output_type -> kmgr.v1.Acknowledgement
+	6,  // 76: kmgr.v1.ViewService.PreviewColumn:output_type -> kmgr.v1.PreviewColumnResponse
+	29, // 77: kmgr.v1.ViewService.DiscoverOptionalResources:output_type -> kmgr.v1.DiscoverOptionalResourcesResponse
+	22, // 78: kmgr.v1.ViewService.SearchCachedObjects:output_type -> kmgr.v1.SearchCachedObjectsResponse
+	25, // 79: kmgr.v1.ViewService.SearchObjects:output_type -> kmgr.v1.SearchObjectsEvent
+	48, // 80: kmgr.v1.ViewService.CancelSearch:output_type -> kmgr.v1.Acknowledgement
+	69, // [69:81] is the sub-list for method output_type
+	57, // [57:69] is the sub-list for method input_type
+	57, // [57:57] is the sub-list for extension type_name
+	57, // [57:57] is the sub-list for extension extendee
+	0,  // [0:57] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_view_proto_init() }
@@ -2789,13 +3719,14 @@ func file_kmgr_v1_view_proto_init() {
 		(*ViewEvent_Schema)(nil),
 		(*ViewEvent_Invalidation)(nil),
 	}
+	file_kmgr_v1_view_proto_msgTypes[32].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_view_proto_rawDesc), len(file_kmgr_v1_view_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   26,
+			NumEnums:      4,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

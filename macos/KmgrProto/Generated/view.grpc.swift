@@ -59,6 +59,45 @@ public enum Kmgr_V1_ViewService: Sendable {
                 type: .unary
             )
         }
+        /// Namespace for "ApplySelectionGesture" metadata.
+        public enum ApplySelectionGesture: Sendable {
+            /// Request type for "ApplySelectionGesture".
+            public typealias Input = Kmgr_V1_ApplySelectionGestureRequest
+            /// Response type for "ApplySelectionGesture".
+            public typealias Output = Kmgr_V1_ApplySelectionGestureResponse
+            /// Descriptor for "ApplySelectionGesture".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ViewService"),
+                method: "ApplySelectionGesture",
+                type: .unary
+            )
+        }
+        /// Namespace for "ProjectSelectionRange" metadata.
+        public enum ProjectSelectionRange: Sendable {
+            /// Request type for "ProjectSelectionRange".
+            public typealias Input = Kmgr_V1_ProjectSelectionRangeRequest
+            /// Response type for "ProjectSelectionRange".
+            public typealias Output = Kmgr_V1_ProjectSelectionRangeResponse
+            /// Descriptor for "ProjectSelectionRange".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ViewService"),
+                method: "ProjectSelectionRange",
+                type: .unary
+            )
+        }
+        /// Namespace for "FetchSelectionPage" metadata.
+        public enum FetchSelectionPage: Sendable {
+            /// Request type for "FetchSelectionPage".
+            public typealias Input = Kmgr_V1_FetchSelectionPageRequest
+            /// Response type for "FetchSelectionPage".
+            public typealias Output = Kmgr_V1_FetchSelectionPageResponse
+            /// Descriptor for "FetchSelectionPage".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ViewService"),
+                method: "FetchSelectionPage",
+                type: .unary
+            )
+        }
         /// Namespace for "CancelView" metadata.
         public enum CancelView: Sendable {
             /// Request type for "CancelView".
@@ -142,6 +181,9 @@ public enum Kmgr_V1_ViewService: Sendable {
             StreamView.descriptor,
             FetchViewRange.descriptor,
             UpdateMetricInterest.descriptor,
+            ApplySelectionGesture.descriptor,
+            ProjectSelectionRange.descriptor,
+            FetchSelectionPage.descriptor,
             CancelView.descriptor,
             PreviewColumn.descriptor,
             DiscoverOptionalResources.descriptor,
@@ -222,6 +264,63 @@ extension Kmgr_V1_ViewService {
             deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_Acknowledgement>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "ApplySelectionGesture" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_ApplySelectionGestureRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_ApplySelectionGestureRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_ApplySelectionGestureResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func applySelectionGesture<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_ApplySelectionGestureRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_ApplySelectionGestureRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ApplySelectionGestureResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ApplySelectionGestureResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "ProjectSelectionRange" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_ProjectSelectionRangeRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_ProjectSelectionRangeRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_ProjectSelectionRangeResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func projectSelectionRange<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_ProjectSelectionRangeRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_ProjectSelectionRangeRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ProjectSelectionRangeResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ProjectSelectionRangeResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "FetchSelectionPage" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_FetchSelectionPageRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_FetchSelectionPageRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_FetchSelectionPageResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func fetchSelectionPage<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_FetchSelectionPageRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_FetchSelectionPageRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_FetchSelectionPageResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_FetchSelectionPageResponse>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "CancelView" method.
@@ -436,6 +535,96 @@ extension Kmgr_V1_ViewService {
             try await self.client.unary(
                 request: request,
                 descriptor: Kmgr_V1_ViewService.Method.UpdateMetricInterest.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "ApplySelectionGesture" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_ApplySelectionGestureRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_ApplySelectionGestureRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_ApplySelectionGestureResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func applySelectionGesture<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_ApplySelectionGestureRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_ApplySelectionGestureRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ApplySelectionGestureResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ApplySelectionGestureResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Kmgr_V1_ViewService.Method.ApplySelectionGesture.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "ProjectSelectionRange" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_ProjectSelectionRangeRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_ProjectSelectionRangeRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_ProjectSelectionRangeResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func projectSelectionRange<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_ProjectSelectionRangeRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_ProjectSelectionRangeRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ProjectSelectionRangeResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ProjectSelectionRangeResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Kmgr_V1_ViewService.Method.ProjectSelectionRange.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "FetchSelectionPage" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_FetchSelectionPageRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_FetchSelectionPageRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_FetchSelectionPageResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func fetchSelectionPage<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_FetchSelectionPageRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_FetchSelectionPageRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_FetchSelectionPageResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_FetchSelectionPageResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Kmgr_V1_ViewService.Method.FetchSelectionPage.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -699,6 +888,81 @@ extension Kmgr_V1_ViewService.ClientProtocol {
         )
     }
 
+    /// Call the "ApplySelectionGesture" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_ApplySelectionGestureRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func applySelectionGesture<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_ApplySelectionGestureRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ApplySelectionGestureResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.applySelectionGesture(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_ApplySelectionGestureRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_ApplySelectionGestureResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "ProjectSelectionRange" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_ProjectSelectionRangeRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func projectSelectionRange<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_ProjectSelectionRangeRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ProjectSelectionRangeResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.projectSelectionRange(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_ProjectSelectionRangeRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_ProjectSelectionRangeResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "FetchSelectionPage" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_FetchSelectionPageRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func fetchSelectionPage<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_FetchSelectionPageRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_FetchSelectionPageResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.fetchSelectionPage(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_FetchSelectionPageRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_FetchSelectionPageResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "CancelView" method.
     ///
     /// - Parameters:
@@ -930,6 +1194,93 @@ extension Kmgr_V1_ViewService.ClientProtocol {
             metadata: metadata
         )
         return try await self.updateMetricInterest(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "ApplySelectionGesture" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func applySelectionGesture<Result>(
+        _ message: Kmgr_V1_ApplySelectionGestureRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ApplySelectionGestureResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_ApplySelectionGestureRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.applySelectionGesture(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "ProjectSelectionRange" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func projectSelectionRange<Result>(
+        _ message: Kmgr_V1_ProjectSelectionRangeRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_ProjectSelectionRangeResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_ProjectSelectionRangeRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.projectSelectionRange(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "FetchSelectionPage" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func fetchSelectionPage<Result>(
+        _ message: Kmgr_V1_FetchSelectionPageRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_FetchSelectionPageResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_FetchSelectionPageRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.fetchSelectionPage(
             request: request,
             options: options,
             onResponse: handleResponse

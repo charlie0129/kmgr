@@ -72,6 +72,36 @@ func TestViewServiceMethodsValidateRequestContext(t *testing.T) {
 			},
 		},
 		{
+			name: "apply selection missing request ID", code: codes.InvalidArgument,
+			requestContext: &kmgrv1.RequestContext{ClusterSessionId: "session"},
+			call: func(ctx *kmgrv1.RequestContext) error {
+				_, err := service.ApplySelectionGesture(context.Background(), &kmgrv1.ApplySelectionGestureRequest{
+					Context: ctx,
+				})
+				return err
+			},
+		},
+		{
+			name: "project selection missing session", code: codes.InvalidArgument,
+			requestContext: &kmgrv1.RequestContext{RequestId: "request"},
+			call: func(ctx *kmgrv1.RequestContext) error {
+				_, err := service.ProjectSelectionRange(context.Background(), &kmgrv1.ProjectSelectionRangeRequest{
+					Context: ctx,
+				})
+				return err
+			},
+		},
+		{
+			name: "selection page missing request ID", code: codes.InvalidArgument,
+			requestContext: &kmgrv1.RequestContext{ClusterSessionId: "session"},
+			call: func(ctx *kmgrv1.RequestContext) error {
+				_, err := service.FetchSelectionPage(context.Background(), &kmgrv1.FetchSelectionPageRequest{
+					Context: ctx,
+				})
+				return err
+			},
+		},
+		{
 			name: "cached search expired", code: codes.DeadlineExceeded,
 			requestContext: &kmgrv1.RequestContext{
 				RequestId: "request", ClusterSessionId: "session", DeadlineUnixMs: expired,
@@ -121,6 +151,42 @@ func TestViewServiceMethodsValidateRequestContext(t *testing.T) {
 			call: func(ctx *kmgrv1.RequestContext) error {
 				_, err := service.CancelView(context.Background(), &kmgrv1.CancelViewRequest{
 					Context: ctx, ViewId: "view", Generation: 1,
+				})
+				return err
+			},
+		},
+		{
+			name: "apply selection expired", code: codes.DeadlineExceeded,
+			requestContext: &kmgrv1.RequestContext{
+				RequestId: "request", ClusterSessionId: "session", DeadlineUnixMs: expired,
+			},
+			call: func(ctx *kmgrv1.RequestContext) error {
+				_, err := service.ApplySelectionGesture(context.Background(), &kmgrv1.ApplySelectionGestureRequest{
+					Context: ctx,
+				})
+				return err
+			},
+		},
+		{
+			name: "project selection expired", code: codes.DeadlineExceeded,
+			requestContext: &kmgrv1.RequestContext{
+				RequestId: "request", ClusterSessionId: "session", DeadlineUnixMs: expired,
+			},
+			call: func(ctx *kmgrv1.RequestContext) error {
+				_, err := service.ProjectSelectionRange(context.Background(), &kmgrv1.ProjectSelectionRangeRequest{
+					Context: ctx,
+				})
+				return err
+			},
+		},
+		{
+			name: "selection page expired", code: codes.DeadlineExceeded,
+			requestContext: &kmgrv1.RequestContext{
+				RequestId: "request", ClusterSessionId: "session", DeadlineUnixMs: expired,
+			},
+			call: func(ctx *kmgrv1.RequestContext) error {
+				_, err := service.FetchSelectionPage(context.Background(), &kmgrv1.FetchSelectionPageRequest{
+					Context: ctx,
 				})
 				return err
 			},

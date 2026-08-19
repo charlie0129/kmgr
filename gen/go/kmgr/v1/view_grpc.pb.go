@@ -22,6 +22,9 @@ const (
 	ViewService_StreamView_FullMethodName                = "/kmgr.v1.ViewService/StreamView"
 	ViewService_FetchViewRange_FullMethodName            = "/kmgr.v1.ViewService/FetchViewRange"
 	ViewService_UpdateMetricInterest_FullMethodName      = "/kmgr.v1.ViewService/UpdateMetricInterest"
+	ViewService_ApplySelectionGesture_FullMethodName     = "/kmgr.v1.ViewService/ApplySelectionGesture"
+	ViewService_ProjectSelectionRange_FullMethodName     = "/kmgr.v1.ViewService/ProjectSelectionRange"
+	ViewService_FetchSelectionPage_FullMethodName        = "/kmgr.v1.ViewService/FetchSelectionPage"
 	ViewService_CancelView_FullMethodName                = "/kmgr.v1.ViewService/CancelView"
 	ViewService_PreviewColumn_FullMethodName             = "/kmgr.v1.ViewService/PreviewColumn"
 	ViewService_DiscoverOptionalResources_FullMethodName = "/kmgr.v1.ViewService/DiscoverOptionalResources"
@@ -37,6 +40,9 @@ type ViewServiceClient interface {
 	StreamView(ctx context.Context, in *OpenViewRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ViewEvent], error)
 	FetchViewRange(ctx context.Context, in *FetchViewRangeRequest, opts ...grpc.CallOption) (*FetchViewRangeResponse, error)
 	UpdateMetricInterest(ctx context.Context, in *UpdateMetricInterestRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
+	ApplySelectionGesture(ctx context.Context, in *ApplySelectionGestureRequest, opts ...grpc.CallOption) (*ApplySelectionGestureResponse, error)
+	ProjectSelectionRange(ctx context.Context, in *ProjectSelectionRangeRequest, opts ...grpc.CallOption) (*ProjectSelectionRangeResponse, error)
+	FetchSelectionPage(ctx context.Context, in *FetchSelectionPageRequest, opts ...grpc.CallOption) (*FetchSelectionPageResponse, error)
 	CancelView(ctx context.Context, in *CancelViewRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
 	PreviewColumn(ctx context.Context, in *PreviewColumnRequest, opts ...grpc.CallOption) (*PreviewColumnResponse, error)
 	DiscoverOptionalResources(ctx context.Context, in *DiscoverOptionalResourcesRequest, opts ...grpc.CallOption) (*DiscoverOptionalResourcesResponse, error)
@@ -86,6 +92,36 @@ func (c *viewServiceClient) UpdateMetricInterest(ctx context.Context, in *Update
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Acknowledgement)
 	err := c.cc.Invoke(ctx, ViewService_UpdateMetricInterest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *viewServiceClient) ApplySelectionGesture(ctx context.Context, in *ApplySelectionGestureRequest, opts ...grpc.CallOption) (*ApplySelectionGestureResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApplySelectionGestureResponse)
+	err := c.cc.Invoke(ctx, ViewService_ApplySelectionGesture_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *viewServiceClient) ProjectSelectionRange(ctx context.Context, in *ProjectSelectionRangeRequest, opts ...grpc.CallOption) (*ProjectSelectionRangeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProjectSelectionRangeResponse)
+	err := c.cc.Invoke(ctx, ViewService_ProjectSelectionRange_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *viewServiceClient) FetchSelectionPage(ctx context.Context, in *FetchSelectionPageRequest, opts ...grpc.CallOption) (*FetchSelectionPageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FetchSelectionPageResponse)
+	err := c.cc.Invoke(ctx, ViewService_FetchSelectionPage_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +204,9 @@ type ViewServiceServer interface {
 	StreamView(*OpenViewRequest, grpc.ServerStreamingServer[ViewEvent]) error
 	FetchViewRange(context.Context, *FetchViewRangeRequest) (*FetchViewRangeResponse, error)
 	UpdateMetricInterest(context.Context, *UpdateMetricInterestRequest) (*Acknowledgement, error)
+	ApplySelectionGesture(context.Context, *ApplySelectionGestureRequest) (*ApplySelectionGestureResponse, error)
+	ProjectSelectionRange(context.Context, *ProjectSelectionRangeRequest) (*ProjectSelectionRangeResponse, error)
+	FetchSelectionPage(context.Context, *FetchSelectionPageRequest) (*FetchSelectionPageResponse, error)
 	CancelView(context.Context, *CancelViewRequest) (*Acknowledgement, error)
 	PreviewColumn(context.Context, *PreviewColumnRequest) (*PreviewColumnResponse, error)
 	DiscoverOptionalResources(context.Context, *DiscoverOptionalResourcesRequest) (*DiscoverOptionalResourcesResponse, error)
@@ -192,6 +231,15 @@ func (UnimplementedViewServiceServer) FetchViewRange(context.Context, *FetchView
 }
 func (UnimplementedViewServiceServer) UpdateMetricInterest(context.Context, *UpdateMetricInterestRequest) (*Acknowledgement, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateMetricInterest not implemented")
+}
+func (UnimplementedViewServiceServer) ApplySelectionGesture(context.Context, *ApplySelectionGestureRequest) (*ApplySelectionGestureResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ApplySelectionGesture not implemented")
+}
+func (UnimplementedViewServiceServer) ProjectSelectionRange(context.Context, *ProjectSelectionRangeRequest) (*ProjectSelectionRangeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProjectSelectionRange not implemented")
+}
+func (UnimplementedViewServiceServer) FetchSelectionPage(context.Context, *FetchSelectionPageRequest) (*FetchSelectionPageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FetchSelectionPage not implemented")
 }
 func (UnimplementedViewServiceServer) CancelView(context.Context, *CancelViewRequest) (*Acknowledgement, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelView not implemented")
@@ -275,6 +323,60 @@ func _ViewService_UpdateMetricInterest_Handler(srv interface{}, ctx context.Cont
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ViewServiceServer).UpdateMetricInterest(ctx, req.(*UpdateMetricInterestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ViewService_ApplySelectionGesture_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApplySelectionGestureRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ViewServiceServer).ApplySelectionGesture(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ViewService_ApplySelectionGesture_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ViewServiceServer).ApplySelectionGesture(ctx, req.(*ApplySelectionGestureRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ViewService_ProjectSelectionRange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProjectSelectionRangeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ViewServiceServer).ProjectSelectionRange(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ViewService_ProjectSelectionRange_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ViewServiceServer).ProjectSelectionRange(ctx, req.(*ProjectSelectionRangeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ViewService_FetchSelectionPage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FetchSelectionPageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ViewServiceServer).FetchSelectionPage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ViewService_FetchSelectionPage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ViewServiceServer).FetchSelectionPage(ctx, req.(*FetchSelectionPageRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -394,6 +496,18 @@ var ViewService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateMetricInterest",
 			Handler:    _ViewService_UpdateMetricInterest_Handler,
+		},
+		{
+			MethodName: "ApplySelectionGesture",
+			Handler:    _ViewService_ApplySelectionGesture_Handler,
+		},
+		{
+			MethodName: "ProjectSelectionRange",
+			Handler:    _ViewService_ProjectSelectionRange_Handler,
+		},
+		{
+			MethodName: "FetchSelectionPage",
+			Handler:    _ViewService_FetchSelectionPage_Handler,
 		},
 		{
 			MethodName: "CancelView",

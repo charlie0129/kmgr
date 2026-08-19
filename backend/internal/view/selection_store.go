@@ -57,7 +57,9 @@ type SelectionStoreConfig struct {
 }
 
 // SelectionScope prevents an opaque token from being consumed by another
-// cluster session or view.
+// cluster session or logical view. ViewID is the stable client-owned logical
+// identity across subscription generations; generation/index live in the
+// immutable snapshot and cannot be numerically rebound.
 type SelectionScope struct {
 	SessionID string
 	ViewID    string
@@ -103,6 +105,24 @@ func NewSelectionSnapshot(
 	}
 	frozen := make([]SelectionIdentity, len(identities))
 	copy(frozen, identities)
+	return newOwnedSelectionSnapshot(generation, indexRevision, frozen)
+}
+
+// newOwnedSelectionSnapshot consumes identities. Runtime uses it after
+// capturing and cloning a private value slice, avoiding a second potentially
+// large identity-array allocation while preserving NewSelectionSnapshot's
+// public freeze guarantee.
+func newOwnedSelectionSnapshot(
+	generation, indexRevision uint64,
+	identities []SelectionIdentity,
+) (*SelectionSnapshot, error) {
+	if generation == 0 || indexRevision == 0 {
+		return nil, fmt.Errorf(
+			"%w: generation and index revision must be nonzero",
+			ErrInvalidSelectionSnapshot,
+		)
+	}
+	frozen := identities
 	uidToIndex := make(map[string]uint64, len(frozen))
 	digest := sha256.New()
 	writeSelectionHashUint64(digest, generation)
@@ -456,6 +476,25 @@ func (s *SelectionStore) Describe(scope SelectionScope, token string) (Selection
 		return SelectionState{}, err
 	}
 	return selectionState(token, record), nil
+}
+
+// snapshotForToken is a runtime integration hook. It lets a Subscription
+// publish the exact canonical pointer retained by the bounded store after two
+// concurrent first gestures independently build equivalent snapshots.
+func (s *SelectionStore) snapshotForToken(
+	scope SelectionScope,
+	token string,
+) (*SelectionSnapshot, error) {
+	if err := validateSelectionScope(scope); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.activeTokenLocked(scope, token, s.now())
+	if err != nil {
+		return nil, err
+	}
+	return record.snapshot.snapshot, nil
 }
 
 // Page returns selected identities in pinned index order. Offset is a rank in

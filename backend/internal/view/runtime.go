@@ -233,6 +233,7 @@ type RuntimeConfig struct {
 	Source                      ResourceSource
 	Metrics                     MetricSource
 	Columns                     ColumnProgramResolver
+	SelectionStoreConfig        SelectionStoreConfig
 	ReleaseDelay                time.Duration
 	BatchDelay                  time.Duration
 	PendingRowLimit             int
@@ -281,6 +282,7 @@ type Runtime struct {
 	source          ResourceSource
 	metrics         MetricSource
 	columns         ColumnProgramResolver
+	selectionStore  *SelectionStore
 	releaseDelay    time.Duration
 	batchDelay      time.Duration
 	pendingRowLimit int
@@ -446,6 +448,10 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if config.Source == nil {
 		return nil, errors.New("resource source must not be nil")
 	}
+	selectionStore, err := NewSelectionStore(config.SelectionStoreConfig)
+	if err != nil {
+		return nil, fmt.Errorf("configure selection store: %w", err)
+	}
 	if config.ReleaseDelay < 0 || config.BatchDelay < 0 || config.PipelinePageSize < 0 || config.PipelineTimeout < 0 ||
 		config.SearchSnapshotLimit < 0 || config.SearchSnapshotObjectLimit < 0 || config.SearchSnapshotTTL < 0 ||
 		config.OpenProjectionLimit < 0 || config.OpenGenerationHistory < 0 ||
@@ -539,6 +545,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		source:                         config.Source,
 		metrics:                        config.Metrics,
 		columns:                        config.Columns,
+		selectionStore:                 selectionStore,
 		releaseDelay:                   releaseDelay,
 		batchDelay:                     batchDelay,
 		pendingRowLimit:                pendingLimit,
@@ -2191,39 +2198,41 @@ type Subscription struct {
 	metricsReconciling    bool
 	lastStatus            *kmgrv1.ViewStatus
 
-	mu                      sync.Mutex
-	generation              uint64
-	sequence                uint64
-	projector               *Projector
-	projectionCacheKey      projectionCacheKey
-	rows                    map[string]*kmgrv1.ResourceRow
-	order                   []string
-	presentationRevision    uint64
-	indexRevision           uint64
-	pendingInvalidation     bool
-	pendingStatuses         []*kmgrv1.ViewStatus
-	pendingError            *kmgrv1.StructuredError
-	pendingSchema           *kmgrv1.ViewSchema
-	sealedInitial           []*kmgrv1.ViewEvent
-	stageUntilReconciled    bool
-	pendingReconciliation   bool
-	reconciliationDelivered bool
-	serverSchema            *kmgrv1.ViewSchema
-	serverColumns           []projectedTableColumn
-	serverCells             map[string][]*kmgrv1.Cell
-	optionalResourceHints   optionalResourceStreamHints
-	inFlightDelivery        *subscriptionDelivery
-	pendingObjects          map[string]*unstructured.Unstructured
-	projectionTimer         *time.Timer
-	projectionScheduled     bool
-	projectionRunning       bool
-	projectionResnapshot    bool
-	projectionRevision      uint64
-	projectionScheduleID    uint64
-	projectionPasses        uint64
-	projectedObjects        uint64
-	projectionContext       context.Context
-	cancelProjection        context.CancelFunc
+	mu                         sync.Mutex
+	generation                 uint64
+	sequence                   uint64
+	projector                  *Projector
+	projectionCacheKey         projectionCacheKey
+	rows                       map[string]*kmgrv1.ResourceRow
+	order                      []string
+	presentationRevision       uint64
+	indexRevision              uint64
+	pendingInvalidation        bool
+	pendingStatuses            []*kmgrv1.ViewStatus
+	pendingError               *kmgrv1.StructuredError
+	pendingSchema              *kmgrv1.ViewSchema
+	sealedInitial              []*kmgrv1.ViewEvent
+	stageUntilReconciled       bool
+	pendingReconciliation      bool
+	reconciliationDelivered    bool
+	serverSchema               *kmgrv1.ViewSchema
+	serverColumns              []projectedTableColumn
+	serverCells                map[string][]*kmgrv1.Cell
+	selectionSnapshot          *SelectionSnapshot
+	selectionSnapshotBuildHook func()
+	optionalResourceHints      optionalResourceStreamHints
+	inFlightDelivery           *subscriptionDelivery
+	pendingObjects             map[string]*unstructured.Unstructured
+	projectionTimer            *time.Timer
+	projectionScheduled        bool
+	projectionRunning          bool
+	projectionResnapshot       bool
+	projectionRevision         uint64
+	projectionScheduleID       uint64
+	projectionPasses           uint64
+	projectedObjects           uint64
+	projectionContext          context.Context
+	cancelProjection           context.CancelFunc
 	// snapshotComplete records whether this generation crossed an authoritative
 	// initial LIST/WatchList barrier. It gates staged reconciliation and warm
 	// catch-up status; it is not client row-delivery state.
@@ -3191,6 +3200,11 @@ func (s *Subscription) advancePresentationLocked(indexChanged bool) {
 	} else if indexChanged {
 		s.indexRevision++
 	}
+	if indexChanged {
+		// Tokens retain their own immutable snapshot through fixed expiry. The
+		// live subscription owns only the lazily built current pointer.
+		s.selectionSnapshot = nil
+	}
 	if indexChanged && s.metricInterestStop != nil {
 		s.metricInterestID++
 		s.metricInterestStop()
@@ -3377,6 +3391,7 @@ func (s *Subscription) retireLocked() *metrics.Subscription {
 	}
 	s.inFlightDelivery = nil
 	s.closed = true
+	s.selectionSnapshot = nil
 	if s.cancelProjection != nil {
 		s.cancelProjection()
 		s.cancelProjection = nil

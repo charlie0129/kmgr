@@ -11,6 +11,9 @@ service ViewService {
   rpc StreamView(OpenViewRequest) returns (stream ViewEvent);
   rpc FetchViewRange(FetchViewRangeRequest) returns (FetchViewRangeResponse);
   rpc UpdateMetricInterest(UpdateMetricInterestRequest) returns (Acknowledgement);
+  rpc ApplySelectionGesture(ApplySelectionGestureRequest) returns (ApplySelectionGestureResponse);
+  rpc ProjectSelectionRange(ProjectSelectionRangeRequest) returns (ProjectSelectionRangeResponse);
+  rpc FetchSelectionPage(FetchSelectionPageRequest) returns (FetchSelectionPageResponse);
   rpc CancelView(CancelViewRequest) returns (Acknowledgement);
   rpc PreviewColumn(PreviewColumnRequest) returns (PreviewColumnResponse);
   rpc DiscoverOptionalResources(DiscoverOptionalResourcesRequest) returns (DiscoverOptionalResourcesResponse);
@@ -320,4 +323,108 @@ message DiscoverOptionalResourcesResponse {
   bool pods_snapshot_complete = 6;
   bool potentially_incomplete = 7;
   StructuredError error = 8;
+}
+
+// Selection tokens are immutable, opaque capabilities scoped to one cluster
+// session and logical view. Each gesture produces a new token with a fixed
+// expiry; consuming a token never extends that expiry.
+enum SelectionGestureKind {
+  SELECTION_GESTURE_KIND_UNSPECIFIED = 0;
+  SELECTION_GESTURE_KIND_REPLACE = 1;
+  SELECTION_GESTURE_KIND_COMMAND_TOGGLE = 2;
+  SELECTION_GESTURE_KIND_SHIFT_EXTEND = 3;
+  SELECTION_GESTURE_KIND_COMMAND_ALL = 4;
+  SELECTION_GESTURE_KIND_CLEAR = 5;
+}
+
+message SelectionGesture {
+  SelectionGestureKind kind = 1;
+  // Absolute row index in the request's generation/index revision. Ignored
+  // only by command-all and clear gestures.
+  uint64 index = 2;
+  // Command-Shift range extension. Invalid for every other gesture kind.
+  bool additive = 3;
+}
+
+message SelectionAnchor {
+  uint64 index = 1;
+  string uid = 2;
+}
+
+message SelectionState {
+  string token = 1;
+  uint64 generation = 2;
+  uint64 index_revision = 3;
+  uint64 selected_count = 4;
+  SelectionAnchor anchor = 5;
+  int64 expires_at_unix_ms = 6;
+}
+
+// ApplySelectionGesture pins numeric input to the complete authoritative
+// ordering identified by generation/index_revision. A previous token from a
+// different revision remains valid but is not rebound; the gesture starts a
+// fresh selection on the requested ordering.
+message ApplySelectionGestureRequest {
+  RequestContext context = 1;
+  string view_id = 2;
+  uint64 generation = 3;
+  uint64 index_revision = 4;
+  string previous_token = 5;
+  SelectionGesture gesture = 6;
+}
+
+message ApplySelectionGestureResponse {
+  string request_id = 1;
+  SelectionState selection = 2;
+}
+
+// ProjectSelectionRange maps an immutable token to one bounded range of the
+// current view by UID. The numeric range is pinned to generation/index_revision
+// and is rejected if the current ordering has changed.
+message ProjectSelectionRangeRequest {
+  RequestContext context = 1;
+  string view_id = 2;
+  uint64 generation = 3;
+  uint64 index_revision = 4;
+  uint64 start_index = 5;
+  uint32 length = 6;
+  string token = 7;
+}
+
+message ProjectSelectionRangeResponse {
+  string request_id = 1;
+  string view_id = 2;
+  uint64 generation = 3;
+  uint64 index_revision = 4;
+  uint64 start_index = 5;
+  uint64 rows_visible = 6;
+  SelectionState selection = 7;
+  repeated bool selected = 8 [packed = true];
+  // Offset inside selected when the token's anchor is present in this range.
+  optional uint32 anchor_offset = 9;
+}
+
+message SelectionPageItem {
+  // Absolute index in the immutable ordering retained by the token.
+  uint64 pinned_index = 1;
+  ResourceIdentity identity = 2;
+}
+
+// Offset is a rank in the selected set rather than a table row index. Paging
+// remains valid after the source view changes revision or closes.
+message FetchSelectionPageRequest {
+  RequestContext context = 1;
+  string view_id = 2;
+  string token = 3;
+  uint64 offset = 4;
+  uint32 limit = 5;
+}
+
+message FetchSelectionPageResponse {
+  string request_id = 1;
+  SelectionState selection = 2;
+  uint64 offset = 3;
+  repeated SelectionPageItem items = 4;
+  uint64 next_offset = 5;
+  bool done = 6;
 }

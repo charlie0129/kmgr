@@ -162,6 +162,59 @@ public enum Kmgr_V1_OptionalResourceCategory: SwiftProtobuf.Enum, Swift.CaseIter
 
 }
 
+/// Selection tokens are immutable, opaque capabilities scoped to one cluster
+/// session and logical view. Each gesture produces a new token with a fixed
+/// expiry; consuming a token never extends that expiry.
+public enum Kmgr_V1_SelectionGestureKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case replace // = 1
+  case commandToggle // = 2
+  case shiftExtend // = 3
+  case commandAll // = 4
+  case clear // = 5
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .replace
+    case 2: self = .commandToggle
+    case 3: self = .shiftExtend
+    case 4: self = .commandAll
+    case 5: self = .clear
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .replace: return 1
+    case .commandToggle: return 2
+    case .shiftExtend: return 3
+    case .commandAll: return 4
+    case .clear: return 5
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Kmgr_V1_SelectionGestureKind] = [
+    .unspecified,
+    .replace,
+    .commandToggle,
+    .shiftExtend,
+    .commandAll,
+    .clear,
+  ]
+
+}
+
 /// PreviewColumn compiles one draft CEL definition in the authoritative Go
 /// environment and evaluates it against either the selected object (after a
 /// fresh UID-pinned GET) or a deterministic, non-sensitive sample object.
@@ -1084,6 +1137,304 @@ public struct Kmgr_V1_DiscoverOptionalResourcesResponse: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
+public struct Kmgr_V1_SelectionGesture: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var kind: Kmgr_V1_SelectionGestureKind = .unspecified
+
+  /// Absolute row index in the request's generation/index revision. Ignored
+  /// only by command-all and clear gestures.
+  public var index: UInt64 = 0
+
+  /// Command-Shift range extension. Invalid for every other gesture kind.
+  public var additive: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Kmgr_V1_SelectionAnchor: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var index: UInt64 = 0
+
+  public var uid: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Kmgr_V1_SelectionState: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var token: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
+
+  public var selectedCount: UInt64 = 0
+
+  public var anchor: Kmgr_V1_SelectionAnchor {
+    get {return _anchor ?? Kmgr_V1_SelectionAnchor()}
+    set {_anchor = newValue}
+  }
+  /// Returns true if `anchor` has been explicitly set.
+  public var hasAnchor: Bool {return self._anchor != nil}
+  /// Clears the value of `anchor`. Subsequent reads from it will return its default value.
+  public mutating func clearAnchor() {self._anchor = nil}
+
+  public var expiresAtUnixMs: Int64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _anchor: Kmgr_V1_SelectionAnchor? = nil
+}
+
+/// ApplySelectionGesture pins numeric input to the complete authoritative
+/// ordering identified by generation/index_revision. A previous token from a
+/// different revision remains valid but is not rebound; the gesture starts a
+/// fresh selection on the requested ordering.
+public struct Kmgr_V1_ApplySelectionGestureRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var viewID: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
+
+  public var previousToken: String = String()
+
+  public var gesture: Kmgr_V1_SelectionGesture {
+    get {return _gesture ?? Kmgr_V1_SelectionGesture()}
+    set {_gesture = newValue}
+  }
+  /// Returns true if `gesture` has been explicitly set.
+  public var hasGesture: Bool {return self._gesture != nil}
+  /// Clears the value of `gesture`. Subsequent reads from it will return its default value.
+  public mutating func clearGesture() {self._gesture = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+  fileprivate var _gesture: Kmgr_V1_SelectionGesture? = nil
+}
+
+public struct Kmgr_V1_ApplySelectionGestureResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var selection: Kmgr_V1_SelectionState {
+    get {return _selection ?? Kmgr_V1_SelectionState()}
+    set {_selection = newValue}
+  }
+  /// Returns true if `selection` has been explicitly set.
+  public var hasSelection: Bool {return self._selection != nil}
+  /// Clears the value of `selection`. Subsequent reads from it will return its default value.
+  public mutating func clearSelection() {self._selection = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _selection: Kmgr_V1_SelectionState? = nil
+}
+
+/// ProjectSelectionRange maps an immutable token to one bounded range of the
+/// current view by UID. The numeric range is pinned to generation/index_revision
+/// and is rejected if the current ordering has changed.
+public struct Kmgr_V1_ProjectSelectionRangeRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var viewID: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
+
+  public var startIndex: UInt64 = 0
+
+  public var length: UInt32 = 0
+
+  public var token: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+}
+
+public struct Kmgr_V1_ProjectSelectionRangeResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var viewID: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
+
+  public var startIndex: UInt64 = 0
+
+  public var rowsVisible: UInt64 = 0
+
+  public var selection: Kmgr_V1_SelectionState {
+    get {return _selection ?? Kmgr_V1_SelectionState()}
+    set {_selection = newValue}
+  }
+  /// Returns true if `selection` has been explicitly set.
+  public var hasSelection: Bool {return self._selection != nil}
+  /// Clears the value of `selection`. Subsequent reads from it will return its default value.
+  public mutating func clearSelection() {self._selection = nil}
+
+  public var selected: [Bool] = []
+
+  /// Offset inside selected when the token's anchor is present in this range.
+  public var anchorOffset: UInt32 {
+    get {return _anchorOffset ?? 0}
+    set {_anchorOffset = newValue}
+  }
+  /// Returns true if `anchorOffset` has been explicitly set.
+  public var hasAnchorOffset: Bool {return self._anchorOffset != nil}
+  /// Clears the value of `anchorOffset`. Subsequent reads from it will return its default value.
+  public mutating func clearAnchorOffset() {self._anchorOffset = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _selection: Kmgr_V1_SelectionState? = nil
+  fileprivate var _anchorOffset: UInt32? = nil
+}
+
+public struct Kmgr_V1_SelectionPageItem: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Absolute index in the immutable ordering retained by the token.
+  public var pinnedIndex: UInt64 = 0
+
+  public var identity: Kmgr_V1_ResourceIdentity {
+    get {return _identity ?? Kmgr_V1_ResourceIdentity()}
+    set {_identity = newValue}
+  }
+  /// Returns true if `identity` has been explicitly set.
+  public var hasIdentity: Bool {return self._identity != nil}
+  /// Clears the value of `identity`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentity() {self._identity = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _identity: Kmgr_V1_ResourceIdentity? = nil
+}
+
+/// Offset is a rank in the selected set rather than a table row index. Paging
+/// remains valid after the source view changes revision or closes.
+public struct Kmgr_V1_FetchSelectionPageRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var viewID: String = String()
+
+  public var token: String = String()
+
+  public var offset: UInt64 = 0
+
+  public var limit: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+}
+
+public struct Kmgr_V1_FetchSelectionPageResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var selection: Kmgr_V1_SelectionState {
+    get {return _selection ?? Kmgr_V1_SelectionState()}
+    set {_selection = newValue}
+  }
+  /// Returns true if `selection` has been explicitly set.
+  public var hasSelection: Bool {return self._selection != nil}
+  /// Clears the value of `selection`. Subsequent reads from it will return its default value.
+  public mutating func clearSelection() {self._selection = nil}
+
+  public var offset: UInt64 = 0
+
+  public var items: [Kmgr_V1_SelectionPageItem] = []
+
+  public var nextOffset: UInt64 = 0
+
+  public var done: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _selection: Kmgr_V1_SelectionState? = nil
+}
+
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate let _protobuf_package = "kmgr.v1"
@@ -1098,6 +1449,10 @@ extension Kmgr_V1_ViewFreshness: SwiftProtobuf._ProtoNameProviding {
 
 extension Kmgr_V1_OptionalResourceCategory: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0OPTIONAL_RESOURCE_CATEGORY_UNSPECIFIED\0\u{1}OPTIONAL_RESOURCE_CATEGORY_EPHEMERAL_STORAGE\0\u{1}OPTIONAL_RESOURCE_CATEGORY_HUGE_PAGE\0\u{1}OPTIONAL_RESOURCE_CATEGORY_ACCELERATOR\0")
+}
+
+extension Kmgr_V1_SelectionGestureKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SELECTION_GESTURE_KIND_UNSPECIFIED\0\u{1}SELECTION_GESTURE_KIND_REPLACE\0\u{1}SELECTION_GESTURE_KIND_COMMAND_TOGGLE\0\u{1}SELECTION_GESTURE_KIND_SHIFT_EXTEND\0\u{1}SELECTION_GESTURE_KIND_COMMAND_ALL\0\u{1}SELECTION_GESTURE_KIND_CLEAR\0")
 }
 
 extension Kmgr_V1_PreviewColumnRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -2746,6 +3101,528 @@ extension Kmgr_V1_DiscoverOptionalResourcesResponse: SwiftProtobuf.Message, Swif
     if lhs.podsSnapshotComplete != rhs.podsSnapshotComplete {return false}
     if lhs.potentiallyIncomplete != rhs.potentiallyIncomplete {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_SelectionGesture: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SelectionGesture"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}index\0\u{1}additive\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.index) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.additive) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 1)
+    }
+    if self.index != 0 {
+      try visitor.visitSingularUInt64Field(value: self.index, fieldNumber: 2)
+    }
+    if self.additive != false {
+      try visitor.visitSingularBoolField(value: self.additive, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_SelectionGesture, rhs: Kmgr_V1_SelectionGesture) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs.index != rhs.index {return false}
+    if lhs.additive != rhs.additive {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_SelectionAnchor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SelectionAnchor"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}index\0\u{1}uid\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.index) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.uid) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.index != 0 {
+      try visitor.visitSingularUInt64Field(value: self.index, fieldNumber: 1)
+    }
+    if !self.uid.isEmpty {
+      try visitor.visitSingularStringField(value: self.uid, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_SelectionAnchor, rhs: Kmgr_V1_SelectionAnchor) -> Bool {
+    if lhs.index != rhs.index {return false}
+    if lhs.uid != rhs.uid {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_SelectionState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SelectionState"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}token\0\u{1}generation\0\u{3}index_revision\0\u{3}selected_count\0\u{1}anchor\0\u{3}expires_at_unix_ms\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.token) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.selectedCount) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._anchor) }()
+      case 6: try { try decoder.decodeSingularInt64Field(value: &self.expiresAtUnixMs) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.token.isEmpty {
+      try visitor.visitSingularStringField(value: self.token, fieldNumber: 1)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 2)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 3)
+    }
+    if self.selectedCount != 0 {
+      try visitor.visitSingularUInt64Field(value: self.selectedCount, fieldNumber: 4)
+    }
+    try { if let v = self._anchor {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    if self.expiresAtUnixMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.expiresAtUnixMs, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_SelectionState, rhs: Kmgr_V1_SelectionState) -> Bool {
+    if lhs.token != rhs.token {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.selectedCount != rhs.selectedCount {return false}
+    if lhs._anchor != rhs._anchor {return false}
+    if lhs.expiresAtUnixMs != rhs.expiresAtUnixMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_ApplySelectionGestureRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ApplySelectionGestureRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{3}index_revision\0\u{3}previous_token\0\u{1}gesture\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.previousToken) }()
+      case 6: try { try decoder.decodeSingularMessageField(value: &self._gesture) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 2)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 3)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 4)
+    }
+    if !self.previousToken.isEmpty {
+      try visitor.visitSingularStringField(value: self.previousToken, fieldNumber: 5)
+    }
+    try { if let v = self._gesture {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ApplySelectionGestureRequest, rhs: Kmgr_V1_ApplySelectionGestureRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.previousToken != rhs.previousToken {return false}
+    if lhs._gesture != rhs._gesture {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_ApplySelectionGestureResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ApplySelectionGestureResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}selection\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._selection) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    try { if let v = self._selection {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ApplySelectionGestureResponse, rhs: Kmgr_V1_ApplySelectionGestureResponse) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs._selection != rhs._selection {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_ProjectSelectionRangeRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProjectSelectionRangeRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{3}index_revision\0\u{3}start_index\0\u{1}length\0\u{1}token\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.startIndex) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.length) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.token) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 2)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 3)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 4)
+    }
+    if self.startIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.startIndex, fieldNumber: 5)
+    }
+    if self.length != 0 {
+      try visitor.visitSingularUInt32Field(value: self.length, fieldNumber: 6)
+    }
+    if !self.token.isEmpty {
+      try visitor.visitSingularStringField(value: self.token, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ProjectSelectionRangeRequest, rhs: Kmgr_V1_ProjectSelectionRangeRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.startIndex != rhs.startIndex {return false}
+    if lhs.length != rhs.length {return false}
+    if lhs.token != rhs.token {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_ProjectSelectionRangeResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProjectSelectionRangeResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}view_id\0\u{1}generation\0\u{3}index_revision\0\u{3}start_index\0\u{3}rows_visible\0\u{1}selection\0\u{1}selected\0\u{3}anchor_offset\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.startIndex) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.rowsVisible) }()
+      case 7: try { try decoder.decodeSingularMessageField(value: &self._selection) }()
+      case 8: try { try decoder.decodeRepeatedBoolField(value: &self.selected) }()
+      case 9: try { try decoder.decodeSingularUInt32Field(value: &self._anchorOffset) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 2)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 3)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 4)
+    }
+    if self.startIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.startIndex, fieldNumber: 5)
+    }
+    if self.rowsVisible != 0 {
+      try visitor.visitSingularUInt64Field(value: self.rowsVisible, fieldNumber: 6)
+    }
+    try { if let v = self._selection {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+    } }()
+    if !self.selected.isEmpty {
+      try visitor.visitPackedBoolField(value: self.selected, fieldNumber: 8)
+    }
+    try { if let v = self._anchorOffset {
+      try visitor.visitSingularUInt32Field(value: v, fieldNumber: 9)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ProjectSelectionRangeResponse, rhs: Kmgr_V1_ProjectSelectionRangeResponse) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.startIndex != rhs.startIndex {return false}
+    if lhs.rowsVisible != rhs.rowsVisible {return false}
+    if lhs._selection != rhs._selection {return false}
+    if lhs.selected != rhs.selected {return false}
+    if lhs._anchorOffset != rhs._anchorOffset {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_SelectionPageItem: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SelectionPageItem"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pinned_index\0\u{1}identity\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.pinnedIndex) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._identity) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.pinnedIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.pinnedIndex, fieldNumber: 1)
+    }
+    try { if let v = self._identity {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_SelectionPageItem, rhs: Kmgr_V1_SelectionPageItem) -> Bool {
+    if lhs.pinnedIndex != rhs.pinnedIndex {return false}
+    if lhs._identity != rhs._identity {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_FetchSelectionPageRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FetchSelectionPageRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}token\0\u{1}offset\0\u{1}limit\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.token) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.offset) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.limit) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 2)
+    }
+    if !self.token.isEmpty {
+      try visitor.visitSingularStringField(value: self.token, fieldNumber: 3)
+    }
+    if self.offset != 0 {
+      try visitor.visitSingularUInt64Field(value: self.offset, fieldNumber: 4)
+    }
+    if self.limit != 0 {
+      try visitor.visitSingularUInt32Field(value: self.limit, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_FetchSelectionPageRequest, rhs: Kmgr_V1_FetchSelectionPageRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.token != rhs.token {return false}
+    if lhs.offset != rhs.offset {return false}
+    if lhs.limit != rhs.limit {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_FetchSelectionPageResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FetchSelectionPageResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}selection\0\u{1}offset\0\u{1}items\0\u{3}next_offset\0\u{1}done\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._selection) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.offset) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.items) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.nextOffset) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.done) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    try { if let v = self._selection {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    if self.offset != 0 {
+      try visitor.visitSingularUInt64Field(value: self.offset, fieldNumber: 3)
+    }
+    if !self.items.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.items, fieldNumber: 4)
+    }
+    if self.nextOffset != 0 {
+      try visitor.visitSingularUInt64Field(value: self.nextOffset, fieldNumber: 5)
+    }
+    if self.done != false {
+      try visitor.visitSingularBoolField(value: self.done, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_FetchSelectionPageResponse, rhs: Kmgr_V1_FetchSelectionPageResponse) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs._selection != rhs._selection {return false}
+    if lhs.offset != rhs.offset {return false}
+    if lhs.items != rhs.items {return false}
+    if lhs.nextOffset != rhs.nextOffset {return false}
+    if lhs.done != rhs.done {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
