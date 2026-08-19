@@ -26,6 +26,534 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/store"
 )
 
+func TestPipelineWatchListStreamsSnapshotAndContinuesSameWatch(t *testing.T) {
+	t.Parallel()
+
+	var requests requestLog
+	releaseEndBookmark := make(chan struct{})
+	initialEventsWritten := make(chan struct{}, 1)
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.add(request)
+		query := request.URL.Query()
+		if query.Get("watch") != "true" || query.Get("sendInitialEvents") != "true" {
+			t.Errorf("request is not WatchList: %v", query)
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if query.Get("allowWatchBookmarks") != "true" ||
+			query.Get("resourceVersionMatch") != string(metav1.ResourceVersionMatchNotOlderThan) ||
+			query.Get("resourceVersion") != "" || query.Get("continue") != "" || query.Get("limit") != "" {
+			t.Errorf("WatchList consistency options = %v", query)
+		}
+		if query.Get("labelSelector") != "app=kmgr" ||
+			query.Get("fieldSelector") != "spec.nodeName=worker-a" {
+			t.Errorf("WatchList selectors = %v", query)
+		}
+		if query.Get("timeoutSeconds") != "30" {
+			t.Errorf("WatchList timeoutSeconds = %q, want 30", query.Get("timeoutSeconds"))
+		}
+
+		writeWatch(response,
+			watchJSON("ADDED", podJSON("uid-a", "a", "91")),
+			watchJSON("ADDED", podJSON("uid-b", "b", "92")),
+			watchJSON("ADDED", podJSON("uid-c", "c", "93")),
+		)
+		initialEventsWritten <- struct{}{}
+		select {
+		case <-releaseEndBookmark:
+		case <-request.Context().Done():
+			return
+		}
+		writeWatch(response,
+			watchJSON("BOOKMARK", initialEventsEndBookmarkJSON("100", "true")),
+			watchJSON("MODIFIED", podJSON("uid-c", "c", "101")),
+			watchJSON("BOOKMARK", bookmarkJSON("102")),
+		)
+	})
+
+	client := newWatchListDynamicResource(t, handler)
+	uidStore := store.New()
+	uidStore.Upsert(testObject("uid-stale", "stale", "80"))
+	uidStore.SetResourceVersion("80")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	firstPage := make(chan Batch, 1)
+	completed := make(chan Batch, 1)
+	liveModified := make(chan Batch, 1)
+	liveBookmark := make(chan Batch, 1)
+	var statusesMu sync.Mutex
+	var statuses []Status
+	pipeline := mustPipeline(t, PipelineConfig{
+		Client:       client,
+		Store:        uidStore,
+		ForceRelist:  true,
+		PageSize:     2,
+		WatchTimeout: 30 * time.Second,
+		ListOptions: metav1.ListOptions{
+			LabelSelector: "app=kmgr",
+			FieldSelector: "spec.nodeName=worker-a",
+		},
+		RetryDelay: noDelay,
+		OnStatus: func(status Status) {
+			statusesMu.Lock()
+			statuses = append(statuses, status)
+			statusesMu.Unlock()
+		},
+		OnBatch: func(batch Batch) {
+			switch {
+			case batch.FromList && !batch.SnapshotComplete:
+				firstPage <- batch
+			case batch.SnapshotComplete:
+				completed <- batch
+			case len(batch.Upserts) == 1 && batch.Upserts[0].GetResourceVersion() == "101":
+				liveModified <- batch
+			case batch.Bookmark && batch.ResourceVersion == "102":
+				liveBookmark <- batch
+				cancel()
+			}
+		},
+	})
+	done := runPipeline(ctx, pipeline)
+
+	receiveSignal(t, initialEventsWritten, "initial WatchList events")
+	page := receiveBatch(t, firstPage, "first WatchList batch")
+	if page.ListPage != 1 || page.ObjectsListed != 2 || len(page.Upserts) != 2 ||
+		page.SnapshotComplete || page.ResourceVersion != "" {
+		t.Fatalf("first WatchList batch = %#v", page)
+	}
+	if got := uidStore.ResourceVersion(); got != "" {
+		t.Fatalf("store resourceVersion before end bookmark = %q, want empty", got)
+	}
+	if _, ok := snapshotObject(uidStore, "uid-stale"); !ok {
+		t.Fatal("stale object was removed before the WatchList end bookmark")
+	}
+	close(releaseEndBookmark)
+
+	final := receiveBatch(t, completed, "completed WatchList snapshot")
+	if final.ListPage != 2 || final.ObjectsListed != 3 || len(final.Upserts) != 1 ||
+		final.ResourceVersion != "100" || !final.FromList || !final.SnapshotComplete ||
+		!slices.Contains(final.RemovedUIDs, types.UID("uid-stale")) {
+		t.Fatalf("completed WatchList batch = %#v", final)
+	}
+	receiveBatch(t, liveModified, "same-stream live modification")
+	receiveBatch(t, liveBookmark, "same-stream live bookmark")
+	assertRunCancelled(t, done)
+
+	if got := requests.snapshot(); len(got) != 1 {
+		t.Fatalf("requests = %v, want one WatchList and no LIST", got)
+	}
+	if got := uidStore.ResourceVersion(); got != "102" {
+		t.Fatalf("store resourceVersion = %q, want 102", got)
+	}
+	if uidStore.Len() != 3 {
+		t.Fatalf("store length = %d, want 3", uidStore.Len())
+	}
+	if _, ok := snapshotObject(uidStore, "uid-stale"); ok {
+		t.Fatal("stale object remained after WatchList reconciliation")
+	}
+	object, ok := snapshotObject(uidStore, "uid-c")
+	if !ok || object.GetResourceVersion() != "101" {
+		t.Fatalf("live object = %#v, want uid-c at resourceVersion 101", object)
+	}
+
+	statusesMu.Lock()
+	gotStatuses := slices.Clone(statuses)
+	statusesMu.Unlock()
+	if len(gotStatuses) < 2 || gotStatuses[0].Phase != PhaseListing {
+		t.Fatalf("statuses = %#v, want Listing first", gotStatuses)
+	}
+	watching := gotStatuses[1]
+	if watching.Phase != PhaseWatching || watching.ResourceVersion != "100" ||
+		watching.PagesListed != 2 || watching.ObjectsListed != 3 || watching.Stale {
+		t.Fatalf("Watching status = %#v", watching)
+	}
+}
+
+func TestPipelineUnsupportedWatchListFallsBackOnceAndStaysDisabled(t *testing.T) {
+	t.Parallel()
+
+	var requests requestLog
+	var listRequests atomic.Int32
+	var watchRequests atomic.Int32
+	var watchListRequests atomic.Int32
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.add(request)
+		query := request.URL.Query()
+		if query.Get("labelSelector") != "app=api" || query.Get("fieldSelector") != "spec.nodeName=worker-a" {
+			t.Errorf("selectors changed during fallback: %v", query)
+		}
+		if query.Get("sendInitialEvents") == "true" {
+			watchListRequests.Add(1)
+			writeAPIStatus(response, metav1.StatusReasonBadRequest, http.StatusBadRequest)
+			return
+		}
+		if query.Get("watch") == "true" {
+			switch watchRequests.Add(1) {
+			case 1:
+				writeWatch(response, watchJSON("ERROR", apiStatusJSON(
+					metav1.StatusReasonExpired, http.StatusGone,
+				)))
+			case 2:
+				writeWatch(response, watchJSON("BOOKMARK", bookmarkJSON("21")))
+			default:
+				t.Errorf("unexpected ordinary WATCH request %d", watchRequests.Load())
+			}
+			return
+		}
+		switch listRequests.Add(1) {
+		case 1:
+			writeList(response, "10", "", podJSON("uid-a", "a", "10"))
+		case 2:
+			writeList(response, "20", "", podJSON("uid-b", "b", "20"))
+		default:
+			t.Errorf("unexpected LIST request %d", listRequests.Load())
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	uidStore := store.New()
+	pipeline := mustPipeline(t, PipelineConfig{
+		Client: newWatchListDynamicResource(t, handler),
+		Store:  uidStore,
+		ListOptions: metav1.ListOptions{
+			LabelSelector: "app=api",
+			FieldSelector: "spec.nodeName=worker-a",
+		},
+		RetryDelay: noDelay,
+		OnBatch: func(batch Batch) {
+			if batch.Bookmark && batch.ResourceVersion == "21" {
+				cancel()
+			}
+		},
+	})
+	assertRunCancelled(t, runPipeline(ctx, pipeline))
+
+	if watchListRequests.Load() != 1 || listRequests.Load() != 2 || watchRequests.Load() != 2 {
+		t.Fatalf(
+			"request counts = WatchList %d, LIST %d, WATCH %d; want 1/2/2",
+			watchListRequests.Load(), listRequests.Load(), watchRequests.Load(),
+		)
+	}
+	if !pipeline.watchListDisabled {
+		t.Fatal("WatchList was not permanently disabled after unsupported semantics")
+	}
+	gotRequests := requests.snapshot()
+	if len(gotRequests) != 5 || gotRequests[0].query.Get("sendInitialEvents") != "true" ||
+		gotRequests[1].query.Get("watch") != "" ||
+		gotRequests[2].query.Get("watch") != "true" ||
+		gotRequests[3].query.Get("watch") != "" ||
+		gotRequests[4].query.Get("watch") != "true" {
+		t.Fatalf("fallback request sequence = %v", gotRequests)
+	}
+	if uidStore.Len() != 1 || uidStore.ResourceVersion() != "21" {
+		t.Fatalf("store len/RV = %d/%q, want 1/21", uidStore.Len(), uidStore.ResourceVersion())
+	}
+	if _, ok := snapshotObject(uidStore, "uid-a"); ok {
+		t.Fatal("first LIST object remained after the fallback relist")
+	}
+	if _, ok := snapshotObject(uidStore, "uid-b"); !ok {
+		t.Fatal("second fallback LIST object was not retained")
+	}
+}
+
+func TestPipelineMalformedWatchListSafelyFallsBackToList(t *testing.T) {
+	t.Parallel()
+
+	prefix := []map[string]any{
+		watchJSON("ADDED", podJSON("uid-partial-a", "partial-a", "1")),
+		watchJSON("ADDED", podJSON("uid-partial-b", "partial-b", "2")),
+	}
+	tests := []struct {
+		name   string
+		events []map[string]any
+	}{
+		{name: "stream closes before end bookmark", events: prefix},
+		{
+			name: "end bookmark has no resource version",
+			events: append(slices.Clone(prefix),
+				watchJSON("BOOKMARK", initialEventsEndBookmarkJSON("", "true"))),
+		},
+		{
+			name: "end bookmark annotation is not true",
+			events: append(slices.Clone(prefix),
+				watchJSON("BOOKMARK", initialEventsEndBookmarkJSON("10", "false"))),
+		},
+		{
+			name: "initial modified event",
+			events: append(slices.Clone(prefix),
+				watchJSON("MODIFIED", podJSON("uid-modified", "modified", "3"))),
+		},
+		{
+			name: "initial object has no UID",
+			events: append(slices.Clone(prefix),
+				watchJSON("ADDED", podJSON("", "missing-uid", "3"))),
+		},
+		{
+			name: "initial object has no resource version",
+			events: append(slices.Clone(prefix),
+				watchJSON("ADDED", podJSON("uid-missing-rv", "missing-rv", ""))),
+		},
+		{
+			name: "duplicate initial UID",
+			events: append(slices.Clone(prefix),
+				watchJSON("ADDED", podJSON("uid-partial-a", "duplicate", "3"))),
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var requests requestLog
+			handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				requests.add(request)
+				query := request.URL.Query()
+				switch {
+				case query.Get("sendInitialEvents") == "true":
+					writeWatch(response, test.events...)
+				case query.Get("watch") == "true":
+					writeWatch(response, watchJSON("BOOKMARK", bookmarkJSON("201")))
+				default:
+					writeList(response, "200", "", podJSON("uid-good", "good", "200"))
+				}
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			uidStore := store.New()
+			uidStore.Upsert(testObject("uid-stale", "stale", "0"))
+			uidStore.SetResourceVersion("0")
+			pipeline := mustPipeline(t, PipelineConfig{
+				Client:      newWatchListDynamicResource(t, handler),
+				Store:       uidStore,
+				ForceRelist: true,
+				PageSize:    1,
+				RetryDelay:  noDelay,
+				OnBatch: func(batch Batch) {
+					if batch.Bookmark && batch.ResourceVersion == "201" {
+						cancel()
+					}
+				},
+			})
+			assertRunCancelled(t, runPipeline(ctx, pipeline))
+
+			gotRequests := requests.snapshot()
+			if len(gotRequests) != 3 || gotRequests[0].query.Get("sendInitialEvents") != "true" ||
+				gotRequests[1].query.Get("watch") != "" ||
+				gotRequests[2].query.Get("watch") != "true" {
+				t.Fatalf("fallback request sequence = %v", gotRequests)
+			}
+			if !pipeline.watchListDisabled {
+				t.Fatal("malformed WatchList did not permanently disable the fast path")
+			}
+			if uidStore.Len() != 1 || uidStore.ResourceVersion() != "201" {
+				t.Fatalf("store len/RV = %d/%q, want 1/201", uidStore.Len(), uidStore.ResourceVersion())
+			}
+			if _, ok := snapshotObject(uidStore, "uid-good"); !ok {
+				t.Fatal("fallback LIST did not establish its authoritative snapshot")
+			}
+			for _, uid := range []types.UID{"uid-stale", "uid-partial-a", "uid-partial-b"} {
+				if _, ok := snapshotObject(uidStore, uid); ok {
+					t.Fatalf("non-authoritative object %q remained after fallback LIST", uid)
+				}
+			}
+		})
+	}
+}
+
+func TestWatchListInitialEventsRequireUnstructuredObjects(t *testing.T) {
+	t.Parallel()
+	metadata := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+		UID: "uid", ResourceVersion: "10",
+	}}
+	if _, err := initialWatchListObject(metadata); err == nil {
+		t.Fatal("typed initial object was accepted instead of unstructured data")
+	}
+	if _, err := initialWatchListBookmark(metadata); err == nil {
+		t.Fatal("typed initial bookmark was accepted instead of unstructured data")
+	}
+}
+
+func TestPipelineWatchListCancellationDoesNotFallBack(t *testing.T) {
+	t.Parallel()
+
+	var requests requestLog
+	streamStarted := make(chan struct{}, 1)
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.add(request)
+		if request.URL.Query().Get("sendInitialEvents") != "true" {
+			t.Errorf("request after WatchList cancellation = %v", request.URL.Query())
+			response.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		writeWatch(response, watchJSON("ADDED", podJSON("uid-pending", "pending", "1")))
+		streamStarted <- struct{}{}
+		<-request.Context().Done()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pipeline := mustPipeline(t, PipelineConfig{
+		Client:     newWatchListDynamicResource(t, handler),
+		Store:      store.New(),
+		RetryDelay: noDelay,
+	})
+	done := runPipeline(ctx, pipeline)
+	receiveSignal(t, streamStarted, "WatchList stream")
+	cancel()
+	assertRunCancelled(t, done)
+
+	if got := requests.snapshot(); len(got) != 1 || got[0].query.Get("sendInitialEvents") != "true" {
+		t.Fatalf("requests after cancellation = %v, want only the WatchList", got)
+	}
+	if pipeline.watchListDisabled {
+		t.Fatal("cancellation permanently disabled WatchList")
+	}
+}
+
+func TestPipelineWatchListDoesNotBroadenAuthorizationOrTransientFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("forbidden is terminal", func(t *testing.T) {
+		t.Parallel()
+		var requests requestLog
+		client := newWatchListDynamicResource(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			requests.add(request)
+			writeAPIStatus(response, metav1.StatusReasonForbidden, http.StatusForbidden)
+		}))
+		pipeline := mustPipeline(t, PipelineConfig{
+			Client: client, Store: store.New(), RetryDelay: noDelay,
+		})
+		err := pipeline.Run(context.Background())
+		if !apierrors.IsForbidden(err) {
+			t.Fatalf("Run error = %v, want Forbidden", err)
+		}
+		if got := requests.snapshot(); len(got) != 1 || got[0].query.Get("sendInitialEvents") != "true" {
+			t.Fatalf("requests = %v, want one WatchList and no LIST", got)
+		}
+		if pipeline.watchListDisabled {
+			t.Fatal("Forbidden response disabled WatchList compatibility")
+		}
+	})
+
+	t.Run("transient failure retries WatchList", func(t *testing.T) {
+		t.Parallel()
+		var requests requestLog
+		var watchLists atomic.Int32
+		client := newWatchListDynamicResource(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			requests.add(request)
+			if request.URL.Query().Get("sendInitialEvents") != "true" {
+				t.Errorf("transient WatchList failure broadened to request %v", request.URL.Query())
+				response.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			switch watchLists.Add(1) {
+			case 1:
+				writeAPIStatus(response, metav1.StatusReasonInternalError, http.StatusInternalServerError)
+			case 2:
+				writeWatch(response,
+					watchJSON("BOOKMARK", initialEventsEndBookmarkJSON("10", "true")),
+					watchJSON("BOOKMARK", bookmarkJSON("11")),
+				)
+			default:
+				t.Errorf("unexpected WatchList request %d", watchLists.Load())
+			}
+		}))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var retries atomic.Int32
+		pipeline := mustPipeline(t, PipelineConfig{
+			Client: client,
+			Store:  store.New(),
+			RetryDelay: func(int) time.Duration {
+				retries.Add(1)
+				return 0
+			},
+			OnBatch: func(batch Batch) {
+				if batch.Bookmark && batch.ResourceVersion == "11" {
+					cancel()
+				}
+			},
+		})
+		assertRunCancelled(t, runPipeline(ctx, pipeline))
+		if watchLists.Load() != 2 || retries.Load() != 1 {
+			t.Fatalf("WatchList/retry counts = %d/%d, want 2/1", watchLists.Load(), retries.Load())
+		}
+		if got := requests.snapshot(); len(got) != 2 {
+			t.Fatalf("requests = %v, want two WatchLists and no LIST", got)
+		}
+		if pipeline.watchListDisabled {
+			t.Fatal("transient response disabled WatchList compatibility")
+		}
+	})
+}
+
+func TestPipelineExpiredWatchListRelistsWithWatchList(t *testing.T) {
+	t.Parallel()
+
+	var requests requestLog
+	var watchLists atomic.Int32
+	client := newWatchListDynamicResource(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.add(request)
+		if request.URL.Query().Get("sendInitialEvents") != "true" {
+			t.Errorf("expired WatchList recovered with non-WatchList request: %v", request.URL.Query())
+			response.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		switch watchLists.Add(1) {
+		case 1:
+			writeWatch(response,
+				watchJSON("ADDED", podJSON("uid-old", "old", "9")),
+				watchJSON("BOOKMARK", initialEventsEndBookmarkJSON("10", "true")),
+				watchJSON("ERROR", apiStatusJSON(metav1.StatusReasonExpired, http.StatusGone)),
+			)
+		case 2:
+			writeWatch(response,
+				watchJSON("ADDED", podJSON("uid-new", "new", "19")),
+				watchJSON("BOOKMARK", initialEventsEndBookmarkJSON("20", "true")),
+				watchJSON("BOOKMARK", bookmarkJSON("21")),
+			)
+		default:
+			t.Errorf("unexpected WatchList request %d", watchLists.Load())
+		}
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	uidStore := store.New()
+	pipeline := mustPipeline(t, PipelineConfig{
+		Client: client,
+		Store:  uidStore,
+		OnBatch: func(batch Batch) {
+			if batch.Bookmark && batch.ResourceVersion == "21" {
+				cancel()
+			}
+		},
+		RetryDelay: noDelay,
+	})
+	assertRunCancelled(t, runPipeline(ctx, pipeline))
+
+	if watchLists.Load() != 2 {
+		t.Fatalf("WatchList requests = %d, want 2", watchLists.Load())
+	}
+	if got := requests.snapshot(); len(got) != 2 {
+		t.Fatalf("requests = %v, want two WatchLists and no LIST", got)
+	}
+	if pipeline.watchListDisabled {
+		t.Fatal("post-synchronization expiry disabled WatchList")
+	}
+	if uidStore.Len() != 1 || uidStore.ResourceVersion() != "21" {
+		t.Fatalf("store len/RV = %d/%q, want 1/21", uidStore.Len(), uidStore.ResourceVersion())
+	}
+	if _, ok := snapshotObject(uidStore, "uid-old"); ok {
+		t.Fatal("expired WatchList object remained after WatchList relist")
+	}
+	if _, ok := snapshotObject(uidStore, "uid-new"); !ok {
+		t.Fatal("WatchList relist object was not retained")
+	}
+}
+
 func TestPipelineStreamsPaginatedListThenWatchesAndBookmarks(t *testing.T) {
 	t.Parallel()
 
@@ -674,6 +1202,10 @@ func (l *requestLog) snapshot() []loggedRequest {
 	return slices.Clone(l.requests)
 }
 
+type watchListSupportedClient struct{ ListerWatcher }
+
+func (watchListSupportedClient) SupportsWatchListSemantics() bool { return true }
+
 func newDynamicResource(t *testing.T, handler http.Handler) ListerWatcher {
 	t.Helper()
 	server := httptest.NewServer(handler)
@@ -683,6 +1215,11 @@ func newDynamicResource(t *testing.T, handler http.Handler) ListerWatcher {
 		t.Fatalf("create dynamic client: %v", err)
 	}
 	return client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "pods"})
+}
+
+func newWatchListDynamicResource(t *testing.T, handler http.Handler) ListerWatcher {
+	t.Helper()
+	return watchListSupportedClient{ListerWatcher: newDynamicResource(t, handler)}
 }
 
 func mustPipeline(t *testing.T, config PipelineConfig) *Pipeline {
@@ -802,6 +1339,19 @@ func bookmarkJSON(resourceVersion string) map[string]any {
 		"apiVersion": "v1",
 		"kind":       "Pod",
 		"metadata":   map[string]any{"resourceVersion": resourceVersion},
+	}
+}
+
+func initialEventsEndBookmarkJSON(resourceVersion, annotation string) map[string]any {
+	return map[string]any{
+		"apiVersion": "meta.k8s.io/v1",
+		"kind":       "PartialObjectMetadata",
+		"metadata": map[string]any{
+			"resourceVersion": resourceVersion,
+			"annotations": map[string]any{
+				metav1.InitialEventsAnnotationKey: annotation,
+			},
+		},
 	}
 }
 

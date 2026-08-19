@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	clientwatchlist "k8s.io/client-go/util/watchlist"
+	"k8s.io/utils/ptr"
 
 	"github.com/charlie0129/kmgr/backend/internal/store"
 )
@@ -32,6 +34,14 @@ const (
 type ListerWatcher interface {
 	List(context.Context, metav1.ListOptions) (*unstructured.UnstructuredList, error)
 	Watch(context.Context, metav1.ListOptions) (watch.Interface, error)
+}
+
+// WatchListSemantics is an explicit capability opt-in. Arbitrary
+// ListerWatcher implementations, especially test doubles and proxy adapters,
+// are kept on the conventional LIST/WATCH path unless they advertise that
+// streaming initial events preserve Kubernetes WatchList semantics.
+type WatchListSemantics interface {
+	SupportsWatchListSemantics() bool
 }
 
 // Phase describes whether the local store is being synchronized or is backed
@@ -59,9 +69,10 @@ type Status struct {
 	Error            error
 }
 
-// Batch describes changes already applied to Store. List pages are delivered
-// as one batch so downstream projection and IPC layers do not need a callback
-// per object. A bookmark has no object changes and only advances freshness.
+// Batch describes changes already applied to Store. LIST pages and bounded
+// WatchList initial-event chunks are delivered as one batch so downstream
+// projection and IPC layers do not need a callback per object. A bookmark has
+// no object changes and only advances freshness.
 type Batch struct {
 	Upserts          []*unstructured.Unstructured
 	RemovedUIDs      []types.UID
@@ -90,7 +101,8 @@ type RetryDelay func(attempt int) time.Duration
 
 // PipelineConfig configures one compatible resource LIST/WATCH stream. The
 // client must already be scoped to the desired GVR and namespace. Selectors in
-// ListOptions are reused unchanged for every list page and watch reconnect.
+// ListOptions are reused unchanged for WatchList, every LIST page, and every
+// watch reconnect.
 type PipelineConfig struct {
 	Client                  ListerWatcher
 	Store                   *store.UIDStore
@@ -107,18 +119,19 @@ type PipelineConfig struct {
 // Pipeline maintains a UIDStore without clearing it during reconnects or
 // relists. A Pipeline may be run again after Run returns, but not concurrently.
 type Pipeline struct {
-	client           ListerWatcher
-	store            *store.UIDStore
-	listOptions      metav1.ListOptions
-	pageSize         int64
-	watchTimeout     time.Duration
-	forceRelist      bool
-	lastSynchronized time.Time
-	retryDelay       RetryDelay
-	onStatus         func(Status)
-	onBatch          func(Batch)
-	tableColumns     []metav1.TableColumnDefinition
-	running          atomic.Bool
+	client            ListerWatcher
+	store             *store.UIDStore
+	listOptions       metav1.ListOptions
+	pageSize          int64
+	watchTimeout      time.Duration
+	forceRelist       bool
+	lastSynchronized  time.Time
+	retryDelay        RetryDelay
+	onStatus          func(Status)
+	onBatch           func(Batch)
+	tableColumns      []metav1.TableColumnDefinition
+	watchListDisabled bool
+	running           atomic.Bool
 }
 
 var ErrAlreadyRunning = errors.New("watcher: pipeline is already running")
@@ -176,8 +189,8 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	defer p.running.Store(false)
 
 	resourceVersion := p.store.ResourceVersion()
-	needsList := p.forceRelist || resourceVersion == ""
-	firstWatch := !needsList
+	needsSnapshot := p.forceRelist || resourceVersion == ""
+	firstWatch := !needsSnapshot
 	retryAttempt := 0
 	var listedPages, listedObjects int
 	lastSynchronized := p.lastSynchronized
@@ -188,7 +201,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			return err
 		}
 
-		if needsList {
+		var (
+			result          watchResult
+			haveWatchResult bool
+		)
+		if needsSnapshot {
 			// Progressive relist pages mutate the retained store before the final
 			// reconciliation commits a new consistent snapshot. Invalidate the old
 			// continuation point first so cancellation or a page error can never
@@ -201,36 +218,80 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				LastSynchronized: lastSynchronized,
 				RetryAttempt:     retryAttempt,
 			})
-			result, err := p.list(ctx)
-			if err != nil {
+			if p.watchListEligible() {
+				watchList := p.watchList(ctx)
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return ctxErr
 				}
-				if isTerminalAPIError(err) {
-					return fmt.Errorf("list resource: %w", err)
+				if watchList.fallback {
+					// A server or client that cannot complete one strict WatchList
+					// snapshot is kept on the proven paginated LIST path for this
+					// Pipeline's remaining lifetime, including later 410 recovery.
+					p.watchListDisabled = true
+				} else if watchList.synchronized {
+					resourceVersion = watchList.list.resourceVersion
+					listedPages = watchList.list.pages
+					listedObjects = watchList.list.objects
+					lastSynchronized = watchList.list.synchronizedAt
+					needsSnapshot = false
+					firstWatch = false
+					retryAttempt = 0
+					result = watchList.watch
+					haveWatchResult = true
+				} else {
+					if isTerminalAPIError(watchList.watch.err) {
+						return fmt.Errorf("stream initial resource state: %w", watchList.watch.err)
+					}
+					p.emitStatus(Status{
+						Phase:            PhaseReconnecting,
+						Stale:            p.store.Len() != 0,
+						ResourceVersion:  p.store.ResourceVersion(),
+						LastSynchronized: lastSynchronized,
+						RetryAttempt:     retryAttempt,
+						Error: fmt.Errorf(
+							"stream initial resource state: %w", watchList.watch.err,
+						),
+					})
+					if err := waitForRetry(ctx, p.retryDelay(retryAttempt)); err != nil {
+						return err
+					}
+					retryAttempt++
+					continue
 				}
-				p.emitStatus(Status{
-					Phase:            PhaseReconnecting,
-					Stale:            p.store.Len() != 0,
-					ResourceVersion:  p.store.ResourceVersion(),
-					LastSynchronized: lastSynchronized,
-					RetryAttempt:     retryAttempt,
-					Error:            fmt.Errorf("list resource: %w", err),
-				})
-				if err := waitForRetry(ctx, p.retryDelay(retryAttempt)); err != nil {
-					return err
-				}
-				retryAttempt++
-				continue
 			}
 
-			resourceVersion = result.resourceVersion
-			listedPages = result.pages
-			listedObjects = result.objects
-			lastSynchronized = result.synchronizedAt
-			needsList = false
-			firstWatch = false
-			retryAttempt = 0
+			if !haveWatchResult {
+				list, err := p.list(ctx)
+				if err != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return ctxErr
+					}
+					if isTerminalAPIError(err) {
+						return fmt.Errorf("list resource: %w", err)
+					}
+					p.emitStatus(Status{
+						Phase:            PhaseReconnecting,
+						Stale:            p.store.Len() != 0,
+						ResourceVersion:  p.store.ResourceVersion(),
+						LastSynchronized: lastSynchronized,
+						RetryAttempt:     retryAttempt,
+						Error:            fmt.Errorf("list resource: %w", err),
+					})
+					if err := waitForRetry(ctx, p.retryDelay(retryAttempt)); err != nil {
+						return err
+					}
+					retryAttempt++
+					continue
+				}
+
+				resourceVersion = list.resourceVersion
+				listedPages = list.pages
+				listedObjects = list.objects
+				lastSynchronized = list.synchronizedAt
+				needsSnapshot = false
+				firstWatch = false
+				retryAttempt = 0
+			}
 		} else if firstWatch {
 			p.emitStatus(Status{
 				Phase:            PhaseResuming,
@@ -241,14 +302,16 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			firstWatch = false
 		}
 
-		result := p.watch(ctx, resourceVersion, Status{
-			Phase:            PhaseWatching,
-			Stale:            false,
-			ResourceVersion:  resourceVersion,
-			LastSynchronized: lastSynchronized,
-			PagesListed:      listedPages,
-			ObjectsListed:    listedObjects,
-		})
+		if !haveWatchResult {
+			result = p.watch(ctx, resourceVersion, Status{
+				Phase:            PhaseWatching,
+				Stale:            false,
+				ResourceVersion:  resourceVersion,
+				LastSynchronized: lastSynchronized,
+				PagesListed:      listedPages,
+				ObjectsListed:    listedObjects,
+			})
+		}
 		if result.lastSynchronized.After(lastSynchronized) {
 			lastSynchronized = result.lastSynchronized
 		}
@@ -257,7 +320,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 		resourceVersion = p.store.ResourceVersion()
 		if result.expired {
-			needsList = true
+			needsSnapshot = true
 			retryAttempt = 0
 			continue
 		}
@@ -289,6 +352,263 @@ type listResult struct {
 	pages           int
 	objects         int
 	synchronizedAt  time.Time
+}
+
+type watchListResult struct {
+	synchronized bool
+	fallback     bool
+	list         listResult
+	watch        watchResult
+}
+
+func (p *Pipeline) watchListEligible() bool {
+	if p.watchListDisabled {
+		return false
+	}
+	// Table representations cannot carry WatchList's streaming initial-event
+	// contract. Keep their existing paginated Table LIST plus Table WATCH path.
+	if _, table := p.client.(TableListerWatcher); table {
+		return false
+	}
+	capability, supported := p.client.(WatchListSemantics)
+	if !supported || !capability.SupportsWatchListSemantics() {
+		return false
+	}
+	return !clientwatchlist.DoesClientNotSupportWatchListSemantics(p.client)
+}
+
+// watchList streams a consistent initial snapshot and then keeps consuming the
+// same request as the live watch. Until the annotated end bookmark arrives,
+// the store's resourceVersion remains empty and stale objects are retained.
+func (p *Pipeline) watchList(ctx context.Context) watchListResult {
+	options := p.listOptions
+	options.Watch = true
+	options.AllowWatchBookmarks = true
+	options.ResourceVersion = ""
+	options.ResourceVersionMatch = metav1.ResourceVersionMatchNotOlderThan
+	options.Continue = ""
+	options.Limit = 0
+	options.SendInitialEvents = ptr.To(true)
+	timeoutSeconds := int64(math.Ceil(p.watchTimeout.Seconds()))
+	if timeoutSeconds < 1 {
+		timeoutSeconds = 1
+	}
+	options.TimeoutSeconds = &timeoutSeconds
+
+	stream, err := p.client.Watch(ctx, options)
+	if err != nil {
+		return watchListResult{
+			fallback: isWatchListFallbackError(err),
+			watch: watchResult{
+				err:     err,
+				expired: isExpired(err),
+			},
+		}
+	}
+	if stream == nil {
+		return watchListResult{
+			fallback: true,
+			watch:    watchResult{err: errors.New("server returned a nil WatchList stream")},
+		}
+	}
+	defer stream.Stop()
+
+	result := watchListResult{}
+	present := make(map[types.UID]struct{})
+	var pending []*unstructured.Unstructured
+	pages := 0
+	objects := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			result.watch.err = ctx.Err()
+			return result
+		case event, ok := <-stream.ResultChan():
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				result.watch.err = ctxErr
+				return result
+			}
+			if !ok {
+				result.watch.err = io.EOF
+				result.fallback = !result.synchronized
+				return result
+			}
+			if event.Type == watch.Error {
+				eventErr := apierrors.FromObject(event.Object)
+				result.watch.err = eventErr
+				result.watch.expired = isExpired(eventErr)
+				if !result.synchronized {
+					var status apierrors.APIStatus
+					result.fallback = !errors.As(eventErr, &status) ||
+						isWatchListFallbackError(eventErr)
+				}
+				return result
+			}
+
+			if result.synchronized {
+				if err := p.applyWatchEvent(event, &result.watch); err != nil {
+					result.watch.err = err
+				}
+				if result.watch.err != nil {
+					return result
+				}
+				continue
+			}
+
+			switch event.Type {
+			case watch.Added:
+				object, objectErr := initialWatchListObject(event.Object)
+				if objectErr != nil {
+					result.watch.err = objectErr
+					result.fallback = true
+					return result
+				}
+				uid := object.GetUID()
+				if _, duplicate := present[uid]; duplicate {
+					result.watch.err = fmt.Errorf("WatchList initial events repeated UID %q", uid)
+					result.fallback = true
+					return result
+				}
+				if int64(len(pending)) == p.pageSize {
+					pages++
+					removed := p.applyWatchListUpserts(pending)
+					p.publishWatchListBatch(
+						pending, removed, "", pages, objects, false, time.Time{},
+					)
+					pending = nil
+				}
+				present[uid] = struct{}{}
+				pending = append(pending, object)
+				objects++
+
+			case watch.Bookmark:
+				bookmark, bookmarkErr := initialWatchListBookmark(event.Object)
+				if bookmarkErr != nil {
+					result.watch.err = bookmarkErr
+					result.fallback = true
+					return result
+				}
+				annotation, annotated := bookmark.GetAnnotations()[metav1.InitialEventsAnnotationKey]
+				if annotated && annotation != "true" {
+					result.watch.err = fmt.Errorf(
+						"WatchList end bookmark annotation %q has value %q, want true",
+						metav1.InitialEventsAnnotationKey, annotation,
+					)
+					result.fallback = true
+					return result
+				}
+				if !annotated {
+					continue
+				}
+
+				resourceVersion := bookmark.GetResourceVersion()
+				synchronizedAt := time.Now()
+				pages++
+				removed := p.applyWatchListUpserts(pending)
+				removed = append(
+					removed,
+					p.store.ReconcileSnapshot(present, resourceVersion)...,
+				)
+				p.publishWatchListBatch(
+					pending, removed, resourceVersion, pages, objects, true, synchronizedAt,
+				)
+				pending = nil
+				result.synchronized = true
+				result.list = listResult{
+					resourceVersion: resourceVersion,
+					pages:           pages,
+					objects:         objects,
+					synchronizedAt:  synchronizedAt,
+				}
+				result.watch.progressed = true
+				result.watch.lastSynchronized = synchronizedAt
+				p.emitStatus(Status{
+					Phase:            PhaseWatching,
+					Stale:            false,
+					ResourceVersion:  resourceVersion,
+					LastSynchronized: synchronizedAt,
+					PagesListed:      pages,
+					ObjectsListed:    objects,
+				})
+
+			default:
+				result.watch.err = fmt.Errorf(
+					"WatchList initial stream contains unsupported %q event", event.Type,
+				)
+				result.fallback = true
+				return result
+			}
+		}
+	}
+}
+
+func initialWatchListObject(value any) (*unstructured.Unstructured, error) {
+	object, ok := value.(*unstructured.Unstructured)
+	if !ok || object == nil {
+		return nil, fmt.Errorf(
+			"WatchList initial event object has type %T, want *unstructured.Unstructured", value,
+		)
+	}
+	if object.GetUID() == "" {
+		return nil, errors.New("WatchList initial event object has no UID")
+	}
+	if object.GetResourceVersion() == "" {
+		return nil, errors.New("WatchList initial event object has no resourceVersion")
+	}
+	return object, nil
+}
+
+func initialWatchListBookmark(value any) (*unstructured.Unstructured, error) {
+	bookmark, ok := value.(*unstructured.Unstructured)
+	if !ok || bookmark == nil {
+		return nil, fmt.Errorf(
+			"WatchList bookmark object has type %T, want *unstructured.Unstructured", value,
+		)
+	}
+	if bookmark.GetResourceVersion() == "" {
+		return nil, errors.New("WatchList bookmark has no resourceVersion")
+	}
+	return bookmark, nil
+}
+
+func (p *Pipeline) applyWatchListUpserts(
+	objects []*unstructured.Unstructured,
+) []types.UID {
+	var removed []types.UID
+	for _, object := range objects {
+		change := p.store.Upsert(object)
+		if change.ReplacedUID != "" {
+			removed = append(removed, change.ReplacedUID)
+		}
+	}
+	return removed
+}
+
+func (p *Pipeline) publishWatchListBatch(
+	upserts []*unstructured.Unstructured,
+	removed []types.UID,
+	resourceVersion string,
+	page, objects int,
+	complete bool,
+	synchronizedAt time.Time,
+) {
+	p.emitBatch(Batch{
+		Upserts:          upserts,
+		RemovedUIDs:      sortedUniqueUIDs(removed),
+		ResourceVersion:  resourceVersion,
+		FromList:         true,
+		ListPage:         page,
+		ObjectsListed:    objects,
+		SnapshotComplete: complete,
+		SynchronizedAt:   synchronizedAt,
+	})
+}
+
+func isWatchListFallbackError(err error) bool {
+	return apierrors.IsBadRequest(err) || apierrors.IsInvalid(err) ||
+		apierrors.IsNotAcceptable(err) || apierrors.IsUnsupportedMediaType(err) ||
+		apierrors.IsMethodNotSupported(err) || isExpired(err)
 }
 
 func (p *Pipeline) list(ctx context.Context) (listResult, error) {
