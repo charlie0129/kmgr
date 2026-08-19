@@ -10,10 +10,12 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	metadataapi "k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/flowcontrol"
 
@@ -230,8 +232,13 @@ func TestTableResourceClientRequestsMetadataOnlyRepresentation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	metadataClient, err := metadataapi.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 	client, err := NewTableResourceClient(
-		config, gvr, "team-a", dynamicClient.Resource(gvr).Namespace("team-a"), metav1.IncludeMetadata,
+		config, gvr, "team-a", dynamicClient.Resource(gvr).Namespace("team-a"),
+		metadataClient.Resource(gvr).Namespace("team-a"), metav1.IncludeMetadata,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +253,227 @@ func TestTableResourceClientRequestsMetadataOnlyRepresentation(t *testing.T) {
 	}
 	if got := requests.snapshot(); len(got) != 1 {
 		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestMetadataTableFailureKeepsFallbackListAndWatchMetadataOnly(t *testing.T) {
+	t.Parallel()
+	var (
+		requests requestLog
+		acceptMu sync.Mutex
+		accepts  []string
+	)
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.add(request)
+		accept := request.Header.Get("Accept")
+		acceptMu.Lock()
+		accepts = append(accepts, accept)
+		acceptMu.Unlock()
+		if strings.Contains(accept, "as=Table") {
+			response.WriteHeader(http.StatusNotAcceptable)
+			return
+		}
+		if request.URL.Query().Get("watch") == "true" {
+			if !strings.Contains(accept, "as=PartialObjectMetadata;") ||
+				strings.Contains(accept, "as=PartialObjectMetadataList") {
+				t.Errorf("metadata WATCH Accept = %q", accept)
+			}
+			writeWatch(response, watchJSON("ADDED", partialWidgetJSON("uid-watch", "watched", "52")))
+			return
+		}
+		if !strings.Contains(accept, "as=PartialObjectMetadataList;") {
+			t.Errorf("metadata LIST Accept = %q", accept)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		writeJSON(response, map[string]any{
+			"apiVersion": "meta.k8s.io/v1",
+			"kind":       "PartialObjectMetadataList",
+			"metadata": map[string]any{
+				"resourceVersion": "51",
+				"continue":        "next",
+			},
+			"items": []any{partialWidgetJSON("uid-list", "listed", "51")},
+		})
+	})
+	gvr := schema.GroupVersionResource{Group: "example.io", Version: "v1", Resource: "widgets"}
+	client := newTableTestClientWithPolicy(t, handler, gvr, "team-a", metav1.IncludeMetadata)
+	options := metav1.ListOptions{
+		LabelSelector:        "app=kmgr",
+		FieldSelector:        "metadata.name=listed",
+		ResourceVersion:      "40",
+		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
+		Limit:                17,
+	}
+	page, err := client.ListTable(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.TableEnabled() {
+		t.Fatal("Table remained enabled after negotiation failure")
+	}
+	if page.ServerTable || page.ResourceVersion != "51" || page.Continue != "next" || len(page.Objects) != 1 {
+		t.Fatalf("metadata fallback page = %#v", page)
+	}
+	listed := page.Objects[0]
+	if listed.GetUID() != "uid-list" || listed.GetLabels()["app"] != "kmgr" ||
+		listed.GetCreationTimestamp().Time.IsZero() {
+		t.Fatalf("metadata fallback object = %#v", listed.Object)
+	}
+	if _, found := listed.Object["spec"]; found {
+		t.Fatalf("metadata fallback LIST retained spec: %#v", listed.Object)
+	}
+
+	watchOptions := options
+	watchOptions.ResourceVersion = "51"
+	watchOptions.ResourceVersionMatch = ""
+	watchOptions.Limit = 0
+	watchOptions.AllowWatchBookmarks = true
+	stream, err := client.WatchTable(context.Background(), watchOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Stop()
+	select {
+	case event := <-stream.ResultChan():
+		object, ok := event.Object.(*unstructured.Unstructured)
+		if !ok || object.GetUID() != "uid-watch" || object.GetLabels()["app"] != "kmgr" {
+			t.Fatalf("metadata fallback WATCH event = %#v", event)
+		}
+		if _, found := object.Object["spec"]; found {
+			t.Fatalf("metadata fallback WATCH retained spec: %#v", object.Object)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("metadata fallback WATCH produced no event")
+	}
+
+	got := requests.snapshot()
+	if len(got) != 3 {
+		t.Fatalf("requests = %v, want Table LIST, metadata LIST, metadata WATCH", got)
+	}
+	wantPath := "/apis/example.io/v1/namespaces/team-a/widgets"
+	for _, request := range got {
+		if request.path != wantPath || request.query.Get("labelSelector") != options.LabelSelector ||
+			request.query.Get("fieldSelector") != options.FieldSelector {
+			t.Fatalf("fallback changed path or selectors: %v", got)
+		}
+	}
+	if got[0].query.Get("includeObject") != string(metav1.IncludeMetadata) ||
+		got[1].query.Get("includeObject") != "" || got[1].query.Get("limit") != "17" ||
+		got[1].query.Get("resourceVersion") != "40" ||
+		got[1].query.Get("resourceVersionMatch") != string(metav1.ResourceVersionMatchNotOlderThan) ||
+		got[2].query.Get("watch") != "true" || got[2].query.Get("resourceVersion") != "51" ||
+		got[2].query.Get("allowWatchBookmarks") != "true" {
+		t.Fatalf("metadata fallback request sequence = %v", got)
+	}
+	acceptMu.Lock()
+	gotAccepts := append([]string(nil), accepts...)
+	acceptMu.Unlock()
+	if len(gotAccepts) != 3 || strings.Contains(gotAccepts[1], "as=Table") ||
+		strings.Contains(gotAccepts[2], "as=Table") {
+		t.Fatalf("fallback Accept headers = %q", gotAccepts)
+	}
+}
+
+func TestMetadataTableFallbackUsesProvidedSharedClient(t *testing.T) {
+	t.Parallel()
+	var requests requestLog
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.add(request)
+		if !strings.Contains(request.Header.Get("Accept"), "as=Table") {
+			t.Errorf("dynamic fallback was called with Accept %q", request.Header.Get("Accept"))
+		}
+		response.WriteHeader(http.StatusNotAcceptable)
+	})
+	gvr := schema.GroupVersionResource{Group: "example.io", Version: "v1", Resource: "widgets"}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	config := &rest.Config{Host: server.URL}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provided := &tableMetadataFallbackStub{page: &metav1.PartialObjectMetadataList{
+		ListMeta: metav1.ListMeta{ResourceVersion: "shared-rv"},
+		Items: []metav1.PartialObjectMetadata{{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "team-a", Name: "shared", UID: "shared-uid", ResourceVersion: "shared-rv",
+		}}},
+	}}
+	client, err := NewTableResourceClient(
+		config, gvr, "team-a", dynamicClient.Resource(gvr).Namespace("team-a"),
+		provided, metav1.IncludeMetadata,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.ListTable(context.Background(), metav1.ListOptions{LabelSelector: "app=kmgr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provided.listCalls != 1 || provided.lastListOptions.LabelSelector != "app=kmgr" {
+		t.Fatalf("provided metadata LIST calls/options = %d/%#v", provided.listCalls, provided.lastListOptions)
+	}
+	if len(page.Objects) != 1 || page.Objects[0].GetUID() != "shared-uid" {
+		t.Fatalf("provided metadata fallback page = %#v", page)
+	}
+	if got := requests.snapshot(); len(got) != 1 {
+		t.Fatalf("HTTP requests = %v, want only Table negotiation", got)
+	}
+}
+
+func TestDisabledMetadataTablePipelinePreservesWatchList(t *testing.T) {
+	t.Parallel()
+	var requests requestLog
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.add(request)
+		accept := request.Header.Get("Accept")
+		query := request.URL.Query()
+		if strings.Contains(accept, "as=Table") || !strings.Contains(accept, "as=PartialObjectMetadata;") {
+			t.Errorf("disabled Table WatchList Accept = %q", accept)
+		}
+		if query.Get("watch") != "true" || query.Get("sendInitialEvents") != "true" ||
+			query.Get("resourceVersionMatch") != string(metav1.ResourceVersionMatchNotOlderThan) ||
+			query.Get("allowWatchBookmarks") != "true" || query.Get("limit") != "" {
+			t.Errorf("disabled Table WatchList query = %v", query)
+		}
+		writeWatch(response,
+			watchJSON("ADDED", partialWidgetJSON("uid-a", "alpha", "70")),
+			watchJSON("BOOKMARK", initialEventsEndBookmarkJSON("71", "true")),
+		)
+	})
+	gvr := schema.GroupVersionResource{Group: "example.io", Version: "v1", Resource: "widgets"}
+	client := newTableTestClientWithPolicy(t, handler, gvr, "team-a", metav1.IncludeMetadata)
+	client.DisableTable()
+	uidStore := store.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pipeline := mustPipeline(t, PipelineConfig{
+		Client: client,
+		Store:  uidStore,
+		ListOptions: metav1.ListOptions{
+			LabelSelector: "app=kmgr",
+		},
+		RetryDelay: noDelay,
+		OnBatch: func(batch Batch) {
+			if batch.SnapshotComplete {
+				cancel()
+			}
+		},
+	})
+	assertRunCancelled(t, runPipeline(ctx, pipeline))
+	if uidStore.Len() != 1 || uidStore.ResourceVersion() != "71" {
+		t.Fatalf("metadata WatchList store len/RV = %d/%q", uidStore.Len(), uidStore.ResourceVersion())
+	}
+	object, found := snapshotObject(uidStore, "uid-a")
+	if !found || object.GetLabels()["app"] != "kmgr" || object.GetCreationTimestamp().Time.IsZero() {
+		t.Fatalf("metadata WatchList object = %#v, found %v", object, found)
+	}
+	if _, found := object.Object["spec"]; found {
+		t.Fatalf("metadata WatchList retained spec: %#v", object.Object)
+	}
+	got := requests.snapshot()
+	if len(got) != 1 || got[0].path != "/apis/example.io/v1/namespaces/team-a/widgets" ||
+		got[0].query.Get("labelSelector") != "app=kmgr" {
+		t.Fatalf("disabled Table WatchList requests = %v", got)
 	}
 }
 
@@ -281,7 +509,7 @@ func TestTableResourceClientRetainsAuthorityRateLimiter(t *testing.T) {
 		t.Fatalf("construct fallback client: %v", err)
 	}
 	client, err := NewTableResourceClient(
-		config, gvr, "team-a", dynamicClient.Resource(gvr).Namespace("team-a"), metav1.IncludeObject,
+		config, gvr, "team-a", dynamicClient.Resource(gvr).Namespace("team-a"), nil, metav1.IncludeObject,
 	)
 	if err != nil {
 		t.Fatalf("NewTableResourceClient: %v", err)
@@ -298,6 +526,17 @@ func newTableTestClient(
 	namespace string,
 ) *TableResourceClient {
 	t.Helper()
+	return newTableTestClientWithPolicy(t, handler, gvr, namespace, metav1.IncludeObject)
+}
+
+func newTableTestClientWithPolicy(
+	t *testing.T,
+	handler http.Handler,
+	gvr schema.GroupVersionResource,
+	namespace string,
+	include metav1.IncludeObjectPolicy,
+) *TableResourceClient {
+	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	config := &rest.Config{Host: server.URL}
@@ -309,11 +548,55 @@ func newTableTestClient(
 	if namespace != "" {
 		fallback = dynamicClient.Resource(gvr).Namespace(namespace)
 	}
-	client, err := NewTableResourceClient(config, gvr, namespace, fallback, metav1.IncludeObject)
+	var metadataFallback metadataapi.ResourceInterface
+	if include == metav1.IncludeMetadata {
+		metadataClient, metadataErr := metadataapi.NewForConfig(config)
+		if metadataErr != nil {
+			t.Fatal(metadataErr)
+		}
+		resourceClient := metadataClient.Resource(gvr)
+		if namespace == "" {
+			metadataFallback = resourceClient
+		} else {
+			metadataFallback = resourceClient.Namespace(namespace)
+		}
+	}
+	client, err := NewTableResourceClient(config, gvr, namespace, fallback, metadataFallback, include)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return client
+}
+
+type tableMetadataFallbackStub struct {
+	metadataapi.ResourceInterface
+	page            *metav1.PartialObjectMetadataList
+	listCalls       int
+	lastListOptions metav1.ListOptions
+}
+
+func (c *tableMetadataFallbackStub) List(
+	_ context.Context,
+	options metav1.ListOptions,
+) (*metav1.PartialObjectMetadataList, error) {
+	c.listCalls++
+	c.lastListOptions = options
+	return c.page.DeepCopy(), nil
+}
+
+func partialWidgetJSON(uid, name, resourceVersion string) map[string]any {
+	return map[string]any{
+		"apiVersion": "meta.k8s.io/v1",
+		"kind":       "PartialObjectMetadata",
+		"metadata": map[string]any{
+			"uid": uid, "namespace": "team-a", "name": name, "resourceVersion": resourceVersion,
+			"creationTimestamp": "2026-08-19T08:00:00Z",
+			"labels":            map[string]any{"app": "kmgr"},
+		},
+		// A malformed endpoint returning extra fields still cannot leak them
+		// through the typed metadata-client boundary.
+		"spec": map[string]any{"payload": "must-not-enter-store"},
+	}
 }
 
 func tableJSON(

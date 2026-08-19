@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 )
 
@@ -56,6 +57,7 @@ func NewTableResourceClient(
 	gvr schema.GroupVersionResource,
 	namespace string,
 	fallback ListerWatcher,
+	metadataFallback metadata.ResourceInterface,
 	include metav1.IncludeObjectPolicy,
 ) (*TableResourceClient, error) {
 	if config == nil {
@@ -66,6 +68,12 @@ func NewTableResourceClient(
 	}
 	if include != metav1.IncludeObject && include != metav1.IncludeMetadata {
 		return nil, fmt.Errorf("unsupported Table includeObject policy %q", include)
+	}
+	if include == metav1.IncludeMetadata {
+		if metadataFallback == nil {
+			return nil, errors.New("metadata-only Table requires a metadata fallback client")
+		}
+		fallback = partialMetadataListerWatcher{client: metadataFallback}
 	}
 	copy := rest.CopyConfig(config)
 	groupVersion := gvr.GroupVersion()
@@ -108,6 +116,22 @@ func (c *TableResourceClient) DisableTable() {
 	if c != nil {
 		c.disabled.Store(true)
 	}
+}
+
+// SupportsWatchListSemantics preserves the fallback's streaming-list
+// capability after Table negotiation has been disabled. While Table remains
+// enabled its distinct row representation still requires LIST followed by
+// WATCH.
+func (c *TableResourceClient) SupportsWatchListSemantics() bool {
+	if c == nil || c.TableEnabled() {
+		return false
+	}
+	capability, ok := c.fallback.(WatchListSemantics)
+	return ok && capability.SupportsWatchListSemantics()
+}
+
+func (c *TableResourceClient) IsWatchListSemanticsUnSupported() bool {
+	return !c.SupportsWatchListSemantics()
 }
 
 func (c *TableResourceClient) ListTable(ctx context.Context, options metav1.ListOptions) (*TableList, error) {

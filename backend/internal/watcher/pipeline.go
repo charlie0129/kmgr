@@ -365,9 +365,10 @@ func (p *Pipeline) watchListEligible() bool {
 	if p.watchListDisabled {
 		return false
 	}
-	// Table representations cannot carry WatchList's streaming initial-event
-	// contract. Keep their existing paginated Table LIST plus Table WATCH path.
-	if _, table := p.client.(TableListerWatcher); table {
+	// Active Table representations cannot carry WatchList's streaming
+	// initial-event contract. A disabled Table client is an ordinary fallback
+	// stream and may preserve that fallback's WatchList capability.
+	if table, ok := p.client.(TableListerWatcher); ok && table.TableEnabled() {
 		return false
 	}
 	capability, supported := p.client.(WatchListSemantics)

@@ -83,9 +83,9 @@ type MetadataSearchResourceSource interface {
 
 // TableResourceSource optionally provides content-negotiated metav1.Table
 // streams for resources without a curated native registry. Implementations
-// include either metadata or full objects according to the projection plan and
-// fall back to the same GVR's ordinary dynamic stream when Table negotiation
-// is unavailable.
+// include either metadata or full objects according to the projection plan.
+// When Table negotiation is unavailable, metadata-only projections stay on
+// PartialObjectMetadata while object-backed projections use the dynamic stream.
 type TableResourceSource interface {
 	OpenTableResource(
 		sessionID string,
@@ -187,10 +187,27 @@ func (s ClusterResourceSource) OpenTableResource(
 	if !ok {
 		return "", nil, ErrSessionNotFound
 	}
+	var metadataFallback metadata.ResourceInterface
+	if include == metav1.IncludeMetadata {
+		metadataClient := session.Metadata()
+		if metadataClient == nil {
+			return "", nil, errors.New("cluster metadata client is unavailable")
+		}
+		resourceClient := metadataClient.Resource(resource)
+		if namespace == "" {
+			metadataFallback = resourceClient
+		} else {
+			metadataFallback = resourceClient.Namespace(namespace)
+		}
+	}
 	client, err := watcher.NewTableResourceClient(
-		session.RESTConfig(), resource, namespace, fallback, include,
+		session.RESTConfig(), resource, namespace, fallback, metadataFallback, include,
 	)
 	if err != nil {
+		if include == metav1.IncludeMetadata {
+			// Never turn a metadata-only plan into an unbounded full-object stream.
+			return "", nil, err
+		}
 		// A session without a reusable REST config remains fully usable through
 		// the ordinary dynamic stream.
 		return authorityID, fallback, nil
