@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/metadata"
 )
 
 var ErrRelationshipResolutionUnavailable = errors.New("Kubernetes relationship resolution is unavailable")
@@ -50,14 +50,16 @@ type CachedChildSource interface {
 // runtime. Keeping the interface in object avoids an object/view import cycle.
 // Implementations may return this concrete slice through an adapter.
 
-type KindResolver interface {
-	ResourceForKind(
+type KindMetadataResolver interface {
+	MetadataForKind(
 		ctx context.Context,
 		sessionID string,
 		gvk schema.GroupVersionKind,
 		namespace string,
-	) (dynamic.ResourceInterface, schema.GroupVersionResource, string, error)
+	) (metadata.ResourceInterface, schema.GroupVersionResource, string, error)
 }
+
+var _ KindMetadataResolver = ClusterResolver{}
 
 // Relationships first fresh-GETs the selected identity, preserving exact UID
 // semantics. Owners are REST-mapped and verified authoritatively. Children are
@@ -106,7 +108,7 @@ func (r *Reader) ownerRelationships(
 	identity Identity,
 	value *unstructured.Unstructured,
 ) ([]Relationship, error) {
-	resolver, ok := r.resolver.(KindResolver)
+	resolver, ok := r.resolver.(KindMetadataResolver)
 	if !ok {
 		return nil, ErrRelationshipResolutionUnavailable
 	}
@@ -117,7 +119,7 @@ func (r *Reader) ownerRelationships(
 		if gvk.Version == "" || gvk.Kind == "" || owner.Name == "" || owner.UID == "" {
 			return nil, fmt.Errorf("invalid owner reference on %s/%s", identity.Namespace, identity.Name)
 		}
-		resource, gvr, namespace, err := resolver.ResourceForKind(
+		resource, gvr, namespace, err := resolver.MetadataForKind(
 			ctx, identity.SessionID, gvk, identity.Namespace,
 		)
 		if err != nil {

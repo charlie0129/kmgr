@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -24,7 +25,7 @@ func TestClientGoResolverPinsDirectPodUID(t *testing.T) {
 	client := fake.NewClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "ns", Name: "pod", UID: "new-uid",
 	}})
-	resolver := ClientGoTargetResolver{Core: client.CoreV1()}
+	resolver := ClientGoTargetResolver{Core: client.CoreV1(), PodUIDs: fakePodUIDGetter(client)}
 	_, err := resolver.Resolve(context.Background(), podIdentity("pod", "old-uid"), 8080)
 	if !errors.Is(err, ErrPodRecreated) {
 		t.Fatalf("Resolve error = %v", err)
@@ -258,6 +259,18 @@ func readyPod(name string, uid types.UID, port int32) *corev1.Pod {
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
 		},
 	}
+}
+
+func fakePodUIDGetter(client *fake.Clientset) podidentity.Getter {
+	return podidentity.GetterFunc(func(
+		ctx context.Context, namespace, name string,
+	) (types.UID, error) {
+		pod, err := client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		return pod.UID, nil
+	})
 }
 
 func newEndpointSliceClient(

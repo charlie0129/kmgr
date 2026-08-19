@@ -11,7 +11,9 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/util/flowcontrol"
@@ -42,7 +44,7 @@ func TestClientGoRunnerVerifiesPodAndBuildsExecRequest(t *testing.T) {
 			authorization: request.Header.Get("Authorization"),
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"api-0","uid":"pod-uid"}}`)
+		_, _ = io.WriteString(writer, `{"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"default","name":"api-0","uid":"pod-uid"}}`)
 	}))
 	defer server.Close()
 
@@ -54,6 +56,10 @@ func TestClientGoRunnerVerifiesPodAndBuildsExecRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewForConfig: %v", err)
 	}
+	metadataClient, err := metadata.NewForConfig(config)
+	if err != nil {
+		t.Fatalf("metadata NewForConfig: %v", err)
+	}
 	var execURL string
 	var factoryConfig *rest.Config
 	stdout := new(bytes.Buffer)
@@ -63,7 +69,7 @@ func TestClientGoRunnerVerifiesPodAndBuildsExecRequest(t *testing.T) {
 	started := false
 	executed := false
 	runner := ClientGoRunner{
-		Core: core, Config: config,
+		Core: core, PodUIDs: podidentity.MetadataGetter{Client: metadataClient}, Config: config,
 		ExecutorFactory: ExecutorFactoryFunc(func(receivedConfig *rest.Config, requestURL string, ready func()) (remotecommand.Executor, error) {
 			factoryConfig = receivedConfig
 			execURL = requestURL
@@ -134,7 +140,7 @@ func TestClientGoRunnerRejectsRecreatedPodBeforeExec(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"api-0","uid":"replacement-uid"}}`)
+		_, _ = io.WriteString(writer, `{"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"default","name":"api-0","uid":"replacement-uid"}}`)
 	}))
 	defer server.Close()
 	config := &rest.Config{Host: server.URL}
@@ -142,9 +148,13 @@ func TestClientGoRunnerRejectsRecreatedPodBeforeExec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewForConfig: %v", err)
 	}
+	metadataClient, err := metadata.NewForConfig(config)
+	if err != nil {
+		t.Fatalf("metadata NewForConfig: %v", err)
+	}
 	factoryCalled := false
 	runner := ClientGoRunner{
-		Core: core, Config: config,
+		Core: core, PodUIDs: podidentity.MetadataGetter{Client: metadataClient}, Config: config,
 		ExecutorFactory: ExecutorFactoryFunc(func(*rest.Config, string, func()) (remotecommand.Executor, error) {
 			factoryCalled = true
 			return nil, errors.New("must not construct an executor")
@@ -164,7 +174,7 @@ func TestClientGoRunnerDoesNotReportRunningWhenTransportUpgradeFails(t *testing.
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"api-0","uid":"pod-uid"}}`)
+		_, _ = io.WriteString(writer, `{"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"default","name":"api-0","uid":"pod-uid"}}`)
 	}))
 	defer server.Close()
 	config := &rest.Config{Host: server.URL}
@@ -172,10 +182,14 @@ func TestClientGoRunnerDoesNotReportRunningWhenTransportUpgradeFails(t *testing.
 	if err != nil {
 		t.Fatalf("NewForConfig: %v", err)
 	}
+	metadataClient, err := metadata.NewForConfig(config)
+	if err != nil {
+		t.Fatalf("metadata NewForConfig: %v", err)
+	}
 	upgradeErr := errors.New("upgrade rejected")
 	started := false
 	runner := ClientGoRunner{
-		Core: core, Config: config,
+		Core: core, PodUIDs: podidentity.MetadataGetter{Client: metadataClient}, Config: config,
 		ExecutorFactory: ExecutorFactoryFunc(func(*rest.Config, string, func()) (remotecommand.Executor, error) {
 			return executorFunc(func(context.Context, remotecommand.StreamOptions) error {
 				return upgradeErr

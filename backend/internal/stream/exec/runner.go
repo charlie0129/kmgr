@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"sync"
 
+	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apihttpstream "k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes/scheme"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -19,23 +19,23 @@ import (
 
 type ClientGoRunner struct {
 	Core            coreclient.CoreV1Interface
+	PodUIDs         podidentity.Getter
 	Config          *rest.Config
 	ExecutorFactory ExecutorFactory
 }
 
 func (r ClientGoRunner) Run(ctx context.Context, request StartRequest, options RunOptions) error {
-	if r.Core == nil || r.Config == nil {
+	if r.Core == nil || r.PodUIDs == nil || r.Config == nil {
 		return ErrExecutorUnavailable
 	}
-	pods := r.Core.Pods(request.Pod.Namespace)
-	pod, err := pods.Get(ctx, request.Pod.Name, metav1.GetOptions{})
+	uid, err := r.PodUIDs.PodUID(ctx, request.Pod.Namespace, request.Pod.Name)
 	if err != nil {
 		return err
 	}
-	if string(pod.UID) != request.Pod.UID {
+	if string(uid) != request.Pod.UID {
 		return &UIDMismatchError{
 			Namespace: request.Pod.Namespace, Name: request.Pod.Name,
-			Expected: request.Pod.UID, Actual: string(pod.UID),
+			Expected: request.Pod.UID, Actual: string(uid),
 		}
 	}
 

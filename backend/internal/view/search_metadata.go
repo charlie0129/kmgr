@@ -19,6 +19,23 @@ type metadataSearchLister struct {
 
 var _ searchLister = metadataSearchLister{}
 
+func (l metadataSearchLister) Get(
+	ctx context.Context,
+	name string,
+) (*unstructured.Unstructured, error) {
+	if l.client == nil {
+		return nil, errors.New("metadata search client is unavailable")
+	}
+	value, err := l.client.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, errors.New("metadata search returned a nil object")
+	}
+	return searchMetadataObject(value), nil
+}
+
 func (l metadataSearchLister) List(
 	ctx context.Context,
 	options metav1.ListOptions,
@@ -40,12 +57,19 @@ func (l metadataSearchLister) List(
 	result.SetContinue(page.GetContinue())
 	result.SetRemainingItemCount(page.GetRemainingItemCount())
 	for index := range page.Items {
-		metadata := &page.Items[index]
-		item := &result.Items[index]
-		item.SetName(metadata.GetName())
-		item.SetNamespace(metadata.GetNamespace())
-		item.SetUID(metadata.GetUID())
-		item.SetResourceVersion(metadata.GetResourceVersion())
+		result.Items[index] = *searchMetadataObject(&page.Items[index])
 	}
 	return result, nil
+}
+
+func searchMetadataObject(value metav1.Object) *unstructured.Unstructured {
+	result := &unstructured.Unstructured{}
+	if value == nil {
+		return result
+	}
+	result.SetName(value.GetName())
+	result.SetNamespace(value.GetNamespace())
+	result.SetUID(value.GetUID())
+	result.SetResourceVersion(value.GetResourceVersion())
+	return result
 }

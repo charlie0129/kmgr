@@ -120,17 +120,19 @@ func (r ClusterResolver) ContextName(sessionID string) (string, bool) {
 	return session.Context().Name, true
 }
 
-// ResourceForKind resolves an owner reference through the authority-shared API
+// MetadataForKind resolves an owner reference through the authority-shared API
 // catalog. Kubernetes resource names are not derived by pluralizing kinds:
 // that is incorrect for many built-ins and arbitrary CRDs. Reusing the same
 // catalog as the workspace and relationship scanner avoids waking a separate
-// DeferredDiscoveryRESTMapper cache for the first owner lookup.
-func (r ClusterResolver) ResourceForKind(
+// DeferredDiscoveryRESTMapper cache for the first owner lookup. The returned
+// metadata client keeps owner UID verification from transferring an entire
+// controller or custom-resource payload.
+func (r ClusterResolver) MetadataForKind(
 	ctx context.Context,
 	sessionID string,
 	gvk schema.GroupVersionKind,
 	namespace string,
-) (dynamic.ResourceInterface, schema.GroupVersionResource, string, error) {
+) (metadata.ResourceInterface, schema.GroupVersionResource, string, error) {
 	if r.Sessions == nil {
 		return nil, schema.GroupVersionResource{}, "", ErrSessionNotFound
 	}
@@ -138,7 +140,7 @@ func (r ClusterResolver) ResourceForKind(
 	if !ok {
 		return nil, schema.GroupVersionResource{}, "", ErrSessionNotFound
 	}
-	if session.Dynamic() == nil {
+	if session.Metadata() == nil {
 		return nil, schema.GroupVersionResource{}, "", ErrRelationshipResolutionUnavailable
 	}
 	catalog, err := session.DiscoverResourcesCached(ctx, false)
@@ -155,8 +157,8 @@ func (r ClusterResolver) ResourceForKind(
 	gvr := schema.GroupVersionResource{
 		Group: discovered.Group, Version: discovered.Version, Resource: discovered.Resource,
 	}
-	namespaceable := session.Dynamic().Resource(gvr)
-	var resource dynamic.ResourceInterface = namespaceable
+	namespaceable := session.Metadata().Resource(gvr)
+	var resource metadata.ResourceInterface = namespaceable
 	resolvedNamespace := ""
 	if discovered.Namespaced {
 		if namespace == "" {

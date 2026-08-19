@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,16 +34,18 @@ func (r ClusterSessions) ResolveSession(sessionID string) (Session, error) {
 	if !found {
 		return Session{}, ErrSessionNotFound
 	}
-	if session.Core() == nil || session.Core().RESTClient() == nil || session.RESTConfig() == nil {
+	if session.Core() == nil || session.Metadata() == nil ||
+		session.Core().RESTClient() == nil || session.RESTConfig() == nil {
 		lease.Release()
 		return Session{}, errors.New("Kubernetes port-forward client is unavailable")
 	}
-	resolver := ClientGoTargetResolver{Core: session.Core(), Dynamic: session.Dynamic()}
+	podUIDs := podidentity.MetadataGetter{Client: session.Metadata()}
+	resolver := ClientGoTargetResolver{Core: session.Core(), Dynamic: session.Dynamic(), PodUIDs: podUIDs}
 	return Session{
 		ContextName: session.Context().Name,
 		Resolver:    resolver,
 		Forwarder: ClientGoForwarder{
-			Config: session.RESTConfig(), RESTClient: session.Core().RESTClient(), Core: session.Core(),
+			Config: session.RESTConfig(), RESTClient: session.Core().RESTClient(), PodUIDs: podUIDs,
 		},
 		Release: lease.Release,
 	}, nil
@@ -51,6 +54,7 @@ func (r ClusterSessions) ResolveSession(sessionID string) (Session, error) {
 type ClientGoTargetResolver struct {
 	Core    v1.CoreV1Interface
 	Dynamic dynamic.Interface
+	PodUIDs podidentity.Getter
 }
 
 const (
@@ -68,16 +72,19 @@ func (r ClientGoTargetResolver) Resolve(ctx context.Context, target Identity, re
 	}
 	switch {
 	case target.IsPod():
-		pod, err := r.Core.Pods(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
+		if r.PodUIDs == nil {
+			return ResolvedTarget{}, errors.New("Kubernetes Pod metadata client is unavailable")
+		}
+		uid, err := r.PodUIDs.PodUID(ctx, target.Namespace, target.Name)
 		if err != nil {
 			return ResolvedTarget{}, err
 		}
-		if pod.UID != target.UID {
-			return ResolvedTarget{}, fmt.Errorf("%w: expected UID %q, found %q", ErrPodRecreated, target.UID, pod.UID)
+		if uid != target.UID {
+			return ResolvedTarget{}, fmt.Errorf("%w: expected UID %q, found %q", ErrPodRecreated, target.UID, uid)
 		}
 		return ResolvedTarget{Pod: Identity{
-			SessionID: target.SessionID, Version: "v1", Resource: "pods", Namespace: pod.Namespace,
-			Name: pod.Name, UID: pod.UID,
+			SessionID: target.SessionID, Version: "v1", Resource: "pods", Namespace: target.Namespace,
+			Name: target.Name, UID: uid,
 		}, RemotePort: remotePort}, nil
 	case target.IsService():
 		service, err := r.Core.Services(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})

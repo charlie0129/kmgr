@@ -274,6 +274,21 @@ func (r *Runtime) Search(
 	}
 	normalizedQuery := strings.ToLower(query.Query)
 	metadataSource, metadataOnly := r.source.(MetadataSearchResourceSource)
+	openMetadata := func(namespace string) (metadataSearchLister, error) {
+		metadataAuthority, metadataClient, metadataErr := metadataSource.OpenMetadataSearchResource(
+			query.SessionID, gvr, namespace,
+		)
+		if metadataErr != nil {
+			return metadataSearchLister{}, metadataErr
+		}
+		if metadataAuthority != authorityID {
+			return metadataSearchLister{}, errors.New("metadata search authority does not match dynamic resource authority")
+		}
+		if metadataClient == nil {
+			return metadataSearchLister{}, errors.New("metadata search client is unavailable")
+		}
+		return metadataSearchLister{client: metadataClient}, nil
+	}
 	snapshotKey := searchSnapshotKey{
 		resource:       keyPrefix,
 		namespaceScope: canonicalNamespaceScope(query.Resource, query.NamespaceScope),
@@ -317,14 +332,24 @@ func (r *Runtime) Search(
 	// Without a reusable metadata snapshot, exact namespace/name can use one
 	// authoritative GET even if this kind has never been listed.
 	if namespace, name, exact := exactSearchIdentity(query.Query, query.Resource, query.NamespaceScope); exact {
-		exactClient := client
-		if query.Resource.Namespaced && namespace != serverNamespace {
-			_, exactClient, err = r.source.OpenResource(query.SessionID, gvr, namespace)
-			if err != nil {
-				return err
+		var value *unstructured.Unstructured
+		var getErr error
+		if metadataOnly {
+			exactClient, metadataErr := openMetadata(namespace)
+			if metadataErr != nil {
+				return metadataErr
 			}
+			value, getErr = exactClient.Get(ctx, name)
+		} else {
+			exactClient := client
+			if query.Resource.Namespaced && namespace != serverNamespace {
+				_, exactClient, err = r.source.OpenResource(query.SessionID, gvr, namespace)
+				if err != nil {
+					return err
+				}
+			}
+			value, getErr = getFromLister(ctx, exactClient, name)
 		}
-		value, getErr := getFromLister(ctx, exactClient, name)
 		if getErr == nil && includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
 			result := makeSearchResult(query.SessionID, query.Resource, value, 10_000, false)
 			notifySearchSourceReady(query)
@@ -384,19 +409,11 @@ func (r *Runtime) Search(
 	}
 	var listClient searchLister = client
 	if metadataOnly {
-		metadataAuthority, metadataClient, metadataErr := metadataSource.OpenMetadataSearchResource(
-			query.SessionID, gvr, serverNamespace,
-		)
+		metadataClient, metadataErr := openMetadata(serverNamespace)
 		if metadataErr != nil {
 			return metadataErr
 		}
-		if metadataAuthority != authorityID {
-			return errors.New("metadata search authority does not match dynamic resource authority")
-		}
-		if metadataClient == nil {
-			return errors.New("metadata search client is unavailable")
-		}
-		listClient = metadataSearchLister{client: metadataClient}
+		listClient = metadataClient
 	}
 	transient, attachment, err := r.startTransientSearchList(ctx, snapshotKey, listClient)
 	if err != nil {

@@ -168,8 +168,10 @@ func lifecycleManager(
 	manager, err := NewManager(Config{
 		Sessions: staticSessionResolver{session: Session{
 			ContextName: "context",
-			Resolver:    ClientGoTargetResolver{Core: client.CoreV1()},
-			Forwarder:   forwarder,
+			Resolver: ClientGoTargetResolver{
+				Core: client.CoreV1(), PodUIDs: fakePodUIDGetter(client),
+			},
+			Forwarder: forwarder,
 		}},
 		Backoff: backoff,
 	})

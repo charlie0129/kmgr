@@ -11,8 +11,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	corev1 "k8s.io/api/core/v1"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 )
 
@@ -23,7 +25,7 @@ func TestClientGoSourceVerifiesUIDAndUsesPodLogSubresource(t *testing.T) {
 		switch request.URL.Path {
 		case "/api/v1/namespaces/team-a/pods/api-0":
 			writer.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(writer, `{"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"team-a","name":"api-0","uid":"pod-uid"}}`)
+			_, _ = fmt.Fprint(writer, `{"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"team-a","name":"api-0","uid":"pod-uid"}}`)
 		case "/api/v1/namespaces/team-a/pods/api-0/log":
 			logRequests.Add(1)
 			assertLogQuery(t, request.URL.Query())
@@ -35,11 +37,18 @@ func TestClientGoSourceVerifiesUIDAndUsesPodLogSubresource(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := coreclient.NewForConfig(&rest.Config{Host: server.URL})
+	config := &rest.Config{Host: server.URL}
+	client, err := coreclient.NewForConfig(config)
 	if err != nil {
 		t.Fatalf("NewForConfig: %v", err)
 	}
-	opener := ClientGoSource{Core: client}
+	metadataClient, err := metadata.NewForConfig(config)
+	if err != nil {
+		t.Fatalf("metadata NewForConfig: %v", err)
+	}
+	opener := ClientGoSource{
+		Core: client, PodUIDs: podidentity.MetadataGetter{Client: metadataClient},
+	}
 	since := int64(120)
 	tail := int64(40)
 	limit := int64(8192)

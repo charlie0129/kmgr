@@ -629,8 +629,11 @@ func TestMetadataSearchSnapshotCannotSeedFullObjectView(t *testing.T) {
 			metadataClient.listCalls.Load(), dynamicClient.listCalls.Load(),
 		)
 	}
-	if dynamicClient.getCalls.Load() != 1 {
-		t.Fatalf("exact identity GET calls = %d, want 1", dynamicClient.getCalls.Load())
+	if dynamicClient.getCalls.Load() != 0 {
+		t.Fatalf("full-object exact identity GET calls = %d, want 0", dynamicClient.getCalls.Load())
+	}
+	if metadataClient.getCalls.Load() != 1 {
+		t.Fatalf("metadata exact identity GET calls = %d, want 1", metadataClient.getCalls.Load())
 	}
 	if !final.Complete || !final.Reusable || len(final.Results) != 1 ||
 		final.Results[0].GetIdentity().GetName() != "beta" || !final.Results[0].GetStale() {
@@ -682,10 +685,10 @@ func TestCompletedMetadataSnapshotPrecedesSpeculativeExactGet(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if dynamicClient.getCalls.Load() != 1 || metadataClient.listCalls.Load() != 1 {
+	if dynamicClient.getCalls.Load() != 0 || metadataClient.getCalls.Load() != 1 || metadataClient.listCalls.Load() != 1 {
 		t.Fatalf(
-			"cold search calls GET=%d metadata LIST=%d, want 1/1",
-			dynamicClient.getCalls.Load(), metadataClient.listCalls.Load(),
+			"cold search calls full GET=%d metadata GET/LIST=%d/%d, want 0/1/1",
+			dynamicClient.getCalls.Load(), metadataClient.getCalls.Load(), metadataClient.listCalls.Load(),
 		)
 	}
 
@@ -701,10 +704,10 @@ func TestCompletedMetadataSnapshotPrecedesSpeculativeExactGet(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if dynamicClient.getCalls.Load() != 1 || metadataClient.listCalls.Load() != 1 {
+	if dynamicClient.getCalls.Load() != 0 || metadataClient.getCalls.Load() != 1 || metadataClient.listCalls.Load() != 1 {
 		t.Fatalf(
-			"snapshot search calls GET=%d metadata LIST=%d, want 1/1",
-			dynamicClient.getCalls.Load(), metadataClient.listCalls.Load(),
+			"snapshot search calls full GET=%d metadata GET/LIST=%d/%d, want 0/1/1",
+			dynamicClient.getCalls.Load(), metadataClient.getCalls.Load(), metadataClient.listCalls.Load(),
 		)
 	}
 	if !final.Complete || !final.Reusable || final.UsedDirectGet || len(final.Results) != 1 ||
@@ -2057,6 +2060,49 @@ func TestExactSearchUsesDirectGet(t *testing.T) {
 	}
 }
 
+func TestExactSearchUsesMetadataGetWhenAvailable(t *testing.T) {
+	t.Parallel()
+	dynamicClient := newSearchClient()
+	metadataClient := &metadataSearchTestClient{getObjects: map[string]*metav1.PartialObjectMetadata{
+		"exact": {
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "ns", Name: "exact", UID: "uid", ResourceVersion: "rv-exact",
+			},
+		},
+	}}
+	runtime, err := NewRuntime(RuntimeConfig{Source: &metadataSearchTestSource{
+		authority: "cluster", dynamic: dynamicClient, metadata: metadataClient,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	var batch SearchBatch
+	err = runtime.Search(context.Background(), SearchQuery{
+		SessionID: "session",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true}, Query: "ns/exact", AllowPaginatedList: true,
+	}, func(value SearchBatch) error { batch = value; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batch.UsedDirectGet || len(batch.Results) != 1 ||
+		batch.Results[0].GetIdentity().GetUid() != "uid" {
+		t.Fatalf("metadata direct GET result = %#v", batch)
+	}
+	if metadataClient.getCalls.Load() != 1 || metadataClient.listCalls.Load() != 0 ||
+		dynamicClient.getCalls.Load() != 0 || dynamicClient.listCalls.Load() != 0 {
+		t.Fatalf(
+			"exact search calls metadata GET/LIST=%d/%d dynamic GET/LIST=%d/%d, want 1/0/0/0",
+			metadataClient.getCalls.Load(), metadataClient.listCalls.Load(),
+			dynamicClient.getCalls.Load(), dynamicClient.listCalls.Load(),
+		)
+	}
+}
+
 func TestNamespacedPartialSearchFallsBackAfterExactGetNotFound(t *testing.T) {
 	t.Parallel()
 	client := newSearchClient()
@@ -2372,8 +2418,11 @@ func (s *metadataSearchTestSource) OpenMetadataSearchResource(
 }
 
 type metadataSearchTestClient struct {
-	page      *metav1.PartialObjectMetadataList
-	listCalls atomic.Int64
+	page       *metav1.PartialObjectMetadataList
+	getObjects map[string]*metav1.PartialObjectMetadata
+	getErr     error
+	listCalls  atomic.Int64
+	getCalls   atomic.Int64
 }
 
 func (c *metadataSearchTestClient) List(
@@ -2401,13 +2450,20 @@ func (*metadataSearchTestClient) DeleteCollection(
 	return errors.New("unexpected metadata delete collection")
 }
 
-func (*metadataSearchTestClient) Get(
-	context.Context,
-	string,
-	metav1.GetOptions,
-	...string,
+func (c *metadataSearchTestClient) Get(
+	_ context.Context,
+	name string,
+	_ metav1.GetOptions,
+	_ ...string,
 ) (*metav1.PartialObjectMetadata, error) {
-	return nil, errors.New("unexpected metadata get")
+	c.getCalls.Add(1)
+	if c.getErr != nil {
+		return nil, c.getErr
+	}
+	if value := c.getObjects[name]; value != nil {
+		return value.DeepCopy(), nil
+	}
+	return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "objects"}, name)
 }
 
 func (*metadataSearchTestClient) Watch(

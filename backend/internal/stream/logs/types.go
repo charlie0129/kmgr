@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -145,7 +146,8 @@ func (f ResolverFunc) Resolve(sessionID string) (ResolvedSession, error) {
 // Kubernetes does not offer a UID precondition for this subresource, so it
 // verifies the current Pod UID immediately before opening the request.
 type ClientGoSource struct {
-	Core coreclient.CoreV1Interface
+	Core    coreclient.CoreV1Interface
+	PodUIDs podidentity.Getter
 }
 
 func (c ClientGoSource) Open(
@@ -153,20 +155,20 @@ func (c ClientGoSource) Open(
 	source Source,
 	options corev1.PodLogOptions,
 ) (io.ReadCloser, error) {
-	if c.Core == nil {
+	if c.Core == nil || c.PodUIDs == nil {
 		return nil, ErrLogClientUnavailable
 	}
 	pods := c.Core.Pods(source.Identity.Namespace)
-	pod, err := pods.Get(ctx, source.Identity.Name, metav1.GetOptions{})
+	uid, err := c.PodUIDs.PodUID(ctx, source.Identity.Namespace, source.Identity.Name)
 	if err != nil {
 		return nil, err
 	}
-	if string(pod.UID) != source.Identity.UID {
+	if string(uid) != source.Identity.UID {
 		return nil, &UIDMismatchError{
 			Namespace: source.Identity.Namespace,
 			Name:      source.Identity.Name,
 			Expected:  source.Identity.UID,
-			Actual:    string(pod.UID),
+			Actual:    string(uid),
 		}
 	}
 	return pods.GetLogs(source.Identity.Name, &options).Stream(ctx)

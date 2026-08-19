@@ -10,6 +10,7 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
+	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -33,14 +34,15 @@ func (r ClusterResolver) Resolve(sessionID string) (ResolvedSession, error) {
 		return ResolvedSession{}, ErrSessionNotFound
 	}
 	config := session.RESTConfig()
-	if session.Core() == nil || config == nil {
+	if session.Core() == nil || session.Metadata() == nil || config == nil {
 		lease.Release()
 		return ResolvedSession{}, ErrExecutorUnavailable
 	}
 	return ResolvedSession{
 		ContextName: session.Context().Name,
 		Runner: ClientGoRunner{
-			Core: session.Core(), Config: config, ExecutorFactory: r.ExecutorFactory,
+			Core: session.Core(), PodUIDs: podidentity.MetadataGetter{Client: session.Metadata()},
+			Config: config, ExecutorFactory: r.ExecutorFactory,
 		},
 		Release: lease.Release,
 	}, nil

@@ -9,9 +9,8 @@ import (
 	"strconv"
 	"sync"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	"k8s.io/apimachinery/pkg/util/httpstream"
-	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	clientportforward "k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
@@ -20,11 +19,11 @@ import (
 type ClientGoForwarder struct {
 	Config     *rest.Config
 	RESTClient rest.Interface
-	Core       corev1client.CoreV1Interface
+	PodUIDs    podidentity.Getter
 }
 
 func (f ClientGoForwarder) Start(ctx context.Context, request ForwardRequest) (RunningForward, error) {
-	if f.Config == nil || f.RESTClient == nil || f.Core == nil {
+	if f.Config == nil || f.RESTClient == nil || f.PodUIDs == nil {
 		return nil, errors.New("Kubernetes port-forward transport is unavailable")
 	}
 	if !request.Pod.IsPod() || request.Pod.Namespace == "" || request.Pod.Name == "" || request.RemotePort == 0 {
@@ -45,7 +44,7 @@ func (f ClientGoForwarder) Start(ctx context.Context, request ForwardRequest) (R
 	dialer := clientportforward.NewFallbackDialer(tunnelDialer, spdyDialer, func(err error) bool {
 		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
 	})
-	return startUIDPinnedClientGoForward(ctx, dialer, f.Core, request)
+	return startUIDPinnedClientGoForward(ctx, dialer, f.PodUIDs, request)
 }
 
 // startUIDPinnedClientGoForward performs the final identity check after the
@@ -56,20 +55,20 @@ func (f ClientGoForwarder) Start(ctx context.Context, request ForwardRequest) (R
 func startUIDPinnedClientGoForward(
 	ctx context.Context,
 	dialer httpstream.Dialer,
-	core corev1client.CoreV1Interface,
+	podUIDs podidentity.Getter,
 	request ForwardRequest,
 ) (RunningForward, error) {
 	pinned := &podUIDValidatingDialer{
 		delegate: dialer,
 		validate: func() error {
-			pod, err := core.Pods(request.Pod.Namespace).Get(ctx, request.Pod.Name, metav1.GetOptions{})
+			uid, err := podUIDs.PodUID(ctx, request.Pod.Namespace, request.Pod.Name)
 			if err != nil {
 				return fmt.Errorf("verify upgraded port-forward Pod identity: %w", err)
 			}
-			if pod.UID != request.Pod.UID {
+			if uid != request.Pod.UID {
 				return fmt.Errorf(
 					"%w: expected UID %q, found %q after transport upgrade",
-					ErrPodRecreated, request.Pod.UID, pod.UID,
+					ErrPodRecreated, request.Pod.UID, uid,
 				)
 			}
 			return nil
