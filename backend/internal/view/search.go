@@ -272,8 +272,50 @@ func (r *Runtime) Search(
 		authorityID: authorityID, group: gvr.Group, version: gvr.Version,
 		resource: gvr.Resource, namespace: serverNamespace,
 	}
-	// Exact namespace/name can use one authoritative GET even if this kind has
-	// never been listed. It is never satisfied solely from stale cache.
+	normalizedQuery := strings.ToLower(query.Query)
+	metadataSource, metadataOnly := r.source.(MetadataSearchResourceSource)
+	snapshotKey := searchSnapshotKey{
+		resource:       keyPrefix,
+		namespaceScope: canonicalNamespaceScope(query.Resource, query.NamespaceScope),
+		metadataOnly:   metadataOnly,
+	}
+	serveCompletedSnapshot := func(examinedBase uint64) (bool, error) {
+		snapshot := r.completedSearchSnapshot(snapshotKey)
+		if snapshot == nil {
+			return false, nil
+		}
+		notifySearchSourceReady(query)
+		results := newBoundedSearchResults(limit)
+		for _, indexed := range snapshot.store.SearchSnapshot() {
+			if err := ctx.Err(); err != nil {
+				return true, err
+			}
+			value := indexed.Object
+			if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
+				continue
+			}
+			if rank, match := searchRankNormalized(
+				normalizedQuery, indexed.NormalizedName, indexed.NormalizedQualified,
+			); match {
+				results.Add(makeSearchResult(query.SessionID, query.Resource, value, rank, true))
+			}
+		}
+		return true, emit(SearchBatch{
+			Results: results.Sorted(), Examined: examinedBase + uint64(snapshot.objectCount),
+			Complete: true, Reusable: true,
+		})
+	}
+	// A completed metadata LIST covers the entire logical scope. Reusing it
+	// before interpreting a bare query as an exact name avoids one speculative
+	// GET (usually a 404) per debounced query revision. Opening a selected result
+	// still follows the normal UID-validating full-object path.
+	if query.AllowPaginatedList && metadataOnly {
+		if served, serveErr := serveCompletedSnapshot(0); served || serveErr != nil {
+			return serveErr
+		}
+	}
+	// Without a reusable metadata snapshot, exact namespace/name can use one
+	// authoritative GET even if this kind has never been listed.
 	if namespace, name, exact := exactSearchIdentity(query.Query, query.Resource, query.NamespaceScope); exact {
 		exactClient := client
 		if query.Resource.Namespaced && namespace != serverNamespace {
@@ -305,7 +347,6 @@ func (r *Runtime) Search(
 	}
 	r.mu.Unlock()
 	cachedResults := newBoundedSearchResults(limit)
-	normalizedQuery := strings.ToLower(query.Query)
 	var examined uint64
 	for _, entry := range cachedEntries {
 		for _, indexed := range entry.store.SearchSnapshot() {
@@ -336,34 +377,10 @@ func (r *Runtime) Search(
 		return emit(SearchBatch{Complete: true})
 	}
 
-	metadataSource, metadataOnly := r.source.(MetadataSearchResourceSource)
-	snapshotKey := searchSnapshotKey{
-		resource:       keyPrefix,
-		namespaceScope: canonicalNamespaceScope(query.Resource, query.NamespaceScope),
-		metadataOnly:   metadataOnly,
-	}
 	seen := newBoundedSearchResults(limit)
 	listExaminedBase := examined
-	if snapshot := r.completedSearchSnapshot(snapshotKey); snapshot != nil {
-		notifySearchSourceReady(query)
-		for _, indexed := range snapshot.store.SearchSnapshot() {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			value := indexed.Object
-			if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
-				continue
-			}
-			if rank, match := searchRankNormalized(
-				normalizedQuery, indexed.NormalizedName, indexed.NormalizedQualified,
-			); match {
-				seen.Add(makeSearchResult(query.SessionID, query.Resource, value, rank, true))
-			}
-		}
-		return emit(SearchBatch{
-			Results: seen.Sorted(), Examined: listExaminedBase + uint64(snapshot.objectCount),
-			Complete: true, Reusable: true,
-		})
+	if served, serveErr := serveCompletedSnapshot(listExaminedBase); served || serveErr != nil {
+		return serveErr
 	}
 	var listClient searchLister = client
 	if metadataOnly {

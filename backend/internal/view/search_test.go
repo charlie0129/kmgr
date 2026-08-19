@@ -629,8 +629,8 @@ func TestMetadataSearchSnapshotCannotSeedFullObjectView(t *testing.T) {
 			metadataClient.listCalls.Load(), dynamicClient.listCalls.Load(),
 		)
 	}
-	if dynamicClient.getCalls.Load() != 2 {
-		t.Fatalf("exact identity GET calls = %d, want 2", dynamicClient.getCalls.Load())
+	if dynamicClient.getCalls.Load() != 1 {
+		t.Fatalf("exact identity GET calls = %d, want 1", dynamicClient.getCalls.Load())
 	}
 	if !final.Complete || !final.Reusable || len(final.Results) != 1 ||
 		final.Results[0].GetIdentity().GetName() != "beta" || !final.Results[0].GetStale() {
@@ -656,6 +656,60 @@ func TestMetadataSearchSnapshotCannotSeedFullObjectView(t *testing.T) {
 	runtime.mu.Unlock()
 	if metadataSnapshots != 1 {
 		t.Fatalf("retained metadata-only snapshots = %d, want 1", metadataSnapshots)
+	}
+}
+
+func TestCompletedMetadataSnapshotPrecedesSpeculativeExactGet(t *testing.T) {
+	t.Parallel()
+	dynamicClient := newSearchClient()
+	metadataClient := &metadataSearchTestClient{page: &metav1.PartialObjectMetadataList{
+		ListMeta: metav1.ListMeta{ResourceVersion: "metadata-rv"},
+		Items: []metav1.PartialObjectMetadata{
+			{ObjectMeta: metav1.ObjectMeta{Name: "alpha", Namespace: "ns", UID: "alpha"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "beta", Namespace: "ns", UID: "beta"}},
+		},
+	}}
+	runtime, err := NewRuntime(RuntimeConfig{Source: &metadataSearchTestSource{
+		authority: "cluster", dynamic: dynamicClient, metadata: metadataClient,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	if err := runtime.Search(context.Background(), inProgressSearchQuery("alp"), func(SearchBatch) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if dynamicClient.getCalls.Load() != 1 || metadataClient.listCalls.Load() != 1 {
+		t.Fatalf(
+			"cold search calls GET=%d metadata LIST=%d, want 1/1",
+			dynamicClient.getCalls.Load(), metadataClient.listCalls.Load(),
+		)
+	}
+
+	// A direct GET here would fail the search. The complete metadata snapshot
+	// should instead answer this exact-looking bare query without any API call.
+	dynamicClient.getErr = apierrors.NewForbidden(
+		schema.GroupResource{Resource: "pods"}, "beta", errors.New("unexpected GET"),
+	)
+	var final SearchBatch
+	if err := runtime.Search(context.Background(), inProgressSearchQuery("beta"), func(batch SearchBatch) error {
+		final = batch
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if dynamicClient.getCalls.Load() != 1 || metadataClient.listCalls.Load() != 1 {
+		t.Fatalf(
+			"snapshot search calls GET=%d metadata LIST=%d, want 1/1",
+			dynamicClient.getCalls.Load(), metadataClient.listCalls.Load(),
+		)
+	}
+	if !final.Complete || !final.Reusable || final.UsedDirectGet || len(final.Results) != 1 ||
+		final.Results[0].GetIdentity().GetName() != "beta" || !final.Results[0].GetStale() {
+		t.Fatalf("snapshot-backed exact-looking result = %#v", final)
 	}
 }
 
