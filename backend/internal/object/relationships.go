@@ -61,16 +61,27 @@ type KindMetadataResolver interface {
 
 var _ KindMetadataResolver = ClusterResolver{}
 
-// Relationships first fresh-GETs the selected identity, preserving exact UID
-// semantics. Owners are REST-mapped and verified authoritatively. Children are
-// drawn only from existing view caches, so every cached child and the overall
-// child result are explicitly marked potentially incomplete.
+// Relationships first metadata-GETs the selected identity, preserving exact
+// UID semantics without transferring its spec/status. Owners are REST-mapped
+// and verified authoritatively. Children are drawn only from existing view
+// caches, so every cached child and the overall child result are explicitly
+// marked potentially incomplete.
 func (r *Reader) Relationships(
 	ctx context.Context,
 	identity Identity,
 	includeOwners, includeChildren bool,
 ) ([]Relationship, bool, error) {
-	value, err := r.Get(ctx, identity)
+	resolver, ok := r.resolver.(MetadataResourceResolver)
+	if !ok {
+		return nil, false, ErrRelationshipResolutionUnavailable
+	}
+	resource, err := resolver.MetadataResource(
+		identity.SessionID, identity.GVR(), identity.Namespace,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	value, err := getIdentityMetadata(ctx, resource, identity)
 	if err != nil {
 		return nil, false, err
 	}
@@ -106,7 +117,7 @@ func (r *Reader) Relationships(
 func (r *Reader) ownerRelationships(
 	ctx context.Context,
 	identity Identity,
-	value *unstructured.Unstructured,
+	value metav1.Object,
 ) ([]Relationship, error) {
 	resolver, ok := r.resolver.(KindMetadataResolver)
 	if !ok {
@@ -144,6 +155,35 @@ func (r *Reader) ownerRelationships(
 		})
 	}
 	return result, nil
+}
+
+func getIdentityMetadata(
+	ctx context.Context,
+	resource metadata.ResourceInterface,
+	identity Identity,
+) (*metav1.PartialObjectMetadata, error) {
+	if err := identity.Validate(); err != nil {
+		return nil, err
+	}
+	if resource == nil {
+		return nil, ErrRelationshipResolutionUnavailable
+	}
+	value, err := resource.Get(ctx, identity.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, errors.New("Kubernetes object metadata is missing")
+	}
+	if string(value.GetUID()) != identity.UID {
+		return nil, &IdentityChangedError{
+			ExpectedUID: identity.UID,
+			ActualUID:   string(value.GetUID()),
+			Namespace:   identity.Namespace,
+			Name:        identity.Name,
+		}
+	}
+	return value, nil
 }
 
 func hasOwnerUID(owners []metav1.OwnerReference, uid string) bool {

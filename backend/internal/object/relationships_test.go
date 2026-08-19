@@ -7,7 +7,9 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/metadata"
 	metadatafake "k8s.io/client-go/metadata/fake"
 )
@@ -15,6 +17,40 @@ import (
 type cachedChildrenStub struct{ values []CachedChild }
 
 func (s cachedChildrenStub) CachedChildren(string, string) []CachedChild { return s.values }
+
+func TestRelationshipsAnchorsSelectedObjectWithMetadataOnlyGet(t *testing.T) {
+	t.Parallel()
+	target := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "owner-uid")
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), target)
+	metadataScheme := metadatafake.NewTestScheme()
+	metav1.AddMetaToScheme(metadataScheme)
+	metadataClient := metadatafake.NewSimpleMetadataClient(
+		metadataScheme, relationshipPartialMetadata(target),
+	)
+	reader, err := NewReader(relationshipMetadataResolverStub{
+		Resolver: fakeResolver{client: dynamicClient}, metadata: metadataClient,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = reader.Relationships(context.Background(), Identity{
+		SessionID: "session", Group: "apps", Version: "v1", Resource: "deployments",
+		Namespace: "ns", Name: "api", UID: "owner-uid",
+	}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actions := dynamicClient.Actions(); len(actions) != 0 {
+		t.Fatalf("full-object actions = %v, want none", actions)
+	}
+	actions := metadataClient.Actions()
+	if len(actions) != 1 || actions[0].GetVerb() != "get" ||
+		actions[0].GetResource() != (schema.GroupVersionResource{
+			Group: "apps", Version: "v1", Resource: "deployments",
+		}) {
+		t.Fatalf("metadata actions = %v, want one exact selected-object GET", actions)
+	}
+}
 
 func TestRelationshipsReturnsCachedChildrenMarkedPotentiallyIncomplete(t *testing.T) {
 	t.Parallel()
@@ -25,7 +61,7 @@ func TestRelationshipsReturnsCachedChildrenMarkedPotentiallyIncomplete(t *testin
 	wrong.SetName("wrong")
 	wrong.SetUID("wrong-uid")
 	wrong.SetOwnerReferences([]metav1.OwnerReference{{UID: "other-owner"}})
-	reader := testReader(t, target)
+	reader := relationshipTestReader(t, target)
 	reader.SetCachedChildSource(cachedChildrenStub{values: []CachedChild{
 		{Version: "v1", Resource: "pods", Object: child},
 		{Version: "v1", Resource: "pods", Object: wrong},
@@ -47,7 +83,7 @@ func TestRelationshipsReturnsCachedChildrenMarkedPotentiallyIncomplete(t *testin
 func TestRelationshipsReportsEmptyCachedChildrenAsPotentiallyIncomplete(t *testing.T) {
 	t.Parallel()
 	target := kubernetesObject("v1", "Pod", "pods", "ns", "owner", "owner-uid")
-	reader := testReader(t, target)
+	reader := relationshipTestReader(t, target)
 	values, incomplete, err := reader.Relationships(context.Background(), Identity{
 		SessionID: "session", Version: "v1", Resource: "pods", Namespace: "ns",
 		Name: "owner", UID: "owner-uid",
@@ -74,12 +110,15 @@ func TestRelationshipsVerifiesOwnerWithMetadataGet(t *testing.T) {
 	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"})
 	scheme := metadatafake.NewTestScheme()
 	metav1.AddMetaToScheme(scheme)
-	metadataClient := metadatafake.NewSimpleMetadataClient(scheme, owner)
+	metadataClient := metadatafake.NewSimpleMetadataClient(
+		scheme, relationshipPartialMetadata(target), owner,
+	)
 	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 
 	reader := testReader(t, target)
 	resolver := &kindMetadataResolverStub{
 		Resolver:  reader.resolver,
+		metadata:  metadataClient,
 		resource:  metadataClient.Resource(gvr).Namespace("ns"),
 		gvr:       gvr,
 		namespace: "ns",
@@ -105,11 +144,24 @@ func TestRelationshipsVerifiesOwnerWithMetadataGet(t *testing.T) {
 
 type kindMetadataResolverStub struct {
 	Resolver
+	metadata  metadata.Interface
 	resource  metadata.ResourceInterface
 	gvr       schema.GroupVersionResource
 	namespace string
 	calls     int
 	requested schema.GroupVersionKind
+}
+
+func (r *kindMetadataResolverStub) MetadataResource(
+	_ string,
+	gvr schema.GroupVersionResource,
+	namespace string,
+) (metadata.ResourceInterface, error) {
+	resource := r.metadata.Resource(gvr)
+	if namespace != "" {
+		return resource.Namespace(namespace), nil
+	}
+	return resource, nil
 }
 
 func (r *kindMetadataResolverStub) MetadataForKind(
@@ -121,6 +173,57 @@ func (r *kindMetadataResolverStub) MetadataForKind(
 	r.calls++
 	r.requested = gvk
 	return r.resource, r.gvr, r.namespace, nil
+}
+
+type relationshipMetadataResolverStub struct {
+	Resolver
+	metadata metadata.Interface
+}
+
+func (r relationshipMetadataResolverStub) MetadataResource(
+	_ string,
+	gvr schema.GroupVersionResource,
+	namespace string,
+) (metadata.ResourceInterface, error) {
+	resource := r.metadata.Resource(gvr)
+	if namespace != "" {
+		return resource.Namespace(namespace), nil
+	}
+	return resource, nil
+}
+
+func relationshipTestReader(
+	t *testing.T,
+	target *unstructured.Unstructured,
+) *Reader {
+	t.Helper()
+	reader := testReader(t, target)
+	scheme := metadatafake.NewTestScheme()
+	metav1.AddMetaToScheme(scheme)
+	client := metadatafake.NewSimpleMetadataClient(
+		scheme, relationshipPartialMetadata(target),
+	)
+	reader.resolver = relationshipMetadataResolverStub{
+		Resolver: reader.resolver, metadata: client,
+	}
+	return reader
+}
+
+func relationshipPartialMetadata(
+	value *unstructured.Unstructured,
+) *metav1.PartialObjectMetadata {
+	result := &metav1.PartialObjectMetadata{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: value.GetAPIVersion(), Kind: value.GetKind(),
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: value.GetNamespace(), Name: value.GetName(),
+			UID: value.GetUID(), ResourceVersion: value.GetResourceVersion(),
+			OwnerReferences: value.GetOwnerReferences(),
+		},
+	}
+	result.SetGroupVersionKind(value.GroupVersionKind())
+	return result
 }
 
 func TestResourceForExactKindUsesExactGroupVersionKindAndScope(t *testing.T) {

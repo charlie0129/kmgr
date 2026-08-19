@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -70,7 +71,9 @@ func TestScanRelationshipsUsesExactOwnerUIDPreferredVersionsAndNamespace(t *test
 	child := partialMetadata("apps/v1", "ReplicaSet", "ns", "api-rs", "child-uid", "owner-uid")
 	wrongUID := partialMetadata("v1", "Pod", "ns", "same-name-owner", "wrong-child", "replacement-owner-uid")
 	otherNamespace := partialMetadata("v1", "Pod", "other", "other", "other-child", "owner-uid")
-	metadataClient := metadatafake.NewSimpleMetadataClient(metadataScheme, child, wrongUID, otherNamespace)
+	metadataClient := metadatafake.NewSimpleMetadataClient(
+		metadataScheme, relationshipPartialMetadata(target), child, wrongUID, otherNamespace,
+	)
 	discovery := newRelationshipDiscoveryClient(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api":
@@ -143,7 +146,7 @@ func TestScanRelationshipsUsesExactOwnerUIDPreferredVersionsAndNamespace(t *test
 func TestClusterRelationshipScansReuseSharedDiscoveryCatalog(t *testing.T) {
 	t.Parallel()
 	var discoveryCycles atomic.Int64
-	var ownerGets atomic.Int64
+	var anchorGets atomic.Int64
 	var metadataLists atomic.Int64
 	reader, sessionID := newClusterRelationshipReader(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -160,10 +163,17 @@ func TestClusterRelationshipScansReuseSharedDiscoveryCatalog(t *testing.T) {
 				}},
 			})
 		case "/apis/apps/v1/namespaces/ns/deployments/api":
-			ownerGets.Add(1)
-			writeRelationshipDiscoveryJSON(t, writer,
-				kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "owner-uid").Object,
-			)
+			anchorGets.Add(1)
+			if accept := request.Header.Get("Accept"); !strings.Contains(accept, "as=PartialObjectMetadata") {
+				t.Errorf("metadata anchor Accept = %q", accept)
+			}
+			writeRelationshipDiscoveryJSON(t, writer, map[string]any{
+				"apiVersion": "meta.k8s.io/v1",
+				"kind":       "PartialObjectMetadata",
+				"metadata": map[string]any{
+					"namespace": "ns", "name": "api", "uid": "owner-uid",
+				},
+			})
 		case "/api/v1/namespaces/ns/pods":
 			metadataLists.Add(1)
 			if request.URL.Query().Get("limit") != "500" {
@@ -218,8 +228,8 @@ func TestClusterRelationshipScansReuseSharedDiscoveryCatalog(t *testing.T) {
 	if got := discoveryCycles.Load(); got != 1 {
 		t.Fatalf("concurrent and repeated relationship scans caused %d discovery cycles, want 1", got)
 	}
-	if got := ownerGets.Load(); got != 3 {
-		t.Fatalf("owner GETs = %d, want one authoritative GET per scan", got)
+	if got := anchorGets.Load(); got != 3 {
+		t.Fatalf("metadata anchor GETs = %d, want one authoritative GET per scan", got)
 	}
 	if got := metadataLists.Load(); got != 3 {
 		t.Fatalf("metadata LISTs = %d, want one explicit object scan per invocation", got)
@@ -231,7 +241,9 @@ func TestScanRelationshipsRejectsRecreatedTargetBeforeBulkLists(t *testing.T) {
 	target := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "new-uid")
 	metadataScheme := metadatafake.NewTestScheme()
 	metav1.AddMetaToScheme(metadataScheme)
-	metadataClient := metadatafake.NewSimpleMetadataClient(metadataScheme)
+	metadataClient := metadatafake.NewSimpleMetadataClient(
+		metadataScheme, relationshipPartialMetadata(target),
+	)
 	var discoveryRequests atomic.Int64
 	discovery := newRelationshipDiscoveryClient(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		discoveryRequests.Add(1)
@@ -249,8 +261,12 @@ func TestScanRelationshipsRejectsRecreatedTargetBeforeBulkLists(t *testing.T) {
 	if !errors.As(err, &changed) || changed.ActualUID != "new-uid" {
 		t.Fatalf("scan error = %#v", err)
 	}
-	if len(metadataClient.Actions()) != 0 {
-		t.Fatalf("bulk metadata access occurred before UID guard: %v", metadataClient.Actions())
+	actions := metadataClient.Actions()
+	if len(actions) != 1 || actions[0].GetVerb() != "get" ||
+		actions[0].GetResource() != (schema.GroupVersionResource{
+			Group: "apps", Version: "v1", Resource: "deployments",
+		}) {
+		t.Fatalf("metadata actions before rejected scan = %v, want one exact anchor GET", actions)
 	}
 	if discoveryRequests.Load() != 0 {
 		t.Fatalf("discovery requests before UID guard = %d", discoveryRequests.Load())
@@ -369,7 +385,9 @@ func TestScanRelationshipsCancelsStalledDiscoveryRequest(t *testing.T) {
 	target := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "owner-uid")
 	metadataScheme := metadatafake.NewTestScheme()
 	metav1.AddMetaToScheme(metadataScheme)
-	metadataClient := metadatafake.NewSimpleMetadataClient(metadataScheme)
+	metadataClient := metadatafake.NewSimpleMetadataClient(
+		metadataScheme, relationshipPartialMetadata(target),
+	)
 	reader, err := NewReader(scanTestResolver{
 		dynamic:   dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), target),
 		discovery: discovery, metadata: metadataClient,
@@ -405,8 +423,10 @@ func TestScanRelationshipsCancelsStalledDiscoveryRequest(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("discovery HTTP handler did not observe request cancellation")
 	}
-	if len(metadataClient.Actions()) != 0 {
-		t.Fatalf("metadata LIST began before discovery completed: %v", metadataClient.Actions())
+	for _, action := range metadataClient.Actions() {
+		if action.GetVerb() == "list" {
+			t.Fatalf("metadata LIST began before discovery completed: %v", metadataClient.Actions())
+		}
 	}
 }
 

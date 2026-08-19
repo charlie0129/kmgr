@@ -78,6 +78,17 @@ type Resolver interface {
 	Resource(sessionID string, gvr schema.GroupVersionResource, namespace string) (dynamic.ResourceInterface, error)
 }
 
+// MetadataResourceResolver is an optional Resolver capability for reads that
+// need only Kubernetes identity metadata. It keeps callers from transferring
+// complete objects merely to validate a UID or inspect owner references.
+type MetadataResourceResolver interface {
+	MetadataResource(
+		sessionID string,
+		gvr schema.GroupVersionResource,
+		namespace string,
+	) (metadata.ResourceInterface, error)
+}
+
 // ContextNameResolver is an optional Resolver capability used only to enrich
 // display-safe structured errors with the human kubeconfig context name. The
 // cluster session ID remains the authority boundary; callers must not treat
@@ -103,6 +114,28 @@ func (r ClusterResolver) Resource(
 		return nil, ErrSessionNotFound
 	}
 	resource := session.Dynamic().Resource(gvr)
+	if namespace == "" {
+		return resource, nil
+	}
+	return resource.Namespace(namespace), nil
+}
+
+func (r ClusterResolver) MetadataResource(
+	sessionID string,
+	gvr schema.GroupVersionResource,
+	namespace string,
+) (metadata.ResourceInterface, error) {
+	if r.Sessions == nil {
+		return nil, ErrSessionNotFound
+	}
+	session, ok := r.Sessions.Get(sessionID)
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+	if session.Metadata() == nil {
+		return nil, ErrRelationshipResolutionUnavailable
+	}
+	resource := session.Metadata().Resource(gvr)
 	if namespace == "" {
 		return resource, nil
 	}

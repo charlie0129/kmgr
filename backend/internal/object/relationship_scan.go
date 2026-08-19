@@ -76,11 +76,6 @@ func (r *Reader) ScanRelationships(
 	if emit == nil {
 		return errors.New("relationship scan emitter must not be nil")
 	}
-	// Anchor the entire scan to the exact selected UID before discovery or any
-	// bulk LIST. A recreated same-name object fails here and is never adopted.
-	if _, err := r.Get(ctx, identity); err != nil {
-		return err
-	}
 	resolver, ok := r.resolver.(RelationshipScanResolver)
 	if !ok {
 		return ErrRelationshipResolutionUnavailable
@@ -95,6 +90,17 @@ func (r *Reader) ScanRelationships(
 	metadataClient := session.Metadata()
 	if metadataClient == nil {
 		return ErrRelationshipResolutionUnavailable
+	}
+	// Anchor the entire scan to the exact selected UID before discovery or any
+	// bulk LIST. A metadata GET is sufficient, and a recreated same-name object
+	// fails here rather than being adopted by the scan.
+	resource := metadataClient.Resource(identity.GVR())
+	var selected metadata.ResourceInterface = resource
+	if identity.Namespace != "" {
+		selected = resource.Namespace(identity.Namespace)
+	}
+	if _, err := getIdentityMetadata(ctx, selected, identity); err != nil {
+		return err
 	}
 	resources, discoveryIncomplete, err := discoverRelationshipResources(ctx, session)
 	if err != nil {

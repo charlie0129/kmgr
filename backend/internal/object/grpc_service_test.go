@@ -87,7 +87,9 @@ func TestGRPCRelationshipScanCursorAndExplicitCancellation(t *testing.T) {
 	target := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "owner-uid")
 	metadataScheme := metadatafake.NewTestScheme()
 	metav1.AddMetaToScheme(metadataScheme)
-	metadataClient := metadatafake.NewSimpleMetadataClient(metadataScheme)
+	metadataClient := metadatafake.NewSimpleMetadataClient(
+		metadataScheme, relationshipPartialMetadata(target),
+	)
 	block := make(chan struct{})
 	metadataClient.PrependReactor("list", "replicasets", func(clienttesting.Action) (bool, runtime.Object, error) {
 		<-block
