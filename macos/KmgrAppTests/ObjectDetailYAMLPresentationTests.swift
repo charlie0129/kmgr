@@ -8,19 +8,6 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Object detail YAML presentation")
 struct ObjectDetailYAMLPresentationTests {
-    @Test("automatic details route ConfigMaps and Secrets directly to Data")
-    func automaticDataTabRouting() {
-        #expect(ObjectDetailInitialTab.automatic.segment(
-            supportsDataEditor: true
-        ) == 3)
-        #expect(ObjectDetailInitialTab.automatic.segment(
-            supportsDataEditor: false
-        ) == 0)
-        #expect(ObjectDetailInitialTab.data.segment(
-            supportsDataEditor: false
-        ) == 0)
-    }
-
     @Test("Relationships table exposes its accessibility label")
     func relationshipTableAccessibilityLabel() throws {
         let identity = ResourceIdentity(
@@ -626,20 +613,25 @@ struct ObjectDetailYAMLPresentationTests {
         controller.view.layoutSubtreeIfNeeded()
         #expect(summaryDocument.frame.width <= summaryScroll.contentSize.width + 1)
 
-        segmented.selectedSegment = 3
-        _ = segmented.sendAction(segmented.action, to: segmented.target)
-        controller.view.layoutSubtreeIfNeeded()
-        let keysTable = try #require(descendants(of: controller.view)
+        let dataController = ObjectDataViewController(
+            identity: identity,
+            provider: provider
+        )
+        dataController.loadView()
+        dataController.view.frame = NSRect(x: 0, y: 0, width: 520, height: 600)
+        dataController.viewDidAppear()
+        defer { dataController.stop() }
+        dataController.view.layoutSubtreeIfNeeded()
+        let keysTable = try #require(descendants(of: dataController.view)
             .compactMap { $0 as? NSTableView }
-            .first { $0.accessibilityLabel() == "ConfigMap and Secret data keys" })
+            .first { $0.accessibilityLabel() == "ConfigMap or Secret data keys and values" })
         try await waitUntil { keysTable.numberOfRows == 1 }
-        keysTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        let dataScroll = try #require(descendants(of: controller.view)
+        let dataScroll = try #require(descendants(of: dataController.view)
             .compactMap { $0 as? NSScrollView }
-            .first { $0.identifier?.rawValue == "object-detail-data-value-scroll" })
+            .first { $0.identifier?.rawValue == "object-data-value-scroll" })
         let dataEditor = try #require(dataScroll.documentView as? NSTextView)
         try await waitUntil { dataEditor.string == value }
-        controller.view.layoutSubtreeIfNeeded()
+        dataController.view.layoutSubtreeIfNeeded()
         #expect(dataScroll.contentSize.width > 100)
         #expect(dataEditor.frame.width > 100)
         #expect(dataEditor.frame.height > 0)
@@ -1070,10 +1062,9 @@ struct ObjectDetailYAMLPresentationTests {
                 secret: true
             )
         )
-        let controller = ObjectDetailViewController(
+        let controller = ObjectDataViewController(
             identity: identity,
-            provider: provider,
-            initialTab: .data
+            provider: provider
         )
         controller.loadView()
         controller.viewDidAppear()
@@ -1081,7 +1072,7 @@ struct ObjectDetailYAMLPresentationTests {
 
         let root = controller.view
         let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
-            .first { $0.accessibilityLabel() == "ConfigMap and Secret data keys" })
+            .first { $0.accessibilityLabel() == "ConfigMap or Secret data keys and values" })
         try await waitUntil { table.numberOfRows == 1 }
 
         #expect(table.headerView != nil)
@@ -1131,8 +1122,10 @@ struct ObjectDetailYAMLPresentationTests {
             object: table
         ))
         let reveal = try #require(descendants(of: root).compactMap { $0 as? NSButton }
-            .first { $0.title == "Reveal" })
+            .first { $0.title == "Show decoded values" })
+        #expect(reveal.state == .off)
         reveal.performClick(nil)
+        #expect(reveal.state == .on)
         valueCell = try #require(table.view(
             atColumn: valueColumnIndex,
             row: 0,
@@ -1144,6 +1137,7 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(revealedValue.contains(Data(sentinel.utf8).base64EncodedString()) == false)
 
         reveal.performClick(nil)
+        #expect(reveal.state == .off)
         valueCell = try #require(table.view(
             atColumn: valueColumnIndex,
             row: 0,
@@ -1154,9 +1148,9 @@ struct ObjectDetailYAMLPresentationTests {
         #expect((valueCell.accessibilityValue() as? String)?.contains(sentinel) != true)
 
         let split = try #require(descendants(of: root).compactMap { $0 as? NSSplitView }
-            .first { $0.identifier?.rawValue == "object-detail-data-split" })
+            .first { $0.identifier?.rawValue == "object-data-split" })
         let keyScroll = try #require(descendants(of: root).compactMap { $0 as? NSScrollView }
-            .first { $0.identifier?.rawValue == "object-detail-data-keys-scroll" })
+            .first { $0.identifier?.rawValue == "object-data-keys-scroll" })
         #expect(split.isVertical)
         #expect(split.arrangedSubviews.count == 2)
         #expect(split.arrangedSubviews[0] === keyScroll)

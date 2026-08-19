@@ -237,20 +237,31 @@ import Testing
     #expect(preview.state == .text)
 }
 
-@Test func binaryValuePreviewNeverRendersRawOrBase64Bytes() {
+@Test func binaryValuePreviewUsesBoundedHexAndASCII() {
     let value = Data("binary-looking-text".utf8)
-    let encoded = value.base64EncodedString()
     let preview = DataValuePreviewPresentation(
         kind: .binary,
         value: value,
         secret: false
     )
 
-    #expect(preview.displayText == "Binary · 19 bytes")
-    #expect(preview.accessibilityValue == "Binary value, 19 bytes")
-    #expect(!preview.displayText.contains("binary-looking-text"))
-    #expect(!preview.displayText.contains(encoded))
+    #expect(preview.displayText
+        == "62 69 6E 61 72 79 2D 6C 6F 6F 6B 69 6E 67 2D 74 … |binary-looking-t…| · 19 bytes")
+    #expect(preview.accessibilityValue == "Binary value: \(preview.displayText)")
+    #expect(preview.isTruncated)
     #expect(preview.state == .binary)
+}
+
+@Test func emptyBinaryValuePreviewIsReadable() {
+    let preview = DataValuePreviewPresentation(
+        kind: .binary,
+        value: Data(),
+        secret: false
+    )
+
+    #expect(preview.displayText == "(empty) · 0 bytes")
+    #expect(preview.accessibilityValue == "Binary value: (empty) · 0 bytes")
+    #expect(!preview.isTruncated)
 }
 
 @Test func invalidUTF8TextValueFallsBackToTheSafeBinaryLabel() {
@@ -260,7 +271,8 @@ import Testing
         secret: false
     )
 
-    #expect(preview.displayText == "Binary · 3 bytes")
+    #expect(preview.displayText == "FF FE FD |...| · 3 bytes")
+    #expect(preview.accessibilityValue == "Binary value: FF FE FD |...| · 3 bytes")
     #expect(preview.state == .binary)
 }
 
@@ -303,7 +315,7 @@ import Testing
     #expect(!secret.displayText.contains(value.base64EncodedString()))
 }
 
-@Test func revealedBinarySecretStillUsesOnlyTheSafeBinaryLabel() {
+@Test func revealedBinarySecretUsesBoundedHexAndASCII() {
     let preview = DataValuePreviewPresentation(
         kind: .binary,
         value: Data([0x00, 0x01, 0x02]),
@@ -311,9 +323,26 @@ import Testing
         hasRevealAuthority: true
     )
 
-    #expect(preview.displayText == "Binary · 3 bytes")
-    #expect(preview.accessibilityValue == "Binary value, 3 bytes")
+    #expect(preview.displayText == "00 01 02 |...| · 3 bytes")
+    #expect(preview.accessibilityValue == "Binary value: 00 01 02 |...| · 3 bytes")
     #expect(preview.state == .binary)
+}
+
+@Test func binaryDumpAndDiffAreBoundedAndByteAligned() {
+    let oversized = Data(repeating: 0x41, count: 300)
+    let dump = BinaryHexASCIIPresentation.dump(oversized)
+    #expect(dump.contains("000000F0"))
+    #expect(!dump.contains("00000100"))
+    #expect(dump.contains("44 additional bytes not shown"))
+
+    let diff = BinaryHexASCIIPresentation.diff(
+        local: Data([0x00, 0xff, 0x10]),
+        current: Data([0x00, 0x7f, 0x10, 0x80])
+    )
+    #expect(diff.local.contains("00 FF 10 --"))
+    #expect(diff.current.contains("00 7F 10 80"))
+    #expect(diff.local.contains("^^"))
+    #expect(diff.current.contains("^^"))
 }
 
 @Test func valuePreviewDoesNotRetainItsInputData() {
@@ -356,6 +385,30 @@ import Testing
     #expect(!display.summaryText.contains(sentinel))
     #expect(!display.placeholderText.contains(sentinel))
     #expect(display.placeholderText.contains("concealed"))
+}
+
+@Test func revealedSecretConflictCanShowTransientTextAndBinaryDiffs() {
+    let text = Data("edited secret".utf8)
+    let revealedText = DataConflictValueDisplay(
+        secret: true,
+        kind: .text,
+        byteCount: text.count,
+        contentHash: DataConflictValueDisplay.contentHash(of: text),
+        decodedText: "edited secret",
+        secretRevealed: true
+    )
+    #expect(revealedText.valueText == "edited secret")
+
+    let binary = DataConflictValueDisplay(
+        secret: true,
+        kind: .binary,
+        byteCount: 4,
+        contentHash: Data(repeating: 1, count: 32),
+        decodedText: nil,
+        binaryText: "00000000  00 FF 10 80  |....|",
+        secretRevealed: true
+    )
+    #expect(binary.valueText?.contains("00 FF 10 80") == true)
 }
 
 @Test func retrySetUsesTheFreshKeyHashWithoutDiscardingLocalBytes() {

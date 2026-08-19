@@ -25,7 +25,6 @@ public struct ResourceDrillDownQuery: Hashable, Sendable {
 public enum ResourceDrillDownPlan: Hashable, Sendable {
     case resource(ResourceDrillDownQuery)
     case containers(pod: ResourceIdentity, values: [PodContainerDetail])
-    case data(ResourceIdentity)
 }
 
 /// Maps a freshly fetched, UID-authoritative object to the useful child view
@@ -61,8 +60,6 @@ public enum ResourceDrillDownPlanner {
             }) else { return nil }
             let containers = ExecContainerCatalog.orderedDetails(from: detail.containers)
             return containers.isEmpty ? nil : .containers(pod: identity, values: containers)
-        case ("", "v1", "configmaps"), ("", "v1", "secrets"):
-            return .data(identity)
         case ("", "v1", "nodes"):
             guard let filter = fieldFilter(path: "spec.nodeName", value: identity.name) else {
                 return nil

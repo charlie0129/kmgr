@@ -5,14 +5,14 @@ import Testing
 
 extension AppKitTestHarness {
 @MainActor
-@Suite("Object subresource lists")
-struct ObjectSubresourceListViewControllerTests {
+@Suite("Pod container list")
+struct PodContainerListViewControllerTests {
     @Test("container list opens logs for the exact selected Pod container")
     func containerLogs() throws {
         let pod = subresourceIdentity(resource: "pods")
-        let controller = ObjectSubresourceListViewController(content: .containers(
+        let controller = PodContainerListViewController(
             pod: pod,
-            values: [
+            containers: [
                 PodContainerDetail(
                     name: "api",
                     kind: .regular,
@@ -40,7 +40,7 @@ struct ObjectSubresourceListViewControllerTests {
                     status: "Terminated: Completed"
                 ),
             ]
-        ))
+        )
         controller.loadView()
         var opened: LogOpenRequest?
         var automaticExec: PodExecTarget?
@@ -127,64 +127,6 @@ struct ObjectSubresourceListViewControllerTests {
         #expect(opened == nil)
     }
 
-    @Test("data list exposes metadata without retaining or rendering values")
-    func dataMetadataOnly() throws {
-        let object = subresourceIdentity(resource: "secrets")
-        let sentinel = "must-never-render"
-        let entry = ObjectDataEntry(
-            key: "token", kind: .text, value: Data(sentinel.utf8),
-            byteSize: UInt64(sentinel.utf8.count),
-            contentHash: Data(repeating: 4, count: 32)
-        )
-        let row = DataSubresourceRow(entry: entry)
-        #expect(Mirror(reflecting: row).children.contains { $0.label == "value" } == false)
-
-        let controller = ObjectSubresourceListViewController(content: .data(
-            object: object, values: [row]
-        ))
-        controller.loadView()
-        var edited: ResourceIdentity?
-        controller.onOpenDataEditor = { edited = $0 }
-        let table = try #require(subresourceDescendants(of: controller.view)
-            .compactMap { $0 as? NSTableView }
-            .first { $0.accessibilityLabel() == "ConfigMap or Secret data keys" })
-        for column in table.tableColumns.indices {
-            let cell = try #require(table.view(
-                atColumn: column, row: 0, makeIfNecessary: true
-            ) as? NSTableCellView)
-            #expect(cell.textField?.stringValue.contains(sentinel) == false)
-        }
-        let button = try #require(subresourceDescendants(of: controller.view)
-            .compactMap { $0 as? NSButton }
-            .first { $0.title == "Open Data Editor" })
-        #expect(controller.contextualShortcutSnapshot.items.map(\.keys)
-            == ["Return", "\u{21E7}\u{2318}N", "Escape"])
-        button.performClick(nil)
-        #expect(edited == object)
-    }
-
-    @Test("empty Data remains an enterable list and can open its editor")
-    func emptyData() throws {
-        let object = subresourceIdentity(resource: "configmaps")
-        let controller = ObjectSubresourceListViewController(content: .data(
-            object: object,
-            values: []
-        ))
-        controller.loadView()
-        var edited: ResourceIdentity?
-        controller.onOpenDataEditor = { edited = $0 }
-        let table = try #require(subresourceDescendants(of: controller.view)
-            .compactMap { $0 as? NSTableView }
-            .first { $0.accessibilityLabel() == "ConfigMap or Secret data keys" })
-        let button = try #require(subresourceDescendants(of: controller.view)
-            .compactMap { $0 as? NSButton }
-            .first { $0.title == "Open Data Editor" })
-
-        #expect(table.numberOfRows == 0)
-        #expect(button.isEnabled)
-        button.performClick(nil)
-        #expect(edited == object)
-    }
 }
 }
 

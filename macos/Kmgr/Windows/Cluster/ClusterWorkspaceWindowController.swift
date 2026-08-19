@@ -655,7 +655,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var objectOpenTask: Task<Void, Never>?
     private var objectOpenRevision: UInt64 = 0
     private var detailController: ObjectDetailViewController?
-    private var subresourceController: ObjectSubresourceListViewController?
+    private var dataController: ObjectDataViewController?
+    private var podContainerController: PodContainerListViewController?
     private var pendingRestorationState: ClusterWindowRestorationState?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
@@ -669,8 +670,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     var onContextualShortcutsChanged: (() -> Void)?
 
     var contextualShortcutSnapshot: ContextualShortcutSnapshot? {
-        if let subresourceController {
-            return subresourceController.contextualShortcutSnapshot
+        if let dataController {
+            return dataController.contextualShortcutSnapshot
+        }
+        if let podContainerController {
+            return podContainerController.contextualShortcutSnapshot
         }
         if detailController != nil {
             return ContextualShortcutCatalog.objectDetails
@@ -855,7 +859,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         // accept an exact-GVR result from the helper generation that just died.
         sidebarController.stop()
         detailController?.engineDidDisconnect()
-        subresourceController?.setNetworkActionsEnabled(false)
+        dataController?.engineDidDisconnect()
+        podContainerController?.setNetworkActionsEnabled(false)
         contentController.engineDidDisconnect()
         connectionActivityTask?.cancel()
         connectionActivityTask = nil
@@ -895,7 +900,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             session: recoveredSession,
             opensCurrentResource: resumesCurrentResource
         )
-        if case .subresource(let identity, let returnState) = contentController.currentDestination {
+        if dataController == nil,
+            case .subresource(let identity, let returnState) = contentController.currentDestination
+        {
             restoreSubresource(identity, returnState: returnState)
         }
         sidebarController.recover(session: recoveredSession) { [weak self] result in
@@ -932,7 +939,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         loadNamespaces()
         startPortForwardObservation()
-        if let detailController {
+        if let dataController {
+            connectionActivityView.setState(.connecting, detail: "Reopening Data…")
+            dataController.recover(session: recoveredSession) { [weak self] result in
+                switch result {
+                case .success:
+                    self?.connectionActivityView.setState(.connected)
+                case .failure(let error):
+                    self?.engineRecoveryFailed(error)
+                }
+            }
+        } else if let detailController {
             connectionActivityView.setState(.connecting, detail: "Reopening view…")
             detailController.recover(session: recoveredSession) { [weak self] result in
                 switch result {
@@ -1040,6 +1057,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         invalidateObjectOpenTask()
         detailController?.stop()
         detailController = nil
+        dataController?.stop()
+        dataController = nil
         if let portForwardObserver {
             portForwards.removeObserver(portForwardObserver)
             self.portForwardObserver = nil
@@ -1139,7 +1158,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     @objc private func namespaceChanged() {
-        let wasShowingDetail = detailController != nil
+        let wasShowingDetail = detailController != nil || dataController != nil
         showResourceList(resume: false)
         contentController.changeNamespaceScope(selectedNamespaceScope())
         if wasShowingDetail {
@@ -1174,7 +1193,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         // a cancellation in a detail/subresource preserves that leaf's prior
         // responder. In the ordinary list, always make keyboard discovery
         // immediately usable again.
-        if detailController != nil || subresourceController != nil,
+        if detailController != nil || dataController != nil || podContainerController != nil,
             let previousResponder,
             window.makeFirstResponder(previousResponder)
         {
@@ -1197,7 +1216,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             self.paletteController = nil
             return
         }
-        if detailController != nil {
+        if detailController != nil || dataController != nil {
             showResourceList()
             checkpointRestoration()
             return
@@ -1238,29 +1257,25 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
         if let action = command.subresourceNetworkAction,
-            let subresourceController,
-            subresourceController.isCompatible(with: action)
+            let podContainerController
         {
-            return subresourceController.canPerform(action)
+            return podContainerController.canPerform(action)
         }
         return contentController.canPerformCommand(command)
     }
 
     func isCommandCompatible(_ command: ResourceTableCommand) -> Bool {
-        if let action = command.subresourceNetworkAction,
-            let subresourceController
-        {
-            return subresourceController.isCompatible(with: action)
+        if command.subresourceNetworkAction != nil, podContainerController != nil {
+            return true
         }
         return contentController.isCommandCompatible(command)
     }
 
     private func performNetworkCommand(_ command: ResourceTableCommand) {
         if let action = command.subresourceNetworkAction,
-            let subresourceController,
-            subresourceController.isCompatible(with: action)
+            let podContainerController
         {
-            if !subresourceController.perform(action) { NSSound.beep() }
+            if !podContainerController.perform(action) { NSSound.beep() }
             return
         }
         contentController.performCommand(command)
@@ -1401,10 +1416,18 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func enterObject(_ identity: ResourceIdentity) {
-        guard ResourceDrillDownPlanner.hasPotentialTarget(identity),
-            let returnState = contentController.captureNavigationState(),
+        guard let returnState = contentController.captureNavigationState(),
             returnState.selectedUIDs.contains(identity.uid)
         else { return }
+
+        // ConfigMap/Secret Data is selected entirely by exact GVR. Its own
+        // UID-validating GetData is the one authoritative GET; fetching Details
+        // first would add latency and duplicate API-server work.
+        if ObjectDataViewController.supports(identity) {
+            showDataSubresource(identity, returnState: returnState)
+            return
+        }
+        guard ResourceDrillDownPlanner.hasPotentialTarget(identity) else { return }
 
         let revision = beginObjectOpenTask()
         objectOpenTask = Task { [weak self, objectDetailProvider] in
@@ -1427,21 +1450,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 case .resource(let query):
                     openDrillDownResource(query)
                 case .containers(let pod, let values):
-                    showSubresource(
-                        .containers(pod: pod, values: values),
-                        returnState: returnState
-                    )
-                case .data(let object):
-                    let data = try await objectDetailProvider.getData(identity: object)
-                    guard !Task.isCancelled, objectOpenRevision == revision,
-                        data.identity == object,
-                        drillDownSourceIsCurrent(identity, returnState: returnState)
-                    else { return }
-                    showSubresource(
-                        .data(
-                            object: object,
-                            values: data.entries.map(DataSubresourceRow.init(entry:))
-                        ),
+                    showPodContainers(
+                        pod: pod,
+                        containers: values,
                         returnState: returnState
                     )
                 }
@@ -1524,20 +1535,29 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         view.window?.makeFirstResponder(contentController.tableResponder)
     }
 
-    private func showSubresource(
-        _ content: ObjectSubresourceContent,
+    private func showPodContainers(
+        pod: ResourceIdentity,
+        containers: [PodContainerDetail],
         returnState: ResourceNavigationState
     ) {
-        contentController.navigateToSubresource(content.parent, returnState: returnState)
-        displaySubresource(content)
+        contentController.navigateToSubresource(pod, returnState: returnState)
+        displayPodContainers(pod: pod, containers: containers)
         checkpointRestoration()
     }
 
-    private func displaySubresource(_ content: ObjectSubresourceContent) {
+    private func displayPodContainers(
+        pod: ResourceIdentity,
+        containers: [PodContainerDetail]
+    ) {
         detailController?.stop()
         detailController = nil
+        dataController?.stop()
+        dataController = nil
         contentController.suspend()
-        let controller = ObjectSubresourceListViewController(content: content)
+        let controller = PodContainerListViewController(
+            pod: pod,
+            containers: containers
+        )
         controller.onBack = { [weak self] in self?.goBack() }
         controller.onOpenLogs = { [weak self] request in self?.onOpenLogs?(request) }
         controller.onOpenExec = { [weak self] target in self?.onOpenExec?(target) }
@@ -1547,13 +1567,38 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         controller.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
         }
-        controller.onOpenDataEditor = { [weak self] identity in
-            self?.showObject(identity, initialTab: .data)
-        }
         controller.onContextualShortcutsChanged = { [weak self] in
             self?.onContextualShortcutsChanged?()
         }
-        subresourceController = controller
+        podContainerController = controller
+        replaceMainContent(with: controller)
+        view.window?.makeFirstResponder(controller.view)
+        onContextualShortcutsChanged?()
+    }
+
+    private func showDataSubresource(
+        _ identity: ResourceIdentity,
+        returnState: ResourceNavigationState
+    ) {
+        contentController.navigateToSubresource(identity, returnState: returnState)
+        displayData(identity)
+        checkpointRestoration()
+    }
+
+    private func displayData(_ identity: ResourceIdentity) {
+        invalidateObjectOpenTask()
+        detailController?.stop()
+        detailController = nil
+        podContainerController = nil
+        dataController?.stop()
+        contentController.suspend()
+        let controller = ObjectDataViewController(
+            identity: identity,
+            provider: objectDetailProvider,
+            session: session
+        )
+        controller.onBack = { [weak self] in self?.goBack() }
+        dataController = controller
         replaceMainContent(with: controller)
         view.window?.makeFirstResponder(controller.view)
         onContextualShortcutsChanged?()
@@ -1576,7 +1621,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     ) {
         invalidateObjectOpenTask()
         detailController?.stop()
-        subresourceController = nil
+        dataController?.stop()
+        dataController = nil
+        podContainerController = nil
         contentController.suspend()
         let controller = ObjectDetailViewController(
             identity: identity,
@@ -1592,11 +1639,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func showResourceList(resume: Bool = true) {
-        guard detailController != nil || subresourceController != nil else { return }
+        guard detailController != nil || dataController != nil || podContainerController != nil else {
+            return
+        }
         detailController?.stop()
+        dataController?.stop()
         replaceMainContent(with: contentController)
         detailController = nil
-        subresourceController = nil
+        dataController = nil
+        podContainerController = nil
         if resume { contentController.resume() }
         view.window?.makeFirstResponder(contentController.tableResponder)
         onContextualShortcutsChanged?()
@@ -1645,6 +1696,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         _ identity: ResourceIdentity,
         returnState: ResourceNavigationState
     ) {
+        if ObjectDataViewController.supports(identity) {
+            displayData(identity)
+            return
+        }
         let revision = beginObjectOpenTask()
         objectOpenTask = Task { [weak self, objectDetailProvider] in
             guard let self else { return }
@@ -1663,17 +1718,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 else { return }
                 switch plan {
                 case .containers(let pod, let values):
-                    displaySubresource(.containers(pod: pod, values: values))
-                case .data(let object):
-                    let data = try await objectDetailProvider.getData(identity: object)
-                    guard !Task.isCancelled, objectOpenRevision == revision,
-                        data.identity == object,
-                        subresourceDestinationIsCurrent(identity)
-                    else { return }
-                    displaySubresource(.data(
-                        object: object,
-                        values: data.entries.map(DataSubresourceRow.init(entry:))
-                    ))
+                    displayPodContainers(pod: pod, containers: values)
                 case .resource:
                     // Resource-to-resource drill-downs have their own resource
                     // history entry and are never encoded as a local child.
@@ -5496,7 +5541,7 @@ private enum ResourceTableCommand: Equatable {
 }
 
 private extension ResourceTableCommand {
-    var subresourceNetworkAction: ObjectSubresourceNetworkAction? {
+    var subresourceNetworkAction: PodContainerNetworkAction? {
         switch self {
         case .openLogs: .openLogs
         case .openPreviousLogs: .openPreviousLogs

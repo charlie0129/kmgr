@@ -302,7 +302,7 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(cancel.isHidden)
     }
 
-    @Test("watch omissions retain YAML and Data failures do not blank the standard detail tab")
+    @Test("watch omissions retain YAML and Details never requests key/value Data")
     func detailFallbacks() async throws {
         let identity = yamlSnapshotIdentity()
         let source = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: settings\n"
@@ -321,15 +321,7 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(merged.yamlUTF8 == previous.yamlUTF8)
         #expect(merged.metrics.isEmpty)
 
-        let provider = SnapshotObjectDetailProvider(
-            details: [previous],
-            dataFailure: ClusterManagerIssue(
-                category: .unavailable,
-                reason: "DataUnavailable",
-                message: "The Data request failed.",
-                operation: "load data"
-            )
-        )
+        let provider = SnapshotObjectDetailProvider(details: [previous])
         let detail = ObjectDetailViewController(
             identity: identity,
             provider: provider,
@@ -343,82 +335,72 @@ struct YAMLSnapshotWindowControllerTests {
             .compactMap { $0 as? NSTextView }
             .first { $0.accessibilityLabel() == "Kubernetes object YAML" })
         try await yamlSnapshotWaitUntil { editor.string == source }
-        try await yamlSnapshotWaitUntil {
-            yamlSnapshotDescendants(of: detail.view).compactMap { $0 as? NSTextField }
-                .contains { $0.stringValue == "YAML loaded · key/value data unavailable" }
-        }
 
         #expect(editor.string == source)
+        #expect(await provider.getDataCallCount() == 0)
         let scroll = try #require(editor.enclosingScrollView)
         #expect(scroll.hasVerticalRuler == false)
         #expect(scroll.verticalRulerView == nil)
     }
 
-    @Test("failed authoritative Data recovery leaves YAML visible and locks stale values")
+    @Test("failed authoritative Data recovery preserves visible values and locks editing")
     func failedDataRecoveryLocksEditor() async throws {
         let identity = yamlSnapshotIdentity()
-        var reboundIdentity = identity
-        reboundIdentity.clusterSessionID = "yaml-session-2"
-        let source = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: settings\n"
+        let value = "preserve-this-local-view"
         let provider = SnapshotObjectDetailProvider(
-            details: [
-                ObjectDetail(
-                    identity: identity,
-                    resourceVersion: "rv-1",
-                    yamlUTF8: Data(source.utf8)
-                ),
-                ObjectDetail(
-                    identity: reboundIdentity,
-                    resourceVersion: "rv-2",
-                    yamlUTF8: Data(source.utf8)
-                ),
-            ],
+            details: [],
             dataFailure: ClusterManagerIssue(
                 category: .unavailable,
                 reason: "DataUnavailable",
                 message: "The Data request failed.",
                 operation: "load data"
             ),
-            successfulDataResponsesBeforeFailure: 1
+            successfulDataResponsesBeforeFailure: 1,
+            dataEntries: [ObjectDataEntry(
+                key: "settings.yaml",
+                kind: .text,
+                value: Data(value.utf8),
+                byteSize: UInt64(value.utf8.count),
+                contentHash: Data(repeating: 8, count: 32)
+            )]
         )
-        let detail = ObjectDetailViewController(
+        let dataController = ObjectDataViewController(
             identity: identity,
-            provider: provider,
-            initialTab: .data
+            provider: provider
         )
-        detail.loadView()
-        detail.viewDidAppear()
-        defer { detail.stop() }
-        let add = try #require(yamlSnapshotDescendants(of: detail.view)
+        dataController.loadView()
+        dataController.viewDidAppear()
+        defer { dataController.stop() }
+        let add = try #require(yamlSnapshotDescendants(of: dataController.view)
             .compactMap { $0 as? NSButton }.first { $0.title == "Add Key" })
-        let segmented = try #require(yamlSnapshotDescendants(of: detail.view)
-            .compactMap { $0 as? NSSegmentedControl }.first)
-        try await yamlSnapshotWaitUntil { add.isEnabled }
+        let valueScroll = try #require(yamlSnapshotDescendants(of: dataController.view)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.accessibilityLabel() == "Selected decoded data value editor" })
+        let editor = try #require(valueScroll.documentView as? NSTextView)
+        try await yamlSnapshotWaitUntil { add.isEnabled && editor.string == value }
 
-        detail.engineDidDisconnect()
+        dataController.engineDidDisconnect()
         var recoveryCompleted = false
-        detail.recover(session: OpenedClusterSession(
+        var recoveryFailed = false
+        dataController.recover(session: OpenedClusterSession(
             sessionID: "yaml-session-2",
             contextName: "yaml-context",
             clusterName: "yaml-cluster",
             serverHostname: "api.example.invalid",
             defaultNamespace: "dev"
         )) { result in
-            if case .success = result { recoveryCompleted = true }
+            recoveryCompleted = true
+            if case .failure = result { recoveryFailed = true }
         }
         try await yamlSnapshotWaitUntil { recoveryCompleted }
 
-        segmented.selectedSegment = 1
-        _ = segmented.sendAction(segmented.action, to: segmented.target)
-        let yaml = try #require(yamlSnapshotDescendants(of: detail.view)
-            .compactMap { $0 as? NSTextView }
-            .first { $0.accessibilityLabel() == "Kubernetes object YAML" })
-        #expect(yaml.string == source)
+        let retry = try #require(yamlSnapshotDescendants(of: dataController.view)
+            .compactMap { $0 as? NSButton }.first { $0.title == "Retry" })
+        #expect(recoveryFailed)
+        #expect(editor.string == value)
         #expect(add.isEnabled == false)
-        #expect(yamlSnapshotDescendants(of: detail.view).compactMap { $0 as? NSTextField }
-            .contains {
-                $0.stringValue == "Reconnected · YAML refreshed · key/value data unavailable"
-            })
+        #expect(editor.isEditable == false)
+        #expect(retry.isHidden == false)
     }
 }
 }
@@ -429,15 +411,18 @@ private actor SnapshotObjectDetailProvider: ObjectDetailProviding {
     private var dataCalls = 0
     private let dataFailure: ClusterManagerIssue?
     private let successfulDataResponsesBeforeFailure: Int
+    private let dataEntries: [ObjectDataEntry]
 
     init(
         details: [ObjectDetail],
         dataFailure: ClusterManagerIssue? = nil,
-        successfulDataResponsesBeforeFailure: Int = 0
+        successfulDataResponsesBeforeFailure: Int = 0,
+        dataEntries: [ObjectDataEntry] = []
     ) {
         self.details = details
         self.dataFailure = dataFailure
         self.successfulDataResponsesBeforeFailure = successfulDataResponsesBeforeFailure
+        self.dataEntries = dataEntries
     }
 
     func getObject(identity: ResourceIdentity) async throws -> ObjectDetail {
@@ -480,7 +465,7 @@ private actor SnapshotObjectDetailProvider: ObjectDetailProviding {
         return ObjectData(
             identity: identity,
             resourceVersion: "rv-data",
-            entries: [],
+            entries: dataEntries,
             secret: false
         )
     }
@@ -512,6 +497,7 @@ private actor SnapshotObjectDetailProvider: ObjectDetailProviding {
     }
 
     func getObjectCallCount() -> Int { objectCalls }
+    func getDataCallCount() -> Int { dataCalls }
 }
 
 private actor YAMLSnapshotEditProvider: ObjectDetailProviding {

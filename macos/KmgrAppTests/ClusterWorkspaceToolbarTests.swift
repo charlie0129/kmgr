@@ -664,6 +664,143 @@ struct ClusterWorkspaceToolbarTests {
         #expect(controller.contextualShortcutSnapshot?.contextID == "pod-containers")
     }
 
+    @Test("Return on ConfigMaps and Secrets opens Data with one GET and no Details GET")
+    func returnOpensCanonicalDataDirectly() async throws {
+        for resource in ["configmaps", "secrets"] {
+            let identity = ResourceIdentity(
+                clusterSessionID: "test-session",
+                group: "",
+                version: "v1",
+                resource: resource,
+                namespace: "default",
+                name: "settings",
+                uid: ResourceUID("\(resource)-settings")
+            )
+            let resourceProvider = SingleObjectWorkspaceResourceProvider(
+                identity: identity,
+                kind: resource == "secrets" ? "Secret" : "ConfigMap"
+            )
+            let detailProvider = TrackingDataObjectDetailProvider(data: ObjectData(
+                identity: identity,
+                resourceVersion: "rv-1",
+                entries: [],
+                secret: resource == "secrets"
+            ))
+            let controller = makeWorkspace(
+                provider: resourceProvider,
+                objectDetailProvider: detailProvider,
+                restoration: ClusterWindowRestorationRecord(
+                    id: "direct-data-\(resource)",
+                    state: ClusterWindowRestorationState(
+                        contextName: "test-context",
+                        gvr: GVR(group: "", version: "v1", resource: resource),
+                        namespaceScope: .namespace("default")
+                    )
+                )
+            )
+            controller.showWindow(nil)
+            do {
+                let window = try #require(controller.window)
+                let root = try #require(window.contentView)
+                let resourceTable = try #require(descendants(of: root)
+                    .compactMap { $0 as? NSTableView }
+                    .first { $0.accessibilityLabel() == "Kubernetes resources" })
+                try await waitUntil { resourceTable.numberOfRows == 1 }
+                resourceTable.selectRowIndexes(
+                    IndexSet(integer: 0),
+                    byExtendingSelection: false
+                )
+                #expect(window.makeFirstResponder(resourceTable))
+                controller.enterResource(nil)
+
+                try await waitUntil {
+                    descendants(of: root).compactMap { $0 as? NSButton }
+                        .contains { $0.title == "Add Key" && $0.isEnabled }
+                }
+                let dataTable = try #require(descendants(of: root)
+                    .compactMap { $0 as? NSTableView }
+                    .first {
+                        $0.accessibilityLabel()
+                            == "ConfigMap or Secret data keys and values"
+                    })
+                #expect(dataTable.numberOfRows == 0)
+                #expect(await detailProvider.dataCallCount() == 1)
+                #expect(await detailProvider.objectCallCount() == 0)
+                #expect(await detailProvider.requestedIdentities() == [identity])
+            } catch {
+                controller.close()
+                throw error
+            }
+            controller.close()
+        }
+    }
+
+    @Test("Forward restoration of Data fetches Data directly again")
+    func forwardRestoresDataWithoutDetails() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "test-session",
+            group: "",
+            version: "v1",
+            resource: "configmaps",
+            namespace: "default",
+            name: "settings",
+            uid: "configmap-settings"
+        )
+        let resourceProvider = SingleObjectWorkspaceResourceProvider(
+            identity: identity,
+            kind: "ConfigMap"
+        )
+        let value = Data("enabled: true\n".utf8)
+        let detailProvider = TrackingDataObjectDetailProvider(data: ObjectData(
+            identity: identity,
+            resourceVersion: "rv-1",
+            entries: [ObjectDataEntry(
+                key: "settings.yaml",
+                kind: .text,
+                value: value,
+                byteSize: UInt64(value.count),
+                contentHash: Data(repeating: 4, count: 32)
+            )],
+            secret: false
+        ))
+        let controller = makeWorkspace(
+            provider: resourceProvider,
+            objectDetailProvider: detailProvider,
+            restoration: ClusterWindowRestorationRecord(
+                id: "forward-data",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "", version: "v1", resource: "configmaps"),
+                    namespaceScope: .namespace("default")
+                )
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourceTable = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        try await waitUntil { resourceTable.numberOfRows == 1 }
+        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(resourceTable))
+        controller.enterResource(nil)
+        try await waitUntilAsync { await detailProvider.dataCallCount() == 1 }
+
+        controller.navigateBack(nil)
+        try await waitUntil { resourceTable.window === window }
+        controller.navigateForward(nil)
+        try await waitUntilAsync { await detailProvider.dataCallCount() == 2 }
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSTextView }
+                .contains { $0.string == "enabled: true\n" }
+        }
+
+        #expect(await detailProvider.objectCallCount() == 0)
+        #expect(await detailProvider.requestedIdentities() == [identity, identity])
+    }
+
     @Test("Back keeps a large Pod list visible through a cold resume placeholder")
     func backRetainsWarmPodRowsUntilAuthoritativeReconciliation() async throws {
         let provider = DelayedWarmResumeWorkspaceResourceProvider(rowCount: 993)
@@ -1048,7 +1185,7 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil {
             descendants(of: root).compactMap { $0 as? NSSegmentedControl }
                 .contains { control in
-                    control.segmentCount == 4
+                    control.segmentCount == 3
                         && control.label(forSegment: 0) == "Summary"
                         && control.selectedSegment == 0
                 }
@@ -2490,6 +2627,68 @@ private final class FilterValidationWorkspaceResourceProvider: WorkspaceResource
     func closeSession(sessionID: String) async {}
 }
 
+private struct SingleObjectWorkspaceResourceProvider: WorkspaceResourceProviding {
+    var identity: ResourceIdentity
+    var kind: String
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        .init(resources: [DiscoveredResource(
+            group: identity.group,
+            version: identity.version,
+            resource: identity.resource,
+            kind: kind,
+            namespaced: !identity.namespace.isEmpty,
+            verbs: ["get", "list", "watch", "patch"]
+        )])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] {
+        identity.namespace.isEmpty ? [] : [identity.namespace]
+    }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        var rebound = identity
+        rebound.clusterSessionID = request.sessionID
+        let matches = request.resource.group == rebound.group
+            && request.resource.version == rebound.version
+            && request.resource.resource == rebound.resource
+        let rows = matches ? [ResourceRow(identity: rebound, cells: [
+            Cell(
+                columnID: "name",
+                displayText: rebound.name,
+                typedValue: .string(rebound.name)
+            ),
+        ])] : []
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.snapshot(
+                cursor: StreamCursor(generation: request.generation, sequence: 1),
+                chunk: ResourceSnapshotChunk(
+                    rows: rows,
+                    first: true,
+                    last: true,
+                    index: 0,
+                    estimatedTotalRows: UInt64(rows.count)
+                )
+            ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                status: ResourceViewStatus(
+                    freshness: .watching,
+                    rowsVisible: UInt64(rows.count)
+                )
+            ))
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
 private final class EventsNavigationWorkspaceResourceProvider: WorkspaceResourceProviding,
     @unchecked Sendable
 {
@@ -2973,6 +3172,83 @@ private struct NoopToolbarObjectDetailProvider: ObjectDetailProviding {
     ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
         throw CancellationError()
     }
+}
+
+private actor TrackingDataObjectDetailProvider: ObjectDetailProviding {
+    private var data: ObjectData
+    private var dataCalls = 0
+    private var objectCalls = 0
+    private var identities: [ResourceIdentity] = []
+
+    init(data: ObjectData) { self.data = data }
+
+    func getObject(identity: ResourceIdentity) async throws -> ObjectDetail {
+        objectCalls += 1
+        return ObjectDetail(identity: identity, resourceVersion: data.resourceVersion)
+    }
+
+    nonisolated func watchObject(
+        identity: ResourceIdentity,
+        resourceVersion: String
+    ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func getRelationships(
+        identity: ResourceIdentity,
+        includeChildren: Bool
+    ) async throws -> ObjectRelationships {
+        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
+    }
+
+    nonisolated func scanRelationships(
+        identity: ResourceIdentity
+    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func cancelRelationshipScan(
+        sessionID: String,
+        scanID: String,
+        generation: UInt64
+    ) async {}
+
+    func getData(identity: ResourceIdentity) async throws -> ObjectData {
+        dataCalls += 1
+        identities.append(identity)
+        guard identity.uid == data.identity.uid else { throw CancellationError() }
+        var rebound = data
+        rebound.identity.clusterSessionID = identity.clusterSessionID
+        return rebound
+    }
+
+    func prepareYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> PreparedYAMLEdit { throw CancellationError() }
+
+    func applyYAML(
+        identity: ResourceIdentity,
+        yamlUTF8: Data,
+        expectedResourceVersion: String,
+        forceFieldOwnership: Bool
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func updateData(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String,
+        mutations: [DataMutationKind]
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func dataCallCount() -> Int { dataCalls }
+    func objectCallCount() -> Int { objectCalls }
+    func requestedIdentities() -> [ResourceIdentity] { identities }
 }
 
 private struct NoopOperationProvider: ResourceOperationProviding {

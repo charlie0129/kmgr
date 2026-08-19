@@ -50,6 +50,91 @@ public enum DataValuePreviewState: Hashable, Sendable {
     case concealed
 }
 
+/// Bounded hexadecimal and ASCII presentations for arbitrary decoded bytes.
+/// The returned strings may contain transient Secret content; callers must keep
+/// them inside the active Data screen and never persist or log them.
+public enum BinaryHexASCIIPresentation {
+    public static let maximumPreviewByteCount = 16
+    public static let maximumDumpByteCount = 256
+
+    public static func preview(_ value: Data) -> String {
+        guard !value.isEmpty else { return "(empty) · 0 bytes" }
+        let displayed = value.prefix(maximumPreviewByteCount)
+        let hex = displayed.map { String(format: "%02X", $0) }.joined(separator: " ")
+        let ascii = String(displayed.map(asciiCharacter))
+        let omitted = value.count > displayed.count ? " …" : ""
+        let asciiOmitted = value.count > displayed.count ? "…" : ""
+        let count = value.count == 1 ? "1 byte" : "\(value.count.formatted()) bytes"
+        return "\(hex)\(omitted) |\(ascii)\(asciiOmitted)| · \(count)"
+    }
+
+    public static func dump(_ value: Data) -> String {
+        dump(value, comparingTo: nil)
+    }
+
+    /// Produces an aligned byte diff. Changed bytes receive a marker row below
+    /// each 16-byte line; absent bytes are rendered as `--` so insertions and
+    /// removals stay aligned between the two sides of the conflict sheet.
+    public static func diff(local: Data, current: Data) -> (local: String, current: String) {
+        (
+            dump(local, comparingTo: current),
+            dump(current, comparingTo: local)
+        )
+    }
+
+    private static func dump(_ value: Data, comparingTo other: Data?) -> String {
+        let total = other.map { max(value.count, $0.count) } ?? value.count
+        let displayedCount = min(total, maximumDumpByteCount)
+        guard displayedCount > 0 else { return "(empty)" }
+
+        var lines: [String] = []
+        lines.reserveCapacity((displayedCount + 15) / 16 * (other == nil ? 1 : 2) + 1)
+        for offset in stride(from: 0, to: displayedCount, by: 16) {
+            let end = min(offset + 16, displayedCount)
+            var hex: [String] = []
+            var ascii = ""
+            var hexMarkers: [String] = []
+            var asciiMarkers = ""
+            hex.reserveCapacity(16)
+            hexMarkers.reserveCapacity(16)
+
+            for index in offset..<end {
+                let byte = index < value.count ? value[index] : nil
+                let otherByte = other.flatMap { index < $0.count ? $0[index] : nil }
+                hex.append(byte.map { String(format: "%02X", $0) } ?? "--")
+                ascii.append(byte.map(asciiCharacter) ?? " ")
+                if other != nil {
+                    let changed = byte != otherByte
+                    hexMarkers.append(changed ? "^^" : "  ")
+                    asciiMarkers.append(changed ? "^" : " ")
+                }
+            }
+            if end - offset < 16 {
+                let padding = 16 - (end - offset)
+                hex.append(contentsOf: repeatElement("  ", count: padding))
+                if other != nil {
+                    hexMarkers.append(contentsOf: repeatElement("  ", count: padding))
+                }
+            }
+            lines.append(String(format: "%08X  ", offset)
+                + hex.joined(separator: " ") + "  |\(ascii)|")
+            if other != nil, hexMarkers.contains("^^") {
+                lines.append("          " + hexMarkers.joined(separator: " ")
+                    + "  |\(asciiMarkers)|")
+            }
+        }
+        if total > displayedCount {
+            lines.append("… \((total - displayedCount).formatted()) additional bytes not shown")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func asciiCharacter(_ byte: UInt8) -> Character {
+        guard (0x20...0x7E).contains(byte) else { return "." }
+        return Character(UnicodeScalar(byte))
+    }
+}
+
 /// A bounded, single-line value for the Data editor's table. Secret input is
 /// concealed by default and becomes presentable only when the caller supplies
 /// explicit reveal authority. The source `Data` is consumed during
@@ -97,10 +182,10 @@ public struct DataValuePreviewPresentation: Hashable, Sendable {
         }
 
         guard kind == .text, let decoded = String(data: value, encoding: .utf8) else {
-            displayText = "Binary · \(countText)"
-            accessibilityValue = "Binary value, \(countText)"
+            displayText = BinaryHexASCIIPresentation.preview(value)
+            accessibilityValue = "Binary value: \(displayText)"
             state = .binary
-            isTruncated = false
+            isTruncated = value.count > BinaryHexASCIIPresentation.maximumPreviewByteCount
             return
         }
 
@@ -320,10 +405,9 @@ public struct DataEditorRowPresentation: Hashable, Sendable {
     }
 }
 
-/// A display-only description used by the key conflict sheet. Callers may
-/// provide decoded text for ConfigMaps, but Secret text is discarded by the
-/// initializer so a Secret can only be represented by kind, byte count, and
-/// content hash.
+/// A display-only description used by the key conflict sheet. Secret content
+/// is retained only when the active Data screen grants transient reveal
+/// authority. Binary content is supplied as a bounded hex + ASCII diff.
 public struct DataConflictValueDisplay: Hashable, Sendable {
     public var summaryText: String
     public var valueText: String?
@@ -334,16 +418,21 @@ public struct DataConflictValueDisplay: Hashable, Sendable {
         kind: DataValueKind,
         byteCount: Int,
         contentHash: Data,
-        decodedText: String?
+        decodedText: String?,
+        binaryText: String? = nil,
+        secretRevealed: Bool = false
     ) {
         let kindText = kind == .text ? "Text" : "Binary"
         let countText = byteCount == 1 ? "1 byte" : "\(byteCount.formatted()) bytes"
         summaryText = "\(kindText) · \(countText)\nSHA-256 \(Self.hex(contentHash))"
-        if secret {
+        if secret && !secretRevealed {
             valueText = nil
             placeholderText = "Secret value concealed. Compare the decoded-byte hash above."
         } else if kind == .text, let decodedText {
             valueText = decodedText
+            placeholderText = ""
+        } else if kind == .binary, let binaryText {
+            valueText = binaryText
             placeholderText = ""
         } else {
             valueText = nil

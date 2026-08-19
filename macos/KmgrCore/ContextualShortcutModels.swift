@@ -201,11 +201,12 @@ public enum ContextualShortcutCatalog {
         )
     }
 
-    public static func dataList(canOpenEditor: Bool) -> ContextualShortcutSnapshot {
+    public static func dataEditor(secret: Bool) -> ContextualShortcutSnapshot {
         var items: [ContextualShortcutItem] = []
-        if canOpenEditor {
-            items.append(item("data.open", "Return", "Open Data editor"))
+        if secret {
+            items.append(item("data.reveal", "D", "Toggle decoded Secret values"))
         }
+        items.append(item("data.save", "\u{2318}S", "Save selected key"))
         items.append(namespaceItem)
         items.append(item("subresource.back", "Escape", "Back to resource list"))
         return ContextualShortcutSnapshot(

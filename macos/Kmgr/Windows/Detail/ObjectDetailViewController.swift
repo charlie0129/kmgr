@@ -6,20 +6,12 @@ enum ObjectDetailInitialTab {
     case summary
     case yaml
     case relationships
-    case data
 
-    func segment(supportsDataEditor: Bool) -> Int {
+    var segment: Int {
         switch self {
-        case .automatic:
-            supportsDataEditor ? 3 : 0
-        case .summary:
-            0
-        case .yaml:
-            1
-        case .relationships:
-            2
-        case .data:
-            supportsDataEditor ? 3 : 0
+        case .automatic, .summary: 0
+        case .yaml: 1
+        case .relationships: 2
         }
     }
 }
@@ -310,33 +302,14 @@ enum ObjectDetailWatchPresentation {
 final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     NSTableViewDelegate, NSTextViewDelegate
 {
-    private enum DataEditorKeyRow {
-        case stored(ObjectDataEntry)
-        case missingDraft(key: String, metadata: DataEditorDraftStore.Metadata)
-
-        var key: String {
-            switch self {
-            case .stored(let entry): entry.id
-            case .missingDraft(let key, _): key
-            }
-        }
-
-        var entry: ObjectDataEntry? {
-            guard case .stored(let entry) = self else { return nil }
-            return entry
-        }
-    }
-
     private(set) var identity: ResourceIdentity
     private var session: OpenedClusterSession?
     private let provider: any ObjectDetailProviding
     private let initialTab: ObjectDetailInitialTab
-    private let dataFileReader: @Sendable (URL) throws -> Data
-    private let dataFileWriter: @Sendable (Data, URL) throws -> Void
     private let yamlPresentationBuilder:
         @Sendable (Data) -> YAMLManagedFieldsPresentation
     private let segmented = NSSegmentedControl(
-        labels: ["Summary", "YAML", "Relationships", "Data"],
+        labels: ["Summary", "YAML", "Relationships"],
         trackingMode: .selectOne,
         target: nil,
         action: nil
@@ -375,23 +348,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     )
     private let saveButton = NSButton(title: "Save", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-    private let dataSplitView = NSSplitView()
-    private let keysTable = NSTableView()
-    private let dataValueTextView = NSTextView()
-    private let dataValueScroll = NSScrollView()
-    private let revealButton = NSButton(title: "Reveal", target: nil, action: nil)
-    private let addKeyButton = NSButton(title: "Add Key", target: nil, action: nil)
-    private let renameKeyButton = NSButton(title: "Rename", target: nil, action: nil)
-    private let deleteKeyButton = NSButton(title: "Delete Key", target: nil, action: nil)
-    private let revertKeyButton = NSButton(title: "Revert", target: nil, action: nil)
-    private let importKeyButton = NSButton(title: "Replace from File…", target: nil, action: nil)
-    private let exportKeyButton = NSButton(title: "Export…", target: nil, action: nil)
-    private let saveKeyButton = NSButton(title: "Save Key", target: nil, action: nil)
-
     private var detail: ObjectDetail?
-    private var objectData: ObjectData?
-    private var selectedDataKey: String?
-    private var selectedDataEntry: ObjectDataEntry?
     private var originalYAML = Data()
     private var yamlPresentation = YAMLManagedFieldsPresentation(
         unprocessedYAMLUTF8: Data()
@@ -406,20 +363,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var activeRelationshipScan: (id: String, generation: UInt64)?
     private var operationTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
-    private var dataFileTask: Task<Void, Never>?
-    private var dataFileGeneration: UInt64 = 0
-    private var authoritativeMutationRefreshInFlight = false
-    /// True when the YAML GET succeeded but the independent ConfigMap/Secret
-    /// Data GET did not. Existing drafts may remain visible, but no value may
-    /// be edited or submitted against an unverified resource version.
-    private var dataAuthorityUnavailable = false
-    private var dataConflictController: DataConflictWindowController?
-    private var conflictedDataKey: String?
-    private let dataDrafts = DataEditorDraftStore()
-    private var secretRevealed = false
-    private var selectedDataDraftKind: DataValueKind?
-    private var selectedDataCanEditText = false
-    private var isInstallingDataEditorState = false
     private var isEditingYAML = false
     private var summaryItems: [ObjectDetailSummaryTableItem] = []
     private var relativeTimeRefreshID: UUID?
@@ -436,12 +379,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         provider: any ObjectDetailProviding,
         initialTab: ObjectDetailInitialTab = .automatic,
         session: OpenedClusterSession? = nil,
-        dataFileReader: @escaping @Sendable (URL) throws -> Data = {
-            try DataValueFileIO.readBounded(from: $0)
-        },
-        dataFileWriter: @escaping @Sendable (Data, URL) throws -> Void = {
-            try DataValueFileIO.write($0, to: $1)
-        },
         yamlPresentationBuilder: @escaping @Sendable (Data)
             -> YAMLManagedFieldsPresentation = {
             YAMLManagedFieldsPresentation(yamlUTF8: $0)
@@ -451,8 +388,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         self.session = session
         self.provider = provider
         self.initialTab = initialTab
-        self.dataFileReader = dataFileReader
-        self.dataFileWriter = dataFileWriter
         self.yamlPresentationBuilder = yamlPresentationBuilder
         super.init(nibName: nil, bundle: nil)
     }
@@ -467,7 +402,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relationshipScanTask?.cancel()
         operationTask?.cancel()
         recoveryTask?.cancel()
-        dataFileTask?.cancel()
         yamlPresentationTask?.cancel()
     }
 
@@ -482,10 +416,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         let breadcrumb = NSTextField(labelWithString: breadcrumbText)
         breadcrumb.font = .systemFont(ofSize: 15, weight: .semibold)
         breadcrumb.lineBreakMode = .byTruncatingMiddle
-        segmented.selectedSegment = initialSegment
+        segmented.selectedSegment = initialTab.segment
         segmented.target = self
         segmented.action = #selector(tabChanged)
-        if !supportsDataEditor { segmented.setEnabled(false, forSegment: 3) }
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
 
@@ -509,7 +442,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         configureSummary()
         configureRelationships()
         configureYAML()
-        configureDataEditor()
         view = root
         tabChanged()
     }
@@ -517,22 +449,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     override func viewDidAppear() {
         super.viewDidAppear()
         view.layoutSubtreeIfNeeded()
-        updateVisibleTextDocumentGeometry()
         loadObject()
     }
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        updateVisibleTextDocumentGeometry()
         updateSummaryTableGeometry()
-    }
-
-    private func updateVisibleTextDocumentGeometry() {
-        TextDocumentGeometry.update(
-            dataValueTextView,
-            in: dataValueScroll,
-            wrapsToViewport: true
-        )
     }
 
     private func updateSummaryTableGeometry() {
@@ -551,14 +473,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         operationTask?.cancel()
         recoveryTask?.cancel()
         cancelYAMLPresentationPreparation()
-        cancelDataFileOperation()
         recoveryTask = nil
-        authoritativeMutationRefreshInFlight = false
-        dataConflictController?.close()
-        dataConflictController = nil
         ObjectDetailRelativeTimeRefreshCenter.shared.remove(relativeTimeRefreshID)
         relativeTimeRefreshID = nil
-        releaseDataDrafts()
     }
 
     /// Helper restart invalidates the session behind this detail. Keep any
@@ -578,13 +495,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         recoveryTask?.cancel()
         recoveryTask = nil
         cancelYAMLPresentationPreparation()
-        cancelDataFileOperation()
-        authoritativeMutationRefreshInFlight = false
-        dataConflictController?.close()
-        dataConflictController = nil
         activeRelationshipScan = nil
         statusLabel.toolTip = nil
-        statusLabel.stringValue = isEditingYAML || hasAnyDataDraftChanges
+        statusLabel.stringValue = isEditingYAML
             ? "Engine disconnected · local edit preserved"
             : "Engine disconnected · reopening this UID when ready"
         statusLabel.textColor = .systemOrange
@@ -611,29 +524,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             guard let self else { return }
             defer { recoveryTask = nil }
             do {
-                if supportsDataEditor {
-                    let detailIdentity = reboundIdentity
-                    let dataIdentity = reboundIdentity
-                    async let fetchedDetail = provider.getObject(identity: detailIdentity)
-                    async let fetchedData: ObjectData? = try? await provider.getData(
-                        identity: dataIdentity
-                    )
-                    let updatedDetail = try await fetchedDetail
-                    let updatedData = await fetchedData
-                    guard !Task.isCancelled else { return }
-                    dataAuthorityUnavailable = updatedData == nil
-                    try installRecovery(detail: updatedDetail, data: updatedData)
-                    if updatedData == nil {
-                        statusLabel.stringValue = hasAnyDataDraftChanges
-                            ? "Reconnected · YAML refreshed · local Data draft preserved and locked"
-                            : "Reconnected · YAML refreshed · key/value data unavailable"
-                        statusLabel.textColor = .systemOrange
-                    }
-                } else {
-                    let updatedDetail = try await provider.getObject(identity: reboundIdentity)
-                    guard !Task.isCancelled else { return }
-                    try installRecovery(detail: updatedDetail, data: nil)
-                }
+                let updatedDetail = try await provider.getObject(identity: reboundIdentity)
+                guard !Task.isCancelled else { return }
+                try installRecovery(detail: updatedDetail)
                 completion(.success(()))
             } catch {
                 guard !Task.isCancelled else { return }
@@ -662,11 +555,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var clusterPresentation: ClusterIdentityPresentation {
         session.map(ClusterIdentityPresentation.init(session:))
             ?? ClusterIdentityPresentation(clusterName: "", contextName: "")
-    }
-
-    private var supportsDataEditor: Bool {
-        identity.group.isEmpty && identity.version == "v1"
-            && (identity.resource == "configmaps" || identity.resource == "secrets")
     }
 
     private var isSecretObject: Bool {
@@ -847,205 +735,35 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         )
     }
 
-    private func configureDataEditor() {
-        dataSplitView.isVertical = true
-        dataSplitView.dividerStyle = .thin
-        dataSplitView.identifier = .init("object-detail-data-split")
-        let columns: [(String, String, CGFloat, CGFloat)] = [
-            ("key", "Key", 175, 100),
-            ("value", "Value", 240, 120),
-            ("type", "Type", 70, 58),
-            ("size", "Size", 82, 68),
-            ("state", "State", 84, 72),
-        ]
-        for (identifier, title, width, minimumWidth) in columns {
-            let column = NSTableColumn(identifier: .init(identifier))
-            column.title = title
-            column.width = width
-            column.minWidth = minimumWidth
-            column.resizingMask = .userResizingMask
-            keysTable.addTableColumn(column)
-        }
-        keysTable.delegate = self
-        keysTable.dataSource = self
-        keysTable.usesAlternatingRowBackgroundColors = true
-        keysTable.allowsEmptySelection = true
-        keysTable.allowsMultipleSelection = false
-        keysTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        keysTable.setAccessibilityLabel("ConfigMap and Secret data keys")
-        let keyScroll = NSScrollView()
-        keyScroll.identifier = .init("object-detail-data-keys-scroll")
-        keyScroll.documentView = keysTable
-        keyScroll.hasVerticalScroller = true
-        keyScroll.hasHorizontalScroller = true
-        keyScroll.autohidesScrollers = true
-        keyScroll.frame = NSRect(x: 0, y: 0, width: 620, height: 500)
-
-        dataValueTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        dataValueTextView.isRichText = false
-        dataValueTextView.isEditable = false
-        dataValueTextView.isSelectable = true
-        dataValueTextView.allowsUndo = true
-        dataValueTextView.delegate = self
-        dataValueScroll.documentView = dataValueTextView
-        dataValueScroll.hasVerticalScroller = true
-        dataValueScroll.identifier = .init("object-detail-data-value-scroll")
-        dataValueScroll.setAccessibilityLabel("Selected data value editor")
-        TextDocumentGeometry.configure(
-            dataValueTextView,
-            in: dataValueScroll,
-            wrapsToViewport: true
-        )
-        addKeyButton.target = self
-        addKeyButton.action = #selector(addDataKey)
-        renameKeyButton.target = self
-        renameKeyButton.action = #selector(renameDataKey)
-        deleteKeyButton.target = self
-        deleteKeyButton.action = #selector(deleteDataKey)
-        revertKeyButton.target = self
-        revertKeyButton.action = #selector(revertCurrentKey)
-        importKeyButton.target = self
-        importKeyButton.action = #selector(importCurrentKey)
-        exportKeyButton.target = self
-        exportKeyButton.action = #selector(exportCurrentKey)
-        revealButton.target = self
-        revealButton.action = #selector(toggleSecretReveal)
-        saveKeyButton.target = self
-        saveKeyButton.action = #selector(saveCurrentKey)
-        saveKeyButton.isEnabled = false
-        for button in [renameKeyButton, deleteKeyButton, revertKeyButton, importKeyButton, exportKeyButton] {
-            button.isEnabled = false
-        }
-        let controls = NSStackView(views: [
-            addKeyButton, renameKeyButton, deleteKeyButton, revertKeyButton,
-            importKeyButton, exportKeyButton, revealButton, saveKeyButton, NSView(),
-        ])
-        controls.orientation = .horizontal
-        let editor = NSView()
-        controls.translatesAutoresizingMaskIntoConstraints = false
-        dataValueScroll.translatesAutoresizingMaskIntoConstraints = false
-        editor.addSubview(controls)
-        editor.addSubview(dataValueScroll)
-        NSLayoutConstraint.activate([
-            controls.leadingAnchor.constraint(equalTo: editor.leadingAnchor, constant: 8),
-            controls.trailingAnchor.constraint(equalTo: editor.trailingAnchor, constant: -8),
-            controls.topAnchor.constraint(equalTo: editor.topAnchor, constant: 7),
-            dataValueScroll.leadingAnchor.constraint(equalTo: editor.leadingAnchor),
-            dataValueScroll.trailingAnchor.constraint(equalTo: editor.trailingAnchor),
-            dataValueScroll.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 5),
-            dataValueScroll.bottomAnchor.constraint(equalTo: editor.bottomAnchor),
-        ])
-        dataSplitView.addArrangedSubview(keyScroll)
-        dataSplitView.addArrangedSubview(editor)
-        dataSplitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
-        dataSplitView.setPosition(620, ofDividerAt: 0)
-    }
-
-    private func loadObject(
-        preservingDataDrafts: Bool = false,
-        lockingDataEditorUntilInstalled: Bool = false
-    ) {
+    private func loadObject() {
         guard loadTask == nil else { return }
-        if lockingDataEditorUntilInstalled {
-            authoritativeMutationRefreshInFlight = true
-            updateDataEditorControls()
-        }
         statusLabel.toolTip = nil
         statusLabel.stringValue = "Loading…"
         statusLabel.textColor = .secondaryLabelColor
         loadTask = Task { [weak self, provider, identity] in
             guard let self else { return }
+            defer { loadTask = nil }
             do {
-                async let fetchedDetail = provider.getObject(identity: identity)
-                if supportsDataEditor {
-                    async let fetchedData: ObjectData? = try? await provider.getData(
-                        identity: identity
-                    )
-                    let detail = try await fetchedDetail
-                    let data = await fetchedData
-                    guard !Task.isCancelled else { return }
-                    install(
-                        detail: detail,
-                        data: data ?? (preservingDataDrafts ? objectData : nil),
-                        preservingDataDrafts: preservingDataDrafts
-                    )
-                    if data == nil {
-                        dataAuthorityUnavailable = true
-                        statusLabel.stringValue = hasAnyDataDraftChanges
-                            ? "YAML loaded · local Data draft preserved and locked"
-                            : "YAML loaded · key/value data unavailable"
-                        statusLabel.textColor = .systemOrange
-                        updateDataEditorControls()
-                    }
-                } else {
-                    let detail = try await fetchedDetail
-                    guard !Task.isCancelled else { return }
-                    install(detail: detail, data: nil)
-                }
+                let fetched = try await provider.getObject(identity: identity)
+                guard !Task.isCancelled else { return }
+                install(detail: fetched)
             } catch {
                 show(error: error)
             }
-            if lockingDataEditorUntilInstalled {
-                authoritativeMutationRefreshInFlight = false
-            }
-            loadTask = nil
-            updateDataEditorControls()
         }
     }
 
-    private func install(
-        detail: ObjectDetail,
-        data: ObjectData?,
-        preservingDataDrafts: Bool = false
-    ) {
-        let selectedKey = preservingDataDrafts ? selectedDataKey : nil
-        if !preservingDataDrafts {
-            releaseDataDrafts()
-        }
-        let wasInstallingDataEditorState = isInstallingDataEditorState
-        isInstallingDataEditorState = true
-        defer { isInstallingDataEditorState = wasInstallingDataEditorState }
+    private func install(detail: ObjectDetail) {
         identity = detail.identity
         self.detail = detail
-        objectData = data
-        if data != nil { dataAuthorityUnavailable = false }
-        selectedDataKey = nil
-        selectedDataEntry = nil
-        conflictedDataKey = nil
         installYAML(detail.yamlUTF8)
         renderSummary(detail)
-        keysTable.reloadData()
-        let rows = dataEditorRows
-        if let data, let selectedKey,
-            let row = rows.firstIndex(where: { $0.key == selectedKey })
-        {
-            keysTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            installSelectedDataRow(rows[row], secret: data.secret)
-        } else {
-            keysTable.deselectAll(nil)
-            selectedDataKey = nil
-            selectedDataDraftKind = nil
-            selectedDataCanEditText = false
-            dataValueTextView.string = ""
-        }
-        updateDataEditorControls()
-        if selectedDataKey != nil, selectedDataEntry == nil {
-            showMissingDataDraftStatus()
-        } else {
-            statusLabel.stringValue = "Resource version \(detail.resourceVersion)"
-            statusLabel.textColor = .secondaryLabelColor
-        }
+        statusLabel.stringValue = "Resource version \(detail.resourceVersion)"
+        statusLabel.textColor = .secondaryLabelColor
         startObjectWatch(resourceVersion: detail.resourceVersion)
-        if initialTab == .automatic, supportsDataEditor {
-            segmented.selectedSegment = 3
-            tabChanged()
-        }
     }
 
-    private func installRecovery(
-        detail updatedDetail: ObjectDetail,
-        data updatedData: ObjectData?
-    ) throws {
+    private func installRecovery(detail updatedDetail: ObjectDetail) throws {
         guard updatedDetail.identity.uid == identity.uid else {
             terminalObjectState = true
             disableEditingAfterDeletion()
@@ -1056,18 +774,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 operation: "recover object details"
             )
         }
-        if let updatedData, updatedData.identity.uid != identity.uid {
-            throw ClusterManagerIssue(
-                category: .conflict,
-                reason: "ObjectRecreated",
-                message: "The key/value response belongs to a different Kubernetes UID.",
-                operation: "recover key/value data"
-            )
-        }
         let preserveYAML = isEditingYAML
-        let preserveData = hasAnyDataDraftChanges
-        let selectedRow = keysTable.selectedRow
-
         identity = updatedDetail.identity
         terminalObjectState = false
         editButton.isEnabled = true
@@ -1081,60 +788,15 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             showYAMLPresentation()
         }
         renderSummary(updatedDetail)
-
-        if let updatedData {
-            let wasInstallingDataEditorState = isInstallingDataEditorState
-            isInstallingDataEditorState = true
-            defer { isInstallingDataEditorState = wasInstallingDataEditorState }
-            if preserveData {
-                if var editingBasis = objectData {
-                    editingBasis.identity = updatedData.identity
-                    objectData = editingBasis
-                }
-                displaySelectedData()
-            } else {
-                releaseDataDrafts()
-                objectData = updatedData
-                secretRevealed = !updatedData.secret
-                revealButton.title = "Reveal"
-                keysTable.reloadData()
-                let row = updatedData.entries.indices.contains(selectedRow) ? selectedRow : -1
-                if row >= 0 {
-                    keysTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                    selectedDataKey = updatedData.entries[row].id
-                    selectedDataEntry = updatedData.entries[row]
-                    displaySelectedData()
-                } else {
-                    selectedDataKey = nil
-                    selectedDataEntry = nil
-                    selectedDataCanEditText = false
-                    dataValueTextView.string = ""
-                }
-            }
-            dataAuthorityUnavailable = false
-        } else if !preserveData {
-            releaseDataDrafts()
-            objectData = nil
-            selectedDataKey = nil
-            selectedDataEntry = nil
-            selectedDataCanEditText = false
-            keysTable.reloadData()
-            keysTable.deselectAll(nil)
-            dataValueTextView.string = ""
-        }
         watchTask?.cancel()
         watchTask = nil
         startObjectWatch(resourceVersion: updatedDetail.resourceVersion)
         relationshipsLoaded = false
         tabChanged()
-        updateDataEditorControls()
-        if preserveYAML || preserveData {
-            statusLabel.stringValue = "Reconnected · server refreshed · local edit preserved"
-            statusLabel.textColor = .systemOrange
-        } else {
-            statusLabel.stringValue = "Reconnected · resource version \(updatedDetail.resourceVersion)"
-            statusLabel.textColor = .secondaryLabelColor
-        }
+        statusLabel.stringValue = preserveYAML
+            ? "Reconnected · server refreshed · local YAML edit preserved"
+            : "Reconnected · resource version \(updatedDetail.resourceVersion)"
+        statusLabel.textColor = preserveYAML ? .systemOrange : .secondaryLabelColor
     }
 
     private func renderSummary(_ detail: ObjectDetail) {
@@ -1195,15 +857,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         case 2:
             show(relationshipsContainerView)
             loadRelationshipsIfNeeded()
-        case 3 where supportsDataEditor:
-            show(dataSplitView)
         default:
             show(summaryScrollView)
         }
-    }
-
-    private var initialSegment: Int {
-        initialTab.segment(supportsDataEditor: supportsDataEditor)
     }
 
     private func startObjectWatch(resourceVersion: String) {
@@ -1276,14 +932,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func disableEditingAfterDeletion() {
-        cancelDataFileOperation()
         editButton.isEnabled = false
         saveButton.isEnabled = false
-        saveKeyButton.isEnabled = false
-        for button in [addKeyButton, renameKeyButton, deleteKeyButton, revertKeyButton, importKeyButton] {
-            button.isEnabled = false
-        }
-        dataValueTextView.isEditable = false
     }
 
     private func loadRelationshipsIfNeeded() {
@@ -1446,7 +1096,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             defer {
                 operationTask = nil
                 updateYAMLEditControls()
-                updateDataEditorControls()
             }
             do {
                 let prepared = try await provider.prepareYAML(
@@ -1473,10 +1122,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                             finishYAMLEdit()
                             loadTask?.cancel()
                             loadTask = nil
-                            loadObject(
-                                preservingDataDrafts: true,
-                                lockingDataEditorUntilInstalled: true
-                            )
+                            loadObject()
                         } else {
                             throw progress.issue ?? ClusterManagerIssue(
                                 category: .conflict,
@@ -1493,7 +1139,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             }
         }
         updateYAMLEditControls()
-        updateDataEditorControls()
     }
 
     private func confirm(diff: [SemanticDiffEntry]) -> Bool {
@@ -1656,54 +1301,20 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     override func cancelOperation(_ sender: Any?) {
         if isEditingYAML {
             cancelYAMLEdit()
-        } else if leaveDataValueEditorIfActive() {
-            return
         } else {
             onBack?()
         }
     }
 
-    /// Escape follows the workspace priority order: while the value editor is
-    /// active it first ends text entry and retains the in-memory key draft.
-    /// A subsequent Escape from the key table may navigate back normally.
-    private func leaveDataValueEditorIfActive() -> Bool {
-        guard supportsDataEditor, segmented.selectedSegment == 3,
-            let window = view.window,
-            let responderView = window.firstResponder as? NSView,
-            responderView === dataValueTextView
-                || responderView.isDescendant(of: dataValueScroll)
-        else { return false }
-        window.makeFirstResponder(keysTable)
-        return true
-    }
-
     @objc func saveDocument(_ sender: Any?) {
-        if isEditingYAML {
-            saveYAML()
-        } else if saveKeyButton.isEnabled {
-            saveCurrentKey()
-        }
-    }
-
-    private var dataEditorRows: [DataEditorKeyRow] {
-        let entries = objectData?.entries ?? []
-        let storedKeys = Set(entries.map(\.id))
-        let missing = dataDrafts.keys
-            .filter { !storedKeys.contains($0) }
-            .sorted()
-            .compactMap { key -> DataEditorKeyRow? in
-                dataDrafts.metadata(for: key).map {
-                    .missingDraft(key: key, metadata: $0)
-                }
-            }
-        return entries.map(DataEditorKeyRow.stored) + missing
+        if isEditingYAML { saveYAML() }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
         switch tableView {
         case summaryTable: summaryItems.count
         case relationshipsTable: relationships.count
-        default: dataEditorRows.count
+        default: 0
         }
     }
 
@@ -1763,41 +1374,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             cell.textField?.textColor = relationship.stale ? .systemOrange : .labelColor
             return cell
         }
-        let dataRows = dataEditorRows
-        guard dataRows.indices.contains(row), let tableColumn else {
-            return nil
-        }
-        let dataRow = dataRows[row]
-        let presentation = dataRowPresentation(for: dataRow)
-        let columnIdentifier = tableColumn.identifier.rawValue
-        let valuePreview = columnIdentifier == "value"
-            ? dataValuePreview(for: dataRow)
-            : nil
-        let value: String
-        switch columnIdentifier {
-        case "key": value = presentation.keyText
-        case "value": value = valuePreview?.displayText ?? ""
-        case "type": value = presentation.typeText
-        case "size": value = presentation.sizeText
-        case "state": value = presentation.state.displayText
-        default: value = ""
-        }
-        let cell = textCell(value, table: tableView, column: tableColumn)
-        cell.setAccessibilityLabel(tableColumn.title)
-        cell.setAccessibilityValue(
-            valuePreview?.accessibilityValue ?? presentation.accessibilityValue
-        )
-        switch presentation.state {
-        case .saved:
-            cell.textField?.textColor = .labelColor
-        case .unsaved:
-            cell.textField?.textColor = tableColumn.identifier.rawValue == "state"
-                ? .systemOrange : .labelColor
-        case .conflict:
-            cell.textField?.textColor = tableColumn.identifier.rawValue == "state"
-                ? .systemRed : .labelColor
-        }
-        return cell
+        return nil
     }
 
     private func summaryCellTooltip(
@@ -1840,69 +1417,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             case .section = summaryItems[row]
         else { return tableView.rowHeight }
         return 30
-    }
-
-    /// Produces a short-lived preview from decoded bytes. Neither this helper
-    /// nor `DataValuePreviewPresentation` retains the source value; draft and
-    /// entry copies are wiped immediately after the presentation is built.
-    private func dataValuePreview(
-        for row: DataEditorKeyRow
-    ) -> DataValuePreviewPresentation? {
-        let secret = objectData?.secret ?? isSecretObject
-        let hasRevealAuthority = secretRevealed && selectedDataKey == row.key
-        if var draft = dataDrafts.snapshot(for: row.key) {
-            defer { draft.wipe() }
-            return DataValuePreviewPresentation(
-                kind: draft.kind,
-                value: draft.value,
-                secret: secret,
-                hasRevealAuthority: hasRevealAuthority
-            )
-        }
-        if let entry = row.entry {
-            var bytes = copyBytes(from: entry)
-            defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
-            return DataValuePreviewPresentation(
-                kind: entry.kind,
-                value: bytes,
-                secret: secret,
-                hasRevealAuthority: hasRevealAuthority
-            )
-        }
-        return nil
-    }
-
-    private func dataRowPresentation(for row: DataEditorKeyRow) -> DataEditorRowPresentation {
-        let selected = selectedDataKey == row.key
-        switch row {
-        case .stored(let entry):
-            let draft = dataDrafts.metadata(for: entry.id)
-            let changed = draft != nil
-            let hasConflict = conflictedDataKey == entry.id
-            return DataEditorRowPresentation(
-                key: entry.id,
-                storedKind: entry.kind,
-                storedByteSize: entry.byteSize,
-                isSelected: selected,
-                draftKind: draft?.kind,
-                draftByteSize: changed || hasConflict
-                    ? draft.map { UInt64($0.byteCount) }
-                    : nil,
-                hasUnsavedChanges: changed,
-                hasConflict: hasConflict
-            )
-        case .missingDraft(let key, let metadata):
-            return DataEditorRowPresentation(
-                key: key,
-                storedKind: metadata.kind,
-                storedByteSize: UInt64(metadata.byteCount),
-                isSelected: selected,
-                draftKind: metadata.kind,
-                draftByteSize: UInt64(metadata.byteCount),
-                hasUnsavedChanges: true,
-                hasConflict: true
-            )
-        }
     }
 
     private func summaryTextCell(
@@ -1972,763 +1486,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         cell.textField?.toolTip = value
         cell.textField?.textColor = .labelColor
         return cell
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard notification.object as? NSTableView === keysTable else { return }
-        guard !isInstallingDataEditorState else { return }
-        let previouslySelectedRow = dataEditorRows.firstIndex { $0.key == selectedDataKey }
-        captureSelectedDataDraft()
-        let rows = dataEditorRows
-        guard let data = objectData, rows.indices.contains(keysTable.selectedRow) else {
-            selectedDataKey = nil
-            selectedDataEntry = nil
-            selectedDataDraftKind = nil
-            selectedDataCanEditText = false
-            dataValueTextView.string = ""
-            dataValueTextView.undoManager?.removeAllActions()
-            updateDataEditorControls()
-            reloadDataRows([previouslySelectedRow].compactMap { $0 })
-            return
-        }
-        installSelectedDataRow(rows[keysTable.selectedRow], secret: data.secret)
-        updateDataEditorControls()
-        reloadDataRows([previouslySelectedRow, keysTable.selectedRow].compactMap { $0 })
-    }
-
-    private func installSelectedDataRow(_ row: DataEditorKeyRow, secret: Bool) {
-        selectedDataKey = row.key
-        selectedDataEntry = row.entry
-        secretRevealed = !secret
-        revealButton.isHidden = !secret
-        revealButton.title = "Reveal"
-        displaySelectedData()
-    }
-
-    @objc private func toggleSecretReveal() {
-        if secretRevealed {
-            captureSelectedDataDraft()
-        }
-        secretRevealed.toggle()
-        revealButton.title = secretRevealed ? "Conceal" : "Reveal"
-        displaySelectedData()
-        updateDataEditorControls()
-        reloadSelectedDataRow()
-    }
-
-    private func displaySelectedData() {
-        guard let data = objectData, let key = selectedDataKey else { return }
-        let entry = selectedDataEntry
-        let draftMetadata = dataDrafts.metadata(for: key)
-        guard entry != nil || draftMetadata != nil else { return }
-        let wasInstallingDataEditorState = isInstallingDataEditorState
-        isInstallingDataEditorState = true
-        defer { isInstallingDataEditorState = wasInstallingDataEditorState }
-        selectedDataDraftKind = draftMetadata?.kind ?? entry?.kind
-        if data.secret && !secretRevealed {
-            let byteCount = draftMetadata?.byteCount ?? Int(entry?.byteSize ?? 0)
-            dataValueTextView.string = "Secret value concealed · \(byteCount) bytes"
-            selectedDataCanEditText = false
-            dataValueTextView.undoManager?.removeAllActions()
-            saveKeyButton.isEnabled = false
-            return
-        }
-        var draft = dataDrafts.snapshot(for: key)
-        defer { draft?.wipe() }
-        var bytes = draft?.value ?? entry.map { copyBytes(from: $0) } ?? Data()
-        if let text = String(data: bytes, encoding: .utf8), !text.contains("\0") {
-            dataValueTextView.string = text
-            selectedDataCanEditText = true
-        } else {
-            let suffix = draft == nil ? "" : " · unsaved"
-            dataValueTextView.string = "Binary value · \(bytes.count) bytes\(suffix)"
-            selectedDataCanEditText = false
-        }
-        bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex)
-        dataValueTextView.undoManager?.removeAllActions()
-        updateDataEditorControls()
-        if entry == nil {
-            showMissingDataDraftStatus()
-        }
-    }
-
-    private func showMissingDataDraftStatus() {
-        statusLabel.stringValue = "Conflict · key missing on server · local draft preserved · Save Key recreates it"
-        statusLabel.textColor = .systemOrange
-    }
-
-    func textDidChange(_ notification: Notification) {
-        guard notification.object as? NSTextView === dataValueTextView else { return }
-        guard !isInstallingDataEditorState else { return }
-        captureSelectedDataDraft()
-        updateDataEditorControls()
-        reloadSelectedDataRow()
-    }
-
-    private var currentDraftBytes: Data? {
-        guard let data = objectData, let key = selectedDataKey else { return nil }
-        guard !data.secret || secretRevealed else { return nil }
-        if selectedDataCanEditText {
-            return Data(dataValueTextView.string.utf8)
-        }
-        return dataDrafts.snapshot(for: key)?.value
-            ?? selectedDataEntry.map { copyBytes(from: $0) }
-    }
-
-    private var hasDataDraftChanges: Bool {
-        selectedDataKey.map(dataDrafts.contains) ?? false
-    }
-
-    private var hasAnyDataDraftChanges: Bool { !dataDrafts.isEmpty }
-
-    private func updateDataEditorControls() {
-        let hasSelection = selectedDataKey != nil && !terminalObjectState
-        let hasStoredSelection = selectedDataEntry != nil && !terminalObjectState
-        let idle = operationTask == nil && dataConflictController == nil
-            && dataFileTask == nil && !authoritativeMutationRefreshInFlight
-            && !dataAuthorityUnavailable
-        addKeyButton.isEnabled = objectData != nil && !terminalObjectState && idle
-        renameKeyButton.isEnabled = hasStoredSelection && idle && !hasDataDraftChanges
-        deleteKeyButton.isEnabled = hasStoredSelection && idle && !hasDataDraftChanges
-        let valueIsAccessible = !(objectData?.secret ?? false) || secretRevealed
-        importKeyButton.isEnabled = hasSelection && idle && valueIsAccessible
-        exportKeyButton.isEnabled = hasSelection && idle && valueIsAccessible
-        revertKeyButton.isEnabled = hasSelection && idle && valueIsAccessible
-            && hasDataDraftChanges
-        saveKeyButton.isEnabled = hasSelection && idle && valueIsAccessible
-            && hasDataDraftChanges
-        dataValueTextView.isEditable = hasSelection && idle && valueIsAccessible
-            && selectedDataCanEditText
-    }
-
-    private func reloadSelectedDataRow() {
-        reloadDataRows([keysTable.selectedRow])
-    }
-
-    private func reloadDataRows(_ rows: [Int]) {
-        let validRows = IndexSet(rows.filter { $0 >= 0 && $0 < keysTable.numberOfRows })
-        guard !validRows.isEmpty else { return }
-        keysTable.reloadData(
-            forRowIndexes: validRows,
-            columnIndexes: IndexSet(integersIn: 0..<keysTable.numberOfColumns)
-        )
-    }
-
-    private func releaseDataDrafts() {
-        let wasInstallingDataEditorState = isInstallingDataEditorState
-        isInstallingDataEditorState = true
-        defer { isInstallingDataEditorState = wasInstallingDataEditorState }
-        dataDrafts.removeAll()
-        selectedDataDraftKind = nil
-        selectedDataCanEditText = false
-        if objectData?.secret == true {
-            dataValueTextView.string = ""
-            dataValueTextView.undoManager?.removeAllActions()
-        }
-    }
-
-    private func captureSelectedDataDraft() {
-        guard let data = objectData, let key = selectedDataKey else { return }
-        guard !data.secret || secretRevealed else { return }
-        guard var value = currentDraftBytes else { return }
-        if let entry = selectedDataEntry {
-            dataDrafts.update(
-                key: key,
-                kind: selectedDataDraftKind ?? entry.kind,
-                value: value,
-                storedKind: entry.kind,
-                valueMatchesStored: valueMatchesEntry(value, entry: entry),
-                storedContentHash: entry.contentHash
-            )
-        } else {
-            dataDrafts.replaceExisting(
-                key: key,
-                kind: selectedDataDraftKind ?? .binary,
-                value: value
-            )
-        }
-        value.resetBytes(in: value.startIndex..<value.endIndex)
-    }
-
-    private func copyBytes(from entry: ObjectDataEntry) -> Data {
-        var result = Data()
-        entry.value.withUnsafeBytes { result.append(contentsOf: $0) }
-        return result
-    }
-
-    private func valueMatchesEntry(_ value: Data, entry: ObjectDataEntry) -> Bool {
-        guard value.count == entry.value.count else { return false }
-        return value.withUnsafeBytes { localBytes in
-            entry.value.withUnsafeBytes { storedBytes in
-                localBytes.elementsEqual(storedBytes)
-            }
-        }
-    }
-
-    @objc private func revertCurrentKey() {
-        guard let key = selectedDataKey else { return }
-        dataDrafts.remove(key)
-        if let entry = selectedDataEntry {
-            selectedDataDraftKind = entry.kind
-            displaySelectedData()
-            reloadSelectedDataRow()
-        } else {
-            selectedDataKey = nil
-            selectedDataDraftKind = nil
-            selectedDataCanEditText = false
-            keysTable.reloadData()
-            keysTable.deselectAll(nil)
-            dataValueTextView.string = ""
-            dataValueTextView.undoManager?.removeAllActions()
-            updateDataEditorControls()
-        }
-        statusLabel.stringValue = "Local key changes reverted"
-        statusLabel.textColor = .secondaryLabelColor
-    }
-
-    @objc private func addDataKey() {
-        guard objectData != nil else { return }
-        let alert = NSAlert()
-        alert.messageText = "Add Key"
-        alert.informativeText = confirmationInformativeText(
-            note: "The new key is created only if it still does not exist on the server."
-        )
-        let nameField = NSTextField(frame: NSRect(x: 0, y: 32, width: 340, height: 24))
-        nameField.placeholderString = "Key name"
-        let kindButton = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 180, height: 26))
-        kindButton.addItems(withTitles: ["Text", "Binary from File"])
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 58))
-        accessory.addSubview(nameField)
-        accessory.addSubview(kindButton)
-        alert.accessoryView = accessory
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let key = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let keys = Set(dataEditorRows.map(\.key))
-        if let message = KubernetesDataKeyValidator.validationMessage(for: key, existingKeys: keys) {
-            showValidation(message)
-            return
-        }
-        if kindButton.indexOfSelectedItem == 1 {
-            chooseImportedFile { [weak self] url in
-                self?.readImportedBytes(from: url) { [weak self] bytes in
-                    self?.performDataMutation(.set(
-                        key: key, kind: .binary, value: bytes, expectedContentHash: Data()
-                    ), successMessage: "Added \(key)")
-                }
-            }
-        } else {
-            performDataMutation(.set(
-                key: key, kind: .text, value: Data(), expectedContentHash: Data()
-            ), successMessage: "Added \(key)")
-        }
-    }
-
-    @objc private func renameDataKey() {
-        guard objectData != nil, let entry = selectedDataEntry,
-            !hasDataDraftChanges
-        else { return }
-        let alert = NSAlert()
-        alert.messageText = "Rename Key"
-        alert.informativeText = confirmationInformativeText(
-            note: "Rename \(entry.id) without changing its value or text/binary kind."
-        )
-        let field = NSTextField(string: entry.id)
-        field.frame.size = NSSize(width: 340, height: 24)
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let newKey = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let keys = Set(dataEditorRows.map(\.key))
-        if let message = KubernetesDataKeyValidator.validationMessage(
-            for: newKey, existingKeys: keys, allowingExistingKey: entry.id
-        ) {
-            showValidation(message)
-            return
-        }
-        guard newKey != entry.id else { return }
-        performDataMutation(.rename(
-            key: entry.id, newKey: newKey, expectedContentHash: entry.contentHash
-        ), successMessage: "Renamed \(entry.id) to \(newKey)")
-    }
-
-    @objc private func deleteDataKey() {
-        guard let entry = selectedDataEntry, !hasDataDraftChanges else { return }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Delete key \(entry.id)?"
-        alert.informativeText = confirmationInformativeText(
-            note: "The delete uses the loaded content hash and will fail if this key changed on the server."
-        )
-        alert.addButton(withTitle: "Delete Key")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        performDataMutation(.delete(
-            key: entry.id, expectedContentHash: entry.contentHash
-        ), successMessage: "Deleted \(entry.id)")
-    }
-
-    @objc private func importCurrentKey() {
-        guard let key = selectedDataKey else { return }
-        chooseImportedFile { [weak self] url in
-            self?.importDataFile(from: url, forKey: key)
-        }
-    }
-
-    func replaceSelectedDataWithImportedBytes(_ bytes: Data) {
-        guard let key = selectedDataKey else { return }
-        replaceDataWithImportedBytes(bytes, forKey: key)
-    }
-
-    private func replaceDataWithImportedBytes(_ bytes: Data, forKey key: String) {
-        let entry = objectData?.entries.first { $0.id == key }
-        let replacementKind: DataValueKind
-        if objectData?.secret == true {
-            // Secret values all belong to `.data`; their text/binary kind is a
-            // presentation hint, so a file import continues to be raw bytes.
-            replacementKind = .binary
-        } else {
-            // Replacing a ConfigMap value must not silently move its key between
-            // `.data` and `.binaryData`. Prefer an existing draft's explicit
-            // kind, then the kind loaded from the server.
-            replacementKind = dataDrafts.metadata(for: key)?.kind
-                ?? entry?.kind
-                ?? .binary
-        }
-        if let entry {
-            dataDrafts.update(
-                key: key,
-                kind: replacementKind,
-                value: bytes,
-                storedKind: entry.kind,
-                valueMatchesStored: valueMatchesEntry(bytes, entry: entry),
-                storedContentHash: entry.contentHash
-            )
-        } else {
-            dataDrafts.replaceExisting(key: key, kind: replacementKind, value: bytes)
-        }
-        if selectedDataKey == key {
-            selectedDataDraftKind = replacementKind
-            selectedDataEntry = entry
-            displaySelectedData()
-        }
-        if let row = dataEditorRows.firstIndex(where: { $0.key == key }) {
-            reloadDataRows([row])
-        }
-        statusLabel.stringValue = dataDrafts.contains(key)
-            ? "Loaded \(bytes.count.formatted()) bytes locally for \(key)"
-            : "Selected file matches the saved value for \(key)"
-        statusLabel.textColor = .secondaryLabelColor
-    }
-
-    private func chooseImportedFile(_ completion: @escaping (URL) -> Void) {
-        guard let window = view.window else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.beginSheetModal(for: window) { response in
-            guard response == .OK, let url = panel.url else { return }
-            completion(url)
-        }
-    }
-
-    /// Testable seam used after NSOpenPanel has supplied a URL. The key is
-    /// captured before asynchronous I/O so a selection change cannot redirect
-    /// imported bytes into a different ConfigMap or Secret entry.
-    func importDataFile(from url: URL, forKey key: String) {
-        guard dataEditorRows.contains(where: { $0.key == key }) else { return }
-        readImportedBytes(from: url) { [weak self] bytes in
-            self?.replaceDataWithImportedBytes(bytes, forKey: key)
-        }
-    }
-
-    private func readImportedBytes(
-        from url: URL,
-        completion: @escaping @MainActor @Sendable (Data) -> Void
-    ) {
-        let reader = dataFileReader
-        startDataFileOperation(status: "Importing \(url.lastPathComponent)…") {
-            try reader(url)
-        } completion: { value in
-            completion(value)
-        }
-    }
-
-    @objc private func exportCurrentKey() {
-        guard let key = selectedDataKey, let window = view.window,
-            var bytes = currentDraftBytes
-        else { return }
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = key
-        panel.beginSheetModal(for: window) { [weak self] response in
-            defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
-            guard response == .OK, let url = panel.url else { return }
-            self?.exportDataFile(bytes, key: key, to: url)
-        }
-    }
-
-    /// Testable seam used after NSSavePanel has supplied its destination.
-    func exportDataFile(_ bytes: Data, key: String, to url: URL) {
-        let writer = dataFileWriter
-        startDataFileOperation(status: "Exporting \(url.lastPathComponent)…") {
-            var protectedBytes = bytes
-            defer {
-                protectedBytes.resetBytes(
-                    in: protectedBytes.startIndex..<protectedBytes.endIndex
-                )
-            }
-            try writer(protectedBytes, url)
-        } completion: { [weak self] _ in
-            self?.statusLabel.stringValue = "Exported \(key)"
-            self?.statusLabel.textColor = .secondaryLabelColor
-        }
-    }
-
-    private func startDataFileOperation<Value: Sendable>(
-        status: String,
-        operation: @escaping @Sendable () throws -> Value,
-        completion: @escaping @MainActor @Sendable (Value) -> Void
-    ) {
-        guard dataFileTask == nil else { return }
-        dataFileGeneration &+= 1
-        let generation = dataFileGeneration
-        statusLabel.stringValue = status
-        statusLabel.textColor = .secondaryLabelColor
-        dataFileTask = Task { [weak self] in
-            do {
-                // This nonisolated async call moves the same stored Task onto
-                // the generic executor. Cancellation reaches the task doing
-                // POSIX I/O instead of only an awaiting shell.
-                let value = try await Self.performDataFileOperation(operation)
-                guard let self, !Task.isCancelled,
-                    dataFileGeneration == generation
-                else { return }
-                dataFileTask = nil
-                completion(value)
-                updateDataEditorControls()
-            } catch {
-                guard let self, !Task.isCancelled,
-                    dataFileGeneration == generation
-                else { return }
-                dataFileTask = nil
-                show(error: error)
-                updateDataEditorControls()
-            }
-        }
-        updateDataEditorControls()
-    }
-
-    private nonisolated static func performDataFileOperation<Value: Sendable>(
-        _ operation: @escaping @Sendable () throws -> Value
-    ) async throws -> Value {
-        try Task.checkCancellation()
-        let value = try operation()
-        try Task.checkCancellation()
-        return value
-    }
-
-    private func cancelDataFileOperation() {
-        dataFileGeneration &+= 1
-        dataFileTask?.cancel()
-        dataFileTask = nil
-    }
-
-    @objc private func saveCurrentKey() {
-        captureSelectedDataDraft()
-        guard let key = selectedDataKey,
-            var draft = dataDrafts.snapshot(for: key)
-        else { return }
-        defer { draft.wipe() }
-        performDataMutation(.set(
-            key: key,
-            kind: draft.kind,
-            value: draft.value,
-            expectedContentHash: selectedDataEntry == nil
-                ? Data()
-                : draft.expectedContentHash
-        ), successMessage: "Saved \(key)")
-    }
-
-    private func performDataMutation(_ mutation: DataMutationKind, successMessage: String) {
-        guard let data = objectData, operationTask == nil else { return }
-        submitDataMutation(
-            mutation,
-            expectedResourceVersion: data.resourceVersion,
-            successMessage: successMessage,
-            recoverConflicts: true
-        )
-    }
-
-    private func submitDataMutation(
-        _ mutation: DataMutationKind,
-        expectedResourceVersion: String,
-        successMessage: String,
-        recoverConflicts: Bool
-    ) {
-        guard operationTask == nil else { return }
-        if conflictedDataKey != mutation.sourceKey {
-            conflictedDataKey = nil
-            reloadSelectedDataRow()
-        }
-        updateDataEditorControls()
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = "Saving key/value data…"
-        statusLabel.textColor = .secondaryLabelColor
-        operationTask = Task { [weak self, provider, identity] in
-            guard let self else { return }
-            defer {
-                operationTask = nil
-                updateDataEditorControls()
-            }
-            do {
-                let stream = try await provider.updateData(
-                    identity: identity,
-                    expectedResourceVersion: expectedResourceVersion,
-                    mutations: [mutation]
-                )
-                for try await progress in stream where progress.state.isTerminal {
-                    if progress.state != .succeeded {
-                        throw progress.issue ?? ClusterManagerIssue(
-                            category: .conflict,
-                            reason: "DataUpdateFailed",
-                            message: "The key was not saved. Your local value remains in the editor.",
-                            operation: "update key/value data"
-                        )
-                    }
-                    statusLabel.stringValue = successMessage
-                    statusLabel.textColor = .secondaryLabelColor
-                    dataDrafts.remove(mutation.sourceKey)
-                    loadTask?.cancel()
-                    loadTask = nil
-                    loadObject(
-                        preservingDataDrafts: true,
-                        lockingDataEditorUntilInstalled: true
-                    )
-                }
-            } catch {
-                if recoverConflicts, Self.clusterIssue(from: error)?.category == .conflict {
-                    await prepareDataConflictRecovery(
-                        mutation: mutation,
-                        successMessage: successMessage
-                    )
-                } else {
-                    show(error: error)
-                }
-            }
-        }
-        updateDataEditorControls()
-    }
-
-    private func prepareDataConflictRecovery(
-        mutation: DataMutationKind,
-        successMessage: String
-    ) async {
-        statusLabel.stringValue = "Conflict detected · loading the current key…"
-        statusLabel.textColor = .systemOrange
-        do {
-            let currentData = try await provider.getData(identity: identity)
-            guard !Task.isCancelled else { return }
-            guard currentData.identity.uid == identity.uid else {
-                throw ClusterManagerIssue(
-                    category: .conflict,
-                    reason: "ObjectRecreated",
-                    message: "A same-name object has a different UID, so the local change cannot be retried.",
-                    operation: "resolve key/value conflict"
-                )
-            }
-            let currentEntry = currentData.entries.first { $0.id == mutation.sourceKey }
-            conflictedDataKey = mutation.sourceKey
-            reloadSelectedDataRow()
-            let destinationExists = mutation.destinationKey.map { destination in
-                currentData.entries.contains { $0.id == destination }
-            } ?? false
-            let retryPlan = mutation.conflictRetryPlan(
-                currentContentHash: currentEntry?.contentHash,
-                destinationExists: destinationExists
-            )
-            presentDataConflict(
-                mutation: mutation,
-                successMessage: successMessage,
-                currentData: currentData,
-                currentEntry: currentEntry,
-                retryPlan: retryPlan
-            )
-        } catch {
-            conflictedDataKey = mutation.sourceKey
-            reloadSelectedDataRow()
-            statusLabel.stringValue = "Conflict · current server data could not be loaded · local edit preserved"
-            statusLabel.textColor = .systemRed
-        }
-    }
-
-    private func presentDataConflict(
-        mutation: DataMutationKind,
-        successMessage: String,
-        currentData: ObjectData,
-        currentEntry: ObjectDataEntry?,
-        retryPlan: DataConflictRetryPlan
-    ) {
-        guard let window = view.window else {
-            statusLabel.stringValue = "Conflict · local edit preserved"
-            statusLabel.textColor = .systemOrange
-            return
-        }
-        let localDisplay = localConflictDisplay(for: mutation, secret: currentData.secret)
-        let currentDisplay = currentEntry.map {
-            conflictDisplay(entry: $0, secret: currentData.secret)
-        } ?? .missing()
-        let retryUnavailableReason: String?
-        if case .unavailable(let reason) = retryPlan {
-            retryUnavailableReason = reason
-        } else {
-            retryUnavailableReason = nil
-        }
-        let canCopyLocal: Bool
-        switch mutation {
-        case .set:
-            canCopyLocal = !currentData.secret
-                || (selectedDataKey == mutation.sourceKey && secretRevealed)
-        case .delete, .rename:
-            canCopyLocal = false
-        }
-        let controller = DataConflictWindowController(
-            session: session,
-            identity: identity,
-            key: mutation.sourceKey,
-            resourceVersion: currentData.resourceVersion,
-            local: localDisplay,
-            current: currentDisplay,
-            canCopyLocal: canCopyLocal,
-            retryUnavailableReason: retryUnavailableReason
-        ) { [weak self] choice in
-            guard let self else { return }
-            dataConflictController = nil
-            defer { updateDataEditorControls() }
-            switch choice {
-            case .reload:
-                conflictedDataKey = nil
-                installCurrentDataAfterConflict(currentData, selecting: mutation.sourceKey)
-                statusLabel.stringValue = "Reloaded current server data"
-                statusLabel.textColor = .secondaryLabelColor
-            case .copyLocal:
-                copyLocalConflictValueToPasteboard(mutation: mutation)
-                statusLabel.stringValue = "Copied local value · local edit preserved"
-                statusLabel.textColor = .secondaryLabelColor
-            case .retry:
-                guard case .retry(let retryMutation) = retryPlan else { return }
-                conflictedDataKey = nil
-                submitDataMutation(
-                    retryMutation,
-                    expectedResourceVersion: currentData.resourceVersion,
-                    successMessage: successMessage,
-                    recoverConflicts: true
-                )
-            case .keepEditing:
-                statusLabel.stringValue = "Conflict · local edit preserved"
-                statusLabel.textColor = .systemOrange
-            }
-        }
-        dataConflictController = controller
-        updateDataEditorControls()
-        controller.beginSheet(for: window)
-    }
-
-    private func localConflictDisplay(
-        for mutation: DataMutationKind,
-        secret: Bool
-    ) -> DataConflictValueDisplay {
-        switch mutation {
-        case .set(_, let kind, let value, _):
-            return DataConflictValueDisplay(
-                secret: secret,
-                kind: kind,
-                byteCount: value.count,
-                contentHash: DataConflictValueDisplay.contentHash(of: value),
-                decodedText: secret ? nil : safeUTF8(value)
-            )
-        case .delete:
-            return .missing("Local action deletes this key.")
-        case .rename(_, let newKey, _):
-            return .missing("Local action renames this key to \(newKey).")
-        }
-    }
-
-    private func conflictDisplay(
-        entry: ObjectDataEntry,
-        secret: Bool
-    ) -> DataConflictValueDisplay {
-        var bytes = copyBytes(from: entry)
-        defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
-        return DataConflictValueDisplay(
-            secret: secret,
-            kind: entry.kind,
-            byteCount: bytes.count,
-            contentHash: entry.contentHash,
-            decodedText: secret ? nil : safeUTF8(bytes)
-        )
-    }
-
-    private func safeUTF8(_ value: Data) -> String? {
-        guard let text = String(data: value, encoding: .utf8), !text.contains("\0") else {
-            return nil
-        }
-        return text
-    }
-
-    private func copyLocalConflictValueToPasteboard(mutation: DataMutationKind) {
-        guard case .set(_, _, let localValue, _) = mutation else { return }
-        var bytes = localValue
-        defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        if let text = safeUTF8(bytes) {
-            pasteboard.setString(text, forType: .string)
-        } else {
-            pasteboard.setData(bytes, forType: NSPasteboard.PasteboardType("public.data"))
-        }
-    }
-
-    private func installCurrentDataAfterConflict(
-        _ currentData: ObjectData,
-        selecting key: String
-    ) {
-        dataDrafts.remove(key)
-        conflictedDataKey = nil
-        let wasInstallingDataEditorState = isInstallingDataEditorState
-        isInstallingDataEditorState = true
-        defer { isInstallingDataEditorState = wasInstallingDataEditorState }
-        objectData = currentData
-        dataAuthorityUnavailable = false
-        secretRevealed = !currentData.secret
-        revealButton.title = "Reveal"
-        keysTable.reloadData()
-        guard let row = currentData.entries.firstIndex(where: { $0.id == key }) else {
-            selectedDataKey = nil
-            selectedDataEntry = nil
-            selectedDataCanEditText = false
-            keysTable.deselectAll(nil)
-            dataValueTextView.string = ""
-            updateDataEditorControls()
-            return
-        }
-        keysTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        selectedDataKey = currentData.entries[row].id
-        selectedDataEntry = currentData.entries[row]
-        displaySelectedData()
-        updateDataEditorControls()
-    }
-
-    private static func clusterIssue(from error: Error) -> ClusterManagerIssue? {
-        if let issue = error as? ClusterManagerIssue { return issue }
-        return nil
-    }
-
-    private func showValidation(_ message: String) {
-        statusLabel.stringValue = message
-        statusLabel.textColor = .systemRed
-        NSSound.beep()
     }
 
     private func show(error: Error) {

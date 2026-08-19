@@ -1,45 +1,7 @@
 import AppKit
 import KmgrCore
 
-struct DataSubresourceRow: Hashable, Sendable {
-    var key: String
-    var kind: DataValueKind
-    var byteSize: UInt64
-
-    init(entry: ObjectDataEntry) {
-        key = entry.id
-        kind = entry.kind
-        byteSize = entry.byteSize
-    }
-}
-
-enum ObjectSubresourceContent: Hashable, Sendable {
-    case containers(pod: ResourceIdentity, values: [PodContainerDetail])
-    case data(object: ResourceIdentity, values: [DataSubresourceRow])
-
-    var parent: ResourceIdentity {
-        switch self {
-        case .containers(let pod, _): pod
-        case .data(let object, _): object
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .containers: "Containers"
-        case .data: "Data"
-        }
-    }
-
-    var count: Int {
-        switch self {
-        case .containers(_, let values): values.count
-        case .data(_, let values): values.count
-        }
-    }
-}
-
-enum ObjectSubresourceNetworkAction: Equatable {
+enum PodContainerNetworkAction: Equatable {
     case openLogs
     case openPreviousLogs
     case openAutomaticExec
@@ -48,7 +10,7 @@ enum ObjectSubresourceNetworkAction: Equatable {
 }
 
 @MainActor
-final class ObjectSubresourceListViewController: NSViewController,
+final class PodContainerListViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate
 {
     var onBack: (() -> Void)?
@@ -56,31 +18,27 @@ final class ObjectSubresourceListViewController: NSViewController,
     var onOpenExec: ((PodExecTarget) -> Void)?
     var onConfigureExec: ((PodExecTarget) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
-    var onOpenDataEditor: ((ResourceIdentity) -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
 
     var contextualShortcutSnapshot: ContextualShortcutSnapshot {
-        switch content {
-        case .containers:
-            let hasSelectedContainer = tableView.selectedRow >= 0
-            return ContextualShortcutCatalog.containerList(
-                canOpenLogs: networkActionsEnabled && hasSelectedContainer,
-                canOpenTerminal: networkActionsEnabled && hasSelectedContainer,
-                canStartPortForward: networkActionsEnabled
-            )
-        case .data:
-            return ContextualShortcutCatalog.dataList(canOpenEditor: networkActionsEnabled)
-        }
+        let hasSelectedContainer = tableView.selectedRow >= 0
+        return ContextualShortcutCatalog.containerList(
+            canOpenLogs: networkActionsEnabled && hasSelectedContainer,
+            canOpenTerminal: networkActionsEnabled && hasSelectedContainer,
+            canStartPortForward: networkActionsEnabled
+        )
     }
 
-    private let content: ObjectSubresourceContent
-    private let tableView = ObjectSubresourceTableView()
+    private let pod: ResourceIdentity
+    private let containers: [PodContainerDetail]
+    private let tableView = PodContainerTableView()
     private let countLabel = NSTextField(labelWithString: "")
     private let actionButton = NSButton(title: "", target: nil, action: nil)
     private var networkActionsEnabled = true
 
-    init(content: ObjectSubresourceContent) {
-        self.content = content
+    init(pod: ResourceIdentity, containers: [PodContainerDetail]) {
+        self.pod = pod
+        self.containers = containers
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -99,16 +57,16 @@ final class ObjectSubresourceListViewController: NSViewController,
         )
         backButton.bezelStyle = .texturedRounded
 
-        let parent = content.parent
-        let parentName = parent.namespace.isEmpty
-            ? parent.name : "\(parent.namespace)/\(parent.name)"
+        let parentName = pod.namespace.isEmpty
+            ? pod.name : "\(pod.namespace)/\(pod.name)"
         let breadcrumb = NSTextField(
-            labelWithString: "\(parent.resource)/\(parentName) · \(content.title)"
+            labelWithString: "\(pod.resource)/\(parentName) · Containers"
         )
         breadcrumb.font = .systemFont(ofSize: 15, weight: .semibold)
         breadcrumb.lineBreakMode = .byTruncatingMiddle
 
-        countLabel.stringValue = content.count == 1 ? "1 item" : "\(content.count) items"
+        countLabel.stringValue = containers.count == 1
+            ? "1 item" : "\(containers.count) items"
         countLabel.textColor = .secondaryLabelColor
         let header = NSStackView(views: [backButton, breadcrumb, NSView(), countLabel])
         header.orientation = .horizontal
@@ -128,14 +86,8 @@ final class ObjectSubresourceListViewController: NSViewController,
         actionButton.target = self
         actionButton.action = #selector(performPrimaryAction)
         actionButton.bezelStyle = .rounded
-        switch content {
-        case .containers:
-            actionButton.title = "Open Selected Container Logs"
-            actionButton.setAccessibilityLabel("Open logs for selected container")
-        case .data:
-            actionButton.title = "Open Data Editor"
-            actionButton.setAccessibilityLabel("Open ConfigMap or Secret Data editor")
-        }
+        actionButton.title = "Open Selected Container Logs"
+        actionButton.setAccessibilityLabel("Open logs for selected container")
         let hint = NSTextField(labelWithString: shortcutHint)
         hint.textColor = .secondaryLabelColor
         let footer = NSStackView(views: [hint, NSView(), actionButton])
@@ -165,7 +117,7 @@ final class ObjectSubresourceListViewController: NSViewController,
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        if content.count > 0, tableView.selectedRow < 0 {
+        if !containers.isEmpty, tableView.selectedRow < 0 {
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
         view.window?.makeFirstResponder(tableView)
@@ -173,7 +125,7 @@ final class ObjectSubresourceListViewController: NSViewController,
         onContextualShortcutsChanged?()
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { content.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { containers.count }
 
     func tableView(
         _ tableView: NSTableView,
@@ -181,14 +133,13 @@ final class ObjectSubresourceListViewController: NSViewController,
         row: Int
     ) -> NSView? {
         guard let tableColumn else { return nil }
-        if case .containers(_, let values) = content,
-            values.indices.contains(row),
+        if containers.indices.contains(row),
             ["cpu", "memory"].contains(tableColumn.identifier.rawValue)
         {
             return resourceUsageCell(
                 in: tableView,
                 columnID: tableColumn.identifier.rawValue,
-                container: values[row]
+                container: containers[row]
             )
         }
         let identifier = NSUserInterfaceItemIdentifier("object-subresource-cell")
@@ -216,42 +167,29 @@ final class ObjectSubresourceListViewController: NSViewController,
         var toolTip: String?
         var textColor = NSColor.labelColor
         var alignment = NSTextAlignment.left
-        switch content {
-        case .containers(_, let values):
-            guard values.indices.contains(row) else { return nil }
-            switch tableColumn.identifier.rawValue {
-            case "name": value = values[row].name
-            case "type": value = containerType(values[row].kind)
+        guard containers.indices.contains(row) else { return nil }
+        switch tableColumn.identifier.rawValue {
+            case "name": value = containers[row].name
+            case "type": value = containerType(containers[row].kind)
             case "status":
-                value = values[row].status.isEmpty ? "Unknown" : values[row].status
-                toolTip = values[row].statusTooltip.isEmpty
-                    ? value : values[row].statusTooltip
-                textColor = statusTextColor(for: values[row].statusSeverity)
+                value = containers[row].status.isEmpty ? "Unknown" : containers[row].status
+                toolTip = containers[row].statusTooltip.isEmpty
+                    ? value : containers[row].statusTooltip
+                textColor = statusTextColor(for: containers[row].statusSeverity)
             case "ready":
-                value = values[row].ready ? "Yes" : "No"
-                textColor = values[row].ready ? .labelColor : .systemOrange
+                value = containers[row].ready ? "Yes" : "No"
+                textColor = containers[row].ready ? .labelColor : .systemOrange
                 alignment = .center
             case "restarts":
-                value = String(values[row].restartCount)
+                value = String(containers[row].restartCount)
                 alignment = .right
             case "ports":
-                value = values[row].ports.isEmpty ? "—" : values[row].ports.joined(separator: ", ")
-                toolTip = values[row].ports.isEmpty
-                    ? "No declared container ports" : values[row].ports.joined(separator: "\n")
-                if values[row].ports.isEmpty { textColor = .secondaryLabelColor }
+                value = containers[row].ports.isEmpty
+                    ? "—" : containers[row].ports.joined(separator: ", ")
+                toolTip = containers[row].ports.isEmpty
+                    ? "No declared container ports" : containers[row].ports.joined(separator: "\n")
+                if containers[row].ports.isEmpty { textColor = .secondaryLabelColor }
             default: value = ""
-            }
-        case .data(_, let values):
-            guard values.indices.contains(row) else { return nil }
-            switch tableColumn.identifier.rawValue {
-            case "key": value = values[row].key
-            case "type": value = values[row].kind == .binary ? "binary" : "text"
-            case "size": value = ByteCountFormatter.string(
-                fromByteCount: Int64(clamping: values[row].byteSize),
-                countStyle: .file
-            )
-            default: value = ""
-            }
         }
         cell.textField?.stringValue = value
         cell.textField?.toolTip = toolTip ?? value
@@ -273,24 +211,17 @@ final class ObjectSubresourceListViewController: NSViewController,
     }
 
     private func configureTable() {
-        let columns: [(String, String, CGFloat)]
-        switch content {
-        case .containers:
-            columns = [
-                ("name", "Container", 240),
-                ("type", "Type", 100),
-                ("status", "Status", 190),
-                ("ready", "Ready", 70),
-                ("restarts", "Restarts", 80),
-                ("cpu", "CPU", 210),
-                ("memory", "Memory", 230),
-                ("ports", "Ports", 220),
-            ]
-            tableView.setAccessibilityLabel("Pod containers")
-        case .data:
-            columns = [("key", "Key", 320), ("type", "Type", 100), ("size", "Size", 110)]
-            tableView.setAccessibilityLabel("ConfigMap or Secret data keys")
-        }
+        let columns: [(String, String, CGFloat)] = [
+            ("name", "Container", 240),
+            ("type", "Type", 100),
+            ("status", "Status", 190),
+            ("ready", "Ready", 70),
+            ("restarts", "Restarts", 80),
+            ("cpu", "CPU", 210),
+            ("memory", "Memory", 230),
+            ("ports", "Ports", 220),
+        ]
+        tableView.setAccessibilityLabel("Pod containers")
         for (identifier, title, width) in columns {
             let column = NSTableColumn(identifier: .init(identifier))
             column.title = title
@@ -316,11 +247,7 @@ final class ObjectSubresourceListViewController: NSViewController,
     }
 
     private var shortcutHint: String {
-        switch content {
-        case .containers:
-            "L/Return: logs · \u{21E7}L: previous logs · S: terminal · \u{21E7}S: configure · P: port-forward · Escape: back"
-        case .data: "Return: Data editor · Escape: back"
-        }
+        "L/Return: logs · \u{21E7}L: previous logs · S: terminal · \u{21E7}S: configure · P: port-forward · Escape: back"
     }
 
     private func containerType(_ kind: ExecContainerKind) -> String {
@@ -405,33 +332,22 @@ final class ObjectSubresourceListViewController: NSViewController,
 
     @objc private func performPrimaryAction() {
         guard actionButton.isEnabled else { return }
-        switch content {
-        case .containers(let pod, let values):
-            guard values.indices.contains(tableView.selectedRow) else { return }
-            onOpenLogs?(.namedContainer(values[tableView.selectedRow].name, in: pod))
-        case .data(let object, _):
-            onOpenDataEditor?(object)
-        }
+        guard containers.indices.contains(tableView.selectedRow) else { return }
+        onOpenLogs?(.namedContainer(containers[tableView.selectedRow].name, in: pod))
     }
 
-    func isCompatible(with action: ObjectSubresourceNetworkAction) -> Bool {
-        if case .containers = content { return true }
-        return false
-    }
-
-    func canPerform(_ action: ObjectSubresourceNetworkAction) -> Bool {
-        guard isCompatible(with: action), networkActionsEnabled else { return false }
+    func canPerform(_ action: PodContainerNetworkAction) -> Bool {
+        guard networkActionsEnabled else { return false }
         if action == .startPortForward { return true }
         return selectedContainerTarget() != nil
     }
 
     @discardableResult
-    func perform(_ action: ObjectSubresourceNetworkAction) -> Bool {
+    func perform(_ action: PodContainerNetworkAction) -> Bool {
         guard canPerform(action) else { return false }
         switch action {
         case .openLogs, .openPreviousLogs:
-            guard case .containers(let pod, _) = content,
-                let target = selectedContainerTarget(),
+            guard let target = selectedContainerTarget(),
                 let container = target.preferredContainer
             else { return false }
             onOpenLogs?(.namedContainer(
@@ -446,37 +362,30 @@ final class ObjectSubresourceListViewController: NSViewController,
             guard let target = selectedContainerTarget() else { return false }
             onConfigureExec?(target)
         case .startPortForward:
-            onStartPortForward?(content.parent)
+            onStartPortForward?(pod)
         }
         return true
     }
 
     private func selectedContainerTarget() -> PodExecTarget? {
-        guard case .containers(let pod, let values) = content,
-            values.indices.contains(tableView.selectedRow)
-        else { return nil }
+        guard containers.indices.contains(tableView.selectedRow) else { return nil }
         return PodExecTarget(
             pod: pod,
-            preferredContainer: values[tableView.selectedRow].name
+            preferredContainer: containers[tableView.selectedRow].name
         )
     }
 
     @objc private func back() { onBack?() }
 
     private func updateSelectionControls() {
-        switch content {
-        case .containers:
-            actionButton.isEnabled = networkActionsEnabled && tableView.selectedRow >= 0
-        case .data:
-            actionButton.isEnabled = networkActionsEnabled
-        }
+        actionButton.isEnabled = networkActionsEnabled && tableView.selectedRow >= 0
     }
 }
 
 @MainActor
-private final class ObjectSubresourceTableView: NSTableView {
+private final class PodContainerTableView: NSTableView {
     var onPrimaryAction: (() -> Void)?
-    var onNetworkAction: ((ObjectSubresourceNetworkAction) -> Void)?
+    var onNetworkAction: ((PodContainerNetworkAction) -> Void)?
     var onBack: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {

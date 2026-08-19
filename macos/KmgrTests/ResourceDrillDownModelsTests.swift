@@ -77,7 +77,7 @@ import Testing
     #expect(ResourceDrillDownPlanner.plan(for: detail) == nil)
 }
 
-@Test func nodeNamespaceAndDataDrillDownUseSafeTypedTargets() {
+@Test func nodeAndNamespaceDrillDownUseSafeTypedTargets() {
     let node = drillDownIdentity(resource: "nodes", namespace: "", name: "worker-1")
     #expect(ResourceDrillDownPlanner.plan(for: ObjectDetail(
         identity: node, resourceVersion: "rv-1"
@@ -100,11 +100,6 @@ import Testing
             namespaceScope: .namespace("payments"), filterExpression: ""
         )
     ))
-
-    let configMap = drillDownIdentity(resource: "configmaps")
-    #expect(ResourceDrillDownPlanner.plan(for: ObjectDetail(
-        identity: configMap, resourceVersion: "rv-1"
-    )) == .data(configMap))
 }
 
 @Test func unsupportedAndEmptyResourcesHaveNoDrillDown() {
@@ -134,6 +129,12 @@ import Testing
             ),
         ],
         containers: [PodContainerDetail(name: "api", kind: .regular)]
+    )) == nil)
+
+    let configMap = drillDownIdentity(resource: "configmaps")
+    #expect(ResourceDrillDownPlanner.hasPotentialTarget(configMap))
+    #expect(ResourceDrillDownPlanner.plan(for: ObjectDetail(
+        identity: configMap, resourceVersion: "rv-1"
     )) == nil)
 }
 
