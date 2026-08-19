@@ -100,6 +100,136 @@ struct ClusterWorkspaceToolbarTests {
         #expect(!controller.validateMenuItem(item))
     }
 
+    @Test("manual API discovery refresh retains the catalog and active GVR while loading")
+    func APIResourceRefreshRetainsActiveView() async throws {
+        let refreshGate = RestorationDiscoveryGate()
+        let deployment = DiscoveredResource(
+            group: "apps", version: "v1", resource: "deployments", kind: "Deployment",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let provider = DiscoveryRefreshWorkspaceProvider(
+            outcomes: [
+                .result(.init(resources: [deployment], revision: "initial")),
+                .result(.init(resources: [
+                    DiscoveredResource(
+                        group: "apps", version: "v1", resource: "deployments",
+                        kind: "Deployment", namespaced: true,
+                        verbs: ["get", "list", "watch"], shortNames: ["deploy"]
+                    ),
+                    DiscoveredResource(
+                        group: "example.io", version: "v1", resource: "widgets",
+                        kind: "Widget", namespaced: true, verbs: ["list", "watch"]
+                    ),
+                ], revision: "refreshed")),
+            ],
+            gates: [1: refreshGate]
+        )
+        let controller = makeWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let refreshItem = NSMenuItem(
+            title: "Refresh API Resources",
+            action: #selector(ClusterWorkspaceWindowController.refreshAPIResources(_:)),
+            keyEquivalent: ""
+        )
+
+        try await waitUntil {
+            provider.finishedDiscoveryCount == 1 && provider.streamRequests.count == 1
+        }
+        #expect(controller.validateMenuItem(refreshItem))
+        controller.refreshAPIResources(nil)
+        try await waitUntil { provider.discoveryRefreshFlags == [false, true] }
+
+        #expect(!controller.validateMenuItem(refreshItem))
+        #expect(provider.streamRequests.count == 1)
+        #expect(provider.namespaceRequestCount == 1)
+        let outline = try #require(apiResourceOutline(in: window))
+        #expect(outline.selectedRow >= 0)
+        #expect(apiDiscoveryStatus(in: window)?.stringValue == "Refreshing API resources…")
+
+        refreshGate.open()
+        try await waitUntil { provider.finishedDiscoveryCount == 2 }
+        #expect(controller.validateMenuItem(refreshItem))
+        #expect(outline.selectedRow >= 0)
+        #expect(provider.streamRequests.count == 1)
+        #expect(provider.namespaceRequestCount == 1)
+    }
+
+    @Test("missing GVR after complete or partial discovery never opens a fallback resource")
+    func APIResourceRefreshNeverNavigatesOnMissingGVR() async throws {
+        for potentiallyIncomplete in [false, true] {
+            let provider = DiscoveryRefreshWorkspaceProvider(outcomes: [
+                .result(.init(resources: [DiscoveredResource(
+                    group: "apps", version: "v1", resource: "deployments",
+                    kind: "Deployment", namespaced: true, verbs: ["list", "watch"]
+                )])),
+                .result(.init(
+                    resources: [DiscoveredResource(
+                        group: "", version: "v1", resource: "pods", kind: "Pod",
+                        namespaced: true, verbs: ["list", "watch"]
+                    )],
+                    potentiallyIncomplete: potentiallyIncomplete,
+                    warning: potentiallyIncomplete ? ClusterManagerIssue(
+                        category: .unavailable,
+                        reason: "DiscoveryPartiallyFailed",
+                        message: "One API group was unavailable.",
+                        operation: "discover-resources"
+                    ) : nil
+                )),
+            ])
+            let controller = makeWorkspace(provider: provider)
+            controller.showWindow(nil)
+            let window = try #require(controller.window)
+            try await waitUntil {
+                provider.finishedDiscoveryCount == 1 && provider.streamRequests.count == 1
+            }
+
+            controller.refreshAPIResources(nil)
+            try await waitUntil { provider.finishedDiscoveryCount == 2 }
+
+            #expect(provider.streamRequests.count == 1)
+            #expect(provider.streamRequests.first?.resource.id == "apps/v1/deployments")
+            #expect(provider.namespaceRequestCount == 1)
+            #expect(apiResourceOutline(in: window)?.selectedRow == -1)
+            let status = apiDiscoveryStatus(in: window)?.stringValue ?? ""
+            #expect(status.contains("discovery incomplete") == potentiallyIncomplete)
+            controller.close()
+        }
+    }
+
+    @Test("failed API discovery refresh keeps the previous catalog")
+    func failedAPIResourceRefreshKeepsCatalog() async throws {
+        let provider = DiscoveryRefreshWorkspaceProvider(outcomes: [
+            .result(.init(resources: [DiscoveredResource(
+                group: "apps", version: "v1", resource: "deployments", kind: "Deployment",
+                namespaced: true, verbs: ["list", "watch"]
+            )])),
+            .failure(ClusterManagerIssue(
+                category: .unavailable,
+                reason: "DiscoveryUnavailable",
+                message: "API discovery is unavailable.",
+                retryable: true,
+                operation: "discover-resources"
+            )),
+        ])
+        let controller = makeWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        try await waitUntil {
+            provider.finishedDiscoveryCount == 1 && provider.streamRequests.count == 1
+        }
+
+        controller.refreshAPIResources(nil)
+        try await waitUntil { provider.finishedDiscoveryCount == 2 }
+
+        #expect(apiResourceOutline(in: window)?.selectedRow ?? -1 >= 0)
+        #expect(apiDiscoveryStatus(in: window)?.stringValue.contains("Refresh failed") == true)
+        #expect(provider.streamRequests.count == 1)
+        #expect(provider.namespaceRequestCount == 1)
+    }
+
     @Test("connection activity stays compact, one-line, and accessible")
     func connectionActivityLabelsDoNotOverlap() throws {
         let view = ClusterConnectionActivityView()
@@ -2229,6 +2359,82 @@ private final class RestorationDiscoveryGate: @unchecked Sendable {
     }
 }
 
+private enum DiscoveryRefreshOutcome: Sendable {
+    case result(ResourceDiscoveryResult)
+    case failure(ClusterManagerIssue)
+}
+
+private final class DiscoveryRefreshWorkspaceProvider: WorkspaceResourceProviding,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let outcomes: [DiscoveryRefreshOutcome]
+    private let gates: [Int: RestorationDiscoveryGate]
+    private var storedDiscoveryRefreshFlags: [Bool] = []
+    private var storedFinishedDiscoveryCount = 0
+    private var storedNamespaceRequestCount = 0
+    private var storedStreamRequests: [ResourceViewRequest] = []
+
+    init(
+        outcomes: [DiscoveryRefreshOutcome],
+        gates: [Int: RestorationDiscoveryGate] = [:]
+    ) {
+        precondition(!outcomes.isEmpty)
+        self.outcomes = outcomes
+        self.gates = gates
+    }
+
+    var discoveryRefreshFlags: [Bool] {
+        lock.withLock { storedDiscoveryRefreshFlags }
+    }
+
+    var finishedDiscoveryCount: Int {
+        lock.withLock { storedFinishedDiscoveryCount }
+    }
+
+    var namespaceRequestCount: Int {
+        lock.withLock { storedNamespaceRequestCount }
+    }
+
+    var streamRequests: [ResourceViewRequest] {
+        lock.withLock { storedStreamRequests }
+    }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        let (outcome, gate) = lock.withLock { () -> (
+            DiscoveryRefreshOutcome, RestorationDiscoveryGate?
+        ) in
+            let index = storedDiscoveryRefreshFlags.count
+            precondition(outcomes.indices.contains(index))
+            storedDiscoveryRefreshFlags.append(refresh)
+            return (outcomes[index], gates[index])
+        }
+        await gate?.wait()
+        lock.withLock { storedFinishedDiscoveryCount += 1 }
+        switch outcome {
+        case .result(let result): return result
+        case .failure(let issue): throw issue
+        }
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] {
+        lock.withLock { storedNamespaceRequestCount += 1 }
+        return ["default"]
+    }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        lock.withLock { storedStreamRequests.append(request) }
+        return AsyncThrowingStream { $0.finish() }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
 private final class RecordingRestorationWorkspaceProvider: WorkspaceResourceProviding,
     @unchecked Sendable
 {
@@ -3171,6 +3377,22 @@ private struct ServiceWorkspaceResourceProvider: WorkspaceResourceProviding {
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
+}
+
+@MainActor
+private func apiResourceOutline(in window: NSWindow) -> NSOutlineView? {
+    guard let root = window.contentView else { return nil }
+    return descendants(of: root)
+        .compactMap { $0 as? NSOutlineView }
+        .first { $0.accessibilityLabel() == "Kubernetes resource kinds" }
+}
+
+@MainActor
+private func apiDiscoveryStatus(in window: NSWindow) -> NSTextField? {
+    guard let root = window.contentView else { return nil }
+    return descendants(of: root)
+        .compactMap { $0 as? NSTextField }
+        .first { $0.accessibilityLabel() == "API resource discovery status" }
 }
 
 @MainActor

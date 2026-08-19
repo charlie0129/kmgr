@@ -61,7 +61,8 @@ type ResourceDiscovery struct {
 // only the API catalog and redacted failure structure, never REST configs,
 // response bodies, or authentication material. Sessions that share an
 // authority therefore reuse discovery while independently loaded catalog
-// snapshots remain isolated.
+// snapshots remain isolated. An explicit refresh keeps the last successful
+// snapshot readable until its replacement succeeds.
 type discoveryResultCache struct {
 	mu         sync.RWMutex
 	generation uint64
@@ -108,7 +109,6 @@ func (c *discoveryResultCache) resolve(
 				return result, err
 			}
 			c.generation++
-			c.result = nil
 			request = &discoveryCacheLoad{
 				generation: c.generation,
 				refresh:    true,
@@ -298,17 +298,26 @@ func DiscoverResources(ctx context.Context, session *Session) (ResourceDiscovery
 }
 
 // DiscoverResourcesCached returns the discovery catalog shared by every
-// session using the same Kubernetes backend. refresh invalidates the cached
-// value before starting or joining a refresh. Concurrent misses and refreshes
-// coalesce per authority, while each waiter retains independent cancellation.
-// Failed or canceled discoveries are not cached, and a request started before
-// a refresh can never repopulate the invalidated generation.
+// session using the same Kubernetes backend. refresh starts or joins an
+// authority-wide refresh while leaving the last successful snapshot available
+// to non-refresh callers. Concurrent misses and refreshes coalesce per
+// authority, while each waiter retains independent cancellation. Failed or
+// canceled initial discoveries are not cached; failed refreshes leave the last
+// successful snapshot intact, and a request started before a refresh can never
+// repopulate the superseded generation.
 func (s *Session) DiscoverResourcesCached(ctx context.Context, refresh bool) (ResourceDiscovery, error) {
 	if s == nil || s.backend == nil || s.Discovery() == nil {
 		return ResourceDiscovery{}, errors.New("cluster session discovery client is unavailable")
 	}
 	return s.backend.discovery.resolve(ctx, refresh, func(loadContext context.Context) (ResourceDiscovery, error) {
-		return DiscoverResourcesWithClient(loadContext, s.Discovery())
+		result, err := DiscoverResourcesWithClient(loadContext, s.Discovery())
+		if err == nil && refresh && s.backend.clients.Mapper != nil {
+			// The mapper is authority-shared, just like this cache. Reset it in
+			// the coalesced leader so a catalog refresh invalidates REST mappings
+			// exactly once without making every waiting workspace repeat the work.
+			s.backend.clients.Mapper.Reset()
+		}
+		return result, err
 	})
 }
 
@@ -596,9 +605,12 @@ func sortedUnique(values []string) []string {
 func discoveryRevision(resources []APIResource) string {
 	hash := sha256.New()
 	for _, resource := range resources {
-		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%s\x00%t\x00%t\n",
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%s\x00%t\x00%t\x00%s\x01%s\x01%s\n",
 			resource.Group, resource.Version, resource.Resource, resource.Kind,
 			resource.Namespaced, resource.PreferredVersion,
+			strings.Join(resource.Verbs, "\x00"),
+			strings.Join(resource.ShortNames, "\x00"),
+			strings.Join(resource.Categories, "\x00"),
 		)
 	}
 	return "discovery_" + hex.EncodeToString(hash.Sum(nil)[:12])

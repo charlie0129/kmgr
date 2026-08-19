@@ -333,6 +333,79 @@ func TestDiscoveryCacheCoalescesConcurrentRefreshes(t *testing.T) {
 	}
 }
 
+func TestDiscoveryCacheServesAndRetainsLastSnapshotAcrossFailedRefresh(t *testing.T) {
+	t.Parallel()
+	backend := &sharedBackend{}
+	initial := ResourceDiscovery{
+		Revision:  "initial",
+		Resources: []APIResource{{Group: "apps", Version: "v1", Resource: "deployments"}},
+	}
+	if _, err := backend.discovery.resolve(
+		context.Background(), false,
+		func(context.Context) (ResourceDiscovery, error) { return initial, nil },
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	refreshFailure := errors.New("refresh unavailable")
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, err := backend.discovery.resolve(
+			context.Background(), true,
+			func(ctx context.Context) (ResourceDiscovery, error) {
+				close(refreshStarted)
+				select {
+				case <-releaseRefresh:
+					return ResourceDiscovery{}, refreshFailure
+				case <-ctx.Done():
+					return ResourceDiscovery{}, ctx.Err()
+				}
+			},
+		)
+		refreshDone <- err
+	}()
+	select {
+	case <-refreshStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh did not start")
+	}
+
+	var unexpectedLoads atomic.Int64
+	duringRefresh, err := backend.discovery.resolve(
+		context.Background(), false,
+		func(context.Context) (ResourceDiscovery, error) {
+			unexpectedLoads.Add(1)
+			return ResourceDiscovery{}, errors.New("unexpected load")
+		},
+	)
+	if err != nil || duringRefresh.Revision != initial.Revision {
+		t.Fatalf("snapshot during refresh = %#v, error = %v", duringRefresh, err)
+	}
+	if got := unexpectedLoads.Load(); got != 0 {
+		t.Fatalf("non-refresh caller started %d loads while a stale snapshot existed", got)
+	}
+
+	close(releaseRefresh)
+	if err := <-refreshDone; !errors.Is(err, refreshFailure) {
+		t.Fatalf("refresh error = %v, want %v", err, refreshFailure)
+	}
+	afterFailure, err := backend.discovery.resolve(
+		context.Background(), false,
+		func(context.Context) (ResourceDiscovery, error) {
+			unexpectedLoads.Add(1)
+			return ResourceDiscovery{}, errors.New("unexpected load")
+		},
+	)
+	if err != nil || afterFailure.Revision != initial.Revision {
+		t.Fatalf("snapshot after failed refresh = %#v, error = %v", afterFailure, err)
+	}
+	if got := unexpectedLoads.Load(); got != 0 {
+		t.Fatalf("failed refresh discarded the cached snapshot and caused %d loads", got)
+	}
+}
+
 func TestCachedMetricsAPIAvailabilityTreatsPartialResultsConservatively(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

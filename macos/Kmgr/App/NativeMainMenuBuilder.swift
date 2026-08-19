@@ -174,6 +174,11 @@ enum NativeMainMenuBuilder {
             keyEquivalent: "n",
             modifiers: [.command, .shift]
         )
+        addResponderItem(
+            to: menu,
+            title: "Refresh API Resources",
+            action: #selector(ClusterWorkspaceWindowController.refreshAPIResources(_:))
+        )
         menu.addItem(.separator())
         addResponderItem(
             to: menu,

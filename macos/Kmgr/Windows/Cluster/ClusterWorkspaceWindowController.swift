@@ -621,6 +621,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func chooseNamespace(_ sender: Any?) {
         workspaceController.chooseNamespace(sender)
     }
+    @objc func refreshAPIResources(_ sender: Any?) {
+        workspaceController.refreshAPIResources(sender)
+    }
     @objc func moveResourceSelectionUp(_ sender: Any?) {
         workspaceController.moveResourceSelectionUp(sender)
     }
@@ -659,6 +662,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(chooseNamespace(_:)) {
             return workspaceController.canChooseNamespace
+        }
+        if menuItem.action == #selector(refreshAPIResources(_:)) {
+            return workspaceController.canRefreshAPIResources
         }
         let command: ResourceTableCommand?
         switch menuItem.action {
@@ -1283,6 +1289,19 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             return
         }
         window.makeFirstResponder(contentController.tableResponder)
+    }
+
+    var canRefreshAPIResources: Bool {
+        sidebarController.canRefreshAPIResources
+    }
+
+    @objc func refreshAPIResources(_ sender: Any?) {
+        guard sidebarController.refreshAPIResources(
+            preserving: contentController.currentResourceID
+        ) else {
+            NSSound.beep()
+            return
+        }
     }
 
     @objc private func showPortForwards() {
@@ -1998,6 +2017,7 @@ private final class ResourceSidebarViewController: NSViewController,
     private var sections: [Section] = []
     private var allResources: [DiscoveredResource] = []
     private var task: Task<Void, Never>?
+    private var taskRevision: UInt64 = 0
     private var pinObserver: UUID?
     private var didChooseInitialResource = false
     private var suppressSelectionCallbacks = false
@@ -2050,6 +2070,8 @@ private final class ResourceSidebarViewController: NSViewController,
         scroll.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.setAccessibilityLabel("API resource discovery status")
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(searchField)
@@ -2080,20 +2102,50 @@ private final class ResourceSidebarViewController: NSViewController,
             }
         }
         guard task == nil else { return }
-        statusLabel.stringValue = "Discovering resource kinds…"
+        beginDiscovery(
+            refresh: false,
+            preserving: nil,
+            onComplete: onComplete
+        )
+    }
+
+    var canRefreshAPIResources: Bool {
+        isAuthenticated && task == nil
+    }
+
+    @discardableResult
+    func refreshAPIResources(preserving resourceID: String?) -> Bool {
+        guard canRefreshAPIResources else { return false }
+        beginDiscovery(refresh: true, preserving: resourceID, onComplete: nil)
+        return true
+    }
+
+    private func beginDiscovery(
+        refresh: Bool,
+        preserving resourceID: String?,
+        onComplete: ((Result<[DiscoveredResource], Error>) -> Void)?
+    ) {
+        guard task == nil else { return }
+        statusLabel.stringValue = refresh
+            ? "Refreshing API resources…"
+            : "Discovering resource kinds…"
         statusLabel.toolTip = nil
         statusLabel.textColor = .secondaryLabelColor
-        task = Task { [weak self, provider, session] in
-            guard let self else { return }
+        taskRevision &+= 1
+        let revision = taskRevision
+        let sessionID = session.sessionID
+        task = Task { [weak self, provider] in
             do {
                 let discovery = try await provider.discoverResources(
-                    sessionID: session.sessionID,
-                    refresh: false
+                    sessionID: sessionID,
+                    refresh: refresh
                 )
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, let self, taskRevision == revision else { return }
+                task = nil
+                let selectedID = resourceID ?? selectedResource()?.id
                 allResources = discovery.resources.filter { $0.verbs.contains("list") }
                 onResourcesChanged?(allResources)
-                rebuildSections()
+                rebuildSections(preservingSelectionID: selectedID)
                 if discovery.potentiallyIncomplete {
                     statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds • discovery incomplete"
                     statusLabel.toolTip = discovery.warning?.userFacingPresentation.detailedText
@@ -2110,9 +2162,14 @@ private final class ResourceSidebarViewController: NSViewController,
                 }
                 onComplete?(.success(allResources))
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, let self, taskRevision == revision else { return }
+                task = nil
                 let presentation = UserFacingErrorPresentation(error)
-                statusLabel.stringValue = presentation.inlineText
+                if refresh, !allResources.isEmpty {
+                    statusLabel.stringValue = "Refresh failed • keeping \(allResources.count.formatted()) resource kinds"
+                } else {
+                    statusLabel.stringValue = presentation.inlineText
+                }
                 statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
                 onComplete?(.failure(error))
@@ -2121,8 +2178,10 @@ private final class ResourceSidebarViewController: NSViewController,
     }
 
     func stop() {
+        taskRevision &+= 1
         task?.cancel()
         task = nil
+        isAuthenticated = false
         if let pinObserver {
             pinStore.removeObserver(pinObserver)
             self.pinObserver = nil
@@ -2133,6 +2192,7 @@ private final class ResourceSidebarViewController: NSViewController,
         session: OpenedClusterSession,
         onComplete: ((Result<[DiscoveredResource], Error>) -> Void)? = nil
     ) {
+        taskRevision &+= 1
         task?.cancel()
         task = nil
         self.session = session
@@ -2143,6 +2203,7 @@ private final class ResourceSidebarViewController: NSViewController,
     }
 
     func installRestoredResource(_ resource: DiscoveredResource) {
+        taskRevision &+= 1
         task?.cancel()
         task = nil
         allResources = [resource]
@@ -2160,8 +2221,8 @@ private final class ResourceSidebarViewController: NSViewController,
 
     @objc private func searchChanged() { rebuildSections() }
 
-    private func rebuildSections() {
-        let selectedID = selectedResource()?.id
+    private func rebuildSections(preservingSelectionID requestedSelectionID: String? = nil) {
+        let selectedID = requestedSelectionID ?? selectedResource()?.id
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let visible = query.isEmpty ? allResources : allResources.filter {
             ([$0.kind, $0.resource] + $0.shortNames)
@@ -2183,15 +2244,21 @@ private final class ResourceSidebarViewController: NSViewController,
                 sections.append(Section(title: title, resources: resources.sorted { $0.kind < $1.kind }))
             }
         }
+        let wasSuppressingSelectionCallbacks = suppressSelectionCallbacks
+        suppressSelectionCallbacks = true
         outlineView.reloadData()
+        outlineView.deselectAll(nil)
         for index in sections.indices
-            where sections[index].title != "Custom Resources" || !query.isEmpty
+            where sections[index].title != "Custom Resources"
+                || !query.isEmpty
+                || sections[index].resources.contains(where: { $0.id == selectedID })
         {
             outlineView.expandItem(sections[index])
         }
         if let selectedID, let resource = allResources.first(where: { $0.id == selectedID }) {
             select(resource: resource, notify: false)
         }
+        suppressSelectionCallbacks = wasSuppressingSelectionCallbacks
     }
 
     private func sectionName(for resource: DiscoveredResource) -> String {
@@ -2408,10 +2475,19 @@ private final class ResourceSidebarViewController: NSViewController,
     }
 
     private func select(resource: DiscoveredResource, notify: Bool) {
+        if !sections.contains(where: {
+            $0.resources.contains(where: { $0.id == resource.id })
+                && outlineView.isItemExpanded($0)
+        }), let section = sections.first(where: {
+            $0.resources.contains(where: { $0.id == resource.id })
+        }) {
+            outlineView.expandItem(section)
+        }
         for row in 0..<outlineView.numberOfRows where (outlineView.item(atRow: row) as? DiscoveredResource)?.id == resource.id {
+            let wasSuppressingSelectionCallbacks = suppressSelectionCallbacks
             suppressSelectionCallbacks = true
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            suppressSelectionCallbacks = false
+            suppressSelectionCallbacks = wasSuppressingSelectionCallbacks
             if notify { onSelectResource?(resource) }
             break
         }

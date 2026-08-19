@@ -71,6 +71,48 @@ func TestDiscoverResourcesFiltersSubresourcesAndNonListableKinds(t *testing.T) {
 	}
 }
 
+func TestDiscoveryRevisionIncludesEveryCatalogBehaviorField(t *testing.T) {
+	t.Parallel()
+	base := APIResource{
+		Group:            "autoscaling",
+		Version:          "v2",
+		Resource:         "horizontalpodautoscalers",
+		Kind:             "HorizontalPodAutoscaler",
+		Namespaced:       true,
+		Verbs:            []string{"get", "list", "watch"},
+		ShortNames:       []string{"hpa"},
+		Categories:       []string{"all"},
+		PreferredVersion: true,
+	}
+	baseRevision := discoveryRevision([]APIResource{base})
+	tests := []struct {
+		name   string
+		mutate func(*APIResource)
+	}{
+		{name: "group", mutate: func(value *APIResource) { value.Group = "scaling.example.io" }},
+		{name: "version", mutate: func(value *APIResource) { value.Version = "v1" }},
+		{name: "resource", mutate: func(value *APIResource) { value.Resource = "autoscalers" }},
+		{name: "kind", mutate: func(value *APIResource) { value.Kind = "Autoscaler" }},
+		{name: "scope", mutate: func(value *APIResource) { value.Namespaced = false }},
+		{name: "preferred version", mutate: func(value *APIResource) { value.PreferredVersion = false }},
+		{name: "verbs", mutate: func(value *APIResource) { value.Verbs = []string{"get", "list"} }},
+		{name: "short names", mutate: func(value *APIResource) { value.ShortNames = []string{"autoscale"} }},
+		{name: "categories", mutate: func(value *APIResource) { value.Categories = []string{"scaling"} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := base
+			changed.Verbs = slices.Clone(base.Verbs)
+			changed.ShortNames = slices.Clone(base.ShortNames)
+			changed.Categories = slices.Clone(base.Categories)
+			test.mutate(&changed)
+			if got := discoveryRevision([]APIResource{changed}); got == baseRevision {
+				t.Fatalf("revision did not change after %s changed: %q", test.name, got)
+			}
+		})
+	}
+}
+
 func TestDiscoverResourcesKeepsPartialListsAndReportsFailedGroup(t *testing.T) {
 	t.Parallel()
 	secretResponse := "credential=never-forward-this"

@@ -133,6 +133,12 @@ struct NativeMainMenuBuilderTests {
                 NSEvent.ModifierFlags([.command, .shift])
             ),
             (
+                "Refresh API Resources",
+                #selector(ClusterWorkspaceWindowController.refreshAPIResources(_:)),
+                "",
+                NSEvent.ModifierFlags.command
+            ),
+            (
                 "Move Selection Up",
                 #selector(ClusterWorkspaceWindowController.moveResourceSelectionUp(_:)),
                 "k",

@@ -349,11 +349,6 @@ func (s *ClusterService) Discover(
 	if !ok {
 		return nil, status.Error(codes.NotFound, "cluster session was not found")
 	}
-	if request.GetRefresh() {
-		if mapper, ok := session.Mapper().(interface{ Reset() }); ok {
-			mapper.Reset()
-		}
-	}
 	discoveryResult, err := session.DiscoverResourcesCached(requestContext, request.GetRefresh())
 	if err != nil {
 		response.Error = connectionError(err, session.Context().Name, session.Context().ServerHostname)
