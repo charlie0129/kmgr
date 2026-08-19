@@ -34,6 +34,12 @@ type SearchQuery struct {
 	Query              string
 	ResultLimit        int
 	AllowPaginatedList bool
+	// sourceReady is invoked after this search can finish independently of an
+	// older query revision: either an exact GET succeeded, a compatible
+	// completed LIST snapshot was acquired, or the search attached to the
+	// shared in-flight LIST. The gRPC adapter uses this internal barrier to
+	// cancel superseded revisions without tearing down their LIST too early.
+	sourceReady func()
 }
 
 type SearchBatch struct {
@@ -41,7 +47,9 @@ type SearchBatch struct {
 	Examined      uint64
 	Complete      bool
 	UsedDirectGet bool
-	Reusable      bool
+	// Reusable means the bounded identity snapshot can answer later query
+	// revisions. Metadata-only snapshots intentionally are not view handoffs.
+	Reusable bool
 }
 
 type CachedSearchQuery struct {
@@ -264,11 +272,6 @@ func (r *Runtime) Search(
 		authorityID: authorityID, group: gvr.Group, version: gvr.Version,
 		resource: gvr.Resource, namespace: serverNamespace,
 	}
-	snapshotKey := searchSnapshotKey{
-		resource:       keyPrefix,
-		namespaceScope: canonicalNamespaceScope(query.Resource, query.NamespaceScope),
-	}
-
 	// Exact namespace/name can use one authoritative GET even if this kind has
 	// never been listed. It is never satisfied solely from stale cache.
 	if namespace, name, exact := exactSearchIdentity(query.Query, query.Resource, query.NamespaceScope); exact {
@@ -282,6 +285,7 @@ func (r *Runtime) Search(
 		value, getErr := getFromLister(ctx, exactClient, name)
 		if getErr == nil && includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
 			result := makeSearchResult(query.SessionID, query.Resource, value, 10_000, false)
+			notifySearchSourceReady(query)
 			return emit(SearchBatch{Results: []*kmgrv1.SearchResult{result}, Examined: 1, Complete: true, UsedDirectGet: true})
 		}
 		// A bare query can be both a possible exact identity and a prefix or
@@ -332,13 +336,57 @@ func (r *Runtime) Search(
 		return emit(SearchBatch{Complete: true})
 	}
 
+	metadataSource, metadataOnly := r.source.(MetadataSearchResourceSource)
+	snapshotKey := searchSnapshotKey{
+		resource:       keyPrefix,
+		namespaceScope: canonicalNamespaceScope(query.Resource, query.NamespaceScope),
+		metadataOnly:   metadataOnly,
+	}
 	seen := newBoundedSearchResults(limit)
 	listExaminedBase := examined
-	transient, attachment, err := r.startTransientSearchList(ctx, snapshotKey, client)
+	if snapshot := r.completedSearchSnapshot(snapshotKey); snapshot != nil {
+		notifySearchSourceReady(query)
+		for _, indexed := range snapshot.store.SearchSnapshot() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			value := indexed.Object
+			if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
+				continue
+			}
+			if rank, match := searchRankNormalized(
+				normalizedQuery, indexed.NormalizedName, indexed.NormalizedQualified,
+			); match {
+				seen.Add(makeSearchResult(query.SessionID, query.Resource, value, rank, true))
+			}
+		}
+		return emit(SearchBatch{
+			Results: seen.Sorted(), Examined: listExaminedBase + uint64(snapshot.objectCount),
+			Complete: true, Reusable: true,
+		})
+	}
+	var listClient searchLister = client
+	if metadataOnly {
+		metadataAuthority, metadataClient, metadataErr := metadataSource.OpenMetadataSearchResource(
+			query.SessionID, gvr, serverNamespace,
+		)
+		if metadataErr != nil {
+			return metadataErr
+		}
+		if metadataAuthority != authorityID {
+			return errors.New("metadata search authority does not match dynamic resource authority")
+		}
+		if metadataClient == nil {
+			return errors.New("metadata search client is unavailable")
+		}
+		listClient = metadataSearchLister{client: metadataClient}
+	}
+	transient, attachment, err := r.startTransientSearchList(ctx, snapshotKey, listClient)
 	if err != nil {
 		return err
 	}
 	defer r.detachTransientSearch(transient, attachment)
+	notifySearchSourceReady(query)
 	for {
 		page, err := r.waitTransientSearchPage(ctx, transient, attachment)
 		if err != nil {
@@ -369,6 +417,12 @@ func (r *Runtime) Search(
 		if page.complete {
 			return nil
 		}
+	}
+}
+
+func notifySearchSourceReady(query SearchQuery) {
+	if query.sourceReady != nil {
+		query.sourceReady()
 	}
 }
 

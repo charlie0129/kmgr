@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/metadata"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
@@ -69,6 +70,18 @@ type ResourceSource interface {
 	)
 }
 
+// MetadataSearchResourceSource optionally provides identity-only clients for
+// explicit resource search. Metadata search snapshots are deliberately kept
+// separate from full-object view handoffs: a dynamic WATCH cannot hydrate
+// fields omitted from PartialObjectMetadata for unchanged objects.
+type MetadataSearchResourceSource interface {
+	OpenMetadataSearchResource(sessionID string, resource schema.GroupVersionResource, namespace string) (
+		authorityID string,
+		client metadata.ResourceInterface,
+		err error,
+	)
+}
+
 // TableResourceSource optionally provides content-negotiated metav1.Table
 // streams for resources without a curated native registry. Implementations
 // must include each full object and fall back to the same GVR's ordinary
@@ -108,8 +121,36 @@ func (s ClusterResourceSource) OpenResource(
 	// SessionRegistry shares one dynamic client between workspace sessions for
 	// the same catalog/context. Include its pointer so a kubeconfig reload that
 	// happens to retain the same stable context ID cannot cross-wire clients.
-	authorityID := session.Context().ID + "/" + pointerIdentity(session.Dynamic())
+	authorityID := clusterSessionAuthorityID(session)
 	return authorityID, resourceClient, nil
+}
+
+func (s ClusterResourceSource) OpenMetadataSearchResource(
+	sessionID string,
+	resource schema.GroupVersionResource,
+	namespace string,
+) (string, metadata.ResourceInterface, error) {
+	if s.Sessions == nil {
+		return "", nil, errors.New("cluster session registry is unavailable")
+	}
+	session, ok := s.Sessions.Get(sessionID)
+	if !ok {
+		return "", nil, ErrSessionNotFound
+	}
+	metadataClient := session.Metadata()
+	if metadataClient == nil {
+		return "", nil, errors.New("cluster metadata client is unavailable")
+	}
+	client := metadataClient.Resource(resource)
+	var resourceClient metadata.ResourceInterface = client
+	if namespace != "" {
+		resourceClient = client.Namespace(namespace)
+	}
+	return clusterSessionAuthorityID(session), resourceClient, nil
+}
+
+func clusterSessionAuthorityID(session *cluster.Session) string {
+	return session.Context().ID + "/" + pointerIdentity(session.Dynamic())
 }
 
 func (s ClusterResourceSource) OpenTableResource(
@@ -147,7 +188,7 @@ func (s ClusterResourceSource) AuthorityID(sessionID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return session.Context().ID + "/" + pointerIdentity(session.Dynamic()), true
+	return clusterSessionAuthorityID(session), true
 }
 
 func pointerIdentity(value any) string {
@@ -291,11 +332,16 @@ type resourceKey struct {
 type searchSnapshotKey struct {
 	resource       resourceKey
 	namespaceScope string
+	// metadataOnly prevents identity-only search pages from being consumed by
+	// or joined to a full-object resource view. Dynamic fallback searches keep
+	// the zero value and retain the legacy view-handoff optimization.
+	metadataOnly bool
 }
 
-// completedSearchSnapshot is a short-lived, single-consumer handoff from a
-// command-palette LIST to a subsequently opened resource view. Once consumed,
-// the normal resourceRuntime owns the store and its LIST/WATCH lifetime.
+// completedSearchSnapshot is a short-lived, multi-search identity source.
+// Full-object snapshots (metadataOnly=false) are also a single-consumer
+// handoff to a subsequently opened resource view; metadata-only snapshots can
+// never cross into that view lifecycle.
 type completedSearchSnapshot struct {
 	store           *store.UIDStore
 	objectCount     int
@@ -1797,6 +1843,25 @@ func (r *Runtime) consumeSearchSnapshotLocked(key searchSnapshotKey) *completedS
 		return nil
 	}
 	r.removeSearchSnapshotLocked(key, snapshot)
+	return snapshot
+}
+
+// completedSearchSnapshot returns a live bounded snapshot without removing it
+// from the query-reuse cache or consuming an eligible full-object view
+// handoff. The UIDStore owns its synchronization, and callers keep the returned
+// snapshot reachable while scanning even if expiration or a view concurrently
+// removes it from Runtime's cache.
+func (r *Runtime) completedSearchSnapshot(key searchSnapshotKey) *completedSearchSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snapshot := r.searchSnapshots[key]
+	if snapshot == nil {
+		return nil
+	}
+	if !time.Now().Before(snapshot.expiresAt) {
+		r.removeSearchSnapshotLocked(key, snapshot)
+		return nil
+	}
 	return snapshot
 }
 
@@ -3621,4 +3686,5 @@ func structuredViewError(operation string, err error, retryable bool) *kmgrv1.St
 // Compile-time check that dynamic clients remain compatible with the narrow
 // pipeline contract as client-go evolves.
 var _ watcher.ListerWatcher = dynamic.ResourceInterface(nil)
+var _ MetadataSearchResourceSource = ClusterResourceSource{}
 var _ = types.UID("")

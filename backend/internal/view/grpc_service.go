@@ -442,6 +442,11 @@ func (s *GRPCService) SearchObjects(
 		return err
 	}
 	defer func() {
+		// If the replacement fails or is canceled before Runtime reaches its
+		// source-ready barrier, no later callback will retire older revisions.
+		// They are stale to the client once this revision was admitted, so finish
+		// that cleanup here without ever touching a newer registration.
+		s.cancelSupersededSearches(key, registration)
 		cancel()
 		s.unregisterSearch(key, registration)
 	}()
@@ -458,6 +463,9 @@ func (s *GRPCService) SearchObjects(
 		NamespaceScope: NamespaceScope{All: scope.GetAllNamespaces(), Namespaces: append([]string(nil), scope.GetNamespaces()...)},
 		Query:          request.GetQuery(), ResultLimit: int(request.GetResultLimit()),
 		AllowPaginatedList: request.GetAllowPaginatedList(),
+		sourceReady: func() {
+			s.cancelSupersededSearches(key, registration)
+		},
 	}, func(batch SearchBatch) error {
 		sequence++
 		return stream.Send(&kmgrv1.SearchObjectsEvent{
@@ -527,10 +535,12 @@ func (s *GRPCService) CancelSearch(
 	return &kmgrv1.Acknowledgement{RequestId: requestID, Accepted: registration != nil}, nil
 }
 
-// registerSearch admits one active query revision for a logical palette search.
-// Generations are compared before query revisions because the client resets its
-// revision counter when it enters a new search generation. Registration uses a
-// distinct owner so a canceled handler's delayed defer cannot unregister a
+// registerSearch admits a newer query revision without immediately canceling
+// its predecessor. The small overlap lets Runtime attach the replacement to an
+// in-flight metadata LIST before cancelSupersededSearches detaches older
+// consumers. Generations are compared before query revisions because the
+// client resets its revision counter when it enters a new search generation.
+// Registration uses a distinct owner so delayed cleanup cannot unregister a
 // replacement that later reuses the same exact cursor.
 func (s *GRPCService) registerSearch(
 	key searchStreamKey,
@@ -540,9 +550,9 @@ func (s *GRPCService) registerSearch(
 	s.searchMu.Lock()
 	defer s.searchMu.Unlock()
 
-	// Reject before canceling anything. This keeps a crossed stale request from
-	// partially disturbing an authoritative registration even if an invariant
-	// violation ever leaves more than one entry for the logical search.
+	// Reject before modifying anything. This keeps a crossed stale request from
+	// partially disturbing authoritative registrations even while revisions
+	// intentionally overlap for source handoff.
 	for existing := range s.searches {
 		if !sameLogicalSearch(existing, key) {
 			continue
@@ -554,18 +564,35 @@ func (s *GRPCService) registerSearch(
 			return nil, status.Error(codes.AlreadyExists, "search generation and query revision are already active")
 		}
 	}
-	for existing, current := range s.searches {
-		if !sameLogicalSearch(existing, key) {
-			continue
-		}
-		current.cancel()
-		delete(s.searches, existing)
-	}
 	if s.searches == nil {
 		s.searches = make(map[searchStreamKey]*searchRegistration)
 	}
 	s.searches[key] = registration
 	return registration, nil
+}
+
+// cancelSupersededSearches retires only revisions older than an admitted
+// owner. The owner check prevents a failed or canceled handler from disturbing
+// a retry that reused its exact cursor, while the version comparison protects
+// a newer revision from delayed cleanup.
+func (s *GRPCService) cancelSupersededSearches(
+	key searchStreamKey,
+	owner *searchRegistration,
+) {
+	var cancellations []context.CancelFunc
+	s.searchMu.Lock()
+	if s.searches[key] == owner {
+		for existing, registration := range s.searches {
+			if sameLogicalSearch(existing, key) && compareSearchVersion(existing, key) < 0 {
+				delete(s.searches, existing)
+				cancellations = append(cancellations, registration.cancel)
+			}
+		}
+	}
+	s.searchMu.Unlock()
+	for _, cancel := range cancellations {
+		cancel()
+	}
 }
 
 func (s *GRPCService) unregisterSearch(key searchStreamKey, owner *searchRegistration) {

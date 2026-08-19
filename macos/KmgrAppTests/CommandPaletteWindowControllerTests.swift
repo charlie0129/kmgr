@@ -144,6 +144,42 @@ struct CommandPaletteWindowControllerTests {
         #expect(controls.status.toolTip?.contains("HTTP 401") == true)
         #expect(controls.status.textColor == .systemRed)
     }
+
+    @Test("query revisions overlap through debounce and dismissal cancels all")
+    func queryRevisionsOverlapUntilDismissal() async throws {
+        let provider = ControllablePaletteSearchProvider()
+        let controller = makePaletteController(provider: provider)
+        controller.showWindow(nil)
+        let controls = try paletteControls(in: controller)
+
+        try enterPodSearch(controller: controller, controls: controls)
+        controls.search.stringValue = "alpha"
+        controller.controlTextDidChange(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: controls.search
+        ))
+        try await waitForPalette { provider.requests.count == 1 }
+        let first = try #require(provider.requests.first)
+
+        controls.search.stringValue = "beta"
+        controller.controlTextDidChange(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: controls.search
+        ))
+        try await Task.sleep(for: .milliseconds(70))
+        #expect(provider.requests.count == 1)
+        #expect(provider.cancellations.isEmpty)
+
+        try await waitForPalette { provider.requests.count == 2 }
+        let requests = provider.requests
+        #expect(provider.cancellations.isEmpty)
+        #expect(requests.map(\.query) == ["alpha", "beta"])
+        #expect(requests.map(\.queryRevision) == [first.queryRevision, first.queryRevision + 1])
+
+        controller.close()
+        try await waitForPalette { provider.cancellations.count == 2 }
+        #expect(Set(provider.cancellations.map(\.queryRevision)) == Set(requests.map(\.queryRevision)))
+    }
 }
 }
 
@@ -280,10 +316,14 @@ private final class ControllablePaletteSearchProvider: ObjectSearchProviding,
     private var cachedResponse = CachedObjectSearchResponse(
         results: [], objectsExamined: 0, examinationTruncated: false
     )
-    private var continuation: AsyncThrowingStream<ObjectSearchMessage, Error>.Continuation?
+    private var storedRequests: [ObjectSearchRequest] = []
+    private var continuations: [UInt64: AsyncThrowingStream<ObjectSearchMessage, Error>.Continuation] = [:]
+    private var storedCancellations: [PaletteSearchCancellation] = []
 
     var request: ObjectSearchRequest? { lock.withLock { storedRequest } }
     var cachedRequest: CachedObjectSearchRequest? { lock.withLock { storedCachedRequest } }
+    var requests: [ObjectSearchRequest] { lock.withLock { storedRequests } }
+    var cancellations: [PaletteSearchCancellation] { lock.withLock { storedCancellations } }
 
     func setCachedResponse(_ value: CachedObjectSearchResponse) {
         lock.withLock { cachedResponse = value }
@@ -302,7 +342,8 @@ private final class ControllablePaletteSearchProvider: ObjectSearchProviding,
         AsyncThrowingStream { continuation in
             lock.withLock {
                 storedRequest = request
-                self.continuation = continuation
+                storedRequests.append(request)
+                continuations[request.queryRevision] = continuation
             }
         }
     }
@@ -312,14 +353,25 @@ private final class ControllablePaletteSearchProvider: ObjectSearchProviding,
         searchID: String,
         generation: UInt64,
         queryRevision: UInt64
-    ) async {}
+    ) async {
+        lock.withLock {
+            storedCancellations.append(PaletteSearchCancellation(
+                sessionID: sessionID,
+                searchID: searchID,
+                generation: generation,
+                queryRevision: queryRevision
+            ))
+        }
+    }
 
     func emit(
         results: [ObjectSearchResult],
         sequence: UInt64,
         issue: ClusterManagerIssue? = nil
     ) {
-        let values = lock.withLock { (storedRequest, continuation) }
+        let values = lock.withLock {
+            (storedRequest, storedRequest.flatMap { continuations[$0.queryRevision] })
+        }
         guard let request = values.0, let continuation = values.1 else { return }
         continuation.yield(ObjectSearchMessage(
             cursor: StreamCursor(generation: request.generation, sequence: sequence),
@@ -335,6 +387,13 @@ private final class ControllablePaletteSearchProvider: ObjectSearchProviding,
             issue: issue
         ))
     }
+}
+
+private struct PaletteSearchCancellation: Sendable {
+    let sessionID: String
+    let searchID: String
+    let generation: UInt64
+    let queryRevision: UInt64
 }
 
 private enum PaletteWindowTestError: Error {

@@ -33,9 +33,16 @@ type transientSearchAttachment struct {
 	replaying bool
 }
 
+// searchLister is intentionally narrower than watcher.ListerWatcher. The
+// metadata-only production search path never watches, while dynamic resource
+// clients used by tests and fallback sources satisfy this interface directly.
+type searchLister interface {
+	List(context.Context, metav1.ListOptions) (*unstructured.UnstructuredList, error)
+}
+
 type transientSearchList struct {
 	key    searchSnapshotKey
-	client watcher.ListerWatcher
+	client searchLister
 	store  *store.UIDStore
 
 	ctx    context.Context
@@ -61,7 +68,7 @@ type transientSearchList struct {
 func (r *Runtime) startTransientSearchList(
 	callerCtx context.Context,
 	key searchSnapshotKey,
-	client watcher.ListerWatcher,
+	client searchLister,
 ) (*transientSearchList, *transientSearchAttachment, error) {
 	for {
 		r.mu.Lock()

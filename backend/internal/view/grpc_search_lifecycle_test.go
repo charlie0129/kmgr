@@ -39,6 +39,9 @@ func TestSearchRegistrationUsesGenerationPrimaryOrdering(t *testing.T) {
 	}
 
 	// Conversely, a newer generation may validly restart its revision counter.
+	// Keep the predecessor alive until the replacement has attached to its
+	// authoritative source; canceling during registration would tear down the
+	// shared LIST before the replacement can join it.
 	newKey := searchStreamKey{
 		sessionID: "session", searchID: "palette", generation: 3, revision: 1,
 	}
@@ -49,11 +52,29 @@ func TestSearchRegistrationUsesGenerationPrimaryOrdering(t *testing.T) {
 	}
 	select {
 	case <-activeContext.Done():
+		t.Fatal("registration canceled its predecessor before source handoff")
 	default:
-		t.Fatal("new generation did not cancel its predecessor")
+	}
+	if len(service.searches) != 2 || service.searches[newKey] != newRegistration {
+		t.Fatalf("registrations before source handoff = %#v", service.searches)
+	}
+	service.cancelSupersededSearches(activeKey, active)
+	select {
+	case <-newContext.Done():
+		t.Fatal("delayed predecessor handoff canceled the newer registration")
+	default:
+	}
+	if len(service.searches) != 2 || service.searches[newKey] != newRegistration {
+		t.Fatalf("registrations after delayed predecessor handoff = %#v", service.searches)
+	}
+	service.cancelSupersededSearches(newKey, newRegistration)
+	select {
+	case <-activeContext.Done():
+	default:
+		t.Fatal("source handoff did not cancel its predecessor")
 	}
 	if len(service.searches) != 1 || service.searches[newKey] != newRegistration {
-		t.Fatalf("registrations after replacement = %#v", service.searches)
+		t.Fatalf("registrations after source handoff = %#v", service.searches)
 	}
 	service.unregisterSearch(newKey, newRegistration)
 	newCancel()
@@ -96,6 +117,7 @@ func TestSearchRegistrationRejectsDuplicatesAndCleanupRequiresExactOwner(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	service.cancelSupersededSearches(key, first)
 	service.unregisterSearch(key, first)
 	if service.searches[key] != retry {
 		t.Fatal("delayed cleanup from the old owner removed the exact-cursor retry")

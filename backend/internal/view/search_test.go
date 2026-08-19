@@ -17,7 +17,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/metadata"
 
 	"github.com/charlie0129/kmgr/backend/internal/store"
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
@@ -522,6 +524,138 @@ func TestCompletedPaginatedSearchSeedsViewAndResumesWatch(t *testing.T) {
 	}
 	if got := client.lastWatchResourceVersion(); got != "rv-final" {
 		t.Fatalf("watch resourceVersion = %q, want rv-final", got)
+	}
+}
+
+func TestCompletedPaginatedSearchSnapshotServesLaterQueryWithoutBeingConsumed(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{listPage(
+		"rv-search", "",
+		pod("alpha", "ns", "alpha", "Running", 0, nil, time.Time{}),
+		pod("beta", "ns", "beta", "Running", 0, nil, time.Time{}),
+	)}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	first := inProgressSearchQuery("alp")
+	if err := runtime.Search(context.Background(), first, func(SearchBatch) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if calls := client.listCalls.Load(); calls != 1 {
+		t.Fatalf("first search LIST calls = %d, want 1", calls)
+	}
+
+	var readyCalls atomic.Int64
+	second := inProgressSearchQuery("bet")
+	second.sourceReady = func() { readyCalls.Add(1) }
+	var final SearchBatch
+	if err := runtime.Search(context.Background(), second, func(batch SearchBatch) error {
+		final = batch
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := client.listCalls.Load(); calls != 1 {
+		t.Fatalf("snapshot-backed search repeated LIST; calls = %d", calls)
+	}
+	if readyCalls.Load() != 1 {
+		t.Fatalf("source-ready calls = %d, want 1", readyCalls.Load())
+	}
+	if !final.Complete || !final.Reusable || final.Examined != 2 || len(final.Results) != 1 {
+		t.Fatalf("snapshot-backed final = %#v", final)
+	}
+	if result := final.Results[0]; result.GetIdentity().GetName() != "beta" || !result.GetStale() {
+		t.Fatalf("snapshot-backed result = %#v", result)
+	}
+
+	view, err := runtime.Open(openView("view-session", "pods", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Close()
+	waitForSnapshotUID(t, view, "beta")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "rv-search" })
+	if calls := client.listCalls.Load(); calls != 1 {
+		t.Fatalf("snapshot-backed search consumed view handoff; LIST calls = %d", calls)
+	}
+	if got := client.lastWatchResourceVersion(); got != "rv-search" {
+		t.Fatalf("watch resourceVersion = %q, want rv-search", got)
+	}
+}
+
+func TestMetadataSearchSnapshotCannotSeedFullObjectView(t *testing.T) {
+	t.Parallel()
+	dynamicClient := newSearchClient()
+	dynamicClient.pages = []*unstructured.UnstructuredList{listPage(
+		"full-rv", "", pod("beta-full", "ns", "beta", "Running", 0, nil, time.Time{}),
+	)}
+	metadataClient := &metadataSearchTestClient{page: &metav1.PartialObjectMetadataList{
+		ListMeta: metav1.ListMeta{ResourceVersion: "metadata-rv"},
+		Items: []metav1.PartialObjectMetadata{
+			{ObjectMeta: metav1.ObjectMeta{Name: "alpha", Namespace: "ns", UID: "alpha"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "beta", Namespace: "ns", UID: "beta"}},
+		},
+	}}
+	runtime, err := NewRuntime(RuntimeConfig{Source: &metadataSearchTestSource{
+		authority: "cluster", dynamic: dynamicClient, metadata: metadataClient,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	if err := runtime.Search(context.Background(), inProgressSearchQuery("alp"), func(SearchBatch) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var final SearchBatch
+	if err := runtime.Search(context.Background(), inProgressSearchQuery("bet"), func(batch SearchBatch) error {
+		final = batch
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if metadataClient.listCalls.Load() != 1 || dynamicClient.listCalls.Load() != 0 {
+		t.Fatalf(
+			"search calls metadata LIST=%d dynamic LIST=%d",
+			metadataClient.listCalls.Load(), dynamicClient.listCalls.Load(),
+		)
+	}
+	if dynamicClient.getCalls.Load() != 2 {
+		t.Fatalf("exact identity GET calls = %d, want 2", dynamicClient.getCalls.Load())
+	}
+	if !final.Complete || !final.Reusable || len(final.Results) != 1 ||
+		final.Results[0].GetIdentity().GetName() != "beta" || !final.Results[0].GetStale() {
+		t.Fatalf("metadata snapshot result = %#v", final)
+	}
+
+	view, err := runtime.Open(openView("view-session", "pods", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Close()
+	waitForSnapshotUID(t, view, "beta-full")
+	if calls := dynamicClient.listCalls.Load(); calls != 1 {
+		t.Fatalf("full-object view LIST calls = %d, want 1", calls)
+	}
+	runtime.mu.Lock()
+	metadataSnapshots := 0
+	for key := range runtime.searchSnapshots {
+		if key.metadataOnly {
+			metadataSnapshots++
+		}
+	}
+	runtime.mu.Unlock()
+	if metadataSnapshots != 1 {
+		t.Fatalf("retained metadata-only snapshots = %d, want 1", metadataSnapshots)
 	}
 }
 
@@ -1059,9 +1193,11 @@ func TestCompatibleSearchJoinsInProgressListWithReplay(t *testing.T) {
 
 	var finalMu sync.Mutex
 	var final SearchBatch
+	secondReady := make(chan struct{})
 	secondDone := make(chan error, 1)
 	go func() {
 		query := inProgressSearchQuery("beta")
+		query.sourceReady = func() { close(secondReady) }
 		secondDone <- runtime.Search(context.Background(), query, func(batch SearchBatch) error {
 			finalMu.Lock()
 			final = batch
@@ -1069,15 +1205,16 @@ func TestCompatibleSearchJoinsInProgressListWithReplay(t *testing.T) {
 			return nil
 		})
 	}()
+	<-secondReady
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first Search error = %v", err)
+	}
 	eventually(t, time.Second, func() bool {
 		finalMu.Lock()
 		defer finalMu.Unlock()
 		return len(final.Results) == 1
 	})
-	cancelFirst()
-	if err := <-firstDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("first Search error = %v", err)
-	}
 	close(client.secondPageGate)
 	if err := <-secondDone; err != nil {
 		t.Fatal(err)
@@ -1846,16 +1983,23 @@ func TestExactSearchUsesDirectGet(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
+	var readyCalls atomic.Int64
 	var batch SearchBatch
-	err = runtime.Search(context.Background(), SearchQuery{
+	query := SearchQuery{
 		SessionID: "session", Resource: ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
 		NamespaceScope: NamespaceScope{All: true}, Query: "ns/exact", AllowPaginatedList: true,
-	}, func(value SearchBatch) error { batch = value; return nil })
+		sourceReady: func() { readyCalls.Add(1) },
+	}
+	err = runtime.Search(context.Background(), query, func(value SearchBatch) error { batch = value; return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !batch.UsedDirectGet || len(batch.Results) != 1 || client.listCalls.Load() != 0 || client.watchCalls.Load() != 0 {
-		t.Fatalf("direct GET result=%#v list=%d watch=%d", batch, client.listCalls.Load(), client.watchCalls.Load())
+	if !batch.UsedDirectGet || len(batch.Results) != 1 || readyCalls.Load() != 1 ||
+		client.listCalls.Load() != 0 || client.watchCalls.Load() != 0 {
+		t.Fatalf(
+			"direct GET result=%#v ready=%d list=%d watch=%d",
+			batch, readyCalls.Load(), client.listCalls.Load(), client.watchCalls.Load(),
+		)
 	}
 }
 
@@ -2149,6 +2293,85 @@ type searchClient struct {
 	listCalls             atomic.Int64
 	getCalls              atomic.Int64
 	watchCalls            atomic.Int64
+}
+
+type metadataSearchTestSource struct {
+	authority string
+	dynamic   watcher.ListerWatcher
+	metadata  metadata.ResourceInterface
+}
+
+func (s *metadataSearchTestSource) OpenResource(
+	string,
+	schema.GroupVersionResource,
+	string,
+) (string, watcher.ListerWatcher, error) {
+	return s.authority, s.dynamic, nil
+}
+
+func (s *metadataSearchTestSource) OpenMetadataSearchResource(
+	string,
+	schema.GroupVersionResource,
+	string,
+) (string, metadata.ResourceInterface, error) {
+	return s.authority, s.metadata, nil
+}
+
+type metadataSearchTestClient struct {
+	page      *metav1.PartialObjectMetadataList
+	listCalls atomic.Int64
+}
+
+func (c *metadataSearchTestClient) List(
+	context.Context,
+	metav1.ListOptions,
+) (*metav1.PartialObjectMetadataList, error) {
+	c.listCalls.Add(1)
+	return c.page.DeepCopy(), nil
+}
+
+func (*metadataSearchTestClient) Delete(
+	context.Context,
+	string,
+	metav1.DeleteOptions,
+	...string,
+) error {
+	return errors.New("unexpected metadata delete")
+}
+
+func (*metadataSearchTestClient) DeleteCollection(
+	context.Context,
+	metav1.DeleteOptions,
+	metav1.ListOptions,
+) error {
+	return errors.New("unexpected metadata delete collection")
+}
+
+func (*metadataSearchTestClient) Get(
+	context.Context,
+	string,
+	metav1.GetOptions,
+	...string,
+) (*metav1.PartialObjectMetadata, error) {
+	return nil, errors.New("unexpected metadata get")
+}
+
+func (*metadataSearchTestClient) Watch(
+	context.Context,
+	metav1.ListOptions,
+) (watch.Interface, error) {
+	return nil, errors.New("unexpected metadata watch")
+}
+
+func (*metadataSearchTestClient) Patch(
+	context.Context,
+	string,
+	types.PatchType,
+	[]byte,
+	metav1.PatchOptions,
+	...string,
+) (*metav1.PartialObjectMetadata, error) {
+	return nil, errors.New("unexpected metadata patch")
 }
 
 // handoffFailureClient lets a transient paginated LIST fail validation once,

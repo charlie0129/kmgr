@@ -130,12 +130,16 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     private let scopeLabel = NSTextField(labelWithString: "")
     private var mode = Mode.root
     private var items: [Item] = []
-    private var searchTask: Task<Void, Never>?
+    // Query revisions intentionally overlap until the engine confirms that a
+    // replacement attached to the shared metadata scan. Keeping every local
+    // task reachable also lets palette dismissal cancel a replacement that
+    // has not reached the engine yet without stranding its predecessor.
+    private var searchTasks: [UInt64: Task<Void, Never>] = [:]
     private var debounceTask: Task<Void, Never>?
     private var rootSearchTask: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var queryRevision: UInt64 = 0
-    private var runningRevision: UInt64?
+    private var runningRevisions: Set<UInt64> = []
     private var gate = GenerationSequenceGate()
     private var resultByIdentity: [String: ObjectSearchResult] = [:]
     private var latestProgress: ObjectSearchProgress?
@@ -469,8 +473,6 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
 
     private func scheduleObjectSearch() {
         debounceTask?.cancel()
-        searchTask?.cancel()
-        cancelRunningSearch()
         statusLabel.toolTip = nil
         resultByIdentity.removeAll(keepingCapacity: true)
         latestProgress = nil
@@ -480,6 +482,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         let query = searchField.stringValue
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
+            cancelRunningSearches()
             statusLabel.stringValue = "Type a name to search this resource kind"
             return
         }
@@ -501,7 +504,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     private func beginObjectSearch(query: String, revision: UInt64) {
         guard case .objects(let resource) = mode else { return }
         gate.reset()
-        runningRevision = revision
+        runningRevisions.insert(revision)
         let request = ObjectSearchRequest(
             sessionID: context.session.sessionID,
             searchID: searchID,
@@ -513,14 +516,12 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             resultLimit: 100,
             allowPaginatedList: true
         )
-        searchTask = Task { [weak self, objectSearchProvider] in
+        searchTasks[revision] = Task { [weak self, objectSearchProvider] in
+            defer { self?.searchDidFinish(revision: revision) }
             do {
                 for try await message in objectSearchProvider.searchObjects(request: request) {
                     guard !Task.isCancelled else { return }
                     self?.receive(message, expectedRevision: revision)
-                }
-                if self?.runningRevision == revision {
-                    self?.runningRevision = nil
                 }
             } catch {
                 guard !Task.isCancelled, let self, revision == queryRevision else { return }
@@ -588,22 +589,31 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     private func cancelPendingSearch() {
         debounceTask?.cancel()
         debounceTask = nil
-        searchTask?.cancel()
-        searchTask = nil
-        cancelRunningSearch()
+        cancelRunningSearches()
     }
 
-    private func cancelRunningSearch() {
-        guard generation > 0, let revision = runningRevision else { return }
-        runningRevision = nil
+    private func searchDidFinish(revision: UInt64) {
+        searchTasks.removeValue(forKey: revision)
+        runningRevisions.remove(revision)
+    }
+
+    private func cancelRunningSearches() {
+        let tasks = Array(searchTasks.values)
+        searchTasks.removeAll(keepingCapacity: true)
+        for task in tasks { task.cancel() }
+        guard generation > 0, !runningRevisions.isEmpty else { return }
+        let revisions = runningRevisions
+        runningRevisions.removeAll(keepingCapacity: true)
         let generation = generation
         Task { [objectSearchProvider, context, searchID] in
-            await objectSearchProvider.cancelSearch(
-                sessionID: context.session.sessionID,
-                searchID: searchID,
-                generation: generation,
-                queryRevision: revision
-            )
+            for revision in revisions {
+                await objectSearchProvider.cancelSearch(
+                    sessionID: context.session.sessionID,
+                    searchID: searchID,
+                    generation: generation,
+                    queryRevision: revision
+                )
+            }
         }
     }
 
