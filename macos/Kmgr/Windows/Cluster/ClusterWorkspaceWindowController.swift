@@ -144,6 +144,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         columnsConfigurationPath: String,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
+        resourceViewportTiming: ResourceViewportTiming = .production,
         logDisplayConfiguration: LogDisplayConfiguration,
         confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
         namespacePickerPresenter: @escaping NamespacePickerPresenter = { control, sender in
@@ -205,6 +206,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             columnConfigurationCoordinator: columnConfigurationCoordinator
                 ?? ColumnConfigurationCoordinator(path: columnsConfigurationPath),
             columnsConfigurationLoader: columnsConfigurationLoader,
+            resourceViewportTiming: resourceViewportTiming,
             namespacePickerPresenter: namespacePickerPresenter,
             namespacePickerKeyWindowCheck: namespacePickerKeyWindowCheck,
             onShowPortForwards: onShowPortForwards
@@ -781,6 +783,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         columnsConfigurationPath: String,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
+        resourceViewportTiming: ResourceViewportTiming,
         namespacePickerPresenter: @escaping NamespacePickerPresenter,
         namespacePickerKeyWindowCheck: @escaping NamespacePickerKeyWindowCheck,
         onShowPortForwards: @escaping @MainActor () -> Void
@@ -815,7 +818,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             columnsConfigurationPath: columnsConfigurationPath,
             columnConfigurationCoordinator: columnConfigurationCoordinator,
-            columnsConfigurationLoader: columnsConfigurationLoader
+            columnsConfigurationLoader: columnsConfigurationLoader,
+            viewportTiming: resourceViewportTiming
         )
         super.init(nibName: nil, bundle: nil)
 
@@ -2609,6 +2613,26 @@ private enum ResourceStreamOpenReason: String {
     case sortChange = "sort-change"
 }
 
+struct ResourceViewportTiming: Sendable {
+    static let production = ResourceViewportTiming(
+        scrollDebounce: .milliseconds(80),
+        metricInterestRefresh: .seconds(15)
+    )
+
+    var scrollDebounce: Duration
+    var metricInterestRefresh: Duration
+
+    init(
+        scrollDebounce: Duration,
+        metricInterestRefresh: Duration
+    ) {
+        precondition(scrollDebounce > .zero)
+        precondition(metricInterestRefresh > .zero)
+        self.scrollDebounce = scrollDebounce
+        self.metricInterestRefresh = metricInterestRefresh
+    }
+}
+
 @MainActor
 private final class ResourceListViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate,
@@ -2634,6 +2658,7 @@ private final class ResourceListViewController: NSViewController,
     private let columnsConfigurationPath: String
     private let columnConfigurationCoordinator: ColumnConfigurationCoordinator
     private let columnsConfigurationLoader: ColumnConfigurationDocumentLoader
+    private let viewportTiming: ResourceViewportTiming
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let sortLabel = NSTextField(labelWithString: "Unsorted")
@@ -2701,6 +2726,23 @@ private final class ResourceListViewController: NSViewController,
     private var lastStreamContext: ResourceWarmRowContext?
     private var rangeCache: ResourceViewRangeCache?
     private var rangeFetchTask: Task<Void, Never>?
+    private var rangeFetchRequests: Set<ResourceViewRangeRequest> = []
+    private var rangeFetchTicket: UInt64 = 0
+    private var viewportUpdateTask: Task<Void, Never>?
+    private var metricInterestUpdateTask: Task<Void, Never>?
+    private var metricInterestRefreshTask: Task<Void, Never>?
+    private var lastMetricInterest: ResourceMetricInterestRequest?
+    private var metricInterestSendTicket: UInt64 = 0
+    /// Full backend cardinality exposed to AppKit. Only `presentedTableRange`
+    /// has materialized UID/cell rows in `model`.
+    private var tableRowsVisible: UInt64 = 0
+    private var presentedTableRange: Range<UInt64>?
+    private var pendingSelectionTableIndexes: IndexSet?
+    private var pendingCommandForLoadingSelection: ResourceTableCommand?
+    /// Selected identities proven to belong to the current complete backend
+    /// index. This stays valid while only the retained viewport moves, so an
+    /// offscreen selected row is not mislabeled as hidden by the filter.
+    private var selectedUIDsKnownInPresentedIndex: Set<ResourceUID> = []
     private var pendingInitialRange: ResourceViewRange?
     private var reconciledRevision: ResourceViewRevision?
     /// Once an exact reconciliation has crossed the retained warm view, later
@@ -2892,7 +2934,8 @@ private final class ResourceListViewController: NSViewController,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         columnsConfigurationPath: String,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator,
-        columnsConfigurationLoader: ColumnConfigurationDocumentLoader
+        columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
+        viewportTiming: ResourceViewportTiming
     ) {
         self.session = session
         self.isAuthenticated = isAuthenticated
@@ -2902,6 +2945,7 @@ private final class ResourceListViewController: NSViewController,
         self.columnsConfigurationPath = columnsConfigurationPath
         self.columnConfigurationCoordinator = columnConfigurationCoordinator
         self.columnsConfigurationLoader = columnsConfigurationLoader
+        self.viewportTiming = viewportTiming
         super.init(nibName: nil, bundle: nil)
         columnsConfigurationObserver = columnConfigurationCoordinator.observe {
             [weak self] match, definitions in
@@ -2982,7 +3026,9 @@ private final class ResourceListViewController: NSViewController,
         tableView.target = self
         tableView.rowSizeStyle = .medium
         tableView.setAccessibilityLabel("Kubernetes resources")
-        tableView.onCommand = { [weak self] command in self?.handle(command) }
+        tableView.onCommand = { [weak self] command in
+            self?.performCommand(command)
+        }
         tableView.onSelectionGesture = { [weak self] gesture in
             self?.performSelectionGesture(gesture) ?? false
         }
@@ -3108,8 +3154,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask = nil
         streamTask?.cancel()
         streamTask = nil
-        rangeFetchTask?.cancel()
-        rangeFetchTask = nil
+        stopViewportWork()
         rangeCache = nil
         pendingInitialRange = nil
         reconciledRevision = nil
@@ -3136,8 +3181,7 @@ private final class ResourceListViewController: NSViewController,
         clearTransientCellPresentation()
         streamTask?.cancel()
         streamTask = nil
-        rangeFetchTask?.cancel()
-        rangeFetchTask = nil
+        stopViewportWork()
         rangeCache = nil
         pendingInitialRange = nil
         reconciledRevision = nil
@@ -3146,6 +3190,7 @@ private final class ResourceListViewController: NSViewController,
         isRetainingWarmRowsForCurrentStream = false
         cancelOptionalResourceDiscovery(selecting: nil)
         model = ResourceTableModel()
+        clearSparseTableProjection()
         tableView.reloadData()
         installFreshnessText("Disconnected", severity: .warning)
         showInlineIssue(message, severity: .warning, toolTip: toolTip)
@@ -3197,8 +3242,7 @@ private final class ResourceListViewController: NSViewController,
         filterTask?.cancel()
         filterTask = nil
         cancelCurrentStream(reason: "suspend")
-        rangeFetchTask?.cancel()
-        rangeFetchTask = nil
+        stopViewportWork()
         rangeCache = nil
         pendingInitialRange = nil
         reconciledRevision = nil
@@ -3227,7 +3271,6 @@ private final class ResourceListViewController: NSViewController,
 
     func captureCommandContext() -> CommandContext {
         let selected = model.selectedIdentities
-        let visibleUIDs = Set(model.orderedVisibleUIDs)
         let window = view.window
         let firstResponder = window?.firstResponder
         let filterOwnsResponder = firstResponder === filterField
@@ -3244,7 +3287,7 @@ private final class ResourceListViewController: NSViewController,
             firstResponder: responder,
             selectedIdentities: selected,
             hiddenSelectionUIDs: Set(selected.lazy.map(\.uid).filter {
-                !visibleUIDs.contains($0)
+                !self.selectedUIDsKnownInPresentedIndex.contains($0)
             }),
             networkActionsAllowed: recoveredResourceTrust.permitsNetworkActions(
                 for: selected
@@ -3274,6 +3317,7 @@ private final class ResourceListViewController: NSViewController,
         }
         if !model.selectedUIDs.isEmpty {
             model.clearSelection()
+            selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
             suppressSelectionCallbacks = true
             tableView.deselectAll(nil)
             suppressSelectionCallbacks = false
@@ -3540,6 +3584,7 @@ private final class ResourceListViewController: NSViewController,
 
     @objc private func scrollBoundsChanged(_ notification: Notification) {
         scheduleRestorationCheckpoint()
+        scheduleViewportUpdate()
     }
 
     private func scheduleRestorationCheckpoint() {
@@ -3550,6 +3595,92 @@ private final class ResourceListViewController: NSViewController,
             guard !Task.isCancelled else { return }
             self?.onRestorationChanged?()
         }
+    }
+
+    private func cancelRangeFetches() {
+        rangeFetchTicket &+= 1
+        rangeFetchTask?.cancel()
+        rangeFetchTask = nil
+        if var cache = rangeCache {
+            for request in rangeFetchRequests { cache.release(request) }
+            rangeCache = cache
+        }
+        rangeFetchRequests.removeAll(keepingCapacity: true)
+    }
+
+    private func stopViewportWork() {
+        viewportUpdateTask?.cancel()
+        viewportUpdateTask = nil
+        cancelRangeFetches()
+        stopMetricInterestWork()
+        pendingCommandForLoadingSelection = nil
+    }
+
+    private func stopMetricInterestWork() {
+        metricInterestSendTicket &+= 1
+        metricInterestUpdateTask?.cancel()
+        metricInterestUpdateTask = nil
+        metricInterestRefreshTask?.cancel()
+        metricInterestRefreshTask = nil
+        lastMetricInterest = nil
+    }
+
+    private func sendMetricInterestIfNeeded(force: Bool = false) {
+        guard let request = rangeCache?.metricInterest,
+            request.generation == generation
+        else {
+            stopMetricInterestWork()
+            return
+        }
+        startMetricInterestRefreshLoopIfNeeded()
+        if force, metricInterestUpdateTask != nil { return }
+        guard force || request != lastMetricInterest else { return }
+
+        lastMetricInterest = request
+        metricInterestSendTicket &+= 1
+        let ticket = metricInterestSendTicket
+        metricInterestUpdateTask?.cancel()
+        let provider = self.provider
+        metricInterestUpdateTask = Task { @MainActor [weak self, provider] in
+            do {
+                try await provider.updateMetricInterest(request: request)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.traceResourceCache(
+                    "event=metric_interest_failed"
+                        + " start=\(request.startIndex) length=\(request.length)"
+                        + " error=\(String(describing: type(of: error)))"
+                )
+            }
+            guard !Task.isCancelled, let self,
+                ticket == metricInterestSendTicket
+            else { return }
+            metricInterestUpdateTask = nil
+        }
+    }
+
+    private func startMetricInterestRefreshLoopIfNeeded() {
+        guard metricInterestRefreshTask == nil else { return }
+        let interval = viewportTiming.metricInterestRefresh
+        metricInterestRefreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, let self else { return }
+                sendMetricInterestIfNeeded(force: true)
+            }
+        }
+    }
+
+    private func clearSparseTableProjection() {
+        tableRowsVisible = 0
+        presentedTableRange = nil
+        pendingSelectionTableIndexes = nil
+        pendingCommandForLoadingSelection = nil
+        selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
     }
 
     private func openStream(
@@ -3628,11 +3759,11 @@ private final class ResourceListViewController: NSViewController,
                     + " rejection=\(resourceCacheRejectionDescription(retentionDecision))"
             )
             model = ResourceTableModel()
+            clearSparseTableProjection()
             tableView.reloadData()
         }
         lastStreamContext = nextStreamContext
-        rangeFetchTask?.cancel()
-        rangeFetchTask = nil
+        stopViewportWork()
         rangeCache = ResourceViewRangeCache(
             sessionID: session.sessionID,
             viewID: viewID,
@@ -3716,6 +3847,7 @@ private final class ResourceListViewController: NSViewController,
     private func cancelCurrentStream(reason: String) {
         streamTask?.cancel()
         streamTask = nil
+        stopViewportWork()
         let generation = generation
         guard generation > 0, generation != lastCancelledGeneration else {
             traceResourceCache(
@@ -3805,72 +3937,33 @@ private final class ResourceListViewController: NSViewController,
                 disposition != .rejectedInvalid,
                 disposition != .hintsOnly
             else { break }
-            let indexChanged: Bool
-            switch disposition {
-            case .installed:
-                indexChanged = true
-            case .advanced(let changed):
-                indexChanged = changed
-            case .hintsOnly, .rejectedStale, .rejectedInvalid:
-                indexChanged = false
-            }
+            cancelRangeFetches()
             pendingInitialRange = nil
             reconciledRevision = nil
-            let boundedCount = min(
-                invalidation.rowsVisible,
-                UInt64(min(
-                    invalidation.maxRangeLength,
-                    ResourceViewInvalidation.protocolMaximumRangeLength
-                ))
-            )
-            let requests = cache.retain(0..<boundedCount)
-            rangeCache = cache
-            if let interest = cache.metricInterest {
-                let provider = self.provider
-                Task { try? await provider.updateMetricInterest(request: interest) }
+            if !isRetainingWarmRowsForCurrentStream {
+                setTableRowsVisible(invalidation.rowsVisible)
             }
-            guard let request = requests.first else {
-                if invalidation.rowsVisible == 0 {
-                    let emptyRange = ResourceViewRange(
-                        viewID: viewID,
-                        revision: invalidation.revision(generation: generation),
-                        startIndex: 0,
-                        rowsVisible: 0,
-                        rows: []
-                    )
-                    if isRetainingWarmRowsForCurrentStream {
-                        pendingInitialRange = emptyRange
-                    } else {
-                        installFetchedRange(
-                            emptyRange,
-                            request: nil,
-                            establishesBaseline: indexChanged
-                        )
-                        endProjectionRequest(outcome: "range-fetched")
-                    }
+            if invalidation.rowsVisible == 0 {
+                _ = cache.retain(0..<0)
+                rangeCache = cache
+                let emptyRange = ResourceViewRange(
+                    viewID: viewID,
+                    revision: invalidation.revision(generation: generation),
+                    startIndex: 0,
+                    rowsVisible: 0,
+                    rows: []
+                )
+                if isRetainingWarmRowsForCurrentStream {
+                    pendingInitialRange = emptyRange
+                } else {
+                    installFetchedRange(emptyRange, request: nil)
+                    endProjectionRequest(outcome: "range-fetched")
                 }
+                sendMetricInterestIfNeeded()
                 break
             }
-            rangeFetchTask?.cancel()
-            let provider = self.provider
-            rangeFetchTask = Task { [weak self] in
-                do {
-                    let range = try await provider.fetchViewRange(request: request)
-                    guard !Task.isCancelled else { return }
-                    await MainActor.run {
-                        self?.receiveFetchedRange(
-                            range,
-                            request: request,
-                            establishesBaseline: indexChanged
-                        )
-                    }
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    await MainActor.run {
-                        self?.receiveRangeFetchFailure(error, request: request)
-                    }
-                }
-            }
+            rangeCache = cache
+            scheduleViewportUpdate(immediate: true)
         case .reconciled(_, let reconciliation):
             let revision = reconciliation.revision(generation: generation)
             let matchesCurrentRevision = rangeCache?.matches(
@@ -3886,11 +3979,7 @@ private final class ResourceListViewController: NSViewController,
                 matchesCurrentRevision
             {
                 self.pendingInitialRange = nil
-                installFetchedRange(
-                    pendingInitialRange,
-                    request: nil,
-                    establishesBaseline: true
-                )
+                installFetchedRange(pendingInitialRange, request: nil)
                 isRetainingWarmRowsForCurrentStream = false
                 endProjectionRequest(outcome: "reconciled")
                 installReconciledStatus(rowCount: reconciliation.rowsVisible)
@@ -3921,17 +4010,221 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
+    private func setTableRowsVisible(_ rowsVisible: UInt64) {
+        guard tableRowsVisible != rowsVisible else { return }
+        tableRowsVisible = rowsVisible
+        if let pendingSelectionTableIndexes {
+            let valid = pendingSelectionTableIndexes.filter {
+                $0 >= 0 && $0 < tableRowCount
+            }
+            self.pendingSelectionTableIndexes = valid.isEmpty
+                ? nil : IndexSet(valid)
+        }
+        let wasSuppressingSelectionCallbacks = suppressSelectionCallbacks
+        suppressSelectionCallbacks = true
+        tableView.noteNumberOfRowsChanged()
+        suppressSelectionCallbacks = wasSuppressingSelectionCallbacks
+        if let anchor = pendingScrollAnchor, rowsVisible > 0 {
+            let row = min(
+                max(0, anchor.priorRowIndex),
+                max(0, tableRowCount - 1)
+            )
+            tableView.scrollRowToVisible(row)
+        }
+    }
+
+    private var tableRowCount: Int { Int(clamping: tableRowsVisible) }
+
+    private var presentedModelRowOffset: Int {
+        Int(clamping: presentedTableRange?.lowerBound ?? 0)
+    }
+
+    private func modelIndex(forTableRow tableRow: Int) -> Int? {
+        guard tableRow >= 0, let presentedTableRange else { return nil }
+        let absoluteIndex = UInt64(tableRow)
+        guard presentedTableRange.contains(absoluteIndex) else { return nil }
+        let modelIndex = Int(clamping:
+            absoluteIndex - presentedTableRange.lowerBound
+        )
+        return model.orderedVisibleUIDs.indices.contains(modelIndex)
+            ? modelIndex : nil
+    }
+
+    private func tableRow(forModelIndex modelIndex: Int) -> Int? {
+        guard model.orderedVisibleUIDs.indices.contains(modelIndex) else {
+            return nil
+        }
+        let (tableRow, overflow) = presentedModelRowOffset
+            .addingReportingOverflow(modelIndex)
+        guard !overflow, tableRow >= 0, tableRow < tableRowCount else {
+            return nil
+        }
+        return tableRow
+    }
+
+    private func resourceRow(atTableRow tableRow: Int) -> ResourceRow? {
+        guard let modelIndex = modelIndex(forTableRow: tableRow) else {
+            return nil
+        }
+        let uid = model.orderedVisibleUIDs[modelIndex]
+        return model.rowByUID[uid]
+    }
+
+    private func selectedTableRowIndexes() -> IndexSet {
+        IndexSet(model.orderedVisibleUIDs.enumerated().compactMap {
+            guard model.selectedUIDs.contains($0.element) else { return nil }
+            return tableRow(forModelIndex: $0.offset)
+        })
+    }
+
+    private func scheduleViewportUpdate(immediate: Bool = false) {
+        viewportUpdateTask?.cancel()
+        let debounce = viewportTiming.scrollDebounce
+        viewportUpdateTask = Task { @MainActor [weak self] in
+            do {
+                if immediate {
+                    await Task.yield()
+                } else {
+                    try await Task.sleep(for: debounce)
+                }
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            viewportUpdateTask = nil
+            tableView.layoutSubtreeIfNeeded()
+            updateViewportRetention()
+        }
+    }
+
+    private func updateViewportRetention() {
+        guard var cache = rangeCache,
+            cache.revision != nil,
+            cache.rowsVisible > 0
+        else { return }
+        let target = ResourceViewViewportPlanner.retainedRange(
+            visibleRows: visibleAbsoluteTableRange(),
+            rowsVisible: cache.rowsVisible,
+            maximumRows: cache.maximumCachedRows
+        )
+        guard !target.isEmpty else { return }
+
+        if cache.retainedRange != target {
+            cancelRangeFetches()
+            guard let refreshed = rangeCache else { return }
+            cache = refreshed
+        }
+        let requests = cache.retain(target)
+        rangeCache = cache
+        sendMetricInterestIfNeeded()
+
+        if let rows = cache.rows(in: target), let revision = cache.revision {
+            acceptCompleteRange(ResourceViewRange(
+                viewID: viewID,
+                revision: revision,
+                startIndex: target.lowerBound,
+                rowsVisible: cache.rowsVisible,
+                rows: rows
+            ), request: nil)
+        }
+        guard !requests.isEmpty else { return }
+        startRangeFetches(requests)
+    }
+
+    private func visibleAbsoluteTableRange() -> Range<UInt64> {
+        let visible = tableView.rows(in: tableView.visibleRect)
+        if visible.location != NSNotFound, visible.length > 0 {
+            let lower = min(max(0, visible.location), tableRowCount)
+            let upper = min(
+                tableRowCount,
+                max(lower + 1, visible.location + visible.length)
+            )
+            return UInt64(lower)..<UInt64(upper)
+        }
+
+        let stride = max(1, tableView.rowHeight + tableView.intercellSpacing.height)
+        let estimatedRows = max(
+            1,
+            Int(ceil(scrollView.contentView.bounds.height / stride)) + 1
+        )
+        let preferred = pendingScrollAnchor?.priorRowIndex ?? 0
+        let lower = min(max(0, preferred), max(0, tableRowCount - 1))
+        let upper = min(tableRowCount, lower + estimatedRows)
+        return UInt64(lower)..<UInt64(max(lower + 1, upper))
+    }
+
+    private func startRangeFetches(_ requests: [ResourceViewRangeRequest]) {
+        guard !requests.isEmpty else { return }
+        cancelRangeFetches()
+        rangeFetchTicket &+= 1
+        let ticket = rangeFetchTicket
+        rangeFetchRequests = Set(requests)
+        let provider = self.provider
+        rangeFetchTask = Task { @MainActor [weak self, provider] in
+            for request in requests {
+                guard !Task.isCancelled else { return }
+                do {
+                    let range = try await provider.fetchViewRange(request: request)
+                    guard !Task.isCancelled else { return }
+                    self?.receiveFetchedRange(
+                        range,
+                        request: request,
+                        ticket: ticket
+                    )
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self?.receiveRangeFetchFailure(
+                        error,
+                        request: request,
+                        ticket: ticket
+                    )
+                }
+            }
+            self?.finishRangeFetches(ticket: ticket)
+        }
+    }
+
+    private func finishRangeFetches(ticket: UInt64) {
+        guard ticket == rangeFetchTicket else { return }
+        rangeFetchTask = nil
+        rangeFetchRequests.removeAll(keepingCapacity: true)
+    }
+
     private func receiveFetchedRange(
         _ range: ResourceViewRange,
         request: ResourceViewRangeRequest,
-        establishesBaseline: Bool
+        ticket: UInt64
     ) {
-        guard var cache = rangeCache else { return }
+        guard ticket == rangeFetchTicket, var cache = rangeCache else { return }
         let reception = cache.receive(range, for: request)
+        rangeFetchRequests.remove(request)
         guard reception != .rejectedRace, reception != .rejectedInvalid else {
+            rangeCache = cache
             return
         }
         rangeCache = cache
+        guard let retained = cache.retainedRange,
+            let rows = cache.rows(in: retained),
+            let revision = cache.revision
+        else { return }
+        acceptCompleteRange(ResourceViewRange(
+            viewID: viewID,
+            revision: revision,
+            startIndex: retained.lowerBound,
+            rowsVisible: cache.rowsVisible,
+            rows: rows
+        ), request: request)
+    }
+
+    private func acceptCompleteRange(
+        _ range: ResourceViewRange,
+        request: ResourceViewRangeRequest?
+    ) {
+        if presentedTableRange == range.startIndex..<(
+            range.startIndex + UInt64(range.rows.count)
+        ), presentedRangeRevision == range.revision {
+            return
+        }
         if isRetainingWarmRowsForCurrentStream,
             !hasReachedInitialReconciliation,
             reconciledRevision != range.revision
@@ -3939,11 +4232,7 @@ private final class ResourceListViewController: NSViewController,
             pendingInitialRange = range
             return
         }
-        installFetchedRange(
-            range,
-            request: request,
-            establishesBaseline: establishesBaseline
-        )
+        installFetchedRange(range, request: request)
         if isRetainingWarmRowsForCurrentStream {
             isRetainingWarmRowsForCurrentStream = false
             endProjectionRequest(outcome: "reconciled")
@@ -3955,11 +4244,13 @@ private final class ResourceListViewController: NSViewController,
 
     private func receiveRangeFetchFailure(
         _ error: Error,
-        request: ResourceViewRangeRequest
+        request: ResourceViewRangeRequest,
+        ticket: UInt64
     ) {
-        guard var cache = rangeCache else { return }
+        guard ticket == rangeFetchTicket, var cache = rangeCache else { return }
         let requestWasCurrent = cache.containsPendingRequest(request)
         cache.release(request)
+        rangeFetchRequests.remove(request)
         rangeCache = cache
         guard requestWasCurrent else { return }
         if let issue = error as? ClusterManagerIssue,
@@ -3982,18 +4273,16 @@ private final class ResourceListViewController: NSViewController,
 
     private func installFetchedRange(
         _ range: ResourceViewRange,
-        request: ResourceViewRangeRequest?,
-        establishesBaseline: Bool
+        request: ResourceViewRangeRequest?
     ) {
-        let previousUIDs = Set(model.orderedVisibleUIDs)
+        let previousUIDs = Set(model.rowByUID.keys)
         let nextUIDs = Set(range.rows.lazy.map { $0.identity.uid })
         let removedUIDs = previousUIDs.subtracting(nextUIDs)
         let continuesPresentedIndex = presentedRangeRevision.map {
             $0.generation == range.revision.generation
                 && $0.index == range.revision.index
         } ?? false
-        let canDetectChanges = !establishesBaseline
-            && continuesPresentedIndex
+        let canDetectChanges = continuesPresentedIndex
             && isChangeDetectionArmed
         let detectedChanges: [ResourceCellChange] = canDetectChanges
             ? range.rows.flatMap { row in
@@ -4004,7 +4293,7 @@ private final class ResourceListViewController: NSViewController,
             }
             : []
         var affectedCellAddresses: Set<ResourceCellAddress> = []
-        if establishesBaseline || !continuesPresentedIndex {
+        if !continuesPresentedIndex {
             clearTransientCellPresentation(
                 keepingRequestedFilterHighlight: true
             )
@@ -4013,13 +4302,46 @@ private final class ResourceListViewController: NSViewController,
                 forUIDs: removedUIDs
             )
         }
-        let capture = captureUpdate()
+        var capture = captureUpdate()
         let order = range.rows.map { $0.identity.uid }
+        if let pendingScrollAnchor,
+            order.contains(pendingScrollAnchor.uid)
+        {
+            capture.scrollAnchor = ScrollAnchor(
+                uid: pendingScrollAnchor.uid,
+                pixelOffsetFromTop: pendingScrollAnchor.pixelOffsetFromTop,
+                priorRowIndex: 0
+            )
+        }
+        let confirmedRemovals = removedUIDs.subtracting(model.selectedUIDs)
         let plan = model.apply(
-            ResourceRowBatch(upserts: range.rows, visibleOrder: .replace(order)),
+            ResourceRowBatch(
+                upserts: range.rows,
+                removedUIDs: confirmedRemovals,
+                visibleOrder: .replace(order)
+            ),
             capture: capture
         )
-        applyTablePlan(restoringPendingSelection(in: plan, chunkIsComplete: true))
+        presentedTableRange = range.startIndex..<(
+            range.startIndex + UInt64(range.rows.count)
+        )
+        setTableRowsVisible(range.rowsVisible)
+        let restoredPlan = restoringPendingSelection(
+            in: plan,
+            chunkIsComplete: true
+        )
+        if !continuesPresentedIndex {
+            selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
+        } else {
+            selectedUIDsKnownInPresentedIndex.formIntersection(
+                model.selectedUIDs
+            )
+        }
+        selectedUIDsKnownInPresentedIndex.formUnion(
+            order.lazy.filter { self.model.selectedUIDs.contains($0) }
+        )
+        applyTablePlan(restoredPlan)
+        pendingScrollAnchor = nil
         if !detectedChanges.isEmpty {
             affectedCellAddresses.formUnion(cellHighlightStore.record(
                 detectedChanges,
@@ -4042,7 +4364,6 @@ private final class ResourceListViewController: NSViewController,
         scheduleCellHighlightRefresh()
         markBaseViewUsableForOptionalResourceDiscovery()
         retainedRowsLastSynchronizedAt = nil
-        rangeFetchTask = nil
         if !isRetainingWarmRowsForCurrentStream {
             installRangeStatus(rowCount: range.rowsVisible)
         }
@@ -4053,6 +4374,18 @@ private final class ResourceListViewController: NSViewController,
                 + " index=\(range.revision.index)"
         )
         if request != nil { updateStatusLine() }
+        runPendingSelectionCommandIfReady()
+    }
+
+    private func runPendingSelectionCommandIfReady() {
+        guard pendingSelectionTableIndexes == nil,
+            let command = pendingCommandForLoadingSelection
+        else { return }
+        pendingCommandForLoadingSelection = nil
+        Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            performCommand(command)
+        }
     }
 
     private func installRangeStatus(rowCount: UInt64) {
@@ -4071,9 +4404,39 @@ private final class ResourceListViewController: NSViewController,
         in plan: ResourceTableUpdatePlan,
         chunkIsComplete: Bool
     ) -> ResourceTableUpdatePlan {
-        guard let pendingSelectionUIDs else { return plan }
-        model.restoreSelection(uids: pendingSelectionUIDs)
-        if chunkIsComplete { self.pendingSelectionUIDs = nil }
+        var restoredSelection = false
+        if let pendingSelectionUIDs {
+            model.restoreSelection(uids: pendingSelectionUIDs)
+            if chunkIsComplete { self.pendingSelectionUIDs = nil }
+            restoredSelection = true
+        }
+        if var pendingIndexes = pendingSelectionTableIndexes {
+            let resolvedModelIndexes = pendingIndexes.compactMap {
+                modelIndex(forTableRow: $0)
+            }
+            if !resolvedModelIndexes.isEmpty {
+                var selectedUIDs = model.selectedUIDs
+                for modelIndex in resolvedModelIndexes {
+                    selectedUIDs.insert(model.orderedVisibleUIDs[modelIndex])
+                    if let tableRow = tableRow(forModelIndex: modelIndex) {
+                        pendingIndexes.remove(tableRow)
+                    }
+                }
+                let anchorUID = tableView.selectedRow >= 0
+                    ? modelIndex(forTableRow: tableView.selectedRow).map {
+                        model.orderedVisibleUIDs[$0]
+                    }
+                    : nil
+                model.restoreSelection(
+                    uids: selectedUIDs,
+                    anchorUID: anchorUID
+                )
+                pendingSelectionTableIndexes = pendingIndexes.isEmpty
+                    ? nil : pendingIndexes
+                restoredSelection = true
+            }
+        }
+        guard restoredSelection else { return plan }
         return ResourceTableUpdatePlan(
             selectedRowIndexes: model.orderedVisibleUIDs.enumerated().compactMap {
                 model.selectedUIDs.contains($0.element) ? $0.offset : nil
@@ -4084,7 +4447,22 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func captureUpdate() -> ResourceTableUpdateCapture {
-        ResourceTableAppKitProjection.capture(model: model, from: tableView)
+        ResourceTableAppKitProjection.capture(
+            model: model,
+            from: tableView,
+            modelRowOffset: presentedModelRowOffset
+        )
+    }
+
+    private func globalScrollAnchor() -> ScrollAnchor? {
+        guard var anchor = captureUpdate().scrollAnchor else {
+            return pendingScrollAnchor
+        }
+        let (absoluteIndex, overflow) = anchor.priorRowIndex
+            .addingReportingOverflow(presentedModelRowOffset)
+        guard !overflow else { return nil }
+        anchor.priorRowIndex = absoluteIndex
+        return anchor
     }
 
     private func applyTablePlan(_ plan: ResourceTableUpdatePlan) {
@@ -4096,8 +4474,9 @@ private final class ResourceListViewController: NSViewController,
         suppressSelectionCallbacks = true
         ResourceTableAppKitProjection.apply(
             plan,
-            visibleRowCount: model.orderedVisibleUIDs.count,
+            visibleRowCount: tableRowCount,
             to: tableView,
+            modelRowOffset: presentedModelRowOffset,
             updateVisibleCell: { [self] view, column, row in
                 configureResourceTableCell(
                     in: tableView,
@@ -4107,6 +4486,16 @@ private final class ResourceListViewController: NSViewController,
                 ) === view
             }
         )
+        if let pendingSelectionTableIndexes,
+            !pendingSelectionTableIndexes.isEmpty
+        {
+            tableView.selectRowIndexes(
+                tableView.selectedRowIndexes.union(
+                    pendingSelectionTableIndexes
+                ),
+                byExtendingSelection: false
+            )
+        }
         suppressSelectionCallbacks = wasSuppressingSelectionCallbacks
         tableSignposter.endInterval(
             PerformanceSignpostCatalog.resourceTableReload,
@@ -4154,7 +4543,10 @@ private final class ResourceListViewController: NSViewController,
             let column = tableView.tableColumns[columnIndex]
             let columnID = tableView.tableColumns[columnIndex].identifier.rawValue
             for rowIndex in visibleRows {
-                let uid = model.orderedVisibleUIDs[rowIndex]
+                guard let row = resourceRow(atTableRow: rowIndex) else {
+                    continue
+                }
+                let uid = row.identity.uid
                 let address = ResourceCellAddress(
                     uid: uid,
                     columnID: columnID
@@ -4191,7 +4583,7 @@ private final class ResourceListViewController: NSViewController,
         }
         let lowerBound = max(0, visibleRange.location)
         let upperBound = min(
-            model.orderedVisibleUIDs.count,
+            tableRowCount,
             visibleRange.location + visibleRange.length
         )
         guard lowerBound < upperBound else { return [] }
@@ -4199,7 +4591,9 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func visibleResourceUIDsInViewport() -> Set<ResourceUID> {
-        Set(visibleTableRowIndexes().map { model.orderedVisibleUIDs[$0] })
+        Set(visibleTableRowIndexes().compactMap {
+            resourceRow(atTableRow: $0)?.identity.uid
+        })
     }
 
     private func scheduleCellHighlightRefresh() {
@@ -4585,10 +4979,13 @@ private final class ResourceListViewController: NSViewController,
         } else {
             sortLabel.stringValue = "Unsorted"
         }
-        let counts = model.selectionCounts
-        let selection = counts.hidden > 0
-            ? "\(counts.selected) selected (\(counts.hidden) hidden by filter)"
-            : "\(counts.selected) selected"
+        let selectedCount = model.selectedUIDs.count
+        let hiddenSelectionCount = model.selectedUIDs.subtracting(
+            selectedUIDsKnownInPresentedIndex
+        ).count
+        let selection = hiddenSelectionCount > 0
+            ? "\(selectedCount) selected (\(hiddenSelectionCount) hidden by filter)"
+            : "\(selectedCount) selected"
         let authoritativeRowCount = resourceViewStatus?.rowsVisible
             ?? UInt64(model.orderedVisibleUIDs.count)
         var statusParts = [
@@ -4834,9 +5231,7 @@ private final class ResourceListViewController: NSViewController,
         rowChangeDetector = ResourceRowChangeDetector(
             columnDefinitions: definitions
         )
-        let selectedRowIndexes = model.orderedVisibleUIDs.enumerated().compactMap {
-            model.selectedUIDs.contains($0.element) ? $0.offset : nil
-        }
+        let selectedRowIndexes = selectedTableRowIndexes()
         columnDefinitionsByID.removeAll(keepingCapacity: true)
         for definition in definitions {
             columnDefinitionsByID[definition.id] = definition
@@ -4878,8 +5273,12 @@ private final class ResourceListViewController: NSViewController,
         }
         applySortPresentation(retainedSort)
         tableView.reloadData()
+        var projectedSelection = selectedRowIndexes
+        if let pendingSelectionTableIndexes {
+            projectedSelection.formUnion(pendingSelectionTableIndexes)
+        }
         tableView.selectRowIndexes(
-            IndexSet(selectedRowIndexes),
+            projectedSelection,
             byExtendingSelection: false
         )
     }
@@ -5066,7 +5465,7 @@ private final class ResourceListViewController: NSViewController,
             sortColumnID: sort.first?.columnID,
             sortDescending: !(sort.first?.ascending ?? true),
             selectedUIDs: model.selectedUIDs,
-            scrollAnchor: captureUpdate().scrollAnchor
+            scrollAnchor: globalScrollAnchor()
         )
     }
 
@@ -5090,7 +5489,7 @@ private final class ResourceListViewController: NSViewController,
             filter: filterField.stringValue,
             sort: sorts,
             isSidebarVisible: isSidebarVisible,
-            scrollAnchor: captureUpdate().scrollAnchor
+            scrollAnchor: globalScrollAnchor()
         )
     }
 
@@ -5158,8 +5557,7 @@ private final class ResourceListViewController: NSViewController,
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
-        rangeFetchTask?.cancel()
-        rangeFetchTask = nil
+        stopViewportWork()
         rangeCache = nil
         pendingInitialRange = nil
         reconciledRevision = nil
@@ -5172,6 +5570,7 @@ private final class ResourceListViewController: NSViewController,
                 + " rows_before=\(model.orderedVisibleUIDs.count)"
         )
         model = ResourceTableModel()
+        clearSparseTableProjection()
         tableView.reloadData()
         titleLabel.stringValue = "Resources"
         installFreshnessText("Ready")
@@ -5449,7 +5848,7 @@ private final class ResourceListViewController: NSViewController,
         )
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { model.orderedVisibleUIDs.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { tableRowCount }
 
     func tableView(
         _ tableView: NSTableView,
@@ -5473,11 +5872,34 @@ private final class ResourceListViewController: NSViewController,
         row: Int,
         reusing existingView: NSView? = nil
     ) -> NSView? {
-        guard model.orderedVisibleUIDs.indices.contains(row) else { return nil }
+        guard row >= 0, row < tableRowCount else { return nil }
         let columnID = tableColumn.identifier.rawValue
-        let uid = model.orderedVisibleUIDs[row]
-        let value = model.rowByUID[uid]?[columnID]
         let alignment = columnDefinitionsByID[columnID]?.alignment ?? .leading
+        guard let resourceRow = resourceRow(atTableRow: row) else {
+            let identifier = NSUserInterfaceItemIdentifier("cell.\(columnID)")
+            let cell: ResourceTextTableCellView
+            if let existingView {
+                guard let existingCell = existingView as? ResourceTextTableCellView
+                else { return nil }
+                cell = existingCell
+            } else {
+                cell = tableView.makeView(
+                    withIdentifier: identifier,
+                    owner: self
+                ) as? ResourceTextTableCellView ?? ResourceTextTableCellView()
+            }
+            cell.identifier = identifier
+            cell.effectsPolicy = cellEffectsPolicy
+            cell.configure(
+                cell: nil,
+                placeholder: tableView.column(withIdentifier: tableColumn.identifier) == 0
+                    ? "Loading…" : "",
+                alignment: textAlignment(alignment)
+            )
+            return cell
+        }
+        let uid = resourceRow.identity.uid
+        let value = resourceRow[columnID]
         let emphasizedTerm = activeFilterHighlight.flatMap {
             $0.applies(to: columnID) ? $0.term : nil
         }
@@ -5552,29 +5974,52 @@ private final class ResourceListViewController: NSViewController,
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !suppressSelectionCallbacks else { return }
+        pendingCommandForLoadingSelection = nil
+        let selectedTableRows = tableView.selectedRowIndexes
+        let selectedModelRows = selectedTableRows.compactMap {
+            modelIndex(forTableRow: $0)
+        }
+        let unresolvedRows = selectedTableRows.filter {
+            modelIndex(forTableRow: $0) == nil
+        }
+        pendingSelectionTableIndexes = unresolvedRows.isEmpty
+            ? nil : IndexSet(unresolvedRows)
         model.replaceSelectionFromVisibleRows(
-            indexes: Array(tableView.selectedRowIndexes),
-            anchorIndex: tableView.selectedRow >= 0 ? tableView.selectedRow : nil
+            indexes: selectedModelRows,
+            anchorIndex: modelIndex(forTableRow: tableView.selectedRow)
         )
+        selectedUIDsKnownInPresentedIndex = model.selectedUIDs
+        if !unresolvedRows.isEmpty {
+            scheduleViewportUpdate(immediate: true)
+        }
         updateStatusLine()
         publishContextualShortcutsIfChanged()
     }
 
     private func performSelectionGesture(_ gesture: ResourceTableSelectionGesture) -> Bool {
-        let row = gesture.keyboardDirection.map {
+        let modelRow = gesture.keyboardDirection.map {
             model.selectionExtensionDestinationIndex(movingDown: $0 == .down)
-        } ?? gesture.row
+        } ?? gesture.row.flatMap(modelIndex(forTableRow:))
         guard model.applySelectionGesture(
-            clickedIndex: row,
+            clickedIndex: modelRow,
             modifiers: gesture.modifiers
         ) else { return false }
-        let selectedIndexes = model.orderedVisibleUIDs.enumerated().compactMap {
-            model.selectedUIDs.contains($0.element) ? $0.offset : nil
+        selectedUIDsKnownInPresentedIndex.formIntersection(model.selectedUIDs)
+        selectedUIDsKnownInPresentedIndex.formUnion(
+            model.orderedVisibleUIDs.lazy.filter {
+                self.model.selectedUIDs.contains($0)
+            }
+        )
+        var selectedIndexes = selectedTableRowIndexes()
+        if let pendingSelectionTableIndexes {
+            selectedIndexes.formUnion(pendingSelectionTableIndexes)
         }
         suppressSelectionCallbacks = true
-        tableView.selectRowIndexes(IndexSet(selectedIndexes), byExtendingSelection: false)
+        tableView.selectRowIndexes(selectedIndexes, byExtendingSelection: false)
         suppressSelectionCallbacks = false
-        if let row { tableView.scrollRowToVisible(row) }
+        if let modelRow, let tableRow = tableRow(forModelIndex: modelRow) {
+            tableView.scrollRowToVisible(tableRow)
+        }
         updateStatusLine()
         publishContextualShortcutsIfChanged()
         return true
@@ -5625,10 +6070,12 @@ private final class ResourceListViewController: NSViewController,
         let rowCount = model.orderedVisibleUIDs.count
         let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
         var fittedWidth = column.headerCell.cellSize.width + 18
-        let visibleRows = tableView.rows(in: tableView.visibleRect)
-        let visibleRange: Range<Int>? = visibleRows.location == NSNotFound
+        let visibleModelRows = visibleTableRowIndexes().compactMap {
+            modelIndex(forTableRow: $0)
+        }
+        let visibleRange: Range<Int>? = visibleModelRows.isEmpty
             ? nil
-            : visibleRows.location..<(visibleRows.location + visibleRows.length)
+            : visibleModelRows.first!..<(visibleModelRows.last! + 1)
 
         for rowIndex in Self.autoWidthPolicy.sampleIndexes(
             rowCount: rowCount,
@@ -5724,16 +6171,21 @@ private final class ResourceListViewController: NSViewController,
             onConfigureExec?(PodExecTarget(pod: identity))
         case .selectAll:
             model.selectAllVisible()
+            selectedUIDsKnownInPresentedIndex.formUnion(
+                model.orderedVisibleUIDs
+            )
             suppressSelectionCallbacks = true
-            tableView.installSelectAllProjection()
+            tableView.selectRowIndexes(
+                selectedTableRowIndexes(),
+                byExtendingSelection: false
+            )
             suppressSelectionCallbacks = false
             updateStatusLine()
             publishContextualShortcutsIfChanged()
         case .delete:
-            let currentVisibleUIDs = Set(model.orderedVisibleUIDs)
             let hidden = hiddenSelectionUIDs ?? Set(
                 selected.lazy.map(\.uid).filter {
-                    !currentVisibleUIDs.contains($0)
+                    !self.selectedUIDsKnownInPresentedIndex.contains($0)
                 }
             )
             let targets = selected.map { identity in
@@ -5790,6 +6242,13 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func performCommand(_ command: ResourceTableCommand) {
+        if command.requiresMaterializedSelection,
+            pendingSelectionTableIndexes?.isEmpty == false
+        {
+            pendingCommandForLoadingSelection = command
+            scheduleViewportUpdate(immediate: true)
+            return
+        }
         guard canPerformCommand(command) else { NSSound.beep(); return }
         handle(command)
     }
@@ -5887,6 +6346,15 @@ private enum ResourceTableCommand: Equatable {
 }
 
 private extension ResourceTableCommand {
+    var requiresMaterializedSelection: Bool {
+        switch self {
+        case .focusFilter, .selectAll, .moveUp, .moveDown, .extendUp, .extendDown:
+            false
+        default:
+            true
+        }
+    }
+
     var subresourceNetworkAction: PodContainerNetworkAction? {
         switch self {
         case .openLogs: .openLogs
@@ -5940,10 +6408,6 @@ private final class ResourceTableView: NSTableView {
             return
         }
         onCommand(.selectAll)
-    }
-
-    func installSelectAllProjection() {
-        super.selectAll(nil)
     }
 
     override func mouseDown(with event: NSEvent) {

@@ -14,6 +14,51 @@ public enum ResourceViewRangeReception: Hashable, Sendable {
     case rejectedInvalid
 }
 
+/// Plans one bounded table window from AppKit's absolute visible row indexes.
+/// The retained range includes approximately one viewport before and after the
+/// visible rows (two screens total overscan), while always respecting the
+/// protocol's hard cache bound.
+public enum ResourceViewViewportPlanner {
+    public static let defaultOverscanScreens = 2
+
+    public static func retainedRange(
+        visibleRows: Range<UInt64>,
+        rowsVisible: UInt64,
+        maximumRows: Int = ResourceViewInvalidation.protocolMaximumRangeLength,
+        overscanScreens: Int = defaultOverscanScreens
+    ) -> Range<UInt64> {
+        guard rowsVisible > 0, maximumRows > 0 else { return 0..<0 }
+
+        let maximum = min(UInt64(maximumRows), rowsVisible)
+        let visibleLower = min(visibleRows.lowerBound, rowsVisible - 1)
+        let visibleUpper = min(
+            rowsVisible,
+            max(visibleLower + 1, visibleRows.upperBound)
+        )
+        let visibleCount = min(maximum, visibleUpper - visibleLower)
+        let overscanCount = visibleCount.multipliedReportingOverflow(
+            by: UInt64(max(0, overscanScreens))
+        )
+        let desiredCount = min(
+            maximum,
+            overscanCount.overflow
+                ? maximum
+                : visibleCount + min(maximum, overscanCount.partialValue)
+        )
+        let extra = desiredCount - visibleCount
+        let preferredBefore = extra / 2
+        var lower = visibleLower > preferredBefore
+            ? visibleLower - preferredBefore
+            : 0
+        var upper = min(rowsVisible, lower + desiredCount)
+        if upper - lower < desiredCount {
+            lower = upper > desiredCount ? upper - desiredCount : 0
+            upper = min(rowsVisible, lower + desiredCount)
+        }
+        return lower..<upper
+    }
+}
+
 /// A bounded sparse cache for the currently visible resource-table window.
 ///
 /// It deliberately stores rows by numeric index only for one exact
@@ -56,6 +101,22 @@ public struct ResourceViewRangeCache: Sendable {
     public func row(at index: UInt64) -> ResourceRow? {
         guard index < rowsVisible else { return nil }
         return rowByIndex[index]
+    }
+
+    /// Returns a complete contiguous slice only when every requested numeric
+    /// index is resident for the current exact revision. Callers never need to
+    /// materialize the backend's complete UID order to project this window.
+    public func rows(in range: Range<UInt64>) -> [ResourceRow]? {
+        guard range.lowerBound <= range.upperBound,
+            range.upperBound <= rowsVisible
+        else { return nil }
+        var rows: [ResourceRow] = []
+        rows.reserveCapacity(Int(range.count))
+        for index in range {
+            guard let row = rowByIndex[index] else { return nil }
+            rows.append(row)
+        }
+        return rows
     }
 
     public func containsPendingRequest(_ request: ResourceViewRangeRequest) -> Bool {
@@ -126,29 +187,32 @@ public struct ResourceViewRangeCache: Sendable {
         guard !bounded.isEmpty else { return [] }
 
         var requests: [ResourceViewRangeRequest] = []
-        var chunkStart = bounded.lowerBound
-        while chunkStart < bounded.upperBound {
-            let remaining = bounded.upperBound - chunkStart
-            let chunkLength = min(UInt64(maxRangeLength), remaining)
-            let chunkEnd = chunkStart + chunkLength
-            let chunk = chunkStart..<chunkEnd
-            let fullyCached = chunk.allSatisfy { rowByIndex[$0] != nil }
-            let alreadyPending = pendingRequests.contains {
-                requestRange($0).lowerBound <= chunk.lowerBound
-                    && requestRange($0).upperBound >= chunk.upperBound
+        var index = bounded.lowerBound
+        while index < bounded.upperBound {
+            if rowByIndex[index] != nil || isPending(index) {
+                index += 1
+                continue
             }
-            if !fullyCached && !alreadyPending {
-                let request = ResourceViewRangeRequest(
-                    sessionID: sessionID,
-                    viewID: viewID,
-                    revision: revision,
-                    startIndex: chunkStart,
-                    length: Int(chunkLength)
-                )
-                pendingRequests.insert(request)
-                requests.append(request)
+
+            let chunkStart = index
+            while index < bounded.upperBound,
+                index - chunkStart < UInt64(maxRangeLength),
+                rowByIndex[index] == nil,
+                !isPending(index)
+            {
+                index += 1
             }
-            chunkStart = chunkEnd
+            let chunkLength = index - chunkStart
+            guard chunkLength > 0 else { continue }
+            let request = ResourceViewRangeRequest(
+                sessionID: sessionID,
+                viewID: viewID,
+                revision: revision,
+                startIndex: chunkStart,
+                length: Int(chunkLength)
+            )
+            pendingRequests.insert(request)
+            requests.append(request)
         }
         return requests
     }
@@ -255,6 +319,10 @@ public struct ResourceViewRangeCache: Sendable {
         let length = UInt64(max(0, request.length))
         let (upper, overflow) = request.startIndex.addingReportingOverflow(length)
         return request.startIndex..<(overflow ? UInt64.max : upper)
+    }
+
+    private func isPending(_ index: UInt64) -> Bool {
+        pendingRequests.contains { requestRange($0).contains(index) }
     }
 }
 

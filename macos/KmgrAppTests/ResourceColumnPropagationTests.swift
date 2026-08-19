@@ -190,11 +190,26 @@ struct ResourceColumnPropagationTests {
             firstProvider.streamRequests.last?.filterExpression == "namespace:payments"
                 && secondProvider.streamRequests.last?.filterExpression == "status:Running"
         }
+        try await waitUntil {
+            guard firstTable.numberOfRows > 0,
+                !firstTable.tableColumns.isEmpty,
+                let cell = firstTable.view(
+                    atColumn: 0,
+                    row: 0,
+                    makeIfNecessary: true
+                ) as? NSTableCellView
+            else { return false }
+            return cell.textField?.stringValue != "Loading…"
+        }
         firstTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         firstTable.delegate?.tableViewSelectionDidChange?(Notification(
             name: NSTableView.selectionDidChangeNotification,
             object: firstTable
         ))
+        try await waitUntil {
+            first.contextualShortcutSnapshot?.items.map(\.keys)
+                .contains("D") == true
+        }
         #expect(firstTable.selectedRowIndexes == IndexSet(integer: 0))
         #expect(secondTable.selectedRowIndexes.isEmpty)
 

@@ -3,6 +3,26 @@ import Testing
 
 @Suite("Sparse resource-view range cache")
 struct ResourceViewRangeCacheTests {
+    @Test("plans bounded top, middle, end, and oversized viewports")
+    func viewportPlanning() {
+        #expect(ResourceViewViewportPlanner.retainedRange(
+            visibleRows: 0..<20,
+            rowsVisible: 1_000
+        ) == 0..<60)
+        #expect(ResourceViewViewportPlanner.retainedRange(
+            visibleRows: 490..<510,
+            rowsVisible: 1_000
+        ) == 470..<530)
+        #expect(ResourceViewViewportPlanner.retainedRange(
+            visibleRows: 980..<1_000,
+            rowsVisible: 1_000
+        ) == 940..<1_000)
+        #expect(ResourceViewViewportPlanner.retainedRange(
+            visibleRows: 1_000..<1_800,
+            rowsVisible: 10_000
+        ) == 1_000..<1_512)
+    }
+
     @Test("bounds retention and fetches only the current sparse window")
     func boundsSparseWindow() {
         var cache = makeCache(maximumCachedRows: 6)
@@ -105,6 +125,84 @@ struct ResourceViewRangeCacheTests {
         ) == .rejectedStale)
     }
 
+    @Test("moving the sparse window retains overlap and rejects its late edge")
+    func movingSparseWindow() throws {
+        var cache = makeCache(maximumCachedRows: 6)
+        _ = cache.receive(
+            cursor: cursor(sequence: 1),
+            invalidation: invalidation(rows: 1_000, maxRange: 4)
+        )
+        for request in cache.retain(100..<106) {
+            #expect(cache.receive(
+                ResourceViewRange(
+                    viewID: "view",
+                    revision: request.revision,
+                    startIndex: request.startIndex,
+                    rowsVisible: 1_000,
+                    rows: (0..<request.length).map {
+                        row(index: Int(request.startIndex) + $0, revision: 11)
+                    }
+                ),
+                for: request
+            ) != .rejectedInvalid)
+        }
+
+        let edge = try #require(cache.retain(103..<109).only)
+        #expect(edge.startIndex == 106)
+        #expect(edge.length == 3)
+        #expect(cache.cachedRowCount == 3)
+        #expect(cache.row(at: 100) == nil)
+        #expect(cache.row(at: 103)?.identity.uid == "uid-103")
+
+        _ = cache.retain(300..<306)
+        #expect(cache.receive(
+            ResourceViewRange(
+                viewID: "view",
+                revision: edge.revision,
+                startIndex: edge.startIndex,
+                rowsVisible: 1_000,
+                rows: (0..<edge.length).map {
+                    row(index: Int(edge.startIndex) + $0, revision: 11)
+                }
+            ),
+            for: edge
+        ) == .rejectedRace)
+    }
+
+    @Test("contiguous rows remain unavailable until every chunk arrives")
+    func completeContiguousRows() throws {
+        var cache = makeCache(maximumCachedRows: 4)
+        _ = cache.receive(
+            cursor: cursor(sequence: 1),
+            invalidation: invalidation(rows: 20, maxRange: 2)
+        )
+        let requests = cache.retain(10..<14)
+        #expect(requests.count == 2)
+        #expect(cache.rows(in: 10..<14) == nil)
+
+        let first = requests[0]
+        _ = cache.receive(ResourceViewRange(
+            viewID: "view",
+            revision: first.revision,
+            startIndex: first.startIndex,
+            rowsVisible: 20,
+            rows: (10..<12).map { row(index: $0, revision: 11) }
+        ), for: first)
+        #expect(cache.rows(in: 10..<14) == nil)
+
+        let second = requests[1]
+        _ = cache.receive(ResourceViewRange(
+            viewID: "view",
+            revision: second.revision,
+            startIndex: second.startIndex,
+            rowsVisible: 20,
+            rows: (12..<14).map { row(index: $0, revision: 11) }
+        ), for: second)
+        #expect(cache.rows(in: 10..<14)?.map(\.identity.uid) == [
+            "uid-10", "uid-11", "uid-12", "uid-13",
+        ])
+    }
+
     @Test("reconciliation is pinned to the exact fetchable presentation")
     func reconciliationRace() {
         var cache = makeCache()
@@ -183,4 +281,8 @@ struct ResourceViewRangeCacheTests {
             ]
         )
     }
+}
+
+private extension Collection {
+    var only: Element? { count == 1 ? first : nil }
 }

@@ -98,6 +98,73 @@ struct ResourceTableAppKitPerformanceTests {
         #expect((statusView as? NSTableCellView)?.textField?.stringValue == "Ready")
     }
 
+    @Test("compact model offsets project onto absolute AppKit rows")
+    func compactModelOffsetProjection() throws {
+        let rows = (5_000..<5_003).map {
+            syntheticRow(ResourceUID("appkit-row-\($0)"))
+        }
+        let dataSource = SyntheticResourceTableDataSource(
+            model: ResourceTableModel(rows: rows),
+            tableRowCount: 10_000,
+            modelRowOffset: 5_000
+        )
+        let tableView = NSTableView()
+        let column = NSTableColumn(identifier: .init("name"))
+        column.width = 300
+        tableView.addTableColumn(column)
+        tableView.delegate = dataSource
+        tableView.dataSource = dataSource
+        tableView.allowsMultipleSelection = true
+
+        let scrollView = NSScrollView(
+            frame: NSRect(x: 0, y: 0, width: 360, height: 100)
+        )
+        scrollView.documentView = tableView
+        let window = NSWindow(
+            contentRect: scrollView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = scrollView
+        defer {
+            tableView.delegate = nil
+            tableView.dataSource = nil
+            window.contentView = NSView()
+            window.close()
+        }
+
+        tableView.reloadData()
+        tableView.scroll(NSPoint(
+            x: 0,
+            y: tableView.rect(ofRow: 5_001).minY + 4
+        ))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        tableView.layoutSubtreeIfNeeded()
+
+        let capture = ResourceTableAppKitProjection.capture(
+            model: dataSource.model,
+            from: tableView,
+            modelRowOffset: 5_000
+        )
+        #expect(capture.scrollAnchor?.uid == "appkit-row-5001")
+        #expect(capture.scrollAnchor?.priorRowIndex == 1)
+
+        ResourceTableAppKitProjection.apply(
+            ResourceTableUpdatePlan(
+                selectedRowIndexes: [2],
+                scrollRestoration: nil,
+                contentUpdate: .refreshCells([])
+            ),
+            visibleRowCount: 10_000,
+            to: tableView,
+            modelRowOffset: 5_000
+        )
+        #expect(tableView.numberOfRows == 10_000)
+        #expect(tableView.selectedRowIndexes == IndexSet(integer: 5_002))
+    }
+
     @Test("100,000 rows keep UID selection and scroll while AppKit stays virtualized")
     func largeTableProjection() throws {
         let rowCount = 100_000
@@ -352,14 +419,22 @@ private final class SyntheticResourceTableDataSource: NSObject,
     NSTableViewDataSource, NSTableViewDelegate
 {
     var model: ResourceTableModel
+    private let tableRowCount: Int
+    private let modelRowOffset: Int
     private(set) var requestedCellCount = 0
 
-    init(model: ResourceTableModel) {
+    init(
+        model: ResourceTableModel,
+        tableRowCount: Int? = nil,
+        modelRowOffset: Int = 0
+    ) {
         self.model = model
+        self.tableRowCount = tableRowCount ?? model.orderedVisibleUIDs.count
+        self.modelRowOffset = modelRowOffset
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        model.orderedVisibleUIDs.count
+        tableRowCount
     }
 
     func tableView(
@@ -367,7 +442,8 @@ private final class SyntheticResourceTableDataSource: NSObject,
         viewFor tableColumn: NSTableColumn?,
         row: Int
     ) -> NSView? {
-        guard model.orderedVisibleUIDs.indices.contains(row), let tableColumn else {
+        let modelRow = row - modelRowOffset
+        guard model.orderedVisibleUIDs.indices.contains(modelRow), let tableColumn else {
             return nil
         }
         requestedCellCount += 1
@@ -383,7 +459,7 @@ private final class SyntheticResourceTableDataSource: NSObject,
             cell.addSubview(label)
             cell.textField = label
         }
-        let uid = model.orderedVisibleUIDs[row]
+        let uid = model.orderedVisibleUIDs[modelRow]
         cell.textField?.stringValue = model.rowByUID[uid]?[columnID]?.displayText ?? "—"
         return cell
     }

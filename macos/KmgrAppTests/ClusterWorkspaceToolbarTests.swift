@@ -847,8 +847,11 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil { table.numberOfRows == 1 }
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         #expect(window.makeFirstResponder(table))
-        #expect(controller.contextualShortcutSnapshot?.contextID == "resource-list")
-        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("L") == true)
+        try await waitUntil {
+            controller.contextualShortcutSnapshot?.contextID == "resource-list"
+                && controller.contextualShortcutSnapshot?.items.map(\.keys)
+                    .contains("L") == true
+        }
 
         controller.focusResourceFilter(nil)
         #expect(controller.contextualShortcutSnapshot == ContextualShortcutCatalog.resourceFilter)
@@ -1085,7 +1088,7 @@ struct ClusterWorkspaceToolbarTests {
 
         try await waitUntil {
             provider.streamRequestCount == 1
-                && resourceTable.numberOfRows == 512
+                && resourceTable.numberOfRows == 993
                 && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
@@ -1100,22 +1103,22 @@ struct ClusterWorkspaceToolbarTests {
         controller.navigateBack(nil)
         try await waitUntil {
             provider.streamRequestCount == 2
-                && resourceTable.numberOfRows == 512
+                && resourceTable.numberOfRows == 993
                 && statusLine.stringValue.contains("Resuming…")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
         #expect(!statusLine.stringValue.hasSuffix(" · Loading…"))
         try await Task.sleep(for: .milliseconds(100))
-        #expect(resourceTable.numberOfRows == 512)
+        #expect(resourceTable.numberOfRows == 993)
 
         provider.releasePartialRows()
         try await Task.sleep(for: .milliseconds(100))
-        #expect(resourceTable.numberOfRows == 512)
+        #expect(resourceTable.numberOfRows == 993)
         #expect(statusLine.stringValue.contains("Resuming…"))
 
         provider.releaseAuthoritativeRows()
         try await waitUntil {
-            resourceTable.numberOfRows == 512
+            resourceTable.numberOfRows == 993
                 && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
@@ -1222,7 +1225,7 @@ struct ClusterWorkspaceToolbarTests {
 
         try await waitUntil {
             provider.streamRequestCount == 1
-                && resourceTable.numberOfRows == 512
+                && resourceTable.numberOfRows == 993
                 && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
@@ -1237,18 +1240,18 @@ struct ClusterWorkspaceToolbarTests {
         controller.navigateBack(nil)
         try await waitUntil {
             provider.streamRequestCount == 2
-                && resourceTable.numberOfRows == 512
+                && resourceTable.numberOfRows == 993
                 && !statusLine.stringValue.hasSuffix(" · Loading…")
                 && statusLine.stringValue.hasPrefix("993 objects")
                 && statusLine.stringValue.contains("1 selected")
         }
         #expect(resourceTable.selectedRowIndexes == IndexSet(integer: 0))
 
-        // Runtime seals the compact warm snapshot first, then emits the full
-        // same-UID base/metrics catch-up as an ordered delta.
+        // Runtime seals the warm snapshot first, then emits the full same-UID
+        // base/metrics catch-up as an ordered delta.
         provider.releaseAuthoritativeRows()
         try await waitUntil {
-            resourceTable.numberOfRows == 512
+            resourceTable.numberOfRows == 993
                 && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.hasPrefix("993 objects")
                 && statusLine.stringValue.contains("1 selected")
@@ -1425,9 +1428,11 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil { table.numberOfRows == 1 }
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         #expect(window.makeFirstResponder(table))
-        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("D") == true)
-        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys)
-            .contains("\u{2318}Return") == false)
+        try await waitUntil {
+            controller.contextualShortcutSnapshot?.items.map(\.keys).contains("D") == true
+                && controller.contextualShortcutSnapshot?.items.map(\.keys)
+                    .contains("\u{2318}Return") == false
+        }
 
         table.keyDown(with: try workspaceLetterKey("d"))
         try await waitUntil {
@@ -2314,6 +2319,7 @@ func makeColumnPropagationWorkspace(
     columnsConfigurationPath: String,
     columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
     columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
+    resourceViewportTiming: ResourceViewportTiming = .production,
     restorationState: ClusterWindowRestorationState? = nil,
     seedFrameAutosaveName: String? = nil
 ) -> ClusterWorkspaceWindowController {
@@ -2342,6 +2348,7 @@ func makeColumnPropagationWorkspace(
         columnsConfigurationPath: columnsConfigurationPath,
         columnConfigurationCoordinator: columnConfigurationCoordinator,
         columnsConfigurationLoader: columnsConfigurationLoader,
+        resourceViewportTiming: resourceViewportTiming,
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },
         restoration: restoration,

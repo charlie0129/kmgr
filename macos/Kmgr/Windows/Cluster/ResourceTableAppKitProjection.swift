@@ -9,13 +9,19 @@ import KmgrCore
 enum ResourceTableAppKitProjection {
     static func capture(
         model: ResourceTableModel,
-        from tableView: NSTableView
+        from tableView: NSTableView,
+        modelRowOffset: Int = 0
     ) -> ResourceTableUpdateCapture {
-        let firstRow = tableView.rows(in: tableView.visibleRect).location
-        let uid = model.orderedVisibleUIDs.indices.contains(firstRow)
-            ? model.orderedVisibleUIDs[firstRow] : nil
+        let firstTableRow = tableView.rows(in: tableView.visibleRect).location
+        let firstModelRow = firstTableRow == NSNotFound
+            ? NSNotFound : firstTableRow - modelRowOffset
+        let uid = model.orderedVisibleUIDs.indices.contains(firstModelRow)
+            ? model.orderedVisibleUIDs[firstModelRow] : nil
         let pixelOffset = uid.map { _ in
-            Double(tableView.rect(ofRow: firstRow).minY - tableView.visibleRect.minY)
+            Double(
+                tableView.rect(ofRow: firstTableRow).minY
+                    - tableView.visibleRect.minY
+            )
         } ?? 0
         return model.captureUpdate(
             topVisibleUID: uid,
@@ -27,6 +33,7 @@ enum ResourceTableAppKitProjection {
         _ plan: ResourceTableUpdatePlan,
         visibleRowCount: Int,
         to tableView: NSTableView,
+        modelRowOffset: Int = 0,
         updateVisibleCell: ((NSView, NSTableColumn, Int) -> Bool)? = nil
     ) {
         let validRows = 0..<max(0, visibleRowCount)
@@ -35,7 +42,9 @@ enum ResourceTableAppKitProjection {
             tableView.reloadData()
         case .refreshCells(let updates):
             var fallbackRowsByColumnIndex: [Int: IndexSet] = [:]
-            for update in updates where validRows.contains(update.rowIndex) {
+            for update in updates {
+                let tableRow = modelRowOffset + update.rowIndex
+                guard validRows.contains(tableRow) else { continue }
                 let identifier = NSUserInterfaceItemIdentifier(update.columnID)
                 let columnIndex = tableView.column(withIdentifier: identifier)
                 guard tableView.tableColumns.indices.contains(columnIndex) else {
@@ -48,15 +57,15 @@ enum ResourceTableAppKitProjection {
                     // enter the viewport.
                     guard let view = tableView.view(
                         atColumn: columnIndex,
-                        row: update.rowIndex,
+                        row: tableRow,
                         makeIfNecessary: false
                     ) else { continue }
-                    if updateVisibleCell(view, column, update.rowIndex) {
+                    if updateVisibleCell(view, column, tableRow) {
                         continue
                     }
                 }
                 fallbackRowsByColumnIndex[columnIndex, default: []]
-                    .insert(update.rowIndex)
+                    .insert(tableRow)
             }
             for (columnIndex, rowIndexes) in fallbackRowsByColumnIndex {
                 tableView.reloadData(
@@ -66,17 +75,19 @@ enum ResourceTableAppKitProjection {
             }
         }
 
-        let selectedRowIndexes = IndexSet(plan.selectedRowIndexes)
+        let selectedRowIndexes = IndexSet(plan.selectedRowIndexes.map {
+            modelRowOffset + $0
+        }.filter(validRows.contains))
         if tableView.selectedRowIndexes != selectedRowIndexes {
             tableView.selectRowIndexes(
                 selectedRowIndexes,
                 byExtendingSelection: false
             )
         }
-        if let restoration = plan.scrollRestoration,
-            validRows.contains(restoration.rowIndex)
-        {
-            let rowRect = tableView.rect(ofRow: restoration.rowIndex)
+        if let restoration = plan.scrollRestoration {
+            let tableRow = modelRowOffset + restoration.rowIndex
+            guard validRows.contains(tableRow) else { return }
+            let rowRect = tableView.rect(ofRow: tableRow)
             let targetY = max(
                 0,
                 rowRect.minY - CGFloat(restoration.pixelOffsetFromTop)
