@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -112,6 +113,143 @@ func TestManagerMergesMultipleSourcesAndForwardsOptions(t *testing.T) {
 			options.LimitBytes == nil || *options.LimitBytes != limit {
 			t.Fatalf("bounded options for %s = %#v", id, options)
 		}
+	}
+}
+
+func TestManagerLimitsConcurrentSourceOpensWithoutHoldingSlotsForReaders(t *testing.T) {
+	t.Parallel()
+	const (
+		limit       = 2
+		sourceCount = 6
+	)
+	entered := make(chan string, sourceCount)
+	returned := make(chan string, sourceCount)
+	release := make(chan struct{}, sourceCount)
+	var active atomic.Int32
+	var peak atomic.Int32
+	opener := openerFunc(func(_ context.Context, source Source, _ corev1.PodLogOptions) (io.ReadCloser, error) {
+		current := active.Add(1)
+		for {
+			previous := peak.Load()
+			if current <= previous || peak.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		entered <- source.ID
+		<-release
+		active.Add(-1)
+		returned <- source.ID
+		return newBlockingReadCloser(), nil
+	})
+	manager := testManager(t, opener, func(config *Config) {
+		config.MaxConcurrentOpens = limit
+	})
+	sources := make([]Source, 0, sourceCount)
+	for index := 0; index < sourceCount; index++ {
+		sources = append(sources, testSource(fmt.Sprintf("open-%d", index)))
+	}
+	subscription, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "bounded-opens", Generation: 1, Sources: sources,
+		Options: Options{Follow: true},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer subscription.Close()
+
+	for range limit {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("initial source opens did not reach the concurrency limit")
+		}
+	}
+	// Returning from Open, rather than reader teardown, must free a slot. Each
+	// release therefore lets one waiting source enter while earlier readers
+	// remain active in follow mode.
+	for index := limit; index < sourceCount; index++ {
+		release <- struct{}{}
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("source %d did not open after an earlier Open returned", index)
+		}
+	}
+	for range limit {
+		release <- struct{}{}
+	}
+	for range sourceCount {
+		select {
+		case <-returned:
+		case <-time.After(2 * time.Second):
+			t.Fatal("source Open did not return")
+		}
+	}
+	if got := peak.Load(); got > limit {
+		t.Fatalf("peak concurrent opens = %d, want at most %d", got, limit)
+	}
+	if got := active.Load(); got != 0 {
+		t.Fatalf("active opens after returns = %d, want 0", got)
+	}
+
+	if !manager.Cancel("session-1", "bounded-opens", 1) {
+		t.Fatal("current generation cancellation was rejected")
+	}
+	if status := waitForTerminal(t, subscription); status.State != StateCancelled {
+		t.Fatalf("terminal state = %v, want cancelled", status.State)
+	}
+}
+
+func TestManagerCancelsSourceWaitingForOpenSlot(t *testing.T) {
+	t.Parallel()
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	opener := openerFunc(func(_ context.Context, source Source, _ corev1.PodLogOptions) (io.ReadCloser, error) {
+		calls.Add(1)
+		entered <- source.ID
+		<-release
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	})
+	manager := testManager(t, opener, func(config *Config) {
+		config.MaxConcurrentOpens = 1
+	})
+	subscription, err := manager.Start(context.Background(), StartRequest{
+		SessionID: "session-1", StreamID: "cancel-wait", Generation: 1,
+		Sources: []Source{testSource("a"), testSource("b")}, Options: Options{Follow: true},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer subscription.Close()
+	var openedID string
+	select {
+	case openedID = <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first source did not enter Open")
+	}
+	waitingID := "a"
+	if openedID == waitingID {
+		waitingID = "b"
+	}
+	if !manager.Cancel("session-1", "cancel-wait", 1) {
+		t.Fatal("current generation cancellation was rejected")
+	}
+	waitFor(t, func() bool {
+		subscription.operation.queue.mu.Lock()
+		defer subscription.operation.queue.mu.Unlock()
+		status, ok := subscription.operation.queue.statuses[waitingID]
+		return ok && status.State == StateCancelled
+	}, "waiting source cancellation")
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Open calls while the slot was cancelled = %d, want 1", got)
+	}
+	close(release)
+	if status := waitForTerminal(t, subscription); status.State != StateCancelled {
+		t.Fatalf("terminal state = %v, want cancelled", status.State)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Open calls after cancellation = %d, want 1", got)
 	}
 }
 

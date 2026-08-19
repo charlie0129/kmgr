@@ -11,6 +11,7 @@ import (
 const (
 	DefaultMaxStreams          = 256
 	DefaultMaxSourcesPerStream = 128
+	DefaultMaxConcurrentOpens  = 16
 	DefaultQueueRecords        = 4096
 	DefaultQueueBytes          = 8 << 20
 	DefaultMaxRecordBytes      = 256 << 10
@@ -23,6 +24,7 @@ type Config struct {
 	Resolver            Resolver
 	MaxStreams          int
 	MaxSourcesPerStream int
+	MaxConcurrentOpens  int
 	QueueRecords        int
 	QueueBytes          int
 	MaxRecordBytes      int
@@ -84,7 +86,11 @@ type Manager struct {
 	operations map[*operation]struct{}
 	latest     map[streamKey]uint64
 	history    []generationEntry
-	closed     bool
+	// openSlots bounds only the short SourceOpener.Open phase. A slot is
+	// returned as soon as Open returns; long-lived follow readers do not hold
+	// one, so a large log window cannot starve later windows.
+	openSlots chan struct{}
+	closed    bool
 }
 
 func NewManager(config Config) (*Manager, error) {
@@ -92,7 +98,7 @@ func NewManager(config Config) (*Manager, error) {
 		return nil, errors.New("log session resolver must not be nil")
 	}
 	applyConfigDefaults(&config)
-	if config.MaxStreams <= 0 || config.MaxSourcesPerStream <= 0 || config.QueueRecords <= 0 ||
+	if config.MaxStreams <= 0 || config.MaxSourcesPerStream <= 0 || config.MaxConcurrentOpens <= 0 || config.QueueRecords <= 0 ||
 		config.QueueBytes <= 0 || config.MaxRecordBytes <= 0 || config.BatchRecords <= 0 ||
 		config.BatchBytes <= 0 || config.GenerationHistory <= 0 {
 		return nil, errors.New("log stream limits must be positive")
@@ -100,7 +106,7 @@ func NewManager(config Config) (*Manager, error) {
 	config.MaxRecordBytes = min(config.MaxRecordBytes, config.QueueBytes, config.BatchBytes)
 	return &Manager{
 		config: config, streams: make(map[streamKey]*operation), operations: make(map[*operation]struct{}),
-		latest: make(map[streamKey]uint64),
+		latest: make(map[streamKey]uint64), openSlots: make(chan struct{}, config.MaxConcurrentOpens),
 	}, nil
 }
 
@@ -110,6 +116,9 @@ func applyConfigDefaults(config *Config) {
 	}
 	if config.MaxSourcesPerStream == 0 {
 		config.MaxSourcesPerStream = DefaultMaxSourcesPerStream
+	}
+	if config.MaxConcurrentOpens == 0 {
+		config.MaxConcurrentOpens = DefaultMaxConcurrentOpens
 	}
 	if config.QueueRecords == 0 {
 		config.QueueRecords = DefaultQueueRecords
@@ -283,7 +292,12 @@ func (m *Manager) runSource(
 ) bool {
 	copySource := source
 	queue.setStatus(Status{State: StateConnecting, SourceID: source.ID, Source: &copySource})
+	if !m.acquireOpen(ctx) {
+		queue.setStatus(Status{State: StateCancelled, SourceID: source.ID, Source: &copySource})
+		return false
+	}
 	reader, err := opener.Open(ctx, source, options.podLogOptions(source.Container))
+	m.releaseOpen()
 	if err != nil {
 		if ctx.Err() != nil {
 			queue.setStatus(Status{State: StateCancelled, SourceID: source.ID, Source: &copySource})
@@ -305,6 +319,27 @@ func (m *Manager) runSource(
 	}
 	queue.setStatus(Status{State: StateCompleted, SourceID: source.ID, Source: &copySource})
 	return false
+}
+
+// acquireOpen waits for one of the manager-wide startup slots. The context is
+// checked again after acquiring a slot because cancellation and a newly
+// available slot can become ready at the same instant; a cancelled waiter must
+// never invoke SourceOpener.Open.
+func (m *Manager) acquireOpen(ctx context.Context) bool {
+	select {
+	case m.openSlots <- struct{}{}:
+		if ctx.Err() != nil {
+			m.releaseOpen()
+			return false
+		}
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (m *Manager) releaseOpen() {
+	<-m.openSlots
 }
 
 func (m *Manager) Cancel(sessionID, streamID string, generation uint64) bool {
