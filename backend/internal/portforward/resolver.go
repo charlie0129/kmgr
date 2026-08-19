@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/podidentity"
@@ -58,13 +56,16 @@ type ClientGoTargetResolver struct {
 }
 
 const (
-	serviceEndpointSliceListPageSize int64 = 500
-	servicePodListPageSize           int64 = 500
+	serviceEndpointSliceListPageSize  int64 = 500
+	servicePodListPageSize            int64 = 500
+	serviceEndpointPodValidationLimit       = 8
 )
 
 var endpointSliceResource = schema.GroupVersionResource{
 	Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices",
 }
+
+var errEndpointPodAccessFallback = errors.New("EndpointSlice Pod access requires selector fallback")
 
 func (r ClientGoTargetResolver) Resolve(ctx context.Context, target Identity, remotePort uint16) (ResolvedTarget, error) {
 	if r.Core == nil {
@@ -110,16 +111,15 @@ func (r ClientGoTargetResolver) Resolve(ctx context.Context, target Identity, re
 }
 
 type endpointPodCandidate struct {
-	name     string
-	uid      types.UID
-	priority int
+	name string
+	uid  types.UID
 }
 
-// resolveServiceEndpointSlice uses the compact service endpoint index to pick
-// one Ready Pod, then performs one exact Pod GET to pin identity, readiness,
-// and named target-port resolution. The caller retains the legacy
-// label-selected Pod LIST only as a compatibility fallback for clusters or
-// identities that cannot expose EndpointSlices, stale slices, and services
+// resolveServiceEndpointSlice follows the stable order returned by paginated
+// EndpointSlice LISTs and stops at the first viable Pod. Exact Pod validation
+// is capped so a stale endpoint index cannot turn one port-forward into an
+// unbounded sequence of GETs. The caller retains the label-selected Pod LIST
+// compatibility fallback for unavailable or stale EndpointSlices and services
 // whose endpoints do not target Pods.
 func (r ClientGoTargetResolver) resolveServiceEndpointSlice(
 	ctx context.Context,
@@ -127,9 +127,10 @@ func (r ClientGoTargetResolver) resolveServiceEndpointSlice(
 	service corev1.Service,
 	remotePort uint16,
 ) (ResolvedTarget, bool, error) {
-	candidates := make(map[types.UID]endpointPodCandidate)
 	continuation := ""
 	seenContinuations := make(map[string]struct{})
+	seenCandidates := make(map[types.UID]struct{}, serviceEndpointPodValidationLimit)
+	validatedCandidates := 0
 	for {
 		items, err := r.Dynamic.Resource(endpointSliceResource).Namespace(target.Namespace).List(
 			ctx,
@@ -162,14 +163,29 @@ func (r ClientGoTargetResolver) resolveServiceEndpointSlice(
 					(ref.Namespace != "" && ref.Namespace != target.Namespace) {
 					continue
 				}
-				priority := 1
-				if endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready {
-					priority = 0
+				if _, duplicate := seenCandidates[ref.UID]; duplicate {
+					continue
 				}
-				candidate := endpointPodCandidate{name: ref.Name, uid: ref.UID, priority: priority}
-				if previous, exists := candidates[ref.UID]; !exists || candidate.priority < previous.priority ||
-					(candidate.priority == previous.priority && candidate.name < previous.name) {
-					candidates[ref.UID] = candidate
+				if validatedCandidates == serviceEndpointPodValidationLimit {
+					return ResolvedTarget{}, false, nil
+				}
+				seenCandidates[ref.UID] = struct{}{}
+				validatedCandidates++
+				resolved, viable, err := r.validateEndpointPod(
+					ctx,
+					target,
+					service,
+					endpointPodCandidate{name: ref.Name, uid: ref.UID},
+					remotePort,
+				)
+				if err != nil {
+					if errors.Is(err, errEndpointPodAccessFallback) {
+						return ResolvedTarget{}, false, nil
+					}
+					return ResolvedTarget{}, false, err
+				}
+				if viable {
+					return resolved, true, nil
 				}
 			}
 		}
@@ -183,37 +199,36 @@ func (r ClientGoTargetResolver) resolveServiceEndpointSlice(
 		seenContinuations[next] = struct{}{}
 		continuation = next
 	}
-	if len(candidates) == 0 {
-		return ResolvedTarget{}, false, nil
-	}
-	ordered := make([]endpointPodCandidate, 0, len(candidates))
-	for _, candidate := range candidates {
-		ordered = append(ordered, candidate)
-	}
-	sort.Slice(ordered, func(left, right int) bool {
-		if ordered[left].priority != ordered[right].priority {
-			return ordered[left].priority < ordered[right].priority
-		}
-		if ordered[left].uid != ordered[right].uid {
-			return string(ordered[left].uid) < string(ordered[right].uid)
-		}
-		return ordered[left].name < ordered[right].name
-	})
-	selected := ordered[0]
-	pod, err := r.Core.Pods(target.Namespace).Get(ctx, selected.name, metav1.GetOptions{})
+	return ResolvedTarget{}, false, nil
+}
+
+func (r ClientGoTargetResolver) validateEndpointPod(
+	ctx context.Context,
+	target Identity,
+	service corev1.Service,
+	candidate endpointPodCandidate,
+	remotePort uint16,
+) (ResolvedTarget, bool, error) {
+	pod, err := r.Core.Pods(target.Namespace).Get(ctx, candidate.name, metav1.GetOptions{})
 	if err != nil {
-		if apierrors.IsForbidden(err) || apierrors.IsNotFound(err) {
+		if apierrors.IsForbidden(err) {
+			return ResolvedTarget{}, false, errEndpointPodAccessFallback
+		}
+		if apierrors.IsNotFound(err) {
 			return ResolvedTarget{}, false, nil
 		}
 		return ResolvedTarget{}, false, fmt.Errorf("get EndpointSlice Pod: %w", err)
 	}
-	if pod.UID != selected.uid || pod.DeletionTimestamp != nil ||
+	if pod.UID != candidate.uid || pod.DeletionTimestamp != nil ||
 		pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded ||
 		!podReady(pod.Status.Conditions) {
 		return ResolvedTarget{}, false, nil
 	}
 	resolvedPort, err := serviceTargetPort(service.Spec.Ports, *pod, remotePort)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRequest) {
+			return ResolvedTarget{}, false, nil
+		}
 		return ResolvedTarget{}, false, err
 	}
 	return ResolvedTarget{
@@ -244,7 +259,7 @@ func (r ClientGoTargetResolver) resolveServicePodList(
 		fields.OneTermNotEqualSelector("status.phase", string(corev1.PodSucceeded)),
 		fields.OneTermNotEqualSelector("status.phase", string(corev1.PodFailed)),
 	).String()
-	var selected *corev1.Pod
+	var targetPortErr error
 	continuation := ""
 	seenContinuations := make(map[string]struct{})
 	for {
@@ -263,10 +278,18 @@ func (r ClientGoTargetResolver) resolveServicePodList(
 				pod.Status.Phase == corev1.PodSucceeded || !podReady(pod.Status.Conditions) {
 				continue
 			}
-			if selected == nil || strings.Compare(string(pod.UID), string(selected.UID)) < 0 {
-				copy := pod.DeepCopy()
-				selected = copy
+			resolvedPort, err := serviceTargetPort(service.Spec.Ports, *pod, remotePort)
+			if err != nil {
+				targetPortErr = err
+				continue
 			}
+			return ResolvedTarget{
+				Pod: Identity{
+					SessionID: target.SessionID, Version: "v1", Resource: "pods", Namespace: pod.Namespace,
+					Name: pod.Name, UID: pod.UID,
+				},
+				RemotePort: resolvedPort,
+			}, nil
 		}
 		next := pods.GetContinue()
 		if next == "" {
@@ -278,18 +301,10 @@ func (r ClientGoTargetResolver) resolveServicePodList(
 		seenContinuations[next] = struct{}{}
 		continuation = next
 	}
-	if selected == nil {
-		return ResolvedTarget{}, ErrNoEligiblePod
+	if targetPortErr != nil {
+		return ResolvedTarget{}, targetPortErr
 	}
-	identity := Identity{
-		SessionID: target.SessionID, Version: "v1", Resource: "pods", Namespace: selected.Namespace,
-		Name: selected.Name, UID: selected.UID,
-	}
-	resolvedPort, err := serviceTargetPort(service.Spec.Ports, *selected, remotePort)
-	if err != nil {
-		return ResolvedTarget{}, err
-	}
-	return ResolvedTarget{Pod: identity, RemotePort: resolvedPort}, nil
+	return ResolvedTarget{}, ErrNoEligiblePod
 }
 
 func podReady(conditions []corev1.PodCondition) bool {
