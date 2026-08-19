@@ -15,7 +15,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -121,10 +120,13 @@ func (r ClusterResolver) ContextName(sessionID string) (string, bool) {
 	return session.Context().Name, true
 }
 
-// ResourceForKind resolves an owner reference through the session's discovery-
-// backed RESTMapper. Kubernetes resource names are not derived by pluralizing
-// kinds: that is incorrect for many built-ins and arbitrary CRDs.
+// ResourceForKind resolves an owner reference through the authority-shared API
+// catalog. Kubernetes resource names are not derived by pluralizing kinds:
+// that is incorrect for many built-ins and arbitrary CRDs. Reusing the same
+// catalog as the workspace and relationship scanner avoids waking a separate
+// DeferredDiscoveryRESTMapper cache for the first owner lookup.
 func (r ClusterResolver) ResourceForKind(
+	ctx context.Context,
 	sessionID string,
 	gvk schema.GroupVersionKind,
 	namespace string,
@@ -136,18 +138,27 @@ func (r ClusterResolver) ResourceForKind(
 	if !ok {
 		return nil, schema.GroupVersionResource{}, "", ErrSessionNotFound
 	}
-	mapper := session.Mapper()
-	if mapper == nil || session.Dynamic() == nil {
+	if session.Dynamic() == nil {
 		return nil, schema.GroupVersionResource{}, "", ErrRelationshipResolutionUnavailable
 	}
-	mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	catalog, err := session.DiscoverResourcesCached(ctx, false)
 	if err != nil {
 		return nil, schema.GroupVersionResource{}, "", err
 	}
-	namespaceable := session.Dynamic().Resource(mapping.Resource)
+	discovered, found := resourceForExactKind(catalog.Resources, gvk)
+	if !found {
+		return nil, schema.GroupVersionResource{}, "", fmt.Errorf(
+			"%w: API resource for %s was not found in the shared discovery catalog",
+			ErrRelationshipResolutionUnavailable, gvk.String(),
+		)
+	}
+	gvr := schema.GroupVersionResource{
+		Group: discovered.Group, Version: discovered.Version, Resource: discovered.Resource,
+	}
+	namespaceable := session.Dynamic().Resource(gvr)
 	var resource dynamic.ResourceInterface = namespaceable
 	resolvedNamespace := ""
-	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+	if discovered.Namespaced {
 		if namespace == "" {
 			return nil, schema.GroupVersionResource{}, "", fmt.Errorf(
 				"namespaced owner %s has no namespace", gvk.String(),
@@ -156,7 +167,17 @@ func (r ClusterResolver) ResourceForKind(
 		resolvedNamespace = namespace
 		resource = namespaceable.Namespace(namespace)
 	}
-	return resource, mapping.Resource, resolvedNamespace, nil
+	return resource, gvr, resolvedNamespace, nil
+}
+
+func resourceForExactKind(resources []cluster.APIResource, gvk schema.GroupVersionKind) (cluster.APIResource, bool) {
+	for _, resource := range resources {
+		if resource.Group == gvk.Group && resource.Version == gvk.Version &&
+			resource.Kind == gvk.Kind && resource.Resource != "" {
+			return resource, true
+		}
+	}
+	return cluster.APIResource{}, false
 }
 
 func (r ClusterResolver) RelationshipScanSession(sessionID string) (RelationshipScanSession, error) {

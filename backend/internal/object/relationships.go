@@ -52,6 +52,7 @@ type CachedChildSource interface {
 
 type KindResolver interface {
 	ResourceForKind(
+		ctx context.Context,
 		sessionID string,
 		gvk schema.GroupVersionKind,
 		namespace string,
@@ -116,7 +117,9 @@ func (r *Reader) ownerRelationships(
 		if gvk.Version == "" || gvk.Kind == "" || owner.Name == "" || owner.UID == "" {
 			return nil, fmt.Errorf("invalid owner reference on %s/%s", identity.Namespace, identity.Name)
 		}
-		resource, gvr, namespace, err := resolver.ResourceForKind(identity.SessionID, gvk, identity.Namespace)
+		resource, gvr, namespace, err := resolver.ResourceForKind(
+			ctx, identity.SessionID, gvk, identity.Namespace,
+		)
 		if err != nil {
 			return nil, err
 		}
