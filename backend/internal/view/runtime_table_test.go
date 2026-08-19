@@ -78,6 +78,9 @@ func TestRuntimeTableOpenIgnoresCompletedRawSearchHandoff(t *testing.T) {
 	if source.tableOpens.Load() != 1 || source.rawOpens.Load() != 1 {
 		t.Fatalf("source opens raw=%d Table=%d", source.rawOpens.Load(), source.tableOpens.Load())
 	}
+	if source.tableObject != metav1.IncludeMetadata {
+		t.Fatalf("default Table object policy = %q, want Metadata", source.tableObject)
+	}
 	runtime.mu.Lock()
 	retainedSearchSnapshots = len(runtime.searchSnapshots)
 	runtime.mu.Unlock()
@@ -264,11 +267,12 @@ func TestRuntimeTableDisableRebuildsRowsWithoutStaleServerCells(t *testing.T) {
 }
 
 type runtimeTableSource struct {
-	authority  string
-	raw        watcher.ListerWatcher
-	table      watcher.ListerWatcher
-	rawOpens   atomic.Int64
-	tableOpens atomic.Int64
+	authority   string
+	raw         watcher.ListerWatcher
+	table       watcher.ListerWatcher
+	rawOpens    atomic.Int64
+	tableOpens  atomic.Int64
+	tableObject metav1.IncludeObjectPolicy
 }
 
 func (s *runtimeTableSource) OpenResource(
@@ -281,10 +285,15 @@ func (s *runtimeTableSource) OpenResource(
 }
 
 func (s *runtimeTableSource) OpenTableResource(
-	string,
-	schema.GroupVersionResource,
-	string,
+	_ string,
+	_ schema.GroupVersionResource,
+	_ string,
+	include metav1.IncludeObjectPolicy,
 ) (string, watcher.ListerWatcher, error) {
+	// Runtime opens one table stream at a time in these fixtures. Record the
+	// representation decision so the integration test proves it reaches the
+	// source boundary.
+	s.tableObject = include
 	s.tableOpens.Add(1)
 	return s.authority, s.table, nil
 }

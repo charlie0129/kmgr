@@ -68,3 +68,56 @@ func TestProjectTableCellsUsesTypedServerValues(t *testing.T) {
 		t.Fatalf("typed Table cells = %#v", cells)
 	}
 }
+
+func TestTableObjectPolicyUsesMetadataOnlyForMetadataAndServerDependencies(t *testing.T) {
+	t.Parallel()
+	resource := ResourceType{
+		Group: "example.io", Version: "v1", Resource: "widgets", Kind: "Widget", Namespaced: true,
+	}
+	metadataProjector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session", Resource: resource,
+		ColumnIDs:        []string{"namespace", "name", "labels", "age", "server-U3RhdHVz"},
+		FilterExpression: "label:app==api ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tableObjectPolicy(metadataProjector); got != metav1.IncludeMetadata {
+		t.Fatalf("metadata/server projection policy = %q", got)
+	}
+
+	for _, test := range []struct {
+		name   string
+		column string
+		filter string
+	}{
+		{name: "status column", column: "status"},
+		{name: "arbitrary builtin", column: "ready"},
+		{name: "status filter", column: "name", filter: "status:Ready"},
+		{name: "field filter", column: "name", filter: "field:spec.tier==frontend"},
+		{name: "object sort", column: "name"},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			columns := []string{"name"}
+			if test.column != "name" {
+				columns = append(columns, test.column)
+			}
+			spec := ProjectionSpec{
+				ClusterSessionID: "session", Resource: resource,
+				ColumnIDs: columns, FilterExpression: test.filter,
+			}
+			if test.name == "object sort" {
+				spec.Sort = []SortDescriptor{{ColumnID: "status"}}
+			}
+			projector, err := NewProjector(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := tableObjectPolicy(projector); got != metav1.IncludeObject {
+				t.Fatalf("full-object projection policy = %q", got)
+			}
+		})
+	}
+}

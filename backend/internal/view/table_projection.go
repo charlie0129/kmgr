@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	viewfilter "github.com/charlie0129/kmgr/backend/internal/view/filter"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +20,58 @@ type projectedTableColumn struct {
 	definition *kmgrv1.ResourceColumnSchema
 	tableType  string
 	format     string
+}
+
+// tableObjectPolicy keeps the common CRD/aggregated Table path compact. Server
+// cells already carry printer output; PartialObjectMetadata supplies the UID,
+// name, namespace, labels, timestamps, and resourceVersion needed by native
+// identity columns and local metadata filters. Any dependency on status,
+// arbitrary fields, CEL, or another object-backed extractor selects the full
+// representation before the LIST/WATCH is opened.
+func tableObjectPolicy(projector *Projector) metav1.IncludeObjectPolicy {
+	if projector == nil || projector.filter == nil {
+		return metav1.IncludeObject
+	}
+	for _, term := range projector.filter.Terms() {
+		switch term.Kind {
+		case viewfilter.Text, viewfilter.Namespace, viewfilter.Name, viewfilter.Label:
+			// Bare text reads projected cells, including server Table cells; the
+			// remaining structured terms are all present in metadata.
+		default:
+			return metav1.IncludeObject
+		}
+	}
+	for _, displayID := range projector.spec.ColumnIDs {
+		if !metadataTableColumn(projector, displayID) {
+			return metav1.IncludeObject
+		}
+	}
+	for _, descriptor := range projector.spec.Sort {
+		if !metadataTableColumn(projector, descriptor.ColumnID) {
+			return metav1.IncludeObject
+		}
+	}
+	return metav1.IncludeMetadata
+}
+
+func metadataTableColumn(projector *Projector, displayID string) bool {
+	if projector == nil || projector.spec.CELPrograms[displayID] != nil {
+		return false
+	}
+	if extractor := projector.spec.ColumnExtractors[displayID]; extractor.Source != "" {
+		if extractor.Source != "builtin" {
+			return false
+		}
+		displayID = extractor.Value
+	} else if strings.HasPrefix(displayID, "server-") {
+		return true
+	}
+	switch displayID {
+	case "namespace", "name", "labels", "age", "created", "resourceVersion":
+		return true
+	default:
+		return false
+	}
 }
 
 func projectTableSchema(columns []metav1.TableColumnDefinition) (*kmgrv1.ViewSchema, []projectedTableColumn) {

@@ -10,7 +10,9 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/flowcontrol"
@@ -35,6 +37,9 @@ func TestTablePipelineNegotiatesPaginatedListAndHeaderlessWatch(t *testing.T) {
 			t.Errorf("includeObject = %q, want %q", got, metav1.IncludeObject)
 		}
 		query := request.URL.Query()
+		if query.Get("sendInitialEvents") != "" || query.Get("resourceVersionMatch") != "" {
+			t.Errorf("Table pipeline attempted WatchList semantics: %v", query)
+		}
 		if query.Get("watch") == "true" {
 			writeWatch(response,
 				watchJSON("ADDED", tableJSON("101", "", nil,
@@ -205,6 +210,65 @@ func TestTableListFailureFallsBackToRawSameGVR(t *testing.T) {
 	}
 }
 
+func TestTableResourceClientRequestsMetadataOnlyRepresentation(t *testing.T) {
+	t.Parallel()
+	var requests requestLog
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.add(request)
+		if got := request.URL.Query().Get("includeObject"); got != string(metav1.IncludeMetadata) {
+			t.Errorf("includeObject = %q, want Metadata", got)
+		}
+		writeTable(response, tableJSON("100", "", []metav1.TableColumnDefinition{
+			{Name: "Name", Type: "string"}, {Name: "Status", Type: "string"},
+		}, tableRow([]any{"alpha", "Ready"}, widgetJSON("uid-a", "alpha", "100"))))
+	})
+	gvr := schema.GroupVersionResource{Group: "example.io", Version: "v1", Resource: "widgets"}
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	config := &rest.Config{Host: httpServer.URL}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewTableResourceClient(
+		config, gvr, "team-a", dynamicClient.Resource(gvr).Namespace("team-a"), metav1.IncludeMetadata,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.ListTable(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Objects) != 1 || page.Objects[0].GetUID() != "uid-a" ||
+		page.Objects[0].GetName() != "alpha" || len(page.Cells[types.UID("uid-a")]) != 2 {
+		t.Fatalf("metadata Table page = %#v", page)
+	}
+	if got := requests.snapshot(); len(got) != 1 {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestDecodeTableObjectAcceptsTypedPartialObjectMetadata(t *testing.T) {
+	t.Parallel()
+	metadata := &metav1.PartialObjectMetadata{
+		TypeMeta: metav1.TypeMeta{APIVersion: "meta.k8s.io/v1", Kind: "PartialObjectMetadata"},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "team-a", Name: "alpha", UID: "uid-a", ResourceVersion: "100",
+			Labels: map[string]string{"app": "api"},
+		},
+	}
+	object, err := decodeTableObject(&metav1.TableRow{
+		Object: k8sruntime.RawExtension{Object: metadata},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object.GetUID() != "uid-a" || object.GetLabels()["app"] != "api" {
+		t.Fatalf("decoded metadata object = %#v", object)
+	}
+}
+
 func TestTableResourceClientRetainsAuthorityRateLimiter(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -216,7 +280,9 @@ func TestTableResourceClientRetainsAuthorityRateLimiter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct fallback client: %v", err)
 	}
-	client, err := NewTableResourceClient(config, gvr, "team-a", dynamicClient.Resource(gvr).Namespace("team-a"))
+	client, err := NewTableResourceClient(
+		config, gvr, "team-a", dynamicClient.Resource(gvr).Namespace("team-a"), metav1.IncludeObject,
+	)
 	if err != nil {
 		t.Fatalf("NewTableResourceClient: %v", err)
 	}
@@ -243,7 +309,7 @@ func newTableTestClient(
 	if namespace != "" {
 		fallback = dynamicClient.Resource(gvr).Namespace(namespace)
 	}
-	client, err := NewTableResourceClient(config, gvr, namespace, fallback)
+	client, err := NewTableResourceClient(config, gvr, namespace, fallback, metav1.IncludeObject)
 	if err != nil {
 		t.Fatal(err)
 	}

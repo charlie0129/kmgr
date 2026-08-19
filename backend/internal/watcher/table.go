@@ -47,6 +47,7 @@ type TableResourceClient struct {
 	fallback  ListerWatcher
 	resource  string
 	namespace string
+	include   metav1.IncludeObjectPolicy
 	disabled  atomic.Bool
 }
 
@@ -55,12 +56,16 @@ func NewTableResourceClient(
 	gvr schema.GroupVersionResource,
 	namespace string,
 	fallback ListerWatcher,
+	include metav1.IncludeObjectPolicy,
 ) (*TableResourceClient, error) {
 	if config == nil {
 		return nil, errors.New("table resource client requires a REST config")
 	}
 	if fallback == nil {
 		return nil, errors.New("table resource client requires a fallback client")
+	}
+	if include != metav1.IncludeObject && include != metav1.IncludeMetadata {
+		return nil, fmt.Errorf("unsupported Table includeObject policy %q", include)
 	}
 	copy := rest.CopyConfig(config)
 	groupVersion := gvr.GroupVersion()
@@ -85,6 +90,7 @@ func NewTableResourceClient(
 	}
 	return &TableResourceClient{
 		rest: client, fallback: fallback, resource: gvr.Resource, namespace: namespace,
+		include: include,
 	}, nil
 }
 
@@ -113,7 +119,7 @@ func (c *TableResourceClient) ListTable(ctx context.Context, options metav1.List
 		SetHeader("Accept", tableAcceptHeader).
 		Namespace(c.namespace).
 		Resource(c.resource).
-		Param("includeObject", string(metav1.IncludeObject)).
+		Param("includeObject", string(c.include)).
 		VersionedParams(&options, metav1.ParameterCodec)
 	table := &metav1.Table{}
 	if err := request.Do(ctx).Into(table); err != nil {
@@ -137,7 +143,7 @@ func (c *TableResourceClient) WatchTable(ctx context.Context, options metav1.Lis
 		SetHeader("Accept", tableAcceptHeader).
 		Namespace(c.namespace).
 		Resource(c.resource).
-		Param("includeObject", string(metav1.IncludeObject)).
+		Param("includeObject", string(c.include)).
 		VersionedParams(&options, metav1.ParameterCodec).
 		Watch(ctx)
 	if err == nil {
@@ -205,8 +211,15 @@ func decodeTableObject(row *metav1.TableRow) (*unstructured.Unstructured, error)
 	if object, ok := row.Object.Object.(*unstructured.Unstructured); ok && object != nil {
 		return object, nil
 	}
+	if row.Object.Object != nil {
+		value, err := runtime.DefaultUnstructuredConverter.ToUnstructured(row.Object.Object)
+		if err != nil {
+			return nil, fmt.Errorf("convert Table row object %T: %w", row.Object.Object, err)
+		}
+		return &unstructured.Unstructured{Object: value}, nil
+	}
 	if len(row.Object.Raw) == 0 {
-		return nil, errors.New("full object is absent despite includeObject=Object")
+		return nil, errors.New("Table row object is absent despite includeObject policy")
 	}
 	decoded, err := runtime.Decode(unstructured.UnstructuredJSONScheme, row.Object.Raw)
 	if err != nil {

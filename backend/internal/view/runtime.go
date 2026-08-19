@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/metadata"
+	clientwatchlist "k8s.io/client-go/util/watchlist"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
@@ -83,10 +84,16 @@ type MetadataSearchResourceSource interface {
 
 // TableResourceSource optionally provides content-negotiated metav1.Table
 // streams for resources without a curated native registry. Implementations
-// must include each full object and fall back to the same GVR's ordinary
-// dynamic stream when Table negotiation is unavailable.
+// include either metadata or full objects according to the projection plan and
+// fall back to the same GVR's ordinary dynamic stream when Table negotiation
+// is unavailable.
 type TableResourceSource interface {
-	OpenTableResource(sessionID string, resource schema.GroupVersionResource, namespace string) (
+	OpenTableResource(
+		sessionID string,
+		resource schema.GroupVersionResource,
+		namespace string,
+		include metav1.IncludeObjectPolicy,
+	) (
 		authorityID string,
 		client watcher.ListerWatcher,
 		err error,
@@ -96,6 +103,17 @@ type TableResourceSource interface {
 // ClusterResourceSource adapts the authoritative cluster session registry.
 type ClusterResourceSource struct {
 	Sessions *cluster.SessionRegistry
+}
+
+// watchListDynamicResource opts a production dynamic client into streaming
+// initial events while retaining the complete dynamic.ResourceInterface. The
+// latter matters to adapters that use richer dynamic-client type assertions.
+type watchListDynamicResource struct {
+	dynamic.ResourceInterface
+}
+
+func (client watchListDynamicResource) SupportsWatchListSemantics() bool {
+	return !clientwatchlist.DoesClientNotSupportWatchListSemantics(client.ResourceInterface)
 }
 
 func (s ClusterResourceSource) OpenResource(
@@ -117,6 +135,7 @@ func (s ClusterResourceSource) OpenResource(
 	} else {
 		resourceClient = client.Namespace(namespace)
 	}
+	resourceClient = watchListDynamicResource{ResourceInterface: resourceClient}
 	// SessionRegistry shares one dynamic client between workspace sessions for
 	// the same catalog/context. Include its pointer so a kubeconfig reload that
 	// happens to retain the same stable context ID cannot cross-wire clients.
@@ -159,6 +178,7 @@ func (s ClusterResourceSource) OpenTableResource(
 	sessionID string,
 	resource schema.GroupVersionResource,
 	namespace string,
+	include metav1.IncludeObjectPolicy,
 ) (string, watcher.ListerWatcher, error) {
 	authorityID, fallback, err := s.OpenResource(sessionID, resource, namespace)
 	if err != nil {
@@ -169,7 +189,7 @@ func (s ClusterResourceSource) OpenTableResource(
 		return "", nil, ErrSessionNotFound
 	}
 	client, err := watcher.NewTableResourceClient(
-		session.RESTConfig(), resource, namespace, fallback,
+		session.RESTConfig(), resource, namespace, fallback, include,
 	)
 	if err != nil {
 		// A session without a reusable REST config remains fully usable through
@@ -323,6 +343,7 @@ type resourceKey struct {
 	namespace   string
 	labels      string
 	fields      string
+	tableObject metav1.IncludeObjectPolicy
 }
 
 // searchSnapshotKey is deliberately stricter than resourceKey. A namespaced
@@ -618,11 +639,22 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
 	}
+	projector, err := projectorFromProto(sessionID, request.GetSpec(), r.columns, query.filter)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var authorityID string
 	var client watcher.ListerWatcher
+	var requestedTableObject metav1.IncludeObjectPolicy
 	if tableSource, ok := r.source.(TableResourceSource); ok &&
 		!viewcolumns.HasCuratedNativeColumns(gvr.Group, gvr.Version, gvr.Resource) {
-		authorityID, client, err = tableSource.OpenTableResource(sessionID, gvr, serverNamespace)
+		requestedTableObject = tableObjectPolicy(projector)
+		authorityID, client, err = tableSource.OpenTableResource(
+			sessionID, gvr, serverNamespace, requestedTableObject,
+		)
 	} else {
 		authorityID, client, err = r.source.OpenResource(sessionID, gvr, serverNamespace)
 	}
@@ -630,12 +662,8 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		return nil, err
 	}
 	_, usesTableStream := client.(watcher.TableListerWatcher)
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	projector, err := projectorFromProto(sessionID, request.GetSpec(), r.columns, query.filter)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
+	if !usesTableStream {
+		requestedTableObject = ""
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -648,6 +676,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		namespace:   serverNamespace,
 		labels:      query.labelSelector,
 		fields:      query.fieldSelector,
+		tableObject: requestedTableObject,
 	}
 	streamKey := viewKey{sessionID: sessionID, viewID: viewID}
 	deliveryIdentity := deliverySignature{
@@ -3747,5 +3776,8 @@ func structuredViewError(operation string, err error, retryable bool) *kmgrv1.St
 // Compile-time check that dynamic clients remain compatible with the narrow
 // pipeline contract as client-go evolves.
 var _ watcher.ListerWatcher = dynamic.ResourceInterface(nil)
+var _ watcher.ListerWatcher = watchListDynamicResource{}
+var _ watcher.WatchListSemantics = watchListDynamicResource{}
+var _ dynamic.ResourceInterface = watchListDynamicResource{}
 var _ MetadataSearchResourceSource = ClusterResourceSource{}
 var _ = types.UID("")
