@@ -87,6 +87,22 @@ message ConnectionEvent {
   // expose counts only; the GUI derives short-window rates from deltas.
   uint64 api_bytes_received = 5;
   uint64 api_bytes_sent = 6;
+  // Process-memory warm-cache accounting only. Neither record includes cache
+  // keys, Kubernetes identities, selectors, or authority identifiers.
+  WarmCacheUsage authority_warm_cache = 7;
+  WarmCacheUsage global_warm_cache = 8;
+}
+
+message WarmCacheUsage {
+  uint64 retained_views = 1;
+  uint64 retained_objects = 2;
+  uint64 retained_bytes = 3;
+  uint64 view_limit = 4;
+  uint64 object_limit = 5;
+  uint64 byte_limit = 6;
+  // Cumulative entries removed specifically to satisfy a warm-cache budget.
+  // Normal consumption, explicit removal, and shutdown do not increment it.
+  uint64 budget_evictions = 7;
 }
 
 message DiscoverRequest {

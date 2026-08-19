@@ -14,6 +14,7 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	"github.com/charlie0129/kmgr/backend/internal/operation"
 	"github.com/charlie0129/kmgr/backend/internal/portforward"
+	"github.com/charlie0129/kmgr/backend/internal/view"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -104,6 +105,41 @@ func TestServerRejectsInvalidWarmCacheLimits(t *testing.T) {
 			}
 			t.Fatalf("NewServer(%+v) = %#v, %v; want error", options, server, err)
 		}
+	}
+}
+
+func TestServerPublishesViewWarmCacheTelemetryToMatchingAuthority(t *testing.T) {
+	t.Parallel()
+	registry := cluster.NewSessionRegistry(&serviceFactory{})
+	t.Cleanup(registry.CloseAll)
+	catalog := serviceCatalog(t)
+	session, err := registry.Open(catalog, serviceContextID(t, catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := view.WarmCacheUsage{
+		RetainedViews: 2, RetainedObjects: 10, RetainedBytes: 2_048,
+		ViewLimit: 8, ObjectLimit: 100, ByteLimit: 1 << 20,
+		BudgetEvictions: 4,
+	}
+	global := view.WarmCacheUsage{
+		RetainedViews: 3, RetainedObjects: 20, RetainedBytes: 4_096,
+		ViewLimit: 24, ObjectLimit: 250, ByteLimit: 2 << 20,
+		BudgetEvictions: 7,
+	}
+	publishWarmCacheTelemetry(registry, view.WarmCacheTelemetry{
+		Global:          global,
+		AuthorityBudget: view.WarmCacheUsage{ViewLimit: 8, ObjectLimit: 100, ByteLimit: 1 << 20},
+		Authorities: map[string]view.WarmCacheUsage{
+			session.AuthorityID(): authority,
+		},
+	})
+	snapshot := session.APIActivity().Snapshot()
+	if snapshot.AuthorityWarmCache.RetainedViews != 2 ||
+		snapshot.AuthorityWarmCache.BudgetEvictions != 4 ||
+		snapshot.GlobalWarmCache.RetainedViews != 3 ||
+		snapshot.GlobalWarmCache.BudgetEvictions != 7 {
+		t.Fatalf("published warm-cache telemetry = %#v", snapshot)
 	}
 }
 

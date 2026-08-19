@@ -267,46 +267,103 @@ public struct Kmgr_V1_WatchConnectionRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_ConnectionEvent: Sendable {
+public struct Kmgr_V1_ConnectionEvent: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var cursor: Kmgr_V1_StreamCursor {
-    get {return _cursor ?? Kmgr_V1_StreamCursor()}
-    set {_cursor = newValue}
+    get {return _storage._cursor ?? Kmgr_V1_StreamCursor()}
+    set {_uniqueStorage()._cursor = newValue}
   }
   /// Returns true if `cursor` has been explicitly set.
-  public var hasCursor: Bool {return self._cursor != nil}
+  public var hasCursor: Bool {return _storage._cursor != nil}
   /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
-  public mutating func clearCursor() {self._cursor = nil}
+  public mutating func clearCursor() {_uniqueStorage()._cursor = nil}
 
-  public var state: Kmgr_V1_ConnectionState = .unspecified
+  public var state: Kmgr_V1_ConnectionState {
+    get {return _storage._state}
+    set {_uniqueStorage()._state = newValue}
+  }
 
-  public var observedAtUnixMs: Int64 = 0
+  public var observedAtUnixMs: Int64 {
+    get {return _storage._observedAtUnixMs}
+    set {_uniqueStorage()._observedAtUnixMs = newValue}
+  }
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
-    set {_error = newValue}
+    get {return _storage._error ?? Kmgr_V1_StructuredError()}
+    set {_uniqueStorage()._error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {return _storage._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
-  public mutating func clearError() {self._error = nil}
+  public mutating func clearError() {_uniqueStorage()._error = nil}
 
   /// Monotonic, process-local Kubernetes API payload totals for this shared
   /// cluster authority. They intentionally exclude kubeconfig contents and
   /// expose counts only; the GUI derives short-window rates from deltas.
-  public var apiBytesReceived: UInt64 = 0
+  public var apiBytesReceived: UInt64 {
+    get {return _storage._apiBytesReceived}
+    set {_uniqueStorage()._apiBytesReceived = newValue}
+  }
 
-  public var apiBytesSent: UInt64 = 0
+  public var apiBytesSent: UInt64 {
+    get {return _storage._apiBytesSent}
+    set {_uniqueStorage()._apiBytesSent = newValue}
+  }
+
+  /// Process-memory warm-cache accounting only. Neither record includes cache
+  /// keys, Kubernetes identities, selectors, or authority identifiers.
+  public var authorityWarmCache: Kmgr_V1_WarmCacheUsage {
+    get {return _storage._authorityWarmCache ?? Kmgr_V1_WarmCacheUsage()}
+    set {_uniqueStorage()._authorityWarmCache = newValue}
+  }
+  /// Returns true if `authorityWarmCache` has been explicitly set.
+  public var hasAuthorityWarmCache: Bool {return _storage._authorityWarmCache != nil}
+  /// Clears the value of `authorityWarmCache`. Subsequent reads from it will return its default value.
+  public mutating func clearAuthorityWarmCache() {_uniqueStorage()._authorityWarmCache = nil}
+
+  public var globalWarmCache: Kmgr_V1_WarmCacheUsage {
+    get {return _storage._globalWarmCache ?? Kmgr_V1_WarmCacheUsage()}
+    set {_uniqueStorage()._globalWarmCache = newValue}
+  }
+  /// Returns true if `globalWarmCache` has been explicitly set.
+  public var hasGlobalWarmCache: Bool {return _storage._globalWarmCache != nil}
+  /// Clears the value of `globalWarmCache`. Subsequent reads from it will return its default value.
+  public mutating func clearGlobalWarmCache() {_uniqueStorage()._globalWarmCache = nil}
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
-  fileprivate var _cursor: Kmgr_V1_StreamCursor? = nil
-  fileprivate var _error: Kmgr_V1_StructuredError? = nil
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public struct Kmgr_V1_WarmCacheUsage: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var retainedViews: UInt64 = 0
+
+  public var retainedObjects: UInt64 = 0
+
+  public var retainedBytes: UInt64 = 0
+
+  public var viewLimit: UInt64 = 0
+
+  public var objectLimit: UInt64 = 0
+
+  public var byteLimit: UInt64 = 0
+
+  /// Cumulative entries removed specifically to satisfy a warm-cache budget.
+  /// Normal consumption, explicit removal, and shutdown do not increment it.
+  public var budgetEvictions: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 public struct Kmgr_V1_DiscoverRequest: Sendable {
@@ -812,7 +869,126 @@ extension Kmgr_V1_WatchConnectionRequest: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ConnectionEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}state\0\u{3}observed_at_unix_ms\0\u{1}error\0\u{3}api_bytes_received\0\u{3}api_bytes_sent\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}state\0\u{3}observed_at_unix_ms\0\u{1}error\0\u{3}api_bytes_received\0\u{3}api_bytes_sent\0\u{3}authority_warm_cache\0\u{3}global_warm_cache\0")
+
+  fileprivate class _StorageClass {
+    var _cursor: Kmgr_V1_StreamCursor? = nil
+    var _state: Kmgr_V1_ConnectionState = .unspecified
+    var _observedAtUnixMs: Int64 = 0
+    var _error: Kmgr_V1_StructuredError? = nil
+    var _apiBytesReceived: UInt64 = 0
+    var _apiBytesSent: UInt64 = 0
+    var _authorityWarmCache: Kmgr_V1_WarmCacheUsage? = nil
+    var _globalWarmCache: Kmgr_V1_WarmCacheUsage? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _cursor = source._cursor
+      _state = source._state
+      _observedAtUnixMs = source._observedAtUnixMs
+      _error = source._error
+      _apiBytesReceived = source._apiBytesReceived
+      _apiBytesSent = source._apiBytesSent
+      _authorityWarmCache = source._authorityWarmCache
+      _globalWarmCache = source._globalWarmCache
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._cursor) }()
+        case 2: try { try decoder.decodeSingularEnumField(value: &_storage._state) }()
+        case 3: try { try decoder.decodeSingularInt64Field(value: &_storage._observedAtUnixMs) }()
+        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._error) }()
+        case 5: try { try decoder.decodeSingularUInt64Field(value: &_storage._apiBytesReceived) }()
+        case 6: try { try decoder.decodeSingularUInt64Field(value: &_storage._apiBytesSent) }()
+        case 7: try { try decoder.decodeSingularMessageField(value: &_storage._authorityWarmCache) }()
+        case 8: try { try decoder.decodeSingularMessageField(value: &_storage._globalWarmCache) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      try { if let v = _storage._cursor {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+      } }()
+      if _storage._state != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._state, fieldNumber: 2)
+      }
+      if _storage._observedAtUnixMs != 0 {
+        try visitor.visitSingularInt64Field(value: _storage._observedAtUnixMs, fieldNumber: 3)
+      }
+      try { if let v = _storage._error {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+      } }()
+      if _storage._apiBytesReceived != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._apiBytesReceived, fieldNumber: 5)
+      }
+      if _storage._apiBytesSent != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._apiBytesSent, fieldNumber: 6)
+      }
+      try { if let v = _storage._authorityWarmCache {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+      } }()
+      try { if let v = _storage._globalWarmCache {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+      } }()
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ConnectionEvent, rhs: Kmgr_V1_ConnectionEvent) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._cursor != rhs_storage._cursor {return false}
+        if _storage._state != rhs_storage._state {return false}
+        if _storage._observedAtUnixMs != rhs_storage._observedAtUnixMs {return false}
+        if _storage._error != rhs_storage._error {return false}
+        if _storage._apiBytesReceived != rhs_storage._apiBytesReceived {return false}
+        if _storage._apiBytesSent != rhs_storage._apiBytesSent {return false}
+        if _storage._authorityWarmCache != rhs_storage._authorityWarmCache {return false}
+        if _storage._globalWarmCache != rhs_storage._globalWarmCache {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_WarmCacheUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".WarmCacheUsage"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}retained_views\0\u{3}retained_objects\0\u{3}retained_bytes\0\u{3}view_limit\0\u{3}object_limit\0\u{3}byte_limit\0\u{3}budget_evictions\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -820,50 +996,51 @@ extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularMessageField(value: &self._cursor) }()
-      case 2: try { try decoder.decodeSingularEnumField(value: &self.state) }()
-      case 3: try { try decoder.decodeSingularInt64Field(value: &self.observedAtUnixMs) }()
-      case 4: try { try decoder.decodeSingularMessageField(value: &self._error) }()
-      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.apiBytesReceived) }()
-      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.apiBytesSent) }()
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.retainedViews) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.retainedObjects) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.retainedBytes) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.viewLimit) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.objectLimit) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.byteLimit) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.budgetEvictions) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    try { if let v = self._cursor {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
-    } }()
-    if self.state != .unspecified {
-      try visitor.visitSingularEnumField(value: self.state, fieldNumber: 2)
+    if self.retainedViews != 0 {
+      try visitor.visitSingularUInt64Field(value: self.retainedViews, fieldNumber: 1)
     }
-    if self.observedAtUnixMs != 0 {
-      try visitor.visitSingularInt64Field(value: self.observedAtUnixMs, fieldNumber: 3)
+    if self.retainedObjects != 0 {
+      try visitor.visitSingularUInt64Field(value: self.retainedObjects, fieldNumber: 2)
     }
-    try { if let v = self._error {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
-    } }()
-    if self.apiBytesReceived != 0 {
-      try visitor.visitSingularUInt64Field(value: self.apiBytesReceived, fieldNumber: 5)
+    if self.retainedBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.retainedBytes, fieldNumber: 3)
     }
-    if self.apiBytesSent != 0 {
-      try visitor.visitSingularUInt64Field(value: self.apiBytesSent, fieldNumber: 6)
+    if self.viewLimit != 0 {
+      try visitor.visitSingularUInt64Field(value: self.viewLimit, fieldNumber: 4)
+    }
+    if self.objectLimit != 0 {
+      try visitor.visitSingularUInt64Field(value: self.objectLimit, fieldNumber: 5)
+    }
+    if self.byteLimit != 0 {
+      try visitor.visitSingularUInt64Field(value: self.byteLimit, fieldNumber: 6)
+    }
+    if self.budgetEvictions != 0 {
+      try visitor.visitSingularUInt64Field(value: self.budgetEvictions, fieldNumber: 7)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  public static func ==(lhs: Kmgr_V1_ConnectionEvent, rhs: Kmgr_V1_ConnectionEvent) -> Bool {
-    if lhs._cursor != rhs._cursor {return false}
-    if lhs.state != rhs.state {return false}
-    if lhs.observedAtUnixMs != rhs.observedAtUnixMs {return false}
-    if lhs._error != rhs._error {return false}
-    if lhs.apiBytesReceived != rhs.apiBytesReceived {return false}
-    if lhs.apiBytesSent != rhs.apiBytesSent {return false}
+  public static func ==(lhs: Kmgr_V1_WarmCacheUsage, rhs: Kmgr_V1_WarmCacheUsage) -> Bool {
+    if lhs.retainedViews != rhs.retainedViews {return false}
+    if lhs.retainedObjects != rhs.retainedObjects {return false}
+    if lhs.retainedBytes != rhs.retainedBytes {return false}
+    if lhs.viewLimit != rhs.viewLimit {return false}
+    if lhs.objectLimit != rhs.objectLimit {return false}
+    if lhs.byteLimit != rhs.byteLimit {return false}
+    if lhs.budgetEvictions != rhs.budgetEvictions {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

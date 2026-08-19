@@ -349,6 +349,50 @@ struct ClusterWorkspaceToolbarTests {
         #expect(statusBar.fittingSize.height <= 24)
     }
 
+    @Test("warm-cache telemetry appears in the persistent workspace status bar")
+    func warmCacheUsesWorkspaceFooter() async throws {
+        let sample = ClusterConnectionActivitySample(
+            cursor: StreamCursor(generation: 1, sequence: 1),
+            state: .connected,
+            observedAt: Date(),
+            bytesReceived: 0,
+            bytesSent: 0,
+            authorityWarmCache: WarmCacheUsage(
+                retainedViews: 2,
+                retainedObjects: 300,
+                retainedBytes: 180 << 20,
+                viewLimit: 8,
+                objectLimit: 100_000,
+                byteLimit: 4 << 30,
+                budgetEvictions: 3
+            ),
+            globalWarmCache: WarmCacheUsage(
+                retainedViews: 4,
+                retainedObjects: 900,
+                retainedBytes: 512 << 20,
+                viewLimit: 24,
+                objectLimit: 250_000,
+                byteLimit: 4 << 30,
+                budgetEvictions: 5
+            )
+        )
+        let controller = makeWorkspace(
+            connectionActivityProvider: StaticConnectionActivityProvider(sample: sample)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
+
+        try await waitUntil {
+            status.stringValue.contains("Warm cache 180 MiB / 4 GiB")
+        }
+        #expect(status.stringValue.contains("global 512 MiB / 4 GiB"))
+        #expect(status.stringValue.contains("evictions 3/5"))
+        #expect(status.toolTip?.contains("not total engine memory") == true)
+    }
+
     @Test("sidebar section material spans the full outline row")
     func sidebarSectionRowsHaveBackground() async throws {
         let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
@@ -2215,6 +2259,8 @@ private func makeWorkspace(
         defaultNamespace: "default"
     ),
     provider: any WorkspaceResourceProviding = NoopWorkspaceResourceProvider(),
+    connectionActivityProvider: any ClusterConnectionActivityProviding =
+        NoopConnectionActivityProvider(),
     logProvider: any LogStreamProviding = NoopLogProvider(),
     objectDetailProvider: any ObjectDetailProviding = NoopToolbarObjectDetailProvider(),
     execProvider: any ExecSessionProviding = NoopExecProvider(),
@@ -2234,7 +2280,7 @@ private func makeWorkspace(
     return ClusterWorkspaceWindowController(
         session: session,
         provider: provider,
-        connectionActivityProvider: NoopConnectionActivityProvider(),
+        connectionActivityProvider: connectionActivityProvider,
         optionalResourceCatalogProvider: NoopOptionalResourceCatalogProvider(),
         objectSearchProvider: NoopObjectSearchProvider(),
         objectDetailProvider: objectDetailProvider,
@@ -3533,6 +3579,18 @@ private struct NoopConnectionActivityProvider: ClusterConnectionActivityProvidin
     func watchConnectionActivity(sessionID: String, streamID: String)
         -> AsyncThrowingStream<ClusterConnectionActivitySample, Error> {
         AsyncThrowingStream { $0.finish() }
+    }
+}
+
+private struct StaticConnectionActivityProvider: ClusterConnectionActivityProviding {
+    let sample: ClusterConnectionActivitySample
+
+    func watchConnectionActivity(sessionID: String, streamID: String)
+        -> AsyncThrowingStream<ClusterConnectionActivitySample, Error> {
+        AsyncThrowingStream {
+            $0.yield(sample)
+            $0.finish()
+        }
     }
 }
 

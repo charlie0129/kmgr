@@ -26,25 +26,82 @@ type APIActivity struct {
 	received atomic.Uint64
 	sent     atomic.Uint64
 	health   atomic.Uint32
+	warm     atomic.Pointer[warmCacheActivitySnapshot]
 
 	mu        sync.Mutex
 	listeners map[chan struct{}]struct{}
 }
 
 type APIActivitySnapshot struct {
-	BytesReceived    uint64
-	BytesSent        uint64
-	ConnectionHealth APIConnectionHealth
+	BytesReceived      uint64
+	BytesSent          uint64
+	ConnectionHealth   APIConnectionHealth
+	AuthorityWarmCache WarmCacheUsage
+	GlobalWarmCache    WarmCacheUsage
+}
+
+// WarmCacheUsage contains aggregate process-memory accounting only. It never
+// carries an authority ID, Kubernetes identity, query key, or selector.
+type WarmCacheUsage struct {
+	RetainedViews   uint64
+	RetainedObjects uint64
+	RetainedBytes   uint64
+	ViewLimit       uint64
+	ObjectLimit     uint64
+	ByteLimit       uint64
+	BudgetEvictions uint64
+}
+
+type warmCacheActivitySnapshot struct {
+	generation uint64
+	authority  WarmCacheUsage
+	global     WarmCacheUsage
 }
 
 func (a *APIActivity) Snapshot() APIActivitySnapshot {
 	if a == nil {
 		return APIActivitySnapshot{}
 	}
-	return APIActivitySnapshot{
+	snapshot := APIActivitySnapshot{
 		BytesReceived:    a.received.Load(),
 		BytesSent:        a.sent.Load(),
 		ConnectionHealth: APIConnectionHealth(a.health.Load()),
+	}
+	if warm := a.warm.Load(); warm != nil {
+		snapshot.AuthorityWarmCache = warm.authority
+		snapshot.GlobalWarmCache = warm.global
+	}
+	return snapshot
+}
+
+// setWarmCacheUsage replaces the current aggregate warm-cache accounting when
+// generation is newer than the installed value. Registry publication happens
+// outside its ownership lock, so the generation guard prevents a delayed old
+// callback from overwriting a newer snapshot. Readers remain lock-free.
+func (a *APIActivity) setWarmCacheUsage(
+	generation uint64,
+	authority, global WarmCacheUsage,
+) {
+	if a == nil {
+		return
+	}
+	next := &warmCacheActivitySnapshot{
+		generation: generation,
+		authority:  authority,
+		global:     global,
+	}
+	for {
+		previous := a.warm.Load()
+		if previous != nil && previous.generation >= generation {
+			return
+		}
+		if !a.warm.CompareAndSwap(previous, next) {
+			continue
+		}
+		if previous == nil || previous.authority != authority || previous.global != global {
+			a.notify()
+		}
+		return
 	}
 }
 

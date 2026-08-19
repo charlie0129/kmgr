@@ -123,11 +123,13 @@ func (s *ClusterService) WatchConnection(
 			Cursor: &kmgrv1.StreamCursor{
 				StreamId: request.GetStreamId(), Generation: generation, Sequence: sequence,
 			},
-			State:            connectionState,
-			ObservedAtUnixMs: time.Now().UnixMilli(),
-			ApiBytesReceived: totals.BytesReceived,
-			ApiBytesSent:     totals.BytesSent,
-			Error:            connectionError,
+			State:              connectionState,
+			ObservedAtUnixMs:   time.Now().UnixMilli(),
+			ApiBytesReceived:   totals.BytesReceived,
+			ApiBytesSent:       totals.BytesSent,
+			AuthorityWarmCache: warmCacheUsageProto(totals.AuthorityWarmCache),
+			GlobalWarmCache:    warmCacheUsageProto(totals.GlobalWarmCache),
+			Error:              connectionError,
 		}); err != nil {
 			return err
 		}
@@ -158,6 +160,18 @@ func (s *ClusterService) WatchConnection(
 				return err
 			}
 		}
+	}
+}
+
+func warmCacheUsageProto(usage cluster.WarmCacheUsage) *kmgrv1.WarmCacheUsage {
+	return &kmgrv1.WarmCacheUsage{
+		RetainedViews:   usage.RetainedViews,
+		RetainedObjects: usage.RetainedObjects,
+		RetainedBytes:   usage.RetainedBytes,
+		ViewLimit:       usage.ViewLimit,
+		ObjectLimit:     usage.ObjectLimit,
+		ByteLimit:       usage.ByteLimit,
+		BudgetEvictions: usage.BudgetEvictions,
 	}
 }
 

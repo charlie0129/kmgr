@@ -157,12 +157,18 @@ func closeHTTPClient(client *http.Client) {
 }
 
 type SessionRegistry struct {
-	mu       sync.RWMutex
-	factory  ClientFactory
-	qps      float32
-	burst    int
-	sessions map[string]*sessionEntry
-	backends map[backendKey]*sharedBackend
+	mu                       sync.RWMutex
+	factory                  ClientFactory
+	qps                      float32
+	burst                    int
+	sessions                 map[string]*sessionEntry
+	backends                 map[backendKey]*sharedBackend
+	authorities              map[string]*sharedBackend
+	authorityRetiredObserver func(string)
+	warmCacheGlobal          WarmCacheUsage
+	warmCacheAuthorityBudget WarmCacheUsage
+	warmCacheAuthorities     map[string]WarmCacheUsage
+	warmCacheGeneration      uint64
 }
 
 type sessionEntry struct {
@@ -177,8 +183,9 @@ type backendKey struct {
 }
 
 type sharedBackend struct {
-	clients BackendClients
-	config  *rest.Config
+	authorityID string
+	clients     BackendClients
+	config      *rest.Config
 	// refs counts live session entries, not individual workspace or stream
 	// leases. A session entry remains live after its workspace closes only
 	// while an independent operation still owns it.
@@ -188,6 +195,15 @@ type sharedBackend struct {
 	// namespaceNames stores only a sorted string snapshot and belongs to this
 	// shared Kubernetes authority rather than any workspace session.
 	namespaceNames namespaceNameCache
+}
+
+// WarmCacheTelemetry is one redacted process-memory cache snapshot from the
+// view runtime. Authorities are addressed only by their process-local opaque
+// IDs; those IDs never cross the connection protocol.
+type WarmCacheTelemetry struct {
+	Global          WarmCacheUsage
+	AuthorityBudget WarmCacheUsage
+	Authorities     map[string]WarmCacheUsage
 }
 
 // SessionLease keeps one session and its shared Kubernetes backend alive for
@@ -214,12 +230,106 @@ func NewSessionRegistry(factory ClientFactory) *SessionRegistry {
 		factory = DefaultClientFactory{}
 	}
 	return &SessionRegistry{
-		factory:  factory,
-		qps:      DefaultClientQPS,
-		burst:    DefaultClientBurst,
-		sessions: make(map[string]*sessionEntry),
-		backends: make(map[backendKey]*sharedBackend),
+		factory:              factory,
+		qps:                  DefaultClientQPS,
+		burst:                DefaultClientBurst,
+		sessions:             make(map[string]*sessionEntry),
+		backends:             make(map[backendKey]*sharedBackend),
+		authorities:          make(map[string]*sharedBackend),
+		warmCacheAuthorities: make(map[string]WarmCacheUsage),
 	}
+}
+
+// SetAuthorityRetiredObserver installs the process-local lifecycle callback
+// used by cache owners to discard state tied to closed backend clients. The
+// callback is always invoked after SessionRegistry releases its mutex.
+func (r *SessionRegistry) SetAuthorityRetiredObserver(observer func(string)) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.authorityRetiredObserver = observer
+	r.mu.Unlock()
+}
+
+// AuthorityActive reports whether an opaque authority still owns live shared
+// Kubernetes clients. It is an O(1), process-local cache-lifecycle check.
+func (r *SessionRegistry) AuthorityActive(authorityID string) bool {
+	if r == nil || authorityID == "" {
+		return false
+	}
+	r.mu.RLock()
+	_, ok := r.authorities[authorityID]
+	r.mu.RUnlock()
+	return ok
+}
+
+func (r *SessionRegistry) notifyAuthoritiesRetired(authorityIDs ...string) {
+	if r == nil || len(authorityIDs) == 0 {
+		return
+	}
+	r.mu.RLock()
+	observer := r.authorityRetiredObserver
+	r.mu.RUnlock()
+	if observer == nil {
+		return
+	}
+	for _, authorityID := range authorityIDs {
+		if authorityID != "" {
+			observer(authorityID)
+		}
+	}
+}
+
+// SetWarmCacheTelemetry publishes one coherent snapshot to every live shared
+// backend. Activity callbacks happen after registry ownership is released, so
+// a connection-stream consumer can never deadlock session or view-cache locks.
+func (r *SessionRegistry) SetWarmCacheTelemetry(snapshot WarmCacheTelemetry) {
+	if r == nil {
+		return
+	}
+	authorities := make(map[string]WarmCacheUsage, len(snapshot.Authorities))
+	for authorityID, usage := range snapshot.Authorities {
+		if authorityID != "" {
+			authorities[authorityID] = usage
+		}
+	}
+	type update struct {
+		activity  *APIActivity
+		authority WarmCacheUsage
+	}
+	r.mu.Lock()
+	r.warmCacheGeneration++
+	generation := r.warmCacheGeneration
+	r.warmCacheGlobal = snapshot.Global
+	r.warmCacheAuthorityBudget = snapshot.AuthorityBudget
+	r.warmCacheAuthorities = authorities
+	updates := make([]update, 0, len(r.backends))
+	for _, backend := range r.backends {
+		if backend == nil || backend.activity == nil {
+			continue
+		}
+		usage := r.warmCacheUsageForAuthorityLocked(backend.authorityID)
+		updates = append(updates, update{activity: backend.activity, authority: usage})
+	}
+	global := r.warmCacheGlobal
+	r.mu.Unlock()
+
+	for _, update := range updates {
+		update.activity.setWarmCacheUsage(generation, update.authority, global)
+	}
+}
+
+func (r *SessionRegistry) warmCacheUsageForAuthorityLocked(authorityID string) WarmCacheUsage {
+	if usage, ok := r.warmCacheAuthorities[authorityID]; ok {
+		return usage
+	}
+	budget := r.warmCacheAuthorityBudget
+	budget.RetainedViews = 0
+	budget.RetainedObjects = 0
+	budget.RetainedBytes = 0
+	budget.BudgetEvictions = 0
+	return budget
 }
 
 func (r *SessionRegistry) SetRateLimit(qps float32, burst int) error {
@@ -252,8 +362,12 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 		return nil, err
 	}
 
+	var retiredAuthorities []string
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		r.mu.Unlock()
+		r.notifyAuthoritiesRetired(retiredAuthorities...)
+	}()
 	config = rest.CopyConfig(config)
 	config.QPS = r.qps
 	config.Burst = r.burst
@@ -262,6 +376,16 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 	key := backendKey{catalog: catalog, contextID: contextInfo.ID}
 	backend := r.backends[key]
 	if backend == nil {
+		var authorityID string
+		for {
+			authorityID, err = newAuthorityID()
+			if err != nil {
+				return nil, err
+			}
+			if r.authorities[authorityID] == nil {
+				break
+			}
+		}
 		// Every client constructed for this authority must receive this exact
 		// limiter. Supplying only QPS/Burst would make each REST client allocate
 		// an independent token bucket and multiply the effective API-server cap.
@@ -272,17 +396,25 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 		if err != nil {
 			return nil, fmt.Errorf("open context %q: %w", contextInfo.Name, err)
 		}
-		backend = &sharedBackend{clients: clients, config: rest.CopyConfig(config), activity: activity}
+		backend = &sharedBackend{
+			authorityID: authorityID,
+			clients:     clients,
+			config:      rest.CopyConfig(config),
+			activity:    activity,
+		}
+		activity.setWarmCacheUsage(
+			r.warmCacheGeneration,
+			r.warmCacheUsageForAuthorityLocked(authorityID),
+			r.warmCacheGlobal,
+		)
 		r.backends[key] = backend
+		r.authorities[authorityID] = backend
 	}
 
 	sessionID, err := newSessionID()
 	if err != nil {
 		if backend.refs == 0 {
-			if backend.clients.Close != nil {
-				backend.clients.Close()
-			}
-			delete(r.backends, key)
+			retiredAuthorities = append(retiredAuthorities, r.closeBackendLocked(key, backend))
 		}
 		return nil, err
 	}
@@ -290,7 +422,7 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 		sessionID, err = newSessionID()
 		if err != nil {
 			if backend.refs == 0 {
-				r.closeBackendLocked(key, backend)
+				retiredAuthorities = append(retiredAuthorities, r.closeBackendLocked(key, backend))
 			}
 			return nil, err
 		}
@@ -331,15 +463,18 @@ func (r *SessionRegistry) Acquire(sessionID string) (*Session, *SessionLease, bo
 // other session shares it) its Kubernetes backend are closed automatically.
 func (r *SessionRegistry) CloseWorkspace(sessionID string) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	entry := r.sessions[sessionID]
 	if entry == nil || !entry.workspaceLease {
+		r.mu.Unlock()
 		return false
 	}
 	entry.workspaceLease = false
+	retiredAuthority := ""
 	if entry.independentLeases == 0 {
-		r.removeSessionLocked(sessionID, entry)
+		retiredAuthority = r.removeSessionLocked(sessionID, entry)
 	}
+	r.mu.Unlock()
+	r.notifyAuthoritiesRetired(retiredAuthority)
 	return true
 }
 
@@ -348,28 +483,34 @@ func (r *SessionRegistry) CloseWorkspace(sessionID string) bool {
 // other callers that require immediate invalidation.
 func (r *SessionRegistry) Close(sessionID string) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	entry := r.sessions[sessionID]
 	if entry == nil {
+		r.mu.Unlock()
 		return false
 	}
-	r.removeSessionLocked(sessionID, entry)
+	retiredAuthority := r.removeSessionLocked(sessionID, entry)
+	r.mu.Unlock()
+	r.notifyAuthoritiesRetired(retiredAuthority)
 	return true
 }
 
-func (r *SessionRegistry) removeSessionLocked(sessionID string, entry *sessionEntry) {
+func (r *SessionRegistry) removeSessionLocked(sessionID string, entry *sessionEntry) string {
 	if entry == nil || r.sessions[sessionID] != entry {
-		return
+		return ""
 	}
 	delete(r.sessions, sessionID)
 	backend := entry.session.backend
 	backend.refs--
 	if backend.refs == 0 {
-		r.closeBackendLocked(entry.session.key, backend)
+		return r.closeBackendLocked(entry.session.key, backend)
 	}
+	return ""
 }
 
-func (r *SessionRegistry) closeBackendLocked(key backendKey, backend *sharedBackend) {
+func (r *SessionRegistry) closeBackendLocked(key backendKey, backend *sharedBackend) string {
+	if backend == nil {
+		return ""
+	}
 	backend.namespaceNames.close()
 	if backend.clients.Mapper != nil {
 		backend.clients.Mapper.Reset()
@@ -378,15 +519,21 @@ func (r *SessionRegistry) closeBackendLocked(key backendKey, backend *sharedBack
 		backend.clients.Close()
 	}
 	delete(r.backends, key)
+	if r.authorities[backend.authorityID] == backend {
+		delete(r.authorities, backend.authorityID)
+	}
+	return backend.authorityID
 }
 
 func (r *SessionRegistry) CloseAll() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	clear(r.sessions)
+	retiredAuthorities := make([]string, 0, len(r.backends))
 	for key, backend := range r.backends {
-		r.closeBackendLocked(key, backend)
+		retiredAuthorities = append(retiredAuthorities, r.closeBackendLocked(key, backend))
 	}
+	r.mu.Unlock()
+	r.notifyAuthoritiesRetired(retiredAuthorities...)
 }
 
 func (l *SessionLease) Release() {
@@ -396,15 +543,18 @@ func (l *SessionLease) Release() {
 	l.once.Do(func() {
 		r := l.registry
 		r.mu.Lock()
-		defer r.mu.Unlock()
 		entry := l.entry
 		if r.sessions[entry.session.id] != entry || entry.independentLeases == 0 {
+			r.mu.Unlock()
 			return
 		}
 		entry.independentLeases--
+		retiredAuthority := ""
 		if !entry.workspaceLease && entry.independentLeases == 0 {
-			r.removeSessionLocked(entry.session.id, entry)
+			retiredAuthority = r.removeSessionLocked(entry.session.id, entry)
 		}
+		r.mu.Unlock()
+		r.notifyAuthoritiesRetired(retiredAuthority)
 	})
 }
 
@@ -425,6 +575,15 @@ func (s *Session) APIActivity() *APIActivity {
 	return s.backend.activity
 }
 
+// AuthorityID is an opaque process-local identity shared by sessions that use
+// the exact same backend clients. It contains no kubeconfig or server data.
+func (s *Session) AuthorityID() string {
+	if s == nil || s.backend == nil {
+		return ""
+	}
+	return s.backend.authorityID
+}
+
 // RESTConfig returns an independent copy for Table and subresource transports
 // such as exec and port-forward. The copy deliberately retains the shared
 // authority-wide RateLimiter identity. Callers must never log it because it
@@ -442,4 +601,12 @@ func newSessionID() (string, error) {
 		return "", fmt.Errorf("generate cluster session ID: %w", err)
 	}
 	return "session_" + hex.EncodeToString(random[:]), nil
+}
+
+func newAuthorityID() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate Kubernetes authority ID: %w", err)
+	}
+	return "authority_" + hex.EncodeToString(random[:]), nil
 }

@@ -1,4 +1,5 @@
 import AppKit
+import KmgrCore
 import Testing
 @testable import Kmgr
 
@@ -12,7 +13,7 @@ struct WorkspaceStatusTests {
         board.set(WorkspaceStatus("12 Pods · Watching"), for: .content)
         board.set(WorkspaceStatus("47 API resources"), for: .discovery)
         board.set(WorkspaceStatus("180 MiB cached"), for: .warmCache)
-        #expect(board.presented.text == "12 Pods · Watching")
+        #expect(board.presented.text == "12 Pods · Watching · 180 MiB cached")
 
         board.set(WorkspaceStatus("Refreshing API resources…", busy: true), for: .discovery)
         #expect(board.presented.text == "Refreshing API resources…")
@@ -31,12 +32,49 @@ struct WorkspaceStatusTests {
             severity: .error,
             toolTip: "One API group is unavailable."
         ), for: .discovery)
-        #expect(board.presented.text == "Object conflict · Discovery failed")
+        #expect(board.presented.text == (
+            "Object conflict · Discovery failed · 180 MiB cached"
+        ))
         #expect(board.presented.toolTip?.contains("The UID changed.") == true)
         #expect(board.presented.toolTip?.contains("One API group is unavailable.") == true)
 
         board.set(nil, for: .content)
         #expect(board.presented.text == "Discovery failed")
+    }
+
+    @Test("warm-cache status reports cluster and global budgets without claiming RSS")
+    func warmCacheStatus() throws {
+        let status = try #require(WarmCacheWorkspaceStatus.make(
+            authority: WarmCacheUsage(
+                retainedViews: 2,
+                retainedObjects: 300,
+                retainedBytes: 180 << 20,
+                viewLimit: 8,
+                objectLimit: 100_000,
+                byteLimit: 4 << 30,
+                budgetEvictions: 3
+            ),
+            global: WarmCacheUsage(
+                retainedViews: 4,
+                retainedObjects: 900,
+                retainedBytes: 512 << 20,
+                viewLimit: 24,
+                objectLimit: 250_000,
+                byteLimit: 4 << 30,
+                budgetEvictions: 5
+            )
+        ))
+
+        #expect(status.text == (
+            "Warm cache 180 MiB / 4 GiB · global 512 MiB / 4 GiB · evictions 3/5"
+        ))
+        #expect(status.toolTip?.contains("2 / 8 queries") == true)
+        #expect(status.toolTip?.contains("300 / 100,000 objects") == true)
+        #expect(status.toolTip?.contains("not total engine memory") == true)
+        #expect(WarmCacheWorkspaceStatus.make(
+            authority: WarmCacheUsage(),
+            global: WarmCacheUsage()
+        ) == nil)
     }
 
     @Test("supplemental problems compose with normal content")

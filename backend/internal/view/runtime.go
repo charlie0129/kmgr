@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -150,7 +149,10 @@ func (s ClusterResourceSource) OpenMetadataSearchResource(
 }
 
 func clusterSessionAuthorityID(session *cluster.Session) string {
-	return session.Context().ID + "/" + pointerIdentity(session.Dynamic())
+	if session == nil {
+		return ""
+	}
+	return session.AuthorityID()
 }
 
 func (s ClusterResourceSource) OpenTableResource(
@@ -191,17 +193,6 @@ func (s ClusterResourceSource) AuthorityID(sessionID string) (string, bool) {
 	return clusterSessionAuthorityID(session), true
 }
 
-func pointerIdentity(value any) string {
-	ref := reflect.ValueOf(value)
-	switch ref.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
-		if !ref.IsNil() {
-			return fmt.Sprintf("%x", ref.Pointer())
-		}
-	}
-	return fmt.Sprintf("%T", value)
-}
-
 type RuntimeConfig struct {
 	Source                      ResourceSource
 	Metrics                     MetricSource
@@ -216,6 +207,8 @@ type RuntimeConfig struct {
 	WarmViewLimitPerAuthority   int
 	WarmObjectLimitPerAuthority int
 	WarmByteLimitPerAuthority   int64
+	WarmCacheObserver           func(WarmCacheTelemetry)
+	WarmCacheAuthorityActive    func(string) bool
 	PipelinePageSize            int64
 	PipelineTimeout             time.Duration
 	SearchSnapshotLimit         int
@@ -260,15 +253,22 @@ type Runtime struct {
 	pageSize          int64
 	watchTimeout      time.Duration
 
-	resources                   map[resourceKey]*resourceRuntime
-	views                       map[viewKey]*Subscription
-	warm                        *watcher.WarmCache[resourceKey, *resourceRuntime]
-	warmByAuthority             map[string]*watcher.WarmCache[resourceKey, *resourceRuntime]
-	warmObjectLimit             int
-	warmByteLimit               int64
-	warmViewLimitPerAuthority   int
-	warmObjectLimitPerAuthority int
-	warmByteLimitPerAuthority   int64
+	resources                      map[resourceKey]*resourceRuntime
+	views                          map[viewKey]*Subscription
+	warm                           *watcher.WarmCache[resourceKey, *resourceRuntime]
+	warmByAuthority                map[string]*watcher.WarmCache[resourceKey, *resourceRuntime]
+	warmViewLimit                  int
+	warmObjectLimit                int
+	warmByteLimit                  int64
+	warmViewLimitPerAuthority      int
+	warmObjectLimitPerAuthority    int
+	warmByteLimitPerAuthority      int64
+	warmBudgetEvictions            uint64
+	warmBudgetEvictionsByAuthority map[string]uint64
+	warmCacheObserver              func(WarmCacheTelemetry)
+	warmCacheAuthorityActive       func(string) bool
+	warmCacheTelemetryWake         chan struct{}
+	warmCacheTelemetryStop         chan chan struct{}
 
 	searchSnapshots           map[searchSnapshotKey]*completedSearchSnapshot
 	searchSnapshotLimit       int
@@ -529,40 +529,46 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if openProjectionLimit <= 0 || openHistoryLimit <= 0 {
 		return nil, errors.New("open projection limits must be positive")
 	}
-	return &Runtime{
-		source:                      config.Source,
-		metrics:                     config.Metrics,
-		columns:                     config.Columns,
-		releaseDelay:                releaseDelay,
-		batchDelay:                  batchDelay,
-		snapshotChunkSize:           chunkSize,
-		pendingRowLimit:             pendingLimit,
-		pageSize:                    config.PipelinePageSize,
-		watchTimeout:                config.PipelineTimeout,
-		resources:                   make(map[resourceKey]*resourceRuntime),
-		views:                       make(map[viewKey]*Subscription),
-		warm:                        watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects, warmBytes),
-		warmByAuthority:             make(map[string]*watcher.WarmCache[resourceKey, *resourceRuntime]),
-		warmObjectLimit:             warmObjects,
-		warmByteLimit:               warmBytes,
-		warmViewLimitPerAuthority:   warmViewsPerAuthority,
-		warmObjectLimitPerAuthority: warmObjectsPerAuthority,
-		warmByteLimitPerAuthority:   warmBytesPerAuthority,
-		searchSnapshots:             make(map[searchSnapshotKey]*completedSearchSnapshot),
-		searchSnapshotLimit:         searchSnapshotLimit,
-		searchSnapshotObjectLimit:   searchSnapshotObjectLimit,
-		searchSnapshotTTL:           searchSnapshotTTL,
-		transientSearchLists:        make(map[searchSnapshotKey]*transientSearchList),
-		openProjectionGate:          make(chan struct{}, openProjectionLimit),
-		openProjectionHook:          config.openProjectionHook,
-		openHandoffHook:             config.openHandoffHook,
-		pipelineRunHook:             config.pipelineRunHook,
-		openings:                    make(map[viewKey]*openAttempt),
-		latestOpen:                  make(map[viewKey]uint64),
-		latestFilter:                make(map[viewKey]uint64),
-		openHistoryLimit:            openHistoryLimit,
-		deliveryStates:              make(map[viewKey]*logicalViewDeliveryState),
-	}, nil
+	result := &Runtime{
+		source:                         config.Source,
+		metrics:                        config.Metrics,
+		columns:                        config.Columns,
+		releaseDelay:                   releaseDelay,
+		batchDelay:                     batchDelay,
+		snapshotChunkSize:              chunkSize,
+		pendingRowLimit:                pendingLimit,
+		pageSize:                       config.PipelinePageSize,
+		watchTimeout:                   config.PipelineTimeout,
+		resources:                      make(map[resourceKey]*resourceRuntime),
+		views:                          make(map[viewKey]*Subscription),
+		warm:                           watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects, warmBytes),
+		warmByAuthority:                make(map[string]*watcher.WarmCache[resourceKey, *resourceRuntime]),
+		warmViewLimit:                  warmViews,
+		warmObjectLimit:                warmObjects,
+		warmByteLimit:                  warmBytes,
+		warmViewLimitPerAuthority:      warmViewsPerAuthority,
+		warmObjectLimitPerAuthority:    warmObjectsPerAuthority,
+		warmByteLimitPerAuthority:      warmBytesPerAuthority,
+		warmBudgetEvictionsByAuthority: make(map[string]uint64),
+		warmCacheObserver:              config.WarmCacheObserver,
+		warmCacheAuthorityActive:       config.WarmCacheAuthorityActive,
+		searchSnapshots:                make(map[searchSnapshotKey]*completedSearchSnapshot),
+		searchSnapshotLimit:            searchSnapshotLimit,
+		searchSnapshotObjectLimit:      searchSnapshotObjectLimit,
+		searchSnapshotTTL:              searchSnapshotTTL,
+		transientSearchLists:           make(map[searchSnapshotKey]*transientSearchList),
+		openProjectionGate:             make(chan struct{}, openProjectionLimit),
+		openProjectionHook:             config.openProjectionHook,
+		openHandoffHook:                config.openHandoffHook,
+		pipelineRunHook:                config.pipelineRunHook,
+		openings:                       make(map[viewKey]*openAttempt),
+		latestOpen:                     make(map[viewKey]uint64),
+		latestFilter:                   make(map[viewKey]uint64),
+		openHistoryLimit:               openHistoryLimit,
+		deliveryStates:                 make(map[viewKey]*logicalViewDeliveryState),
+	}
+	result.startWarmCacheTelemetry()
+	return result, nil
 }
 
 // Open installs warm rows synchronously before starting or resuming network
@@ -1618,6 +1624,9 @@ func (r *Runtime) getWarmLocked(
 		authorityCache.Remove(key)
 	}
 	r.removeEmptyAuthorityWarmLocked(key.authorityID)
+	if inGlobal || inAuthority {
+		r.signalWarmCacheTelemetryLocked()
+	}
 	return authority, false
 }
 
@@ -1629,6 +1638,9 @@ func (r *Runtime) putWarmLocked(
 	key resourceKey,
 	entry watcher.WarmEntry[*resourceRuntime],
 ) ([]resourceKey, bool) {
+	if !r.warmCacheAuthorityIsActiveLocked(key.authorityID) {
+		return nil, false
+	}
 	if entry.ObjectCount > r.warmObjectLimit || entry.ObjectCount > r.warmObjectLimitPerAuthority ||
 		entry.ByteCount > r.warmByteLimit || entry.ByteCount > r.warmByteLimitPerAuthority {
 		return nil, false
@@ -1662,6 +1674,10 @@ func (r *Runtime) putWarmLocked(
 	if !admitted {
 		authorityCache.Remove(key)
 		r.removeEmptyAuthorityWarmLocked(key.authorityID)
+		r.recordWarmBudgetEvictionsLocked(evicted)
+		if len(evicted) != 0 {
+			r.signalWarmCacheTelemetryLocked()
+		}
 		return evicted, false
 	}
 	for _, evictedKey := range globalEvicted {
@@ -1672,7 +1688,13 @@ func (r *Runtime) putWarmLocked(
 		appendEvicted(evictedKey)
 	}
 	r.removeEmptyAuthorityWarmLocked(key.authorityID)
+	r.recordWarmBudgetEvictionsLocked(evicted)
+	r.signalWarmCacheTelemetryLocked()
 	return evicted, true
+}
+
+func (r *Runtime) warmCacheAuthorityIsActiveLocked(authorityID string) bool {
+	return r.warmCacheAuthorityActive == nil || r.warmCacheAuthorityActive(authorityID)
 }
 
 func (r *Runtime) removeWarmLocked(key resourceKey) bool {
@@ -1680,6 +1702,9 @@ func (r *Runtime) removeWarmLocked(key resourceKey) bool {
 	if cache := r.warmByAuthority[key.authorityID]; cache != nil {
 		removed = cache.Remove(key) || removed
 		r.removeEmptyAuthorityWarmLocked(key.authorityID)
+	}
+	if removed {
+		r.signalWarmCacheTelemetryLocked()
 	}
 	return removed
 }
@@ -1805,6 +1830,13 @@ func (r *Runtime) Close() {
 		r.removeWarmLocked(key)
 		delete(r.resources, key)
 	}
+	// Defensive reset also releases any one-sided fixture or recovery entry
+	// that was not reachable through resources. Shutdown is not an eviction.
+	r.warm = watcher.NewWarmCache[resourceKey, *resourceRuntime](
+		r.warmViewLimit, r.warmObjectLimit, r.warmByteLimit,
+	)
+	clear(r.warmByAuthority)
+	r.signalWarmCacheTelemetryLocked()
 	for key, snapshot := range r.searchSnapshots {
 		r.removeSearchSnapshotLocked(key, snapshot)
 	}
@@ -1812,6 +1844,7 @@ func (r *Runtime) Close() {
 		r.closeTransientSearchListLocked(transient, ErrViewClosed)
 	}
 	r.mu.Unlock()
+	r.stopWarmCacheTelemetry()
 	for _, attempt := range attempts {
 		attempt.cancel()
 	}

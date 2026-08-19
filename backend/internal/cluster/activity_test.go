@@ -77,6 +77,70 @@ func TestAPIActivityTracksConnectionHealthWithoutRetainingErrors(t *testing.T) {
 	assertHealth(http.StatusNoContent, nil, APIConnectionConnected)
 }
 
+func TestAPIActivityPublishesWarmCacheChangesWithoutPayloadActivity(t *testing.T) {
+	t.Parallel()
+	activity := &APIActivity{}
+	updates, unsubscribe := activity.Subscribe()
+	defer unsubscribe()
+	authority := WarmCacheUsage{
+		RetainedViews: 2, RetainedObjects: 300, RetainedBytes: 4096,
+		ViewLimit: 8, ObjectLimit: 100_000, ByteLimit: 1 << 30,
+		BudgetEvictions: 4,
+	}
+	global := WarmCacheUsage{
+		RetainedViews: 5, RetainedObjects: 900, RetainedBytes: 16_384,
+		ViewLimit: 24, ObjectLimit: 250_000, ByteLimit: 2 << 30,
+		BudgetEvictions: 7,
+	}
+	activity.setWarmCacheUsage(1, authority, global)
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("warm-cache-only change did not notify activity subscriber")
+	}
+	snapshot := activity.Snapshot()
+	if snapshot.AuthorityWarmCache != authority || snapshot.GlobalWarmCache != global ||
+		snapshot.BytesReceived != 0 || snapshot.BytesSent != 0 {
+		t.Fatalf("warm-cache snapshot = %#v", snapshot)
+	}
+
+	activity.setWarmCacheUsage(2, authority, global)
+	select {
+	case <-updates:
+		t.Fatal("identical warm-cache snapshot emitted a redundant hint")
+	default:
+	}
+}
+
+func TestAPIActivityRejectsOutOfOrderWarmCachePublication(t *testing.T) {
+	t.Parallel()
+	activity := &APIActivity{}
+	updates, unsubscribe := activity.Subscribe()
+	defer unsubscribe()
+	newerAuthority := WarmCacheUsage{RetainedViews: 2, BudgetEvictions: 3}
+	newerGlobal := WarmCacheUsage{RetainedViews: 4, BudgetEvictions: 5}
+	activity.setWarmCacheUsage(2, newerAuthority, newerGlobal)
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("new warm-cache generation did not notify subscriber")
+	}
+
+	activity.setWarmCacheUsage(
+		1,
+		WarmCacheUsage{RetainedViews: 1, BudgetEvictions: 1},
+		WarmCacheUsage{RetainedViews: 1, BudgetEvictions: 1},
+	)
+	select {
+	case <-updates:
+		t.Fatal("stale warm-cache generation notified subscriber")
+	default:
+	}
+	if snapshot := activity.Snapshot(); snapshot.AuthorityWarmCache != newerAuthority || snapshot.GlobalWarmCache != newerGlobal {
+		t.Fatalf("stale generation replaced warm-cache telemetry = %#v", snapshot)
+	}
+}
+
 func TestActivityRoundTripperCountsOnlyBytesActuallyRead(t *testing.T) {
 	t.Parallel()
 	activity := &APIActivity{}

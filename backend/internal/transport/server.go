@@ -111,10 +111,15 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		WarmViewLimitPerAuthority:   options.WarmViewLimitPerAuthority,
 		WarmObjectLimitPerAuthority: options.WarmObjectLimitPerAuthority,
 		WarmByteLimitPerAuthority:   options.WarmByteLimitPerAuthority,
+		WarmCacheObserver: func(snapshot view.WarmCacheTelemetry) {
+			publishWarmCacheTelemetry(sessions, snapshot)
+		},
+		WarmCacheAuthorityActive: sessions.AuthorityActive,
 	})
 	if err != nil {
 		return nil, err
 	}
+	sessions.SetAuthorityRetiredObserver(viewRuntime.RetireWarmCacheAuthority)
 	viewService, err := view.NewGRPCService(viewRuntime, columnsCompiler)
 	if err != nil {
 		viewRuntime.Close()
@@ -235,6 +240,36 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		forwards:   forwardManager,
 		logger:     options.Logger,
 	}, nil
+}
+
+func publishWarmCacheTelemetry(
+	sessions *cluster.SessionRegistry,
+	snapshot view.WarmCacheTelemetry,
+) {
+	if sessions == nil {
+		return
+	}
+	authorities := make(map[string]cluster.WarmCacheUsage, len(snapshot.Authorities))
+	for authorityID, usage := range snapshot.Authorities {
+		authorities[authorityID] = clusterWarmCacheUsage(usage)
+	}
+	sessions.SetWarmCacheTelemetry(cluster.WarmCacheTelemetry{
+		Global:          clusterWarmCacheUsage(snapshot.Global),
+		AuthorityBudget: clusterWarmCacheUsage(snapshot.AuthorityBudget),
+		Authorities:     authorities,
+	})
+}
+
+func clusterWarmCacheUsage(usage view.WarmCacheUsage) cluster.WarmCacheUsage {
+	return cluster.WarmCacheUsage{
+		RetainedViews:   usage.RetainedViews,
+		RetainedObjects: usage.RetainedObjects,
+		RetainedBytes:   usage.RetainedBytes,
+		ViewLimit:       usage.ViewLimit,
+		ObjectLimit:     usage.ObjectLimit,
+		ByteLimit:       usage.ByteLimit,
+		BudgetEvictions: usage.BudgetEvictions,
+	}
 }
 
 func (s *Server) Serve(listener net.Listener) error {

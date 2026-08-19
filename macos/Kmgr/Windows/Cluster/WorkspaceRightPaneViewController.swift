@@ -112,6 +112,7 @@ final class WorkspaceRightPaneViewController: NSViewController {
         for source: WorkspaceStatusSource
     ) {
         precondition(source != .content)
+        guard board.status(for: source) != status else { return }
         board.set(status, for: source)
         renderStatus()
     }

@@ -58,13 +58,27 @@ private actor ClusterConnectionActivityRPCCapture: ClusterConnectionActivityRPC 
 }
 
 @Test func connectionActivityProviderBuildsEnvelopeAndMapsTotals() async throws {
-    let event = ClusterConnectionActivityRPCCapture.event(
+    var event = ClusterConnectionActivityRPCCapture.event(
         streamID: "activity-1",
         sequence: 7,
         state: .reconnecting,
         received: 2_048,
         sent: 512
     )
+    event.authorityWarmCache.retainedViews = 2
+    event.authorityWarmCache.retainedObjects = 300
+    event.authorityWarmCache.retainedBytes = 4_096
+    event.authorityWarmCache.viewLimit = 8
+    event.authorityWarmCache.objectLimit = 100_000
+    event.authorityWarmCache.byteLimit = 1 << 30
+    event.authorityWarmCache.budgetEvictions = 3
+    event.globalWarmCache.retainedViews = 4
+    event.globalWarmCache.retainedObjects = 900
+    event.globalWarmCache.retainedBytes = 16_384
+    event.globalWarmCache.viewLimit = 24
+    event.globalWarmCache.objectLimit = 250_000
+    event.globalWarmCache.byteLimit = 2 << 30
+    event.globalWarmCache.budgetEvictions = 5
     let rpc = ClusterConnectionActivityRPCCapture(mode: .events([event]))
     let provider = EngineClusterConnectionActivityProvider(
         rpc: rpc,
@@ -93,6 +107,24 @@ private actor ClusterConnectionActivityRPCCapture: ClusterConnectionActivityRPC 
     #expect(samples.first?.observedAt == Date(timeIntervalSince1970: 12.345))
     #expect(samples.first?.bytesReceived == 2_048)
     #expect(samples.first?.bytesSent == 512)
+    #expect(samples.first?.authorityWarmCache == WarmCacheUsage(
+        retainedViews: 2,
+        retainedObjects: 300,
+        retainedBytes: 4_096,
+        viewLimit: 8,
+        objectLimit: 100_000,
+        byteLimit: 1 << 30,
+        budgetEvictions: 3
+    ))
+    #expect(samples.first?.globalWarmCache == WarmCacheUsage(
+        retainedViews: 4,
+        retainedObjects: 900,
+        retainedBytes: 16_384,
+        viewLimit: 24,
+        objectLimit: 250_000,
+        byteLimit: 2 << 30,
+        budgetEvictions: 5
+    ))
 }
 
 @Test func connectionActivityProviderRejectsCrossStreamEvent() async {

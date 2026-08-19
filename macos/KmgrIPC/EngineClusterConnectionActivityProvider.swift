@@ -148,7 +148,23 @@ public struct EngineClusterConnectionActivityProvider: ClusterConnectionActivity
             observedAt: Date(timeIntervalSince1970: Double(event.observedAtUnixMs) / 1_000),
             bytesReceived: event.apiBytesReceived,
             bytesSent: event.apiBytesSent,
+            authorityWarmCache: warmCacheUsage(from: event.authorityWarmCache),
+            globalWarmCache: warmCacheUsage(from: event.globalWarmCache),
             issue: event.hasError ? EngineClusterContextProvider.issue(from: event.error) : nil
+        )
+    }
+
+    private static func warmCacheUsage(
+        from usage: Kmgr_V1_WarmCacheUsage
+    ) -> WarmCacheUsage {
+        WarmCacheUsage(
+            retainedViews: usage.retainedViews,
+            retainedObjects: usage.retainedObjects,
+            retainedBytes: usage.retainedBytes,
+            viewLimit: usage.viewLimit,
+            objectLimit: usage.objectLimit,
+            byteLimit: usage.byteLimit,
+            budgetEvictions: usage.budgetEvictions
         )
     }
 

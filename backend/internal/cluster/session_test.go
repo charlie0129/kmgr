@@ -4,8 +4,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/rest"
 )
@@ -52,6 +54,13 @@ func TestSessionRegistryOpensIndependentSessionsWithSharedClients(t *testing.T) 
 	if first.APIActivity() == nil || first.APIActivity() != second.APIActivity() {
 		t.Fatal("same Kubernetes authority did not share one activity counter")
 	}
+	if first.AuthorityID() == "" || first.AuthorityID() != second.AuthorityID() {
+		t.Fatal("same Kubernetes authority did not share one stable opaque ID")
+	}
+	if strings.Contains(first.AuthorityID(), contextID) ||
+		strings.Contains(first.AuthorityID(), first.Context().Name) {
+		t.Fatal("authority ID contains kubeconfig context identity")
+	}
 	if len(factory.configs) != 1 {
 		t.Fatalf("client factory calls = %d, want 1", len(factory.configs))
 	}
@@ -84,6 +93,64 @@ func TestSessionRegistryOpensIndependentSessionsWithSharedClients(t *testing.T) 
 	}
 }
 
+func TestSessionRegistryNotifiesRetiredAuthorityAfterFinalBackendClose(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog(t, "https://cluster.example.test")
+	contextID := requireContextNamed(t, catalog, "local").ID
+	registry := NewSessionRegistry(&recordingFactory{})
+	t.Cleanup(registry.CloseAll)
+	type retirement struct {
+		authorityID string
+		stillActive bool
+	}
+	retired := make(chan retirement, 2)
+	registry.SetAuthorityRetiredObserver(func(authorityID string) {
+		retired <- retirement{
+			authorityID: authorityID,
+			stillActive: registry.AuthorityActive(authorityID),
+		}
+	})
+	first, err := registry.Open(catalog, contextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := registry.Open(catalog, contextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityID := first.AuthorityID()
+	if !registry.AuthorityActive(authorityID) {
+		t.Fatal("new shared authority was not active")
+	}
+	if !registry.Close(first.ID()) {
+		t.Fatal("first shared session did not close")
+	}
+	select {
+	case event := <-retired:
+		t.Fatalf("authority retired while a shared session remained: %#v", event)
+	default:
+	}
+	if !registry.Close(second.ID()) {
+		t.Fatal("final shared session did not close")
+	}
+	select {
+	case event := <-retired:
+		if event.authorityID != authorityID || event.stillActive {
+			t.Fatalf("retirement event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("final backend close did not retire its authority")
+	}
+
+	reopened, err := registry.Open(catalog, contextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.AuthorityID() == authorityID || !registry.AuthorityActive(reopened.AuthorityID()) {
+		t.Fatal("reopened backend did not receive a distinct active authority")
+	}
+}
+
 func TestDifferentAuthoritiesDoNotShareActivityCounters(t *testing.T) {
 	t.Parallel()
 	firstCatalog := testCatalog(t, "https://first.example.test")
@@ -101,6 +168,124 @@ func TestDifferentAuthoritiesDoNotShareActivityCounters(t *testing.T) {
 	first.APIActivity().AddReceived(9)
 	if first.APIActivity() == second.APIActivity() || second.APIActivity().Snapshot().BytesReceived != 0 {
 		t.Fatal("independent Kubernetes authorities shared activity totals")
+	}
+	if first.AuthorityID() == "" || first.AuthorityID() == second.AuthorityID() {
+		t.Fatal("independent Kubernetes authorities shared an opaque authority ID")
+	}
+}
+
+func TestSessionRegistryRoutesWarmCacheTelemetryAcrossAuthorities(t *testing.T) {
+	t.Parallel()
+	firstCatalog := testCatalog(t, "https://first.example.test")
+	secondCatalog := testCatalog(t, "https://second.example.test")
+	registry := NewSessionRegistry(&recordingFactory{})
+	t.Cleanup(registry.CloseAll)
+	authorityBudget := WarmCacheUsage{
+		ViewLimit: 8, ObjectLimit: 100_000, ByteLimit: 1 << 30,
+	}
+	initialGlobal := WarmCacheUsage{
+		ViewLimit: 24, ObjectLimit: 250_000, ByteLimit: 2 << 30,
+	}
+	registry.SetWarmCacheTelemetry(WarmCacheTelemetry{
+		Global: initialGlobal, AuthorityBudget: authorityBudget,
+	})
+	first, err := registry.Open(
+		firstCatalog, requireContextNamed(t, firstCatalog, "local").ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := registry.Open(
+		secondCatalog, requireContextNamed(t, secondCatalog, "local").ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []*Session{first, second} {
+		snapshot := session.APIActivity().Snapshot()
+		if snapshot.AuthorityWarmCache != authorityBudget ||
+			snapshot.GlobalWarmCache != initialGlobal {
+			t.Fatalf("initial cache budget = %#v", snapshot)
+		}
+	}
+
+	firstUpdates, stopFirst := first.APIActivity().Subscribe()
+	defer stopFirst()
+	secondUpdates, stopSecond := second.APIActivity().Subscribe()
+	defer stopSecond()
+	firstUsage := authorityBudget
+	firstUsage.RetainedViews = 2
+	firstUsage.RetainedObjects = 30
+	firstUsage.RetainedBytes = 4_096
+	firstUsage.BudgetEvictions = 1
+	secondUsage := authorityBudget
+	secondUsage.RetainedViews = 1
+	secondUsage.RetainedObjects = 12
+	secondUsage.RetainedBytes = 2_048
+	global := initialGlobal
+	global.RetainedViews = 3
+	global.RetainedObjects = 42
+	global.RetainedBytes = 6_144
+	global.BudgetEvictions = 1
+	registry.SetWarmCacheTelemetry(WarmCacheTelemetry{
+		Global:          global,
+		AuthorityBudget: authorityBudget,
+		Authorities: map[string]WarmCacheUsage{
+			first.AuthorityID(): firstUsage, second.AuthorityID(): secondUsage,
+		},
+	})
+	for name, updates := range map[string]<-chan struct{}{
+		"first": firstUpdates, "second": secondUpdates,
+	} {
+		select {
+		case <-updates:
+		case <-time.After(time.Second):
+			t.Fatalf("%s authority was not notified", name)
+		}
+	}
+	if snapshot := first.APIActivity().Snapshot(); snapshot.AuthorityWarmCache != firstUsage ||
+		snapshot.GlobalWarmCache != global {
+		t.Fatalf("first routed telemetry = %#v", snapshot)
+	}
+	if snapshot := second.APIActivity().Snapshot(); snapshot.AuthorityWarmCache != secondUsage ||
+		snapshot.GlobalWarmCache != global {
+		t.Fatalf("second routed telemetry = %#v", snapshot)
+	}
+}
+
+func TestSessionRegistryWarmCacheGenerationRejectsDelayedPublication(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog(t, "https://cluster.example.test")
+	registry := NewSessionRegistry(&recordingFactory{})
+	t.Cleanup(registry.CloseAll)
+	session, err := registry.Open(catalog, requireContextNamed(t, catalog, "local").ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	olderAuthority := WarmCacheUsage{RetainedViews: 1, BudgetEvictions: 1}
+	olderGlobal := WarmCacheUsage{RetainedViews: 1, BudgetEvictions: 1}
+	registry.SetWarmCacheTelemetry(WarmCacheTelemetry{
+		Global: olderGlobal,
+		Authorities: map[string]WarmCacheUsage{
+			session.AuthorityID(): olderAuthority,
+		},
+	})
+	registry.mu.RLock()
+	olderGeneration := registry.warmCacheGeneration
+	registry.mu.RUnlock()
+	newerAuthority := WarmCacheUsage{RetainedViews: 2, BudgetEvictions: 3}
+	newerGlobal := WarmCacheUsage{RetainedViews: 4, BudgetEvictions: 5}
+	registry.SetWarmCacheTelemetry(WarmCacheTelemetry{
+		Global: newerGlobal,
+		Authorities: map[string]WarmCacheUsage{
+			session.AuthorityID(): newerAuthority,
+		},
+	})
+
+	// Model an older publisher resuming after the newer registry update.
+	session.APIActivity().setWarmCacheUsage(olderGeneration, olderAuthority, olderGlobal)
+	if snapshot := session.APIActivity().Snapshot(); snapshot.AuthorityWarmCache != newerAuthority || snapshot.GlobalWarmCache != newerGlobal {
+		t.Fatalf("delayed publication replaced newer registry telemetry = %#v", snapshot)
 	}
 }
 

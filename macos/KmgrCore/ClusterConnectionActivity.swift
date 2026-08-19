@@ -9,6 +9,34 @@ public enum ClusterConnectionState: Hashable, Sendable {
     case closed
 }
 
+public struct WarmCacheUsage: Hashable, Sendable {
+    public var retainedViews: UInt64
+    public var retainedObjects: UInt64
+    public var retainedBytes: UInt64
+    public var viewLimit: UInt64
+    public var objectLimit: UInt64
+    public var byteLimit: UInt64
+    public var budgetEvictions: UInt64
+
+    public init(
+        retainedViews: UInt64 = 0,
+        retainedObjects: UInt64 = 0,
+        retainedBytes: UInt64 = 0,
+        viewLimit: UInt64 = 0,
+        objectLimit: UInt64 = 0,
+        byteLimit: UInt64 = 0,
+        budgetEvictions: UInt64 = 0
+    ) {
+        self.retainedViews = retainedViews
+        self.retainedObjects = retainedObjects
+        self.retainedBytes = retainedBytes
+        self.viewLimit = viewLimit
+        self.objectLimit = objectLimit
+        self.byteLimit = byteLimit
+        self.budgetEvictions = budgetEvictions
+    }
+}
+
 /// Monotonic Kubernetes API payload totals emitted by the Go helper. The UI
 /// derives rates locally so brief bursts remain visible without a chatty IPC
 /// stream and no request or response content crosses this model boundary.
@@ -18,6 +46,8 @@ public struct ClusterConnectionActivitySample: Hashable, Sendable {
     public var observedAt: Date
     public var bytesReceived: UInt64
     public var bytesSent: UInt64
+    public var authorityWarmCache: WarmCacheUsage
+    public var globalWarmCache: WarmCacheUsage
     public var issue: ClusterManagerIssue?
 
     public init(
@@ -26,6 +56,8 @@ public struct ClusterConnectionActivitySample: Hashable, Sendable {
         observedAt: Date,
         bytesReceived: UInt64,
         bytesSent: UInt64,
+        authorityWarmCache: WarmCacheUsage = WarmCacheUsage(),
+        globalWarmCache: WarmCacheUsage = WarmCacheUsage(),
         issue: ClusterManagerIssue? = nil
     ) {
         self.cursor = cursor
@@ -33,6 +65,8 @@ public struct ClusterConnectionActivitySample: Hashable, Sendable {
         self.observedAt = observedAt
         self.bytesReceived = bytesReceived
         self.bytesSent = bytesSent
+        self.authorityWarmCache = authorityWarmCache
+        self.globalWarmCache = globalWarmCache
         self.issue = issue
     }
 }
@@ -72,17 +106,34 @@ public struct ClusterConnectionRateTracker: Hashable, Sendable {
 
     public mutating func receive(
         _ sample: ClusterConnectionActivitySample
-    ) -> ClusterConnectionRate {
-        defer { lastSample = sample }
-        guard let previous = lastSample,
-            sample.observedAt > previous.observedAt,
+    ) -> ClusterConnectionRate? {
+        guard let previous = lastSample else {
+            lastSample = sample
+            return nil
+        }
+        guard sample.observedAt > previous.observedAt,
             sample.bytesReceived >= previous.bytesReceived,
             sample.bytesSent >= previous.bytesSent
-        else { return ClusterConnectionRate() }
+        else {
+            lastSample = sample
+            return ClusterConnectionRate()
+        }
+        guard sample.bytesReceived != previous.bytesReceived
+            || sample.bytesSent != previous.bytesSent
+        else {
+            // Health and warm-cache telemetry share the connection stream but
+            // are not transfer samples. Do not blank the current rate or move
+            // its baseline when only those aggregates changed.
+            return nil
+        }
         let duration = sample.observedAt.timeIntervalSince(previous.observedAt)
-        guard duration > 0 else { return ClusterConnectionRate() }
+        guard duration > 0 else {
+            lastSample = sample
+            return ClusterConnectionRate()
+        }
         let received = sample.bytesReceived - previous.bytesReceived
         let sent = sample.bytesSent - previous.bytesSent
+        lastSample = sample
         return ClusterConnectionRate(
             bytesReceivedPerSecond: Double(received) / duration,
             bytesSentPerSecond: Double(sent) / duration,

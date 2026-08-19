@@ -698,6 +698,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     }
 }
 
+private struct DisplayedWarmCacheUsage: Equatable {
+    var authority: WarmCacheUsage
+    var global: WarmCacheUsage
+}
+
 @MainActor
 private final class ClusterWorkspaceViewController: NSSplitViewController,
     NSToolbarDelegate, NSSearchFieldDelegate
@@ -723,6 +728,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var connectionActivityTask: Task<Void, Never>?
     private var connectionActivityGate = GenerationSequenceGate()
     private var connectionRateTracker = ClusterConnectionRateTracker()
+    private var displayedWarmCacheUsage: DisplayedWarmCacheUsage?
     private let forwardsButton = NSButton(title: "Forwards 0", target: nil, action: nil)
     private let actionsButton = NSMenuToolbarItem(itemIdentifier: .actions)
     private var namespaceTask: Task<Void, Never>?
@@ -970,6 +976,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.engineDidDisconnect()
         connectionActivityTask?.cancel()
         connectionActivityTask = nil
+        resetWarmCacheStatus()
         connectionActivityView.setState(.reconnecting, detail: message)
     }
 
@@ -1109,6 +1116,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         connectionActivityTask?.cancel()
         connectionActivityGate.reset()
         connectionRateTracker = ClusterConnectionRateTracker()
+        resetWarmCacheStatus()
         connectionActivityView.update(rate: ClusterConnectionRate())
         let provider = connectionActivityProvider
         let sessionID = session.sessionID
@@ -1130,13 +1138,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                         sample.state,
                         detail: sample.issue?.userFacingPresentation.detailedText
                     )
-                    connectionActivityView.update(
-                        rate: connectionRateTracker.receive(sample)
-                    )
+                    if let rate = connectionRateTracker.receive(sample) {
+                        connectionActivityView.update(rate: rate)
+                    }
+                    updateWarmCacheStatus(from: sample)
                 }
             } catch {
                 guard !Task.isCancelled, self?.session.sessionID == sessionID else { return }
                 let presentation = UserFacingErrorPresentation(error)
+                self?.resetWarmCacheStatus()
                 self?.connectionActivityView.setState(
                     .reconnecting,
                     detail: presentation.detailedText
@@ -1148,6 +1158,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     func stop() {
         connectionActivityTask?.cancel()
         connectionActivityTask = nil
+        resetWarmCacheStatus()
         namespaceTask?.cancel()
         palettePresentationTask?.cancel()
         palettePresentationTask = nil
@@ -1164,6 +1175,27 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         sidebarController.stop()
         contentController.stop()
+    }
+
+    private func updateWarmCacheStatus(from sample: ClusterConnectionActivitySample) {
+        let usage = DisplayedWarmCacheUsage(
+            authority: sample.authorityWarmCache,
+            global: sample.globalWarmCache
+        )
+        guard usage != displayedWarmCacheUsage else { return }
+        displayedWarmCacheUsage = usage
+        rightPaneController.setSupplementalStatus(
+            WarmCacheWorkspaceStatus.make(
+                authority: usage.authority,
+                global: usage.global
+            ),
+            for: .warmCache
+        )
+    }
+
+    private func resetWarmCacheStatus() {
+        displayedWarmCacheUsage = nil
+        rightPaneController.setSupplementalStatus(nil, for: .warmCache)
     }
 
     func makeToolbar() -> NSToolbar {

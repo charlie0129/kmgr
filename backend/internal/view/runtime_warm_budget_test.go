@@ -2,7 +2,9 @@ package view
 
 import (
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/store"
 	"github.com/charlie0129/kmgr/backend/internal/systemmemory"
@@ -238,6 +240,218 @@ func TestWarmCacheGlobalByteEvictionIsRemovedFromAuthorityLRU(t *testing.T) {
 	}
 	if _, exists := runtime.warmByAuthority["cluster-a"]; exists {
 		t.Fatal("global byte eviction left an authority-cache ghost")
+	}
+}
+
+func TestWarmCacheTelemetryDistinguishesEvictionFromConsumptionAndClose(t *testing.T) {
+	t.Parallel()
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:                      &fakeResourceSource{},
+		WarmViewLimit:               3,
+		WarmObjectLimit:             30,
+		WarmByteLimit:               1 << 30,
+		WarmViewLimitPerAuthority:   1,
+		WarmObjectLimitPerAuthority: 10,
+		WarmByteLimitPerAuthority:   1 << 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aPods := addWarmBudgetEntry(t, runtime, "cluster-a", "pods", 2)
+	bPods := addWarmBudgetEntry(t, runtime, "cluster-b", "pods", 3)
+	aNodes := addWarmBudgetEntry(t, runtime, "cluster-a", "nodes", 4)
+	snapshot := runtime.WarmCacheTelemetrySnapshot()
+	if snapshot.Global.RetainedViews != 2 ||
+		snapshot.Global.RetainedObjects != 7 ||
+		snapshot.Global.BudgetEvictions != 1 {
+		t.Fatalf("global telemetry after authority eviction = %#v", snapshot.Global)
+	}
+	if got := snapshot.Authorities["cluster-a"]; got.RetainedViews != 1 ||
+		got.RetainedObjects != 4 || got.BudgetEvictions != 1 {
+		t.Fatalf("cluster-a telemetry = %#v", got)
+	}
+	if got := snapshot.Authorities["cluster-b"]; got.RetainedViews != 1 ||
+		got.RetainedObjects != 3 || got.BudgetEvictions != 0 {
+		t.Fatalf("cluster-b telemetry = %#v", got)
+	}
+	if snapshot.Global.RetainedBytes != uint64(runtime.warm.ByteCount()) ||
+		snapshot.Authorities["cluster-a"].RetainedBytes !=
+			uint64(runtime.warmByAuthority["cluster-a"].ByteCount()) {
+		t.Fatal("telemetry did not report conservative retained-byte weights")
+	}
+	if runtime.resources[aPods.key] != nil ||
+		runtime.resources[aNodes.key] != aNodes ||
+		runtime.resources[bPods.key] != bPods {
+		t.Fatal("telemetry fixture retained the wrong warm entries")
+	}
+
+	runtime.mu.Lock()
+	if !runtime.removeWarmLocked(aNodes.key) {
+		runtime.mu.Unlock()
+		t.Fatal("normal warm-cache consumption did not remove cluster-a Nodes")
+	}
+	runtime.mu.Unlock()
+	consumed := runtime.WarmCacheTelemetrySnapshot()
+	if consumed.Global.RetainedViews != 1 ||
+		consumed.Global.BudgetEvictions != 1 ||
+		consumed.Authorities["cluster-a"].RetainedViews != 0 ||
+		consumed.Authorities["cluster-a"].BudgetEvictions != 1 {
+		t.Fatalf("normal consumption changed eviction accounting = %#v", consumed)
+	}
+	rejected := addWarmBudgetEntry(t, runtime, "cluster-c", "events", 11)
+	afterRejection := runtime.WarmCacheTelemetrySnapshot()
+	if runtime.resources[rejected.key] != nil ||
+		afterRejection.Global.BudgetEvictions != consumed.Global.BudgetEvictions {
+		t.Fatalf("oversized rejection counted as an eviction = %#v", afterRejection)
+	}
+
+	runtime.Close()
+	closed := runtime.WarmCacheTelemetrySnapshot()
+	if closed.Global.RetainedViews != 0 || closed.Global.RetainedObjects != 0 ||
+		closed.Global.RetainedBytes != 0 || closed.Global.BudgetEvictions != 1 {
+		t.Fatalf("closed global telemetry = %#v", closed.Global)
+	}
+	if closed.Authorities["cluster-a"].RetainedViews != 0 ||
+		closed.Authorities["cluster-a"].BudgetEvictions != 1 {
+		t.Fatalf("closed authority telemetry = %#v", closed.Authorities["cluster-a"])
+	}
+}
+
+func TestWarmCacheTelemetryAttributesGlobalEvictionToRemovedAuthority(t *testing.T) {
+	t.Parallel()
+	runtime := newWarmBudgetRuntime(t, 2, 20, 2, 20)
+	defer runtime.Close()
+	addWarmBudgetEntry(t, runtime, "cluster-a", "pods", 1)
+	addWarmBudgetEntry(t, runtime, "cluster-b", "pods", 1)
+	addWarmBudgetEntry(t, runtime, "cluster-c", "pods", 1)
+
+	snapshot := runtime.WarmCacheTelemetrySnapshot()
+	if snapshot.Global.RetainedViews != 2 || snapshot.Global.BudgetEvictions != 1 {
+		t.Fatalf("global telemetry = %#v", snapshot.Global)
+	}
+	if got := snapshot.Authorities["cluster-a"]; got.RetainedViews != 0 ||
+		got.BudgetEvictions != 1 {
+		t.Fatalf("evicted authority telemetry = %#v", got)
+	}
+	if snapshot.Authorities["cluster-b"].RetainedViews != 1 ||
+		snapshot.Authorities["cluster-c"].RetainedViews != 1 {
+		t.Fatalf("retained authority telemetry = %#v", snapshot.Authorities)
+	}
+}
+
+func TestWarmCacheAuthorityRetirementPrunesHistoryAndRejectsLateAdmission(t *testing.T) {
+	t.Parallel()
+	active := make(map[string]bool)
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:                      &fakeResourceSource{},
+		WarmViewLimit:               2,
+		WarmObjectLimit:             20,
+		WarmByteLimit:               1 << 30,
+		WarmViewLimitPerAuthority:   1,
+		WarmObjectLimitPerAuthority: 10,
+		WarmByteLimitPerAuthority:   1 << 30,
+		WarmCacheAuthorityActive: func(authorityID string) bool {
+			return active[authorityID]
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	for index := range 64 {
+		authorityID := fmt.Sprintf("retired-%d", index)
+		active[authorityID] = true
+		addWarmBudgetEntry(t, runtime, authorityID, "pods", 1)
+		addWarmBudgetEntry(t, runtime, authorityID, "nodes", 1)
+		before := runtime.WarmCacheTelemetrySnapshot()
+		if before.Authorities[authorityID].BudgetEvictions != 1 {
+			t.Fatalf("authority %q did not record its true budget eviction", authorityID)
+		}
+
+		active[authorityID] = false
+		runtime.RetireWarmCacheAuthority(authorityID)
+		after := runtime.WarmCacheTelemetrySnapshot()
+		if _, exists := after.Authorities[authorityID]; exists {
+			t.Fatalf("retired authority %q remained in telemetry", authorityID)
+		}
+		if _, exists := runtime.warmBudgetEvictionsByAuthority[authorityID]; exists {
+			t.Fatalf("retired authority %q remained in eviction history", authorityID)
+		}
+		late := addWarmBudgetEntry(t, runtime, authorityID, "events", 1)
+		if runtime.resources[late.key] != nil {
+			t.Fatalf("retired authority %q re-entered the warm cache", authorityID)
+		}
+	}
+
+	snapshot := runtime.WarmCacheTelemetrySnapshot()
+	if len(snapshot.Authorities) != 0 || len(runtime.warmBudgetEvictionsByAuthority) != 0 ||
+		snapshot.Global.RetainedViews != 0 {
+		t.Fatalf("retired authority history remained after reopen cycle = %#v", snapshot)
+	}
+	if snapshot.Global.BudgetEvictions != 64 {
+		t.Fatalf("global true-eviction history = %d, want 64", snapshot.Global.BudgetEvictions)
+	}
+
+	active["reopened"] = true
+	addWarmBudgetEntry(t, runtime, "reopened", "pods", 1)
+	reopened := runtime.WarmCacheTelemetrySnapshot()
+	if reopened.Authorities["reopened"].RetainedViews != 1 || len(reopened.Authorities) != 1 {
+		t.Fatalf("reopened authority telemetry = %#v", reopened.Authorities)
+	}
+}
+
+func TestWarmCacheObserverPublishesInitialChangesAndFinalZeroOutsideCacheLocks(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var snapshots []WarmCacheTelemetry
+	updates := make(chan struct{}, 8)
+	observer := func(snapshot WarmCacheTelemetry) {
+		mu.Lock()
+		snapshots = append(snapshots, snapshot)
+		mu.Unlock()
+		updates <- struct{}{}
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:                      &fakeResourceSource{},
+		WarmViewLimit:               2,
+		WarmObjectLimit:             20,
+		WarmByteLimit:               1 << 30,
+		WarmViewLimitPerAuthority:   2,
+		WarmObjectLimitPerAuthority: 20,
+		WarmByteLimitPerAuthority:   1 << 30,
+		WarmCacheObserver:           observer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("initial cache budgets were not published")
+	}
+	addWarmBudgetEntry(t, runtime, "cluster", "pods", 2)
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("warm-cache admission did not wake observer")
+	}
+	runtime.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(snapshots) < 3 {
+		t.Fatalf("observer snapshots = %d, want initial/change/close", len(snapshots))
+	}
+	initial := snapshots[0]
+	final := snapshots[len(snapshots)-1]
+	if initial.Global.ViewLimit != 2 || initial.Global.RetainedViews != 0 {
+		t.Fatalf("initial telemetry = %#v", initial)
+	}
+	if final.Global.RetainedViews != 0 || final.Global.RetainedObjects != 0 ||
+		final.Global.RetainedBytes != 0 {
+		t.Fatalf("final telemetry = %#v", final)
 	}
 }
 

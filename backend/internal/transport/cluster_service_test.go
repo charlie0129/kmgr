@@ -451,6 +451,67 @@ func TestWatchConnectionEmitsObservedTransportAndAuthenticationStates(t *testing
 	}
 }
 
+func TestWatchConnectionEmitsWarmCacheChangesWithoutNetworkActivity(t *testing.T) {
+	t.Parallel()
+	catalog := serviceCatalog(t)
+	sessions := cluster.NewSessionRegistry(&serviceFactory{})
+	t.Cleanup(sessions.CloseAll)
+	session, err := sessions.Open(catalog, serviceContextID(t, catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewClusterService(ClusterServiceOptions{Sessions: sessions})
+	streamContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := newConnectionTestStream(streamContext)
+	result := make(chan error, 1)
+	go func() {
+		result <- service.WatchConnection(&kmgrv1.WatchConnectionRequest{
+			Context: &kmgrv1.RequestContext{
+				RequestId: "warm-cache", ClusterSessionId: session.ID(),
+			},
+			StreamId: "connection-warm-cache",
+		}, stream)
+	}()
+	stream.waitForCount(t, 1)
+
+	authority := cluster.WarmCacheUsage{
+		RetainedViews: 2, RetainedObjects: 300, RetainedBytes: 4_096,
+		ViewLimit: 8, ObjectLimit: 100_000, ByteLimit: 1 << 30,
+		BudgetEvictions: 3,
+	}
+	global := cluster.WarmCacheUsage{
+		RetainedViews: 4, RetainedObjects: 900, RetainedBytes: 16_384,
+		ViewLimit: 24, ObjectLimit: 250_000, ByteLimit: 2 << 30,
+		BudgetEvictions: 5,
+	}
+	sessions.SetWarmCacheTelemetry(cluster.WarmCacheTelemetry{
+		Global: global,
+		AuthorityBudget: cluster.WarmCacheUsage{
+			ViewLimit: 8, ObjectLimit: 100_000, ByteLimit: 1 << 30,
+		},
+		Authorities: map[string]cluster.WarmCacheUsage{
+			session.AuthorityID(): authority,
+		},
+	})
+	stream.waitForCount(t, 2)
+	event := stream.snapshot()[1]
+	if event.GetApiBytesReceived() != 0 || event.GetApiBytesSent() != 0 ||
+		event.GetAuthorityWarmCache().GetRetainedViews() != 2 ||
+		event.GetAuthorityWarmCache().GetRetainedObjects() != 300 ||
+		event.GetAuthorityWarmCache().GetRetainedBytes() != 4_096 ||
+		event.GetAuthorityWarmCache().GetViewLimit() != 8 ||
+		event.GetAuthorityWarmCache().GetBudgetEvictions() != 3 ||
+		event.GetGlobalWarmCache().GetRetainedViews() != 4 ||
+		event.GetGlobalWarmCache().GetBudgetEvictions() != 5 {
+		t.Fatalf("warm-cache connection event = %#v", event)
+	}
+	cancel()
+	if err := <-result; status.Code(err) != codes.Canceled {
+		t.Fatalf("WatchConnection cancellation = %v", err)
+	}
+}
+
 func TestWatchConnectionLeaseSurvivesPreservingWorkspaceClose(t *testing.T) {
 	t.Parallel()
 	catalog := serviceCatalog(t)
