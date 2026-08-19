@@ -6,23 +6,20 @@ enum ObjectDetailInitialTab {
     case summary
     case yaml
     case relationships
-    case metrics
     case data
 
-    func segment(supportsDataEditor: Bool, supportsMetrics: Bool) -> Int {
+    func segment(supportsDataEditor: Bool) -> Int {
         switch self {
         case .automatic:
-            supportsDataEditor ? 4 : 0
+            supportsDataEditor ? 3 : 0
         case .summary:
             0
         case .yaml:
             1
         case .relationships:
             2
-        case .metrics:
-            supportsMetrics ? 3 : 0
         case .data:
-            supportsDataEditor ? 4 : 0
+            supportsDataEditor ? 3 : 0
         }
     }
 }
@@ -57,13 +54,12 @@ enum ObjectDetailSummaryPresentation {
 
     static func sections(
         for detail: ObjectDetail,
-        conditionTimeZone: TimeZone = .current
+        conditionTimeZone: TimeZone = .current,
+        now: Date = Date()
     ) -> [ObjectDetailSummarySection] {
-        let conditionTimestamps = detail.summaryFields.contains {
-            $0.sectionID == "conditions"
-        } ? ConditionTimestampFormatting(timeZone: conditionTimeZone) : nil
+        let conditionTimestamps = ConditionTimestampFormatting(timeZone: conditionTimeZone)
         let fields = detail.summaryFields.map {
-            summaryRow($0, conditionTimestamps: conditionTimestamps)
+            summaryRow($0, conditionTimestamps: conditionTimestamps, now: now)
         }
             + metadataRows(sectionID: "labels", values: detail.labels)
             + metadataRows(sectionID: "annotations", values: detail.annotations)
@@ -74,6 +70,15 @@ enum ObjectDetailSummaryPresentation {
                 sectionOrder.append(field.sectionID)
             }
             rowsBySection[field.sectionID, default: []].append(field)
+        }
+        let originalOrder = Dictionary(uniqueKeysWithValues: sectionOrder.enumerated().map {
+            ($0.element, $0.offset)
+        })
+        sectionOrder.sort { lhs, rhs in
+            let left = sectionPriority(lhs)
+            let right = sectionPriority(rhs)
+            if left != right { return left < right }
+            return originalOrder[lhs, default: 0] < originalOrder[rhs, default: 0]
         }
         return sectionOrder.map { sectionID in
             ObjectDetailSummarySection(
@@ -92,13 +97,18 @@ enum ObjectDetailSummaryPresentation {
 
     private static func summaryRow(
         _ field: ObjectSummaryField,
-        conditionTimestamps: ConditionTimestampFormatting?
+        conditionTimestamps: ConditionTimestampFormatting,
+        now: Date
     ) -> ObjectDetailSummaryRow {
         let label = normalizedText(field.label)
         let normalizedValue = normalizedText(field.displayText)
-        let value = field.sectionID == "conditions"
-            ? conditionTimestamps?.localized(normalizedValue) ?? normalizedValue
-            : normalizedValue
+        let value: String
+        if field.sectionID == "conditions", let transitionTime = field.transitionTime {
+            let timing = "for \(compactAge(since: transitionTime, now: now)) (since \(conditionTimestamps.localized(transitionTime)))"
+            value = normalizedValue.isEmpty ? timing : "\(normalizedValue) · \(timing)"
+        } else {
+            value = normalizedValue
+        }
         let shortened = value.count > maximumVisibleValueCharacters
         return ObjectDetailSummaryRow(
             sectionID: field.sectionID,
@@ -183,22 +193,20 @@ enum ObjectDetailSummaryPresentation {
             || (value.hasPrefix("[") && value.hasSuffix("]"))
     }
 
-    static func localizedConditionText(_ value: String, timeZone: TimeZone) -> String {
-        ConditionTimestampFormatting(timeZone: timeZone).localized(value)
+    static func compactAge(since date: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        guard seconds >= 60 else { return "<1m" }
+        let minutes = seconds / 60
+        guard minutes >= 60 else { return "\(minutes)m" }
+        let hours = minutes / 60
+        guard hours >= 24 else { return "\(hours)h" }
+        return "\(hours / 24)d"
     }
 
     private struct ConditionTimestampFormatting {
-        private let wholeSeconds: ISO8601DateFormatter
-        private let fractionalSeconds: ISO8601DateFormatter
         private let local: DateFormatter
 
         init(timeZone: TimeZone) {
-            wholeSeconds = ISO8601DateFormatter()
-            wholeSeconds.formatOptions = [.withInternetDateTime]
-            fractionalSeconds = ISO8601DateFormatter()
-            fractionalSeconds.formatOptions = [
-                .withInternetDateTime, .withFractionalSeconds,
-            ]
             local = DateFormatter()
             local.locale = Locale(identifier: "en_US_POSIX")
             local.calendar = Calendar(identifier: .gregorian)
@@ -206,21 +214,7 @@ enum ObjectDetailSummaryPresentation {
             local.dateFormat = "yyyy-MM-dd HH:mm:ss XXX"
         }
 
-        func localized(_ value: String) -> String {
-            let marker: Range<String.Index>
-            if value.hasPrefix("since ") {
-                marker = value.startIndex..<value.index(value.startIndex, offsetBy: 6)
-            } else if let range = value.range(of: " · since ", options: .backwards) {
-                marker = range
-            } else {
-                return value
-            }
-            let timestamp = String(value[marker.upperBound...])
-            guard let date = wholeSeconds.date(from: timestamp)
-                ?? fractionalSeconds.date(from: timestamp)
-            else { return value }
-            return String(value[..<marker.upperBound]) + local.string(from: date)
-        }
+        func localized(_ value: Date) -> String { local.string(from: value) }
     }
 
     private static func copyHint(forCharacterCount count: Int) -> String {
@@ -234,16 +228,69 @@ enum ObjectDetailSummaryPresentation {
             .capitalized
     }
 
+    private static func sectionPriority(_ sectionID: String) -> Int {
+        switch sectionID {
+        case "identity": 0
+        case "labels": 10
+        case "annotations": 20
+        case "status": 30
+        case "replicas": 31
+        case "network": 32
+        case "service": 33
+        case "secret": 34
+        case "owners": 40
+        case "selectors": 41
+        case "containers": 50
+        case "ports": 51
+        case "endpoints": 52
+        case "conditions": 1_000
+        default: 900
+        }
+    }
+
     private static func bounded(_ value: String, maximumCharacters: Int) -> String {
         guard value.count > maximumCharacters else { return value }
         return String(value.prefix(maximumCharacters - 1)) + "…"
     }
 }
 
+/// All open Details surfaces share one minute ticker. Relative condition ages
+/// are presentation-only and never cause a Kubernetes request.
+@MainActor
+private final class ObjectDetailRelativeTimeRefreshCenter {
+    static let shared = ObjectDetailRelativeTimeRefreshCenter()
+
+    private var callbacks: [UUID: () -> Void] = [:]
+    private var timer: Timer?
+
+    func add(_ callback: @escaping () -> Void) -> UUID {
+        let id = UUID()
+        callbacks[id] = callback
+        if timer == nil {
+            let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.fire() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
+        }
+        return id
+    }
+
+    func remove(_ id: UUID?) {
+        guard let id else { return }
+        callbacks.removeValue(forKey: id)
+        if callbacks.isEmpty {
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+
+    private func fire() {
+        for callback in callbacks.values { callback() }
+    }
+}
+
 enum ObjectDetailWatchPresentation {
-    /// WatchObject has no include-metrics contract. An empty metrics array on
-    /// a watch update therefore means "not carried by this stream", not that
-    /// the Metrics API retracted the values fetched by GetObject.
     static func merging(_ update: ObjectDetail, previous: ObjectDetail?) -> ObjectDetail {
         guard let previous else { return update }
         var merged = update
@@ -252,9 +299,6 @@ enum ObjectDetailWatchPresentation {
         // transient helper/watch omission cannot blank either YAML renderer.
         if update.yamlUTF8.isEmpty, !previous.yamlUTF8.isEmpty {
             merged.yamlUTF8 = previous.yamlUTF8
-        }
-        if update.metrics.isEmpty, !previous.metrics.isEmpty {
-            merged.metrics = previous.metrics
         }
         return merged
     }
@@ -292,7 +336,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let yamlPresentationBuilder:
         @Sendable (Data) -> YAMLManagedFieldsPresentation
     private let segmented = NSSegmentedControl(
-        labels: ["Summary", "YAML", "Relationships", "Metrics", "Data"],
+        labels: ["Summary", "YAML", "Relationships", "Data"],
         trackingMode: .selectOne,
         target: nil,
         action: nil
@@ -313,8 +357,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let cancelRelationshipScanButton = NSButton(
         title: "Cancel Scan", target: nil, action: nil
     )
-    private let metricsStack = NSStackView()
-    private let metricsScrollView = NSScrollView()
     private lazy var yamlScrollView = NSTextView.scrollablePlainDocumentContentTextView()
     private lazy var yamlTextView: NSTextView = {
         guard let textView = yamlScrollView.documentView as? NSTextView else {
@@ -380,6 +422,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var isInstallingDataEditorState = false
     private var isEditingYAML = false
     private var summaryItems: [ObjectDetailSummaryTableItem] = []
+    private var relativeTimeRefreshID: UUID?
     private var relationships: [ObjectRelationship] = []
     private var relationshipsLoaded = false
     private var childrenPotentiallyIncomplete = true
@@ -442,8 +485,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         segmented.selectedSegment = initialSegment
         segmented.target = self
         segmented.action = #selector(tabChanged)
-        if !supportsMetrics { segmented.setEnabled(false, forSegment: 3) }
-        if !supportsDataEditor { segmented.setEnabled(false, forSegment: 4) }
+        if !supportsDataEditor { segmented.setEnabled(false, forSegment: 3) }
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
 
@@ -466,7 +508,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         ])
         configureSummary()
         configureRelationships()
-        configureMetrics()
         configureYAML()
         configureDataEditor()
         view = root
@@ -484,7 +525,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         super.viewDidLayout()
         updateVisibleTextDocumentGeometry()
         updateSummaryTableGeometry()
-        resizeStackDocument(metricsStack, in: metricsScrollView)
     }
 
     private func updateVisibleTextDocumentGeometry() {
@@ -516,6 +556,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         authoritativeMutationRefreshInFlight = false
         dataConflictController?.close()
         dataConflictController = nil
+        ObjectDetailRelativeTimeRefreshCenter.shared.remove(relativeTimeRefreshID)
+        relativeTimeRefreshID = nil
         releaseDataDrafts()
     }
 
@@ -631,11 +673,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         identity.group.isEmpty && identity.version == "v1" && identity.resource == "secrets"
     }
 
-    private var supportsMetrics: Bool {
-        identity.group.isEmpty && identity.version == "v1"
-            && (identity.resource == "pods" || identity.resource == "nodes")
-    }
-
     private func configureSummary() {
         configureTable(
             summaryTable,
@@ -708,18 +745,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             relationshipsScrollView.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 5),
             relationshipsScrollView.bottomAnchor.constraint(equalTo: relationshipsContainerView.bottomAnchor),
         ])
-    }
-
-    private func configureMetrics() {
-        metricsStack.orientation = .vertical
-        metricsStack.alignment = .leading
-        metricsStack.spacing = 8
-        metricsStack.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
-        metricsStack.frame = NSRect(x: 0, y: 0, width: 640, height: 1)
-        metricsStack.autoresizingMask = [.width]
-        metricsScrollView.documentView = metricsStack
-        metricsScrollView.hasVerticalScroller = true
-        metricsScrollView.identifier = .init("object-detail-metrics-scroll")
     }
 
     private func configureTable(
@@ -1004,7 +1029,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             dataValueTextView.string = ""
         }
         updateDataEditorControls()
-        renderMetrics(detail.metrics)
         if selectedDataKey != nil, selectedDataEntry == nil {
             showMissingDataDraftStatus()
         } else {
@@ -1013,7 +1037,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
         startObjectWatch(resourceVersion: detail.resourceVersion)
         if initialTab == .automatic, supportsDataEditor {
-            segmented.selectedSegment = 4
+            segmented.selectedSegment = 3
             tabChanged()
         }
     }
@@ -1057,7 +1081,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             showYAMLPresentation()
         }
         renderSummary(updatedDetail)
-        renderMetrics(updatedDetail.metrics)
 
         if let updatedData {
             let wasInstallingDataEditorState = isInstallingDataEditorState
@@ -1115,6 +1138,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func renderSummary(_ detail: ObjectDetail) {
+        synchronizeRelativeTimeRefresh(for: detail)
         let selectedIDs = Set(summaryTable.selectedRowIndexes.compactMap { index -> String? in
             guard summaryItems.indices.contains(index),
                 case .row(let row) = summaryItems[index]
@@ -1137,6 +1161,22 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
     }
 
+    private func synchronizeRelativeTimeRefresh(for detail: ObjectDetail) {
+        let needsRefresh = detail.summaryFields.contains {
+            $0.sectionID == "conditions" && $0.transitionTime != nil
+        }
+        if needsRefresh, relativeTimeRefreshID == nil {
+            relativeTimeRefreshID = ObjectDetailRelativeTimeRefreshCenter.shared.add {
+                [weak self] in
+                guard let self, let detail = self.detail else { return }
+                self.renderSummary(detail)
+            }
+        } else if !needsRefresh, relativeTimeRefreshID != nil {
+            ObjectDetailRelativeTimeRefreshCenter.shared.remove(relativeTimeRefreshID)
+            relativeTimeRefreshID = nil
+        }
+    }
+
     private func summaryCopyText(for indexes: IndexSet) -> String? {
         let rows = indexes.compactMap { index -> ObjectDetailSummaryRow? in
             guard summaryItems.indices.contains(index),
@@ -1148,66 +1188,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         return ObjectDetailSummaryPresentation.copyText(for: rows)
     }
 
-    private func renderMetrics(_ metrics: [ResourceUsageValue]) {
-        clear(metricsStack)
-        guard !metrics.isEmpty else {
-            let label = NSTextField(labelWithString: "Metrics unavailable or not yet reported.")
-            label.textColor = .secondaryLabelColor
-            metricsStack.addArrangedSubview(label)
-            resizeStackDocument(metricsStack, in: metricsScrollView)
-            return
-        }
-        for value in metrics {
-            let title = value.resourceName.isEmpty ? "Resource" : value.resourceName
-            let used = value.usage.map { metricNumber($0, unit: value.unit) } ?? "Unavailable"
-
-            var components = ["\(used) used"]
-            if value.request != nil || value.limit != nil {
-                let requested = value.request.map { metricNumber($0, unit: value.unit) } ?? "—"
-                let limit = value.limit.map { metricNumber($0, unit: value.unit) } ?? "—"
-                components.append("\(requested) requested")
-                components.append("\(limit) limit")
-            }
-            if let capacity = value.capacity {
-                components.append("\(metricNumber(capacity, unit: value.unit)) allocatable")
-            }
-            let label = NSTextField(labelWithString: "\(title):  \(components.joined(separator: " · "))")
-            label.identifier = NSUserInterfaceItemIdentifier("object-detail-metric")
-            if let measured = value.measuredAtUnixMilliseconds {
-                label.toolTip = "Measured \(Self.dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(measured) / 1_000))) · \(value.provider)"
-            }
-            metricsStack.addArrangedSubview(label)
-        }
-        resizeStackDocument(metricsStack, in: metricsScrollView)
-    }
-
-    /// Stack views also arrive with a zero document frame. Keep their width
-    /// attached to the clip view and grow the document to its intrinsic
-    /// content height after each render and window resize.
-    private func resizeStackDocument(_ stack: NSStackView, in scrollView: NSScrollView) {
-        let viewport = scrollView.contentSize
-        let width = max(1, viewport.width)
-        if stack.frame.width != width {
-            stack.setFrameSize(NSSize(width: width, height: max(1, stack.frame.height)))
-        }
-        stack.layoutSubtreeIfNeeded()
-        let height = max(viewport.height, stack.fittingSize.height, 1)
-        if stack.frame.height != height {
-            stack.setFrameSize(NSSize(width: width, height: height))
-        }
-    }
-
-    private func clear(_ stack: NSStackView) {
-        stack.arrangedSubviews.forEach { child in
-            stack.removeArrangedSubview(child)
-            child.removeFromSuperview()
-        }
-    }
-
-    private func metricNumber(_ value: Double, unit: String) -> String {
-        KubernetesResourceQuantityFormatter.compact(value, unit: unit)
-    }
-
     @objc private func tabChanged() {
         switch segmented.selectedSegment {
         case 1:
@@ -1215,9 +1195,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         case 2:
             show(relationshipsContainerView)
             loadRelationshipsIfNeeded()
-        case 3 where supportsMetrics:
-            show(metricsScrollView)
-        case 4 where supportsDataEditor:
+        case 3 where supportsDataEditor:
             show(dataSplitView)
         default:
             show(summaryScrollView)
@@ -1225,10 +1203,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private var initialSegment: Int {
-        initialTab.segment(
-            supportsDataEditor: supportsDataEditor,
-            supportsMetrics: supportsMetrics
-        )
+        initialTab.segment(supportsDataEditor: supportsDataEditor)
     }
 
     private func startObjectWatch(resourceVersion: String) {
@@ -1296,7 +1271,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         detail = presented
         installYAML(presented.yamlUTF8)
         renderSummary(presented)
-        renderMetrics(presented.metrics)
         statusLabel.stringValue = "Watching · resource version \(updated.resourceVersion)"
         statusLabel.textColor = .secondaryLabelColor
     }
@@ -1693,7 +1667,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     /// active it first ends text entry and retains the in-memory key draft.
     /// A subsequent Escape from the key table may navigate back normally.
     private func leaveDataValueEditorIfActive() -> Bool {
-        guard supportsDataEditor, segmented.selectedSegment == 4,
+        guard supportsDataEditor, segmented.selectedSegment == 3,
             let window = view.window,
             let responderView = window.firstResponder as? NSView,
             responderView === dataValueTextView
@@ -2766,12 +2740,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     @objc private func backPressed() { onBack?() }
 
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .medium
-        return formatter
-    }()
 }
 
 @MainActor

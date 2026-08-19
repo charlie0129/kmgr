@@ -98,7 +98,7 @@ public enum ContextualShortcutCatalog {
             items.append(item("resource.enter", "Return", "Enter selected subresource"))
         }
         if availability.canOpenDetails {
-            items.append(item("resource.details", "\u{2318}Return", "Open selected object details"))
+            items.append(item("resource.details", "D", "Describe selected object"))
         }
         if availability.canOpenYAML {
             items.append(item(

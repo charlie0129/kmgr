@@ -303,15 +303,18 @@ func (x *GetObjectRequest) GetIncludeMetrics() bool {
 }
 
 type ObjectSummaryField struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SectionId     string                 `protobuf:"bytes,1,opt,name=section_id,json=sectionId,proto3" json:"section_id,omitempty"`
-	FieldId       string                 `protobuf:"bytes,2,opt,name=field_id,json=fieldId,proto3" json:"field_id,omitempty"`
-	Label         string                 `protobuf:"bytes,3,opt,name=label,proto3" json:"label,omitempty"`
-	DisplayText   string                 `protobuf:"bytes,4,opt,name=display_text,json=displayText,proto3" json:"display_text,omitempty"`
-	Tooltip       string                 `protobuf:"bytes,5,opt,name=tooltip,proto3" json:"tooltip,omitempty"`
-	Severity      CellSeverity           `protobuf:"varint,6,opt,name=severity,proto3,enum=kmgr.v1.CellSeverity" json:"severity,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	SectionId   string                 `protobuf:"bytes,1,opt,name=section_id,json=sectionId,proto3" json:"section_id,omitempty"`
+	FieldId     string                 `protobuf:"bytes,2,opt,name=field_id,json=fieldId,proto3" json:"field_id,omitempty"`
+	Label       string                 `protobuf:"bytes,3,opt,name=label,proto3" json:"label,omitempty"`
+	DisplayText string                 `protobuf:"bytes,4,opt,name=display_text,json=displayText,proto3" json:"display_text,omitempty"`
+	Tooltip     string                 `protobuf:"bytes,5,opt,name=tooltip,proto3" json:"tooltip,omitempty"`
+	Severity    CellSeverity           `protobuf:"varint,6,opt,name=severity,proto3,enum=kmgr.v1.CellSeverity" json:"severity,omitempty"`
+	// Structured condition transition time. Zero means this field is not a
+	// condition or Kubernetes did not publish a valid timestamp.
+	TransitionTimeUnixMs int64 `protobuf:"varint,7,opt,name=transition_time_unix_ms,json=transitionTimeUnixMs,proto3" json:"transition_time_unix_ms,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ObjectSummaryField) Reset() {
@@ -384,6 +387,13 @@ func (x *ObjectSummaryField) GetSeverity() CellSeverity {
 		return x.Severity
 	}
 	return CellSeverity_CELL_SEVERITY_UNSPECIFIED
+}
+
+func (x *ObjectSummaryField) GetTransitionTimeUnixMs() int64 {
+	if x != nil {
+		return x.TransitionTimeUnixMs
+	}
+	return 0
 }
 
 // PodContainerDetail is a bounded, display-safe projection of one declared
@@ -1499,7 +1509,7 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\bidentity\x18\x02 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12!\n" +
 	"\finclude_yaml\x18\x03 \x01(\bR\vincludeYaml\x12'\n" +
 	"\x0finclude_summary\x18\x04 \x01(\bR\x0eincludeSummary\x12'\n" +
-	"\x0finclude_metrics\x18\x05 \x01(\bR\x0eincludeMetrics\"\xd4\x01\n" +
+	"\x0finclude_metrics\x18\x05 \x01(\bR\x0eincludeMetrics\"\x8b\x02\n" +
 	"\x12ObjectSummaryField\x12\x1d\n" +
 	"\n" +
 	"section_id\x18\x01 \x01(\tR\tsectionId\x12\x19\n" +
@@ -1507,7 +1517,8 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\x05label\x18\x03 \x01(\tR\x05label\x12!\n" +
 	"\fdisplay_text\x18\x04 \x01(\tR\vdisplayText\x12\x18\n" +
 	"\atooltip\x18\x05 \x01(\tR\atooltip\x121\n" +
-	"\bseverity\x18\x06 \x01(\x0e2\x15.kmgr.v1.CellSeverityR\bseverity\"\xde\x02\n" +
+	"\bseverity\x18\x06 \x01(\x0e2\x15.kmgr.v1.CellSeverityR\bseverity\x125\n" +
+	"\x17transition_time_unix_ms\x18\a \x01(\x03R\x14transitionTimeUnixMs\"\xde\x02\n" +
 	"\x12PodContainerDetail\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12-\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x19.kmgr.v1.PodContainerKindR\x04kind\x12\x16\n" +

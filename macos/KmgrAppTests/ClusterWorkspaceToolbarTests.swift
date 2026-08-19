@@ -1022,6 +1022,39 @@ struct ClusterWorkspaceToolbarTests {
             .contains("\u{21E7}Y") == true)
     }
 
+    @Test("D describes the selected object without changing Return drill-down")
+    func describeShortcutOpensDetails() async throws {
+        let pod = toolbarPodIdentity()
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: toolbarPodDetail(pod)
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        try await waitUntil { table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("D") == true)
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys)
+            .contains("\u{2318}Return") == false)
+
+        table.keyDown(with: try workspaceLetterKey("d"))
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSSegmentedControl }
+                .contains { control in
+                    control.segmentCount == 4
+                        && control.label(forSegment: 0) == "Summary"
+                        && control.selectedSegment == 0
+                }
+        }
+    }
+
     @Test("a slower Enter cannot replace a newer dedicated YAML window")
     func explicitDetailSupersedesPendingDrillDown() async throws {
         let pod = toolbarPodIdentity()

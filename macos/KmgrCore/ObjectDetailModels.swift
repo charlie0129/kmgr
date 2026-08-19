@@ -7,6 +7,7 @@ public struct ObjectSummaryField: Hashable, Sendable {
     public var displayText: String
     public var tooltip: String
     public var severity: CellSeverity
+    public var transitionTime: Date?
 
     public init(
         sectionID: String,
@@ -14,7 +15,8 @@ public struct ObjectSummaryField: Hashable, Sendable {
         label: String,
         displayText: String,
         tooltip: String = "",
-        severity: CellSeverity = .normal
+        severity: CellSeverity = .normal,
+        transitionTime: Date? = nil
     ) {
         self.sectionID = sectionID
         self.fieldID = fieldID
@@ -22,6 +24,7 @@ public struct ObjectSummaryField: Hashable, Sendable {
         self.displayText = displayText
         self.tooltip = tooltip
         self.severity = severity
+        self.transitionTime = transitionTime
     }
 }
 
@@ -414,6 +417,9 @@ public struct OperationProgress: Hashable, Sendable {
 
 public protocol ObjectDetailProviding: Sendable {
     func getObject(identity: ResourceIdentity) async throws -> ObjectDetail
+    /// Fetches the Pod presentation used by the Return-driven container table.
+    /// Ordinary Details deliberately does not opt into Metrics API work.
+    func getPodContainerDetail(identity: ResourceIdentity) async throws -> ObjectDetail
     func watchObject(
         identity: ResourceIdentity,
         resourceVersion: String
@@ -448,4 +454,10 @@ public protocol ObjectDetailProviding: Sendable {
         expectedResourceVersion: String,
         mutations: [DataMutationKind]
     ) async throws -> AsyncThrowingStream<OperationProgress, Error>
+}
+
+public extension ObjectDetailProviding {
+    func getPodContainerDetail(identity: ResourceIdentity) async throws -> ObjectDetail {
+        try await getObject(identity: identity)
+    }
 }

@@ -568,10 +568,14 @@ func detailResponse(requestID string, identity *kmgrv1.ResourceIdentity, detail 
 		Annotations: stringEntries(detail.Annotations),
 	}
 	for _, field := range detail.Summary {
-		response.SummaryFields = append(response.SummaryFields, &kmgrv1.ObjectSummaryField{
+		value := &kmgrv1.ObjectSummaryField{
 			SectionId: field.Section, FieldId: field.ID, Label: field.Label,
 			DisplayText: field.Value, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
-		})
+		}
+		if !field.TransitionTime.IsZero() {
+			value.TransitionTimeUnixMs = field.TransitionTime.UnixMilli()
+		}
+		response.SummaryFields = append(response.SummaryFields, value)
 	}
 	for _, container := range detail.Containers {
 		response.Containers = append(response.Containers, &kmgrv1.PodContainerDetail{

@@ -148,11 +148,18 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     }
 }
 
-@Test func objectDetailProviderPreservesAbsentAndExplicitZeroUsageComponents() async throws {
+@Test func objectDetailsDoNotRequestMetrics() async throws {
     let rpc = ObjectDetailRPCCapture()
     var response = Kmgr_V1_GetObjectResponse()
     response.identity = protoIdentity(name: "api", uid: "uid-api")
     response.yamlUtf8 = Data("kind: Deployment\n".utf8)
+    var condition = Kmgr_V1_ObjectSummaryField()
+    condition.sectionID = "conditions"
+    condition.fieldID = "condition:0"
+    condition.label = "Ready"
+    condition.displayText = "True"
+    condition.transitionTimeUnixMs = 1_755_427_785_123
+    response.summaryFields = [condition]
     var usage = Kmgr_V1_ResourceUsageValue()
     usage.used = 0
     usage.usageAvailable = true
@@ -170,8 +177,12 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(detail.metrics.first?.capacity == nil)
     #expect(detail.metrics.first?.sortValue == 0)
     #expect(detail.yamlUTF8 == Data("kind: Deployment\n".utf8))
+    #expect(detail.summaryFields.first?.transitionTime
+        == Date(timeIntervalSince1970: 1_755_427_785.123))
     let request = await rpc.capturedObject()
     #expect(request?.includeYaml == true)
+    #expect(request?.includeSummary == true)
+    #expect(request?.includeMetrics == false)
 }
 
 @Test func objectDetailProviderMapsTypedContainerPresentationAndMetrics() async throws {
@@ -200,7 +211,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
 
     let detail = try await EngineObjectDetailProvider(
         rpc: rpc, identifier: { "request" }
-    ).getObject(identity: identity(name: "api", uid: "uid-api"))
+    ).getPodContainerDetail(identity: identity(name: "api", uid: "uid-api"))
     let mapped = try #require(detail.containers.first)
     #expect(mapped.name == "app")
     #expect(mapped.kind == .regular)
@@ -212,6 +223,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(mapped.metric(named: "cpu")?.usage == 0.42)
     #expect(mapped.metric(named: "cpu")?.request == 0.5)
     #expect(mapped.metric(named: "cpu")?.limit == 1)
+    #expect(await rpc.capturedObject()?.includeMetrics == true)
 }
 
 @Test func objectDetailProviderRejectsSuccessfulEmptyYAML() async {

@@ -213,10 +213,10 @@ enum NativeMainMenuBuilder {
         )
         addResponderItem(
             to: menu,
-            title: "Open Details",
+            title: "Describe",
             action: #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
-            keyEquivalent: "\r",
-            modifiers: [.command]
+            keyEquivalent: "d",
+            modifiers: []
         )
         addResponderItem(
             to: menu,

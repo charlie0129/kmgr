@@ -1413,7 +1413,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 if objectOpenRevision == revision { objectOpenTask = nil }
             }
             do {
-                let detail = try await objectDetailProvider.getObject(identity: identity)
+                let detail = try await drillDownDetail(
+                    identity,
+                    provider: objectDetailProvider
+                )
                 guard !Task.isCancelled, objectOpenRevision == revision,
                     detail.identity == identity,
                     drillDownSourceIsCurrent(identity, returnState: returnState),
@@ -1464,6 +1467,19 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             && current.namespaceSelection == returnState.namespaceSelection
             && current.filter == returnState.filter
             && current.selectedUIDs.contains(identity.uid)
+    }
+
+    private func drillDownDetail(
+        _ identity: ResourceIdentity,
+        provider: any ObjectDetailProviding
+    ) async throws -> ObjectDetail {
+        if identity.group.isEmpty,
+            identity.version == "v1",
+            identity.resource == "pods"
+        {
+            return try await provider.getPodContainerDetail(identity: identity)
+        }
+        return try await provider.getObject(identity: identity)
     }
 
     private func openDrillDownResource(_ query: ResourceDrillDownQuery) {
@@ -1636,7 +1652,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 if objectOpenRevision == revision { objectOpenTask = nil }
             }
             do {
-                let detail = try await objectDetailProvider.getObject(identity: identity)
+                let detail = try await drillDownDetail(
+                    identity,
+                    provider: objectDetailProvider
+                )
                 guard !Task.isCancelled, objectOpenRevision == revision,
                     detail.identity == identity,
                     subresourceDestinationIsCurrent(identity),
@@ -5555,32 +5574,36 @@ private final class ResourceTableView: NSTableView {
     override func keyDown(with event: NSEvent) {
         guard currentEditor() == nil else { super.keyDown(with: event); return }
         let command = event.modifierFlags.contains(.command)
-        switch (event.charactersIgnoringModifiers, event.keyCode, command) {
+        let unmodified = event.modifierFlags.intersection([
+            .shift, .command, .control, .option,
+        ]).isEmpty
+        switch (event.charactersIgnoringModifiers?.lowercased(), event.keyCode, command) {
         case ("/", _, false): onCommand?(.focusFilter)
         case ("j", _, false): onCommand?(.moveDown)
         case ("k", _, false): onCommand?(.moveUp)
+        case ("d", _, false) where unmodified: onCommand?(.open)
         case (_, 36, false): onCommand?(.enter)
-        case ("y", _, false), ("Y", _, false):
+        case ("y", _, false):
             guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
                 super.keyDown(with: event)
                 return
             }
             onCommand?(event.modifierFlags.contains(.shift)
                 ? .openYAMLSnapshot : .openYAML)
-        case ("e", _, false), ("E", _, false): onCommand?(.openEvents)
-        case ("l", _, false), ("L", _, false):
+        case ("e", _, false): onCommand?(.openEvents)
+        case ("l", _, false):
             guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
                 super.keyDown(with: event)
                 return
             }
             onCommand?(event.modifierFlags.contains(.shift) ? .openPreviousLogs : .openLogs)
-        case ("s", _, false), ("S", _, false):
+        case ("s", _, false):
             guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
                 super.keyDown(with: event)
                 return
             }
             onCommand?(event.modifierFlags.contains(.shift) ? .configureExec : .openExec)
-        case ("p", _, false), ("P", _, false): onCommand?(.startPortForward)
+        case ("p", _, false): onCommand?(.startPortForward)
         case ("a", _, true): onCommand?(.selectAll)
         case (_, 51, true): onCommand?(.delete)
         case ("[", _, true):

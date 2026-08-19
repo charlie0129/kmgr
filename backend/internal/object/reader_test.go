@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -282,7 +283,9 @@ func TestGenericSummaryIncludesConditionsOwnersAndWorkloadStatus(t *testing.T) {
 	condition := byID["condition:0"]
 	if condition.Section != "conditions" || condition.Label != "Available" ||
 		!strings.Contains(condition.Value, "MinimumReplicasAvailable") ||
-		!strings.Contains(condition.Value, "Deployment has minimum availability") {
+		!strings.Contains(condition.Value, "Deployment has minimum availability") ||
+		condition.TransitionTime.Format(time.RFC3339) != "2026-08-14T02:03:04Z" ||
+		strings.Contains(condition.Value, "2026-08-14") {
 		t.Errorf("condition summary = %#v", condition)
 	}
 	owner := byID["owner:0"]

@@ -201,12 +201,23 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
     }
 
     public func getObject(identity: ResourceIdentity) async throws -> ObjectDetail {
+        try await getObject(identity: identity, includeMetrics: false)
+    }
+
+    public func getPodContainerDetail(identity: ResourceIdentity) async throws -> ObjectDetail {
+        try await getObject(identity: identity, includeMetrics: true)
+    }
+
+    private func getObject(
+        identity: ResourceIdentity,
+        includeMetrics: Bool
+    ) async throws -> ObjectDetail {
         var request = Kmgr_V1_GetObjectRequest()
         request.context = context(identity.clusterSessionID, timeout: unaryTimeout)
         request.identity = Self.protoIdentity(identity)
         request.includeYaml = true
         request.includeSummary = true
-        request.includeMetrics = true
+        request.includeMetrics = includeMetrics
         do {
             let response = try await rpc.getObject(request, timeout: unaryTimeout)
             try Self.validate(response.requestID, expected: request.context.requestID)
@@ -602,7 +613,10 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                     label: field.label,
                     displayText: field.displayText,
                     tooltip: field.tooltip,
-                    severity: severity(field.severity)
+                    severity: severity(field.severity),
+                    transitionTime: field.transitionTimeUnixMs == 0 ? nil : Date(
+                        timeIntervalSince1970: TimeInterval(field.transitionTimeUnixMs) / 1_000
+                    )
                 )
             },
             labels: Dictionary(

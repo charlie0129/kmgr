@@ -115,10 +115,10 @@ struct NativeMainMenuBuilderTests {
                 NSEvent.ModifierFlags()
             ),
             (
-                "Open Details",
+                "Describe",
                 #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
-                "\r",
-                NSEvent.ModifierFlags.command
+                "d",
+                NSEvent.ModifierFlags()
             ),
             (
                 "Focus Resource Filter",

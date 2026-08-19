@@ -11,16 +11,13 @@ struct ObjectDetailYAMLPresentationTests {
     @Test("automatic details route ConfigMaps and Secrets directly to Data")
     func automaticDataTabRouting() {
         #expect(ObjectDetailInitialTab.automatic.segment(
-            supportsDataEditor: true,
-            supportsMetrics: false
-        ) == 4)
+            supportsDataEditor: true
+        ) == 3)
         #expect(ObjectDetailInitialTab.automatic.segment(
-            supportsDataEditor: false,
-            supportsMetrics: false
+            supportsDataEditor: false
         ) == 0)
         #expect(ObjectDetailInitialTab.data.segment(
-            supportsDataEditor: false,
-            supportsMetrics: false
+            supportsDataEditor: false
         ) == 0)
     }
 
@@ -629,7 +626,7 @@ struct ObjectDetailYAMLPresentationTests {
         controller.view.layoutSubtreeIfNeeded()
         #expect(summaryDocument.frame.width <= summaryScroll.contentSize.width + 1)
 
-        segmented.selectedSegment = 4
+        segmented.selectedSegment = 3
         _ = segmented.sendAction(segmented.action, to: segmented.target)
         controller.view.layoutSubtreeIfNeeded()
         let keysTable = try #require(descendants(of: controller.view)
@@ -790,11 +787,7 @@ struct ObjectDetailYAMLPresentationTests {
             uid: ResourceUID("uid")
         )
         let longJSON = "{\"payload\":\"\(String(repeating: "x", count: 2_000))\"}"
-        let serverCondition = "True · NewReplicaSetAvailable · since 2026-08-17T10:49:45Z"
-        let localCondition = ObjectDetailSummaryPresentation.localizedConditionText(
-            serverCondition,
-            timeZone: .current
-        )
+        let transitionTime = Date(timeIntervalSince1970: 1_755_428_985)
         let detail = ObjectDetail(
             identity: identity,
             resourceVersion: "rv-1",
@@ -809,7 +802,8 @@ struct ObjectDetailYAMLPresentationTests {
                     sectionID: "conditions",
                     fieldID: "condition:0",
                     label: "Progressing",
-                    displayText: serverCondition
+                    displayText: "True · NewReplicaSetAvailable",
+                    transitionTime: transitionTime
                 ),
             ],
             labels: ["tier": "frontend", "app": "api"],
@@ -844,25 +838,28 @@ struct ObjectDetailYAMLPresentationTests {
 
         let sections = ObjectDetailSummaryPresentation.sections(for: detail)
         #expect(sections.map(\.title) == [
-            "Status", "Conditions", "Labels", "Annotations",
+            "Labels", "Annotations", "Status", "Conditions",
         ])
+        let localCondition = try #require(
+            sections.first { $0.id == "conditions" }?.rows.first?.displayText
+        )
         #expect(sections.flatMap(\.rows).map { "\($0.label)\t\($0.displayText)" } == [
-            "Available\tTrue",
-            "Progressing\t\(localCondition)",
             "app\tapi",
             "tier\tfrontend",
             "example.test/note\tfirst second",
             "example.test/payload\tJSON value omitted · \(longJSON.count.formatted()) characters",
+            "Available\tTrue",
+            "Progressing\t\(localCondition)",
         ])
 
         let conditionsHeading = try #require(table.view(
-            atColumn: 0, row: 2, makeIfNecessary: true
+            atColumn: 0, row: 8, makeIfNecessary: true
         ) as? NSTextField)
         let conditionField = try #require(table.view(
-            atColumn: 0, row: 3, makeIfNecessary: true
+            atColumn: 0, row: 9, makeIfNecessary: true
         ))
         let conditionValue = try #require(table.view(
-            atColumn: 1, row: 3, makeIfNecessary: true
+            atColumn: 1, row: 9, makeIfNecessary: true
         ))
         #expect(conditionsHeading.stringValue == "Conditions")
         #expect(descendants(of: conditionField).contains {
@@ -873,10 +870,10 @@ struct ObjectDetailYAMLPresentationTests {
         })
 
         let annotationField = try #require(table.view(
-            atColumn: 0, row: 8, makeIfNecessary: true
+            atColumn: 0, row: 4, makeIfNecessary: true
         ))
         let annotationValue = try #require(table.view(
-            atColumn: 1, row: 8, makeIfNecessary: true
+            atColumn: 1, row: 4, makeIfNecessary: true
         ))
         #expect(descendants(of: annotationField).compactMap { $0 as? NSTextField }
             .contains { $0.stringValue == "example.test/note" && $0.isSelectable })
@@ -884,7 +881,7 @@ struct ObjectDetailYAMLPresentationTests {
             .contains { $0.stringValue == "first second" && $0.isSelectable })
 
         let payloadValue = try #require(table.view(
-            atColumn: 1, row: 9, makeIfNecessary: true
+            atColumn: 1, row: 5, makeIfNecessary: true
         ))
         #expect(descendants(of: payloadValue).compactMap { $0 as? NSTextField }
             .contains {
@@ -897,7 +894,7 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(table.frame.width <= summaryScroll.contentSize.width + 1)
 
         let copyableTable = try #require(table as? CopyableSummaryTableView)
-        copyableTable.selectRowIndexes(IndexSet(integer: 9), byExtendingSelection: false)
+        copyableTable.selectRowIndexes(IndexSet(integer: 5), byExtendingSelection: false)
         #expect(copyableTable.tryToPerform(#selector(NSText.copy(_:)), with: nil))
         #expect(NSPasteboard.general.string(forType: .string)
             == "Annotations\texample.test/payload\t\(longJSON)")
@@ -916,7 +913,8 @@ struct ObjectDetailYAMLPresentationTests {
             uid: ResourceUID("uid")
         )
         let timeZone = try #require(TimeZone(secondsFromGMT: 8 * 60 * 60))
-        let serverValue = "True · message since startup · since 2026-08-17T10:49:45.123Z"
+        let transitionTime = Date(timeIntervalSince1970: 1_755_427_785.123)
+        let now = transitionTime.addingTimeInterval(86_460)
         let sections = ObjectDetailSummaryPresentation.sections(
             for: ObjectDetail(
                 identity: identity,
@@ -925,22 +923,62 @@ struct ObjectDetailYAMLPresentationTests {
                     sectionID: "conditions",
                     fieldID: "condition:0",
                     label: "Ready",
-                    displayText: serverValue
+                    displayText: "True · message since startup",
+                    transitionTime: transitionTime
                 )]
             ),
-            conditionTimeZone: timeZone
+            conditionTimeZone: timeZone,
+            now: now
         )
         let condition = try #require(sections.first?.rows.first)
 
         #expect(condition.displayText
-            == "True · message since startup · since 2026-08-17 18:49:45 +08:00")
+            == "True · message since startup · for 1d (since 2025-08-17 18:49:45 +08:00)")
         #expect(condition.copyValue == condition.displayText)
         #expect(ObjectDetailSummaryPresentation.copyText(for: [condition])
-            == "Conditions\tReady\tTrue · message since startup · since 2026-08-17 18:49:45 +08:00")
-        #expect(ObjectDetailSummaryPresentation.localizedConditionText(
-            "True · since not-a-timestamp",
-            timeZone: timeZone
-        ) == "True · since not-a-timestamp")
+            == "Conditions\tReady\tTrue · message since startup · for 1d (since 2025-08-17 18:49:45 +08:00)")
+        #expect(ObjectDetailSummaryPresentation.compactAge(
+            since: transitionTime,
+            now: transitionTime.addingTimeInterval(60)
+        ) == "1m")
+    }
+
+    @Test("Summary sections follow inspection priority with Conditions last")
+    func summarySectionPriority() {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: "pods",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let fields = [
+            "conditions", "endpoints", "ports", "containers", "selectors", "owners",
+            "future-section", "secret", "service", "network", "replicas", "status",
+            "identity",
+        ].map {
+            ObjectSummaryField(
+                sectionID: $0,
+                fieldID: $0,
+                label: $0,
+                displayText: $0
+            )
+        }
+        let sections = ObjectDetailSummaryPresentation.sections(for: ObjectDetail(
+            identity: identity,
+            resourceVersion: "rv",
+            summaryFields: fields,
+            labels: ["app": "api"],
+            annotations: ["owner": "team"]
+        ))
+
+        #expect(sections.map(\.id) == [
+            "identity", "labels", "annotations", "status", "replicas", "network",
+            "service", "secret", "owners", "selectors", "containers", "ports",
+            "endpoints", "future-section", "conditions",
+        ])
     }
 
     @Test("Summary omits long JSON and bounds metadata entry counts")

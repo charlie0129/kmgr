@@ -319,7 +319,7 @@ struct YAMLSnapshotWindowControllerTests {
         )
         let merged = ObjectDetailWatchPresentation.merging(emptyUpdate, previous: previous)
         #expect(merged.yamlUTF8 == previous.yamlUTF8)
-        #expect(merged.metrics == previous.metrics)
+        #expect(merged.metrics.isEmpty)
 
         let provider = SnapshotObjectDetailProvider(
             details: [previous],

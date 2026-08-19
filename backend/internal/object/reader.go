@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -268,10 +269,11 @@ type Detail struct {
 }
 
 type SummaryField struct {
-	Section string
-	ID      string
-	Label   string
-	Value   string
+	Section        string
+	ID             string
+	Label          string
+	Value          string
+	TransitionTime time.Time
 }
 
 func (r *Reader) Detail(ctx context.Context, identity Identity, includeYAML, includeSummary bool) (Detail, error) {
@@ -572,6 +574,7 @@ func conditionSummary(object map[string]any) []SummaryField {
 		reason, _, _ := unstructured.NestedString(condition, "reason")
 		message, _, _ := unstructured.NestedString(condition, "message")
 		transitioned, _, _ := unstructured.NestedString(condition, "lastTransitionTime")
+		transitionTime, _ := time.Parse(time.RFC3339, transitioned)
 		if typeName == "" && status == "" && reason == "" && message == "" {
 			continue
 		}
@@ -589,12 +592,9 @@ func conditionSummary(object map[string]any) []SummaryField {
 		if message != "" {
 			parts = append(parts, message)
 		}
-		if transitioned != "" {
-			parts = append(parts, "since "+transitioned)
-		}
 		result = append(result, SummaryField{
 			Section: "conditions", ID: fmt.Sprintf("condition:%d", index), Label: label,
-			Value: boundedSummaryText(strings.Join(parts, " · ")),
+			Value: boundedSummaryText(strings.Join(parts, " · ")), TransitionTime: transitionTime,
 		})
 	}
 	if omitted := originalCount - len(conditions); omitted > 0 {

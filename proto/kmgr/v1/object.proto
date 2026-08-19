@@ -31,6 +31,9 @@ message ObjectSummaryField {
   string display_text = 4;
   string tooltip = 5;
   CellSeverity severity = 6;
+  // Structured condition transition time. Zero means this field is not a
+  // condition or Kubernetes did not publish a valid timestamp.
+  int64 transition_time_unix_ms = 7;
 }
 
 enum PodContainerKind {

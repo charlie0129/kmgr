@@ -239,6 +239,10 @@ public struct Kmgr_V1_ObjectSummaryField: Sendable {
 
   public var severity: Kmgr_V1_CellSeverity = .unspecified
 
+  /// Structured condition transition time. Zero means this field is not a
+  /// condition or Kubernetes did not publish a valid timestamp.
+  public var transitionTimeUnixMs: Int64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -818,7 +822,7 @@ extension Kmgr_V1_GetObjectRequest: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Kmgr_V1_ObjectSummaryField: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ObjectSummaryField"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}section_id\0\u{3}field_id\0\u{1}label\0\u{3}display_text\0\u{1}tooltip\0\u{1}severity\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}section_id\0\u{3}field_id\0\u{1}label\0\u{3}display_text\0\u{1}tooltip\0\u{1}severity\0\u{3}transition_time_unix_ms\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -832,6 +836,7 @@ extension Kmgr_V1_ObjectSummaryField: SwiftProtobuf.Message, SwiftProtobuf._Mess
       case 4: try { try decoder.decodeSingularStringField(value: &self.displayText) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.tooltip) }()
       case 6: try { try decoder.decodeSingularEnumField(value: &self.severity) }()
+      case 7: try { try decoder.decodeSingularInt64Field(value: &self.transitionTimeUnixMs) }()
       default: break
       }
     }
@@ -856,6 +861,9 @@ extension Kmgr_V1_ObjectSummaryField: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if self.severity != .unspecified {
       try visitor.visitSingularEnumField(value: self.severity, fieldNumber: 6)
     }
+    if self.transitionTimeUnixMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.transitionTimeUnixMs, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -866,6 +874,7 @@ extension Kmgr_V1_ObjectSummaryField: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if lhs.displayText != rhs.displayText {return false}
     if lhs.tooltip != rhs.tooltip {return false}
     if lhs.severity != rhs.severity {return false}
+    if lhs.transitionTimeUnixMs != rhs.transitionTimeUnixMs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
