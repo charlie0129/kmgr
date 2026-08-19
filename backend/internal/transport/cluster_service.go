@@ -446,7 +446,7 @@ func (s *ClusterService) ListNamespaces(
 	if !ok {
 		return nil, status.Error(codes.NotFound, "cluster session was not found")
 	}
-	namespaces, err := cluster.ListNamespaces(requestContext, session)
+	namespaces, err := session.ListNamespacesCached(requestContext)
 	if err != nil {
 		response.Error = connectionError(err, session.Context().Name, session.Context().ServerHostname)
 		response.Error.Operation = "list-namespaces"

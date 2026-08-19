@@ -27,6 +27,15 @@ type RelationshipScanResolver interface {
 	RelationshipScanSession(sessionID string) (RelationshipScanSession, error)
 }
 
+// RelationshipScanSession exposes the authority-shared discovery catalog and
+// the metadata client used for the explicit object scan. It deliberately does
+// not expose a raw discovery client, which would let callers bypass catalog
+// reuse and repeat the complete API group/version fanout.
+type RelationshipScanSession interface {
+	DiscoverResources(context.Context) (cluster.ResourceDiscovery, error)
+	Metadata() metadata.Interface
+}
+
 type RelationshipScanResource struct {
 	Group      string
 	Version    string
@@ -80,6 +89,13 @@ func (r *Reader) ScanRelationships(
 	if err != nil {
 		return err
 	}
+	if session == nil {
+		return ErrRelationshipResolutionUnavailable
+	}
+	metadataClient := session.Metadata()
+	if metadataClient == nil {
+		return ErrRelationshipResolutionUnavailable
+	}
 	resources, discoveryIncomplete, err := discoverRelationshipResources(ctx, session)
 	if err != nil {
 		return err
@@ -103,7 +119,7 @@ func (r *Reader) ScanRelationships(
 		}
 		progress.Current = resource
 		resourceErr := r.scanRelationshipResource(
-			ctx, session.Metadata, identity, resource, seen, &progress, emit,
+			ctx, metadataClient, identity, resource, seen, &progress, emit,
 		)
 		progress.ResourcesScanned++
 		if resourceErr != nil {
@@ -206,10 +222,10 @@ func discoverRelationshipResources(
 	ctx context.Context,
 	session RelationshipScanSession,
 ) ([]RelationshipScanResource, bool, error) {
-	if session.Discovery == nil || session.Metadata == nil {
+	if session == nil {
 		return nil, false, ErrRelationshipResolutionUnavailable
 	}
-	discovered, err := cluster.DiscoverResourcesWithClient(ctx, session.Discovery)
+	discovered, err := session.DiscoverResources(ctx)
 	if err != nil {
 		return nil, false, fmt.Errorf("discover listable resources: %w", err)
 	}

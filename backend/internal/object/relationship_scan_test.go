@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -19,6 +23,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/metadata"
 	metadatafake "k8s.io/client-go/metadata/fake"
 	"k8s.io/client-go/rest"
 )
@@ -40,7 +45,20 @@ func (r scanTestResolver) Resource(
 }
 
 func (r scanTestResolver) RelationshipScanSession(string) (RelationshipScanSession, error) {
-	return RelationshipScanSession{Discovery: r.discovery, Metadata: r.metadata}, nil
+	return scanTestSession{discovery: r.discovery, metadataClient: r.metadata}, nil
+}
+
+type scanTestSession struct {
+	discovery      discovery.DiscoveryInterface
+	metadataClient metadata.Interface
+}
+
+func (s scanTestSession) DiscoverResources(ctx context.Context) (cluster.ResourceDiscovery, error) {
+	return cluster.DiscoverResourcesWithClient(ctx, s.discovery)
+}
+
+func (s scanTestSession) Metadata() metadata.Interface {
+	return s.metadataClient
 }
 
 func TestScanRelationshipsUsesExactOwnerUIDPreferredVersionsAndNamespace(t *testing.T) {
@@ -122,6 +140,92 @@ func TestScanRelationshipsUsesExactOwnerUIDPreferredVersionsAndNamespace(t *test
 	}
 }
 
+func TestClusterRelationshipScansReuseSharedDiscoveryCatalog(t *testing.T) {
+	t.Parallel()
+	var discoveryCycles atomic.Int64
+	var ownerGets atomic.Int64
+	var metadataLists atomic.Int64
+	reader, sessionID := newClusterRelationshipReader(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			discoveryCycles.Add(1)
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIVersions{Versions: []string{"v1"}})
+		case "/apis":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIGroupList{})
+		case "/api/v1":
+			writeRelationshipDiscoveryJSON(t, writer, &metav1.APIResourceList{
+				GroupVersion: "v1",
+				APIResources: []metav1.APIResource{{
+					Name: "pods", Kind: "Pod", Namespaced: true, Verbs: metav1.Verbs{"list"},
+				}},
+			})
+		case "/apis/apps/v1/namespaces/ns/deployments/api":
+			ownerGets.Add(1)
+			writeRelationshipDiscoveryJSON(t, writer,
+				kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "owner-uid").Object,
+			)
+		case "/api/v1/namespaces/ns/pods":
+			metadataLists.Add(1)
+			if request.URL.Query().Get("limit") != "500" {
+				t.Errorf("metadata list limit = %q, want 500", request.URL.Query().Get("limit"))
+			}
+			writeRelationshipDiscoveryJSON(t, writer, map[string]any{
+				"apiVersion": "meta.k8s.io/v1",
+				"kind":       "PartialObjectMetadataList",
+				"metadata":   map[string]any{"resourceVersion": "1"},
+				"items":      []any{},
+			})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	identity := Identity{
+		SessionID: sessionID, Group: "apps", Version: "v1", Resource: "deployments",
+		Namespace: "ns", Name: "api", UID: "owner-uid",
+	}
+	scan := func() error {
+		var final RelationshipScanProgress
+		err := reader.ScanRelationships(context.Background(), identity, func(update RelationshipScanUpdate) error {
+			final = update.Progress
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if !final.Complete || final.ResourcesScanned != 1 {
+			return fmt.Errorf("final progress = %#v", final)
+		}
+		return nil
+	}
+
+	start := make(chan struct{})
+	resultErrors := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			resultErrors <- scan()
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-resultErrors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := scan(); err != nil {
+		t.Fatal(err)
+	}
+	if got := discoveryCycles.Load(); got != 1 {
+		t.Fatalf("concurrent and repeated relationship scans caused %d discovery cycles, want 1", got)
+	}
+	if got := ownerGets.Load(); got != 3 {
+		t.Fatalf("owner GETs = %d, want one authoritative GET per scan", got)
+	}
+	if got := metadataLists.Load(); got != 3 {
+		t.Fatalf("metadata LISTs = %d, want one explicit object scan per invocation", got)
+	}
+}
+
 func TestScanRelationshipsRejectsRecreatedTargetBeforeBulkLists(t *testing.T) {
 	t.Parallel()
 	target := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "new-uid")
@@ -183,8 +287,8 @@ func TestDiscoverRelationshipResourcesSelectsStablePreferredVersion(t *testing.T
 	}))
 	metadataScheme := metadatafake.NewTestScheme()
 	metav1.AddMetaToScheme(metadataScheme)
-	resources, incomplete, err := discoverRelationshipResources(context.Background(), RelationshipScanSession{
-		Discovery: discovery, Metadata: metadatafake.NewSimpleMetadataClient(metadataScheme),
+	resources, incomplete, err := discoverRelationshipResources(context.Background(), scanTestSession{
+		discovery: discovery, metadataClient: metadatafake.NewSimpleMetadataClient(metadataScheme),
 	})
 	if err != nil || incomplete || len(resources) != 1 || resources[0].Version != "v1beta1" {
 		// Honor the server-declared preferred version rather than guessing from
@@ -226,8 +330,8 @@ func TestDiscoverRelationshipResourcesKeepsPartialResults(t *testing.T) {
 	}))
 	metadataScheme := metadatafake.NewTestScheme()
 	metav1.AddMetaToScheme(metadataScheme)
-	resources, incomplete, err := discoverRelationshipResources(context.Background(), RelationshipScanSession{
-		Discovery: discovery, Metadata: metadatafake.NewSimpleMetadataClient(metadataScheme),
+	resources, incomplete, err := discoverRelationshipResources(context.Background(), scanTestSession{
+		discovery: discovery, metadataClient: metadatafake.NewSimpleMetadataClient(metadataScheme),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -304,6 +408,48 @@ func TestScanRelationshipsCancelsStalledDiscoveryRequest(t *testing.T) {
 	if len(metadataClient.Actions()) != 0 {
 		t.Fatalf("metadata LIST began before discovery completed: %v", metadataClient.Actions())
 	}
+}
+
+func newClusterRelationshipReader(t *testing.T, handler http.Handler) (*Reader, string) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- name: target
+  cluster:
+    server: %q
+contexts:
+- name: target
+  context:
+    cluster: target
+current-context: target
+`, server.URL)
+	if err := os.WriteFile(kubeconfigPath, []byte(kubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := cluster.DiscoverPaths([]string{kubeconfigPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contexts := catalog.Contexts()
+	if len(contexts) != 1 {
+		t.Fatalf("kubeconfig contexts = %#v", contexts)
+	}
+	registry := cluster.NewSessionRegistry(nil)
+	t.Cleanup(registry.CloseAll)
+	session, err := registry.Open(catalog, contexts[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewReader(ClusterResolver{Sessions: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reader, session.ID()
 }
 
 func newRelationshipDiscoveryClient(t *testing.T, handler http.Handler) discovery.DiscoveryInterface {

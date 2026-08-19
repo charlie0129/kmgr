@@ -21,7 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/metadata"
 	"sigs.k8s.io/yaml"
@@ -90,14 +89,6 @@ type ContextNameResolver interface {
 
 type ClusterResolver struct {
 	Sessions *cluster.SessionRegistry
-}
-
-// RelationshipScanSession exposes read-only discovery and metadata clients for
-// an explicit exhaustive child scan. The metadata client transfers only object
-// metadata rather than every resource's full spec/status payload.
-type RelationshipScanSession struct {
-	Discovery discovery.DiscoveryInterface
-	Metadata  metadata.Interface
 }
 
 func (r ClusterResolver) Resource(
@@ -170,16 +161,32 @@ func (r ClusterResolver) ResourceForKind(
 
 func (r ClusterResolver) RelationshipScanSession(sessionID string) (RelationshipScanSession, error) {
 	if r.Sessions == nil {
-		return RelationshipScanSession{}, ErrSessionNotFound
+		return nil, ErrSessionNotFound
 	}
 	session, ok := r.Sessions.Get(sessionID)
 	if !ok {
-		return RelationshipScanSession{}, ErrSessionNotFound
+		return nil, ErrSessionNotFound
 	}
 	if session.Discovery() == nil || session.Metadata() == nil {
-		return RelationshipScanSession{}, ErrRelationshipResolutionUnavailable
+		return nil, ErrRelationshipResolutionUnavailable
 	}
-	return RelationshipScanSession{Discovery: session.Discovery(), Metadata: session.Metadata()}, nil
+	return clusterRelationshipScanSession{session: session}, nil
+}
+
+// clusterRelationshipScanSession keeps discovery caching at the shared
+// Kubernetes authority boundary. Object scanning sees only the immutable
+// catalog operation and the metadata client it actually needs; it cannot
+// accidentally bypass the cache through a raw discovery client.
+type clusterRelationshipScanSession struct {
+	session *cluster.Session
+}
+
+func (s clusterRelationshipScanSession) DiscoverResources(ctx context.Context) (cluster.ResourceDiscovery, error) {
+	return s.session.DiscoverResourcesCached(ctx, false)
+}
+
+func (s clusterRelationshipScanSession) Metadata() metadata.Interface {
+	return s.session.Metadata()
 }
 
 type Reader struct {

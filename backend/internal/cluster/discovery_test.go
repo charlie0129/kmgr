@@ -15,7 +15,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 )
 
@@ -191,6 +191,7 @@ func writeDiscoveryJSON(t *testing.T, writer http.ResponseWriter, value any) {
 func TestListNamespacesPaginatesSortsAndDeduplicates(t *testing.T) {
 	t.Parallel()
 	queries := make(chan url.Values, 2)
+	accepts := make(chan string, 2)
 	session := namespaceTestSession(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/v1/namespaces" {
 			http.NotFound(writer, request)
@@ -198,6 +199,7 @@ func TestListNamespacesPaginatesSortsAndDeduplicates(t *testing.T) {
 		}
 		query := request.URL.Query()
 		queries <- query
+		accepts <- request.Header.Get("Accept")
 		switch query.Get("continue") {
 		case "":
 			writeNamespaceList(t, writer, "namespace-next", "z")
@@ -219,6 +221,24 @@ func TestListNamespacesPaginatesSortsAndDeduplicates(t *testing.T) {
 	if first.Get("limit") != "500" || first.Get("continue") != "" ||
 		second.Get("limit") != "500" || second.Get("continue") != "namespace-next" {
 		t.Fatalf("namespace queries = %#v, %#v", first, second)
+	}
+	firstAccept, secondAccept := <-accepts, <-accepts
+	if !strings.Contains(firstAccept, "as=PartialObjectMetadataList") ||
+		!strings.Contains(secondAccept, "as=PartialObjectMetadataList") {
+		t.Fatalf("namespace Accept headers = %q, %q", firstAccept, secondAccept)
+	}
+}
+
+func TestListNamespacesRequiresMetadataClient(t *testing.T) {
+	t.Parallel()
+	session := &Session{backend: &sharedBackend{}}
+	const want = "cluster session metadata client is unavailable"
+
+	if _, err := ListNamespaces(context.Background(), session); err == nil || err.Error() != want {
+		t.Fatalf("ListNamespaces error = %v, want %q", err, want)
+	}
+	if _, err := session.ListNamespacesCached(context.Background()); err == nil || err.Error() != want {
+		t.Fatalf("ListNamespacesCached error = %v, want %q", err, want)
 	}
 }
 
@@ -252,11 +272,11 @@ func namespaceTestSession(t *testing.T, handler http.Handler) *Session {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	client, err := dynamic.NewForConfig(&rest.Config{Host: server.URL})
+	client, err := metadata.NewForConfig(&rest.Config{Host: server.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Session{backend: &sharedBackend{clients: BackendClients{Dynamic: client}}}
+	return &Session{backend: &sharedBackend{clients: BackendClients{Metadata: client}}}
 }
 
 func writeNamespaceList(t *testing.T, writer http.ResponseWriter, continuation string, names ...string) {
@@ -264,11 +284,12 @@ func writeNamespaceList(t *testing.T, writer http.ResponseWriter, continuation s
 	items := make([]map[string]any, 0, len(names))
 	for _, name := range names {
 		items = append(items, map[string]any{
-			"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": name},
+			"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadata",
+			"metadata": map[string]any{"name": name},
 		})
 	}
 	writeDiscoveryJSON(t, writer, map[string]any{
-		"apiVersion": "v1", "kind": "NamespaceList",
+		"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList",
 		"metadata": map[string]any{"continue": continuation, "resourceVersion": "1"},
 		"items":    items,
 	})

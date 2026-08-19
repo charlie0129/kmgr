@@ -66,32 +66,145 @@ type discoveryResultCache struct {
 	mu         sync.RWMutex
 	generation uint64
 	result     *ResourceDiscovery
+	inFlight   *discoveryCacheLoad
 }
 
-func (c *discoveryResultCache) begin(refresh bool) (ResourceDiscovery, bool, uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+type discoveryCacheLoad struct {
+	generation uint64
+	refresh    bool
+	done       chan struct{}
+	result     ResourceDiscovery
+	err        error
+	contextErr error
+}
+
+func (c *discoveryResultCache) resolve(
+	ctx context.Context,
+	refresh bool,
+	load func(context.Context) (ResourceDiscovery, error),
+) (ResourceDiscovery, error) {
+	if load == nil {
+		return ResourceDiscovery{}, errors.New("cluster discovery loader is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return ResourceDiscovery{}, err
+	}
 	if refresh {
-		c.generation++
-		c.result = nil
+		for {
+			c.mu.Lock()
+			request := c.inFlight
+			if request != nil && request.refresh && request.generation == c.generation {
+				c.mu.Unlock()
+				result, err := waitForDiscoveryLoad(ctx, request)
+				if contextErr := ctx.Err(); contextErr != nil {
+					return ResourceDiscovery{}, contextErr
+				}
+				if err != nil && request.contextErr != nil {
+					// The leader's context ended, not this caller's. Start or
+					// join a replacement refresh so cancellation remains local
+					// to the caller that owned it.
+					continue
+				}
+				return result, err
+			}
+			c.generation++
+			c.result = nil
+			request = &discoveryCacheLoad{
+				generation: c.generation,
+				refresh:    true,
+				done:       make(chan struct{}),
+			}
+			c.inFlight = request
+			c.mu.Unlock()
+			return c.executeLoad(ctx, request, load)
+		}
 	}
-	if c.result == nil {
-		return ResourceDiscovery{}, false, c.generation
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return ResourceDiscovery{}, err
+		}
+		c.mu.Lock()
+		if c.result != nil {
+			cached := c.result
+			c.mu.Unlock()
+			result := cloneResourceDiscovery(*cached)
+			if err := ctx.Err(); err != nil {
+				return ResourceDiscovery{}, err
+			}
+			return result, nil
+		}
+		request := c.inFlight
+		if request == nil || request.generation != c.generation {
+			request = &discoveryCacheLoad{
+				generation: c.generation,
+				done:       make(chan struct{}),
+			}
+			c.inFlight = request
+			c.mu.Unlock()
+			return c.executeLoad(ctx, request, load)
+		}
+		c.mu.Unlock()
+
+		result, err := waitForDiscoveryLoad(ctx, request)
+		if contextErr := ctx.Err(); contextErr != nil {
+			return ResourceDiscovery{}, contextErr
+		}
+		c.mu.RLock()
+		current := request.generation == c.generation
+		c.mu.RUnlock()
+		if !current || (err != nil && request.contextErr != nil) {
+			// A refresh superseded this request, or the leader's context
+			// ended while this caller remains live. Join or start the load
+			// that is authoritative for the current generation.
+			continue
+		}
+		return result, err
 	}
-	return cloneResourceDiscovery(*c.result), true, c.generation
 }
 
-func (c *discoveryResultCache) store(generation uint64, result ResourceDiscovery, replace bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	// A refresh that started after this request invalidates its result. Among
-	// ordinary concurrent misses, retain the first complete result. A refresh
-	// owns its generation and replaces any ordinary request that raced it.
-	if generation != c.generation || (c.result != nil && !replace) {
-		return
+func waitForDiscoveryLoad(ctx context.Context, request *discoveryCacheLoad) (ResourceDiscovery, error) {
+	select {
+	case <-ctx.Done():
+		return ResourceDiscovery{}, ctx.Err()
+	case <-request.done:
+		if request.err != nil {
+			return ResourceDiscovery{}, request.err
+		}
+		return cloneResourceDiscovery(request.result), nil
 	}
-	cloned := cloneResourceDiscovery(result)
-	c.result = &cloned
+}
+
+func (c *discoveryResultCache) executeLoad(
+	ctx context.Context,
+	request *discoveryCacheLoad,
+	load func(context.Context) (ResourceDiscovery, error),
+) (ResourceDiscovery, error) {
+	result, err := load(ctx)
+	loadContextErr := ctx.Err()
+	if err == nil || loadContextErr == nil || !errors.Is(err, loadContextErr) {
+		loadContextErr = nil
+	}
+	if err == nil {
+		result = cloneResourceDiscovery(result)
+	}
+	c.mu.Lock()
+	request.result = result
+	request.err = err
+	request.contextErr = loadContextErr
+	if err == nil && request.generation == c.generation {
+		cached := result
+		c.result = &cached
+	}
+	if c.inFlight == request {
+		c.inFlight = nil
+	}
+	close(request.done)
+	c.mu.Unlock()
+	if err != nil {
+		return ResourceDiscovery{}, err
+	}
+	return cloneResourceDiscovery(result), nil
 }
 
 func (c *discoveryResultCache) metricsAPIAvailability() (available, known bool) {
@@ -186,29 +299,17 @@ func DiscoverResources(ctx context.Context, session *Session) (ResourceDiscovery
 
 // DiscoverResourcesCached returns the discovery catalog shared by every
 // session using the same Kubernetes backend. refresh invalidates the cached
-// value before starting a new request. Failed or canceled discoveries are not
-// cached, and a request started before a refresh can never repopulate the
-// invalidated generation.
+// value before starting or joining a refresh. Concurrent misses and refreshes
+// coalesce per authority, while each waiter retains independent cancellation.
+// Failed or canceled discoveries are not cached, and a request started before
+// a refresh can never repopulate the invalidated generation.
 func (s *Session) DiscoverResourcesCached(ctx context.Context, refresh bool) (ResourceDiscovery, error) {
 	if s == nil || s.backend == nil || s.Discovery() == nil {
 		return ResourceDiscovery{}, errors.New("cluster session discovery client is unavailable")
 	}
-	if err := ctx.Err(); err != nil {
-		return ResourceDiscovery{}, err
-	}
-	if cached, ok, generation := s.backend.discovery.begin(refresh); ok {
-		if err := ctx.Err(); err != nil {
-			return ResourceDiscovery{}, err
-		}
-		return cached, nil
-	} else {
-		result, err := DiscoverResourcesWithClient(ctx, s.Discovery())
-		if err != nil {
-			return ResourceDiscovery{}, err
-		}
-		s.backend.discovery.store(generation, result, refresh)
-		return cloneResourceDiscovery(result), nil
-	}
+	return s.backend.discovery.resolve(ctx, refresh, func(loadContext context.Context) (ResourceDiscovery, error) {
+		return DiscoverResourcesWithClient(loadContext, s.Discovery())
+	})
 }
 
 // CachedMetricsAPIAvailability reports only what a prior discovery established
@@ -452,10 +553,10 @@ func validDiscoveryVersion(value string) bool {
 }
 
 func ListNamespaces(ctx context.Context, session *Session) ([]string, error) {
-	if session == nil || session.Dynamic() == nil {
-		return nil, errors.New("cluster session dynamic client is unavailable")
+	if session == nil || session.backend == nil || session.Metadata() == nil {
+		return nil, errors.New("cluster session metadata client is unavailable")
 	}
-	resource := session.Dynamic().Resource(schema.GroupVersionResource{Version: "v1", Resource: "namespaces"})
+	resource := session.Metadata().Resource(schema.GroupVersionResource{Version: "v1", Resource: "namespaces"})
 	options := metav1.ListOptions{Limit: namespaceListPageSize}
 	seenContinueTokens := make(map[string]struct{})
 	namespaces := make([]string, 0)

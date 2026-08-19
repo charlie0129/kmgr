@@ -183,6 +183,9 @@ type sharedBackend struct {
 	refs      int
 	activity  *APIActivity
 	discovery discoveryResultCache
+	// namespaceNames stores only a sorted string snapshot and belongs to this
+	// shared Kubernetes authority rather than any workspace session.
+	namespaceNames namespaceNameCache
 }
 
 // SessionLease keeps one session and its shared Kubernetes backend alive for
@@ -358,6 +361,7 @@ func (r *SessionRegistry) removeSessionLocked(sessionID string, entry *sessionEn
 }
 
 func (r *SessionRegistry) closeBackendLocked(key backendKey, backend *sharedBackend) {
+	backend.namespaceNames.close()
 	if backend.clients.Mapper != nil {
 		backend.clients.Mapper.Reset()
 	}
