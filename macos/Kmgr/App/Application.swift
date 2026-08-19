@@ -57,6 +57,7 @@ final class Application: NSObject, NSApplicationDelegate {
         var engineConfiguration = EngineSupervisor.Configuration.bundled()
         engineConfiguration.columnsConfigurationPath = preferences.current.columnsConfigurationPath
         engineConfiguration.metricsRefreshSeconds = preferences.current.metricsRefreshSeconds
+        engineConfiguration.advancedPerformance = preferences.current.advancedPerformance
         let supervisor = EngineSupervisor(configuration: engineConfiguration)
         self.engineSupervisor = supervisor
         let restorationStore = WorkspaceRestorationStore()

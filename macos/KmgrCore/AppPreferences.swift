@@ -92,8 +92,106 @@ public enum PreferenceControlledMutation: Hashable, Sendable {
     case scaling
 }
 
+public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
+    public var globalWarmCacheViewLimit: Int
+    public var globalWarmCacheObjectLimit: Int
+    public var globalWarmCacheMemoryPercent: Int
+    public var authorityWarmCacheViewLimit: Int
+    public var authorityWarmCacheObjectLimit: Int
+    public var authorityWarmCacheMemoryPercent: Int
+    public var kubernetesQPS: Double
+    public var kubernetesBurst: Int
+
+    public init(
+        globalWarmCacheViewLimit: Int = 24,
+        globalWarmCacheObjectLimit: Int = 250_000,
+        globalWarmCacheMemoryPercent: Int = 20,
+        authorityWarmCacheViewLimit: Int = 8,
+        authorityWarmCacheObjectLimit: Int = 100_000,
+        authorityWarmCacheMemoryPercent: Int = 20,
+        kubernetesQPS: Double = 40,
+        kubernetesBurst: Int = 80
+    ) {
+        self.globalWarmCacheViewLimit = globalWarmCacheViewLimit
+        self.globalWarmCacheObjectLimit = globalWarmCacheObjectLimit
+        self.globalWarmCacheMemoryPercent = globalWarmCacheMemoryPercent
+        self.authorityWarmCacheViewLimit = authorityWarmCacheViewLimit
+        self.authorityWarmCacheObjectLimit = authorityWarmCacheObjectLimit
+        self.authorityWarmCacheMemoryPercent = authorityWarmCacheMemoryPercent
+        self.kubernetesQPS = kubernetesQPS
+        self.kubernetesBurst = kubernetesBurst
+    }
+
+    public func validationIssues() -> [AppPreferenceIssue] {
+        var issues: [AppPreferenceIssue] = []
+        let maximumCrossPlatformInteger = Int(Int32.max)
+        func validateCount(_ value: Int, field: String, title: String) {
+            if !(1...maximumCrossPlatformInteger).contains(value) {
+                issues.append(AppPreferenceIssue(
+                    field: field,
+                    message: "\(title) must be between 1 and \(maximumCrossPlatformInteger.formatted())."
+                ))
+            }
+        }
+        func validatePercent(_ value: Int, field: String, title: String) {
+            if !(1...100).contains(value) {
+                issues.append(AppPreferenceIssue(
+                    field: field,
+                    message: "\(title) must be between 1% and 100%."
+                ))
+            }
+        }
+
+        validateCount(
+            globalWarmCacheViewLimit,
+            field: "advancedPerformance.globalWarmCacheViewLimit",
+            title: "Global warm-cache query limit"
+        )
+        validateCount(
+            globalWarmCacheObjectLimit,
+            field: "advancedPerformance.globalWarmCacheObjectLimit",
+            title: "Global warm-cache object limit"
+        )
+        validatePercent(
+            globalWarmCacheMemoryPercent,
+            field: "advancedPerformance.globalWarmCacheMemoryPercent",
+            title: "Global warm-cache memory limit"
+        )
+        validateCount(
+            authorityWarmCacheViewLimit,
+            field: "advancedPerformance.authorityWarmCacheViewLimit",
+            title: "Per-cluster warm-cache query limit"
+        )
+        validateCount(
+            authorityWarmCacheObjectLimit,
+            field: "advancedPerformance.authorityWarmCacheObjectLimit",
+            title: "Per-cluster warm-cache object limit"
+        )
+        validatePercent(
+            authorityWarmCacheMemoryPercent,
+            field: "advancedPerformance.authorityWarmCacheMemoryPercent",
+            title: "Per-cluster warm-cache memory limit"
+        )
+        let convertedQPS = Float(kubernetesQPS)
+        if !kubernetesQPS.isFinite || kubernetesQPS <= 0 ||
+            !convertedQPS.isFinite || convertedQPS <= 0
+        {
+            issues.append(AppPreferenceIssue(
+                field: "advancedPerformance.kubernetesQPS",
+                message: "Kubernetes QPS must be a finite positive 32-bit value."
+            ))
+        }
+        validateCount(
+            kubernetesBurst,
+            field: "advancedPerformance.kubernetesBurst",
+            title: "Kubernetes burst"
+        )
+        return issues
+    }
+}
+
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v1"
+    public static let apiVersion = "kmgr.preferences/v2"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
@@ -102,6 +200,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
     public var restoreOpenClusterWindows: Bool
     public var confirmations: ConfirmationPreferences
     public var columnsConfigurationPath: String
+    public var advancedPerformance: AdvancedPerformancePreferences
 
     public init(
         appearance: AppearancePreference = .system,
@@ -110,7 +209,8 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         defaultNamespace: DefaultNamespacePreference = .contextDefault,
         restoreOpenClusterWindows: Bool = true,
         confirmations: ConfirmationPreferences = ConfirmationPreferences(),
-        columnsConfigurationPath: String = AppPreferences.defaultColumnsConfigurationPath
+        columnsConfigurationPath: String = AppPreferences.defaultColumnsConfigurationPath,
+        advancedPerformance: AdvancedPerformancePreferences = AdvancedPerformancePreferences()
     ) {
         self.appearance = appearance
         self.logs = logs
@@ -119,6 +219,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         self.restoreOpenClusterWindows = restoreOpenClusterWindows
         self.confirmations = confirmations
         self.columnsConfigurationPath = columnsConfigurationPath
+        self.advancedPerformance = advancedPerformance
     }
 
     public static var defaultColumnsConfigurationPath: String {
@@ -156,6 +257,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
                 message: "Metrics refresh interval must be between 5 and 300 seconds."
             ))
         }
+        issues.append(contentsOf: advancedPerformance.validationIssues())
         let path = columnsConfigurationPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if path.isEmpty || !NSString(string: path).expandingTildeInPath.hasPrefix("/") {
             issues.append(AppPreferenceIssue(
@@ -185,6 +287,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
     case workspaceRestoration
     case metricsRefresh
     case columnsConfigurationPath
+    case advancedPerformance
 
     public enum Activation: Hashable, Sendable {
         case immediate
@@ -198,7 +301,8 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
             .immediate
         case .defaultNamespace:
             .newWorkspace
-        case .workspaceRestoration, .metricsRefresh, .columnsConfigurationPath:
+        case .workspaceRestoration, .metricsRefresh, .columnsConfigurationPath,
+            .advancedPerformance:
             .applicationRelaunch
         }
     }
@@ -212,6 +316,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         case .workspaceRestoration: "Open cluster window restoration"
         case .metricsRefresh: "Metrics refresh"
         case .columnsConfigurationPath: "Programmable columns path"
+        case .advancedPerformance: "Advanced performance configuration"
         }
     }
 }
@@ -238,6 +343,9 @@ public struct AppPreferencesDelta: Hashable, Sendable {
         }
         if previous.columnsConfigurationPath != updated.columnsConfigurationPath {
             changes.insert(.columnsConfigurationPath)
+        }
+        if previous.advancedPerformance != updated.advancedPerformance {
+            changes.insert(.advancedPerformance)
         }
         self.changes = changes
     }
@@ -340,27 +448,33 @@ public final class AppPreferencesStore {
         do {
             document = try JSONDecoder().decode(Document.self, from: data)
         } catch {
-            loadIssue = AppPreferencesLoadIssue(
+            rejectSavedPreferences(AppPreferencesLoadIssue(
                 reason: .invalidData,
                 message: "Saved settings could not be decoded; conservative defaults are in use."
-            )
+            ))
             return
         }
         guard document.apiVersion == AppPreferences.apiVersion else {
-            loadIssue = AppPreferencesLoadIssue(
+            rejectSavedPreferences(AppPreferencesLoadIssue(
                 reason: .unsupportedVersion,
                 message: "Saved settings use unsupported version \(document.apiVersion); conservative defaults are in use."
-            )
+            ))
             return
         }
         do {
             current = try document.preferences.validated()
         } catch {
-            loadIssue = AppPreferencesLoadIssue(
+            rejectSavedPreferences(AppPreferencesLoadIssue(
                 reason: .invalidValues,
                 message: "Saved settings contain invalid limits; conservative defaults are in use."
-            )
+            ))
         }
+    }
+
+    private func rejectSavedPreferences(_ issue: AppPreferencesLoadIssue) {
+        defaults.removeObject(forKey: Self.storageKey)
+        current = AppPreferences()
+        loadIssue = issue
     }
 }
 

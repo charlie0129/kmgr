@@ -25,17 +25,23 @@ import (
 const DefaultGracefulStopTimeout = 5 * time.Second
 
 type ServerOptions struct {
-	Version                string
-	Logger                 *slog.Logger
-	CatalogLoader          CatalogLoader
-	ClientFactory          cluster.ClientFactory
-	SessionProber          SessionProber
-	ProbeTimeout           time.Duration
-	ColumnsPath            string
-	MetricsRefreshInterval time.Duration
-	KubernetesQPS          float32
-	KubernetesBurst        int
-	GRPCOptions            []grpc.ServerOption
+	Version                     string
+	Logger                      *slog.Logger
+	CatalogLoader               CatalogLoader
+	ClientFactory               cluster.ClientFactory
+	SessionProber               SessionProber
+	ProbeTimeout                time.Duration
+	ColumnsPath                 string
+	MetricsRefreshInterval      time.Duration
+	KubernetesQPS               float32
+	KubernetesBurst             int
+	WarmViewLimit               int
+	WarmObjectLimit             int
+	WarmByteLimit               int64
+	WarmViewLimitPerAuthority   int
+	WarmObjectLimitPerAuthority int
+	WarmByteLimitPerAuthority   int64
+	GRPCOptions                 []grpc.ServerOption
 }
 
 // Server wires authentication, safe RPC logging, engine lifecycle, catalogs,
@@ -98,7 +104,13 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		Metrics: &view.KubernetesMetricSource{
 			Sessions: sessions, RefreshInterval: options.MetricsRefreshInterval,
 		},
-		Columns: columnManager,
+		Columns:                     columnManager,
+		WarmViewLimit:               options.WarmViewLimit,
+		WarmObjectLimit:             options.WarmObjectLimit,
+		WarmByteLimit:               options.WarmByteLimit,
+		WarmViewLimitPerAuthority:   options.WarmViewLimitPerAuthority,
+		WarmObjectLimitPerAuthority: options.WarmObjectLimitPerAuthority,
+		WarmByteLimitPerAuthority:   options.WarmByteLimitPerAuthority,
 	})
 	if err != nil {
 		return nil, err

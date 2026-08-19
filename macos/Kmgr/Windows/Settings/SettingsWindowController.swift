@@ -16,6 +16,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let logByteLimitField = NSTextField()
     private let renderBatchField = NSTextField()
     private let metricsRefreshField = NSTextField()
+    private let globalWarmViewLimitField = NSTextField()
+    private let globalWarmObjectLimitField = NSTextField()
+    private let globalWarmMemoryPercentField = NSTextField()
+    private let authorityWarmViewLimitField = NSTextField()
+    private let authorityWarmObjectLimitField = NSTextField()
+    private let authorityWarmMemoryPercentField = NSTextField()
+    private let kubernetesQPSField = NSTextField()
+    private let kubernetesBurstField = NSTextField()
     private let restoreWindowsButton = NSButton(
         checkboxWithTitle: "Restore open cluster windows when Kmgr launches",
         target: nil,
@@ -38,13 +46,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         self.preferencesStore = preferencesStore
         loadedPreferences = preferencesStore.current
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 690, height: 680),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Settings — \(Product.applicationName)"
-        window.minSize = NSSize(width: 610, height: 500)
+        window.minSize = NSSize(width: 640, height: 520)
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
         let restoredSavedFrame = window.setFrameUsingName(frameAutosaveName)
@@ -88,16 +96,52 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
 
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
-            metricsRefreshField, columnsPathField,
+            metricsRefreshField,
+            globalWarmViewLimitField, globalWarmObjectLimitField,
+            globalWarmMemoryPercentField, authorityWarmViewLimitField,
+            authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
+            kubernetesQPSField, kubernetesBurstField,
+            columnsPathField,
         ] {
             field.delegate = self
             field.isBezeled = true
             field.bezelStyle = .roundedBezel
         }
-        for field in [logRecordLimitField, logByteLimitField, renderBatchField, metricsRefreshField] {
+        for field in [
+            logRecordLimitField, logByteLimitField, renderBatchField,
+            metricsRefreshField,
+            globalWarmViewLimitField, globalWarmObjectLimitField,
+            globalWarmMemoryPercentField, authorityWarmViewLimitField,
+            authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
+            kubernetesQPSField, kubernetesBurstField,
+        ] {
             field.alignment = .right
             field.widthAnchor.constraint(equalToConstant: 110).isActive = true
         }
+        globalWarmViewLimitField.setAccessibilityIdentifier(
+            "settings.performance.globalWarmViews"
+        )
+        globalWarmObjectLimitField.setAccessibilityIdentifier(
+            "settings.performance.globalWarmObjects"
+        )
+        globalWarmMemoryPercentField.setAccessibilityIdentifier(
+            "settings.performance.globalWarmMemoryPercent"
+        )
+        authorityWarmViewLimitField.setAccessibilityIdentifier(
+            "settings.performance.authorityWarmViews"
+        )
+        authorityWarmObjectLimitField.setAccessibilityIdentifier(
+            "settings.performance.authorityWarmObjects"
+        )
+        authorityWarmMemoryPercentField.setAccessibilityIdentifier(
+            "settings.performance.authorityWarmMemoryPercent"
+        )
+        kubernetesQPSField.setAccessibilityIdentifier(
+            "settings.performance.kubernetesQPS"
+        )
+        kubernetesBurstField.setAccessibilityIdentifier(
+            "settings.performance.kubernetesBurst"
+        )
         columnsPathField.lineBreakMode = .byTruncatingMiddle
         columnsPathField.setAccessibilityLabel("External column configuration path")
 
@@ -121,6 +165,49 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 labeledRow("Retained records", control: logRecordLimitField),
                 labeledRow("Retained data", control: logByteLimitField, suffix: "MiB"),
                 labeledRow("Render batching", control: renderBatchField, suffix: "milliseconds"),
+            ]
+        )
+
+        let warmCacheHelp = NSTextField(wrappingLabelWithString:
+            "Warm-cache limits govern retained raw resource queries, not total engine memory. The global limits are aggregate ceilings; each cluster is also bounded independently."
+        )
+        warmCacheHelp.textColor = .secondaryLabelColor
+        warmCacheHelp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let relaunchWarning = NSTextField(wrappingLabelWithString:
+            "These engine-owned settings apply after quitting and relaunching the application. Existing cluster sessions keep their current limits."
+        )
+        relaunchWarning.textColor = .systemOrange
+        relaunchWarning.font = .systemFont(
+            ofSize: NSFont.smallSystemFontSize,
+            weight: .medium
+        )
+        relaunchWarning.setAccessibilityIdentifier(
+            "settings.performance.relaunchWarning"
+        )
+        let advancedPerformance = section(
+            title: "Advanced Performance",
+            rows: [
+                warmCacheHelp,
+                groupHeading("Warm cache — global aggregate"),
+                labeledRow("Retained queries", control: globalWarmViewLimitField),
+                labeledRow("Retained objects", control: globalWarmObjectLimitField),
+                labeledRow(
+                    "Physical memory",
+                    control: globalWarmMemoryPercentField,
+                    suffix: "%"
+                ),
+                groupHeading("Warm cache — per cluster"),
+                labeledRow("Retained queries", control: authorityWarmViewLimitField),
+                labeledRow("Retained objects", control: authorityWarmObjectLimitField),
+                labeledRow(
+                    "Physical memory",
+                    control: authorityWarmMemoryPercentField,
+                    suffix: "%"
+                ),
+                groupHeading("Kubernetes API — aggregate per cluster"),
+                labeledRow("Sustained QPS", control: kubernetesQPSField),
+                labeledRow("Burst", control: kubernetesBurstField),
+                relaunchWarning,
             ]
         )
 
@@ -173,13 +260,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         shortcutGrid.column(at: 1).xPlacement = .leading
         let shortcuts = section(title: "Keyboard Shortcuts", rows: [shortcutGrid])
 
-        let contentStack = NSStackView(views: [general, logs, confirmations, columns, shortcuts])
+        let contentStack = NSStackView(views: [
+            general, logs, advancedPerformance, confirmations, columns, shortcuts,
+        ])
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
         contentStack.spacing = 12
         contentStack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         contentStack.translatesAutoresizingMaskIntoConstraints = false
-        for section in [general, logs, confirmations, columns, shortcuts] {
+        for section in [
+            general, logs, advancedPerformance, confirmations, columns, shortcuts,
+        ] {
             section.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -32).isActive = true
         }
 
@@ -280,6 +371,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         return row
     }
 
+    private func groupHeading(_ title: String) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        return label
+    }
+
     private func install(_ preferences: AppPreferences) {
         appearanceButton.selectItem(at: AppearancePreference.allCases.firstIndex(of: preferences.appearance) ?? 0)
         namespaceButton.selectItem(at: DefaultNamespacePreference.allCases.firstIndex(of: preferences.defaultNamespace) ?? 0)
@@ -287,6 +385,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         logByteLimitField.integerValue = preferences.logs.byteLimit / (1 << 20)
         renderBatchField.integerValue = preferences.logs.renderBatchMilliseconds
         metricsRefreshField.integerValue = preferences.metricsRefreshSeconds
+        globalWarmViewLimitField.integerValue =
+            preferences.advancedPerformance.globalWarmCacheViewLimit
+        globalWarmObjectLimitField.integerValue =
+            preferences.advancedPerformance.globalWarmCacheObjectLimit
+        globalWarmMemoryPercentField.integerValue =
+            preferences.advancedPerformance.globalWarmCacheMemoryPercent
+        authorityWarmViewLimitField.integerValue =
+            preferences.advancedPerformance.authorityWarmCacheViewLimit
+        authorityWarmObjectLimitField.integerValue =
+            preferences.advancedPerformance.authorityWarmCacheObjectLimit
+        authorityWarmMemoryPercentField.integerValue =
+            preferences.advancedPerformance.authorityWarmCacheMemoryPercent
+        kubernetesQPSField.doubleValue =
+            preferences.advancedPerformance.kubernetesQPS
+        kubernetesBurstField.integerValue =
+            preferences.advancedPerformance.kubernetesBurst
         restoreWindowsButton.state = preferences.restoreOpenClusterWindows ? .on : .off
         confirmRestartButton.state = preferences.confirmations.confirmWorkloadRestart ? .on : .off
         confirmScaleButton.state = preferences.confirmations.confirmScaling ? .on : .off
@@ -319,7 +433,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 confirmWorkloadRestart: confirmRestartButton.state == .on,
                 confirmScaling: confirmScaleButton.state == .on
             ),
-            columnsConfigurationPath: columnsPathField.stringValue
+            columnsConfigurationPath: columnsPathField.stringValue,
+            advancedPerformance: AdvancedPerformancePreferences(
+                globalWarmCacheViewLimit: parsedInteger(globalWarmViewLimitField),
+                globalWarmCacheObjectLimit: parsedInteger(globalWarmObjectLimitField),
+                globalWarmCacheMemoryPercent: parsedInteger(
+                    globalWarmMemoryPercentField
+                ),
+                authorityWarmCacheViewLimit: parsedInteger(
+                    authorityWarmViewLimitField
+                ),
+                authorityWarmCacheObjectLimit: parsedInteger(
+                    authorityWarmObjectLimitField
+                ),
+                authorityWarmCacheMemoryPercent: parsedInteger(
+                    authorityWarmMemoryPercentField
+                ),
+                kubernetesQPS: parsedDouble(kubernetesQPSField),
+                kubernetesBurst: parsedInteger(kubernetesBurstField)
+            )
         )
     }
 
@@ -335,6 +467,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         formatter.allowsFloats = false
         formatter.isLenient = false
         return formatter.number(from: value)?.intValue ?? 0
+    }
+
+    private func parsedDouble(_ field: NSTextField) -> Double {
+        let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let number = Double(value) { return number }
+
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.allowsFloats = true
+        formatter.isLenient = false
+        return formatter.number(from: value)?.doubleValue ?? .nan
     }
 
     private func validateControls(showSuccess: Bool) {

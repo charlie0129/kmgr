@@ -27,27 +27,27 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	"github.com/charlie0129/kmgr/backend/internal/store"
+	"github.com/charlie0129/kmgr/backend/internal/systemmemory"
 	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 	viewfilter "github.com/charlie0129/kmgr/backend/internal/view/filter"
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
 )
 
 const (
-	DefaultViewReleaseDelay                  = 3 * time.Second
-	DefaultViewBatchDelay                    = 35 * time.Millisecond
-	DefaultSnapshotChunk                     = 500
-	DefaultPendingRowLimit                   = 4096
-	DefaultWarmViewLimit                     = 24
-	DefaultWarmObjectLimit                   = 250_000
-	DefaultWarmByteLimit               int64 = 512 << 20
-	DefaultWarmViewLimitPerAuthority         = 8
-	DefaultWarmObjectLimitPerAuthority       = 100_000
-	DefaultWarmByteLimitPerAuthority   int64 = 192 << 20
-	DefaultSearchSnapshotLimit               = 4
-	DefaultSearchSnapshotObjectLimit         = 250_000
-	DefaultSearchSnapshotTTL                 = 30 * time.Second
-	DefaultOpenGenerationHistory             = 1024
-	defaultOpenProjectionLimit               = 4
+	DefaultViewReleaseDelay            = 3 * time.Second
+	DefaultViewBatchDelay              = 35 * time.Millisecond
+	DefaultSnapshotChunk               = 500
+	DefaultPendingRowLimit             = 4096
+	DefaultWarmViewLimit               = 24
+	DefaultWarmObjectLimit             = 250_000
+	DefaultWarmMemoryPercent           = 20
+	DefaultWarmViewLimitPerAuthority   = 8
+	DefaultWarmObjectLimitPerAuthority = 100_000
+	DefaultSearchSnapshotLimit         = 4
+	DefaultSearchSnapshotObjectLimit   = 250_000
+	DefaultSearchSnapshotTTL           = 30 * time.Second
+	DefaultOpenGenerationHistory       = 1024
+	defaultOpenProjectionLimit         = 4
 )
 
 var (
@@ -467,9 +467,6 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		warmObjects = DefaultWarmObjectLimit
 	}
 	warmBytes := config.WarmByteLimit
-	if warmBytes == 0 {
-		warmBytes = DefaultWarmByteLimit
-	}
 	warmViewsPerAuthority := config.WarmViewLimitPerAuthority
 	if warmViewsPerAuthority == 0 {
 		warmViewsPerAuthority = DefaultWarmViewLimitPerAuthority
@@ -479,8 +476,27 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		warmObjectsPerAuthority = DefaultWarmObjectLimitPerAuthority
 	}
 	warmBytesPerAuthority := config.WarmByteLimitPerAuthority
-	if warmBytesPerAuthority == 0 {
-		warmBytesPerAuthority = DefaultWarmByteLimitPerAuthority
+	if warmBytes == 0 || warmBytesPerAuthority == 0 {
+		physicalBytes, err := systemmemory.Bytes()
+		if err != nil {
+			return nil, fmt.Errorf("resolve default warm-cache memory budget: %w", err)
+		}
+		if warmBytes == 0 {
+			warmBytes, err = systemmemory.PercentageLimit(
+				physicalBytes, DefaultWarmMemoryPercent,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("resolve default global warm-cache memory budget: %w", err)
+			}
+		}
+		if warmBytesPerAuthority == 0 {
+			warmBytesPerAuthority, err = systemmemory.PercentageLimit(
+				physicalBytes, DefaultWarmMemoryPercent,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("resolve default authority warm-cache memory budget: %w", err)
+			}
+		}
 	}
 	if chunkSize <= 0 || pendingLimit <= 0 || warmViews <= 0 || warmObjects <= 0 ||
 		warmBytes <= 0 || warmViewsPerAuthority <= 0 || warmObjectsPerAuthority <= 0 ||

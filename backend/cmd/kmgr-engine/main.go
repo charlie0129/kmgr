@@ -15,10 +15,21 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
+	"github.com/charlie0129/kmgr/backend/internal/systemmemory"
 	"github.com/charlie0129/kmgr/backend/internal/transport"
+	"github.com/charlie0129/kmgr/backend/internal/view"
 )
 
 var version = "dev"
+
+type warmCacheConfiguration struct {
+	globalViews            int
+	globalObjects          int
+	globalMemoryPercent    int
+	authorityViews         int
+	authorityObjects       int
+	authorityMemoryPercent int
+}
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -43,6 +54,43 @@ func run(arguments []string) int {
 		"kubernetes-burst", cluster.DefaultClientBurst,
 		"aggregate Kubernetes client burst for each authority",
 	)
+	warmCache := warmCacheConfiguration{}
+	flags.IntVar(
+		&warmCache.globalViews,
+		"warm-cache-global-views",
+		view.DefaultWarmViewLimit,
+		"maximum warm resource queries retained across all authorities",
+	)
+	flags.IntVar(
+		&warmCache.globalObjects,
+		"warm-cache-global-objects",
+		view.DefaultWarmObjectLimit,
+		"maximum warm Kubernetes objects retained across all authorities",
+	)
+	flags.IntVar(
+		&warmCache.globalMemoryPercent,
+		"warm-cache-global-memory-percent",
+		view.DefaultWarmMemoryPercent,
+		"maximum warm-cache retained bytes as a percentage of physical memory",
+	)
+	flags.IntVar(
+		&warmCache.authorityViews,
+		"warm-cache-authority-views",
+		view.DefaultWarmViewLimitPerAuthority,
+		"maximum warm resource queries retained for one authority",
+	)
+	flags.IntVar(
+		&warmCache.authorityObjects,
+		"warm-cache-authority-objects",
+		view.DefaultWarmObjectLimitPerAuthority,
+		"maximum warm Kubernetes objects retained for one authority",
+	)
+	flags.IntVar(
+		&warmCache.authorityMemoryPercent,
+		"warm-cache-authority-memory-percent",
+		view.DefaultWarmMemoryPercent,
+		"maximum warm-cache retained bytes for one authority as a percentage of physical memory",
+	)
 	logLevel := flags.String("log-level", "info", "stderr log level: debug, info, warn, or error")
 	startDevelopmentProfiler := registerDevelopmentProfiler(flags)
 	if err := flags.Parse(arguments); err != nil {
@@ -62,6 +110,10 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
 		return 2
 	}
+	if err := validateWarmCacheConfiguration(warmCache); err != nil {
+		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
+		return 2
+	}
 	if *showVersion {
 		fmt.Printf("kmgr-engine %s\n", version)
 		return 0
@@ -78,6 +130,20 @@ func run(arguments []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
 		return 2
+	}
+	physicalMemory, err := systemmemory.Bytes()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "kmgr-engine: resolve warm-cache memory budget:", err)
+		return 1
+	}
+	globalWarmBytes, authorityWarmBytes, err := resolveWarmCacheByteLimits(
+		physicalMemory,
+		warmCache.globalMemoryPercent,
+		warmCache.authorityMemoryPercent,
+	)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "kmgr-engine: resolve warm-cache memory budget:", err)
+		return 1
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	stopDevelopmentProfiler, err := startDevelopmentProfiler(logger)
@@ -99,12 +165,18 @@ func run(arguments []string) int {
 	}()
 
 	server, err := transport.NewServer(*launchToken, transport.ServerOptions{
-		Version:                version,
-		Logger:                 logger,
-		ColumnsPath:            *columnsPath,
-		MetricsRefreshInterval: *metricsRefresh,
-		KubernetesQPS:          validatedQPS,
-		KubernetesBurst:        *kubernetesBurst,
+		Version:                     version,
+		Logger:                      logger,
+		ColumnsPath:                 *columnsPath,
+		MetricsRefreshInterval:      *metricsRefresh,
+		KubernetesQPS:               validatedQPS,
+		KubernetesBurst:             *kubernetesBurst,
+		WarmViewLimit:               warmCache.globalViews,
+		WarmObjectLimit:             warmCache.globalObjects,
+		WarmByteLimit:               globalWarmBytes,
+		WarmViewLimitPerAuthority:   warmCache.authorityViews,
+		WarmObjectLimitPerAuthority: warmCache.authorityObjects,
+		WarmByteLimitPerAuthority:   authorityWarmBytes,
 	})
 	if err != nil {
 		logger.Error("failed to initialize engine server", "error_kind", "configuration")
@@ -158,6 +230,43 @@ func validateKubernetesRateLimit(qps float64, burst int) (float32, error) {
 		return 0, errors.New("--kubernetes-burst must be positive")
 	}
 	return convertedQPS, nil
+}
+
+func validateWarmCacheConfiguration(configuration warmCacheConfiguration) error {
+	if configuration.globalViews <= 0 {
+		return errors.New("--warm-cache-global-views must be positive")
+	}
+	if configuration.globalObjects <= 0 {
+		return errors.New("--warm-cache-global-objects must be positive")
+	}
+	if configuration.authorityViews <= 0 {
+		return errors.New("--warm-cache-authority-views must be positive")
+	}
+	if configuration.authorityObjects <= 0 {
+		return errors.New("--warm-cache-authority-objects must be positive")
+	}
+	if configuration.globalMemoryPercent < 1 || configuration.globalMemoryPercent > 100 {
+		return errors.New("--warm-cache-global-memory-percent must be between 1 and 100")
+	}
+	if configuration.authorityMemoryPercent < 1 || configuration.authorityMemoryPercent > 100 {
+		return errors.New("--warm-cache-authority-memory-percent must be between 1 and 100")
+	}
+	return nil
+}
+
+func resolveWarmCacheByteLimits(
+	physicalMemory uint64,
+	globalPercent, authorityPercent int,
+) (int64, int64, error) {
+	global, err := systemmemory.PercentageLimit(physicalMemory, globalPercent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("global limit: %w", err)
+	}
+	authority, err := systemmemory.PercentageLimit(physicalMemory, authorityPercent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("authority limit: %w", err)
+	}
+	return global, authority, nil
 }
 
 func parseLogLevel(value string) (slog.Level, error) {

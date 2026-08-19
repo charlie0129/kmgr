@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charlie0129/kmgr/backend/internal/store"
+	"github.com/charlie0129/kmgr/backend/internal/systemmemory"
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -246,12 +247,20 @@ func TestRuntimeWarmByteDefaultsAndNegativeValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.warmByteLimit != DefaultWarmByteLimit ||
-		runtime.warmByteLimitPerAuthority != DefaultWarmByteLimitPerAuthority {
+	total, err := systemmemory.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBytes, err := systemmemory.PercentageLimit(total, DefaultWarmMemoryPercent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.warmByteLimit != wantBytes ||
+		runtime.warmByteLimitPerAuthority != wantBytes {
 		t.Fatalf(
-			"warm byte defaults = %d/%d, want %d/%d",
+			"warm byte defaults = %d/%d, want %d/%d (20%% of physical memory)",
 			runtime.warmByteLimit, runtime.warmByteLimitPerAuthority,
-			DefaultWarmByteLimit, DefaultWarmByteLimitPerAuthority,
+			wantBytes, wantBytes,
 		)
 	}
 	runtime.Close()

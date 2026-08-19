@@ -87,6 +87,26 @@ func TestServerRejectsInvalidKubernetesRateLimit(t *testing.T) {
 	}
 }
 
+func TestServerRejectsInvalidWarmCacheLimits(t *testing.T) {
+	for _, options := range []ServerOptions{
+		{WarmViewLimit: -1},
+		{WarmObjectLimit: -1},
+		{WarmByteLimit: -1},
+		{WarmViewLimitPerAuthority: -1},
+		{WarmObjectLimitPerAuthority: -1},
+		{WarmByteLimitPerAuthority: -1},
+	} {
+		options.Version = "test"
+		server, err := NewServer(strings.Repeat("a", 64), options)
+		if server != nil || err == nil {
+			if server != nil {
+				server.Shutdown(time.Second)
+			}
+			t.Fatalf("NewServer(%+v) = %#v, %v; want error", options, server, err)
+		}
+	}
+}
+
 func TestServerAuthenticatesEveryRPC(t *testing.T) {
 	t.Parallel()
 	token := strings.Repeat("a", 64)

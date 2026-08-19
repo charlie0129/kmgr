@@ -1,6 +1,7 @@
 import Foundation
 import GRPCCore
 import GRPCNIOTransportHTTP2Posix
+import KmgrCore
 import KmgrProto
 import OSLog
 #if canImport(Darwin)
@@ -135,6 +136,7 @@ public final class EngineSupervisor {
         public var clientVersion: String
         public var columnsConfigurationPath: String?
         public var metricsRefreshSeconds: Int?
+        public var advancedPerformance: AdvancedPerformancePreferences?
         public var logLevel: String?
 
         public init(
@@ -148,6 +150,7 @@ public final class EngineSupervisor {
             clientVersion: String = "dev",
             columnsConfigurationPath: String? = nil,
             metricsRefreshSeconds: Int? = nil,
+            advancedPerformance: AdvancedPerformancePreferences? = nil,
             logLevel: String? = nil
         ) {
             precondition(restartStabilityDuration >= .zero)
@@ -161,6 +164,7 @@ public final class EngineSupervisor {
             self.clientVersion = clientVersion
             self.columnsConfigurationPath = columnsConfigurationPath
             self.metricsRefreshSeconds = metricsRefreshSeconds
+            self.advancedPerformance = advancedPerformance
             self.logLevel = logLevel
         }
 
@@ -643,6 +647,28 @@ extension EngineSupervisor.Configuration {
         }
         if let metricsRefreshSeconds, metricsRefreshSeconds > 0 {
             arguments += ["--metrics-refresh", "\(metricsRefreshSeconds)s"]
+        }
+        if let advancedPerformance,
+            advancedPerformance.validationIssues().isEmpty
+        {
+            arguments += [
+                "--warm-cache-global-views",
+                "\(advancedPerformance.globalWarmCacheViewLimit)",
+                "--warm-cache-global-objects",
+                "\(advancedPerformance.globalWarmCacheObjectLimit)",
+                "--warm-cache-global-memory-percent",
+                "\(advancedPerformance.globalWarmCacheMemoryPercent)",
+                "--warm-cache-authority-views",
+                "\(advancedPerformance.authorityWarmCacheViewLimit)",
+                "--warm-cache-authority-objects",
+                "\(advancedPerformance.authorityWarmCacheObjectLimit)",
+                "--warm-cache-authority-memory-percent",
+                "\(advancedPerformance.authorityWarmCacheMemoryPercent)",
+                "--kubernetes-qps",
+                "\(advancedPerformance.kubernetesQPS)",
+                "--kubernetes-burst",
+                "\(advancedPerformance.kubernetesBurst)",
+            ]
         }
         if let normalizedLogLevel {
             arguments += ["--log-level", normalizedLogLevel]

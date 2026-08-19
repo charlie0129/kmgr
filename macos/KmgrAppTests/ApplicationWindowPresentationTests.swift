@@ -32,6 +32,49 @@ struct ApplicationWindowPresentationTests {
         #expect(!AppPreferencesStore(defaults: defaults).current.restoreOpenClusterWindows)
     }
 
+    @Test("Advanced Performance exposes cache and Kubernetes engine tunables")
+    func advancedPerformanceSettings() throws {
+        let suite = "kmgr-app-performance-settings-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AppPreferencesStore(defaults: defaults)
+        let settings = SettingsWindowController(
+            preferencesStore: store,
+            frameAutosaveName: "Settings-performance-\(UUID().uuidString)"
+        )
+        let root = try #require(settings.window?.contentView)
+        let fields = descendants(of: root).compactMap { $0 as? NSTextField }
+        func field(_ identifier: String) throws -> NSTextField {
+            try #require(fields.first { $0.accessibilityIdentifier() == identifier })
+        }
+
+        let globalMemory = try field(
+            "settings.performance.globalWarmMemoryPercent"
+        )
+        let authorityMemory = try field(
+            "settings.performance.authorityWarmMemoryPercent"
+        )
+        let qps = try field("settings.performance.kubernetesQPS")
+        let burst = try field("settings.performance.kubernetesBurst")
+        #expect(globalMemory.integerValue == 20)
+        #expect(authorityMemory.integerValue == 20)
+        #expect(fields.first {
+            $0.accessibilityIdentifier() == "settings.performance.relaunchWarning"
+        }?.stringValue.contains("relaunching") == true)
+
+        globalMemory.stringValue = "30"
+        authorityMemory.stringValue = "10"
+        qps.stringValue = "12.5"
+        burst.stringValue = "37"
+        let apply = try #require(button(titled: "Apply", beneath: root))
+        apply.performClick(nil)
+
+        #expect(store.current.advancedPerformance.globalWarmCacheMemoryPercent == 30)
+        #expect(store.current.advancedPerformance.authorityWarmCacheMemoryPercent == 10)
+        #expect(store.current.advancedPerformance.kubernetesQPS == 12.5)
+        #expect(store.current.advancedPerformance.kubernetesBurst == 37)
+    }
+
     @Test("Settings preserves its frame when reopened and when restored")
     func settingsFrameAutosaveIsNotOverriddenByCentering() throws {
         let preferencesSuite = "kmgr-app-settings-frame-\(UUID().uuidString)"

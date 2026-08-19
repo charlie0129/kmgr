@@ -1,5 +1,6 @@
 import Foundation
 @testable import KmgrIPC
+import KmgrCore
 import KmgrProto
 import Testing
 
@@ -42,12 +43,30 @@ struct EngineSupervisorLifecycleTests {
             helperURL: URL(fileURLWithPath: "/tmp/kmgr-engine"),
             columnsConfigurationPath: "/tmp/columns.yaml",
             metricsRefreshSeconds: 45,
+            advancedPerformance: AdvancedPerformancePreferences(
+                globalWarmCacheViewLimit: 48,
+                globalWarmCacheObjectLimit: 500_000,
+                globalWarmCacheMemoryPercent: 30,
+                authorityWarmCacheViewLimit: 12,
+                authorityWarmCacheObjectLimit: 150_000,
+                authorityWarmCacheMemoryPercent: 10,
+                kubernetesQPS: 12.5,
+                kubernetesBurst: 37
+            ),
             logLevel: " DEBUG "
         )
         #expect(configuration.helperArguments(appendingTo: ["--socket", "/tmp/a.sock"]) == [
             "--socket", "/tmp/a.sock",
             "--columns", "/tmp/columns.yaml",
             "--metrics-refresh", "45s",
+            "--warm-cache-global-views", "48",
+            "--warm-cache-global-objects", "500000",
+            "--warm-cache-global-memory-percent", "30",
+            "--warm-cache-authority-views", "12",
+            "--warm-cache-authority-objects", "150000",
+            "--warm-cache-authority-memory-percent", "10",
+            "--kubernetes-qps", "12.5",
+            "--kubernetes-burst", "37",
             "--log-level", "debug",
         ])
     }
@@ -58,6 +77,9 @@ struct EngineSupervisorLifecycleTests {
             helperURL: URL(fileURLWithPath: "/tmp/kmgr-engine"),
             columnsConfigurationPath: "",
             metricsRefreshSeconds: 0,
+            advancedPerformance: AdvancedPerformancePreferences(
+                globalWarmCacheMemoryPercent: 0
+            ),
             logLevel: "verbose"
         )
         #expect(configuration.helperArguments(appendingTo: ["base"]) == ["base"])

@@ -20,6 +20,16 @@ import Testing
     preferences.restoreOpenClusterWindows = false
     preferences.confirmations.confirmWorkloadRestart = false
     preferences.columnsConfigurationPath = "~/Library/Application Support/kmgr/custom-columns.yaml"
+    preferences.advancedPerformance = AdvancedPerformancePreferences(
+        globalWarmCacheViewLimit: 48,
+        globalWarmCacheObjectLimit: 500_000,
+        globalWarmCacheMemoryPercent: 30,
+        authorityWarmCacheViewLimit: 12,
+        authorityWarmCacheObjectLimit: 150_000,
+        authorityWarmCacheMemoryPercent: 10,
+        kubernetesQPS: 12.5,
+        kubernetesBurst: 37
+    )
     try store.save(preferences)
 
     let reloaded = AppPreferencesStore(defaults: defaults)
@@ -31,6 +41,7 @@ import Testing
     #expect(!reloaded.current.restoreOpenClusterWindows)
     #expect(!reloaded.current.confirmations.confirmWorkloadRestart)
     #expect(reloaded.current.columnsConfigurationPath.hasPrefix("/"))
+    #expect(reloaded.current.advancedPerformance == preferences.advancedPerformance)
     #expect(reloaded.loadIssue == nil)
 
     let encoded = try #require(defaults.data(forKey: AppPreferencesStore.storageKey))
@@ -60,11 +71,13 @@ import Testing
     var store = AppPreferencesStore(defaults: defaults)
     #expect(store.current == AppPreferences())
     #expect(store.loadIssue?.reason == .unsupportedVersion)
+    #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
 
     defaults.set(Data("not-json".utf8), forKey: AppPreferencesStore.storageKey)
     store = AppPreferencesStore(defaults: defaults)
     #expect(store.current == AppPreferences())
     #expect(store.loadIssue?.reason == .invalidData)
+    #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
 }
 
 @Test func appPreferenceValidationEnforcesConservativeBoundsAndSafetyInvariants() throws {
@@ -74,6 +87,16 @@ import Testing
     preferences.logs.renderBatchMilliseconds = 1
     preferences.metricsRefreshSeconds = 1
     preferences.columnsConfigurationPath = "relative/columns.yaml"
+    preferences.advancedPerformance = AdvancedPerformancePreferences(
+        globalWarmCacheViewLimit: 0,
+        globalWarmCacheObjectLimit: 0,
+        globalWarmCacheMemoryPercent: 0,
+        authorityWarmCacheViewLimit: 0,
+        authorityWarmCacheObjectLimit: 0,
+        authorityWarmCacheMemoryPercent: 101,
+        kubernetesQPS: .infinity,
+        kubernetesBurst: 0
+    )
     let fields = Set(preferences.validationIssues().map(\.field))
     #expect(fields == [
         "logs.recordLimit",
@@ -81,6 +104,14 @@ import Testing
         "logs.renderBatchMilliseconds",
         "metricsRefreshSeconds",
         "columnsConfigurationPath",
+        "advancedPerformance.globalWarmCacheViewLimit",
+        "advancedPerformance.globalWarmCacheObjectLimit",
+        "advancedPerformance.globalWarmCacheMemoryPercent",
+        "advancedPerformance.authorityWarmCacheViewLimit",
+        "advancedPerformance.authorityWarmCacheObjectLimit",
+        "advancedPerformance.authorityWarmCacheMemoryPercent",
+        "advancedPerformance.kubernetesQPS",
+        "advancedPerformance.kubernetesBurst",
     ])
     #expect(ConfirmationPreferences.alwaysConfirmResourceDeletion)
     #expect(ConfirmationPreferences.alwaysConfirmActiveTerminalClose)
@@ -126,6 +157,7 @@ import Testing
     updated.restoreOpenClusterWindows = false
     updated.metricsRefreshSeconds += 5
     updated.columnsConfigurationPath = "/tmp/kmgr-columns.yaml"
+    updated.advancedPerformance.globalWarmCacheMemoryPercent = 30
 
     let delta = AppPreferencesDelta(previous: previous, updated: updated)
 
@@ -135,10 +167,37 @@ import Testing
     #expect(delta.changes(activated: .newWorkspace) == [.defaultNamespace])
     #expect(delta.changes(activated: .applicationRelaunch) == [
         .workspaceRestoration, .metricsRefresh, .columnsConfigurationPath,
+        .advancedPerformance,
     ])
     #expect(delta.requiresApplicationRelaunch)
     #expect(!delta.isEmpty)
     #expect(AppPreferencesDelta(previous: updated, updated: updated).isEmpty)
+}
+
+@MainActor
+@Test func invalidPersistedPerformanceSettingsAreRemovedAndReset() throws {
+    let suite = "kmgr-tests-invalid-performance-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    var preferences = AppPreferences()
+    preferences.advancedPerformance.globalWarmCacheMemoryPercent = 0
+    let encodedPreferences = try JSONEncoder().encode(preferences)
+    let preferencesObject = try #require(
+        JSONSerialization.jsonObject(with: encodedPreferences) as? [String: Any]
+    )
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": AppPreferences.apiVersion,
+            "preferences": preferencesObject,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let store = AppPreferencesStore(defaults: defaults)
+    #expect(store.current == AppPreferences())
+    #expect(store.loadIssue?.reason == .invalidValues)
+    #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
 }
 
 @Test func incompleteCurrentPreferencesAreRejectedInsteadOfMigrated() throws {

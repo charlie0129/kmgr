@@ -72,3 +72,45 @@ func TestKubernetesRateLimitFlagsAreValidated(t *testing.T) {
 		}
 	}
 }
+
+func TestWarmCacheFlagsAreValidated(t *testing.T) {
+	if code := run([]string{
+		"--version",
+		"--warm-cache-global-views", "48",
+		"--warm-cache-global-objects", "500000",
+		"--warm-cache-global-memory-percent", "30",
+		"--warm-cache-authority-views", "12",
+		"--warm-cache-authority-objects", "150000",
+		"--warm-cache-authority-memory-percent", "10",
+	}); code != 0 {
+		t.Fatalf("run(valid warm-cache flags) = %d, want success", code)
+	}
+	for _, arguments := range [][]string{
+		{"--version", "--warm-cache-global-views", "0"},
+		{"--version", "--warm-cache-global-objects", "-1"},
+		{"--version", "--warm-cache-global-memory-percent", "0"},
+		{"--version", "--warm-cache-global-memory-percent", "101"},
+		{"--version", "--warm-cache-authority-views", "0"},
+		{"--version", "--warm-cache-authority-objects", "-1"},
+		{"--version", "--warm-cache-authority-memory-percent", "0"},
+		{"--version", "--warm-cache-authority-memory-percent", "101"},
+	} {
+		if code := run(arguments); code != 2 {
+			t.Errorf("run(%q) = %d, want usage error", arguments, code)
+		}
+	}
+}
+
+func TestWarmCacheMemoryPercentagesResolveIndependently(t *testing.T) {
+	global, authority, err := resolveWarmCacheByteLimits(10_000, 20, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if global != 2_000 || authority != 700 {
+		t.Fatalf("resolved warm-cache bytes = %d/%d, want 2000/700", global, authority)
+	}
+
+	if _, _, err := resolveWarmCacheByteLimits(0, 20, 20); err == nil {
+		t.Fatal("zero physical memory was accepted")
+	}
+}
