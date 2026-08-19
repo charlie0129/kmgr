@@ -23,6 +23,16 @@ public protocol WorkspaceRPC: Sendable {
         receive: @escaping @Sendable (Kmgr_V1_ViewEvent) throws -> Void
     ) async throws
 
+    func fetchViewRange(
+        request: Kmgr_V1_FetchViewRangeRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_FetchViewRangeResponse
+
+    func updateMetricInterest(
+        request: Kmgr_V1_UpdateMetricInterestRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_Acknowledgement
+
     func cancelView(
         request: Kmgr_V1_CancelViewRequest,
         timeout: Duration
@@ -89,6 +99,26 @@ public struct EngineWorkspaceRPC: WorkspaceRPC {
         timeout: Duration
     ) async throws -> Kmgr_V1_Acknowledgement {
         try await connection.viewClient().cancelView(
+            request,
+            options: callOptions(timeout: timeout)
+        )
+    }
+
+    public func fetchViewRange(
+        request: Kmgr_V1_FetchViewRangeRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_FetchViewRangeResponse {
+        try await connection.viewClient().fetchViewRange(
+            request,
+            options: callOptions(timeout: timeout)
+        )
+    }
+
+    public func updateMetricInterest(
+        request: Kmgr_V1_UpdateMetricInterestRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_Acknowledgement {
+        try await connection.viewClient().updateMetricInterest(
             request,
             options: callOptions(timeout: timeout)
         )
@@ -350,6 +380,94 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         _ = try? await rpc.cancelView(request: request, timeout: controlTimeout)
     }
 
+    public func fetchViewRange(
+        request: ResourceViewRangeRequest
+    ) async throws -> ResourceViewRange {
+        do {
+            try Self.validateRangeRequest(request)
+            var rpcRequest = Kmgr_V1_FetchViewRangeRequest()
+            rpcRequest.context = makeRequestContext(
+                sessionID: request.sessionID,
+                timeout: unaryTimeout
+            )
+            rpcRequest.viewID = request.viewID
+            rpcRequest.generation = request.revision.generation
+            rpcRequest.presentationRevision = request.revision.presentation
+            rpcRequest.indexRevision = request.revision.index
+            rpcRequest.startIndex = request.startIndex
+            rpcRequest.length = UInt32(request.length)
+
+            let response = try await rpc.fetchViewRange(
+                request: rpcRequest,
+                timeout: unaryTimeout
+            )
+            try validateResponseID(
+                response.requestID,
+                expected: rpcRequest.context.requestID,
+                operation: "fetch resource view range"
+            )
+            try Self.validateRangeResponse(response, for: request)
+            return ResourceViewRange(
+                viewID: response.viewID,
+                revision: ResourceViewRevision(
+                    generation: response.generation,
+                    presentation: response.presentationRevision,
+                    index: response.indexRevision
+                ),
+                startIndex: response.startIndex,
+                rowsVisible: response.rowsVisible,
+                rows: response.rows.map(Self.row(from:))
+            )
+        } catch {
+            throw EngineClusterContextProvider.issue(
+                from: error,
+                contextName: "",
+                operation: "fetch resource view range"
+            )
+        }
+    }
+
+    public func updateMetricInterest(
+        request: ResourceMetricInterestRequest
+    ) async throws {
+        do {
+            try Self.validateMetricInterest(request)
+            var rpcRequest = Kmgr_V1_UpdateMetricInterestRequest()
+            rpcRequest.context = makeRequestContext(
+                sessionID: request.sessionID,
+                timeout: controlTimeout
+            )
+            rpcRequest.viewID = request.viewID
+            rpcRequest.generation = request.generation
+            rpcRequest.indexRevision = request.indexRevision
+            rpcRequest.startIndex = request.startIndex
+            rpcRequest.length = UInt32(request.length)
+
+            let response = try await rpc.updateMetricInterest(
+                request: rpcRequest,
+                timeout: controlTimeout
+            )
+            try validateResponseID(
+                response.requestID,
+                expected: rpcRequest.context.requestID,
+                operation: "update metric interest"
+            )
+            guard response.accepted else {
+                throw Self.validationIssue(
+                    reason: "MetricInterestRejected",
+                    message: "The engine rejected the metric viewport because the resource view changed.",
+                    operation: "update metric interest"
+                )
+            }
+        } catch {
+            throw EngineClusterContextProvider.issue(
+                from: error,
+                contextName: "",
+                operation: "update metric interest"
+            )
+        }
+    }
+
     public func closeSession(sessionID: String) async {
         var request = Kmgr_V1_CloseSessionRequest()
         request.context = makeRequestContext(
@@ -487,42 +605,28 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
             )
         case .status(let status):
             return .status(cursor: cursor, status: statusValue(from: status))
-        case .snapshot(let snapshot):
-            return .snapshot(
+        case .invalidation(let invalidation):
+            return .invalidation(
                 cursor: cursor,
-                chunk: ResourceSnapshotChunk(
-                    rows: snapshot.rows.map(row(from:)),
-                    first: snapshot.firstChunk,
-                    last: snapshot.lastChunk,
-                    index: snapshot.chunkIndex,
-                    estimatedTotalRows: snapshot.estimatedTotalRows,
+                invalidation: ResourceViewInvalidation(
+                    presentationRevision: invalidation.presentationRevision,
+                    indexRevision: invalidation.indexRevision,
+                    rowsVisible: invalidation.rowsVisible,
+                    maxRangeLength: Int(invalidation.maxRangeLength),
                     observedOptionalResourceKeys: Set(
-                        snapshot.observedOptionalResourceKeys
+                        invalidation.observedOptionalResourceKeys
                     ),
                     observedOptionalResourceKeysTruncated:
-                        snapshot.observedOptionalResourceKeysTruncated
-                )
-            )
-        case .delta(let delta):
-            return .delta(
-                cursor: cursor,
-                delta: ResourceRowDelta(
-                    upserts: delta.upserts.map(row(from:)),
-                    removedUIDs: Set(delta.removedUids.map { ResourceUID($0) }),
-                    orderedUIDs: delta.orderedUids.map { ResourceUID($0) },
-                    orderIsComplete: delta.orderIsComplete,
-                    observedOptionalResourceKeys: Set(
-                        delta.observedOptionalResourceKeys
-                    ),
-                    observedOptionalResourceKeysTruncated:
-                        delta.observedOptionalResourceKeysTruncated
+                        invalidation.observedOptionalResourceKeysTruncated
                 )
             )
         case .reconciled(let reconciliation):
             return .reconciled(
                 cursor: cursor,
                 reconciliation: ResourceViewReconciliation(
-                    rowsVisible: reconciliation.rowsVisible
+                    rowsVisible: reconciliation.rowsVisible,
+                    presentationRevision: reconciliation.presentationRevision,
+                    indexRevision: reconciliation.indexRevision
                 )
             )
         case .error(let error):
@@ -569,7 +673,85 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
             objectsExamined: status.objectsExamined,
             rowsVisible: status.rowsVisible,
             lastSynchronizedAt: synchronizedAt,
-            fromWarmCache: status.fromWarmCache
+            fromWarmCache: status.fromWarmCache,
+            metricsReconciling: status.metricsReconciling
+        )
+    }
+
+    private static func validateRangeRequest(
+        _ request: ResourceViewRangeRequest
+    ) throws {
+        guard !request.sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            !request.viewID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            request.revision.isValid,
+            request.hasValidLength
+        else {
+            throw validationIssue(
+                reason: "InvalidViewRange",
+                message: "A session, view, nonzero revisions, and a range length from 1 through 512 are required.",
+                operation: "fetch resource view range"
+            )
+        }
+    }
+
+    private static func validateRangeResponse(
+        _ response: Kmgr_V1_FetchViewRangeResponse,
+        for request: ResourceViewRangeRequest
+    ) throws {
+        let revisionMatches = response.generation == request.revision.generation
+            && response.presentationRevision == request.revision.presentation
+            && response.indexRevision == request.revision.index
+        guard response.viewID == request.viewID,
+            revisionMatches,
+            response.startIndex == request.startIndex,
+            response.startIndex <= response.rowsVisible
+        else {
+            throw validationIssue(
+                reason: "ViewRangeRevisionMismatch",
+                message: "The engine returned rows for a different resource-view presentation.",
+                operation: "fetch resource view range",
+                category: .internalFailure
+            )
+        }
+        let available = response.rowsVisible - response.startIndex
+        let expectedCount = min(UInt64(request.length), available)
+        guard UInt64(response.rows.count) == expectedCount else {
+            throw validationIssue(
+                reason: "ViewRangeLengthMismatch",
+                message: "The engine returned an incomplete resource-view range.",
+                operation: "fetch resource view range",
+                category: .internalFailure
+            )
+        }
+    }
+
+    private static func validateMetricInterest(
+        _ request: ResourceMetricInterestRequest
+    ) throws {
+        guard !request.sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            !request.viewID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            request.hasValidRange
+        else {
+            throw validationIssue(
+                reason: "InvalidMetricInterest",
+                message: "A session, view, nonzero revisions, and a viewport length from 1 through 512 are required.",
+                operation: "update metric interest"
+            )
+        }
+    }
+
+    private static func validationIssue(
+        reason: String,
+        message: String,
+        operation: String,
+        category: ClusterManagerIssue.Category = .validation
+    ) -> ClusterManagerIssue {
+        ClusterManagerIssue(
+            category: category,
+            reason: reason,
+            message: message,
+            retryable: false,
+            operation: operation
         )
     }
 

@@ -1085,8 +1085,9 @@ struct ClusterWorkspaceToolbarTests {
 
         try await waitUntil {
             provider.streamRequestCount == 1
-                && resourceTable.numberOfRows == 993
+                && resourceTable.numberOfRows == 512
                 && statusLine.stringValue.hasSuffix(" · Watching")
+                && statusLine.stringValue.hasPrefix("993 objects")
         }
         resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         #expect(window.makeFirstResponder(resourceTable))
@@ -1099,22 +1100,22 @@ struct ClusterWorkspaceToolbarTests {
         controller.navigateBack(nil)
         try await waitUntil {
             provider.streamRequestCount == 2
-                && resourceTable.numberOfRows == 993
+                && resourceTable.numberOfRows == 512
                 && statusLine.stringValue.contains("Resuming…")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
         #expect(!statusLine.stringValue.hasSuffix(" · Loading…"))
         try await Task.sleep(for: .milliseconds(100))
-        #expect(resourceTable.numberOfRows == 993)
+        #expect(resourceTable.numberOfRows == 512)
 
         provider.releasePartialRows()
         try await Task.sleep(for: .milliseconds(100))
-        #expect(resourceTable.numberOfRows == 993)
+        #expect(resourceTable.numberOfRows == 512)
         #expect(statusLine.stringValue.contains("Resuming…"))
 
         provider.releaseAuthoritativeRows()
         try await waitUntil {
-            resourceTable.numberOfRows == 993
+            resourceTable.numberOfRows == 512
                 && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
@@ -1221,8 +1222,9 @@ struct ClusterWorkspaceToolbarTests {
 
         try await waitUntil {
             provider.streamRequestCount == 1
-                && resourceTable.numberOfRows == 993
+                && resourceTable.numberOfRows == 512
                 && statusLine.stringValue.hasSuffix(" · Watching")
+                && statusLine.stringValue.hasPrefix("993 objects")
         }
         resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         #expect(window.makeFirstResponder(resourceTable))
@@ -1235,8 +1237,9 @@ struct ClusterWorkspaceToolbarTests {
         controller.navigateBack(nil)
         try await waitUntil {
             provider.streamRequestCount == 2
-                && resourceTable.numberOfRows == 993
+                && resourceTable.numberOfRows == 512
                 && !statusLine.stringValue.hasSuffix(" · Loading…")
+                && statusLine.stringValue.hasPrefix("993 objects")
                 && statusLine.stringValue.contains("1 selected")
         }
         #expect(resourceTable.selectedRowIndexes == IndexSet(integer: 0))
@@ -1245,8 +1248,9 @@ struct ClusterWorkspaceToolbarTests {
         // same-UID base/metrics catch-up as an ordered delta.
         provider.releaseAuthoritativeRows()
         try await waitUntil {
-            resourceTable.numberOfRows == 993
+            resourceTable.numberOfRows == 512
                 && statusLine.stringValue.hasSuffix(" · Watching")
+                && statusLine.stringValue.hasPrefix("993 objects")
                 && statusLine.stringValue.contains("1 selected")
         }
         #expect(resourceTable.selectedRowIndexes == IndexSet(integer: 0))
@@ -2600,7 +2604,7 @@ private struct HeaderStatusWorkspaceResourceProvider: WorkspaceResourceProviding
     func closeSession(sessionID: String) async {}
 }
 
-private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResourceProviding,
+private final class WarmResumeSelectionWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding,
     @unchecked Sendable
 {
     typealias StreamContinuation = AsyncThrowingStream<
@@ -2611,7 +2615,7 @@ private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResou
     private let lock = NSLock()
     private let rows: [ResourceRow]
     private var storedStreamRequestCount = 0
-    private var resumeGeneration: UInt64?
+    private var resumeRequest: ResourceViewRequest?
     private var resumeContinuation: StreamContinuation?
 
     init(rowCount: Int) {
@@ -2663,15 +2667,10 @@ private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResou
         }
         return AsyncThrowingStream { continuation in
             if requestNumber == 1 {
-                continuation.yield(.snapshot(
-                    cursor: StreamCursor(generation: request.generation, sequence: 1),
-                    chunk: ResourceSnapshotChunk(
-                        rows: rows,
-                        first: true,
-                        last: true,
-                        index: 0,
-                        estimatedTotalRows: UInt64(rows.count)
-                    )
+                continuation.yield(testSnapshotInvalidation(
+                    request: request,
+                    sequence: 1,
+                    rows: rows
                 ))
                 continuation.yield(.status(
                     cursor: StreamCursor(generation: request.generation, sequence: 2),
@@ -2685,7 +2684,7 @@ private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResou
             }
 
             lock.withLock {
-                resumeGeneration = request.generation
+                resumeRequest = request
                 resumeContinuation = continuation
             }
             continuation.yield(.status(
@@ -2697,38 +2696,30 @@ private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResou
                     fromWarmCache: true
                 )
             ))
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 2),
-                chunk: ResourceSnapshotChunk(
-                    rows: rows,
-                    first: true,
-                    last: true,
-                    index: 0,
-                    estimatedTotalRows: UInt64(rows.count)
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 2,
+                rows: rows
             ))
-            continuation.yield(.reconciled(
-                cursor: StreamCursor(generation: request.generation, sequence: 3),
-                reconciliation: ResourceViewReconciliation(
-                    rowsVisible: UInt64(rows.count)
-                )
+            continuation.yield(testReconciliation(
+                request: request,
+                sequence: 3
             ))
         }
     }
 
     func releaseAuthoritativeRows() {
-        let state = lock.withLock { (resumeGeneration, resumeContinuation) }
-        guard let generation = state.0, let continuation = state.1 else { return }
-        continuation.yield(.delta(
-            cursor: StreamCursor(generation: generation, sequence: 4),
-            delta: ResourceRowDelta(
-                upserts: rows,
-                orderedUIDs: rows.map { $0.identity.uid },
-                orderIsComplete: true
-            )
+        let state = lock.withLock { (resumeRequest, resumeContinuation) }
+        guard let request = state.0, let continuation = state.1 else { return }
+        continuation.yield(testDeltaInvalidation(
+            request: request,
+            sequence: 4,
+            upserts: rows,
+            orderedUIDs: rows.map { $0.identity.uid },
+            orderIsComplete: true
         ))
         continuation.yield(.status(
-            cursor: StreamCursor(generation: generation, sequence: 5),
+            cursor: StreamCursor(generation: request.generation, sequence: 5),
             status: ResourceViewStatus(
                 freshness: .watching,
                 rowsVisible: UInt64(rows.count)
@@ -2744,7 +2735,7 @@ private final class WarmResumeSelectionWorkspaceResourceProvider: WorkspaceResou
     func closeSession(sessionID: String) async {}
 }
 
-private final class DelayedWarmResumeWorkspaceResourceProvider: WorkspaceResourceProviding,
+private final class DelayedWarmResumeWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding,
     @unchecked Sendable
 {
     typealias StreamContinuation = AsyncThrowingStream<
@@ -2755,7 +2746,7 @@ private final class DelayedWarmResumeWorkspaceResourceProvider: WorkspaceResourc
     private let lock = NSLock()
     private let rows: [ResourceRow]
     private var storedStreamRequestCount = 0
-    private var resumeGeneration: UInt64?
+    private var resumeRequest: ResourceViewRequest?
     private var resumeContinuation: StreamContinuation?
 
     init(rowCount: Int) {
@@ -2807,15 +2798,10 @@ private final class DelayedWarmResumeWorkspaceResourceProvider: WorkspaceResourc
         }
         return AsyncThrowingStream { continuation in
             if requestNumber == 1 {
-                continuation.yield(.snapshot(
-                    cursor: StreamCursor(generation: request.generation, sequence: 1),
-                    chunk: ResourceSnapshotChunk(
-                        rows: rows,
-                        first: true,
-                        last: true,
-                        index: 0,
-                        estimatedTotalRows: UInt64(rows.count)
-                    )
+                continuation.yield(testSnapshotInvalidation(
+                    request: request,
+                    sequence: 1,
+                    rows: rows
                 ))
                 continuation.yield(.status(
                     cursor: StreamCursor(generation: request.generation, sequence: 2),
@@ -2829,111 +2815,95 @@ private final class DelayedWarmResumeWorkspaceResourceProvider: WorkspaceResourc
             }
 
             lock.withLock {
-                resumeGeneration = request.generation
+                resumeRequest = request
                 resumeContinuation = continuation
             }
             continuation.yield(.status(
                 cursor: StreamCursor(generation: request.generation, sequence: 1),
                 status: ResourceViewStatus(freshness: .loading)
             ))
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 2),
-                chunk: ResourceSnapshotChunk(
-                    rows: [],
-                    first: true,
-                    last: true,
-                    index: 0,
-                    estimatedTotalRows: 0
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 2,
+                rows: []
             ))
             continuation.yield(.status(
                 cursor: StreamCursor(generation: request.generation, sequence: 3),
                 status: ResourceViewStatus(freshness: .loading)
             ))
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 4),
-                chunk: ResourceSnapshotChunk(
-                    rows: [],
-                    first: true,
-                    last: true,
-                    index: 0,
-                    estimatedTotalRows: 0
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 4,
+                rows: []
             ))
         }
     }
 
     func releasePartialRows() {
-        let state = lock.withLock { (resumeGeneration, resumeContinuation) }
-        guard let generation = state.0, let continuation = state.1 else { return }
+        let state = lock.withLock { (resumeRequest, resumeContinuation) }
+        guard let request = state.0, let continuation = state.1 else { return }
         let partial = Array(rows.prefix(500))
-        continuation.yield(.delta(
-            cursor: StreamCursor(generation: generation, sequence: 5),
-            delta: ResourceRowDelta(
-                upserts: partial,
-                orderedUIDs: partial.map { $0.identity.uid },
-                orderIsComplete: true
-            )
+        continuation.yield(testDeltaInvalidation(
+            request: request,
+            sequence: 5,
+            upserts: partial,
+            orderedUIDs: partial.map { $0.identity.uid },
+            orderIsComplete: true
         ))
     }
 
     func releaseAuthoritativeRows() {
-        let state = lock.withLock { (resumeGeneration, resumeContinuation) }
-        guard let generation = state.0, let continuation = state.1 else { return }
+        let state = lock.withLock { (resumeRequest, resumeContinuation) }
+        guard let request = state.0, let continuation = state.1 else { return }
         continuation.yield(.status(
-            cursor: StreamCursor(generation: generation, sequence: 6),
+            cursor: StreamCursor(generation: request.generation, sequence: 6),
             status: ResourceViewStatus(
                 freshness: .watching,
                 rowsVisible: UInt64(rows.count)
             )
         ))
-        continuation.yield(.delta(
-            cursor: StreamCursor(generation: generation, sequence: 7),
-            delta: ResourceRowDelta(
-                upserts: Array(rows.dropFirst(500)),
-                orderedUIDs: rows.map { $0.identity.uid },
-                orderIsComplete: true
-            )
+        continuation.yield(testDeltaInvalidation(
+            request: request,
+            sequence: 7,
+            upserts: Array(rows.dropFirst(500)),
+            orderedUIDs: rows.map { $0.identity.uid },
+            orderIsComplete: true
         ))
-        continuation.yield(.reconciled(
-            cursor: StreamCursor(generation: generation, sequence: 8),
-            reconciliation: ResourceViewReconciliation(
-                rowsVisible: UInt64(rows.count)
-            )
+        continuation.yield(testReconciliation(
+            request: request,
+            sequence: 8
         ))
     }
 
     func releaseAuthoritativeEmpty() {
-        let state = lock.withLock { (resumeGeneration, resumeContinuation) }
-        guard let generation = state.0, let continuation = state.1 else { return }
+        let state = lock.withLock { (resumeRequest, resumeContinuation) }
+        guard let request = state.0, let continuation = state.1 else { return }
         continuation.yield(.status(
-            cursor: StreamCursor(generation: generation, sequence: 5),
+            cursor: StreamCursor(generation: request.generation, sequence: 5),
             status: ResourceViewStatus(freshness: .watching, rowsVisible: 0)
         ))
-        continuation.yield(.delta(
-            cursor: StreamCursor(generation: generation, sequence: 6),
-            delta: ResourceRowDelta(
-                removedUIDs: Set(rows.map { $0.identity.uid }),
-                orderedUIDs: [],
-                orderIsComplete: true
-            )
+        continuation.yield(testDeltaInvalidation(
+            request: request,
+            sequence: 6,
+            removedUIDs: Set(rows.map { $0.identity.uid }),
+            orderedUIDs: [],
+            orderIsComplete: true
         ))
-        continuation.yield(.reconciled(
-            cursor: StreamCursor(generation: generation, sequence: 7),
-            reconciliation: ResourceViewReconciliation(rowsVisible: 0)
+        continuation.yield(testReconciliation(
+            request: request,
+            sequence: 7
         ))
     }
 
     func removeAllRows() {
-        let state = lock.withLock { (resumeGeneration, resumeContinuation) }
-        guard let generation = state.0, let continuation = state.1 else { return }
-        continuation.yield(.delta(
-            cursor: StreamCursor(generation: generation, sequence: 9),
-            delta: ResourceRowDelta(
-                removedUIDs: Set(rows.map { $0.identity.uid }),
-                orderedUIDs: [],
-                orderIsComplete: true
-            )
+        let state = lock.withLock { (resumeRequest, resumeContinuation) }
+        guard let request = state.0, let continuation = state.1 else { return }
+        continuation.yield(testDeltaInvalidation(
+            request: request,
+            sequence: 9,
+            removedUIDs: Set(rows.map { $0.identity.uid }),
+            orderedUIDs: [],
+            orderIsComplete: true
         ))
     }
 
@@ -2945,7 +2915,7 @@ private final class DelayedWarmResumeWorkspaceResourceProvider: WorkspaceResourc
     func closeSession(sessionID: String) async {}
 }
 
-private final class FilterValidationWorkspaceResourceProvider: WorkspaceResourceProviding,
+private final class FilterValidationWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding,
     @unchecked Sendable
 {
     private let lock = NSLock()
@@ -2986,20 +2956,15 @@ private final class FilterValidationWorkspaceResourceProvider: WorkspaceResource
                     group: "", version: "v1", resource: "pods",
                     namespace: "default", name: "api", uid: "pod-api"
                 )
-                continuation.yield(.snapshot(
-                    cursor: StreamCursor(generation: request.generation, sequence: 1),
-                    chunk: ResourceSnapshotChunk(
-                        rows: [ResourceRow(identity: identity, cells: [
-                            Cell(
-                                columnID: "name", displayText: "api",
-                                typedValue: .string("api")
-                            ),
-                        ])],
-                        first: true,
-                        last: true,
-                        index: 0,
-                        estimatedTotalRows: 1
-                    )
+                continuation.yield(testSnapshotInvalidation(
+                    request: request,
+                    sequence: 1,
+                    rows: [ResourceRow(identity: identity, cells: [
+                        Cell(
+                            columnID: "name", displayText: "api",
+                            typedValue: .string("api")
+                        ),
+                    ])]
                 ))
                 continuation.yield(.status(
                     cursor: StreamCursor(generation: request.generation, sequence: 2),
@@ -3027,7 +2992,7 @@ private final class FilterValidationWorkspaceResourceProvider: WorkspaceResource
     func closeSession(sessionID: String) async {}
 }
 
-private struct SingleObjectWorkspaceResourceProvider: WorkspaceResourceProviding {
+private struct SingleObjectWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding {
     var identity: ResourceIdentity
     var kind: String
 
@@ -3064,15 +3029,10 @@ private struct SingleObjectWorkspaceResourceProvider: WorkspaceResourceProviding
             ),
         ])] : []
         return AsyncThrowingStream { continuation in
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 1),
-                chunk: ResourceSnapshotChunk(
-                    rows: rows,
-                    first: true,
-                    last: true,
-                    index: 0,
-                    estimatedTotalRows: UInt64(rows.count)
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: rows
             ))
             continuation.yield(.status(
                 cursor: StreamCursor(generation: request.generation, sequence: 2),
@@ -3089,7 +3049,7 @@ private struct SingleObjectWorkspaceResourceProvider: WorkspaceResourceProviding
     func closeSession(sessionID: String) async {}
 }
 
-private final class EventsNavigationWorkspaceResourceProvider: WorkspaceResourceProviding,
+private final class EventsNavigationWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding,
     @unchecked Sendable
 {
     private let lock = NSLock()
@@ -3134,12 +3094,10 @@ private final class EventsNavigationWorkspaceResourceProvider: WorkspaceResource
             } else {
                 rows = []
             }
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 1),
-                chunk: ResourceSnapshotChunk(
-                    rows: rows, first: true, last: true, index: 0,
-                    estimatedTotalRows: UInt64(rows.count)
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: rows
             ))
             continuation.yield(.status(
                 cursor: StreamCursor(generation: request.generation, sequence: 2),
@@ -3155,7 +3113,7 @@ private final class EventsNavigationWorkspaceResourceProvider: WorkspaceResource
     func closeSession(sessionID: String) async {}
 }
 
-private struct NamespaceDrillDownWorkspaceResourceProvider: WorkspaceResourceProviding {
+private struct NamespaceDrillDownWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding {
     var namespace: ResourceIdentity
 
     func discoverResources(sessionID: String, refresh: Bool) async throws
@@ -3189,29 +3147,19 @@ private struct NamespaceDrillDownWorkspaceResourceProvider: WorkspaceResourcePro
             rows = []
         }
         return AsyncThrowingStream { continuation in
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 1),
-                chunk: ResourceSnapshotChunk(
-                    rows: rows,
-                    first: true,
-                    last: true,
-                    index: 0,
-                    estimatedTotalRows: UInt64(rows.count)
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: rows
             ))
             continuation.yield(.status(
                 cursor: StreamCursor(generation: request.generation, sequence: 2),
                 status: ResourceViewStatus(freshness: .watching, rowsVisible: UInt64(rows.count))
             ))
             if request.stageUntilReconciled {
-                continuation.yield(.reconciled(
-                    cursor: StreamCursor(
-                        generation: request.generation,
-                        sequence: 3
-                    ),
-                    reconciliation: ResourceViewReconciliation(
-                        rowsVisible: UInt64(rows.count)
-                    )
+                continuation.yield(testReconciliation(
+                    request: request,
+                    sequence: 3
                 ))
             }
             continuation.finish()
@@ -3223,7 +3171,7 @@ private struct NamespaceDrillDownWorkspaceResourceProvider: WorkspaceResourcePro
 }
 
 private final class RelationshipDrillDownWorkspaceResourceProvider:
-    WorkspaceResourceProviding, @unchecked Sendable
+    RangeBackedTestWorkspaceProviding, @unchecked Sendable
 {
     private let lock = NSLock()
     private let source: ResourceIdentity
@@ -3268,12 +3216,10 @@ private final class RelationshipDrillDownWorkspaceResourceProvider:
             )])]
             : []
         return AsyncThrowingStream { continuation in
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 1),
-                chunk: ResourceSnapshotChunk(
-                    rows: rows, first: true, last: true, index: 0,
-                    estimatedTotalRows: UInt64(rows.count)
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: rows
             ))
             continuation.yield(.status(
                 cursor: StreamCursor(generation: request.generation, sequence: 2),
@@ -3282,11 +3228,9 @@ private final class RelationshipDrillDownWorkspaceResourceProvider:
                 )
             ))
             if request.stageUntilReconciled {
-                continuation.yield(.reconciled(
-                    cursor: StreamCursor(generation: request.generation, sequence: 3),
-                    reconciliation: ResourceViewReconciliation(
-                        rowsVisible: UInt64(rows.count)
-                    )
+                continuation.yield(testReconciliation(
+                    request: request,
+                    sequence: 3
                 ))
             }
             continuation.finish()
@@ -3297,7 +3241,7 @@ private final class RelationshipDrillDownWorkspaceResourceProvider:
     func closeSession(sessionID: String) async {}
 }
 
-private struct SelectAllFilterWorkspaceResourceProvider: WorkspaceResourceProviding {
+private struct SelectAllFilterWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding {
     func discoverResources(sessionID: String, refresh: Bool) async throws
         -> ResourceDiscoveryResult {
         .init(resources: [DiscoveredResource(
@@ -3314,15 +3258,10 @@ private struct SelectAllFilterWorkspaceResourceProvider: WorkspaceResourceProvid
         let worker = row(name: "worker", uid: "pod-worker", sessionID: request.sessionID)
         let rows = request.filterExpression.isEmpty ? [api, worker] : [api]
         return AsyncThrowingStream { continuation in
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 1),
-                chunk: ResourceSnapshotChunk(
-                    rows: rows,
-                    first: true,
-                    last: true,
-                    index: 0,
-                    estimatedTotalRows: UInt64(rows.count)
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: rows
             ))
             continuation.yield(.status(
                 cursor: StreamCursor(generation: request.generation, sequence: 2),
@@ -3332,14 +3271,9 @@ private struct SelectAllFilterWorkspaceResourceProvider: WorkspaceResourceProvid
                 )
             ))
             if request.stageUntilReconciled {
-                continuation.yield(.reconciled(
-                    cursor: StreamCursor(
-                        generation: request.generation,
-                        sequence: 3
-                    ),
-                    reconciliation: ResourceViewReconciliation(
-                        rowsVisible: UInt64(rows.count)
-                    )
+                continuation.yield(testReconciliation(
+                    request: request,
+                    sequence: 3
                 ))
             }
             continuation.finish()
@@ -3365,7 +3299,7 @@ private struct SelectAllFilterWorkspaceResourceProvider: WorkspaceResourceProvid
     }
 }
 
-private struct ServiceWorkspaceResourceProvider: WorkspaceResourceProviding {
+private struct ServiceWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding {
     func discoverResources(sessionID: String, refresh: Bool) async throws
         -> ResourceDiscoveryResult {
         .init(resources: [DiscoveredResource(
@@ -3384,25 +3318,17 @@ private struct ServiceWorkspaceResourceProvider: WorkspaceResourceProviding {
             namespace: "default", name: "api", uid: "service-api"
         )
         return AsyncThrowingStream { continuation in
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 1),
-                chunk: ResourceSnapshotChunk(
-                    rows: [ResourceRow(identity: identity, cells: [Cell(
-                        columnID: "name", displayText: "api", typedValue: .string("api")
-                    )])],
-                    first: true,
-                    last: true,
-                    index: 0,
-                    estimatedTotalRows: 1
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: [ResourceRow(identity: identity, cells: [Cell(
+                    columnID: "name", displayText: "api", typedValue: .string("api")
+                )])]
             ))
             if request.stageUntilReconciled {
-                continuation.yield(.reconciled(
-                    cursor: StreamCursor(
-                        generation: request.generation,
-                        sequence: 2
-                    ),
-                    reconciliation: ResourceViewReconciliation(rowsVisible: 1)
+                continuation.yield(testReconciliation(
+                    request: request,
+                    sequence: 2
                 ))
             }
             continuation.finish()

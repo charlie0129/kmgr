@@ -96,9 +96,12 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(discovery.warning?.retryable == true)
     }
 
-    @Test("maps streamed request, compact rows, status, deltas, and structured failures")
+    @Test("maps control invalidations and revision-pinned range and metric RPCs")
     func mapsViewStream() async throws {
-        let rpc = FakeWorkspaceRPC(streamEvents: Self.viewEvents())
+        let rpc = FakeWorkspaceRPC(
+            streamEvents: Self.viewEvents(),
+            rangeRows: [Self.resourceRow()]
+        )
         let provider = deterministicProvider(rpc: rpc)
         let request = ResourceViewRequest(
             sessionID: "session-one",
@@ -133,7 +136,7 @@ struct EngineWorkspaceResourceProviderTests {
             messages.append(message)
         }
 
-        #expect(messages.count == 5)
+        #expect(messages.count == 4)
         guard case .status(let statusCursor, let status) = messages[0] else {
             Issue.record("Expected status event")
             return
@@ -144,19 +147,58 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(status.rowsVisible == 1)
         #expect(status.lastSynchronizedAt == Date(timeIntervalSince1970: 1_234))
         #expect(status.fromWarmCache == false)
+        #expect(status.metricsReconciling)
 
-        guard case .snapshot(let snapshotCursor, let snapshot) = messages[1],
-            let row = snapshot.rows.first
+        guard case .invalidation(let invalidationCursor, let invalidation) = messages[1]
         else {
-            Issue.record("Expected snapshot event")
+            Issue.record("Expected invalidation event")
             return
         }
-        #expect(snapshotCursor == StreamCursor(generation: 7, sequence: 2))
-        #expect(snapshot.first && snapshot.last)
-        #expect(snapshot.index == 0)
-        #expect(snapshot.estimatedTotalRows == 1)
-        #expect(snapshot.observedOptionalResourceKeys == ["hugepages-2Mi"])
-        #expect(!snapshot.observedOptionalResourceKeysTruncated)
+        #expect(invalidationCursor == StreamCursor(generation: 7, sequence: 2))
+        #expect(invalidation.presentationRevision == 11)
+        #expect(invalidation.indexRevision == 3)
+        #expect(invalidation.rowsVisible == 1)
+        #expect(invalidation.maxRangeLength == 512)
+        #expect(invalidation.observedOptionalResourceKeys == ["hugepages-2Mi"])
+        #expect(invalidation.observedOptionalResourceKeysTruncated)
+
+        guard case .reconciled(let reconciledCursor, let reconciliation) = messages[2]
+        else {
+            Issue.record("Expected reconciliation event")
+            return
+        }
+        #expect(reconciledCursor == StreamCursor(generation: 7, sequence: 3))
+        #expect(reconciliation.rowsVisible == 1)
+        #expect(reconciliation.presentationRevision == 11)
+        #expect(reconciliation.indexRevision == 3)
+
+        guard case .failure(_, let issue) = messages[3] else {
+            Issue.record("Expected structured stream failure")
+            return
+        }
+        #expect(issue.category == .authorization)
+        #expect(issue.reason == "PodsForbidden")
+        #expect(issue.httpStatusCode == 403)
+        #expect(issue.operation == "watch pods")
+        #expect(issue.safeDetails["resource"] == "pods")
+
+        let revision = ResourceViewRevision(
+            generation: 7,
+            presentation: 11,
+            index: 3
+        )
+        let range = try await provider.fetchViewRange(request: ResourceViewRangeRequest(
+            sessionID: "session-one",
+            viewID: "view-pods",
+            revision: revision,
+            startIndex: 0,
+            length: 1
+        ))
+        #expect(range.viewID == "view-pods")
+        #expect(range.revision == revision)
+        #expect(range.startIndex == 0)
+        #expect(range.rowsVisible == 1)
+        let row = try #require(range.rows.first)
         #expect(row.identity == ResourceIdentity(
             clusterSessionID: "session-one",
             group: "",
@@ -192,33 +234,14 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(usage.provider == "metrics.k8s.io")
         #expect(usage.measurementScope == "pod")
 
-        guard case .delta(_, let delta) = messages[2] else {
-            Issue.record("Expected delta event")
-            return
-        }
-        #expect(delta.removedUIDs == ["uid-old"])
-        #expect(delta.orderedUIDs == ["uid-api"])
-        #expect(delta.orderIsComplete)
-        #expect(delta.observedOptionalResourceKeys == ["aliyun.com/ppu"])
-        #expect(delta.observedOptionalResourceKeysTruncated)
-
-        guard case .reconciled(let reconciledCursor, let reconciliation) = messages[3]
-        else {
-            Issue.record("Expected reconciliation event")
-            return
-        }
-        #expect(reconciledCursor == StreamCursor(generation: 7, sequence: 4))
-        #expect(reconciliation.rowsVisible == 1)
-
-        guard case .failure(_, let issue) = messages[4] else {
-            Issue.record("Expected structured stream failure")
-            return
-        }
-        #expect(issue.category == .authorization)
-        #expect(issue.reason == "PodsForbidden")
-        #expect(issue.httpStatusCode == 403)
-        #expect(issue.operation == "watch pods")
-        #expect(issue.safeDetails["resource"] == "pods")
+        try await provider.updateMetricInterest(request: ResourceMetricInterestRequest(
+            sessionID: "session-one",
+            viewID: "view-pods",
+            generation: 7,
+            indexRevision: 3,
+            startIndex: 0,
+            length: 1
+        ))
 
         let captured = await rpc.capturedStreamRequest()
         #expect(captured?.context.clusterSessionID == "session-one")
@@ -235,6 +258,23 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(captured?.spec.columnIds == ["name", "ready", "large", "memory", "cpu", "debug", "sort"])
         #expect(captured?.spec.sort.first?.direction == .descending)
         #expect(captured?.spec.sort.first?.nullsFirst == true)
+
+        let capturedRange = await rpc.capturedRangeRequest()
+        #expect(capturedRange?.context.clusterSessionID == "session-one")
+        #expect(capturedRange?.context.deadlineUnixMs == 1_030_000)
+        #expect(capturedRange?.viewID == "view-pods")
+        #expect(capturedRange?.generation == 7)
+        #expect(capturedRange?.presentationRevision == 11)
+        #expect(capturedRange?.indexRevision == 3)
+        #expect(capturedRange?.startIndex == 0)
+        #expect(capturedRange?.length == 1)
+
+        let metricInterest = await rpc.capturedMetricInterestRequest()
+        #expect(metricInterest?.context.deadlineUnixMs == 1_005_000)
+        #expect(metricInterest?.generation == 7)
+        #expect(metricInterest?.indexRevision == 3)
+        #expect(metricInterest?.startIndex == 0)
+        #expect(metricInterest?.length == 1)
     }
 
     @Test("cancel and close send exact identities and preserve independent streams")
@@ -357,37 +397,32 @@ struct EngineWorkspaceResourceProviderTests {
         status.status.objectsExamined = 500
         status.status.rowsVisible = 1
         status.status.lastSynchronizedUnixMs = 1_234_000
+        status.status.metricsReconciling = true
 
-        var snapshot = Kmgr_V1_ViewEvent()
-        snapshot.cursor = cursor(sequence: 2)
-        snapshot.snapshot.firstChunk = true
-        snapshot.snapshot.lastChunk = true
-        snapshot.snapshot.chunkIndex = 0
-        snapshot.snapshot.estimatedTotalRows = 1
-        snapshot.snapshot.observedOptionalResourceKeys = ["hugepages-2Mi"]
-        snapshot.snapshot.rows = [resourceRow()]
-
-        var delta = Kmgr_V1_ViewEvent()
-        delta.cursor = cursor(sequence: 3)
-        delta.delta.removedUids = ["uid-old"]
-        delta.delta.orderedUids = ["uid-api"]
-        delta.delta.orderIsComplete = true
-        delta.delta.observedOptionalResourceKeys = ["aliyun.com/ppu"]
-        delta.delta.observedOptionalResourceKeysTruncated = true
+        var invalidation = Kmgr_V1_ViewEvent()
+        invalidation.cursor = cursor(sequence: 2)
+        invalidation.invalidation.presentationRevision = 11
+        invalidation.invalidation.indexRevision = 3
+        invalidation.invalidation.rowsVisible = 1
+        invalidation.invalidation.maxRangeLength = 512
+        invalidation.invalidation.observedOptionalResourceKeys = ["hugepages-2Mi"]
+        invalidation.invalidation.observedOptionalResourceKeysTruncated = true
 
         var reconciled = Kmgr_V1_ViewEvent()
-        reconciled.cursor = cursor(sequence: 4)
+        reconciled.cursor = cursor(sequence: 3)
         reconciled.reconciled.rowsVisible = 1
+        reconciled.reconciled.presentationRevision = 11
+        reconciled.reconciled.indexRevision = 3
 
         var failure = Kmgr_V1_ViewEvent()
-        failure.cursor = cursor(sequence: 5)
+        failure.cursor = cursor(sequence: 4)
         failure.error.category = .authorization
         failure.error.reason = "PodsForbidden"
         failure.error.message = "Watching Pods is forbidden."
         failure.error.httpStatusCode = 403
         failure.error.operation = "watch pods"
         failure.error.safeDetails = ["resource": "pods"]
-        return [status, snapshot, delta, reconciled, failure]
+        return [status, invalidation, reconciled, failure]
     }
 
     private static func cursor(sequence: UInt64) -> Kmgr_V1_StreamCursor {
@@ -474,6 +509,7 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
     private let resources: [Kmgr_V1_ApiResource]
     private let namespaces: [String]
     private let streamEvents: [Kmgr_V1_ViewEvent]
+    private let rangeRows: [Kmgr_V1_ResourceRow]
     private let discoveryError: Kmgr_V1_StructuredError?
     private let discoveryWarning: Kmgr_V1_StructuredError?
     private let discoveryPotentiallyIncomplete: Bool
@@ -481,6 +517,8 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
     private var discoverRequest: Kmgr_V1_DiscoverRequest?
     private var namespaceRequest: Kmgr_V1_ListNamespacesRequest?
     private var streamRequest: Kmgr_V1_OpenViewRequest?
+    private var rangeRequest: Kmgr_V1_FetchViewRangeRequest?
+    private var metricInterestRequest: Kmgr_V1_UpdateMetricInterestRequest?
     private var cancelRequest: Kmgr_V1_CancelViewRequest?
     private var closeRequest: Kmgr_V1_CloseSessionRequest?
 
@@ -488,6 +526,7 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
         resources: [Kmgr_V1_ApiResource] = [],
         namespaces: [String] = [],
         streamEvents: [Kmgr_V1_ViewEvent] = [],
+        rangeRows: [Kmgr_V1_ResourceRow] = [],
         discoveryError: Kmgr_V1_StructuredError? = nil,
         discoveryWarning: Kmgr_V1_StructuredError? = nil,
         discoveryPotentiallyIncomplete: Bool = false
@@ -495,6 +534,7 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
         self.resources = resources
         self.namespaces = namespaces
         self.streamEvents = streamEvents
+        self.rangeRows = rangeRows
         self.discoveryError = discoveryError
         self.discoveryWarning = discoveryWarning
         self.discoveryPotentiallyIncomplete = discoveryPotentiallyIncomplete
@@ -503,6 +543,10 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
     func capturedDiscoverRequest() -> Kmgr_V1_DiscoverRequest? { discoverRequest }
     func capturedNamespaceRequest() -> Kmgr_V1_ListNamespacesRequest? { namespaceRequest }
     func capturedStreamRequest() -> Kmgr_V1_OpenViewRequest? { streamRequest }
+    func capturedRangeRequest() -> Kmgr_V1_FetchViewRangeRequest? { rangeRequest }
+    func capturedMetricInterestRequest() -> Kmgr_V1_UpdateMetricInterestRequest? {
+        metricInterestRequest
+    }
     func capturedCancelRequest() -> Kmgr_V1_CancelViewRequest? { cancelRequest }
     func capturedCloseRequest() -> Kmgr_V1_CloseSessionRequest? { closeRequest }
 
@@ -541,6 +585,38 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
         for event in streamEvents {
             try receive(event)
         }
+    }
+
+    func fetchViewRange(
+        request: Kmgr_V1_FetchViewRangeRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_FetchViewRangeResponse {
+        rangeRequest = request
+        var response = Kmgr_V1_FetchViewRangeResponse()
+        response.requestID = request.context.requestID
+        response.viewID = request.viewID
+        response.generation = request.generation
+        response.presentationRevision = request.presentationRevision
+        response.indexRevision = request.indexRevision
+        response.startIndex = request.startIndex
+        response.rowsVisible = UInt64(rangeRows.count)
+        if request.startIndex <= response.rowsVisible {
+            let start = Int(request.startIndex)
+            let end = min(rangeRows.count, start + Int(request.length))
+            response.rows = Array(rangeRows[start..<end])
+        }
+        return response
+    }
+
+    func updateMetricInterest(
+        request: Kmgr_V1_UpdateMetricInterestRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_Acknowledgement {
+        metricInterestRequest = request
+        var response = Kmgr_V1_Acknowledgement()
+        response.requestID = request.context.requestID
+        response.accepted = true
+        return response
     }
 
     func cancelView(

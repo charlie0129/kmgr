@@ -19,63 +19,40 @@ public enum PerformanceSignpostCatalog {
 /// The only streamed resource metadata admitted to model/table signposts.
 /// Object names, namespaces, UIDs, cell values, selectors, and filter text are
 /// deliberately absent.
-public struct ResourceBatchSignpostMetadata: Hashable, Sendable {
-    public enum Kind: String, Hashable, Sendable {
-        case snapshot
-        case delta
-    }
-
-    public var kind: Kind
+public struct ResourceInvalidationSignpostMetadata: Hashable, Sendable {
     public var generation: UInt64
     public var sequence: UInt64
-    public var upsertCount: Int
-    public var removalCount: Int
-    public var orderCount: Int
-    public var replacesOrder: Bool
+    public var presentationRevision: UInt64
+    public var indexRevision: UInt64
+    public var rowsVisible: UInt64
 
     public init(
-        kind: Kind,
         generation: UInt64,
         sequence: UInt64,
-        upsertCount: Int,
-        removalCount: Int,
-        orderCount: Int,
-        replacesOrder: Bool
+        presentationRevision: UInt64,
+        indexRevision: UInt64,
+        rowsVisible: UInt64
     ) {
-        self.kind = kind
         self.generation = generation
         self.sequence = sequence
-        self.upsertCount = upsertCount
-        self.removalCount = removalCount
-        self.orderCount = orderCount
-        self.replacesOrder = replacesOrder
+        self.presentationRevision = presentationRevision
+        self.indexRevision = indexRevision
+        self.rowsVisible = rowsVisible
     }
 }
 
 public extension ResourceViewMessage {
-    /// Returns bounded cardinalities and stream revisions for performance
-    /// correlation. Status and error events do not mutate the table model.
-    var resourceBatchSignpostMetadata: ResourceBatchSignpostMetadata? {
+    /// Returns only bounded cardinalities and revisions for performance
+    /// correlation. Rows and complete UID order never travel on this stream.
+    var resourceInvalidationSignpostMetadata: ResourceInvalidationSignpostMetadata? {
         switch self {
-        case .snapshot(let cursor, let chunk):
-            ResourceBatchSignpostMetadata(
-                kind: .snapshot,
+        case .invalidation(let cursor, let invalidation):
+            ResourceInvalidationSignpostMetadata(
                 generation: cursor.generation,
                 sequence: cursor.sequence,
-                upsertCount: chunk.rows.count,
-                removalCount: 0,
-                orderCount: chunk.rows.count,
-                replacesOrder: chunk.last
-            )
-        case .delta(let cursor, let delta):
-            ResourceBatchSignpostMetadata(
-                kind: .delta,
-                generation: cursor.generation,
-                sequence: cursor.sequence,
-                upsertCount: delta.upserts.count,
-                removalCount: delta.removedUIDs.count,
-                orderCount: delta.orderedUIDs.count,
-                replacesOrder: delta.orderIsComplete
+                presentationRevision: invalidation.presentationRevision,
+                indexRevision: invalidation.indexRevision,
+                rowsVisible: invalidation.rowsVisible
             )
         case .schema, .status, .reconciled, .failure:
             nil

@@ -89,9 +89,24 @@ import Testing
 
 @Test func everyResourceViewMessageCarriesGenerationCursor() {
     let cursor = StreamCursor(generation: 7, sequence: 31)
-    let message = ResourceViewMessage.delta(
+    let message = ResourceViewMessage.invalidation(
         cursor: cursor,
-        delta: ResourceRowDelta(removedUIDs: ["uid-old"])
+        invalidation: ResourceViewInvalidation(
+            presentationRevision: 9,
+            indexRevision: 4,
+            rowsVisible: 800_000,
+            maxRangeLength: 512
+        )
     )
     #expect(message.cursor == cursor)
+}
+
+@Test func resourceStatusCarriesGlobalMetricReconciliationState() {
+    let status = ResourceViewStatus(
+        freshness: .watching,
+        rowsVisible: 42,
+        metricsReconciling: true
+    )
+    #expect(status.metricsReconciling)
+    #expect(!status.showsProgress)
 }

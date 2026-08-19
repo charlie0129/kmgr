@@ -18,53 +18,32 @@ struct PerformanceDiagnosticsTests {
         #expect(PerformanceSignpostCatalog.logTextInstall.description == "LogTextInstall")
     }
 
-    @Test("resource metadata exposes counts and revisions but no object content")
-    func resourceBatchMetadata() throws {
-        let row = ResourceRow(identity: ResourceIdentity(
-            clusterSessionID: "session-secret",
-            group: "",
-            version: "v1",
-            resource: "pods",
-            namespace: "private-namespace",
-            name: "private-name",
-            uid: "private-uid"
-        ), cells: [])
-        let snapshot = ResourceViewMessage.snapshot(
+    @Test("resource metadata exposes only bounded counts and revisions")
+    func resourceInvalidationMetadata() throws {
+        let invalidation = ResourceViewMessage.invalidation(
             cursor: StreamCursor(generation: 4, sequence: 7),
-            chunk: ResourceSnapshotChunk(
-                rows: [row], first: true, last: false, index: 0,
-                estimatedTotalRows: 20
+            invalidation: ResourceViewInvalidation(
+                presentationRevision: 19,
+                indexRevision: 8,
+                rowsVisible: 2_000_000,
+                maxRangeLength: 512,
+                observedOptionalResourceKeys: ["private.example/key"]
             )
         )
-        let snapshotMetadata = try #require(snapshot.resourceBatchSignpostMetadata)
-        #expect(snapshotMetadata == ResourceBatchSignpostMetadata(
-            kind: .snapshot,
+        let metadata = try #require(
+            invalidation.resourceInvalidationSignpostMetadata
+        )
+        #expect(metadata == ResourceInvalidationSignpostMetadata(
             generation: 4,
             sequence: 7,
-            upsertCount: 1,
-            removalCount: 0,
-            orderCount: 1,
-            replacesOrder: false
+            presentationRevision: 19,
+            indexRevision: 8,
+            rowsVisible: 2_000_000
         ))
-
-        let delta = ResourceViewMessage.delta(
-            cursor: StreamCursor(generation: 4, sequence: 8),
-            delta: ResourceRowDelta(
-                upserts: [row],
-                removedUIDs: ["another-private-uid"],
-                orderedUIDs: ["private-uid"],
-                orderIsComplete: true
-            )
-        )
-        let deltaMetadata = try #require(delta.resourceBatchSignpostMetadata)
-        #expect(deltaMetadata.upsertCount == 1)
-        #expect(deltaMetadata.removalCount == 1)
-        #expect(deltaMetadata.orderCount == 1)
-        #expect(deltaMetadata.replacesOrder)
 
         #expect(ResourceViewMessage.status(
             cursor: StreamCursor(generation: 4, sequence: 9),
             status: ResourceViewStatus(freshness: .watching)
-        ).resourceBatchSignpostMetadata == nil)
+        ).resourceInvalidationSignpostMetadata == nil)
     }
 }

@@ -2698,12 +2698,22 @@ private final class ResourceListViewController: NSViewController,
         String: DeferredColumnPresentationState
     ] = [:]
     private var suppressSortChanges = false
-    private var snapshotUIDs: [ResourceUID] = []
     private var lastStreamContext: ResourceWarmRowContext?
-    private var stagedReconciliation: ResourceStagedReconciliation?
-    private var isRetainingWarmRowsForCurrentStream: Bool {
-        stagedReconciliation != nil
-    }
+    private var rangeCache: ResourceViewRangeCache?
+    private var rangeFetchTask: Task<Void, Never>?
+    private var pendingInitialRange: ResourceViewRange?
+    private var reconciledRevision: ResourceViewRevision?
+    /// Once an exact reconciliation has crossed the retained warm view, later
+    /// revisions are ordinary live invalidations and do not need another
+    /// reconciliation merely because an earlier range fetch lost a race.
+    private var hasReachedInitialReconciliation = false
+    /// Revision of the bounded range currently projected into the table.
+    /// Keeping this separate from the transport cache lets a presentation-only
+    /// invalidation compare rows against the last rendered range and retain
+    /// UID-pinned cell effects, while an index/generation change establishes a
+    /// fresh baseline.
+    private var presentedRangeRevision: ResourceViewRevision?
+    private var isRetainingWarmRowsForCurrentStream = false
     private var backendResourceViewStatus: ResourceViewStatus?
     private var retainedRowsLastSynchronizedAt: Date?
     private var pendingScrollAnchor: ScrollAnchor?
@@ -2837,8 +2847,7 @@ private final class ResourceListViewController: NSViewController,
         switch message {
         case .schema: "schema"
         case .status: "status"
-        case .snapshot: "snapshot"
-        case .delta: "delta"
+        case .invalidation: "invalidation"
         case .reconciled: "reconciled"
         case .failure: "failure"
         }
@@ -3099,7 +3108,14 @@ private final class ResourceListViewController: NSViewController,
         filterTask = nil
         streamTask?.cancel()
         streamTask = nil
-        stagedReconciliation = nil
+        rangeFetchTask?.cancel()
+        rangeFetchTask = nil
+        rangeCache = nil
+        pendingInitialRange = nil
+        reconciledRevision = nil
+        hasReachedInitialReconciliation = false
+        presentedRangeRevision = nil
+        isRetainingWarmRowsForCurrentStream = false
         cancelOptionalResourceDiscovery(selecting: nil)
         generationGate.reset()
         recoveredResourceTrust.requireValidation()
@@ -3120,7 +3136,14 @@ private final class ResourceListViewController: NSViewController,
         clearTransientCellPresentation()
         streamTask?.cancel()
         streamTask = nil
-        stagedReconciliation = nil
+        rangeFetchTask?.cancel()
+        rangeFetchTask = nil
+        rangeCache = nil
+        pendingInitialRange = nil
+        reconciledRevision = nil
+        hasReachedInitialReconciliation = false
+        presentedRangeRevision = nil
+        isRetainingWarmRowsForCurrentStream = false
         cancelOptionalResourceDiscovery(selecting: nil)
         model = ResourceTableModel()
         tableView.reloadData()
@@ -3174,7 +3197,14 @@ private final class ResourceListViewController: NSViewController,
         filterTask?.cancel()
         filterTask = nil
         cancelCurrentStream(reason: "suspend")
-        stagedReconciliation = nil
+        rangeFetchTask?.cancel()
+        rangeFetchTask = nil
+        rangeCache = nil
+        pendingInitialRange = nil
+        reconciledRevision = nil
+        hasReachedInitialReconciliation = false
+        presentedRangeRevision = nil
+        isRetainingWarmRowsForCurrentStream = false
         cancelOptionalResourceDiscovery(selecting: nil)
     }
 
@@ -3601,19 +3631,31 @@ private final class ResourceListViewController: NSViewController,
             tableView.reloadData()
         }
         lastStreamContext = nextStreamContext
-        stagedReconciliation = canKeepWarmRows
-            ? ResourceStagedReconciliation() : nil
+        rangeFetchTask?.cancel()
+        rangeFetchTask = nil
+        rangeCache = ResourceViewRangeCache(
+            sessionID: session.sessionID,
+            viewID: viewID,
+            generation: generation
+        )
+        pendingInitialRange = nil
+        reconciledRevision = nil
+        hasReachedInitialReconciliation = false
+        presentedRangeRevision = nil
+        isRetainingWarmRowsForCurrentStream = canKeepWarmRows
         backendResourceViewStatus = nil
         retainedRowsLastSynchronizedAt = canKeepWarmRows
             ? resourceViewStatus?.lastSynchronizedAt : nil
-        snapshotUIDs.removeAll(keepingCapacity: true)
         hideInlineIssue()
         titleLabel.stringValue = resource.kind.isEmpty ? resource.resource : resource.kind
         scopeLabel.stringValue = scope.presentation
         if canKeepWarmRows {
             installResourceViewStatus(ResourceWarmRowPolicy.refreshingStatus(
                 backendStatus: nil,
-                retainedRowCount: model.orderedVisibleUIDs.count,
+                retainedRowCount: Int(clamping:
+                    resourceViewStatus?.rowsVisible
+                        ?? UInt64(model.orderedVisibleUIDs.count)
+                ),
                 lastSynchronizedAt: retainedRowsLastSynchronizedAt
             ))
         } else {
@@ -3733,232 +3775,134 @@ private final class ResourceListViewController: NSViewController,
                     + " local_rows=\(model.orderedVisibleUIDs.count)"
                     + " retaining=\(isRetainingWarmRowsForCurrentStream)"
                     + " from_warm_cache=\(status.fromWarmCache)"
-                    + " staged_rows=\(stagedReconciliation?.visibleRowCount ?? 0)"
+                    + " cached_rows=\(rangeCache?.cachedRowCount ?? 0)"
             )
             backendResourceViewStatus = status
             if isRetainingWarmRowsForCurrentStream {
                 installResourceViewStatus(ResourceWarmRowPolicy.refreshingStatus(
                     backendStatus: status,
-                    retainedRowCount: model.orderedVisibleUIDs.count,
+                    retainedRowCount: Int(clamping:
+                        resourceViewStatus?.rowsVisible
+                            ?? UInt64(model.orderedVisibleUIDs.count)
+                    ),
                     lastSynchronizedAt: retainedRowsLastSynchronizedAt
                 ))
             } else {
                 installResourceViewStatus(status)
             }
-        case .snapshot(_, let chunk):
-            if var staged = stagedReconciliation {
-                let stagedRowsBefore = staged.visibleRowCount
-                staged.receive(chunk)
-                stagedReconciliation = staged
-                traceResourceCache(
-                    "event=snapshot_staged sequence=\(cursor.sequence)"
-                        + " index=\(chunk.index)"
-                        + " first=\(chunk.first) last=\(chunk.last)"
-                        + " chunk_rows=\(chunk.rows.count)"
-                        + " staged_rows_before=\(stagedRowsBefore)"
-                        + " staged_rows_after=\(staged.visibleRowCount)"
-                        + " retained_rows=\(model.orderedVisibleUIDs.count)"
-                )
+        case .invalidation(_, let invalidation):
+            observeOptionalResourceKeys(
+                invalidation.observedOptionalResourceKeys,
+                truncated: invalidation.observedOptionalResourceKeysTruncated
+            )
+            guard var cache = rangeCache else { break }
+            let disposition = cache.receive(
+                cursor: cursor,
+                invalidation: invalidation
+            )
+            rangeCache = cache
+            guard disposition != .rejectedStale,
+                disposition != .rejectedInvalid,
+                disposition != .hintsOnly
+            else { break }
+            let indexChanged: Bool
+            switch disposition {
+            case .installed:
+                indexChanged = true
+            case .advanced(let changed):
+                indexChanged = changed
+            case .hintsOnly, .rejectedStale, .rejectedInvalid:
+                indexChanged = false
+            }
+            pendingInitialRange = nil
+            reconciledRevision = nil
+            let boundedCount = min(
+                invalidation.rowsVisible,
+                UInt64(min(
+                    invalidation.maxRangeLength,
+                    ResourceViewInvalidation.protocolMaximumRangeLength
+                ))
+            )
+            let requests = cache.retain(0..<boundedCount)
+            rangeCache = cache
+            if let interest = cache.metricInterest {
+                let provider = self.provider
+                Task { try? await provider.updateMetricInterest(request: interest) }
+            }
+            guard let request = requests.first else {
+                if invalidation.rowsVisible == 0 {
+                    let emptyRange = ResourceViewRange(
+                        viewID: viewID,
+                        revision: invalidation.revision(generation: generation),
+                        startIndex: 0,
+                        rowsVisible: 0,
+                        rows: []
+                    )
+                    if isRetainingWarmRowsForCurrentStream {
+                        pendingInitialRange = emptyRange
+                    } else {
+                        installFetchedRange(
+                            emptyRange,
+                            request: nil,
+                            establishesBaseline: indexChanged
+                        )
+                        endProjectionRequest(outcome: "range-fetched")
+                    }
+                }
                 break
             }
-            let rowsBeforeSnapshot = model.orderedVisibleUIDs.count
-            traceResourceCache(
-                "event=snapshot_received sequence=\(cursor.sequence)"
-                    + " index=\(chunk.index)"
-                    + " first=\(chunk.first) last=\(chunk.last)"
-                    + " chunk_rows=\(chunk.rows.count)"
-                    + " estimated_rows=\(chunk.estimatedTotalRows)"
-                    + " local_rows_before=\(rowsBeforeSnapshot)"
-                    + " backend_freshness="
-                    + (backendResourceViewStatus.map {
-                        String(describing: $0.freshness)
-                    } ?? "none")
-                    + " first_row="
-                    + resourceCacheIdentityDescription(chunk.rows.first?.identity)
-                    + " last_row="
-                    + resourceCacheIdentityDescription(chunk.rows.last?.identity)
-            )
-            let metadata = message.resourceBatchSignpostMetadata!
-            let interval = tableSignposter.beginInterval(
-                PerformanceSignpostCatalog.resourceModelApply,
-                "kind=\(metadata.kind.rawValue, privacy: .public) generation=\(metadata.generation) sequence=\(metadata.sequence) upserts=\(metadata.upsertCount) removals=\(metadata.removalCount) order_count=\(metadata.orderCount) replaces_order=\(metadata.replacesOrder)"
-            )
-            var capture = captureUpdate()
-            if chunk.first {
-                clearTransientCellPresentation(
-                    keepingRequestedFilterHighlight: true
-                )
-                snapshotUIDs.removeAll(keepingCapacity: true)
+            rangeFetchTask?.cancel()
+            let provider = self.provider
+            rangeFetchTask = Task { [weak self] in
+                do {
+                    let range = try await provider.fetchViewRange(request: request)
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        self?.receiveFetchedRange(
+                            range,
+                            request: request,
+                            establishesBaseline: indexChanged
+                        )
+                    }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        self?.receiveRangeFetchFailure(error, request: request)
+                    }
+                }
             }
-            snapshotUIDs.append(contentsOf: chunk.rows.map { $0.identity.uid })
-            recoveredResourceTrust.receiveSnapshot(
-                uids: chunk.rows.map { $0.identity.uid },
-                first: chunk.first,
-                last: chunk.last
-            )
-            if let pendingScrollAnchor,
-                chunk.last || chunk.rows.contains(where: { $0.identity.uid == pendingScrollAnchor.uid })
+        case .reconciled(_, let reconciliation):
+            let revision = reconciliation.revision(generation: generation)
+            let matchesCurrentRevision = rangeCache?.matches(
+                cursor: cursor,
+                reconciliation: reconciliation
+            ) == true
+            if matchesCurrentRevision {
+                reconciledRevision = revision
+                hasReachedInitialReconciliation = true
+            }
+            if let pendingInitialRange,
+                pendingInitialRange.revision == revision,
+                matchesCurrentRevision
             {
-                capture = ResourceTableUpdateCapture(
-                    selectedUIDs: capture.selectedUIDs,
-                    selectionAnchorUID: capture.selectionAnchorUID,
-                    previousOrder: capture.previousOrder,
-                    scrollAnchor: pendingScrollAnchor
+                self.pendingInitialRange = nil
+                installFetchedRange(
+                    pendingInitialRange,
+                    request: nil,
+                    establishesBaseline: true
                 )
-                self.pendingScrollAnchor = nil
-            }
-            let order: VisibleOrderUpdate = chunk.last
-                ? .replace(snapshotUIDs)
-                : .append(chunk.rows.map { $0.identity.uid })
-            var plan = model.apply(
-                ResourceRowBatch(
-                    upserts: chunk.rows,
-                    visibleOrder: order
-                ),
-                capture: capture
-            )
-            plan = restoringPendingSelection(in: plan, chunkIsComplete: chunk.last)
-            tableSignposter.endInterval(
-                PerformanceSignpostCatalog.resourceModelApply,
-                interval,
-                "visible_rows=\(self.model.orderedVisibleUIDs.count) stored_rows=\(self.model.rowByUID.count) selected_rows=\(plan.selectedRowIndexes.count)"
-            )
-            applyTablePlan(plan)
-            traceResourceCache(
-                "event=snapshot_applied sequence=\(cursor.sequence)"
-                    + " index=\(chunk.index)"
-                    + " first=\(chunk.first) last=\(chunk.last)"
-                    + " chunk_rows=\(chunk.rows.count)"
-                    + " local_rows_before=\(rowsBeforeSnapshot)"
-                    + " local_rows_after=\(model.orderedVisibleUIDs.count)"
-            )
-            if rowsBeforeSnapshot > 0, model.orderedVisibleUIDs.isEmpty {
-                traceResourceCache(
-                    "event=rows_cleared cause=snapshot"
-                        + " sequence=\(cursor.sequence)"
-                        + " first=\(chunk.first) last=\(chunk.last)"
-                        + " chunk_rows=\(chunk.rows.count)"
-                        + " backend_freshness="
-                        + (backendResourceViewStatus.map {
-                            String(describing: $0.freshness)
-                        } ?? "none")
-                )
-            }
-            if chunk.last {
-                isChangeDetectionArmed = true
-                activateRequestedFilterHighlight()
-            }
-            observeOptionalResourceKeys(
-                chunk.observedOptionalResourceKeys,
-                truncated: chunk.observedOptionalResourceKeysTruncated
-            )
-            if !chunk.rows.isEmpty || chunk.last {
-                markBaseViewUsableForOptionalResourceDiscovery()
-            }
-            if chunk.last {
-                endProjectionRequest(outcome: "snapshot-complete")
+                isRetainingWarmRowsForCurrentStream = false
+                endProjectionRequest(outcome: "reconciled")
+                installReconciledStatus(rowCount: reconciliation.rowsVisible)
+                shouldPublishContextualShortcuts = true
+            } else if reconciliation.rowsVisible == 0,
+                matchesCurrentRevision
+            {
+                isRetainingWarmRowsForCurrentStream = false
+                endProjectionRequest(outcome: "reconciled")
+                installReconciledStatus(rowCount: reconciliation.rowsVisible)
                 shouldPublishContextualShortcuts = true
             }
-        case .delta(_, let delta):
-            if var staged = stagedReconciliation {
-                let stagedRowsBefore = staged.visibleRowCount
-                staged.receive(delta)
-                stagedReconciliation = staged
-                traceResourceCache(
-                    "event=delta_staged sequence=\(cursor.sequence)"
-                        + " upserts=\(delta.upserts.count)"
-                        + " removals=\(delta.removedUIDs.count)"
-                        + " ordered=\(delta.orderedUIDs.count)"
-                        + " order_complete=\(delta.orderIsComplete)"
-                        + " staged_rows_before=\(stagedRowsBefore)"
-                        + " staged_rows_after=\(staged.visibleRowCount)"
-                        + " retained_rows=\(model.orderedVisibleUIDs.count)"
-                )
-                break
-            }
-            let rowsBeforeDelta = model.orderedVisibleUIDs.count
-            let detectedChanges: [ResourceCellChange] = isChangeDetectionArmed
-                ? delta.upserts.flatMap { row -> [ResourceCellChange] in
-                    guard !delta.removedUIDs.contains(row.identity.uid) else {
-                        return []
-                    }
-                    return rowChangeDetector.changes(
-                        from: model.rowByUID[row.identity.uid],
-                        to: row
-                    )
-                }
-                : []
-            var affectedCellAddresses = cellHighlightStore.removeAll(
-                forUIDs: delta.removedUIDs
-            )
-            let selectedUIDs = model.selectedUIDs
-            shouldPublishContextualShortcuts = delta.removedUIDs.contains {
-                selectedUIDs.contains($0)
-            } || (recoveredResourceTrust.requiresValidation && delta.upserts.contains {
-                selectedUIDs.contains($0.identity.uid)
-            })
-            let metadata = message.resourceBatchSignpostMetadata!
-            let interval = tableSignposter.beginInterval(
-                PerformanceSignpostCatalog.resourceModelApply,
-                "kind=\(metadata.kind.rawValue, privacy: .public) generation=\(metadata.generation) sequence=\(metadata.sequence) upserts=\(metadata.upsertCount) removals=\(metadata.removalCount) order_count=\(metadata.orderCount) replaces_order=\(metadata.replacesOrder)"
-            )
-            let capture = captureUpdate()
-            let order: VisibleOrderUpdate = delta.orderIsComplete
-                ? .replace(delta.orderedUIDs)
-                : .unchanged
-            var plan = model.apply(ResourceRowBatch(
-                upserts: delta.upserts,
-                removedUIDs: delta.removedUIDs,
-                visibleOrder: order
-            ), capture: capture)
-            plan = restoringPendingSelection(in: plan, chunkIsComplete: false)
-            tableSignposter.endInterval(
-                PerformanceSignpostCatalog.resourceModelApply,
-                interval,
-                "visible_rows=\(self.model.orderedVisibleUIDs.count) stored_rows=\(self.model.rowByUID.count) selected_rows=\(plan.selectedRowIndexes.count)"
-            )
-            if !detectedChanges.isEmpty {
-                affectedCellAddresses.formUnion(cellHighlightStore.record(
-                    detectedChanges,
-                    at: ContinuousClock.now,
-                    visibleUIDs: visibleResourceUIDsInViewport()
-                ))
-            }
-            applyTablePlan(plan)
-            traceResourceCache(
-                "event=delta_applied sequence=\(cursor.sequence)"
-                    + " upserts=\(delta.upserts.count)"
-                    + " removals=\(delta.removedUIDs.count)"
-                    + " ordered=\(delta.orderedUIDs.count)"
-                    + " order_complete=\(delta.orderIsComplete)"
-                    + " local_rows_before=\(rowsBeforeDelta)"
-                    + " local_rows_after=\(model.orderedVisibleUIDs.count)"
-                    + " first_upsert="
-                    + resourceCacheIdentityDescription(delta.upserts.first?.identity)
-            )
-            if rowsBeforeDelta > 0, model.orderedVisibleUIDs.isEmpty {
-                traceResourceCache(
-                    "event=rows_cleared cause=delta"
-                        + " sequence=\(cursor.sequence)"
-                        + " removals=\(delta.removedUIDs.count)"
-                        + " order_complete=\(delta.orderIsComplete)"
-                )
-            }
-            reloadVisibleCellPresentation(at: affectedCellAddresses)
-            scheduleCellHighlightRefresh()
-            recoveredResourceTrust.receiveDelta(
-                upsertedUIDs: delta.upserts.map { $0.identity.uid },
-                removedUIDs: delta.removedUIDs
-            )
-            observeOptionalResourceKeys(
-                delta.observedOptionalResourceKeys,
-                truncated: delta.observedOptionalResourceKeysTruncated
-            )
-        case .reconciled(_, let reconciliation):
-            shouldPublishContextualShortcuts = promoteStagedReconciliation(
-                reconciliation,
-                sequence: cursor.sequence
-            )
         case .failure(_, let issue):
             traceResourceCache(
                 "event=stream_failure sequence=\(cursor.sequence)"
@@ -3977,87 +3921,150 @@ private final class ResourceListViewController: NSViewController,
         }
     }
 
-    @discardableResult
-    private func promoteStagedReconciliation(
-        _ reconciliation: ResourceViewReconciliation,
-        sequence: UInt64
-    ) -> Bool {
-        guard let staged = stagedReconciliation else {
-            traceResourceCache(
-                "event=reconciliation_ignored cause=no-staged-table"
-                    + " sequence=\(sequence)"
-                    + " expected_rows=\(reconciliation.rowsVisible)"
-                    + " local_rows=\(model.orderedVisibleUIDs.count)"
-            )
-            return false
+    private func receiveFetchedRange(
+        _ range: ResourceViewRange,
+        request: ResourceViewRangeRequest,
+        establishesBaseline: Bool
+    ) {
+        guard var cache = rangeCache else { return }
+        let reception = cache.receive(range, for: request)
+        guard reception != .rejectedRace, reception != .rejectedInvalid else {
+            return
         }
-        guard staged.matches(reconciliation) else {
-            traceResourceCache(
-                "event=reconciliation_rejected cause=row-count-mismatch"
-                    + " sequence=\(sequence)"
-                    + " expected_rows=\(reconciliation.rowsVisible)"
-                    + " staged_rows=\(staged.visibleRowCount)"
-                    + " retained_rows=\(model.orderedVisibleUIDs.count)"
-            )
-            logger.error(
-                "Rejected incomplete staged resource reconciliation: expected=\(reconciliation.rowsVisible) staged=\(staged.visibleRowCount)"
-            )
-            return false
+        rangeCache = cache
+        if isRetainingWarmRowsForCurrentStream,
+            !hasReachedInitialReconciliation,
+            reconciledRevision != range.revision
+        {
+            pendingInitialRange = range
+            return
         }
+        installFetchedRange(
+            range,
+            request: request,
+            establishesBaseline: establishesBaseline
+        )
+        if isRetainingWarmRowsForCurrentStream {
+            isRetainingWarmRowsForCurrentStream = false
+            endProjectionRequest(outcome: "reconciled")
+            installReconciledStatus(rowCount: range.rowsVisible)
+        } else {
+            endProjectionRequest(outcome: "range-fetched")
+        }
+    }
 
-        let rowsBeforePromotion = model.orderedVisibleUIDs.count
-        var capture = captureUpdate()
-        if let pendingScrollAnchor {
-            capture = ResourceTableUpdateCapture(
-                selectedUIDs: capture.selectedUIDs,
-                selectionAnchorUID: capture.selectionAnchorUID,
-                previousOrder: capture.previousOrder,
-                scrollAnchor: pendingScrollAnchor
+    private func receiveRangeFetchFailure(
+        _ error: Error,
+        request: ResourceViewRangeRequest
+    ) {
+        guard var cache = rangeCache else { return }
+        let requestWasCurrent = cache.containsPendingRequest(request)
+        cache.release(request)
+        rangeCache = cache
+        guard requestWasCurrent else { return }
+        if let issue = error as? ClusterManagerIssue,
+            issue.category == .validation
+        {
+            // A pinned range is expected to lose a race when the backing view
+            // advances before the control invalidation is delivered. The next
+            // invalidation requests the new revision; surfacing this transient
+            // transport rejection would leave a stale inline error after the
+            // replacement range succeeds.
+            traceResourceCache(
+                "event=range_fetch_ignored cause=revision-race"
+                    + " presentation=\(request.revision.presentation)"
+                    + " index=\(request.revision.index)"
             )
-            self.pendingScrollAnchor = nil
+            return
         }
-        clearTransientCellPresentation(keepingRequestedFilterHighlight: true)
-        var plan = model.apply(staged.promotionBatch, capture: capture)
-        plan = restoringPendingSelection(in: plan, chunkIsComplete: true)
+        show(error: error)
+    }
+
+    private func installFetchedRange(
+        _ range: ResourceViewRange,
+        request: ResourceViewRangeRequest?,
+        establishesBaseline: Bool
+    ) {
+        let previousUIDs = Set(model.orderedVisibleUIDs)
+        let nextUIDs = Set(range.rows.lazy.map { $0.identity.uid })
+        let removedUIDs = previousUIDs.subtracting(nextUIDs)
+        let continuesPresentedIndex = presentedRangeRevision.map {
+            $0.generation == range.revision.generation
+                && $0.index == range.revision.index
+        } ?? false
+        let canDetectChanges = !establishesBaseline
+            && continuesPresentedIndex
+            && isChangeDetectionArmed
+        let detectedChanges: [ResourceCellChange] = canDetectChanges
+            ? range.rows.flatMap { row in
+                rowChangeDetector.changes(
+                    from: model.rowByUID[row.identity.uid],
+                    to: row
+                )
+            }
+            : []
+        var affectedCellAddresses: Set<ResourceCellAddress> = []
+        if establishesBaseline || !continuesPresentedIndex {
+            clearTransientCellPresentation(
+                keepingRequestedFilterHighlight: true
+            )
+        } else {
+            affectedCellAddresses = cellHighlightStore.removeAll(
+                forUIDs: removedUIDs
+            )
+        }
+        let capture = captureUpdate()
+        let order = range.rows.map { $0.identity.uid }
+        let plan = model.apply(
+            ResourceRowBatch(upserts: range.rows, visibleOrder: .replace(order)),
+            capture: capture
+        )
+        applyTablePlan(restoringPendingSelection(in: plan, chunkIsComplete: true))
+        if !detectedChanges.isEmpty {
+            affectedCellAddresses.formUnion(cellHighlightStore.record(
+                detectedChanges,
+                at: ContinuousClock.now,
+                visibleUIDs: visibleResourceUIDsInViewport()
+            ))
+        }
         recoveredResourceTrust.receiveSnapshot(
-            uids: staged.model.orderedVisibleUIDs,
+            uids: order,
             first: true,
+            // The projected table contains only exact rows returned by this
+            // authenticated, revision-pinned range. Rows outside the bounded
+            // projection do not need to be materialized to trust these UIDs.
             last: true
         )
-        stagedReconciliation = nil
-        snapshotUIDs.removeAll(keepingCapacity: true)
-        retainedRowsLastSynchronizedAt = nil
-        applyTablePlan(plan)
+        presentedRangeRevision = range.revision
         isChangeDetectionArmed = true
         activateRequestedFilterHighlight()
-        observeOptionalResourceKeys(
-            staged.observedOptionalResourceKeys,
-            truncated: staged.observedOptionalResourceKeysTruncated
-        )
+        reloadVisibleCellPresentation(at: affectedCellAddresses)
+        scheduleCellHighlightRefresh()
         markBaseViewUsableForOptionalResourceDiscovery()
-        endProjectionRequest(outcome: "reconciled")
-        traceResourceCache(
-            "event=reconciliation_promoted sequence=\(sequence)"
-                + " rows_before=\(rowsBeforePromotion)"
-                + " rows_after=\(model.orderedVisibleUIDs.count)"
-                + " confirmed_removals=\(staged.confirmedRemovedUIDs.count)"
-                + " backend_freshness="
-                + (backendResourceViewStatus.map {
-                    String(describing: $0.freshness)
-                } ?? "none")
-        )
-        if rowsBeforePromotion > 0, model.orderedVisibleUIDs.isEmpty {
-            traceResourceCache(
-                "event=rows_cleared cause=authoritative-reconciliation"
-                    + " sequence=\(sequence)"
-            )
+        retainedRowsLastSynchronizedAt = nil
+        rangeFetchTask = nil
+        if !isRetainingWarmRowsForCurrentStream {
+            installRangeStatus(rowCount: range.rowsVisible)
         }
-        var status = backendResourceViewStatus ?? ResourceViewStatus(
-            freshness: .complete
+        traceResourceCache(
+            "event=range_applied start=\(range.startIndex)"
+                + " rows=\(range.rows.count) total=\(range.rowsVisible)"
+                + " presentation=\(range.revision.presentation)"
+                + " index=\(range.revision.index)"
         )
-        status.rowsVisible = UInt64(model.orderedVisibleUIDs.count)
+        if request != nil { updateStatusLine() }
+    }
+
+    private func installRangeStatus(rowCount: UInt64) {
+        var status = backendResourceViewStatus
+            ?? resourceViewStatus
+            ?? ResourceViewStatus(freshness: .complete)
+        status.rowsVisible = rowCount
         installResourceViewStatus(status)
-        return true
+    }
+
+    private func installReconciledStatus(rowCount: UInt64) {
+        installRangeStatus(rowCount: rowCount)
     }
 
     private func restoringPendingSelection(
@@ -4582,8 +4589,10 @@ private final class ResourceListViewController: NSViewController,
         let selection = counts.hidden > 0
             ? "\(counts.selected) selected (\(counts.hidden) hidden by filter)"
             : "\(counts.selected) selected"
+        let authoritativeRowCount = resourceViewStatus?.rowsVisible
+            ?? UInt64(model.orderedVisibleUIDs.count)
         var statusParts = [
-            "\(model.orderedVisibleUIDs.count.formatted()) objects",
+            "\(authoritativeRowCount.formatted()) objects",
             selection,
         ]
         if !labelSelector.isEmpty || !fieldSelector.isEmpty {
@@ -5149,7 +5158,14 @@ private final class ResourceListViewController: NSViewController,
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
-        stagedReconciliation = nil
+        rangeFetchTask?.cancel()
+        rangeFetchTask = nil
+        rangeCache = nil
+        pendingInitialRange = nil
+        reconciledRevision = nil
+        hasReachedInitialReconciliation = false
+        presentedRangeRevision = nil
+        isRetainingWarmRowsForCurrentStream = false
         clearTransientCellPresentation()
         traceResourceCache(
             "event=rows_cleared cause=restored-resource-validation-rejected"

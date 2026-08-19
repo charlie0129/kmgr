@@ -397,8 +397,8 @@ public struct Kmgr_V1_OpenViewRequest: @unchecked Sendable {
   public mutating func clearSpec() {_uniqueStorage()._spec = nil}
 
   /// The client already has a compatible rendered table. The engine must emit
-  /// ViewReconciled only after every preceding payload needed to construct one
-  /// complete replacement presentation has been delivered.
+  /// ViewReconciled only after an authoritative replacement invalidation is
+  /// available through FetchViewRange.
   public var stageUntilReconciled: Bool {
     get {return _storage._stageUntilReconciled}
     set {_uniqueStorage()._stageUntilReconciled = newValue}
@@ -453,6 +453,10 @@ public struct Kmgr_V1_ViewStatus: Sendable {
 
   public var resourceVersionHint: String = String()
 
+  /// True while metric-backed global order or membership is still being
+  /// completed. Display-only viewport metric refreshes do not set this flag.
+  public var metricsReconciling: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -506,73 +510,149 @@ public struct Kmgr_V1_ViewSchema: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_SnapshotChunk: Sendable {
+/// ViewInvalidation announces the exact backend presentation currently
+/// available through FetchViewRange. The presentation revision advances for
+/// any cell payload change. The index revision advances only when membership or
+/// order changes, allowing selection state to remain stable across cell-only
+/// refreshes. Both revisions are nonzero, generation-local, and monotonically
+/// increase. An event may repeat both revisions solely to carry new advisory
+/// optional-resource keys; repeated revisions do not invalidate cached rows.
+public struct Kmgr_V1_ViewInvalidation: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
+
+  public var presentationRevision: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
+
+  public var rowsVisible: UInt64 = 0
+
+  public var maxRangeLength: UInt32 = 0
+
+  /// Advisory exact Kubernetes ResourceName values newly observed in the raw
+  /// core/v1 Pod or Node objects. Entries are distinct and sorted. Clients may
+  /// use them to decide when to repeat cache-only optional resource discovery;
+  /// the catalog RPC remains authoritative for metadata.
+  public var observedOptionalResourceKeys: [String] = []
+
+  /// True when the advisory key set exceeded its bounded wire budget. Clients
+  /// should repeat cache-only discovery even if every retained key is known.
+  public var observedOptionalResourceKeysTruncated: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Kmgr_V1_FetchViewRangeRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var viewID: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var presentationRevision: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
+
+  public var startIndex: UInt64 = 0
+
+  public var length: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+}
+
+public struct Kmgr_V1_FetchViewRangeResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var viewID: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var presentationRevision: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
+
+  public var startIndex: UInt64 = 0
+
+  public var rowsVisible: UInt64 = 0
 
   public var rows: [Kmgr_V1_ResourceRow] = []
 
-  public var firstChunk: Bool = false
-
-  public var lastChunk: Bool = false
-
-  public var chunkIndex: UInt64 = 0
-
-  public var estimatedTotalRows: UInt64 = 0
-
-  /// Advisory exact Kubernetes ResourceName values newly observed in the raw
-  /// core/v1 Pod or Node objects behind this snapshot. Entries are distinct and
-  /// sorted. Clients may use them to decide when to repeat cache-only optional
-  /// resource discovery; the catalog RPC remains authoritative for metadata.
-  public var observedOptionalResourceKeys: [String] = []
-
-  /// True when the advisory key set exceeded its bounded wire budget. Clients
-  /// should repeat cache-only discovery even if every retained key is known.
-  public var observedOptionalResourceKeysTruncated: Bool = false
-
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 }
 
-public struct Kmgr_V1_RowDelta: Sendable {
+/// UpdateMetricInterest is a debounced viewport hint. Index revision pins the
+/// numeric range to one exact ordering; stale hints are rejected rather than
+/// silently rebound. Swift chooses its visible-range overscan within the
+/// advertised max_range_length.
+public struct Kmgr_V1_UpdateMetricInterestRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  public var upserts: [Kmgr_V1_ResourceRow] = []
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
 
-  public var removedUids: [String] = []
+  public var viewID: String = String()
 
-  public var orderedUids: [String] = []
+  public var generation: UInt64 = 0
 
-  public var orderIsComplete: Bool = false
+  public var indexRevision: UInt64 = 0
 
-  /// Advisory exact Kubernetes ResourceName values newly observed in raw
-  /// core/v1 Pod or Node upserts. This may be populated even when filtering
-  /// produces no row upsert. Entries are distinct and sorted.
-  public var observedOptionalResourceKeys: [String] = []
+  public var startIndex: UInt64 = 0
 
-  /// True when the advisory key set exceeded its bounded wire budget. Clients
-  /// should repeat cache-only discovery even if every retained key is known.
-  public var observedOptionalResourceKeysTruncated: Bool = false
+  public var length: UInt32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-/// A generation-local commit barrier. All snapshot/delta events preceding this
-/// event form one complete replacement presentation, including the empty case.
-/// Clients that requested stage_until_reconciled can build those payloads off
-/// screen and replace their retained table atomically when this event arrives.
+/// A generation-local commit barrier. The named revisions identify one complete
+/// authoritative presentation, including the empty case, available through
+/// FetchViewRange. Clients that requested stage_until_reconciled may replace
+/// their retained table atomically when this event arrives.
 public struct Kmgr_V1_ViewReconciled: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var rowsVisible: UInt64 = 0
+
+  public var presentationRevision: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -594,22 +674,6 @@ public struct Kmgr_V1_ViewEvent: Sendable {
   public mutating func clearCursor() {self._cursor = nil}
 
   public var payload: Kmgr_V1_ViewEvent.OneOf_Payload? = nil
-
-  public var snapshot: Kmgr_V1_SnapshotChunk {
-    get {
-      if case .snapshot(let v)? = payload {return v}
-      return Kmgr_V1_SnapshotChunk()
-    }
-    set {payload = .snapshot(newValue)}
-  }
-
-  public var delta: Kmgr_V1_RowDelta {
-    get {
-      if case .delta(let v)? = payload {return v}
-      return Kmgr_V1_RowDelta()
-    }
-    set {payload = .delta(newValue)}
-  }
 
   public var status: Kmgr_V1_ViewStatus {
     get {
@@ -643,15 +707,22 @@ public struct Kmgr_V1_ViewEvent: Sendable {
     set {payload = .schema(newValue)}
   }
 
+  public var invalidation: Kmgr_V1_ViewInvalidation {
+    get {
+      if case .invalidation(let v)? = payload {return v}
+      return Kmgr_V1_ViewInvalidation()
+    }
+    set {payload = .invalidation(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
-    case snapshot(Kmgr_V1_SnapshotChunk)
-    case delta(Kmgr_V1_RowDelta)
     case status(Kmgr_V1_ViewStatus)
     case error(Kmgr_V1_StructuredError)
     case reconciled(Kmgr_V1_ViewReconciled)
     case schema(Kmgr_V1_ViewSchema)
+    case invalidation(Kmgr_V1_ViewInvalidation)
 
   }
 
@@ -1545,7 +1616,7 @@ extension Kmgr_V1_CancelViewRequest: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 extension Kmgr_V1_ViewStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewStatus"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}freshness\0\u{3}objects_examined\0\u{3}rows_visible\0\u{3}last_synchronized_unix_ms\0\u{3}from_warm_cache\0\u{3}resource_version_hint\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}freshness\0\u{3}objects_examined\0\u{3}rows_visible\0\u{3}last_synchronized_unix_ms\0\u{3}from_warm_cache\0\u{3}resource_version_hint\0\u{3}metrics_reconciling\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1559,6 +1630,7 @@ extension Kmgr_V1_ViewStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
       case 4: try { try decoder.decodeSingularInt64Field(value: &self.lastSynchronizedUnixMs) }()
       case 5: try { try decoder.decodeSingularBoolField(value: &self.fromWarmCache) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.resourceVersionHint) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.metricsReconciling) }()
       default: break
       }
     }
@@ -1583,6 +1655,9 @@ extension Kmgr_V1_ViewStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
     if !self.resourceVersionHint.isEmpty {
       try visitor.visitSingularStringField(value: self.resourceVersionHint, fieldNumber: 6)
     }
+    if self.metricsReconciling != false {
+      try visitor.visitSingularBoolField(value: self.metricsReconciling, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1593,6 +1668,7 @@ extension Kmgr_V1_ViewStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
     if lhs.lastSynchronizedUnixMs != rhs.lastSynchronizedUnixMs {return false}
     if lhs.fromWarmCache != rhs.fromWarmCache {return false}
     if lhs.resourceVersionHint != rhs.resourceVersionHint {return false}
+    if lhs.metricsReconciling != rhs.metricsReconciling {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1708,9 +1784,9 @@ extension Kmgr_V1_ViewSchema: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension Kmgr_V1_SnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SnapshotChunk"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}rows\0\u{3}first_chunk\0\u{3}last_chunk\0\u{3}chunk_index\0\u{3}estimated_total_rows\0\u{3}observed_optional_resource_keys\0\u{3}observed_optional_resource_keys_truncated\0")
+extension Kmgr_V1_ViewInvalidation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ViewInvalidation"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}presentation_revision\0\u{3}index_revision\0\u{3}rows_visible\0\u{3}max_range_length\0\u{3}observed_optional_resource_keys\0\u{3}observed_optional_resource_keys_truncated\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1718,70 +1794,10 @@ extension Kmgr_V1_SnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.rows) }()
-      case 2: try { try decoder.decodeSingularBoolField(value: &self.firstChunk) }()
-      case 3: try { try decoder.decodeSingularBoolField(value: &self.lastChunk) }()
-      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.chunkIndex) }()
-      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.estimatedTotalRows) }()
-      case 6: try { try decoder.decodeRepeatedStringField(value: &self.observedOptionalResourceKeys) }()
-      case 7: try { try decoder.decodeSingularBoolField(value: &self.observedOptionalResourceKeysTruncated) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.rows.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.rows, fieldNumber: 1)
-    }
-    if self.firstChunk != false {
-      try visitor.visitSingularBoolField(value: self.firstChunk, fieldNumber: 2)
-    }
-    if self.lastChunk != false {
-      try visitor.visitSingularBoolField(value: self.lastChunk, fieldNumber: 3)
-    }
-    if self.chunkIndex != 0 {
-      try visitor.visitSingularUInt64Field(value: self.chunkIndex, fieldNumber: 4)
-    }
-    if self.estimatedTotalRows != 0 {
-      try visitor.visitSingularUInt64Field(value: self.estimatedTotalRows, fieldNumber: 5)
-    }
-    if !self.observedOptionalResourceKeys.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.observedOptionalResourceKeys, fieldNumber: 6)
-    }
-    if self.observedOptionalResourceKeysTruncated != false {
-      try visitor.visitSingularBoolField(value: self.observedOptionalResourceKeysTruncated, fieldNumber: 7)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: Kmgr_V1_SnapshotChunk, rhs: Kmgr_V1_SnapshotChunk) -> Bool {
-    if lhs.rows != rhs.rows {return false}
-    if lhs.firstChunk != rhs.firstChunk {return false}
-    if lhs.lastChunk != rhs.lastChunk {return false}
-    if lhs.chunkIndex != rhs.chunkIndex {return false}
-    if lhs.estimatedTotalRows != rhs.estimatedTotalRows {return false}
-    if lhs.observedOptionalResourceKeys != rhs.observedOptionalResourceKeys {return false}
-    if lhs.observedOptionalResourceKeysTruncated != rhs.observedOptionalResourceKeysTruncated {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension Kmgr_V1_RowDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".RowDelta"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}upserts\0\u{3}removed_uids\0\u{3}ordered_uids\0\u{3}order_is_complete\0\u{3}observed_optional_resource_keys\0\u{3}observed_optional_resource_keys_truncated\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.upserts) }()
-      case 2: try { try decoder.decodeRepeatedStringField(value: &self.removedUids) }()
-      case 3: try { try decoder.decodeRepeatedStringField(value: &self.orderedUids) }()
-      case 4: try { try decoder.decodeSingularBoolField(value: &self.orderIsComplete) }()
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.presentationRevision) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.rowsVisible) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.maxRangeLength) }()
       case 5: try { try decoder.decodeRepeatedStringField(value: &self.observedOptionalResourceKeys) }()
       case 6: try { try decoder.decodeSingularBoolField(value: &self.observedOptionalResourceKeysTruncated) }()
       default: break
@@ -1790,17 +1806,17 @@ extension Kmgr_V1_RowDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.upserts.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.upserts, fieldNumber: 1)
+    if self.presentationRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.presentationRevision, fieldNumber: 1)
     }
-    if !self.removedUids.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.removedUids, fieldNumber: 2)
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 2)
     }
-    if !self.orderedUids.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.orderedUids, fieldNumber: 3)
+    if self.rowsVisible != 0 {
+      try visitor.visitSingularUInt64Field(value: self.rowsVisible, fieldNumber: 3)
     }
-    if self.orderIsComplete != false {
-      try visitor.visitSingularBoolField(value: self.orderIsComplete, fieldNumber: 4)
+    if self.maxRangeLength != 0 {
+      try visitor.visitSingularUInt32Field(value: self.maxRangeLength, fieldNumber: 4)
     }
     if !self.observedOptionalResourceKeys.isEmpty {
       try visitor.visitRepeatedStringField(value: self.observedOptionalResourceKeys, fieldNumber: 5)
@@ -1811,11 +1827,11 @@ extension Kmgr_V1_RowDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  public static func ==(lhs: Kmgr_V1_RowDelta, rhs: Kmgr_V1_RowDelta) -> Bool {
-    if lhs.upserts != rhs.upserts {return false}
-    if lhs.removedUids != rhs.removedUids {return false}
-    if lhs.orderedUids != rhs.orderedUids {return false}
-    if lhs.orderIsComplete != rhs.orderIsComplete {return false}
+  public static func ==(lhs: Kmgr_V1_ViewInvalidation, rhs: Kmgr_V1_ViewInvalidation) -> Bool {
+    if lhs.presentationRevision != rhs.presentationRevision {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.rowsVisible != rhs.rowsVisible {return false}
+    if lhs.maxRangeLength != rhs.maxRangeLength {return false}
     if lhs.observedOptionalResourceKeys != rhs.observedOptionalResourceKeys {return false}
     if lhs.observedOptionalResourceKeysTruncated != rhs.observedOptionalResourceKeysTruncated {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
@@ -1823,9 +1839,197 @@ extension Kmgr_V1_RowDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
   }
 }
 
+extension Kmgr_V1_FetchViewRangeRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FetchViewRangeRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{3}presentation_revision\0\u{3}index_revision\0\u{3}start_index\0\u{1}length\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.presentationRevision) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.startIndex) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.length) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 2)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 3)
+    }
+    if self.presentationRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.presentationRevision, fieldNumber: 4)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 5)
+    }
+    if self.startIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.startIndex, fieldNumber: 6)
+    }
+    if self.length != 0 {
+      try visitor.visitSingularUInt32Field(value: self.length, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_FetchViewRangeRequest, rhs: Kmgr_V1_FetchViewRangeRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.presentationRevision != rhs.presentationRevision {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.startIndex != rhs.startIndex {return false}
+    if lhs.length != rhs.length {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_FetchViewRangeResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FetchViewRangeResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}view_id\0\u{1}generation\0\u{3}presentation_revision\0\u{3}index_revision\0\u{3}start_index\0\u{3}rows_visible\0\u{1}rows\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.presentationRevision) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.startIndex) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.rowsVisible) }()
+      case 8: try { try decoder.decodeRepeatedMessageField(value: &self.rows) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 2)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 3)
+    }
+    if self.presentationRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.presentationRevision, fieldNumber: 4)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 5)
+    }
+    if self.startIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.startIndex, fieldNumber: 6)
+    }
+    if self.rowsVisible != 0 {
+      try visitor.visitSingularUInt64Field(value: self.rowsVisible, fieldNumber: 7)
+    }
+    if !self.rows.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.rows, fieldNumber: 8)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_FetchViewRangeResponse, rhs: Kmgr_V1_FetchViewRangeResponse) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.presentationRevision != rhs.presentationRevision {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.startIndex != rhs.startIndex {return false}
+    if lhs.rowsVisible != rhs.rowsVisible {return false}
+    if lhs.rows != rhs.rows {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_UpdateMetricInterestRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".UpdateMetricInterestRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{3}index_revision\0\u{3}start_index\0\u{1}length\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.startIndex) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.length) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 2)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 3)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 4)
+    }
+    if self.startIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.startIndex, fieldNumber: 5)
+    }
+    if self.length != 0 {
+      try visitor.visitSingularUInt32Field(value: self.length, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_UpdateMetricInterestRequest, rhs: Kmgr_V1_UpdateMetricInterestRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.startIndex != rhs.startIndex {return false}
+    if lhs.length != rhs.length {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Kmgr_V1_ViewReconciled: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewReconciled"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}rows_visible\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}rows_visible\0\u{3}presentation_revision\0\u{3}index_revision\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1834,6 +2038,8 @@ extension Kmgr_V1_ViewReconciled: SwiftProtobuf.Message, SwiftProtobuf._MessageI
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularUInt64Field(value: &self.rowsVisible) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.presentationRevision) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
       default: break
       }
     }
@@ -1843,11 +2049,19 @@ extension Kmgr_V1_ViewReconciled: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if self.rowsVisible != 0 {
       try visitor.visitSingularUInt64Field(value: self.rowsVisible, fieldNumber: 1)
     }
+    if self.presentationRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.presentationRevision, fieldNumber: 2)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Kmgr_V1_ViewReconciled, rhs: Kmgr_V1_ViewReconciled) -> Bool {
     if lhs.rowsVisible != rhs.rowsVisible {return false}
+    if lhs.presentationRevision != rhs.presentationRevision {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1855,7 +2069,7 @@ extension Kmgr_V1_ViewReconciled: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}snapshot\0\u{1}delta\0\u{1}status\0\u{1}error\0\u{1}reconciled\0\u{1}schema\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}status\0\u{1}error\0\u{1}reconciled\0\u{1}schema\0\u{1}invalidation\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1865,32 +2079,6 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularMessageField(value: &self._cursor) }()
       case 2: try {
-        var v: Kmgr_V1_SnapshotChunk?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .snapshot(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .snapshot(v)
-        }
-      }()
-      case 3: try {
-        var v: Kmgr_V1_RowDelta?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .delta(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .delta(v)
-        }
-      }()
-      case 4: try {
         var v: Kmgr_V1_ViewStatus?
         var hadOneofValue = false
         if let current = self.payload {
@@ -1903,7 +2091,7 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
           self.payload = .status(v)
         }
       }()
-      case 5: try {
+      case 3: try {
         var v: Kmgr_V1_StructuredError?
         var hadOneofValue = false
         if let current = self.payload {
@@ -1916,7 +2104,7 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
           self.payload = .error(v)
         }
       }()
-      case 6: try {
+      case 4: try {
         var v: Kmgr_V1_ViewReconciled?
         var hadOneofValue = false
         if let current = self.payload {
@@ -1929,7 +2117,7 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
           self.payload = .reconciled(v)
         }
       }()
-      case 7: try {
+      case 5: try {
         var v: Kmgr_V1_ViewSchema?
         var hadOneofValue = false
         if let current = self.payload {
@@ -1940,6 +2128,19 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .schema(v)
+        }
+      }()
+      case 6: try {
+        var v: Kmgr_V1_ViewInvalidation?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .invalidation(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .invalidation(v)
         }
       }()
       default: break
@@ -1956,29 +2157,25 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
       try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
     } }()
     switch self.payload {
-    case .snapshot?: try {
-      guard case .snapshot(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
-    }()
-    case .delta?: try {
-      guard case .delta(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
-    }()
     case .status?: try {
       guard case .status(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
     }()
     case .error?: try {
       guard case .error(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
     }()
     case .reconciled?: try {
       guard case .reconciled(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
     }()
     case .schema?: try {
       guard case .schema(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    }()
+    case .invalidation?: try {
+      guard case .invalidation(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
     }()
     case nil: break
     }

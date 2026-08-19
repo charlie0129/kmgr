@@ -7,7 +7,7 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Resource list cell effects", .serialized)
 struct ResourceListCellEffectsTests {
-    @Test("complete snapshot is baseline and later UID-pinned deltas highlight")
+    @Test("initial range is baseline and later UID-pinned revisions highlight")
     func snapshotDeltaExpiryAndReplacement() async throws {
         let provider = ControlledCellEffectsWorkspaceProvider()
         let controller = makeCellEffectsWorkspace(provider: provider)
@@ -19,41 +19,17 @@ struct ResourceListCellEffectsTests {
         #expect(provider.yieldSnapshot(
             rows: [cellEffectsRow(
                 uid: "pod-old",
-                status: "Pending",
+                status: "Running",
                 restarts: 0,
-                cpuUsage: 0.1
+                cpuUsage: 0.2
             )],
             first: true,
-            last: false
+            last: true
         ))
         try await waitForCellEffects { table.numberOfRows == 1 }
         #expect(try highlightedCell(
             in: table,
             columnID: "status"
-        ).renderedHighlightColor == nil)
-
-        // The same UID may be revised while a progressive snapshot is still
-        // establishing its baseline. Neither ordinary nor usage cells flash.
-        #expect(provider.yieldSnapshot(
-            rows: [cellEffectsRow(
-                uid: "pod-old",
-                status: "Running",
-                restarts: 0,
-                cpuUsage: 0.2
-            )],
-            first: false,
-            last: true
-        ))
-        try await waitForCellEffects {
-            text(in: table, columnID: "status") == "Running"
-        }
-        #expect(try highlightedCell(
-            in: table,
-            columnID: "status"
-        ).renderedHighlightColor == nil)
-        #expect(try highlightedCell(
-            in: table,
-            columnID: "cpu"
         ).renderedHighlightColor == nil)
 
         #expect(provider.yieldDelta(
@@ -304,7 +280,7 @@ struct ResourceListCellEffectsTests {
 }
 
 private final class ControlledCellEffectsWorkspaceProvider:
-    WorkspaceResourceProviding, @unchecked Sendable
+    RangeBackedTestWorkspaceProviding, @unchecked Sendable
 {
     private final class StreamState: @unchecked Sendable {
         let request: ResourceViewRequest
@@ -369,18 +345,11 @@ private final class ControlledCellEffectsWorkspaceProvider:
         last: Bool
     ) -> Bool {
         guard let emission = nextEmission() else { return false }
-        emission.state.continuation.yield(.snapshot(
-            cursor: StreamCursor(
-                generation: emission.state.request.generation,
-                sequence: emission.sequence
-            ),
-            chunk: ResourceSnapshotChunk(
-                rows: rows,
-                first: first,
-                last: last,
-                index: 0,
-                estimatedTotalRows: UInt64(rows.count)
-            )
+        emission.state.continuation.yield(testSnapshotInvalidation(
+            request: emission.state.request,
+            sequence: emission.sequence,
+            rows: rows,
+            first: first
         ))
         return true
     }
@@ -393,17 +362,13 @@ private final class ControlledCellEffectsWorkspaceProvider:
         orderIsComplete: Bool = false
     ) -> Bool {
         guard let emission = nextEmission() else { return false }
-        emission.state.continuation.yield(.delta(
-            cursor: StreamCursor(
-                generation: emission.state.request.generation,
-                sequence: emission.sequence
-            ),
-            delta: ResourceRowDelta(
-                upserts: upserts,
-                removedUIDs: removedUIDs,
-                orderedUIDs: orderedUIDs,
-                orderIsComplete: orderIsComplete
-            )
+        emission.state.continuation.yield(testDeltaInvalidation(
+            request: emission.state.request,
+            sequence: emission.sequence,
+            upserts: upserts,
+            removedUIDs: removedUIDs,
+            orderedUIDs: orderedUIDs,
+            orderIsComplete: orderIsComplete
         ))
         return true
     }
@@ -411,12 +376,9 @@ private final class ControlledCellEffectsWorkspaceProvider:
     @discardableResult
     func yieldReconciled(rowsVisible: UInt64) -> Bool {
         guard let emission = nextEmission() else { return false }
-        emission.state.continuation.yield(.reconciled(
-            cursor: StreamCursor(
-                generation: emission.state.request.generation,
-                sequence: emission.sequence
-            ),
-            reconciliation: ResourceViewReconciliation(rowsVisible: rowsVisible)
+        emission.state.continuation.yield(testReconciliation(
+            request: emission.state.request,
+            sequence: emission.sequence
         ))
         return true
     }

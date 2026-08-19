@@ -66,6 +66,14 @@ public protocol WorkspaceResourceProviding: Sendable {
         request: ResourceViewRequest
     ) -> AsyncThrowingStream<ResourceViewMessage, Error>
 
+    func fetchViewRange(
+        request: ResourceViewRangeRequest
+    ) async throws -> ResourceViewRange
+
+    func updateMetricInterest(
+        request: ResourceMetricInterestRequest
+    ) async throws
+
     func cancelView(sessionID: String, viewID: String, generation: UInt64) async
     func closeSession(sessionID: String) async
 }
@@ -139,27 +147,187 @@ public struct ResourceSortDescriptor: Hashable, Sendable {
 public enum ResourceViewMessage: Hashable, Sendable {
     case schema(cursor: StreamCursor, schema: ResourceViewSchema)
     case status(cursor: StreamCursor, status: ResourceViewStatus)
-    case snapshot(cursor: StreamCursor, chunk: ResourceSnapshotChunk)
-    case delta(cursor: StreamCursor, delta: ResourceRowDelta)
+    case invalidation(cursor: StreamCursor, invalidation: ResourceViewInvalidation)
     case reconciled(cursor: StreamCursor, reconciliation: ResourceViewReconciliation)
     case failure(cursor: StreamCursor, issue: ClusterManagerIssue)
 
     public var cursor: StreamCursor {
         switch self {
-        case .schema(let cursor, _), .status(let cursor, _), .snapshot(let cursor, _),
-            .delta(let cursor, _), .reconciled(let cursor, _),
+        case .schema(let cursor, _), .status(let cursor, _),
+            .invalidation(let cursor, _), .reconciled(let cursor, _),
             .failure(let cursor, _): cursor
         }
     }
 }
 
+/// The exact backend presentation named by a control-stream invalidation.
+/// Numeric row indexes are meaningful only while all three revisions match.
+public struct ResourceViewRevision: Hashable, Sendable {
+    public var generation: UInt64
+    public var presentation: UInt64
+    public var index: UInt64
+
+    public init(generation: UInt64, presentation: UInt64, index: UInt64) {
+        self.generation = generation
+        self.presentation = presentation
+        self.index = index
+    }
+
+    public var isValid: Bool {
+        generation > 0 && presentation > 0 && index > 0
+    }
+}
+
+/// Announces a revision-pinned backend presentation without transporting its
+/// complete rows or UID order. Repeated identical revisions carry hints only.
+public struct ResourceViewInvalidation: Hashable, Sendable {
+    public static let protocolMaximumRangeLength = 512
+
+    public var presentationRevision: UInt64
+    public var indexRevision: UInt64
+    public var rowsVisible: UInt64
+    public var maxRangeLength: Int
+    public var observedOptionalResourceKeys: Set<String>
+    public var observedOptionalResourceKeysTruncated: Bool
+
+    public init(
+        presentationRevision: UInt64,
+        indexRevision: UInt64,
+        rowsVisible: UInt64,
+        maxRangeLength: Int,
+        observedOptionalResourceKeys: Set<String> = [],
+        observedOptionalResourceKeysTruncated: Bool = false
+    ) {
+        self.presentationRevision = presentationRevision
+        self.indexRevision = indexRevision
+        self.rowsVisible = rowsVisible
+        self.maxRangeLength = maxRangeLength
+        self.observedOptionalResourceKeys = observedOptionalResourceKeys
+        self.observedOptionalResourceKeysTruncated =
+            observedOptionalResourceKeysTruncated
+    }
+
+    public func revision(generation: UInt64) -> ResourceViewRevision {
+        ResourceViewRevision(
+            generation: generation,
+            presentation: presentationRevision,
+            index: indexRevision
+        )
+    }
+
+    public var hasValidRangeContract: Bool {
+        presentationRevision > 0
+            && indexRevision > 0
+            && (1...Self.protocolMaximumRangeLength).contains(maxRangeLength)
+    }
+}
+
+/// One bounded, immutable slice of a resource presentation.
+public struct ResourceViewRange: Hashable, Sendable {
+    public var viewID: String
+    public var revision: ResourceViewRevision
+    public var startIndex: UInt64
+    public var rowsVisible: UInt64
+    public var rows: [ResourceRow]
+
+    public init(
+        viewID: String,
+        revision: ResourceViewRevision,
+        startIndex: UInt64,
+        rowsVisible: UInt64,
+        rows: [ResourceRow]
+    ) {
+        self.viewID = viewID
+        self.revision = revision
+        self.startIndex = startIndex
+        self.rowsVisible = rowsVisible
+        self.rows = rows
+    }
+}
+
+public struct ResourceViewRangeRequest: Hashable, Sendable {
+    public var sessionID: String
+    public var viewID: String
+    public var revision: ResourceViewRevision
+    public var startIndex: UInt64
+    public var length: Int
+
+    public init(
+        sessionID: String,
+        viewID: String,
+        revision: ResourceViewRevision,
+        startIndex: UInt64,
+        length: Int
+    ) {
+        self.sessionID = sessionID
+        self.viewID = viewID
+        self.revision = revision
+        self.startIndex = startIndex
+        self.length = length
+    }
+
+    public var hasValidLength: Bool {
+        (1...ResourceViewInvalidation.protocolMaximumRangeLength).contains(length)
+    }
+}
+
+/// A debounced viewport hint for metric-backed display columns. Its numeric
+/// range is pinned to one index revision and must never be silently rebound.
+public struct ResourceMetricInterestRequest: Hashable, Sendable {
+    public var sessionID: String
+    public var viewID: String
+    public var generation: UInt64
+    public var indexRevision: UInt64
+    public var startIndex: UInt64
+    public var length: Int
+
+    public init(
+        sessionID: String,
+        viewID: String,
+        generation: UInt64,
+        indexRevision: UInt64,
+        startIndex: UInt64,
+        length: Int
+    ) {
+        self.sessionID = sessionID
+        self.viewID = viewID
+        self.generation = generation
+        self.indexRevision = indexRevision
+        self.startIndex = startIndex
+        self.length = length
+    }
+
+    public var hasValidRange: Bool {
+        generation > 0
+            && indexRevision > 0
+            && (1...ResourceViewInvalidation.protocolMaximumRangeLength).contains(length)
+    }
+}
+
 /// Marks the ordered end of a complete replacement presentation for one
-/// resource-view generation.
+/// resource-view generation. A later invalidation may supersede it before the
+/// client fetches a range, so consumers must still compare all revisions.
 public struct ResourceViewReconciliation: Hashable, Sendable {
     public var rowsVisible: UInt64
+    public var presentationRevision: UInt64
+    public var indexRevision: UInt64
 
-    public init(rowsVisible: UInt64) {
+    public init(
+        rowsVisible: UInt64,
+        presentationRevision: UInt64,
+        indexRevision: UInt64
+    ) {
         self.rowsVisible = rowsVisible
+        self.presentationRevision = presentationRevision
+        self.indexRevision = indexRevision
+    }
+
+    public func revision(generation: UInt64) -> ResourceViewRevision {
+        ResourceViewRevision(
+            generation: generation,
+            presentation: presentationRevision,
+            index: indexRevision
+        )
     }
 }
 
@@ -196,19 +364,22 @@ public struct ResourceViewStatus: Hashable, Sendable {
     public var rowsVisible: UInt64
     public var lastSynchronizedAt: Date?
     public var fromWarmCache: Bool
+    public var metricsReconciling: Bool
 
     public init(
         freshness: Freshness,
         objectsExamined: UInt64 = 0,
         rowsVisible: UInt64 = 0,
         lastSynchronizedAt: Date? = nil,
-        fromWarmCache: Bool = false
+        fromWarmCache: Bool = false,
+        metricsReconciling: Bool = false
     ) {
         self.freshness = freshness
         self.objectsExamined = objectsExamined
         self.rowsVisible = rowsVisible
         self.lastSynchronizedAt = lastSynchronizedAt
         self.fromWarmCache = fromWarmCache
+        self.metricsReconciling = metricsReconciling
     }
 
     /// Whether continuity work is happening in the background. The resource
@@ -295,65 +466,5 @@ public struct ResourceViewStatus: Hashable, Sendable {
         let hours = minutes / 60
         if hours < 24 { return "\(hours)h" }
         return "\(hours / 24)d"
-    }
-}
-
-public struct ResourceSnapshotChunk: Hashable, Sendable {
-    public var rows: [ResourceRow]
-    public var first: Bool
-    public var last: Bool
-    public var index: UInt64
-    public var estimatedTotalRows: UInt64
-    /// Exact scheduler resource names observed in the raw Pod/Node objects
-    /// behind this projection. They are discovery hints only; the authenticated
-    /// cache-only catalog remains authoritative for column installation.
-    public var observedOptionalResourceKeys: Set<String>
-    /// More exact names were observed than the bounded stream hint can carry.
-    /// Clients should still perform one authoritative cache-only refresh.
-    public var observedOptionalResourceKeysTruncated: Bool
-
-    public init(
-        rows: [ResourceRow],
-        first: Bool,
-        last: Bool,
-        index: UInt64,
-        estimatedTotalRows: UInt64,
-        observedOptionalResourceKeys: Set<String> = [],
-        observedOptionalResourceKeysTruncated: Bool = false
-    ) {
-        self.rows = rows
-        self.first = first
-        self.last = last
-        self.index = index
-        self.estimatedTotalRows = estimatedTotalRows
-        self.observedOptionalResourceKeys = observedOptionalResourceKeys
-        self.observedOptionalResourceKeysTruncated = observedOptionalResourceKeysTruncated
-    }
-}
-
-public struct ResourceRowDelta: Hashable, Sendable {
-    public var upserts: [ResourceRow]
-    public var removedUIDs: Set<ResourceUID>
-    public var orderedUIDs: [ResourceUID]
-    public var orderIsComplete: Bool
-    /// See `ResourceSnapshotChunk.observedOptionalResourceKeys`. A keys-only
-    /// delta may carry this hint even when filtering suppresses every row.
-    public var observedOptionalResourceKeys: Set<String>
-    public var observedOptionalResourceKeysTruncated: Bool
-
-    public init(
-        upserts: [ResourceRow] = [],
-        removedUIDs: Set<ResourceUID> = [],
-        orderedUIDs: [ResourceUID] = [],
-        orderIsComplete: Bool = false,
-        observedOptionalResourceKeys: Set<String> = [],
-        observedOptionalResourceKeysTruncated: Bool = false
-    ) {
-        self.upserts = upserts
-        self.removedUIDs = removedUIDs
-        self.orderedUIDs = orderedUIDs
-        self.orderIsComplete = orderIsComplete
-        self.observedOptionalResourceKeys = observedOptionalResourceKeys
-        self.observedOptionalResourceKeysTruncated = observedOptionalResourceKeysTruncated
     }
 }

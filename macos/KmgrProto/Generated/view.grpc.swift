@@ -33,6 +33,32 @@ public enum Kmgr_V1_ViewService: Sendable {
                 type: .serverStreaming
             )
         }
+        /// Namespace for "FetchViewRange" metadata.
+        public enum FetchViewRange: Sendable {
+            /// Request type for "FetchViewRange".
+            public typealias Input = Kmgr_V1_FetchViewRangeRequest
+            /// Response type for "FetchViewRange".
+            public typealias Output = Kmgr_V1_FetchViewRangeResponse
+            /// Descriptor for "FetchViewRange".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ViewService"),
+                method: "FetchViewRange",
+                type: .unary
+            )
+        }
+        /// Namespace for "UpdateMetricInterest" metadata.
+        public enum UpdateMetricInterest: Sendable {
+            /// Request type for "UpdateMetricInterest".
+            public typealias Input = Kmgr_V1_UpdateMetricInterestRequest
+            /// Response type for "UpdateMetricInterest".
+            public typealias Output = Kmgr_V1_Acknowledgement
+            /// Descriptor for "UpdateMetricInterest".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ViewService"),
+                method: "UpdateMetricInterest",
+                type: .unary
+            )
+        }
         /// Namespace for "CancelView" metadata.
         public enum CancelView: Sendable {
             /// Request type for "CancelView".
@@ -114,6 +140,8 @@ public enum Kmgr_V1_ViewService: Sendable {
         /// Descriptors for all methods in the "kmgr.v1.ViewService" service.
         public static let descriptors: [GRPCCore.MethodDescriptor] = [
             StreamView.descriptor,
+            FetchViewRange.descriptor,
+            UpdateMetricInterest.descriptor,
             CancelView.descriptor,
             PreviewColumn.descriptor,
             DiscoverOptionalResources.descriptor,
@@ -156,6 +184,44 @@ extension Kmgr_V1_ViewService {
             deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ViewEvent>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_ViewEvent>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "FetchViewRange" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_FetchViewRangeRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_FetchViewRangeRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_FetchViewRangeResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func fetchViewRange<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_FetchViewRangeRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_FetchViewRangeRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_FetchViewRangeResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_FetchViewRangeResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "UpdateMetricInterest" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_UpdateMetricInterestRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_UpdateMetricInterestRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_Acknowledgement` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func updateMetricInterest<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_UpdateMetricInterestRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_UpdateMetricInterestRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_Acknowledgement>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "CancelView" method.
@@ -310,6 +376,66 @@ extension Kmgr_V1_ViewService {
             try await self.client.serverStreaming(
                 request: request,
                 descriptor: Kmgr_V1_ViewService.Method.StreamView.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "FetchViewRange" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_FetchViewRangeRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_FetchViewRangeRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_FetchViewRangeResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func fetchViewRange<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_FetchViewRangeRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_FetchViewRangeRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_FetchViewRangeResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_FetchViewRangeResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Kmgr_V1_ViewService.Method.FetchViewRange.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "UpdateMetricInterest" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_UpdateMetricInterestRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_UpdateMetricInterestRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_Acknowledgement` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func updateMetricInterest<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_UpdateMetricInterestRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_UpdateMetricInterestRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_Acknowledgement>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Kmgr_V1_ViewService.Method.UpdateMetricInterest.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -523,6 +649,56 @@ extension Kmgr_V1_ViewService.ClientProtocol {
         )
     }
 
+    /// Call the "FetchViewRange" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_FetchViewRangeRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func fetchViewRange<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_FetchViewRangeRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_FetchViewRangeResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.fetchViewRange(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_FetchViewRangeRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_FetchViewRangeResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "UpdateMetricInterest" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_UpdateMetricInterestRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func updateMetricInterest<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_UpdateMetricInterestRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.updateMetricInterest(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_UpdateMetricInterestRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_Acknowledgement>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "CancelView" method.
     ///
     /// - Parameters:
@@ -696,6 +872,64 @@ extension Kmgr_V1_ViewService.ClientProtocol {
             metadata: metadata
         )
         return try await self.streamView(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "FetchViewRange" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func fetchViewRange<Result>(
+        _ message: Kmgr_V1_FetchViewRangeRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_FetchViewRangeResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_FetchViewRangeRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.fetchViewRange(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "UpdateMetricInterest" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func updateMetricInterest<Result>(
+        _ message: Kmgr_V1_UpdateMetricInterestRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_UpdateMetricInterestRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.updateMetricInterest(
             request: request,
             options: options,
             onResponse: handleResponse

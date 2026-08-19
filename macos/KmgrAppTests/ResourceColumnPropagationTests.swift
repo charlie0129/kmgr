@@ -1253,7 +1253,7 @@ private final class StagedColumnConfigurationDocumentLoader: @unchecked Sendable
     }
 }
 
-private final class ColumnPropagationWorkspaceProvider: WorkspaceResourceProviding,
+private final class ColumnPropagationWorkspaceProvider: RangeBackedTestWorkspaceProviding,
     @unchecked Sendable
 {
     let resources: [DiscoveredResource]
@@ -1299,23 +1299,15 @@ private final class ColumnPropagationWorkspaceProvider: WorkspaceResourceProvidi
             }
         )
         return AsyncThrowingStream { continuation in
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 1),
-                chunk: ResourceSnapshotChunk(
-                    rows: [row],
-                    first: true,
-                    last: true,
-                    index: 0,
-                    estimatedTotalRows: 1
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: [row]
             ))
             if request.stageUntilReconciled {
-                continuation.yield(.reconciled(
-                    cursor: StreamCursor(
-                        generation: request.generation,
-                        sequence: 2
-                    ),
-                    reconciliation: ResourceViewReconciliation(rowsVisible: 1)
+                continuation.yield(testReconciliation(
+                    request: request,
+                    sequence: 2
                 ))
             }
             continuation.finish()
@@ -1358,7 +1350,7 @@ private struct ExactResourceCatalogProvider: OptionalResourceCatalogProviding {
     }
 }
 
-private final class ColdOptionalResourceWorkspaceProvider: WorkspaceResourceProviding,
+private final class ColdOptionalResourceWorkspaceProvider: RangeBackedTestWorkspaceProviding,
     @unchecked Sendable
 {
     let resource: DiscoveredResource
@@ -1402,27 +1394,17 @@ private final class ColdOptionalResourceWorkspaceProvider: WorkspaceResourceProv
                     self?.continuations.removeValue(forKey: request.generation)
                 }
             }
-            continuation.yield(.snapshot(
-                cursor: StreamCursor(generation: request.generation, sequence: 1),
-                chunk: ResourceSnapshotChunk(
-                    rows: rows,
-                    first: true,
-                    last: true,
-                    index: 0,
-                    estimatedTotalRows: UInt64(rows.count),
-                    observedOptionalResourceKeys:
-                        rows.isEmpty ? [] : ["hugepages-2Mi"]
-                )
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: rows,
+                observedOptionalResourceKeys:
+                    rows.isEmpty ? [] : ["hugepages-2Mi"]
             ))
             if request.stageUntilReconciled {
-                continuation.yield(.reconciled(
-                    cursor: StreamCursor(
-                        generation: request.generation,
-                        sequence: 2
-                    ),
-                    reconciliation: ResourceViewReconciliation(
-                        rowsVisible: UInt64(rows.count)
-                    )
+                continuation.yield(testReconciliation(
+                    request: request,
+                    sequence: 2
                 ))
             }
         }
@@ -1449,15 +1431,14 @@ private final class ColdOptionalResourceWorkspaceProvider: WorkspaceResourceProv
             return (request, continuation, sequence, uid, emittedUIDs)
         }
         guard let (request, continuation, sequence, uid, order) = state else { return }
-        continuation.yield(.delta(
-            cursor: StreamCursor(generation: request.generation, sequence: sequence),
-            delta: ResourceRowDelta(
-                upserts: [Self.row(request: request, uid: uid)],
-                orderedUIDs: order,
-                orderIsComplete: true,
-                observedOptionalResourceKeys: observedOptionalResourceKeys,
-                observedOptionalResourceKeysTruncated: truncated
-            )
+        continuation.yield(testDeltaInvalidation(
+            request: request,
+            sequence: sequence,
+            upserts: [Self.row(request: request, uid: uid)],
+            orderedUIDs: order,
+            orderIsComplete: true,
+            observedOptionalResourceKeys: observedOptionalResourceKeys,
+            observedOptionalResourceKeysTruncated: truncated
         ))
     }
 
@@ -1478,12 +1459,11 @@ private final class ColdOptionalResourceWorkspaceProvider: WorkspaceResourceProv
             return (request, continuation, sequence)
         }
         guard let (request, continuation, sequence) = state else { return }
-        continuation.yield(.delta(
-            cursor: StreamCursor(generation: request.generation, sequence: sequence),
-            delta: ResourceRowDelta(
-                observedOptionalResourceKeys: keys,
-                observedOptionalResourceKeysTruncated: truncated
-            )
+        continuation.yield(testDeltaInvalidation(
+            request: request,
+            sequence: sequence,
+            observedOptionalResourceKeys: keys,
+            observedOptionalResourceKeysTruncated: truncated
         ))
     }
 
