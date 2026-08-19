@@ -37,6 +37,7 @@ var (
 	ErrWorkloadResolutionUnavailable = errors.New("workload log resolution is unavailable")
 	ErrUnsupportedLogResource        = errors.New("resource does not support logs")
 	ErrResolutionScanLimit           = errors.New("workload log resolution scan limit exceeded")
+	ErrResolutionPagination          = errors.New("workload log resolution pagination did not advance")
 )
 
 // PodInventory is the immutable, UID-pinned Pod and regular-container
@@ -505,6 +506,7 @@ func (c *sourceResolutionClients) listControlledObjects(
 ) ([]metav1.PartialObjectMetadata, error) {
 	var result []metav1.PartialObjectMetadata
 	var continueToken string
+	seenContinueTokens := make(map[string]struct{})
 	for {
 		if err := c.beginAPICall(); err != nil {
 			return nil, err
@@ -523,10 +525,16 @@ func (c *sourceResolutionClients) listControlledObjects(
 				result = append(result, list.Items[index])
 			}
 		}
-		continueToken = list.GetContinue()
-		if continueToken == "" {
+		nextContinueToken, err := resolutionContinueToken(
+			gvr.Resource, list.GetContinue(), seenContinueTokens,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if nextContinueToken == "" {
 			return result, nil
 		}
+		continueToken = nextContinueToken
 	}
 }
 
@@ -540,6 +548,7 @@ func (c *sourceResolutionClients) listPods(
 		return nil
 	}
 	var continueToken string
+	seenContinueTokens := make(map[string]struct{})
 	for {
 		if err := c.beginAPICall(); err != nil {
 			return err
@@ -562,11 +571,32 @@ func (c *sourceResolutionClients) listPods(
 				return err
 			}
 		}
-		continueToken = list.GetContinue()
-		if continueToken == "" {
+		nextContinueToken, err := resolutionContinueToken(
+			"Pods", list.GetContinue(), seenContinueTokens,
+		)
+		if err != nil {
+			return err
+		}
+		if nextContinueToken == "" {
 			return nil
 		}
+		continueToken = nextContinueToken
 	}
+}
+
+func resolutionContinueToken(
+	resource string,
+	next string,
+	seen map[string]struct{},
+) (string, error) {
+	if next == "" {
+		return "", nil
+	}
+	if _, repeated := seen[next]; repeated {
+		return "", fmt.Errorf("%w: %s repeated continue token %q", ErrResolutionPagination, resource, next)
+	}
+	seen[next] = struct{}{}
+	return next, nil
 }
 
 func (c *sourceResolutionClients) beginAPICall() error {

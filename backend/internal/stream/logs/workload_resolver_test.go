@@ -10,12 +10,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	metadatafake "k8s.io/client-go/metadata/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func TestDeploymentResolutionRequiresEveryOwnerUIDHop(t *testing.T) {
@@ -245,6 +247,47 @@ func TestResolutionObjectBudgetIsAggregateAcrossSelectedIdentities(t *testing.T)
 	var limit *ResolutionScanLimitError
 	if !errors.As(err, &limit) || limit.Limit != defaultMaxResolutionObjects || limit.Resource != "Pods" {
 		t.Fatalf("next identity error = %v", err)
+	}
+}
+
+func TestPodResolutionRejectsRepeatedContinueToken(t *testing.T) {
+	t.Parallel()
+	client := kubernetesfake.NewSimpleClientset()
+	calls := 0
+	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		calls++
+		return true, &corev1.PodList{ListMeta: metav1.ListMeta{Continue: "repeat"}}, nil
+	})
+	clients := &sourceResolutionClients{
+		sessionID: "session", core: client.CoreV1(), maxPods: DefaultMaxResolvedPods,
+		pods: make(map[types.UID]PodInventory),
+	}
+
+	err := clients.listPods(context.Background(), "team", labels.Everything(), uidSet("owner"))
+	if !errors.Is(err, ErrResolutionPagination) || calls != 2 {
+		t.Fatalf("repeated Pod continuation error/calls = %v/%d, want pagination error after 2", err, calls)
+	}
+}
+
+func TestMetadataOwnerScanRejectsRepeatedContinueToken(t *testing.T) {
+	t.Parallel()
+	scheme := metadatafake.NewTestScheme()
+	metav1.AddMetaToScheme(scheme)
+	client := metadatafake.NewSimpleMetadataClient(scheme)
+	calls := 0
+	client.PrependReactor("list", "replicasets", func(clienttesting.Action) (bool, runtime.Object, error) {
+		calls++
+		return true, &metav1.List{ListMeta: metav1.ListMeta{Continue: "repeat"}}, nil
+	})
+	clients := &sourceResolutionClients{metadata: client}
+
+	_, err := clients.listControlledObjects(
+		context.Background(),
+		schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"},
+		"team", labels.Everything(), "owner",
+	)
+	if !errors.Is(err, ErrResolutionPagination) || calls != 2 {
+		t.Fatalf("repeated metadata continuation error/calls = %v/%d, want pagination error after 2", err, calls)
 	}
 }
 
