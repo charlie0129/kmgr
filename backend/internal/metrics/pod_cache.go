@@ -22,6 +22,7 @@ const (
 	DefaultPodSampleEntryLimit        = 100_000
 	DefaultPodSampleLimit             = 100_000
 	DefaultPodSampleMaxConcurrentGETs = 16
+	DefaultPodDetailEntryLimit        = 256
 )
 
 var (
@@ -48,6 +49,7 @@ type PodSampleCacheConfig struct {
 	NegativeTTL       time.Duration
 	EntryLimit        int
 	SampleLimit       int
+	DetailEntryLimit  int
 	MaxConcurrentGETs int
 
 	// Now is optional and exists for deterministic TTL tests.
@@ -63,6 +65,7 @@ type PodSampleCache struct {
 	negativeTTL time.Duration
 	entryLimit  int
 	sampleLimit int
+	detailLimit int
 	now         func() time.Time
 
 	ctx    context.Context
@@ -73,6 +76,8 @@ type PodSampleCache struct {
 	entries     map[podSampleKey]*podSampleEntry
 	lru         list.List
 	sampleCount int
+	details     map[podSampleKey]*podDetailEntry
+	detailLRU   list.List
 	flights     map[podSampleKey]*podSampleFlight
 	work        []podSampleKey
 	closed      bool
@@ -94,13 +99,21 @@ type podSampleEntry struct {
 }
 
 type podSampleFlight struct {
-	done     chan struct{}
-	fallback *Sample
-	result   podSampleResult
+	done            chan struct{}
+	fallback        *Sample
+	detailFallback  *metricsapi.PodMetrics
+	detailRequested bool
+	result          podSampleResult
+	detailResult    podDetailResult
 }
 
 type podSampleLookup struct {
 	result podSampleResult
+	flight *podSampleFlight
+}
+
+type podDetailLookup struct {
+	result podDetailResult
 	flight *podSampleFlight
 }
 
@@ -111,6 +124,25 @@ type podSampleResult struct {
 	updatedAt time.Time
 	err       error
 	cacheable bool
+}
+
+type podDetailEntry struct {
+	key       podSampleKey
+	result    podDetailResult
+	expiresAt time.Time
+	element   *list.Element
+}
+
+type podDetailResult struct {
+	value     *metricsapi.PodMetrics
+	updatedAt time.Time
+	err       error
+	cacheable bool
+}
+
+type podRefreshResult struct {
+	sample podSampleResult
+	detail podDetailResult
 }
 
 func NewPodSampleCache(config PodSampleCacheConfig) (*PodSampleCache, error) {
@@ -144,6 +176,12 @@ func NewPodSampleCache(config PodSampleCacheConfig) (*PodSampleCache, error) {
 	if err != nil {
 		return nil, err
 	}
+	detailLimit, err := positivePodCacheLimit(
+		config.DetailEntryLimit, DefaultPodDetailEntryLimit, "detail entry limit",
+	)
+	if err != nil {
+		return nil, err
+	}
 	maxConcurrentGETs, err := positivePodCacheLimit(
 		config.MaxConcurrentGETs, DefaultPodSampleMaxConcurrentGETs, "GET concurrency",
 	)
@@ -157,8 +195,9 @@ func NewPodSampleCache(config PodSampleCacheConfig) (*PodSampleCache, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cache := &PodSampleCache{
 		client: config.Client, refreshTTL: refreshTTL, negativeTTL: negativeTTL,
-		entryLimit: entryLimit, sampleLimit: sampleLimit, now: now,
+		entryLimit: entryLimit, sampleLimit: sampleLimit, detailLimit: detailLimit, now: now,
 		ctx: ctx, cancel: cancel, entries: make(map[podSampleKey]*podSampleEntry),
+		details: make(map[podSampleKey]*podDetailEntry),
 		flights: make(map[podSampleKey]*podSampleFlight), closeDone: make(chan struct{}),
 	}
 	cache.workReady = sync.NewCond(&cache.mu)
@@ -251,6 +290,62 @@ func (c *PodSampleCache) Resolve(ctx context.Context, references []PodReference)
 	return podSampleSnapshot(references, results), nil
 }
 
+// ResolveDetail returns one UID-pinned PodMetrics payload for an explicit
+// container-detail request. Detailed payloads have a small independent LRU,
+// while their GETs share the compact sample cache's worker pool and in-flight
+// request for the same Pod. A nil value with a nil error means Metrics Server
+// has no sample for the Pod.
+func (c *PodSampleCache) ResolveDetail(
+	ctx context.Context,
+	reference PodReference,
+) (*metricsapi.PodMetrics, error) {
+	if c == nil {
+		return nil, ErrPodSampleCacheClosed
+	}
+	if ctx == nil {
+		return nil, errors.New("Pod metrics detail context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.ctx.Err() != nil {
+		return nil, ErrPodSampleCacheClosed
+	}
+	references, err := canonicalPodReferences([]PodReference{reference})
+	if err != nil {
+		return nil, err
+	}
+	lookup, err := c.lookupDetailOrStart(references[0])
+	if err != nil {
+		return nil, err
+	}
+	result := lookup.result
+	if lookup.flight != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-c.ctx.Done():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, ErrPodSampleCacheClosed
+		case <-lookup.flight.done:
+			result = lookup.flight.detailResult
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if result.value == nil {
+		return nil, result.err
+	}
+	// A retained value is the last UID-validated sample. Transient refresh
+	// failures may make it stale, but the explicit container table has no
+	// measurement-state field; its timestamp still communicates age and using
+	// the value matches the compact cache's stale-fallback behavior.
+	return result.value.DeepCopy(), nil
+}
+
 func canonicalPodReferences(references []PodReference) ([]PodReference, error) {
 	result := make([]PodReference, 0, len(references))
 	seen := make(map[podSampleKey]struct{}, len(references))
@@ -300,10 +395,47 @@ func (c *PodSampleCache) lookupOrStart(reference PodReference) (podSampleLookup,
 		fallback := cloneSample(entry.result.sample)
 		flight.fallback = &fallback
 	}
+	if entry := c.details[key]; entry != nil && entry.result.value != nil {
+		flight.detailFallback = entry.result.value.DeepCopy()
+	}
 	c.flights[key] = flight
 	c.work = append(c.work, key)
 	c.workReady.Signal()
 	return podSampleLookup{flight: flight}, nil
+}
+
+func (c *PodSampleCache) lookupDetailOrStart(reference PodReference) (podDetailLookup, error) {
+	key := podSampleKey{
+		namespace: reference.Namespace, name: reference.Name, uid: reference.UID,
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return podDetailLookup{}, ErrPodSampleCacheClosed
+	}
+	now := c.now()
+	if entry := c.details[key]; entry != nil {
+		c.detailLRU.MoveToFront(entry.element)
+		if now.Before(entry.expiresAt) {
+			return podDetailLookup{result: clonePodDetailResult(entry.result)}, nil
+		}
+	}
+	if flight := c.flights[key]; flight != nil {
+		flight.detailRequested = true
+		return podDetailLookup{flight: flight}, nil
+	}
+	flight := &podSampleFlight{done: make(chan struct{}), detailRequested: true}
+	if entry := c.entries[key]; entry != nil && entry.result.hasSample {
+		fallback := cloneSample(entry.result.sample)
+		flight.fallback = &fallback
+	}
+	if entry := c.details[key]; entry != nil && entry.result.value != nil {
+		flight.detailFallback = entry.result.value.DeepCopy()
+	}
+	c.flights[key] = flight
+	c.work = append(c.work, key)
+	c.workReady.Signal()
+	return podDetailLookup{flight: flight}, nil
 }
 
 func (c *PodSampleCache) runWorker() {
@@ -329,14 +461,21 @@ func (c *PodSampleCache) runWorker() {
 		if flight == nil {
 			continue
 		}
-		result := c.refresh(key, flight.fallback)
+		result := c.refresh(key, flight.fallback, flight.detailFallback)
 		c.completeFlight(key, flight, result)
 	}
 }
 
-func (c *PodSampleCache) refresh(key podSampleKey, fallback *Sample) podSampleResult {
+func (c *PodSampleCache) refresh(
+	key podSampleKey,
+	fallback *Sample,
+	detailFallback *metricsapi.PodMetrics,
+) podRefreshResult {
 	if err := c.ctx.Err(); err != nil {
-		return podSampleResult{state: MeasurementUnavailable, err: ErrPodSampleCacheClosed}
+		return podRefreshResult{
+			sample: podSampleResult{state: MeasurementUnavailable, err: ErrPodSampleCacheClosed},
+			detail: podDetailResult{err: ErrPodSampleCacheClosed},
+		}
 	}
 	value, err := c.client.PodMetricses(key.namespace).Get(
 		c.ctx, key.name, metav1.GetOptions{},
@@ -347,36 +486,61 @@ func (c *PodSampleCache) refresh(key podSampleKey, fallback *Sample) podSampleRe
 	}
 	if err == nil {
 		if value.UID != "" && value.UID != key.uid {
-			return podSampleResult{
-				state: MeasurementUnavailable, updatedAt: completedAt,
-				err: ErrPodMetricsUIDMismatch, cacheable: true,
+			return podRefreshResult{
+				sample: podSampleResult{
+					state: MeasurementUnavailable, updatedAt: completedAt,
+					err: ErrPodMetricsUIDMismatch, cacheable: true,
+				},
+				detail: podDetailResult{
+					updatedAt: completedAt, err: ErrPodMetricsUIDMismatch, cacheable: true,
+				},
 			}
 		}
-		return podSampleResult{
-			sample: podMetricSample(value), hasSample: true,
-			state: MeasurementCurrent, updatedAt: completedAt, cacheable: true,
+		return podRefreshResult{
+			sample: podSampleResult{
+				sample: podMetricSample(value), hasSample: true,
+				state: MeasurementCurrent, updatedAt: completedAt, cacheable: true,
+			},
+			detail: podDetailResult{
+				value: value.DeepCopy(), updatedAt: completedAt, cacheable: true,
+			},
 		}
 	}
 	if c.ctx.Err() != nil {
-		return podSampleResult{state: MeasurementUnavailable, err: ErrPodSampleCacheClosed}
+		return podRefreshResult{
+			sample: podSampleResult{state: MeasurementUnavailable, err: ErrPodSampleCacheClosed},
+			detail: podDetailResult{err: ErrPodSampleCacheClosed},
+		}
 	}
 	if apierrors.IsNotFound(err) {
-		return podSampleResult{
-			state: MeasurementCurrent, updatedAt: completedAt, cacheable: true,
+		return podRefreshResult{
+			sample: podSampleResult{
+				state: MeasurementCurrent, updatedAt: completedAt, cacheable: true,
+			},
+			detail: podDetailResult{
+				updatedAt: completedAt, cacheable: true,
+			},
 		}
 	}
 	classified := classifyMetricsError(err)
 	safeErr := safeMetricsError(classified)
+	result := podRefreshResult{
+		sample: podSampleResult{
+			state: MeasurementUnavailable, updatedAt: completedAt,
+			err: safeErr, cacheable: true,
+		},
+		detail: podDetailResult{updatedAt: completedAt, err: safeErr, cacheable: true},
+	}
 	if !errors.Is(classified, ErrMetricsAPIForbidden) && fallback != nil {
-		return podSampleResult{
+		result.sample = podSampleResult{
 			sample: cloneSample(*fallback), hasSample: true,
 			state: MeasurementStale, updatedAt: completedAt, err: safeErr, cacheable: true,
 		}
 	}
-	return podSampleResult{
-		state: MeasurementUnavailable, updatedAt: completedAt,
-		err: safeErr, cacheable: true,
+	if !errors.Is(classified, ErrMetricsAPIForbidden) && detailFallback != nil {
+		result.detail.value = detailFallback.DeepCopy()
 	}
+	return result
 }
 
 func podMetricSample(value *metricsapi.PodMetrics) Sample {
@@ -390,7 +554,7 @@ func podMetricSample(value *metricsapi.PodMetrics) Sample {
 func (c *PodSampleCache) completeFlight(
 	key podSampleKey,
 	flight *podSampleFlight,
-	result podSampleResult,
+	refresh podRefreshResult,
 ) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -398,13 +562,18 @@ func (c *PodSampleCache) completeFlight(
 		return
 	}
 	delete(c.flights, key)
-	if !c.closed && result.cacheable {
-		c.putLocked(key, result)
+	if !c.closed && refresh.sample.cacheable {
+		c.putLocked(key, refresh.sample)
+	}
+	if !c.closed && flight.detailRequested && refresh.detail.cacheable {
+		c.putDetailLocked(key, refresh.detail)
 	}
 	if c.closed {
-		result = podSampleResult{state: MeasurementUnavailable, err: ErrPodSampleCacheClosed}
+		refresh.sample = podSampleResult{state: MeasurementUnavailable, err: ErrPodSampleCacheClosed}
+		refresh.detail = podDetailResult{err: ErrPodSampleCacheClosed}
 	}
-	flight.result = clonePodSampleResult(result)
+	flight.result = clonePodSampleResult(refresh.sample)
+	flight.detailResult = clonePodDetailResult(refresh.detail)
 	close(flight.done)
 }
 
@@ -430,6 +599,36 @@ func (c *PodSampleCache) putLocked(key podSampleKey, result podSampleResult) {
 	}
 	entry.expiresAt = result.updatedAt.Add(ttl)
 	c.enforceLimitsLocked()
+}
+
+func (c *PodSampleCache) putDetailLocked(key podSampleKey, result podDetailResult) {
+	entry := c.details[key]
+	if entry == nil {
+		entry = &podDetailEntry{key: key}
+		entry.element = c.detailLRU.PushFront(entry)
+		c.details[key] = entry
+	} else {
+		c.detailLRU.MoveToFront(entry.element)
+	}
+	entry.result = clonePodDetailResult(result)
+	ttl := c.negativeTTL
+	if result.value != nil && result.err == nil {
+		ttl = c.refreshTTL
+	}
+	entry.expiresAt = result.updatedAt.Add(ttl)
+	c.enforceDetailLimitLocked()
+}
+
+func (c *PodSampleCache) enforceDetailLimitLocked() {
+	for len(c.details) > c.detailLimit {
+		element := c.detailLRU.Back()
+		if element == nil {
+			return
+		}
+		entry := element.Value.(*podDetailEntry)
+		delete(c.details, entry.key)
+		c.detailLRU.Remove(element)
+	}
 }
 
 func (c *PodSampleCache) enforceLimitsLocked() {
@@ -486,6 +685,13 @@ func clonePodSampleResult(result podSampleResult) podSampleResult {
 	return result
 }
 
+func clonePodDetailResult(result podDetailResult) podDetailResult {
+	if result.value != nil {
+		result.value = result.value.DeepCopy()
+	}
+	return result
+}
+
 func cloneSample(sample Sample) Sample {
 	resources := make(map[string]int64, len(sample.Resources))
 	for name, value := range sample.Resources {
@@ -519,6 +725,8 @@ func (c *PodSampleCache) Close() {
 	c.entries = nil
 	c.lru.Init()
 	c.sampleCount = 0
+	c.details = nil
+	c.detailLRU.Init()
 	c.flights = nil
 	c.work = nil
 	close(c.closeDone)

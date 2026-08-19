@@ -93,6 +93,117 @@ func TestPodSampleCacheExactGETRefreshAndStableClones(t *testing.T) {
 	}
 }
 
+func TestPodSampleCacheDetailSharesInflightGETAndUsesSeparateBoundedTier(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	client := &podCacheTestClient{get: func(
+		context.Context, string, string,
+	) (*metricsapi.PodMetrics, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		<-release
+		return &metricsapi.PodMetrics{
+			ObjectMeta: metav1.ObjectMeta{UID: "uid-api"},
+			Timestamp:  metav1.NewTime(time.Unix(123, 0)),
+			Containers: []metricsapi.ContainerMetrics{
+				{Name: "app", Usage: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("125m"),
+				}},
+				{Name: "sidecar", Usage: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("25m"),
+				}},
+			},
+		}, nil
+	}}
+	cache := newTestPodSampleCache(t, PodSampleCacheConfig{
+		Client: client, RefreshTTL: time.Hour, NegativeTTL: time.Minute,
+		EntryLimit: 10, SampleLimit: 10, DetailEntryLimit: 1, MaxConcurrentGETs: 1,
+	})
+	reference := podReference("api")
+	type sampleResult struct {
+		snapshot Snapshot
+		err      error
+	}
+	sampleDone := make(chan sampleResult, 1)
+	go func() {
+		snapshot, err := cache.Resolve(context.Background(), []PodReference{reference})
+		sampleDone <- sampleResult{snapshot: snapshot, err: err}
+	}()
+	receivePodCacheSignal(t, started, "shared detail GET")
+	detailDone := make(chan struct {
+		value *metricsapi.PodMetrics
+		err   error
+	}, 1)
+	go func() {
+		value, err := cache.ResolveDetail(context.Background(), reference)
+		detailDone <- struct {
+			value *metricsapi.PodMetrics
+			err   error
+		}{value: value, err: err}
+	}()
+	eventuallyPodCache(t, func() bool {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		flight := cache.flights[podSampleKey{
+			namespace: reference.Namespace, name: reference.Name, uid: reference.UID,
+		}]
+		return flight != nil && flight.detailRequested
+	})
+	close(release)
+	select {
+	case result := <-sampleDone:
+		if result.err != nil || result.snapshot.Samples[string(reference.UID)].Resources["cpu"] != 150_000_000 {
+			t.Fatalf("sample result = %#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sample resolve did not finish")
+	}
+	select {
+	case result := <-detailDone:
+		if result.err != nil || len(result.value.Containers) != 2 {
+			t.Fatalf("detail result = %#v", result)
+		}
+		result.value.Containers[0].Name = "mutated"
+	case <-time.After(time.Second):
+		t.Fatal("detail resolve did not finish")
+	}
+	second, err := cache.ResolveDetail(context.Background(), reference)
+	if err != nil || second.Containers[0].Name != "app" || calls.Load() != 1 {
+		t.Fatalf("cached detail = %#v, error = %v, calls = %d", second, err, calls.Load())
+	}
+
+	// Compact-only samples never retain per-container payloads.
+	client.get = func(context.Context, string, string) (*metricsapi.PodMetrics, error) {
+		calls.Add(1)
+		return podMetric("uid-other", 1), nil
+	}
+	if _, err := cache.Resolve(context.Background(), []PodReference{podReference("other")}); err != nil {
+		t.Fatal(err)
+	}
+	cache.mu.Lock()
+	if len(cache.details) != 1 || cache.details[podSampleKey{
+		namespace: "team", name: "other", uid: "uid-other",
+	}] != nil {
+		cache.mu.Unlock()
+		t.Fatalf("detail tier retained compact-only payloads: %#v", cache.details)
+	}
+	cache.mu.Unlock()
+	if _, err := cache.ResolveDetail(context.Background(), podReference("other")); err != nil {
+		t.Fatal(err)
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if len(cache.details) != 1 || cache.details[podSampleKey{
+		namespace: "team", name: "other", uid: "uid-other",
+	}] == nil || cache.details[podSampleKey{
+		namespace: "team", name: "api", uid: "uid-api",
+	}] != nil {
+		t.Fatalf("detail LRU did not enforce its independent limit: %#v", cache.details)
+	}
+}
+
 func TestPodSampleCacheKeysRecreatedPodByBaseUID(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
@@ -605,6 +716,7 @@ func TestPodSampleCacheValidatesConfigurationAndReferences(t *testing.T) {
 		},
 		{name: "negative entry limit", config: PodSampleCacheConfig{Client: client, EntryLimit: -1}},
 		{name: "negative sample limit", config: PodSampleCacheConfig{Client: client, SampleLimit: -1}},
+		{name: "negative detail limit", config: PodSampleCacheConfig{Client: client, DetailEntryLimit: -1}},
 		{name: "negative concurrency", config: PodSampleCacheConfig{Client: client, MaxConcurrentGETs: -1}},
 	} {
 		if cache, err := NewPodSampleCache(test.config); err == nil {
@@ -737,4 +849,16 @@ func receivePodCacheSignal[T any](t *testing.T, values <-chan T, description str
 		var zero T
 		return zero
 	}
+}
+
+func eventuallyPodCache(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("Pod metrics cache condition was not satisfied")
 }

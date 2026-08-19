@@ -99,11 +99,12 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load columns configuration: %w", err)
 	}
+	metricSource := &view.KubernetesMetricSource{
+		Sessions: sessions, RefreshInterval: options.MetricsRefreshInterval,
+	}
 	viewRuntime, err := view.NewRuntime(view.RuntimeConfig{
-		Source: view.ClusterResourceSource{Sessions: sessions},
-		Metrics: &view.KubernetesMetricSource{
-			Sessions: sessions, RefreshInterval: options.MetricsRefreshInterval,
-		},
+		Source:                      view.ClusterResourceSource{Sessions: sessions},
+		Metrics:                     metricSource,
 		Columns:                     columnManager,
 		WarmViewLimit:               options.WarmViewLimit,
 		WarmObjectLimit:             options.WarmObjectLimit,
@@ -131,7 +132,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		return nil, err
 	}
 	objectReader.SetCachedChildSource(relationshipCacheAdapter{runtime: viewRuntime})
-	detailMetrics, err := object.NewKubernetesDetailMetricsProvider(sessions)
+	detailMetrics, err := object.NewKubernetesDetailMetricsProvider(sessions, metricSource)
 	if err != nil {
 		viewRuntime.Close()
 		return nil, err

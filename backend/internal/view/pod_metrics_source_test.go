@@ -9,6 +9,8 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -73,6 +75,59 @@ func TestKubernetesMetricSourceReusesExactPodCacheAcrossAuthoritySessions(t *tes
 	if actions := client.Actions(); len(actions) != 1 || actions[0].GetVerb() != "get" ||
 		actions[0].GetNamespace() != "team" {
 		t.Fatalf("Metrics client actions = %#v", actions)
+	}
+	if released := source.ReleaseIdleProviders(); released != 1 {
+		t.Fatalf("released exact caches = %d, want 1", released)
+	}
+}
+
+func TestKubernetesMetricSourceSharesDetailedPodCacheAcrossAuthoritySessions(t *testing.T) {
+	t.Parallel()
+	client := metricsfake.NewSimpleClientset()
+	var calls atomic.Int32
+	client.PrependReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		calls.Add(1)
+		return true, &metricsapi.PodMetrics{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: action.GetNamespace(), Name: "api", UID: "pod-uid",
+			},
+			Containers: []metricsapi.ContainerMetrics{
+				{Name: "app", Usage: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("125m"),
+				}},
+				{Name: "sidecar", Usage: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("25m"),
+				}},
+			},
+		}, nil
+	})
+	registry := cluster.NewSessionRegistry(metricClientFactory{metrics: client.MetricsV1beta1()})
+	t.Cleanup(registry.CloseAll)
+	catalog := metricTestCatalog(t)
+	first, err := registry.Open(catalog, metricContextID(t, catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := registry.Open(catalog, metricContextID(t, catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &KubernetesMetricSource{Sessions: registry, RefreshInterval: time.Hour}
+	reference := metrics.PodReference{Namespace: "team", Name: "api", UID: "pod-uid"}
+	detail, err := source.ResolvePodMetricsDetail(context.Background(), first.ID(), reference)
+	if err != nil || len(detail.Containers) != 2 {
+		t.Fatalf("first detail = %#v, error = %v", detail, err)
+	}
+	detail.Containers[0].Name = "mutated"
+	secondDetail, err := source.ResolvePodMetricsDetail(context.Background(), second.ID(), reference)
+	if err != nil || secondDetail.Containers[0].Name != "app" {
+		t.Fatalf("second detail = %#v, error = %v", secondDetail, err)
+	}
+	snapshot, err := source.ResolvePodMetrics(
+		context.Background(), second.ID(), second.AuthorityID(), []metrics.PodReference{reference},
+	)
+	if err != nil || snapshot.Samples["pod-uid"].Resources["cpu"] != 150_000_000 || calls.Load() != 1 {
+		t.Fatalf("compact snapshot = %#v, error = %v, calls = %d", snapshot, err, calls.Load())
 	}
 	if released := source.ReleaseIdleProviders(); released != 1 {
 		t.Fatalf("released exact caches = %d, want 1", released)

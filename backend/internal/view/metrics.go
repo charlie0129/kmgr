@@ -75,6 +75,7 @@ type KubernetesMetricSource struct {
 	PodSampleNegativeTTL       time.Duration
 	PodSampleEntryLimit        int
 	PodSampleLimit             int
+	PodDetailEntryLimit        int
 	PodSampleMaxConcurrentGETs int
 	// Zero uses the conservative defaults above. These budgets cover only idle
 	// providers; providers with an open lookup lease or active subscriber are

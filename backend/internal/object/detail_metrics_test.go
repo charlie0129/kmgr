@@ -203,6 +203,50 @@ func TestKubernetesDetailMetricsProviderAccountsPodAndPreservesExactResources(t 
 	}
 }
 
+func TestKubernetesDetailMetricsProviderUsesSharedDetailedPodCache(t *testing.T) {
+	t.Parallel()
+	pod := &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "team-a", Name: "api", UID: "pod-uid",
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+	}
+	metric := &metricsapi.PodMetrics{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "api", UID: "pod-uid"},
+		Containers: []metricsapi.ContainerMetrics{{
+			Name: "app", Usage: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("125m"),
+			},
+		}},
+	}
+	directClient := metricsfake.NewSimpleClientset()
+	directClient.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("unexpected direct PodMetrics GET")
+	})
+	cache := &fakePodMetricsDetailResolver{value: metric}
+	provider := &KubernetesDetailMetricsProvider{
+		clients:        &fakeDetailMetricsClientResolver{client: directClient.MetricsV1beta1()},
+		podDetailCache: cache,
+	}
+	values, err := provider.Metrics(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "pods", Namespace: "team-a",
+		Name: "api", UID: "pod-uid",
+	}, unstructuredForDetailMetrics(t, pod))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache.calls != 1 || cache.sessionID != "session" ||
+		cache.reference != (metrics.PodReference{Namespace: "team-a", Name: "api", UID: "pod-uid"}) ||
+		len(directClient.Actions()) != 0 {
+		t.Fatalf("cache call = %#v; direct actions = %#v", cache, directClient.Actions())
+	}
+	cpu := detailUsageByName(t, values.ContainerResources["app"], corev1.ResourceCPU)
+	if !cpu.GetUsageAvailable() || cpu.GetUsed() != 0.125 {
+		t.Fatalf("cached container CPU = %#v", cpu)
+	}
+}
+
 func TestKubernetesDetailMetricsProviderUsesNodeAllocatableAsCapacity(t *testing.T) {
 	t.Parallel()
 	node := &corev1.Node{
@@ -400,6 +444,28 @@ type fakeDetailMetricsClientResolver struct {
 	availabilityErr   error
 	availabilityCalls int
 	clientCalls       int
+}
+
+type fakePodMetricsDetailResolver struct {
+	calls     int
+	sessionID string
+	reference metrics.PodReference
+	value     *metricsapi.PodMetrics
+	err       error
+}
+
+func (r *fakePodMetricsDetailResolver) ResolvePodMetricsDetail(
+	_ context.Context,
+	sessionID string,
+	reference metrics.PodReference,
+) (*metricsapi.PodMetrics, error) {
+	r.calls++
+	r.sessionID = sessionID
+	r.reference = reference
+	if r.value == nil {
+		return nil, r.err
+	}
+	return r.value.DeepCopy(), r.err
 }
 
 func (r *fakeDetailMetricsClientResolver) CachedMetricsAPIAvailability(

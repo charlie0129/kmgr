@@ -41,22 +41,42 @@ type detailMetricsClientResolver interface {
 	MetricsClient(sessionID string) (metricsclient.MetricsV1beta1Interface, error)
 }
 
+// PodMetricsDetailResolver is the shared authority cache seam used by the
+// explicit Pod container table. Implementations must pin the lookup to the
+// supplied base-Pod UID and coalesce it with viewport metric requests.
+type PodMetricsDetailResolver interface {
+	ResolvePodMetricsDetail(
+		ctx context.Context,
+		sessionID string,
+		reference metrics.PodReference,
+	) (*metricsapi.PodMetrics, error)
+}
+
 // KubernetesDetailMetricsProvider reads the optional Metrics API through a
 // client derived from the selected authoritative cluster session. It performs
 // no I/O until Metrics is called for a Pod or Node detail request.
 type KubernetesDetailMetricsProvider struct {
-	clients detailMetricsClientResolver
+	clients        detailMetricsClientResolver
+	podDetailCache PodMetricsDetailResolver
 }
 
 func NewKubernetesDetailMetricsProvider(
 	sessions *cluster.SessionRegistry,
+	resolvers ...PodMetricsDetailResolver,
 ) (*KubernetesDetailMetricsProvider, error) {
 	if sessions == nil {
 		return nil, errors.New("cluster session registry must not be nil")
 	}
-	return &KubernetesDetailMetricsProvider{
+	provider := &KubernetesDetailMetricsProvider{
 		clients: &sessionDetailMetricsClients{sessions: sessions},
-	}, nil
+	}
+	if len(resolvers) > 1 {
+		return nil, errors.New("at most one Pod metrics detail resolver may be configured")
+	}
+	if len(resolvers) == 1 {
+		provider.podDetailCache = resolvers[0]
+	}
+	return provider, nil
 }
 
 type sessionDetailMetricsClients struct {
@@ -148,9 +168,19 @@ func (p *KubernetesDetailMetricsProvider) Metrics(
 
 	switch kind {
 	case metrics.PodMetrics:
-		value, err := client.PodMetricses(identity.Namespace).Get(ctx, identity.Name, metav1.GetOptions{})
+		var value *metricsapi.PodMetrics
+		if p.podDetailCache != nil {
+			value, err = p.podDetailCache.ResolvePodMetricsDetail(ctx, identity.SessionID, metrics.PodReference{
+				Namespace: identity.Namespace, Name: identity.Name, UID: types.UID(identity.UID),
+			})
+		} else {
+			value, err = client.PodMetricses(identity.Namespace).Get(ctx, identity.Name, metav1.GetOptions{})
+		}
 		if err != nil {
 			return accounting, err
+		}
+		if value == nil {
+			return accounting, nil
 		}
 		if err := validateMetricsUID(value.GetUID(), identity); err != nil {
 			return accounting, err

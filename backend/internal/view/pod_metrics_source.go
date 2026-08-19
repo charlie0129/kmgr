@@ -7,6 +7,7 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
+	metricsapi "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
 )
 
@@ -32,14 +33,56 @@ func (s *KubernetesMetricSource) ResolvePodMetrics(
 	if err := ctx.Err(); err != nil {
 		return metrics.Snapshot{}, err
 	}
-	session, lease, err := s.acquireMetricsSession(sessionID, authorityID)
+	cache, release, err := s.acquirePodSampleCache(sessionID, authorityID)
 	if err != nil {
 		return metrics.Snapshot{}, err
 	}
-	defer lease.Release()
+	defer release()
+	return cache.Resolve(ctx, references)
+}
+
+// ResolvePodMetricsDetail serves an explicit container-table request through
+// the same authority-owned cache and in-flight GET as viewport samples. Only
+// explicit calls retain the per-container payload in the cache's small detail
+// tier.
+func (s *KubernetesMetricSource) ResolvePodMetricsDetail(
+	ctx context.Context,
+	sessionID string,
+	reference metrics.PodReference,
+) (*metricsapi.PodMetrics, error) {
+	if ctx == nil {
+		return nil, errors.New("Pod metrics detail context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s == nil || s.Sessions == nil {
+		return nil, errors.New("cluster session registry is unavailable")
+	}
+	session, ok := s.Sessions.Get(sessionID)
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+	authorityID := session.AuthorityID()
+	cache, release, err := s.acquirePodSampleCache(sessionID, authorityID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return cache.ResolveDetail(ctx, reference)
+}
+
+func (s *KubernetesMetricSource) acquirePodSampleCache(
+	sessionID, authorityID string,
+) (*metrics.PodSampleCache, func(), error) {
+	session, lease, err := s.acquireMetricsSession(sessionID, authorityID)
+	if err != nil {
+		return nil, nil, err
+	}
 	client := session.Metrics()
 	if client == nil {
-		return metrics.Snapshot{}, errors.New("cluster Metrics API client is unavailable")
+		lease.Release()
+		return nil, nil, errors.New("cluster Metrics API client is unavailable")
 	}
 
 	s.mu.Lock()
@@ -60,10 +103,13 @@ func (s *KubernetesMetricSource) ResolvePodMetrics(
 	}
 	s.mu.Unlock()
 	if err != nil {
-		return metrics.Snapshot{}, err
+		lease.Release()
+		return nil, nil, err
 	}
-	defer s.finishPodSampleResolve(authorityID, entry)
-	return entry.cache.Resolve(ctx, references)
+	return entry.cache, func() {
+		s.finishPodSampleResolve(authorityID, entry)
+		lease.Release()
+	}, nil
 }
 
 func (s *KubernetesMetricSource) finishPodSampleResolve(
@@ -152,6 +198,7 @@ func (s *KubernetesMetricSource) podSampleCacheConfig(
 	return metrics.PodSampleCacheConfig{
 		Client: client, RefreshTTL: refreshTTL, NegativeTTL: negativeTTL,
 		EntryLimit: s.PodSampleEntryLimit, SampleLimit: s.PodSampleLimit,
+		DetailEntryLimit:  s.PodDetailEntryLimit,
 		MaxConcurrentGETs: s.PodSampleMaxConcurrentGETs,
 	}
 }
