@@ -113,6 +113,24 @@ func TestSnapshotUsesStableIdentityOrder(t *testing.T) {
 	}
 }
 
+func TestGetManyPreservesRequestedOrderDuplicatesAndMissingSlots(t *testing.T) {
+	t.Parallel()
+	s := New()
+	first := object("uid-a", "ns", "a", "")
+	second := object("uid-b", "ns", "b", "")
+	s.Upsert(first)
+	s.Upsert(second)
+
+	objects := s.GetMany([]types.UID{"uid-b", "missing", "uid-a", "uid-b"})
+	if len(objects) != 4 || objects[0] != second || objects[1] != nil ||
+		objects[2] != first || objects[3] != second {
+		t.Fatalf("GetMany result = %#v", objects)
+	}
+	if got := s.GetMany(nil); got == nil || len(got) != 0 {
+		t.Fatalf("empty GetMany result = %#v, want non-nil empty slice", got)
+	}
+}
+
 func TestSnapshotContextRejectsNilAndAlreadyCanceledContext(t *testing.T) {
 	t.Parallel()
 	s := New()

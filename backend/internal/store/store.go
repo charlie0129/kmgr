@@ -130,6 +130,21 @@ func (s *UIDStore) Len() int {
 	return len(s.byUID)
 }
 
+// GetMany returns immutable object pointers in the same positions as the
+// requested UIDs. A missing UID produces a nil entry. This is the viewport
+// lookup path: it avoids constructing and sorting a complete store snapshot
+// when a caller needs only a bounded range of already-indexed objects.
+func (s *UIDStore) GetMany(uids []types.UID) []*unstructured.Unstructured {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	objects := make([]*unstructured.Unstructured, len(uids))
+	for index, uid := range uids {
+		objects[index] = s.byUID[uid]
+	}
+	return objects
+}
+
 // RetainedBytes returns a conservative estimate of the heap retained by raw
 // objects and the UID store's indexes. It is maintained incrementally so warm
 // cache admission never needs to serialize or traverse a complete large view
