@@ -119,15 +119,17 @@ func (s *GRPCService) WatchObject(
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	// Verify the UID before opening the watch. When the caller has no resource
-	// version, anchor the watch at this authoritative GET so updates cannot fall
-	// into a GET/WATCH gap.
-	current, err := s.reader.Get(operationContext, identity)
-	if err != nil {
-		return s.sendObjectFailure(stream, request, 1, err, "watch-object")
-	}
 	resourceVersion := request.GetResourceVersion()
 	if resourceVersion == "" {
+		// A caller without an authoritative snapshot needs one UID-pinned GET to
+		// anchor the watch without a GET/WATCH gap. Details passes the resource
+		// version from its immediately preceding GetObject, so repeating that GET
+		// here would add latency and API-server work without strengthening the
+		// identity contract: every delivered watch object is still UID-checked.
+		current, getErr := s.reader.Get(operationContext, identity)
+		if getErr != nil {
+			return s.sendObjectFailure(stream, request, 1, getErr, "watch-object")
+		}
 		resourceVersion = current.GetResourceVersion()
 	}
 	var sequence uint64 = 1

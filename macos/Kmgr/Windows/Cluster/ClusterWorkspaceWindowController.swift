@@ -1538,36 +1538,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func freshOpen(_ identity: ResourceIdentity) {
-        let revision = beginObjectOpenTask()
-        publishWorkspaceOperation(WorkspaceStatus(
-            "Refreshing \(identity.name)…",
-            busy: true
-        ))
-        objectOpenTask = Task { [weak self, objectDetailProvider] in
-            guard let self else { return }
-            defer {
-                if objectOpenRevision == revision { objectOpenTask = nil }
-            }
-            do {
-                let detail = try await objectDetailProvider.getObject(identity: identity)
-                guard !Task.isCancelled, objectOpenRevision == revision else { return }
-                objectOpenTask = nil
-                publishWorkspaceOperation(nil)
-                showObject(detail.identity, initialTab: .automatic)
-            } catch is CancellationError {
-                if objectOpenRevision == revision {
-                    publishWorkspaceOperation(nil)
-                }
-            } catch {
-                guard !Task.isCancelled, objectOpenRevision == revision else { return }
-                let presentation = UserFacingErrorPresentation(error)
-                publishWorkspaceOperation(WorkspaceStatus(
-                    presentation.inlineText,
-                    severity: .error,
-                    toolTip: presentation.detailedText
-                ))
-            }
-        }
+        // The Details controller performs the one UID-pinned authoritative GET
+        // it needs. A palette preflight used to fetch the same object first,
+        // adding latency without changing the identity passed to Details.
+        invalidateObjectOpenTask()
+        publishWorkspaceOperation(nil)
+        showObject(identity, initialTab: .automatic)
     }
 
     private func enterObject(_ identity: ResourceIdentity) {

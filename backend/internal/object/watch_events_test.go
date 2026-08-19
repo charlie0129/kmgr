@@ -97,6 +97,72 @@ func TestWatchObjectPinsUIDMapsUpdatesAndBookmarks(t *testing.T) {
 	}
 }
 
+func TestWatchObjectDoesNotRepeatAuthoritativeGetWhenResourceVersionIsSupplied(t *testing.T) {
+	t.Parallel()
+	pod := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "uid")
+	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), pod)
+	fakeWatch := watch.NewRaceFreeFake()
+	var getCalls int
+	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		getCalls++
+		return false, nil, nil
+	})
+	client.PrependWatchReactor("pods", func(action clienttesting.Action) (bool, watch.Interface, error) {
+		if got := action.(clienttesting.WatchAction).GetWatchRestrictions().ResourceVersion; got != "rv-authoritative" {
+			t.Errorf("watch resource version = %q", got)
+		}
+		return true, fakeWatch, nil
+	})
+	reader, _ := NewReader(fakeResolver{client: client})
+	service, _ := NewGRPCService(reader)
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := newObjectTestStream(ctx)
+	done := make(chan error, 1)
+	request := watchRequest("rv-authoritative")
+	go func() { done <- service.WatchObject(request, stream) }()
+	stream.waitForCount(t, 1)
+	cancel()
+	if err := <-done; status.Code(err) != codes.Canceled {
+		t.Fatalf("watch returned %v, want cancelled", err)
+	}
+	if getCalls != 0 {
+		t.Fatalf("duplicate initial GET calls = %d, want 0", getCalls)
+	}
+}
+
+func TestWatchObjectAnchorsWithGetWhenResourceVersionIsAbsent(t *testing.T) {
+	t.Parallel()
+	pod := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "uid")
+	pod.SetResourceVersion("rv-current")
+	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), pod)
+	fakeWatch := watch.NewRaceFreeFake()
+	var getCalls int
+	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		getCalls++
+		return false, nil, nil
+	})
+	client.PrependWatchReactor("pods", func(action clienttesting.Action) (bool, watch.Interface, error) {
+		if got := action.(clienttesting.WatchAction).GetWatchRestrictions().ResourceVersion; got != "rv-current" {
+			t.Errorf("watch resource version = %q", got)
+		}
+		return true, fakeWatch, nil
+	})
+	reader, _ := NewReader(fakeResolver{client: client})
+	service, _ := NewGRPCService(reader)
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := newObjectTestStream(ctx)
+	done := make(chan error, 1)
+	go func() { done <- service.WatchObject(watchRequest(""), stream) }()
+	stream.waitForCount(t, 1)
+	cancel()
+	if err := <-done; status.Code(err) != codes.Canceled {
+		t.Fatalf("watch returned %v, want cancelled", err)
+	}
+	if getCalls != 1 {
+		t.Fatalf("anchor GET calls = %d, want 1", getCalls)
+	}
+}
+
 func TestWatchObjectReconnectsFromLastDeliveredResourceVersion(t *testing.T) {
 	t.Parallel()
 	pod := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "uid")
@@ -171,7 +237,7 @@ func TestWatchObjectReanchorsWithFreshGetAfterGone(t *testing.T) {
 		getMu.Lock()
 		defer getMu.Unlock()
 		getCalls++
-		if getCalls == 2 {
+		if getCalls == 1 {
 			return true, nil, apierrors.NewInternalError(errors.New("temporary GET failure"))
 		}
 		return false, nil, nil
@@ -226,8 +292,8 @@ func TestWatchObjectReanchorsWithFreshGetAfterGone(t *testing.T) {
 		t.Fatalf("410 reanchor event = %#v", events[1])
 	}
 	getMu.Lock()
-	if getCalls != 3 {
-		t.Fatalf("GET calls after transient reanchor failure = %d, want 3", getCalls)
+	if getCalls != 2 {
+		t.Fatalf("GET calls after transient reanchor failure = %d, want 2", getCalls)
 	}
 	getMu.Unlock()
 	cancel()
