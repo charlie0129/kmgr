@@ -14,6 +14,7 @@ import (
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 type executorFunc func(context.Context, remotecommand.StreamOptions) error
@@ -45,7 +46,10 @@ func TestClientGoRunnerVerifiesPodAndBuildsExecRequest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	config := &rest.Config{Host: server.URL, BearerToken: "test-bearer-token"}
+	limiter := flowcontrol.NewTokenBucketRateLimiter(12.5, 37)
+	config := &rest.Config{
+		Host: server.URL, BearerToken: "test-bearer-token", RateLimiter: limiter,
+	}
 	core, err := coreclient.NewForConfig(config)
 	if err != nil {
 		t.Fatalf("NewForConfig: %v", err)
@@ -93,6 +97,9 @@ func TestClientGoRunnerVerifiesPodAndBuildsExecRequest(t *testing.T) {
 	}
 	if factoryConfig == config || factoryConfig.Host != config.Host || factoryConfig.BearerToken != config.BearerToken {
 		t.Fatalf("executor config was not a faithful copy: %#v", factoryConfig)
+	}
+	if factoryConfig.RateLimiter != limiter {
+		t.Fatal("exec transport copy replaced the authority-wide limiter")
 	}
 
 	parsed, err := url.Parse(execURL)

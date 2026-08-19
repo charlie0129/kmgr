@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/charlie0129/kmgr/backend/internal/store"
 )
@@ -201,6 +202,26 @@ func TestTableListFailureFallsBackToRawSameGVR(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTableResourceClientRetainsAuthorityRateLimiter(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(server.Close)
+	limiter := flowcontrol.NewTokenBucketRateLimiter(12.5, 37)
+	config := &rest.Config{Host: server.URL, RateLimiter: limiter}
+	gvr := schema.GroupVersionResource{Group: "example.io", Version: "v1", Resource: "widgets"}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		t.Fatalf("construct fallback client: %v", err)
+	}
+	client, err := NewTableResourceClient(config, gvr, "team-a", dynamicClient.Resource(gvr).Namespace("team-a"))
+	if err != nil {
+		t.Fatalf("NewTableResourceClient: %v", err)
+	}
+	if got := client.rest.GetRateLimiter(); got != limiter {
+		t.Fatal("Table REST config replaced the authority-wide limiter")
 	}
 }
 

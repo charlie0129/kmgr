@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -58,6 +59,13 @@ func TestSessionRegistryOpensIndependentSessionsWithSharedClients(t *testing.T) 
 	if config.QPS != DefaultClientQPS || config.Burst != DefaultClientBurst {
 		t.Fatalf("rate limit = %v/%d", config.QPS, config.Burst)
 	}
+	if config.RateLimiter == nil || config.RateLimiter.QPS() != DefaultClientQPS {
+		t.Fatalf("shared rate limiter = %#v", config.RateLimiter)
+	}
+	if first.RESTConfig().RateLimiter != config.RateLimiter ||
+		second.RESTConfig().RateLimiter != config.RateLimiter {
+		t.Fatal("same authority did not retain one limiter for Table/subresource clients")
+	}
 	if config.UserAgent != "kmgr-engine" {
 		t.Fatalf("user agent = %q", config.UserAgent)
 	}
@@ -112,6 +120,10 @@ func TestDifferentCatalogSnapshotsDoNotSilentlyReuseCredentials(t *testing.T) {
 	if len(factory.configs) != 2 {
 		t.Fatalf("client factory calls = %d, want 2 catalog generations", len(factory.configs))
 	}
+	if factory.configs[0].RateLimiter == nil || factory.configs[1].RateLimiter == nil ||
+		factory.configs[0].RateLimiter == factory.configs[1].RateLimiter {
+		t.Fatal("independent Kubernetes authorities did not receive independent limiters")
+	}
 }
 
 func TestSessionRegistryRejectsUnsupportedAuthenticationBeforeFactory(t *testing.T) {
@@ -164,8 +176,41 @@ func TestSessionRegistryRateLimitCanOnlyChangeWhileIdle(t *testing.T) {
 		t.Fatal("rate limit changed with an open session")
 	}
 	registry.Close(session.ID())
-	if err := registry.SetRateLimit(0, 1); err == nil {
-		t.Fatal("invalid rate limit accepted")
+	for _, qps := range []float32{0, -1, float32(math.NaN()), float32(math.Inf(1))} {
+		if err := registry.SetRateLimit(qps, 1); err == nil {
+			t.Errorf("invalid QPS %v was accepted", qps)
+		}
+	}
+	if err := registry.SetRateLimit(1, 0); err == nil {
+		t.Fatal("invalid burst was accepted")
+	}
+}
+
+func TestSessionRegistryUsesConfiguredFractionalRateLimit(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog(t, "https://cluster.example.test")
+	factory := &recordingFactory{}
+	registry := NewSessionRegistry(factory)
+	t.Cleanup(registry.CloseAll)
+	if err := registry.SetRateLimit(12.5, 37); err != nil {
+		t.Fatalf("SetRateLimit: %v", err)
+	}
+	session, err := registry.Open(catalog, requireContextNamed(t, catalog, "local").ID)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if len(factory.configs) != 1 {
+		t.Fatalf("client factory calls = %d, want 1", len(factory.configs))
+	}
+	config := factory.configs[0]
+	if config.QPS != 12.5 || config.Burst != 37 {
+		t.Fatalf("configured rate limit = %v/%d", config.QPS, config.Burst)
+	}
+	if config.RateLimiter == nil || config.RateLimiter.QPS() != 12.5 {
+		t.Fatalf("configured shared limiter = %#v", config.RateLimiter)
+	}
+	if session.RESTConfig().RateLimiter != config.RateLimiter {
+		t.Fatal("subresource configuration replaced the authority limiter")
 	}
 }
 

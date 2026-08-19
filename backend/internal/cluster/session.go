@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sync"
 
@@ -17,6 +18,7 @@ import (
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/util/flowcontrol"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
 )
 
@@ -221,8 +223,11 @@ func NewSessionRegistry(factory ClientFactory) *SessionRegistry {
 }
 
 func (r *SessionRegistry) SetRateLimit(qps float32, burst int) error {
-	if qps <= 0 || burst <= 0 {
-		return errors.New("Kubernetes rate limits must be positive")
+	if qps <= 0 || math.IsNaN(float64(qps)) || math.IsInf(float64(qps), 0) {
+		return errors.New("Kubernetes QPS must be finite and positive")
+	}
+	if burst <= 0 {
+		return errors.New("Kubernetes burst must be positive")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -257,6 +262,10 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 	key := backendKey{catalog: catalog, contextID: contextInfo.ID}
 	backend := r.backends[key]
 	if backend == nil {
+		// Every client constructed for this authority must receive this exact
+		// limiter. Supplying only QPS/Burst would make each REST client allocate
+		// an independent token bucket and multiply the effective API-server cap.
+		config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(config.QPS, config.Burst)
 		activity := &APIActivity{}
 		config = configWithAPIActivity(config, activity)
 		clients, err := r.factory.New(config)
@@ -416,9 +425,10 @@ func (s *Session) APIActivity() *APIActivity {
 	return s.backend.activity
 }
 
-// RESTConfig returns an independent copy for subresource transports such as
-// exec and port-forward. Callers must never log it because it may contain
-// authentication material.
+// RESTConfig returns an independent copy for Table and subresource transports
+// such as exec and port-forward. The copy deliberately retains the shared
+// authority-wide RateLimiter identity. Callers must never log it because it
+// may contain authentication material.
 func (s *Session) RESTConfig() *rest.Config {
 	if s == nil || s.backend == nil || s.backend.config == nil {
 		return nil

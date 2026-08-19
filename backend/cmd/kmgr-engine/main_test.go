@@ -51,3 +51,24 @@ func TestMetricsRefreshFlagIsValidated(t *testing.T) {
 		t.Fatalf("run(invalid --metrics-refresh) = %d, want usage error", code)
 	}
 }
+
+func TestKubernetesRateLimitFlagsAreValidated(t *testing.T) {
+	if code := run([]string{
+		"--version", "--kubernetes-qps", "12.5", "--kubernetes-burst", "37",
+	}); code != 0 {
+		t.Fatalf("run(valid fractional Kubernetes rate limit) = %d, want success", code)
+	}
+	for _, arguments := range [][]string{
+		{"--version", "--kubernetes-qps", "0"},
+		{"--version", "--kubernetes-qps", "NaN"},
+		{"--version", "--kubernetes-qps", "+Inf"},
+		{"--version", "--kubernetes-qps", "3.5e38"},
+		{"--version", "--kubernetes-qps", "1e-50"},
+		{"--version", "--kubernetes-burst", "0"},
+		{"--version", "--kubernetes-burst", "not-an-integer"},
+	} {
+		if code := run(arguments); code != 2 {
+			t.Errorf("run(%q) = %d, want usage error", arguments, code)
+		}
+	}
+}

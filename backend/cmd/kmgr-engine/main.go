@@ -2,15 +2,18 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	"github.com/charlie0129/kmgr/backend/internal/transport"
 )
@@ -32,6 +35,14 @@ func run(arguments []string) int {
 		"metrics-refresh", metrics.DefaultRefreshInterval,
 		"refresh interval for active Metrics API consumers",
 	)
+	kubernetesQPS := flags.Float64(
+		"kubernetes-qps", cluster.DefaultClientQPS,
+		"aggregate Kubernetes client requests per second for each authority",
+	)
+	kubernetesBurst := flags.Int(
+		"kubernetes-burst", cluster.DefaultClientBurst,
+		"aggregate Kubernetes client burst for each authority",
+	)
 	logLevel := flags.String("log-level", "info", "stderr log level: debug, info, warn, or error")
 	startDevelopmentProfiler := registerDevelopmentProfiler(flags)
 	if err := flags.Parse(arguments); err != nil {
@@ -44,6 +55,11 @@ func run(arguments []string) int {
 	}
 	if *metricsRefresh <= 0 {
 		fmt.Fprintln(os.Stderr, "kmgr-engine: --metrics-refresh must be positive")
+		return 2
+	}
+	validatedQPS, err := validateKubernetesRateLimit(*kubernetesQPS, *kubernetesBurst)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
 		return 2
 	}
 	if *showVersion {
@@ -87,6 +103,8 @@ func run(arguments []string) int {
 		Logger:                 logger,
 		ColumnsPath:            *columnsPath,
 		MetricsRefreshInterval: *metricsRefresh,
+		KubernetesQPS:          validatedQPS,
+		KubernetesBurst:        *kubernetesBurst,
 	})
 	if err != nil {
 		logger.Error("failed to initialize engine server", "error_kind", "configuration")
@@ -128,6 +146,18 @@ func run(arguments []string) int {
 		return 1
 	}
 	return 0
+}
+
+func validateKubernetesRateLimit(qps float64, burst int) (float32, error) {
+	convertedQPS := float32(qps)
+	if qps <= 0 || math.IsNaN(qps) || math.IsInf(qps, 0) ||
+		convertedQPS <= 0 || math.IsInf(float64(convertedQPS), 0) {
+		return 0, errors.New("--kubernetes-qps must be a finite positive 32-bit value")
+	}
+	if burst <= 0 {
+		return 0, errors.New("--kubernetes-burst must be positive")
+	}
+	return convertedQPS, nil
 }
 
 func parseLogLevel(value string) (slog.Level, error) {

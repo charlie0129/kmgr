@@ -3,12 +3,14 @@ package transport
 import (
 	"context"
 	"errors"
+	"math"
 	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	"github.com/charlie0129/kmgr/backend/internal/operation"
 	"github.com/charlie0129/kmgr/backend/internal/portforward"
@@ -20,7 +22,70 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 )
+
+type serverRateLimitFactory struct {
+	config *rest.Config
+}
+
+func (f *serverRateLimitFactory) New(config *rest.Config) (cluster.BackendClients, error) {
+	f.config = rest.CopyConfig(config)
+	return cluster.BackendClients{}, nil
+}
+
+func TestServerConfiguresKubernetesRateLimitBeforeSessionOpen(t *testing.T) {
+	factory := &serverRateLimitFactory{}
+	server, err := NewServer(strings.Repeat("a", 64), ServerOptions{
+		Version: "test", ColumnsPath: t.TempDir() + "/columns.yaml",
+		ClientFactory: factory, KubernetesQPS: 12.5, KubernetesBurst: 37,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { server.Shutdown(time.Second) })
+	catalog := serviceCatalog(t)
+	session, err := server.sessions.Open(catalog, serviceContextID(t, catalog))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if factory.config == nil || factory.config.QPS != 12.5 || factory.config.Burst != 37 {
+		t.Fatalf("factory rate limit = %#v", factory.config)
+	}
+	if factory.config.RateLimiter == nil || factory.config.RateLimiter.QPS() != 12.5 {
+		t.Fatalf("factory shared limiter = %#v", factory.config.RateLimiter)
+	}
+	if session.RESTConfig().RateLimiter != factory.config.RateLimiter {
+		t.Fatal("server session did not retain the configured authority limiter")
+	}
+}
+
+func TestServerRejectsInvalidKubernetesRateLimit(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		qps   float32
+		burst int
+	}{
+		{name: "missing burst", qps: 1},
+		{name: "missing QPS", burst: 1},
+		{name: "negative QPS", qps: -1, burst: 1},
+		{name: "NaN QPS", qps: float32(math.NaN()), burst: 1},
+		{name: "infinite QPS", qps: float32(math.Inf(1)), burst: 1},
+		{name: "negative burst", qps: 1, burst: -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, err := NewServer(strings.Repeat("a", 64), ServerOptions{
+				Version: "test", KubernetesQPS: test.qps, KubernetesBurst: test.burst,
+			})
+			if server != nil || err == nil {
+				if server != nil {
+					server.Shutdown(time.Second)
+				}
+				t.Fatalf("NewServer(%v/%d) = %#v, %v; want error", test.qps, test.burst, server, err)
+			}
+		})
+	}
+}
 
 func TestServerAuthenticatesEveryRPC(t *testing.T) {
 	t.Parallel()

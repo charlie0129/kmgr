@@ -33,6 +33,8 @@ type ServerOptions struct {
 	ProbeTimeout           time.Duration
 	ColumnsPath            string
 	MetricsRefreshInterval time.Duration
+	KubernetesQPS          float32
+	KubernetesBurst        int
 	GRPCOptions            []grpc.ServerOption
 }
 
@@ -65,6 +67,11 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	}
 	catalogs := NewCatalogRegistry(options.CatalogLoader)
 	sessions := cluster.NewSessionRegistry(options.ClientFactory)
+	if options.KubernetesQPS != 0 || options.KubernetesBurst != 0 {
+		if err := sessions.SetRateLimit(options.KubernetesQPS, options.KubernetesBurst); err != nil {
+			return nil, fmt.Errorf("configure Kubernetes client rate limit: %w", err)
+		}
+	}
 	clusterService := NewClusterService(ClusterServiceOptions{
 		Catalogs:     catalogs,
 		Sessions:     sessions,
