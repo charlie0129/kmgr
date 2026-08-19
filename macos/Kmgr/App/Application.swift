@@ -26,6 +26,7 @@ final class Application: NSObject, NSApplicationDelegate {
     /// separate columns configuration path.
     private let tableLayoutStore: TableLayoutStore
     private let engineColumnsConfigurationPath: String
+    private let columnConfigurationCoordinator: ColumnConfigurationCoordinator
     private let restorationStore: WorkspaceRestorationStore
     private var pendingRestorationNotice: ClusterManagerInitialNotice?
     private let settingsWindowController: SettingsWindowController
@@ -50,6 +51,9 @@ final class Application: NSObject, NSApplicationDelegate {
         self.preferencesStore = preferences
         self.tableLayoutStore = TableLayoutStore()
         self.engineColumnsConfigurationPath = preferences.current.columnsConfigurationPath
+        self.columnConfigurationCoordinator = ColumnConfigurationCoordinator(
+            path: preferences.current.columnsConfigurationPath
+        )
         var engineConfiguration = EngineSupervisor.Configuration.bundled()
         engineConfiguration.columnsConfigurationPath = preferences.current.columnsConfigurationPath
         engineConfiguration.metricsRefreshSeconds = preferences.current.metricsRefreshSeconds
@@ -253,7 +257,9 @@ final class Application: NSObject, NSApplicationDelegate {
         workspaceRecoveryTasks.removeAll()
         for attempt in restoredWorkspaceAttempts.values { attempt.cancel() }
         restoredWorkspaceAttempts.removeAll()
-        terminationTask = Task { [engineSupervisor, portForwardCoordinator] in
+        terminationTask = Task {
+            [engineSupervisor, portForwardCoordinator, columnConfigurationCoordinator] in
+            await columnConfigurationCoordinator.flushPendingLayoutSaves()
             await portForwardCoordinator.stopAllActive()
             portForwardCoordinator.stopWatching()
             await engineSupervisor.shutdown()
@@ -337,6 +343,7 @@ final class Application: NSObject, NSApplicationDelegate {
             portForwards: portForwardCoordinator,
             tableLayoutStore: tableLayoutStore,
             columnsConfigurationPath: engineColumnsConfigurationPath,
+            columnConfigurationCoordinator: columnConfigurationCoordinator,
             logDisplayConfiguration: LogDisplayConfiguration(
                 preferences: preferencesStore.current.logs
             ),
@@ -517,12 +524,10 @@ final class Application: NSObject, NSApplicationDelegate {
             previewProvider: columnPreviewProvider,
             previewContext: request.previewContext,
             configurationPath: configurationPath,
+            configurationCoordinator: columnConfigurationCoordinator,
             tableLayoutStore: tableLayoutStore
         )
         controller.onDraftChanged = request.apply
-        controller.onSaved = { [weak self] definitions in
-            self?.applySavedColumns(definitions, matching: request.match)
-        }
         controller.onClose = { [weak self, weak controller] in
             guard self?.columnsManagerControllers[identifier] === controller else { return }
             self?.columnsManagerControllers.removeValue(forKey: identifier)
@@ -532,17 +537,6 @@ final class Application: NSObject, NSApplicationDelegate {
         // The manager loads and parses the external file away from the main
         // actor, then publishes the matching definitions through this callback.
         controller.beginSheet(for: parent)
-    }
-
-    /// Column definitions are shared by exact GVR across cluster windows.
-    /// Draft previews stay local to their editor; only a successful persisted
-    /// save is fanned out to other open workspaces.
-    private func applySavedColumns(
-        _ definitions: [ColumnDefinition],
-        matching match: ColumnResourceMatch
-    ) {
-        SavedResourceColumnsChange(match: match, definitions: definitions)
-            .apply(to: workspaceControllers.values)
     }
 
     @objc func showPortForwards(_ sender: Any?) {

@@ -399,7 +399,7 @@ struct ColumnsManagerWindowControllerTests {
         _ = toggle.sendAction(toggle.action, to: toggle.target)
 
         try await waitUntil {
-            !table.isEnabled && status.stringValue.contains("changed outside this window")
+            !table.isEnabled && status.stringValue.contains("changed outside this application")
         }
         manager.window?.cancelOperation(nil)
         #expect(closeCount == 0)
@@ -421,6 +421,63 @@ struct ColumnsManagerWindowControllerTests {
 
         manager.window?.cancelOperation(nil)
         try await waitUntil { closeCount == 1 }
+    }
+
+    @Test("a resource-table layout save updates an idle Columns sheet")
+    func sharedCoordinatorUpdatesIdleManager() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-columns-shared-layout-\(UUID().uuidString)")
+        let path = directory.appendingPathComponent("columns.yaml").path
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let match = ColumnResourceMatch(group: "", version: "v1", resource: "pods")
+        let original = [ColumnDefinition(
+            id: "name", title: "Name", source: .builtin,
+            value: "name", type: .string, width: 140
+        )]
+        try ColumnConfigurationFileStore(path: path).save(
+            ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: match,
+                columns: original
+            )])
+        )
+        let coordinator = ColumnConfigurationCoordinator(path: path)
+        let manager = ColumnsManagerWindowController(
+            resourceTitle: "Pods",
+            match: match,
+            defaultColumns: original,
+            previewProvider: NoopColumnPreviewProvider(),
+            previewContext: testPreviewContext(),
+            configurationPath: path,
+            configurationCoordinator: coordinator
+        )
+        let root = try #require(manager.window?.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Columns for Pods" })
+        try await waitUntil { table.numberOfRows == 1 && table.isEnabled }
+
+        let saved = [
+            ColumnDefinition(
+                id: "status", title: "Status", source: .builtin,
+                value: "status", type: .string, width: 333
+            ),
+            original[0],
+        ]
+        _ = try await coordinator.save(saved, matching: match)
+
+        try await waitUntil {
+            guard table.numberOfRows == 2 else { return false }
+            let titleColumn = table.tableColumns.firstIndex {
+                $0.identifier.rawValue == "column-title"
+            } ?? -1
+            guard titleColumn >= 0,
+                let first = table.view(
+                    atColumn: titleColumn,
+                    row: 0,
+                    makeIfNecessary: true
+                ) as? NSTableCellView
+            else { return false }
+            return first.textField?.stringValue == "Status"
+        }
     }
 
     @Test("discovered disabled resources merge without overriding configured identity")

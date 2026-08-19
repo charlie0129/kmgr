@@ -259,13 +259,8 @@ import Testing
 
     let laterNodes = [testColumn(id: "saved-nodes")]
     cache.recordSaved(laterNodes, matching: nodes)
-    #expect(cache.document == nil)
-    let reloaded = cache.installLoaded(ColumnsConfigurationDocument(views: [
-        ResourceColumnConfiguration(match: pods, columns: savedPods),
-        ResourceColumnConfiguration(match: nodes, columns: loadedNodes),
-    ]))
-    #expect(reloaded.views.first { $0.match == pods }?.columns == savedPods)
-    #expect(reloaded.views.first { $0.match == nodes }?.columns == laterNodes)
+    #expect(cache.document?.views.first { $0.match == pods }?.columns == savedPods)
+    #expect(cache.document?.views.first { $0.match == nodes }?.columns == laterNodes)
 }
 
 private func testColumn(id: String) -> ColumnDefinition {

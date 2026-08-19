@@ -37,22 +37,26 @@ struct DeferredColumnPresentationState {
     }
 }
 
-/// One successfully persisted GVR-scoped definition change. Keeping fan-out
-/// explicit and main-actor-bound avoids process-global notification payloads
-/// while allowing every currently open workspace to reconcile its own view.
-@MainActor
-struct SavedResourceColumnsChange {
-    var match: ColumnResourceMatch
-    var definitions: [ColumnDefinition]
+/// Only fields that change backend extraction belong here. Titles, alignment,
+/// preferred width, and presentation order are local table concerns and must
+/// not reopen a LIST/WATCH stream when the same projected column set remains.
+private struct ResourceColumnProjectionIdentity: Hashable {
+    var id: String
+    var source: ColumnSource
+    var expression: String?
+    var value: String?
+    var type: ColumnResultType
+    var missing: String?
+    var listJoiner: String?
 
-    @discardableResult
-    func apply<Workspaces: Sequence>(to workspaces: Workspaces) -> Int
-    where Workspaces.Element == ClusterWorkspaceWindowController {
-        workspaces.reduce(into: 0) { count, workspace in
-            if workspace.applySavedColumns(definitions, matching: match) {
-                count += 1
-            }
-        }
+    init(_ definition: ColumnDefinition) {
+        id = definition.id
+        source = definition.source
+        expression = definition.expression
+        value = definition.value
+        type = definition.type
+        missing = definition.missing
+        listJoiner = definition.listJoiner
     }
 }
 
@@ -87,7 +91,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let execProvider: any ExecSessionProviding
     private let portForwards: PortForwardCoordinator
     private let tableLayoutStore: TableLayoutStore
-    private let columnsConfigurationPath: String
     private let logDisplayConfiguration: LogDisplayConfiguration
     private let confirmationPreferences: @MainActor () -> ConfirmationPreferences
     private let workspaceController: ClusterWorkspaceViewController
@@ -117,6 +120,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         portForwards: PortForwardCoordinator,
         tableLayoutStore: TableLayoutStore? = nil,
         columnsConfigurationPath: String,
+        columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
         logDisplayConfiguration: LogDisplayConfiguration,
         confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
@@ -142,7 +146,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.restoration = restoration
         self.portForwards = portForwards
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
-        self.columnsConfigurationPath = columnsConfigurationPath
         self.logDisplayConfiguration = logDisplayConfiguration
         self.confirmationPreferences = confirmationPreferences
 
@@ -173,6 +176,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             portForwards: portForwards,
             tableLayoutStore: self.tableLayoutStore,
             columnsConfigurationPath: columnsConfigurationPath,
+            columnConfigurationCoordinator: columnConfigurationCoordinator
+                ?? ColumnConfigurationCoordinator(path: columnsConfigurationPath),
             columnsConfigurationLoader: columnsConfigurationLoader,
             namespacePickerPresenter: namespacePickerPresenter,
             namespacePickerKeyWindowCheck: namespacePickerKeyWindowCheck,
@@ -639,7 +644,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let recentObjectStore: RecentObjectStore
     private let portForwards: PortForwardCoordinator
     private let tableLayoutStore: TableLayoutStore
-    private let columnsConfigurationPath: String
     private let namespacePickerPresenter: NamespacePickerPresenter
     private let namespacePickerKeyWindowCheck: NamespacePickerKeyWindowCheck
     private let onShowPortForwards: @MainActor () -> Void
@@ -701,6 +705,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         portForwards: PortForwardCoordinator,
         tableLayoutStore: TableLayoutStore,
         columnsConfigurationPath: String,
+        columnConfigurationCoordinator: ColumnConfigurationCoordinator,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
         namespacePickerPresenter: @escaping NamespacePickerPresenter,
         namespacePickerKeyWindowCheck: @escaping NamespacePickerKeyWindowCheck,
@@ -715,7 +720,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.recentObjectStore = recentObjectStore
         self.portForwards = portForwards
         self.tableLayoutStore = tableLayoutStore
-        self.columnsConfigurationPath = columnsConfigurationPath
         self.namespacePickerPresenter = namespacePickerPresenter
         self.namespacePickerKeyWindowCheck = namespacePickerKeyWindowCheck
         self.onShowPortForwards = onShowPortForwards
@@ -732,6 +736,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             provider: provider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             columnsConfigurationPath: columnsConfigurationPath,
+            columnConfigurationCoordinator: columnConfigurationCoordinator,
             columnsConfigurationLoader: columnsConfigurationLoader,
             connectionActivityView: connectionActivityView
         )
@@ -2376,6 +2381,7 @@ private final class ResourceListViewController: NSViewController,
     private let provider: any WorkspaceResourceProviding
     private let optionalResourceCatalogProvider: any OptionalResourceCatalogProviding
     private let columnsConfigurationPath: String
+    private let columnConfigurationCoordinator: ColumnConfigurationCoordinator
     private let columnsConfigurationLoader: ColumnConfigurationDocumentLoader
     private let connectionActivityView: ClusterConnectionActivityView
     private let titleLabel = NSTextField(labelWithString: "Resources")
@@ -2434,6 +2440,7 @@ private final class ResourceListViewController: NSViewController,
     private var columnsConfigurationCache = ColumnConfigurationCacheState()
     private var columnsConfigurationLoadTask: Task<Void, Never>?
     private var columnsConfigurationLoadGeneration: UInt64 = 0
+    private var columnsConfigurationObserver: UUID?
     private var deferredColumnPresentationByResourceID: [
         String: DeferredColumnPresentationState
     ] = [:]
@@ -2622,6 +2629,7 @@ private final class ResourceListViewController: NSViewController,
         provider: any WorkspaceResourceProviding,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         columnsConfigurationPath: String,
+        columnConfigurationCoordinator: ColumnConfigurationCoordinator,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
         connectionActivityView: ClusterConnectionActivityView
     ) {
@@ -2631,13 +2639,27 @@ private final class ResourceListViewController: NSViewController,
         self.provider = provider
         self.optionalResourceCatalogProvider = optionalResourceCatalogProvider
         self.columnsConfigurationPath = columnsConfigurationPath
+        self.columnConfigurationCoordinator = columnConfigurationCoordinator
         self.columnsConfigurationLoader = columnsConfigurationLoader
         self.connectionActivityView = connectionActivityView
         super.init(nibName: nil, bundle: nil)
+        columnsConfigurationObserver = columnConfigurationCoordinator.observe {
+            [weak self] match, definitions in
+            _ = self?.applySavedColumns(definitions, matching: match)
+        }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
+
+    deinit {
+        let coordinator = columnConfigurationCoordinator
+        if let columnsConfigurationObserver {
+            Task { @MainActor in
+                coordinator.removeObserver(columnsConfigurationObserver)
+            }
+        }
+    }
 
     override func loadView() {
         let root = NSView()
@@ -2701,7 +2723,10 @@ private final class ResourceListViewController: NSViewController,
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
-        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        // Preferred widths are global per exact GVR. Adaptive AppKit widths
+        // depend on one window's viewport and must never feed back into that
+        // shared layout, so resource tables scroll horizontally instead.
+        tableView.columnAutoresizingStyle = .noColumnAutoresizing
         tableView.doubleAction = #selector(enterSelectedObjectFromTable)
         tableView.target = self
         tableView.rowSizeStyle = .medium
@@ -4469,15 +4494,22 @@ private final class ResourceListViewController: NSViewController,
             )
             let definitions = reconciled.views.first(where: { $0.match == match })?.columns
                 ?? defaultColumnDefinitions(for: resource)
-            let previous = installedColumnDefinitions
+            let previousProjection = projectionIdentity(
+                for: installedColumnDefinitions
+            )
             let previousSort = currentSortPresentation
             provisionalDefaultColumnResourceIDs.remove(resource.id)
             columnDefinitionsByResourceID[resource.id] = definitions
             installEffectiveColumns(for: resource)
             if let deferredPresentation {
                 applyDeferredColumnPresentation(deferredPresentation)
+                if !deferredPresentation.columnMoves.isEmpty
+                    || !deferredPresentation.measurementOverrides.isEmpty
+                {
+                    scheduleCurrentColumnLayoutPersistence()
+                }
             }
-            if installedColumnDefinitions != previous
+            if projectionIdentity(for: installedColumnDefinitions) != previousProjection
                 || currentSortPresentation != previousSort
             {
                 openStream(reason: .loadedColumnConfiguration)
@@ -4496,6 +4528,7 @@ private final class ResourceListViewController: NSViewController,
         )
         columnDefinitionsByResourceID[resourceID] = definitions
         let previousEffective = installedColumnDefinitions
+        let previousProjection = projectionIdentity(for: previousEffective)
         let previousSort = currentSortPresentation
         let deferredPresentation = deferredColumnPresentationByResourceID
             .removeValue(forKey: resourceID)
@@ -4510,7 +4543,7 @@ private final class ResourceListViewController: NSViewController,
         if let deferredPresentation {
             applyDeferredColumnPresentation(deferredPresentation)
         }
-        if installedColumnDefinitions != previousEffective
+        if projectionIdentity(for: installedColumnDefinitions) != previousProjection
             || currentSortPresentation != previousSort
         {
             openStream(reason: .appliedColumns)
@@ -4524,22 +4557,14 @@ private final class ResourceListViewController: NSViewController,
         _ definitions: [ColumnDefinition],
         matching match: ColumnResourceMatch
     ) -> Bool {
-        columnsConfigurationLoadGeneration &+= 1
-        columnsConfigurationLoadTask?.cancel()
-        columnsConfigurationLoadTask = nil
         columnsConfigurationCache.recordSaved(definitions, matching: match)
-        if let currentID = resource?.id {
-            let currentDefinitions = columnDefinitionsByResourceID[currentID]
-            columnDefinitionsByResourceID.removeAll(keepingCapacity: true)
-            if let currentDefinitions {
-                columnDefinitionsByResourceID[currentID] = currentDefinitions
+        columnDefinitionsByResourceID[match.key] = definitions
+        provisionalDefaultColumnResourceIDs.remove(match.key)
+        defer {
+            if columnsConfigurationCache.document == nil {
+                beginColumnsConfigurationLoadIfNeeded()
             }
-            provisionalDefaultColumnResourceIDs = [currentID]
-        } else {
-            columnDefinitionsByResourceID.removeAll(keepingCapacity: true)
-            provisionalDefaultColumnResourceIDs.removeAll(keepingCapacity: true)
         }
-        defer { beginColumnsConfigurationLoadIfNeeded() }
         guard let resource,
             match == ColumnResourceMatch(
                 group: resource.group,
@@ -4656,6 +4681,81 @@ private final class ResourceListViewController: NSViewController,
         definitions.filter(\.isEnabled)
     }
 
+    private func projectionIdentity(
+        for definitions: [ColumnDefinition]
+    ) -> Set<ResourceColumnProjectionIdentity> {
+        Set(definitions.lazy.filter(\.isEnabled).map(ResourceColumnProjectionIdentity.init))
+    }
+
+    /// Builds the one persisted exact-GVR layout from the current table while
+    /// leaving locally hidden definitions (for example Namespace in a
+    /// single-namespace scope) in their existing slots. Dragging visible
+    /// columns therefore never changes enabled state or silently pushes a
+    /// temporarily hidden column to the end.
+    private func currentPersistableColumnLayout() -> (
+        match: ColumnResourceMatch,
+        definitions: [ColumnDefinition]
+    )? {
+        guard !suppressPresentationCheckpoint,
+            columnsConfigurationCache.document != nil,
+            let resource
+        else { return nil }
+
+        let gvr = resourceGVR(for: resource)
+        let persisted = persistedColumnDefinitions(for: resource)
+        var definitions = optionalResourceOverlayState.applying(
+            to: persisted,
+            sessionID: session.sessionID,
+            gvr: gvr
+        )
+        let visibleIDs = tableView.tableColumns.map { $0.identifier.rawValue }
+        let visibleIDSet = Set(visibleIDs)
+        let definitionsByID = Dictionary(uniqueKeysWithValues: definitions.map {
+            ($0.id, $0)
+        })
+        guard visibleIDs.allSatisfy({ definitionsByID[$0] != nil }) else {
+            return nil
+        }
+
+        // Reorder only slots occupied by currently visible definitions. This
+        // preserves the relative placement of disabled and scope-hidden rows.
+        let visibleSlots = definitions.indices.filter {
+            visibleIDSet.contains(definitions[$0].id)
+        }
+        guard visibleSlots.count == visibleIDs.count else { return nil }
+        for (slot, id) in zip(visibleSlots, visibleIDs) {
+            guard var definition = definitionsByID[id],
+                let column = tableView.tableColumns.first(where: {
+                    $0.identifier.rawValue == id
+                })
+            else { return nil }
+            definition.width = Double(column.width)
+            definitions[slot] = definition
+        }
+
+        return (
+            ColumnResourceMatch(
+                group: resource.group,
+                version: resource.version,
+                resource: resource.resource
+            ),
+            definitions
+        )
+    }
+
+    private func scheduleCurrentColumnLayoutPersistence() {
+        guard let layout = currentPersistableColumnLayout() else { return }
+        columnConfigurationCoordinator.scheduleLayoutSave(
+            layout.definitions,
+            matching: layout.match
+        ) { [weak self] error in
+            self?.showInlineIssue(
+                "Could not save the shared column layout. \(error.localizedDescription)",
+                color: .systemRed
+            )
+        }
+    }
+
     private func installEffectiveColumns(for resource: DiscoveredResource) {
         installColumns(effectiveColumnDefinitions(
             persistedDefinitions: persistedColumnDefinitions(for: resource),
@@ -4723,7 +4823,6 @@ private final class ResourceListViewController: NSViewController,
     private func navigationState() -> ResourceNavigationState? {
         guard let resource else { return nil }
         let deferredPresentation = deferredColumnPresentationByResourceID[resource.id]
-        let columns = deferredPresentation?.columns ?? currentColumnPresentation
         let sort = deferredPresentation?.sort ?? currentSortPresentation
         return ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
@@ -4731,13 +4830,9 @@ private final class ResourceListViewController: NSViewController,
             filter: filterField.stringValue,
             sortColumnID: sort.first?.columnID,
             sortDescending: !(sort.first?.ascending ?? true),
-            columns: columns,
-            columnMoveOverrides: deferredPresentation.flatMap {
-                $0.columnMoves.isEmpty ? nil : $0.columnMoves
-            },
-            columnMeasurementOverrides: deferredPresentation.flatMap {
-                $0.measurementOverrides.isEmpty ? nil : $0.measurementOverrides
-            },
+            // Exact-GVR order and widths live only in columns.yaml. History
+            // retains navigation and sort, never a competing window layout.
+            columns: [],
             selectedUIDs: model.selectedUIDs,
             scrollAnchor: captureUpdate().scrollAnchor
         )
@@ -4752,7 +4847,6 @@ private final class ResourceListViewController: NSViewController,
         let deferredPresentation = resource.flatMap {
             deferredColumnPresentationByResourceID[$0.id]
         }
-        let columns = deferredPresentation?.columns ?? currentColumnPresentation
         let sorts = deferredPresentation?.sort ?? currentSortPresentation
         return ClusterWindowRestorationState(
             contextName: contextName,
@@ -4761,13 +4855,7 @@ private final class ResourceListViewController: NSViewController,
             namespaceScope: NamespaceScope(scope),
             filter: filterField.stringValue,
             sort: sorts,
-            columns: columns,
-            columnMoveOverrides: deferredPresentation.flatMap {
-                $0.columnMoves.isEmpty ? nil : $0.columnMoves
-            },
-            columnMeasurementOverrides: deferredPresentation.flatMap {
-                $0.measurementOverrides.isEmpty ? nil : $0.measurementOverrides
-            },
+            columns: [],
             isSidebarVisible: isSidebarVisible,
             scrollAnchor: captureUpdate().scrollAnchor
         )
@@ -4792,10 +4880,8 @@ private final class ResourceListViewController: NSViewController,
         suppressPresentationCheckpoint = true
         defer { suppressPresentationCheckpoint = false }
         let deferredPresentation = DeferredColumnPresentationState(
-            columns: restoration.columns,
-            sort: restoration.sort,
-            columnMoves: restoration.columnMoveOverrides ?? [],
-            measurementOverrides: restoration.columnMeasurementOverrides ?? []
+            columns: [],
+            sort: restoration.sort
         )
         deferColumnPresentationIfNeeded(for: restored, presentation: deferredPresentation)
         configureColumns(for: restored)
@@ -4806,9 +4892,7 @@ private final class ResourceListViewController: NSViewController,
             namespaceSelection: scope, filter: restoration.filter,
             sortColumnID: restoration.sort.first?.columnID,
             sortDescending: !(restoration.sort.first?.ascending ?? true),
-            columns: restoration.columns,
-            columnMoveOverrides: restoration.columnMoveOverrides,
-            columnMeasurementOverrides: restoration.columnMeasurementOverrides,
+            columns: [],
             scrollAnchor: restoration.scrollAnchor
         )
         history = WorkspaceNavigationHistory(initial: .resource(nav))
@@ -4925,10 +5009,8 @@ private final class ResourceListViewController: NSViewController,
             [SortDescriptorState(columnID: $0, ascending: !state.sortDescending)]
         } ?? []
         let deferredPresentation = DeferredColumnPresentationState(
-            columns: state.columns,
-            sort: restoredSort,
-            columnMoves: state.columnMoveOverrides ?? [],
-            measurementOverrides: state.columnMeasurementOverrides ?? []
+            columns: [],
+            sort: restoredSort
         )
         deferColumnPresentationIfNeeded(for: resource!, presentation: deferredPresentation)
         configureColumns(for: resource!)
@@ -5273,11 +5355,13 @@ private final class ResourceListViewController: NSViewController,
 
     func tableViewColumnDidMove(_ notification: Notification) {
         updateDeferredColumnOrderFromMove(notification)
+        scheduleCurrentColumnLayoutPersistence()
         scheduleRestorationCheckpoint()
     }
 
     func tableViewColumnDidResize(_ notification: Notification) {
         updateDeferredColumnMeasurementsFromCurrentTable(notification)
+        scheduleCurrentColumnLayoutPersistence()
         scheduleRestorationCheckpoint()
     }
 

@@ -21,11 +21,17 @@ struct ColumnConfigurationCacheState {
         _ definitions: [ColumnDefinition],
         matching match: ColumnResourceMatch
     ) {
-        // The editor saves a complete document and may have incorporated
-        // external changes to other GVRs. Invalidate the old snapshot instead
-        // of pretending the one callback contains that whole document.
-        document = nil
-        pendingSavedDefinitions[match] = definitions
+        if var document {
+            // Saves are serialized by the process-wide coordinator and mutate
+            // exactly one GVR. Sibling snapshots therefore remain valid and a
+            // divider drag does not trigger one file reload per open window.
+            Self.upsert(definitions, matching: match, in: &document)
+            self.document = document
+        } else {
+            // A load already in flight may return an older snapshot. Reapply
+            // the durable exact-GVR save when that snapshot arrives.
+            pendingSavedDefinitions[match] = definitions
+        }
     }
 
     @discardableResult

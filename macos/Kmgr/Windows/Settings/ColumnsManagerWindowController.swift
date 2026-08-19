@@ -35,10 +35,10 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private let discoveredColumns: [ColumnDefinition]
     private let previewProvider: any ColumnPreviewProviding
     private let previewContext: ColumnPreviewContext
-    private let fileStore: ColumnConfigurationFileStore
+    private let configurationCoordinator: ColumnConfigurationCoordinator
     private let tableLayoutStore: TableLayoutStore
     private let windowDismissal: WindowDismissal
-    private var configurationDocument: ColumnsConfigurationDocument
+    private var configurationObserver: UUID?
     private var draft: ResourceColumnDraft
     private var lastAppliedColumns: [ColumnDefinition]
     private var persistenceAvailable: Bool
@@ -46,6 +46,9 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private var customColumnIDs: Set<String> = []
     private var fileOperationTask: Task<Void, Never>?
     private var autoSaveTask: Task<Void, Never>?
+    private var isCoordinatorSaveInProgress = false
+    private var coordinatorSaveDefinitions: [ColumnDefinition]?
+    private var pendingExternallySavedDefinitions: [ColumnDefinition]?
     private var draftRevision: UInt64 = 0
     private var dismissalRequested = false
     private var isPerformingDismissal = false
@@ -84,6 +87,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         previewProvider: any ColumnPreviewProviding,
         previewContext: ColumnPreviewContext,
         configurationPath: String = AppPreferences.defaultColumnsConfigurationPath,
+        configurationCoordinator: ColumnConfigurationCoordinator? = nil,
         tableLayoutStore: TableLayoutStore? = nil,
         windowDismissal: WindowDismissal = .appKit
     ) {
@@ -98,11 +102,11 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         self.defaultColumns = mergedDefaults
         self.previewProvider = previewProvider
         self.previewContext = previewContext
+        self.configurationCoordinator = configurationCoordinator
+            ?? ColumnConfigurationCoordinator(path: configurationPath)
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.windowDismissal = windowDismissal
-        fileStore = ColumnConfigurationFileStore(path: configurationPath)
 
-        configurationDocument = ColumnsConfigurationDocument()
         draft = ResourceColumnDraft(match: match, columns: mergedDefaults)
         lastAppliedColumns = mergedDefaults
         persistenceAvailable = false
@@ -122,6 +126,11 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         window.onCancelOperation = { [weak self] in
             self?.requestDismissal()
         }
+        configurationObserver = self.configurationCoordinator.observe {
+            [weak self] savedMatch, definitions in
+            guard let self, savedMatch == self.match else { return }
+            self.receiveExternallySavedDefinitions(definitions)
+        }
         configureContent(in: window)
         tableView.reloadData()
         updateActionAvailability()
@@ -135,6 +144,12 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     deinit {
         autoSaveTask?.cancel()
         fileOperationTask?.cancel()
+        let coordinator = configurationCoordinator
+        if let configurationObserver {
+            Task { @MainActor in
+                coordinator.removeObserver(configurationObserver)
+            }
+        }
     }
 
     /// Adds cache-discovered native columns to a configured/default layout
@@ -265,6 +280,10 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         autoSaveTask = nil
         fileOperationTask?.cancel()
         fileOperationTask = nil
+        if let configurationObserver {
+            configurationCoordinator.removeObserver(configurationObserver)
+            self.configurationObserver = nil
+        }
         onClose?()
     }
 
@@ -608,13 +627,13 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         guard fileOperationTask == nil else { return }
         showStatus(statusPrefix == nil ? "Loading column configuration…" : "Reloading column configuration…", error: false)
         updateActionAvailability()
-        let fileStore = fileStore
+        let configurationCoordinator = configurationCoordinator
+        let reload = statusPrefix != nil
         fileOperationTask = Task { [weak self] in
             do {
-                let loaded = try await fileStore.loadOffMain()
+                let loaded = try await configurationCoordinator.load(reload: reload)
                 try Task.checkCancellation()
                 guard let self else { return }
-                configurationDocument = loaded
                 let configured = loaded.views.first(where: { $0.match == match })?.columns
                     ?? baseDefaultColumns
                 customColumnIDs = Set(configured.lazy.filter {
@@ -651,10 +670,10 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         guard fileOperationTask == nil else { return }
         showStatus("Preparing column configuration…", error: false)
         updateActionAvailability()
-        let fileStore = fileStore
+        let configurationCoordinator = configurationCoordinator
         fileOperationTask = Task { [weak self] in
             do {
-                let url = try await fileStore.ensureFileExistsOffMain()
+                let url = try await configurationCoordinator.ensureFileExists()
                 try Task.checkCancellation()
                 guard NSWorkspace.shared.open(url) else {
                     throw ColumnConfigurationFileIssue("No application could open \(url.path).")
@@ -675,32 +694,18 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
             showStatus("Reload a valid configuration before saving.", error: true)
             return
         }
-        let baseline = configurationDocument
         let columns = draft.columns
-        var updated = baseline
-        let view = ResourceColumnConfiguration(match: match, columns: columns)
-        if let index = updated.views.firstIndex(where: { $0.match == match }) {
-            updated.views[index] = view
-        } else {
-            updated.views.append(view)
-        }
         showStatus("Saving column configuration…", error: false)
-        let fileStore = fileStore
+        let configurationCoordinator = configurationCoordinator
+        let match = match
         let saveRevision = draftRevision
+        isCoordinatorSaveInProgress = true
+        coordinatorSaveDefinitions = columns
         fileOperationTask = Task { [weak self] in
             do {
-                let currentOnDisk = try await fileStore.loadOffMain()
-                try Task.checkCancellation()
-                guard currentOnDisk == baseline else {
-                    self?.persistenceAvailable = false
-                    throw ColumnConfigurationFileIssue(
-                        "The column configuration changed outside this window. Reload it before saving so no external edit is overwritten."
-                    )
-                }
-                try await fileStore.saveOffMain(updated)
+                _ = try await configurationCoordinator.save(columns, matching: match)
                 try Task.checkCancellation()
                 guard let self else { return }
-                configurationDocument = updated
                 let isLatest = saveRevision == draftRevision
                 lastAppliedColumns = columns
                 dirty = !isLatest
@@ -731,8 +736,54 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
                 showStatus(error.localizedDescription, error: true)
             }
             guard let self else { return }
+            isCoordinatorSaveInProgress = false
+            coordinatorSaveDefinitions = nil
             completeFileOperation()
         }
+        updateActionAvailability()
+    }
+
+    private func receiveExternallySavedDefinitions(
+        _ persistedDefinitions: [ColumnDefinition]
+    ) {
+        // Ignore only our exact submitted snapshot. A newer same-GVR save can
+        // complete while this task awaits serialized disk I/O; retain that
+        // notification so our older completion cannot leave stale UI behind.
+        if isCoordinatorSaveInProgress {
+            guard persistedDefinitions != coordinatorSaveDefinitions else { return }
+            pendingExternallySavedDefinitions = persistedDefinitions
+            return
+        }
+        guard fileOperationTask == nil else {
+            pendingExternallySavedDefinitions = persistedDefinitions
+            return
+        }
+        guard !dirty else {
+            autoSaveTask?.cancel()
+            autoSaveTask = nil
+            persistenceAvailable = false
+            showStatus(
+                "Columns changed in another window. Reload before saving this draft.",
+                error: true
+            )
+            updateActionAvailability()
+            return
+        }
+
+        customColumnIDs = Set(persistedDefinitions.lazy.filter {
+            !self.isBaseDefault($0)
+        }.map(\.id))
+        let definitions = Self.mergingDiscoveredColumns(
+            discoveredColumns,
+            into: persistedDefinitions
+        )
+        draft = ResourceColumnDraft(match: match, columns: definitions)
+        lastAppliedColumns = definitions
+        persistenceAvailable = true
+        configurationReady = true
+        tableView.reloadData()
+        onDraftChanged?(definitions)
+        showStatus("Updated from another window · \(scopeDescription)", error: false)
         updateActionAvailability()
     }
 
@@ -742,6 +793,10 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private func completeFileOperation() {
         fileOperationTask = nil
         updateActionAvailability()
+        if let pendingExternallySavedDefinitions {
+            self.pendingExternallySavedDefinitions = nil
+            receiveExternallySavedDefinitions(pendingExternallySavedDefinitions)
+        }
         if dismissalRequested {
             requestDismissal()
         } else if dirty, persistenceAvailable {

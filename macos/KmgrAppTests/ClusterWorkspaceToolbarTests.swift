@@ -1991,6 +1991,7 @@ func makeColumnPropagationWorkspace(
     provider: any WorkspaceResourceProviding,
     optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
     columnsConfigurationPath: String,
+    columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
     columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
     restorationState: ClusterWindowRestorationState? = nil
 ) -> ClusterWorkspaceWindowController {
@@ -2017,6 +2018,7 @@ func makeColumnPropagationWorkspace(
         execProvider: NoopExecProvider(),
         portForwards: portForwards,
         columnsConfigurationPath: columnsConfigurationPath,
+        columnConfigurationCoordinator: columnConfigurationCoordinator,
         columnsConfigurationLoader: columnsConfigurationLoader,
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },

@@ -199,10 +199,11 @@ struct ResourceColumnPropagationTests {
         #expect(secondTable.selectedRowIndexes.isEmpty)
 
         let definitions = sharedSavedColumnDefinitions()
-        let appliedCount = SavedResourceColumnsChange(
-            match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
-            definitions: definitions
-        ).apply(to: workspaces)
+        let appliedCount = applySavedColumns(
+            definitions,
+            matching: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+            to: workspaces
+        )
 
         #expect(appliedCount == 2)
         try await waitUntil {
@@ -221,8 +222,8 @@ struct ResourceColumnPropagationTests {
         #expect(secondTable.selectedRowIndexes.isEmpty)
     }
 
-    @Test("a save invalidates cached definitions for other GVRs")
-    func savedEditReloadsCompleteDocumentForOtherGVRs() async throws {
+    @Test("an exact-GVR save preserves sibling caches without a file reload")
+    func savedEditPreservesOtherGVRCaches() async throws {
         let fixture = try ColumnPropagationFixture()
         defer { fixture.remove() }
         let pods = DiscoveredResource(
@@ -252,49 +253,131 @@ struct ResourceColumnPropagationTests {
         defer { workspaces.forEach { $0.close() } }
 
         try await waitUntil {
-            podsProvider.streamRequests.count == 1
-                && nodesProvider.streamRequests.count == 1
+            guard let podsTable = self.resourceTable(in: podsWorkspace),
+                let nodesTable = self.resourceTable(in: nodesWorkspace)
+            else { return false }
+            return podsProvider.streamRequests.last?.columnIDs
+                    == podsTable.tableColumns.map { $0.identifier.rawValue }
+                && nodesProvider.streamRequests.last?.columnIDs
+                    == nodesTable.tableColumns.map { $0.identifier.rawValue }
         }
+        let nodesTable = try #require(resourceTable(in: nodesWorkspace))
+        let originalNodeIDs = nodesTable.tableColumns.map { $0.identifier.rawValue }
+        let originalNodeTitles = nodesTable.tableColumns.map(\.title)
+        let originalNodeRequestCount = nodesProvider.streamRequests.count
         let savedPods = sharedSavedColumnDefinitions()
-        let reloadedNodes = [ColumnDefinition(
-            id: "name",
-            title: "Node Identity From Reload",
-            source: .builtin,
-            value: "name",
-            type: .string,
-            width: 260
-        )]
-        try await ColumnConfigurationFileStore(path: fixture.path).saveOffMain(
-            ColumnsConfigurationDocument(views: [
-                ResourceColumnConfiguration(
-                    match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
-                    columns: savedPods
-                ),
-                ResourceColumnConfiguration(
-                    match: ColumnResourceMatch(group: "", version: "v1", resource: "nodes"),
-                    columns: reloadedNodes
-                ),
-            ])
-        )
 
-        let appliedCount = SavedResourceColumnsChange(
-            match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
-            definitions: savedPods
-        ).apply(to: workspaces)
+        let appliedCount = applySavedColumns(
+            savedPods,
+            matching: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+            to: workspaces
+        )
 
         #expect(appliedCount == 1)
         try await waitUntil {
-            nodesProvider.streamRequests.count == 2
-                && nodesProvider.streamRequests.last?.columnIDs == ["name"]
-                && self.resourceTable(in: nodesWorkspace)?.tableColumns.map(\.title)
-                    == ["Node Identity From Reload"]
+            self.resourceTable(in: podsWorkspace)?.tableColumns.map {
+                $0.identifier.rawValue
+            } == savedPods.map(\.id)
         }
-        let reloadedTable = try #require(resourceTable(in: nodesWorkspace))
-        #expect(reloadedTable.tableColumns[0].width == 260)
+        #expect(nodesTable.tableColumns.map { $0.identifier.rawValue } == originalNodeIDs)
+        #expect(nodesTable.tableColumns.map(\.title) == originalNodeTitles)
+        #expect(nodesProvider.streamRequests.count == originalNodeRequestCount)
     }
 
-    @Test("late persisted columns retain complete restored presentation")
-    func restoredCustomColumnSurvivesLateConfigurationLoad() async throws {
+    @Test("resource-table drag layout persists and synchronizes by exact GVR")
+    func tableLayoutPersistsAndSynchronizesByExactGVR() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let match = ColumnResourceMatch(group: "", version: "v1", resource: "pods")
+        let definitions = [
+            ColumnDefinition(
+                id: "name", title: "Name", source: .builtin,
+                value: "name", type: .string, width: 160
+            ),
+            ColumnDefinition(
+                id: "status", title: "Status", source: .builtin,
+                value: "status", type: .string, width: 120
+            ),
+        ]
+        try ColumnConfigurationFileStore(path: fixture.path).save(
+            ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
+                match: match,
+                columns: definitions
+            )])
+        )
+        let coordinator = ColumnConfigurationCoordinator(
+            path: fixture.path,
+            layoutPersistenceDelay: .milliseconds(20)
+        )
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let firstProvider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let secondProvider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let first = makeWorkspace(
+            suffix: "layout-first",
+            provider: firstProvider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            configurationCoordinator: coordinator
+        )
+        let second = makeWorkspace(
+            suffix: "layout-second",
+            provider: secondProvider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            configurationCoordinator: coordinator
+        )
+        start([first, second])
+        defer { first.close(); second.close() }
+
+        try await waitUntil {
+            self.resourceTable(in: first)?.tableColumns.map {
+                $0.identifier.rawValue
+            } == ["name", "status"]
+                && self.resourceTable(in: second)?.tableColumns.map {
+                    $0.identifier.rawValue
+                } == ["name", "status"]
+                && firstProvider.streamRequests.last?.columnIDs == ["name", "status"]
+                && secondProvider.streamRequests.last?.columnIDs == ["name", "status"]
+        }
+        let firstTable = try #require(resourceTable(in: first))
+        let secondTable = try #require(resourceTable(in: second))
+        let initialFirstRequests = firstProvider.streamRequests.count
+        let initialSecondRequests = secondProvider.streamRequests.count
+        let status = try #require(firstTable.tableColumns.first {
+            $0.identifier.rawValue == "status"
+        })
+        try moveColumn(status, to: 0, in: firstTable)
+        let oldWidth = status.width
+        status.width = 333
+        firstTable.delegate?.tableViewColumnDidResize?(Notification(
+            name: NSTableView.columnDidResizeNotification,
+            object: firstTable,
+            userInfo: ["NSTableColumn": status, "NSOldWidth": oldWidth]
+        ))
+
+        try await waitUntil {
+            guard let saved = try? ColumnConfigurationFileStore(path: fixture.path)
+                .load().views.first(where: { $0.match == match })?.columns
+            else { return false }
+            return saved.map(\.id) == ["status", "name"]
+                && saved.first?.width == 333
+                && secondTable.tableColumns.map { $0.identifier.rawValue }
+                    == ["status", "name"]
+                && secondTable.tableColumns.first?.width == 333
+        }
+        // Order and preferred width are presentation-only; retaining the same
+        // extractor set must not reopen either LIST/WATCH stream.
+        #expect(firstProvider.streamRequests.count == initialFirstRequests)
+        #expect(secondProvider.streamRequests.count == initialSecondRequests)
+        #expect(firstTable.columnAutoresizingStyle == .noColumnAutoresizing)
+        #expect(secondTable.columnAutoresizingStyle == .noColumnAutoresizing)
+    }
+
+    @Test("exact-GVR file layout wins over stale per-window restoration")
+    func persistedLayoutWinsOverRestoredPresentation() async throws {
         let fixture = try ColumnPropagationFixture()
         defer { fixture.remove() }
         let pods = DiscoveredResource(
@@ -348,16 +431,16 @@ struct ResourceColumnPropagationTests {
         try await waitUntil {
             guard let table = self.resourceTable(in: workspace) else { return false }
             return table.tableColumns.map { $0.identifier.rawValue }
-                == ["restored-custom", "name"]
+                == ["name", "restored-custom"]
                 && table.sortDescriptors.first?.key == "restored-custom"
                 && table.sortDescriptors.first?.ascending == false
                 && provider.streamRequests.last?.sort.first?.columnID == "restored-custom"
                 && provider.streamRequests.last?.sort.first?.direction == .descending
         }
         let table = try #require(resourceTable(in: workspace))
-        #expect(table.tableColumns[0].width == 333)
-        #expect(table.tableColumns[1].width == 777)
-        #expect(table.tableColumns.map(\.title) == ["Custom From File", "Name From File"])
+        #expect(table.tableColumns[0].width == 140)
+        #expect(table.tableColumns[1].width == 150)
+        #expect(table.tableColumns.map(\.title) == ["Name From File", "Custom From File"])
     }
 
     @Test("presentation changes made during a late load win over saved restoration")
@@ -409,15 +492,9 @@ struct ResourceColumnPropagationTests {
         table.dataSource?.tableView?(table, sortDescriptorsDidChange: oldSort)
 
         try await waitUntil {
-            checkpoint?.state.columns.first?.columnID == "restored-custom"
-                && checkpoint?.state.columnMoveOverrides?.first
-                    == ColumnMoveState(columnID: "name", targetIndex: 0)
-                && checkpoint?.state.columns.first(where: {
-                    $0.columnID == "restored-custom"
-                })?.width == 333
-                && checkpoint?.state.columnMeasurementOverrides?.first(where: {
-                    $0.columnID == "name"
-                })?.width == 900
+            checkpoint?.state.columns.isEmpty == true
+                && checkpoint?.state.columnMoveOverrides == nil
+                && checkpoint?.state.columnMeasurementOverrides == nil
                 && checkpoint?.state.sort.first
                     == SortDescriptorState(columnID: "name", ascending: false)
         }
@@ -437,7 +514,7 @@ struct ResourceColumnPropagationTests {
                 && provider.streamRequests.last?.sort.first?.direction == .descending
         }
         #expect(table.tableColumns[0].width == 900)
-        #expect(table.tableColumns[1].width == 333)
+        #expect(table.tableColumns[1].width == 150)
     }
 
     @Test("fresh navigation changes win without replacing untouched file presentation")
@@ -501,14 +578,8 @@ struct ResourceColumnPropagationTests {
         table.dataSource?.tableView?(table, sortDescriptorsDidChange: oldSort)
         try await waitUntil {
             checkpoint?.state.columns.isEmpty == true
-                && checkpoint?.state.columnMoveOverrides == [
-                    ColumnMoveState(columnID: "status", targetIndex: 0),
-                    ColumnMoveState(columnID: "status", targetIndex: 2),
-                    ColumnMoveState(columnID: "status", targetIndex: 0),
-                ]
-                && checkpoint?.state.columnMeasurementOverrides?.first(where: {
-                    $0.columnID == "name"
-                })?.width == 900
+                && checkpoint?.state.columnMoveOverrides == nil
+                && checkpoint?.state.columnMeasurementOverrides == nil
                 && checkpoint?.state.sort.first
                     == SortDescriptorState(columnID: "name", ascending: false)
         }
@@ -532,8 +603,8 @@ struct ResourceColumnPropagationTests {
         #expect(table.tableColumns[2].width == 900)
     }
 
-    @Test("a saved definition consumes restoration while the initial load is pending")
-    func savedDefinitionConsumesDeferredRestoration() async throws {
+    @Test("a saved definition reconciles one in-flight configuration load")
+    func savedDefinitionReconcilesInFlightLoad() async throws {
         let fixture = try ColumnPropagationFixture()
         defer { fixture.remove() }
         let loader = StagedColumnConfigurationDocumentLoader()
@@ -556,30 +627,29 @@ struct ResourceColumnPropagationTests {
         defer { workspace.close() }
 
         try await waitUntil { loader.requestIsPending(1) }
-        #expect(SavedResourceColumnsChange(
-            match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
-            definitions: definitions
-        ).apply(to: [workspace]) == 1)
+        #expect(applySavedColumns(
+            definitions,
+            matching: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+            to: [workspace]
+        ) == 1)
 
         let table = try #require(resourceTable(in: workspace))
         try await waitUntil {
-            table.tableColumns.map { $0.identifier.rawValue } == ["restored-custom", "name"]
+            table.tableColumns.map { $0.identifier.rawValue } == ["name", "restored-custom"]
                 && table.sortDescriptors.first?.key == "restored-custom"
                 && table.sortDescriptors.first?.ascending == false
                 && provider.streamRequests.last?.sort.first?.columnID == "restored-custom"
-                && loader.requestIsPending(2)
         }
-        #expect(table.tableColumns[0].width == 333)
-        #expect(table.tableColumns[1].width == 777)
+        #expect(table.tableColumns[0].width == 140)
+        #expect(table.tableColumns[1].width == 150)
 
         let document = ColumnsConfigurationDocument(views: [ResourceColumnConfiguration(
             match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
             columns: definitions
         )])
         loader.complete(attempt: 1, with: document)
-        loader.complete(attempt: 2, with: document)
         try await waitUntil { loader.pendingRequestCount == 0 }
-        #expect(table.tableColumns.map { $0.identifier.rawValue } == ["restored-custom", "name"])
+        #expect(table.tableColumns.map { $0.identifier.rawValue } == ["name", "restored-custom"])
         #expect(table.sortDescriptors.first?.key == "restored-custom")
     }
 
@@ -733,13 +803,13 @@ struct ResourceColumnPropagationTests {
             guard let table = self.resourceTable(in: workspace) else { return false }
             return provider.streamRequests.last?.resource.resource == "pods"
                 && table.tableColumns.map { $0.identifier.rawValue }
-                    == ["restored-custom", "name"]
+                    == ["name", "restored-custom"]
                 && table.sortDescriptors.first?.key == "restored-custom"
                 && table.sortDescriptors.first?.ascending == false
         }
         let table = try #require(resourceTable(in: workspace))
-        #expect(table.tableColumns[0].width == 333)
-        #expect(table.tableColumns[1].width == 777)
+        #expect(table.tableColumns[0].width == 140)
+        #expect(table.tableColumns[1].width == 150)
     }
 
     @Test("each same-GVR window retains its exact optional-resource overlay")
@@ -789,10 +859,11 @@ struct ResourceColumnPropagationTests {
             } == true
         }
         let definitions = sharedSavedColumnDefinitions()
-        let appliedCount = SavedResourceColumnsChange(
-            match: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
-            definitions: definitions
-        ).apply(to: workspaces)
+        let appliedCount = applySavedColumns(
+            definitions,
+            matching: ColumnResourceMatch(group: "", version: "v1", resource: "pods"),
+            to: workspaces
+        )
 
         #expect(appliedCount == 2)
         let firstIDs = try #require(resourceTable(in: first)).tableColumns.map {
@@ -937,6 +1008,7 @@ struct ResourceColumnPropagationTests {
         provider: any WorkspaceResourceProviding,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         configurationPath: String,
+        configurationCoordinator: ColumnConfigurationCoordinator? = nil,
         configurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
         restorationState: ClusterWindowRestorationState? = nil
     ) -> ClusterWorkspaceWindowController {
@@ -951,6 +1023,7 @@ struct ResourceColumnPropagationTests {
             provider: provider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             columnsConfigurationPath: configurationPath,
+            columnConfigurationCoordinator: configurationCoordinator,
             columnsConfigurationLoader: configurationLoader,
             restorationState: restorationState
         )
@@ -1131,6 +1204,19 @@ private func restoredColumnPresentationState() -> ClusterWindowRestorationState 
             ColumnPresentationState(columnID: "name", width: 777),
         ]
     )
+}
+
+@MainActor
+private func applySavedColumns(
+    _ definitions: [ColumnDefinition],
+    matching match: ColumnResourceMatch,
+    to workspaces: [ClusterWorkspaceWindowController]
+) -> Int {
+    workspaces.reduce(into: 0) { count, workspace in
+        if workspace.applySavedColumns(definitions, matching: match) {
+            count += 1
+        }
+    }
 }
 
 private final class StagedColumnConfigurationDocumentLoader: @unchecked Sendable {
