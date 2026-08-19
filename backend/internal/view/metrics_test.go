@@ -37,7 +37,7 @@ func TestKubernetesMetricSourceConstructsProvidersWithoutFetching(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	authority := first.Context().ID + "/shared"
+	authority := first.AuthorityID()
 	source := &KubernetesMetricSource{Sessions: registry, RefreshInterval: time.Hour}
 	firstLease, err := source.OpenMetrics(
 		first.ID(), authority, metrics.PodMetrics, "team-a", "app=api",
@@ -103,7 +103,7 @@ func TestKubernetesMetricSourceBoundsIdleProvidersWithoutDisruptingActiveSharing
 	if err != nil {
 		t.Fatal(err)
 	}
-	authority := session.Context().ID + "/shared"
+	authority := session.AuthorityID()
 	source := &KubernetesMetricSource{
 		Sessions: registry, RefreshInterval: time.Hour,
 		IdleProviderLimit: 1, IdleSampleLimit: 100,
@@ -195,7 +195,7 @@ func TestKubernetesMetricSourceRejectsIdleSnapshotOverSampleBudget(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	authority := session.Context().ID + "/shared"
+	authority := session.AuthorityID()
 	source := &KubernetesMetricSource{
 		Sessions: registry, RefreshInterval: time.Hour,
 		IdleProviderLimit: 8, IdleSampleLimit: 1,
@@ -260,11 +260,22 @@ func TestKubernetesMetricSourceUsesKnownDiscoveryAbsence(t *testing.T) {
 	if _, err := session.DiscoverResourcesCached(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
-	provider, err := (&KubernetesMetricSource{
+	source := &KubernetesMetricSource{
 		Sessions: registry, RefreshInterval: time.Hour,
-	}).OpenMetrics(session.ID(), "authority", metrics.PodMetrics, "team-a", "")
+	}
+	provider, err := source.OpenMetrics(
+		session.ID(), session.AuthorityID(), metrics.PodMetrics, "team-a", "",
+	)
 	if provider != nil || !errors.Is(err, metrics.ErrMetricsAPIUnavailable) {
 		t.Fatalf("known-absent Metrics API result = (%#v, %v)", provider, err)
+	}
+	snapshot, err := source.ResolvePodMetrics(
+		context.Background(), session.ID(), session.AuthorityID(),
+		[]metrics.PodReference{{Namespace: "team-a", Name: "api", UID: "uid"}},
+	)
+	if snapshot.Samples != nil || !errors.Is(err, metrics.ErrMetricsAPIUnavailable) ||
+		len(source.podCaches) != 0 {
+		t.Fatalf("known-absent exact Metrics API result = (%#v, %v)", snapshot, err)
 	}
 }
 

@@ -2,6 +2,7 @@ package view
 
 import (
 	"container/list"
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -41,12 +42,40 @@ type MetricSource interface {
 	) (*metrics.ProviderLease, error)
 }
 
+// PodMetricResolver is the exact, UID-pinned metrics path used when a Pod
+// view's base query cannot be represented by Metrics Server. Implementations
+// share their cache by Kubernetes authority; Runtime supplies only bounded
+// viewport ranges unless metric-backed ordering or filtering requires complete
+// candidate coverage.
+type PodMetricResolver interface {
+	ResolvePodMetrics(
+		ctx context.Context,
+		sessionID, authorityID string,
+		references []metrics.PodReference,
+	) (metrics.Snapshot, error)
+}
+
+// PodMetricRefreshCadence optionally exposes the positive TTL used by an exact
+// PodMetricResolver. Complete-coverage views use it to refresh authoritative
+// metric-backed order or membership even when their base objects are idle.
+type PodMetricRefreshCadence interface {
+	PodMetricRefreshInterval() time.Duration
+}
+
 // KubernetesMetricSource constructs Kubernetes Metrics API clients from
 // authoritative session REST configs and shares providers between independent
 // workspace sessions backed by the same Kubernetes authority.
 type KubernetesMetricSource struct {
 	Sessions        *cluster.SessionRegistry
 	RefreshInterval time.Duration
+	// Exact PodMetrics GETs reuse RefreshInterval unless an explicit positive
+	// TTL is supplied here. The remaining zero values use metrics package
+	// defaults. All limits are per Kubernetes authority.
+	PodSampleRefreshTTL        time.Duration
+	PodSampleNegativeTTL       time.Duration
+	PodSampleEntryLimit        int
+	PodSampleLimit             int
+	PodSampleMaxConcurrentGETs int
 	// Zero uses the conservative defaults above. These budgets cover only idle
 	// providers; providers with an open lookup lease or active subscriber are
 	// always retained until that consumer releases them.
@@ -57,6 +86,7 @@ type KubernetesMetricSource struct {
 	providers   map[metricProviderKey]*metricProviderEntry
 	idle        list.List
 	idleSamples int
+	podCaches   map[string]*podSampleCacheEntry
 }
 
 type metricProviderKey struct {
@@ -84,16 +114,9 @@ func (s *KubernetesMetricSource) OpenMetrics(
 	if authorityID == "" {
 		return nil, errors.New("metrics authority must not be empty")
 	}
-	session, ok := s.Sessions.Get(sessionID)
-	if !ok {
-		return nil, ErrSessionNotFound
-	}
-	if available, known := session.CachedMetricsAPIAvailability(); known && !available {
-		// Discovery is performed explicitly when the workspace opens. Reuse its
-		// authoritative negative result instead of waking a provider that can
-		// only generate repeated 404/forbidden traffic. Partial discovery stays
-		// unknown and is allowed to degrade through the normal provider path.
-		return nil, metrics.ErrMetricsAPIUnavailable
+	session, err := s.metricsSession(sessionID, authorityID)
+	if err != nil {
+		return nil, err
 	}
 	if kind != metrics.PodMetrics {
 		// NodeMetrics does not have a label-selected view today. Keeping the
@@ -194,35 +217,47 @@ func (s *KubernetesMetricSource) removeIdleLocked(entry *metricProviderEntry) {
 	entry.idleSamples = 0
 }
 
-// ReleaseIdleAuthority drops warm metrics snapshots and client references for
-// one Kubernetes authority without disrupting any active provider.
+// ReleaseIdleAuthority drops warm metrics snapshots, an idle exact Pod sample
+// cache, and client references for one Kubernetes authority without disrupting
+// active LIST or exact consumers. Authority retirement uses this after its
+// shared backend clients have closed.
 func (s *KubernetesMetricSource) ReleaseIdleAuthority(authorityID string) int {
 	if s == nil || authorityID == "" {
 		return 0
 	}
-	return s.releaseIdleMatching(func(entry *metricProviderEntry) bool {
-		return entry.key.authorityID == authorityID
-	})
+	return s.releaseIdleMatching(
+		func(entry *metricProviderEntry) bool { return entry.key.authorityID == authorityID },
+		func(candidate string) bool { return candidate == authorityID },
+		false,
+	)
 }
 
-// ReleaseIdleProviders drops all currently idle providers. Runtime shutdown
-// uses this after closing its subscriptions; active providers shared by
-// another consumer remain indexed and continue normally.
+// ReleaseIdleProviders drops all currently idle LIST providers and force-closes
+// every exact Pod cache. Runtime shutdown uses this after canceling its
+// subscriptions, so any final exact Resolve is woken instead of being orphaned;
+// an active LIST provider shared by another consumer remains indexed.
 func (s *KubernetesMetricSource) ReleaseIdleProviders() int {
 	if s == nil {
 		return 0
 	}
-	return s.releaseIdleMatching(func(*metricProviderEntry) bool { return true })
+	return s.releaseIdleMatching(
+		func(*metricProviderEntry) bool { return true },
+		func(string) bool { return true },
+		true,
+	)
 }
 
-func (s *KubernetesMetricSource) releaseIdleMatching(match func(*metricProviderEntry) bool) int {
+func (s *KubernetesMetricSource) releaseIdleMatching(
+	matchProvider func(*metricProviderEntry) bool,
+	matchPodCache func(string) bool,
+	forcePodCaches bool,
+) int {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	released := 0
 	for element := s.idle.Front(); element != nil; {
 		next := element.Next()
 		entry := element.Value.(*metricProviderEntry)
-		if match(entry) {
+		if matchProvider(entry) {
 			s.removeIdleLocked(entry)
 			if entry.provider.ReleaseIdle() {
 				delete(s.providers, entry.key)
@@ -230,6 +265,22 @@ func (s *KubernetesMetricSource) releaseIdleMatching(match func(*metricProviderE
 			}
 		}
 		element = next
+	}
+	podCaches := make([]*metrics.PodSampleCache, 0)
+	for authorityID, entry := range s.podCaches {
+		if !matchPodCache(authorityID) ||
+			(!forcePodCaches && entry != nil && entry.active != 0) {
+			continue
+		}
+		delete(s.podCaches, authorityID)
+		if entry != nil && entry.cache != nil {
+			podCaches = append(podCaches, entry.cache)
+		}
+	}
+	s.mu.Unlock()
+	for _, cache := range podCaches {
+		cache.Close()
+		released++
 	}
 	return released
 }

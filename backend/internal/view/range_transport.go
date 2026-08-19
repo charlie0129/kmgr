@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const DefaultViewRangeLength = 512
@@ -112,19 +113,30 @@ func (r *Runtime) UpdateMetricInterest(
 	if err != nil {
 		return err
 	}
-	defer subscription.mu.Unlock()
 	if subscription.indexRevision != indexRevision {
+		subscription.mu.Unlock()
 		return fmt.Errorf(
 			"%w: requested index %d, current %d",
 			ErrStaleViewRevision, indexRevision, subscription.indexRevision,
 		)
 	}
 	if startIndex > uint64(len(subscription.order)) {
+		subscription.mu.Unlock()
 		return fmt.Errorf(
 			"%w: start index %d exceeds row count %d",
 			ErrInvalidViewRange, startIndex, len(subscription.order),
 		)
 	}
+	endIndex := uint64(len(subscription.order))
+	if requestedEnd := startIndex + uint64(length); requestedEnd >= startIndex && requestedEnd < endIndex {
+		endIndex = requestedEnd
+	}
+	uids := make([]types.UID, 0, endIndex-startIndex)
+	for _, uid := range subscription.order[startIndex:endIndex] {
+		uids = append(uids, types.UID(uid))
+	}
+	subscription.mu.Unlock()
+	subscription.updateMetricInterest(indexRevision, uids)
 	return nil
 }
 

@@ -844,6 +844,17 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		}
 	}
 	subscription.metricPlan = metricPlan
+	if resolver, ok := r.metrics.(PodMetricResolver); ok {
+		subscription.podMetricResolver = resolver
+		subscription.metricSessionID = sessionID
+		subscription.metricAuthorityID = authorityID
+		subscription.metricRefreshInterval = metrics.DefaultPodSampleRefreshTTL
+		if cadence, ok := r.metrics.(PodMetricRefreshCadence); ok {
+			if interval := cadence.PodMetricRefreshInterval(); interval > 0 {
+				subscription.metricRefreshInterval = interval
+			}
+		}
+	}
 	var metricProviderLease *metrics.ProviderLease
 	if r.metrics != nil && metricPlan.strategy == metricFetchSharedList {
 		metricKind, _ := metricKindFor(projector.spec.Resource)
@@ -872,6 +883,11 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			State: metrics.MeasurementUnavailable,
 		})
 		subscription.projector = projector
+	}
+	if metricPlan.dependency.requiresCompleteCoverage() &&
+		(metricProviderLease != nil ||
+			metricPlan.strategy == metricFetchPodObjects && subscription.podMetricResolver != nil) {
+		subscription.metricsReconciling = true
 	}
 	if metricProviderLease == nil {
 		projector = subscription.projector
@@ -969,7 +985,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	subscription.sealInitialUnlocked(
 		initialStatus,
 		warmRows,
-		subscription.stageUntilReconciled && snapshotComplete,
+		subscription.stageUntilReconciled && snapshotComplete && !subscription.metricsReconciling,
 	)
 	if r.openHandoffHook != nil {
 		r.openHandoffHook()
@@ -1082,6 +1098,9 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	// response from contending with the base LIST/WATCH setup.
 	if metricProviderLease != nil {
 		subscription.attachMetrics(metricProviderLease.Subscribe())
+	}
+	if snapshotComplete && subscription.metricPlan.dependency.requiresCompleteCoverage() {
+		subscription.requestCompleteMetricCoverage()
 	}
 	return subscription, nil
 }
@@ -2139,6 +2158,22 @@ type Subscription struct {
 	metrics      *metrics.Subscription
 	metricCancel context.CancelFunc
 
+	podMetricResolver     PodMetricResolver
+	metricSessionID       string
+	metricAuthorityID     string
+	metricInterestID      uint64
+	metricInterestStop    context.CancelFunc
+	metricRefreshInterval time.Duration
+	metricCoverageID      uint64
+	metricCoverageCommit  uint64
+	metricCoverageRunning bool
+	metricCoverageDirty   bool
+	metricCoverageTimer   *time.Timer
+	metricRefreshAfter    time.Time
+	metricRefreshPending  bool
+	metricsReconciling    bool
+	lastStatus            *kmgrv1.ViewStatus
+
 	mu                      sync.Mutex
 	generation              uint64
 	sequence                uint64
@@ -2308,7 +2343,12 @@ func (s *Subscription) attachMetrics(subscription *metrics.Subscription) {
 	}
 	s.metrics = subscription
 	s.metricCancel = cancel
+	requestRefresh := s.metricRefreshPending
+	s.metricRefreshPending = false
 	s.mu.Unlock()
+	if requestRefresh {
+		subscription.RequestRefresh()
+	}
 	go s.receiveMetrics(ctx, subscription)
 }
 
@@ -2335,6 +2375,16 @@ func (s *Subscription) applyMetrics(snapshot metrics.Snapshot) {
 	s.projector = s.projector.WithMetrics(snapshot)
 	s.projectionRevision++
 	s.projectionResnapshot = true
+	if s.metricPlan.dependency.requiresCompleteCoverage() && s.snapshotComplete {
+		if !s.metricsReconciling {
+			s.metricCoverageID++
+			s.setMetricsReconcilingLocked(true)
+		}
+		if s.metricRefreshAfter.IsZero() || !snapshot.UpdatedAt.Before(s.metricRefreshAfter) {
+			s.metricCoverageCommit = s.metricCoverageID
+			s.metricRefreshAfter = time.Time{}
+		}
+	}
 	s.scheduleProjectionLocked()
 	s.mu.Unlock()
 }
@@ -2497,6 +2547,8 @@ func (s *Subscription) sealInitialUnlocked(
 	if status != nil {
 		copy := proto.Clone(status).(*kmgrv1.ViewStatus)
 		copy.RowsVisible = uint64(len(rows))
+		copy.MetricsReconciling = s.metricsReconciling
+		s.lastStatus = proto.Clone(copy).(*kmgrv1.ViewStatus)
 		s.sealedInitial = append(s.sealedInitial, &kmgrv1.ViewEvent{
 			Payload: &kmgrv1.ViewEvent_Status{Status: copy},
 		})
@@ -2537,7 +2589,8 @@ func (s *Subscription) sealInitialUnlocked(
 // once because a retained client needs only the first complete replacement;
 // later WATCH updates apply directly to the promoted table.
 func (s *Subscription) markReconciledLocked() {
-	if !s.stageUntilReconciled || s.reconciliationDelivered || s.pendingReconciliation {
+	if !s.stageUntilReconciled || s.metricsReconciling ||
+		s.reconciliationDelivered || s.pendingReconciliation {
 		return
 	}
 	s.pendingReconciliation = true
@@ -2633,12 +2686,13 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 	}
 	if batch.SnapshotComplete {
 		s.snapshotComplete = true
-		s.pendingStatuses = append(s.pendingStatuses, &kmgrv1.ViewStatus{
+		s.setStatusLocked(&kmgrv1.ViewStatus{
 			Freshness:              kmgrv1.ViewFreshness_VIEW_FRESHNESS_WATCHING,
 			ObjectsExamined:        uint64(batch.ObjectsListed),
 			RowsVisible:            uint64(len(s.rows)),
 			LastSynchronizedUnixMs: batch.SynchronizedAt.UnixMilli(),
 		})
+		s.requireCompleteMetricCoverageLocked()
 		s.markReconciledLocked()
 	}
 	s.signalLocked(batch.FromList)
@@ -2697,6 +2751,9 @@ func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
 	if len(s.pendingObjects) > s.pendingLimit {
 		clear(s.pendingObjects)
 		s.projectionResnapshot = true
+	}
+	if s.snapshotComplete && (len(batch.Upserts) != 0 || len(batch.RemovedUIDs) != 0) {
+		s.requireCompleteMetricCoverageLocked()
 	}
 	if presentationChanged {
 		s.advancePresentationLocked(true)
@@ -2948,6 +3005,7 @@ func (s *Subscription) runProjection() {
 				s.advancePresentationLocked(indexChanged)
 			}
 			s.publishWarmCatchupStatusLocked()
+			s.completeMetricCoverageLocked()
 		} else {
 			var previousOrder []string
 			orderCandidate := false
@@ -3116,6 +3174,11 @@ func (s *Subscription) advancePresentationLocked(indexChanged bool) {
 	} else if indexChanged {
 		s.indexRevision++
 	}
+	if indexChanged && s.metricInterestStop != nil {
+		s.metricInterestID++
+		s.metricInterestStop()
+		s.metricInterestStop = nil
+	}
 	s.pendingInvalidation = true
 }
 
@@ -3143,6 +3206,8 @@ func (s *Subscription) setStatusLocked(status *kmgrv1.ViewStatus) {
 	}
 	copy := proto.Clone(status).(*kmgrv1.ViewStatus)
 	copy.RowsVisible = uint64(len(s.rows))
+	copy.MetricsReconciling = s.metricsReconciling
+	s.lastStatus = proto.Clone(copy).(*kmgrv1.ViewStatus)
 	if len(s.pendingStatuses) < 8 {
 		s.pendingStatuses = append(s.pendingStatuses, copy)
 	} else {
@@ -3302,6 +3367,14 @@ func (s *Subscription) retireLocked() *metrics.Subscription {
 	if s.metricCancel != nil {
 		s.metricCancel()
 		s.metricCancel = nil
+	}
+	if s.metricInterestStop != nil {
+		s.metricInterestStop()
+		s.metricInterestStop = nil
+	}
+	if s.metricCoverageTimer != nil {
+		s.metricCoverageTimer.Stop()
+		s.metricCoverageTimer = nil
 	}
 	metricSubscription := s.metrics
 	s.metrics = nil
