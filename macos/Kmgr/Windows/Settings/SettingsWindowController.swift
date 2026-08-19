@@ -24,6 +24,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let authorityWarmMemoryPercentField = NSTextField()
     private let kubernetesQPSField = NSTextField()
     private let kubernetesBurstField = NSTextField()
+    private let idleMetricProviderLimitField = NSTextField()
+    private let idleMetricSampleLimitField = NSTextField()
+    private let exactPodMetricsEntryLimitField = NSTextField()
+    private let exactPodMetricsSampleLimitField = NSTextField()
+    private let exactPodMetricsDetailEntryLimitField = NSTextField()
+    private let exactPodMetricsGETConcurrencyField = NSTextField()
+    private let logSourceOpenConcurrencyField = NSTextField()
     private let restoreWindowsButton = NSButton(
         checkboxWithTitle: "Restore open cluster windows when Kmgr launches",
         target: nil,
@@ -101,6 +108,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
             kubernetesQPSField, kubernetesBurstField,
+            idleMetricProviderLimitField, idleMetricSampleLimitField,
+            exactPodMetricsEntryLimitField, exactPodMetricsSampleLimitField,
+            exactPodMetricsDetailEntryLimitField,
+            exactPodMetricsGETConcurrencyField, logSourceOpenConcurrencyField,
             columnsPathField,
         ] {
             field.delegate = self
@@ -114,6 +125,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
             kubernetesQPSField, kubernetesBurstField,
+            idleMetricProviderLimitField, idleMetricSampleLimitField,
+            exactPodMetricsEntryLimitField, exactPodMetricsSampleLimitField,
+            exactPodMetricsDetailEntryLimitField,
+            exactPodMetricsGETConcurrencyField, logSourceOpenConcurrencyField,
         ] {
             field.alignment = .right
             field.widthAnchor.constraint(equalToConstant: 110).isActive = true
@@ -141,6 +156,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         )
         kubernetesBurstField.setAccessibilityIdentifier(
             "settings.performance.kubernetesBurst"
+        )
+        idleMetricProviderLimitField.setAccessibilityIdentifier(
+            "settings.performance.idleMetricProviders"
+        )
+        idleMetricSampleLimitField.setAccessibilityIdentifier(
+            "settings.performance.idleMetricSamples"
+        )
+        exactPodMetricsEntryLimitField.setAccessibilityIdentifier(
+            "settings.performance.exactPodMetricsEntries"
+        )
+        exactPodMetricsSampleLimitField.setAccessibilityIdentifier(
+            "settings.performance.exactPodMetricsSamples"
+        )
+        exactPodMetricsDetailEntryLimitField.setAccessibilityIdentifier(
+            "settings.performance.exactPodMetricsDetails"
+        )
+        exactPodMetricsGETConcurrencyField.setAccessibilityIdentifier(
+            "settings.performance.exactPodMetricsGETConcurrency"
+        )
+        logSourceOpenConcurrencyField.setAccessibilityIdentifier(
+            "settings.performance.logSourceOpenConcurrency"
         )
         columnsPathField.lineBreakMode = .byTruncatingMiddle
         columnsPathField.setAccessibilityLabel("External column configuration path")
@@ -207,6 +243,34 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 groupHeading("Kubernetes API — aggregate per cluster"),
                 labeledRow("Sustained QPS", control: kubernetesQPSField),
                 labeledRow("Burst", control: kubernetesBurstField),
+                groupHeading("Metrics LIST cache — process-wide"),
+                labeledRow(
+                    "Idle providers",
+                    control: idleMetricProviderLimitField
+                ),
+                labeledRow("Idle samples", control: idleMetricSampleLimitField),
+                groupHeading("Exact PodMetrics cache — per cluster"),
+                labeledRow(
+                    "Result entries",
+                    control: exactPodMetricsEntryLimitField
+                ),
+                labeledRow(
+                    "Positive samples",
+                    control: exactPodMetricsSampleLimitField
+                ),
+                labeledRow(
+                    "Raw detail entries",
+                    control: exactPodMetricsDetailEntryLimitField
+                ),
+                labeledRow(
+                    "GET concurrency",
+                    control: exactPodMetricsGETConcurrencyField
+                ),
+                groupHeading("Logs — process-wide"),
+                labeledRow(
+                    "Concurrent source opens",
+                    control: logSourceOpenConcurrencyField
+                ),
                 relaunchWarning,
             ]
         )
@@ -401,6 +465,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             preferences.advancedPerformance.kubernetesQPS
         kubernetesBurstField.integerValue =
             preferences.advancedPerformance.kubernetesBurst
+        idleMetricProviderLimitField.integerValue =
+            preferences.advancedPerformance.idleMetricProviderLimit
+        idleMetricSampleLimitField.integerValue =
+            preferences.advancedPerformance.idleMetricSampleLimit
+        exactPodMetricsEntryLimitField.integerValue =
+            preferences.advancedPerformance.exactPodMetricsEntryLimit
+        exactPodMetricsSampleLimitField.integerValue =
+            preferences.advancedPerformance.exactPodMetricsSampleLimit
+        exactPodMetricsDetailEntryLimitField.integerValue =
+            preferences.advancedPerformance.exactPodMetricsDetailEntryLimit
+        exactPodMetricsGETConcurrencyField.integerValue =
+            preferences.advancedPerformance.exactPodMetricsGETConcurrency
+        logSourceOpenConcurrencyField.integerValue =
+            preferences.advancedPerformance.logSourceOpenConcurrency
         restoreWindowsButton.state = preferences.restoreOpenClusterWindows ? .on : .off
         confirmRestartButton.state = preferences.confirmations.confirmWorkloadRestart ? .on : .off
         confirmScaleButton.state = preferences.confirmations.confirmScaling ? .on : .off
@@ -450,7 +528,26 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                     authorityWarmMemoryPercentField
                 ),
                 kubernetesQPS: parsedDouble(kubernetesQPSField),
-                kubernetesBurst: parsedInteger(kubernetesBurstField)
+                kubernetesBurst: parsedInteger(kubernetesBurstField),
+                idleMetricProviderLimit: parsedInteger(
+                    idleMetricProviderLimitField
+                ),
+                idleMetricSampleLimit: parsedInteger(idleMetricSampleLimitField),
+                exactPodMetricsEntryLimit: parsedInteger(
+                    exactPodMetricsEntryLimitField
+                ),
+                exactPodMetricsSampleLimit: parsedInteger(
+                    exactPodMetricsSampleLimitField
+                ),
+                exactPodMetricsDetailEntryLimit: parsedInteger(
+                    exactPodMetricsDetailEntryLimitField
+                ),
+                exactPodMetricsGETConcurrency: parsedInteger(
+                    exactPodMetricsGETConcurrencyField
+                ),
+                logSourceOpenConcurrency: parsedInteger(
+                    logSourceOpenConcurrencyField
+                )
             )
         )
     }

@@ -108,6 +108,27 @@ func TestServerRejectsInvalidWarmCacheLimits(t *testing.T) {
 	}
 }
 
+func TestServerRejectsInvalidMetricCacheAndLogConcurrencyLimits(t *testing.T) {
+	for _, options := range []ServerOptions{
+		{IdleMetricProviderLimit: -1},
+		{IdleMetricSampleLimit: -1},
+		{PodMetricsEntryLimit: -1},
+		{PodMetricsSampleLimit: -1},
+		{PodMetricsDetailEntryLimit: -1},
+		{PodMetricsGETConcurrency: -1},
+		{LogSourceOpenConcurrency: -1},
+	} {
+		options.Version = "test"
+		server, err := NewServer(strings.Repeat("a", 64), options)
+		if server != nil || err == nil {
+			if server != nil {
+				server.Shutdown(time.Second)
+			}
+			t.Fatalf("NewServer(%+v) = %#v, %v; want error", options, server, err)
+		}
+	}
+}
+
 func TestServerPublishesViewWarmCacheTelemetryToMatchingAuthority(t *testing.T) {
 	t.Parallel()
 	registry := cluster.NewSessionRegistry(&serviceFactory{})

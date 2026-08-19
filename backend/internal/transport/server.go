@@ -33,6 +33,13 @@ type ServerOptions struct {
 	ProbeTimeout                time.Duration
 	ColumnsPath                 string
 	MetricsRefreshInterval      time.Duration
+	IdleMetricProviderLimit     int
+	IdleMetricSampleLimit       int
+	PodMetricsEntryLimit        int
+	PodMetricsSampleLimit       int
+	PodMetricsDetailEntryLimit  int
+	PodMetricsGETConcurrency    int
+	LogSourceOpenConcurrency    int
 	KubernetesQPS               float32
 	KubernetesBurst             int
 	WarmViewLimit               int
@@ -100,7 +107,17 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		return nil, fmt.Errorf("load columns configuration: %w", err)
 	}
 	metricSource := &view.KubernetesMetricSource{
-		Sessions: sessions, RefreshInterval: options.MetricsRefreshInterval,
+		Sessions:                   sessions,
+		RefreshInterval:            options.MetricsRefreshInterval,
+		IdleProviderLimit:          options.IdleMetricProviderLimit,
+		IdleSampleLimit:            options.IdleMetricSampleLimit,
+		PodSampleEntryLimit:        options.PodMetricsEntryLimit,
+		PodSampleLimit:             options.PodMetricsSampleLimit,
+		PodDetailEntryLimit:        options.PodMetricsDetailEntryLimit,
+		PodSampleMaxConcurrentGETs: options.PodMetricsGETConcurrency,
+	}
+	if err := metricSource.ValidateConfiguration(); err != nil {
+		return nil, fmt.Errorf("configure Kubernetes metrics cache: %w", err)
 	}
 	viewRuntime, err := view.NewRuntime(view.RuntimeConfig{
 		Source:                      view.ClusterResourceSource{Sessions: sessions},
@@ -154,7 +171,8 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		return nil, err
 	}
 	logManager, err := streamlogs.NewManager(streamlogs.Config{
-		Resolver: streamlogs.ClusterResolver{Sessions: sessions},
+		Resolver:           streamlogs.ClusterResolver{Sessions: sessions},
+		MaxConcurrentOpens: options.LogSourceOpenConcurrency,
 	})
 	if err != nil {
 		operationManager.Close()

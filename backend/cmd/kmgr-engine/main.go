@@ -15,6 +15,7 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
+	streamlogs "github.com/charlie0129/kmgr/backend/internal/stream/logs"
 	"github.com/charlie0129/kmgr/backend/internal/systemmemory"
 	"github.com/charlie0129/kmgr/backend/internal/transport"
 	"github.com/charlie0129/kmgr/backend/internal/view"
@@ -29,6 +30,15 @@ type warmCacheConfiguration struct {
 	authorityViews         int
 	authorityObjects       int
 	authorityMemoryPercent int
+}
+
+type metricCacheConfiguration struct {
+	idleProviders    int
+	idleSamples      int
+	exactEntries     int
+	exactSamples     int
+	exactDetails     int
+	exactConcurrency int
 }
 
 func main() {
@@ -55,6 +65,7 @@ func run(arguments []string) int {
 		"aggregate Kubernetes client burst for each authority",
 	)
 	warmCache := warmCacheConfiguration{}
+	metricCache := metricCacheConfiguration{}
 	flags.IntVar(
 		&warmCache.globalViews,
 		"warm-cache-global-views",
@@ -91,6 +102,47 @@ func run(arguments []string) int {
 		view.DefaultWarmMemoryPercent,
 		"maximum warm-cache retained bytes for one authority as a percentage of physical memory",
 	)
+	flags.IntVar(
+		&metricCache.idleProviders,
+		"metrics-idle-provider-limit",
+		view.DefaultIdleMetricProviderLimit,
+		"maximum idle Metrics API LIST providers retained process-wide",
+	)
+	flags.IntVar(
+		&metricCache.idleSamples,
+		"metrics-idle-sample-limit",
+		view.DefaultIdleMetricSampleLimit,
+		"maximum samples retained by idle Metrics API LIST providers process-wide",
+	)
+	flags.IntVar(
+		&metricCache.exactEntries,
+		"pod-metrics-cache-entry-limit",
+		metrics.DefaultPodSampleEntryLimit,
+		"maximum exact PodMetrics result entries retained for one authority",
+	)
+	flags.IntVar(
+		&metricCache.exactSamples,
+		"pod-metrics-positive-sample-limit",
+		metrics.DefaultPodSampleLimit,
+		"maximum positive exact PodMetrics samples retained for one authority",
+	)
+	flags.IntVar(
+		&metricCache.exactDetails,
+		"pod-metrics-detail-entry-limit",
+		metrics.DefaultPodDetailEntryLimit,
+		"maximum raw exact PodMetrics detail entries retained for one authority",
+	)
+	flags.IntVar(
+		&metricCache.exactConcurrency,
+		"pod-metrics-get-concurrency",
+		metrics.DefaultPodSampleMaxConcurrentGETs,
+		"maximum concurrent exact PodMetrics GETs for one authority",
+	)
+	logSourceOpenConcurrency := flags.Int(
+		"log-source-open-concurrency",
+		streamlogs.DefaultMaxConcurrentOpens,
+		"maximum concurrent Kubernetes log-source opens process-wide",
+	)
 	logLevel := flags.String("log-level", "info", "stderr log level: debug, info, warn, or error")
 	startDevelopmentProfiler := registerDevelopmentProfiler(flags)
 	if err := flags.Parse(arguments); err != nil {
@@ -111,6 +163,17 @@ func run(arguments []string) int {
 		return 2
 	}
 	if err := validateWarmCacheConfiguration(warmCache); err != nil {
+		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
+		return 2
+	}
+	if err := validateMetricCacheConfiguration(metricCache); err != nil {
+		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
+		return 2
+	}
+	if err := validatePositiveCrossPlatformCount(
+		*logSourceOpenConcurrency,
+		"--log-source-open-concurrency",
+	); err != nil {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
 		return 2
 	}
@@ -169,6 +232,13 @@ func run(arguments []string) int {
 		Logger:                      logger,
 		ColumnsPath:                 *columnsPath,
 		MetricsRefreshInterval:      *metricsRefresh,
+		IdleMetricProviderLimit:     metricCache.idleProviders,
+		IdleMetricSampleLimit:       metricCache.idleSamples,
+		PodMetricsEntryLimit:        metricCache.exactEntries,
+		PodMetricsSampleLimit:       metricCache.exactSamples,
+		PodMetricsDetailEntryLimit:  metricCache.exactDetails,
+		PodMetricsGETConcurrency:    metricCache.exactConcurrency,
+		LogSourceOpenConcurrency:    *logSourceOpenConcurrency,
 		KubernetesQPS:               validatedQPS,
 		KubernetesBurst:             *kubernetesBurst,
 		WarmViewLimit:               warmCache.globalViews,
@@ -226,30 +296,57 @@ func validateKubernetesRateLimit(qps float64, burst int) (float32, error) {
 		convertedQPS <= 0 || math.IsInf(float64(convertedQPS), 0) {
 		return 0, errors.New("--kubernetes-qps must be a finite positive 32-bit value")
 	}
-	if burst <= 0 {
-		return 0, errors.New("--kubernetes-burst must be positive")
+	if err := validatePositiveCrossPlatformCount(burst, "--kubernetes-burst"); err != nil {
+		return 0, err
 	}
 	return convertedQPS, nil
 }
 
 func validateWarmCacheConfiguration(configuration warmCacheConfiguration) error {
-	if configuration.globalViews <= 0 {
-		return errors.New("--warm-cache-global-views must be positive")
-	}
-	if configuration.globalObjects <= 0 {
-		return errors.New("--warm-cache-global-objects must be positive")
-	}
-	if configuration.authorityViews <= 0 {
-		return errors.New("--warm-cache-authority-views must be positive")
-	}
-	if configuration.authorityObjects <= 0 {
-		return errors.New("--warm-cache-authority-objects must be positive")
+	for _, limit := range []struct {
+		value int
+		name  string
+	}{
+		{configuration.globalViews, "--warm-cache-global-views"},
+		{configuration.globalObjects, "--warm-cache-global-objects"},
+		{configuration.authorityViews, "--warm-cache-authority-views"},
+		{configuration.authorityObjects, "--warm-cache-authority-objects"},
+	} {
+		if err := validatePositiveCrossPlatformCount(limit.value, limit.name); err != nil {
+			return err
+		}
 	}
 	if configuration.globalMemoryPercent < 1 || configuration.globalMemoryPercent > 100 {
 		return errors.New("--warm-cache-global-memory-percent must be between 1 and 100")
 	}
 	if configuration.authorityMemoryPercent < 1 || configuration.authorityMemoryPercent > 100 {
 		return errors.New("--warm-cache-authority-memory-percent must be between 1 and 100")
+	}
+	return nil
+}
+
+func validateMetricCacheConfiguration(configuration metricCacheConfiguration) error {
+	for _, limit := range []struct {
+		value int
+		name  string
+	}{
+		{configuration.idleProviders, "--metrics-idle-provider-limit"},
+		{configuration.idleSamples, "--metrics-idle-sample-limit"},
+		{configuration.exactEntries, "--pod-metrics-cache-entry-limit"},
+		{configuration.exactSamples, "--pod-metrics-positive-sample-limit"},
+		{configuration.exactDetails, "--pod-metrics-detail-entry-limit"},
+		{configuration.exactConcurrency, "--pod-metrics-get-concurrency"},
+	} {
+		if err := validatePositiveCrossPlatformCount(limit.value, limit.name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePositiveCrossPlatformCount(value int, name string) error {
+	if value <= 0 || uint64(value) > uint64(math.MaxInt32) {
+		return fmt.Errorf("%s must be between 1 and %d", name, math.MaxInt32)
 	}
 	return nil
 }

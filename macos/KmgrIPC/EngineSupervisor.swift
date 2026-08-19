@@ -668,6 +668,20 @@ extension EngineSupervisor.Configuration {
                 "\(advancedPerformance.kubernetesQPS)",
                 "--kubernetes-burst",
                 "\(advancedPerformance.kubernetesBurst)",
+                "--metrics-idle-provider-limit",
+                "\(advancedPerformance.idleMetricProviderLimit)",
+                "--metrics-idle-sample-limit",
+                "\(advancedPerformance.idleMetricSampleLimit)",
+                "--pod-metrics-cache-entry-limit",
+                "\(advancedPerformance.exactPodMetricsEntryLimit)",
+                "--pod-metrics-positive-sample-limit",
+                "\(advancedPerformance.exactPodMetricsSampleLimit)",
+                "--pod-metrics-detail-entry-limit",
+                "\(advancedPerformance.exactPodMetricsDetailEntryLimit)",
+                "--pod-metrics-get-concurrency",
+                "\(advancedPerformance.exactPodMetricsGETConcurrency)",
+                "--log-source-open-concurrency",
+                "\(advancedPerformance.logSourceOpenConcurrency)",
             ]
         }
         if let normalizedLogLevel {

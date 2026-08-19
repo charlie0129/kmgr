@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -88,6 +89,31 @@ type KubernetesMetricSource struct {
 	idle        list.List
 	idleSamples int
 	podCaches   map[string]*podSampleCacheEntry
+}
+
+// ValidateConfiguration rejects explicit invalid limits before the source is
+// installed in a Runtime. Zero keeps the documented default for embedders that
+// do not supply helper flags.
+func (s *KubernetesMetricSource) ValidateConfiguration() error {
+	if s == nil {
+		return errors.New("Kubernetes metric source must not be nil")
+	}
+	for _, limit := range []struct {
+		value int
+		name  string
+	}{
+		{s.IdleProviderLimit, "idle provider limit"},
+		{s.IdleSampleLimit, "idle sample limit"},
+		{s.PodSampleEntryLimit, "exact PodMetrics entry limit"},
+		{s.PodSampleLimit, "exact PodMetrics positive sample limit"},
+		{s.PodDetailEntryLimit, "exact PodMetrics detail entry limit"},
+		{s.PodSampleMaxConcurrentGETs, "exact PodMetrics GET concurrency"},
+	} {
+		if limit.value < 0 {
+			return fmt.Errorf("Kubernetes metric source %s must be positive", limit.name)
+		}
+	}
+	return nil
 }
 
 type metricProviderKey struct {

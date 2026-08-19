@@ -56,8 +56,26 @@ struct ApplicationWindowPresentationTests {
         )
         let qps = try field("settings.performance.kubernetesQPS")
         let burst = try field("settings.performance.kubernetesBurst")
+        let idleProviders = try field("settings.performance.idleMetricProviders")
+        let idleSamples = try field("settings.performance.idleMetricSamples")
+        let exactEntries = try field("settings.performance.exactPodMetricsEntries")
+        let exactSamples = try field("settings.performance.exactPodMetricsSamples")
+        let exactDetails = try field("settings.performance.exactPodMetricsDetails")
+        let exactConcurrency = try field(
+            "settings.performance.exactPodMetricsGETConcurrency"
+        )
+        let logOpenConcurrency = try field(
+            "settings.performance.logSourceOpenConcurrency"
+        )
         #expect(globalMemory.integerValue == 20)
         #expect(authorityMemory.integerValue == 20)
+        #expect(idleProviders.integerValue == 8)
+        #expect(idleSamples.integerValue == 100_000)
+        #expect(exactEntries.integerValue == 100_000)
+        #expect(exactSamples.integerValue == 100_000)
+        #expect(exactDetails.integerValue == 256)
+        #expect(exactConcurrency.integerValue == 16)
+        #expect(logOpenConcurrency.integerValue == 16)
         #expect(fields.first {
             $0.accessibilityIdentifier() == "settings.performance.relaunchWarning"
         }?.stringValue.contains("relaunching") == true)
@@ -66,6 +84,13 @@ struct ApplicationWindowPresentationTests {
         authorityMemory.stringValue = "10"
         qps.stringValue = "12.5"
         burst.stringValue = "37"
+        idleProviders.stringValue = "5"
+        idleSamples.stringValue = "75000"
+        exactEntries.stringValue = "80000"
+        exactSamples.stringValue = "70000"
+        exactDetails.stringValue = "128"
+        exactConcurrency.stringValue = "12"
+        logOpenConcurrency.stringValue = "9"
         let apply = try #require(button(titled: "Apply", beneath: root))
         apply.performClick(nil)
 
@@ -73,6 +98,13 @@ struct ApplicationWindowPresentationTests {
         #expect(store.current.advancedPerformance.authorityWarmCacheMemoryPercent == 10)
         #expect(store.current.advancedPerformance.kubernetesQPS == 12.5)
         #expect(store.current.advancedPerformance.kubernetesBurst == 37)
+        #expect(store.current.advancedPerformance.idleMetricProviderLimit == 5)
+        #expect(store.current.advancedPerformance.idleMetricSampleLimit == 75_000)
+        #expect(store.current.advancedPerformance.exactPodMetricsEntryLimit == 80_000)
+        #expect(store.current.advancedPerformance.exactPodMetricsSampleLimit == 70_000)
+        #expect(store.current.advancedPerformance.exactPodMetricsDetailEntryLimit == 128)
+        #expect(store.current.advancedPerformance.exactPodMetricsGETConcurrency == 12)
+        #expect(store.current.advancedPerformance.logSourceOpenConcurrency == 9)
     }
 
     @Test("Settings preserves its frame when reopened and when restored")

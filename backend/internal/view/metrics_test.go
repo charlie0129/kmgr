@@ -21,6 +21,24 @@ import (
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
 )
 
+func TestKubernetesMetricSourceValidatesExplicitLimits(t *testing.T) {
+	if err := (&KubernetesMetricSource{}).ValidateConfiguration(); err != nil {
+		t.Fatalf("zero-value defaults: %v", err)
+	}
+	for _, source := range []*KubernetesMetricSource{
+		{IdleProviderLimit: -1},
+		{IdleSampleLimit: -1},
+		{PodSampleEntryLimit: -1},
+		{PodSampleLimit: -1},
+		{PodDetailEntryLimit: -1},
+		{PodSampleMaxConcurrentGETs: -1},
+	} {
+		if err := source.ValidateConfiguration(); err == nil {
+			t.Fatalf("ValidateConfiguration(%+v) accepted an invalid limit", source)
+		}
+	}
+}
+
 func TestKubernetesMetricSourceConstructsProvidersWithoutFetching(t *testing.T) {
 	t.Parallel()
 	catalog := metricTestCatalog(t)

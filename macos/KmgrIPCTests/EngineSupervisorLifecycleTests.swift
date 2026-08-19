@@ -51,7 +51,14 @@ struct EngineSupervisorLifecycleTests {
                 authorityWarmCacheObjectLimit: 150_000,
                 authorityWarmCacheMemoryPercent: 10,
                 kubernetesQPS: 12.5,
-                kubernetesBurst: 37
+                kubernetesBurst: 37,
+                idleMetricProviderLimit: 5,
+                idleMetricSampleLimit: 75_000,
+                exactPodMetricsEntryLimit: 80_000,
+                exactPodMetricsSampleLimit: 70_000,
+                exactPodMetricsDetailEntryLimit: 128,
+                exactPodMetricsGETConcurrency: 12,
+                logSourceOpenConcurrency: 9
             ),
             logLevel: " DEBUG "
         )
@@ -67,6 +74,13 @@ struct EngineSupervisorLifecycleTests {
             "--warm-cache-authority-memory-percent", "10",
             "--kubernetes-qps", "12.5",
             "--kubernetes-burst", "37",
+            "--metrics-idle-provider-limit", "5",
+            "--metrics-idle-sample-limit", "75000",
+            "--pod-metrics-cache-entry-limit", "80000",
+            "--pod-metrics-positive-sample-limit", "70000",
+            "--pod-metrics-detail-entry-limit", "128",
+            "--pod-metrics-get-concurrency", "12",
+            "--log-source-open-concurrency", "9",
             "--log-level", "debug",
         ])
     }

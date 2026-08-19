@@ -101,6 +101,13 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     public var authorityWarmCacheMemoryPercent: Int
     public var kubernetesQPS: Double
     public var kubernetesBurst: Int
+    public var idleMetricProviderLimit: Int
+    public var idleMetricSampleLimit: Int
+    public var exactPodMetricsEntryLimit: Int
+    public var exactPodMetricsSampleLimit: Int
+    public var exactPodMetricsDetailEntryLimit: Int
+    public var exactPodMetricsGETConcurrency: Int
+    public var logSourceOpenConcurrency: Int
 
     public init(
         globalWarmCacheViewLimit: Int = 24,
@@ -110,7 +117,14 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         authorityWarmCacheObjectLimit: Int = 100_000,
         authorityWarmCacheMemoryPercent: Int = 20,
         kubernetesQPS: Double = 40,
-        kubernetesBurst: Int = 80
+        kubernetesBurst: Int = 80,
+        idleMetricProviderLimit: Int = 8,
+        idleMetricSampleLimit: Int = 100_000,
+        exactPodMetricsEntryLimit: Int = 100_000,
+        exactPodMetricsSampleLimit: Int = 100_000,
+        exactPodMetricsDetailEntryLimit: Int = 256,
+        exactPodMetricsGETConcurrency: Int = 16,
+        logSourceOpenConcurrency: Int = 16
     ) {
         self.globalWarmCacheViewLimit = globalWarmCacheViewLimit
         self.globalWarmCacheObjectLimit = globalWarmCacheObjectLimit
@@ -120,6 +134,13 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         self.authorityWarmCacheMemoryPercent = authorityWarmCacheMemoryPercent
         self.kubernetesQPS = kubernetesQPS
         self.kubernetesBurst = kubernetesBurst
+        self.idleMetricProviderLimit = idleMetricProviderLimit
+        self.idleMetricSampleLimit = idleMetricSampleLimit
+        self.exactPodMetricsEntryLimit = exactPodMetricsEntryLimit
+        self.exactPodMetricsSampleLimit = exactPodMetricsSampleLimit
+        self.exactPodMetricsDetailEntryLimit = exactPodMetricsDetailEntryLimit
+        self.exactPodMetricsGETConcurrency = exactPodMetricsGETConcurrency
+        self.logSourceOpenConcurrency = logSourceOpenConcurrency
     }
 
     public func validationIssues() -> [AppPreferenceIssue] {
@@ -186,12 +207,47 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
             field: "advancedPerformance.kubernetesBurst",
             title: "Kubernetes burst"
         )
+        validateCount(
+            idleMetricProviderLimit,
+            field: "advancedPerformance.idleMetricProviderLimit",
+            title: "Idle metric provider limit"
+        )
+        validateCount(
+            idleMetricSampleLimit,
+            field: "advancedPerformance.idleMetricSampleLimit",
+            title: "Idle metric sample limit"
+        )
+        validateCount(
+            exactPodMetricsEntryLimit,
+            field: "advancedPerformance.exactPodMetricsEntryLimit",
+            title: "Exact PodMetrics cache entry limit"
+        )
+        validateCount(
+            exactPodMetricsSampleLimit,
+            field: "advancedPerformance.exactPodMetricsSampleLimit",
+            title: "Exact PodMetrics positive sample limit"
+        )
+        validateCount(
+            exactPodMetricsDetailEntryLimit,
+            field: "advancedPerformance.exactPodMetricsDetailEntryLimit",
+            title: "Exact PodMetrics raw detail entry limit"
+        )
+        validateCount(
+            exactPodMetricsGETConcurrency,
+            field: "advancedPerformance.exactPodMetricsGETConcurrency",
+            title: "Exact PodMetrics GET concurrency"
+        )
+        validateCount(
+            logSourceOpenConcurrency,
+            field: "advancedPerformance.logSourceOpenConcurrency",
+            title: "Log source open concurrency"
+        )
         return issues
     }
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v2"
+    public static let apiVersion = "kmgr.preferences/v3"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
@@ -416,6 +472,10 @@ public final class AppPreferencesStore {
         var preferences: AppPreferences
     }
 
+    private struct Envelope: Decodable {
+        var apiVersion: String
+    }
+
     private let defaults: UserDefaults
     public private(set) var current: AppPreferences
     public private(set) var loadIssue: AppPreferencesLoadIssue?
@@ -444,9 +504,10 @@ public final class AppPreferencesStore {
 
     private func loadFromDefaults() {
         guard let data = defaults.data(forKey: Self.storageKey) else { return }
-        let document: Document
+        let decoder = JSONDecoder()
+        let envelope: Envelope
         do {
-            document = try JSONDecoder().decode(Document.self, from: data)
+            envelope = try decoder.decode(Envelope.self, from: data)
         } catch {
             rejectSavedPreferences(AppPreferencesLoadIssue(
                 reason: .invalidData,
@@ -454,10 +515,20 @@ public final class AppPreferencesStore {
             ))
             return
         }
-        guard document.apiVersion == AppPreferences.apiVersion else {
+        guard envelope.apiVersion == AppPreferences.apiVersion else {
             rejectSavedPreferences(AppPreferencesLoadIssue(
                 reason: .unsupportedVersion,
-                message: "Saved settings use unsupported version \(document.apiVersion); conservative defaults are in use."
+                message: "Saved settings use unsupported version \(envelope.apiVersion); conservative defaults are in use."
+            ))
+            return
+        }
+        let document: Document
+        do {
+            document = try decoder.decode(Document.self, from: data)
+        } catch {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings could not be decoded; conservative defaults are in use."
             ))
             return
         }

@@ -28,7 +28,14 @@ import Testing
         authorityWarmCacheObjectLimit: 150_000,
         authorityWarmCacheMemoryPercent: 10,
         kubernetesQPS: 12.5,
-        kubernetesBurst: 37
+        kubernetesBurst: 37,
+        idleMetricProviderLimit: 5,
+        idleMetricSampleLimit: 75_000,
+        exactPodMetricsEntryLimit: 80_000,
+        exactPodMetricsSampleLimit: 70_000,
+        exactPodMetricsDetailEntryLimit: 128,
+        exactPodMetricsGETConcurrency: 12,
+        logSourceOpenConcurrency: 9
     )
     try store.save(preferences)
 
@@ -95,7 +102,14 @@ import Testing
         authorityWarmCacheObjectLimit: 0,
         authorityWarmCacheMemoryPercent: 101,
         kubernetesQPS: .infinity,
-        kubernetesBurst: 0
+        kubernetesBurst: 0,
+        idleMetricProviderLimit: 0,
+        idleMetricSampleLimit: 0,
+        exactPodMetricsEntryLimit: 0,
+        exactPodMetricsSampleLimit: 0,
+        exactPodMetricsDetailEntryLimit: 0,
+        exactPodMetricsGETConcurrency: 0,
+        logSourceOpenConcurrency: 0
     )
     let fields = Set(preferences.validationIssues().map(\.field))
     #expect(fields == [
@@ -112,6 +126,13 @@ import Testing
         "advancedPerformance.authorityWarmCacheMemoryPercent",
         "advancedPerformance.kubernetesQPS",
         "advancedPerformance.kubernetesBurst",
+        "advancedPerformance.idleMetricProviderLimit",
+        "advancedPerformance.idleMetricSampleLimit",
+        "advancedPerformance.exactPodMetricsEntryLimit",
+        "advancedPerformance.exactPodMetricsSampleLimit",
+        "advancedPerformance.exactPodMetricsDetailEntryLimit",
+        "advancedPerformance.exactPodMetricsGETConcurrency",
+        "advancedPerformance.logSourceOpenConcurrency",
     ])
     #expect(ConfirmationPreferences.alwaysConfirmResourceDeletion)
     #expect(ConfirmationPreferences.alwaysConfirmActiveTerminalClose)
@@ -122,6 +143,48 @@ import Testing
         $0.keys == "⇧⌘N" && $0.action.contains("namespace")
     })
     #expect(AppPreferences().restoreOpenClusterWindows)
+}
+
+@MainActor
+@Test func oldPreferenceSchemaIsResetWithoutDecodingLegacyFields() throws {
+    let suite = "kmgr-tests-old-performance-schema-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    var preferences = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(AppPreferences()))
+            as? [String: Any]
+    )
+    var advanced = try #require(preferences["advancedPerformance"] as? [String: Any])
+    for key in [
+        "idleMetricProviderLimit", "idleMetricSampleLimit",
+        "exactPodMetricsEntryLimit", "exactPodMetricsSampleLimit",
+        "exactPodMetricsDetailEntryLimit", "exactPodMetricsGETConcurrency",
+        "logSourceOpenConcurrency",
+    ] {
+        advanced.removeValue(forKey: key)
+    }
+    preferences["advancedPerformance"] = advanced
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": "kmgr.preferences/v2",
+            "preferences": preferences,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let store = AppPreferencesStore(defaults: defaults)
+    #expect(store.current == AppPreferences())
+    #expect(store.loadIssue?.reason == .unsupportedVersion)
+    #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
+}
+
+@Test func performanceCountsRejectValuesOutsideSigned32BitRange() {
+    var preferences = AppPreferences()
+    preferences.advancedPerformance.exactPodMetricsEntryLimit = Int(Int32.max) + 1
+    #expect(preferences.validationIssues().contains {
+        $0.field == "advancedPerformance.exactPodMetricsEntryLimit"
+    })
 }
 
 @Test func defaultNamespacePreferenceSeedsOnlyNewWorkspaceScope() {

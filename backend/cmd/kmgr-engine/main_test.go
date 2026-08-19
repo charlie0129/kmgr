@@ -65,6 +65,7 @@ func TestKubernetesRateLimitFlagsAreValidated(t *testing.T) {
 		{"--version", "--kubernetes-qps", "3.5e38"},
 		{"--version", "--kubernetes-qps", "1e-50"},
 		{"--version", "--kubernetes-burst", "0"},
+		{"--version", "--kubernetes-burst", "2147483648"},
 		{"--version", "--kubernetes-burst", "not-an-integer"},
 	} {
 		if code := run(arguments); code != 2 {
@@ -87,6 +88,7 @@ func TestWarmCacheFlagsAreValidated(t *testing.T) {
 	}
 	for _, arguments := range [][]string{
 		{"--version", "--warm-cache-global-views", "0"},
+		{"--version", "--warm-cache-global-views", "2147483648"},
 		{"--version", "--warm-cache-global-objects", "-1"},
 		{"--version", "--warm-cache-global-memory-percent", "0"},
 		{"--version", "--warm-cache-global-memory-percent", "101"},
@@ -94,6 +96,36 @@ func TestWarmCacheFlagsAreValidated(t *testing.T) {
 		{"--version", "--warm-cache-authority-objects", "-1"},
 		{"--version", "--warm-cache-authority-memory-percent", "0"},
 		{"--version", "--warm-cache-authority-memory-percent", "101"},
+	} {
+		if code := run(arguments); code != 2 {
+			t.Errorf("run(%q) = %d, want usage error", arguments, code)
+		}
+	}
+}
+
+func TestMetricCacheAndLogConcurrencyFlagsAreValidated(t *testing.T) {
+	if code := run([]string{
+		"--version",
+		"--metrics-idle-provider-limit", "5",
+		"--metrics-idle-sample-limit", "75000",
+		"--pod-metrics-cache-entry-limit", "80000",
+		"--pod-metrics-positive-sample-limit", "70000",
+		"--pod-metrics-detail-entry-limit", "128",
+		"--pod-metrics-get-concurrency", "12",
+		"--log-source-open-concurrency", "9",
+	}); code != 0 {
+		t.Fatalf("run(valid metric/log limits) = %d, want success", code)
+	}
+	for _, arguments := range [][]string{
+		{"--version", "--metrics-idle-provider-limit", "0"},
+		{"--version", "--metrics-idle-sample-limit", "-1"},
+		{"--version", "--pod-metrics-cache-entry-limit", "0"},
+		{"--version", "--pod-metrics-positive-sample-limit", "-1"},
+		{"--version", "--pod-metrics-detail-entry-limit", "0"},
+		{"--version", "--pod-metrics-get-concurrency", "-1"},
+		{"--version", "--pod-metrics-get-concurrency", "2147483648"},
+		{"--version", "--log-source-open-concurrency", "0"},
+		{"--version", "--log-source-open-concurrency", "2147483648"},
 	} {
 		if code := run(arguments); code != 2 {
 			t.Errorf("run(%q) = %d, want usage error", arguments, code)
