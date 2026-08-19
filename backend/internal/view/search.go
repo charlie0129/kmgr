@@ -409,11 +409,31 @@ func (r *Runtime) Search(
 	}
 	var listClient searchLister = client
 	if metadataOnly {
-		metadataClient, metadataErr := openMetadata(serverNamespace)
-		if metadataErr != nil {
-			return metadataErr
+		exactNamespaces := exactSearchMetadataNamespaces(query.Resource, query.NamespaceScope)
+		if len(exactNamespaces) != 0 {
+			streams := make([]searchNamespaceListStream, 0, len(exactNamespaces))
+			for _, namespace := range exactNamespaces {
+				metadataClient, metadataErr := openMetadata(namespace)
+				if metadataErr != nil {
+					return metadataErr
+				}
+				streams = append(streams, searchNamespaceListStream{
+					namespace: namespace,
+					client:    metadataClient,
+				})
+			}
+			exactClient, metadataErr := newExactNamespaceSearchLister(streams)
+			if metadataErr != nil {
+				return metadataErr
+			}
+			listClient = exactClient
+		} else {
+			metadataClient, metadataErr := openMetadata(serverNamespace)
+			if metadataErr != nil {
+				return metadataErr
+			}
+			listClient = metadataClient
 		}
-		listClient = metadataClient
 	}
 	transient, attachment, err := r.startTransientSearchList(ctx, snapshotKey, listClient)
 	if err != nil {
@@ -479,13 +499,14 @@ func compatibleSearchKey(prefix, value resourceKey) bool {
 }
 
 func searchServerNamespace(resource ResourceType, scope NamespaceScope) string {
-	if !resource.Namespaced || scope.All || len(scope.Namespaces) > 1 {
+	if !resource.Namespaced || scope.All {
 		return ""
 	}
-	if len(scope.Namespaces) == 0 {
-		return "default"
+	namespaces := canonicalSearchNamespaces(scope)
+	if len(namespaces) == 1 {
+		return namespaces[0]
 	}
-	return scope.Namespaces[0]
+	return ""
 }
 
 // canonicalNamespaceScope captures logical scope independently from the
