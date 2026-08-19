@@ -45,6 +45,7 @@ type Provider struct {
 	nextID       uint64
 	ctx          context.Context
 	cancel       context.CancelFunc
+	refresh      chan struct{}
 	running      bool
 	activeRuns   int
 	released     bool
@@ -80,6 +81,7 @@ func NewProvider(fetcher Fetcher, refreshInterval time.Duration) (*Provider, err
 	return &Provider{
 		fetcher: fetcher, interval: refreshInterval, now: time.Now,
 		consumers: make(map[uint64]chan Snapshot),
+		refresh:   make(chan struct{}, 1),
 		latest:    Snapshot{State: MeasurementUnavailable},
 	}, nil
 }
@@ -193,6 +195,31 @@ func (p *Provider) subscribeLocked() *Subscription {
 }
 
 func (s *Subscription) Updates() <-chan Snapshot { return s.updates }
+
+// RequestRefresh asks the shared provider to begin another fetch as soon as
+// possible. Requests from multiple views coalesce into one wake-up, and a
+// request received during a fetch schedules exactly one follow-up fetch. This
+// lets a base-resource LIST/WATCH barrier obtain a metrics snapshot that is at
+// least as new without opening a second provider or waiting for the periodic
+// interval.
+func (s *Subscription) RequestRefresh() {
+	if s == nil || s.provider == nil {
+		return
+	}
+	s.provider.requestRefresh()
+}
+
+func (p *Provider) requestRefresh() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.released || !p.running || len(p.consumers) == 0 {
+		return
+	}
+	select {
+	case p.refresh <- struct{}{}:
+	default:
+	}
+}
 
 func (s *Subscription) Close() {
 	if s == nil || s.provider == nil {
@@ -309,6 +336,8 @@ func (p *Provider) run(ctx context.Context) {
 		case <-ctx.Done():
 			timer.Stop()
 			return
+		case <-p.refresh:
+			timer.Stop()
 		case <-timer.C:
 		}
 	}

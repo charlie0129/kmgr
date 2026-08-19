@@ -140,6 +140,45 @@ func TestProviderRetainsLastGoodValuesAsStaleAfterRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestProviderCoalescesExplicitRefreshRequests(t *testing.T) {
+	t.Parallel()
+	provider, err := NewProvider(&sequenceFetcher{values: []map[string]Sample{
+		{"pod": {Resources: map[string]int64{"cpu": 1}}},
+		{"pod": {Resources: map[string]int64{"cpu": 2}}},
+	}}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription := provider.Subscribe()
+	defer subscription.Close()
+	select {
+	case snapshot := <-subscription.Updates():
+		if snapshot.Samples["pod"].Resources["cpu"] != 1 {
+			t.Fatalf("initial snapshot = %#v", snapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no initial metrics snapshot")
+	}
+	for range 32 {
+		subscription.RequestRefresh()
+	}
+	select {
+	case snapshot := <-subscription.Updates():
+		if snapshot.Samples["pod"].Resources["cpu"] != 2 {
+			t.Fatalf("refreshed snapshot = %#v", snapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("explicit refresh did not wake provider")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if calls := provider.fetcher.(*sequenceFetcher).calls.Load(); calls < 2 || calls > 3 {
+		// A request that races after the explicit fetch has started may schedule
+		// one follow-up. The other 31 requests must still collapse rather than
+		// causing one API call apiece.
+		t.Fatalf("coalesced refresh fetches = %d, want 2 or 3 total", calls)
+	}
+}
+
 func TestProviderLeasePinsUntilSubscriptionAndIdleReleaseDropsSnapshot(t *testing.T) {
 	t.Parallel()
 	fetcher := &sequenceFetcher{values: []map[string]Sample{
