@@ -26,25 +26,6 @@ import Testing
     #expect(json.contains("rows") == false)
 }
 
-@Test func secretDiagnosticRecordsMetadataButNotValue() throws {
-    let sentinel = "top-secret-value"
-    let diagnostic = KeyValueEditorDiagnostic(
-        resourceKind: .secret,
-        namespace: "payments",
-        name: "database",
-        key: "password",
-        byteCount: sentinel.utf8.count,
-        hasUnsavedChanges: true
-    )
-
-    let data = try JSONEncoder().encode(diagnostic)
-    let encoded = String(decoding: data, as: UTF8.self)
-
-    #expect(encoded.contains("database"))
-    #expect(encoded.contains("password"))
-    #expect(encoded.contains(sentinel) == false)
-}
-
 @Test func sensitiveBytesCanBeReplacedWithoutExposingStorage() {
     let bytes = SensitiveBytes(Data("old".utf8))
     #expect(bytes.count == 3)

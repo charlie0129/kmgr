@@ -114,7 +114,7 @@ views:
       - id: status
         title: Status
         source: builtin
-        value: pod.status
+        value: status
         type: string
 `), compiler)
 	if err != nil {
@@ -274,9 +274,9 @@ celEnvironment: kmgr.cel/v1
 views:
 - match: {version: v1, resource: pods}
   columns:
-  - {id: phase, title: Phase, source: builtin, value: pod.status, type: string}
+  - {id: phase, title: Phase, source: builtin, value: status, type: string}
   - {id: gpu, title: GPU, source: metric, value: resource:nvidia.com/gpu, type: resourceUsage}
-  - {id: cpu-load, title: CPU, source: metric, value: pod.cpu.usageRequestLimit, type: resourceUsage}
+  - {id: cpu-load, title: CPU, source: metric, value: cpu, type: resourceUsage}
 `), compiler)
 	if err != nil {
 		t.Fatal(err)
@@ -315,7 +315,7 @@ celEnvironment: kmgr.cel/v1
 views:
 - match: {version: v1, resource: pods}
   columns:
-  - {id: phase, title: Phase, source: builtin, value: pod.status, type: string}
+  - {id: phase, title: Phase, source: builtin, value: status, type: string}
   - {id: gpu, title: GPU, source: metric, value: resource:nvidia.com/gpu, type: resourceUsage, enabled: false}
   - {id: team, title: Team, source: cel, expression: object.metadata.name, type: string}
 `), compiler)
@@ -348,19 +348,17 @@ func TestParseColumnsCompileValidatesSourceValueContracts(t *testing.T) {
 		"unknown metric":           `{id: x, title: X, source: metric, value: pod.network, type: resourceUsage}`,
 		"metric type":              `{id: x, title: X, source: metric, value: cpu, type: number}`,
 		"malformed exact resource": `{id: x, title: X, source: metric, value: 'resource:bad/resource/name', type: resourceUsage}`,
-		"Pod metric on Node":       `{id: x, title: X, source: metric, value: pod.cpu.usageRequestLimit, type: resourceUsage}`,
+		"legacy builtin alias":     `{id: x, title: X, source: builtin, value: pod.status, type: string}`,
+		"legacy Pod metric alias":  `{id: x, title: X, source: metric, value: pod.cpu.usageRequestLimit, type: resourceUsage}`,
+		"legacy Node metric alias": `{id: x, title: X, source: metric, value: node.cpu.usageAllocatable, type: resourceUsage}`,
 	}
 	for name, column := range cases {
 		name, column := name, column
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			resource := "pods"
-			if name == "Pod metric on Node" {
-				resource = "nodes"
-			}
 			input := "apiVersion: kmgr.charlie0129.dev/v1alpha1\n" +
 				"celEnvironment: kmgr.cel/v1\nviews:\n" +
-				"- match: {version: v1, resource: " + resource + "}\n  columns:\n  - " + column + "\n"
+				"- match: {version: v1, resource: pods}\n  columns:\n  - " + column + "\n"
 			if _, err := ParseColumns([]byte(input), compiler); err == nil {
 				t.Fatalf("invalid source/value contract accepted:\n%s", input)
 			}

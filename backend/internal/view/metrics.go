@@ -10,7 +10,6 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const (
@@ -331,11 +330,4 @@ func sampleForObject(snapshot metrics.Snapshot, uid, namespace, name string, kin
 		fallback = namespace + "/" + name
 	}
 	return snapshot.Samples[fallback]
-}
-
-func gvrForProjector(projector *Projector) schema.GroupVersionResource {
-	return schema.GroupVersionResource{
-		Group: projector.spec.Resource.Group, Version: projector.spec.Resource.Version,
-		Resource: projector.spec.Resource.Resource,
-	}
 }

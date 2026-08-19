@@ -32,13 +32,6 @@ const (
 	UnsupportedAuthProvider UnsupportedAuthMechanism = "auth-provider"
 )
 
-// IsUnsupportedAuthentication reports whether err came from kmgr's explicit
-// credential-plugin safety check.
-func IsUnsupportedAuthentication(err error) bool {
-	var unsupportedError *UnsupportedAuthenticationError
-	return errors.As(err, &unsupportedError)
-}
-
 // ContextInfo is credential-free metadata suitable for showing in the
 // cluster chooser. IDs are deterministic for an unchanged context and target,
 // independent of kubeconfig ordering.
@@ -62,9 +55,8 @@ type ContextInfo struct {
 // Catalog is an immutable snapshot of the kubeconfigs visible when Discover
 // was called. Reloading is done by creating a new Catalog.
 type Catalog struct {
-	contexts   []ContextInfo
-	bindings   map[string]contextBinding
-	uniqueName map[string]string
+	contexts []ContextInfo
+	bindings map[string]contextBinding
 }
 
 // contextBinding keeps the exact configuration snapshot that produced a
@@ -77,7 +69,7 @@ type contextBinding struct {
 	contextName string
 }
 
-// ContextNotFoundError reports a stale or unknown context ID/name.
+// ContextNotFoundError reports a stale or unknown opaque context reference.
 type ContextNotFoundError struct {
 	Reference string
 }
@@ -188,9 +180,8 @@ func discoverHomeDirectory(rules *clientcmd.ClientConfigLoadingRules) (*Catalog,
 }
 
 // discoverIndependentFiles catalogs each automatically discovered sibling as
-// its own kubeconfig authority. The normal default file retains precedence for
-// an exact-name lookup, but opaque context IDs bind every chooser row to the
-// cluster and credentials from the file that produced it.
+// its own kubeconfig authority. Opaque context IDs bind every chooser row to
+// the cluster and credentials from the file that produced it.
 func discoverIndependentFiles(paths []string, defaultPath string) (*Catalog, error) {
 	catalog := newEmptyCatalog()
 	for _, path := range paths {
@@ -261,14 +252,13 @@ func (c *Catalog) Contexts() []ContextInfo {
 	return result
 }
 
-// Context looks up metadata by deterministic ID or exact kubeconfig name.
+// Context looks up metadata by deterministic opaque ID.
 func (c *Catalog) Context(reference string) (ContextInfo, bool) {
-	bindingID, ok := c.bindingID(reference)
-	if !ok {
+	if c == nil {
 		return ContextInfo{}, false
 	}
 	for _, info := range c.contexts {
-		if info.ID == bindingID {
+		if info.ID == reference {
 			result := info
 			result.SourcePaths = append([]string(nil), info.SourcePaths...)
 			result.UnsupportedAuthentications = append(
@@ -281,14 +271,16 @@ func (c *Catalog) Context(reference string) (ContextInfo, bool) {
 	return ContextInfo{}, false
 }
 
-// RESTConfig returns client-go configuration for a context ID or name. It is
+// RESTConfig returns client-go configuration for a context ID. It is
 // a local operation; constructing it does not connect to the cluster.
 func (c *Catalog) RESTConfig(reference string) (*rest.Config, error) {
-	bindingID, ok := c.bindingID(reference)
+	if c == nil {
+		return nil, &ContextNotFoundError{Reference: reference}
+	}
+	binding, ok := c.bindings[reference]
 	if !ok {
 		return nil, &ContextNotFoundError{Reference: reference}
 	}
-	binding := c.bindings[bindingID]
 	name := binding.contextName
 	contextConfig := binding.config.Contexts[name]
 	if contextConfig == nil {
@@ -334,17 +326,6 @@ func (c *Catalog) RESTConfig(reference string) (*rest.Config, error) {
 	return restConfig, nil
 }
 
-func (c *Catalog) bindingID(reference string) (string, bool) {
-	if c == nil {
-		return "", false
-	}
-	if _, exists := c.bindings[reference]; exists {
-		return reference, true
-	}
-	id, exists := c.uniqueName[reference]
-	return id, exists
-}
-
 func newCatalog(config *clientcmdapi.Config) *Catalog {
 	catalog := newEmptyCatalog()
 	catalog.addConfig(config)
@@ -353,10 +334,7 @@ func newCatalog(config *clientcmdapi.Config) *Catalog {
 }
 
 func newEmptyCatalog() *Catalog {
-	return &Catalog{
-		bindings:   make(map[string]contextBinding),
-		uniqueName: make(map[string]string),
-	}
+	return &Catalog{bindings: make(map[string]contextBinding)}
 }
 
 func (c *Catalog) append(other *Catalog, retainCurrent bool) {
@@ -392,13 +370,6 @@ func (c *Catalog) addBinding(info ContextInfo, binding contextBinding) {
 	}
 	c.contexts = append(c.contexts, info)
 	c.bindings[info.ID] = binding
-	if existing, seen := c.uniqueName[info.Name]; !seen {
-		c.uniqueName[info.Name] = info.ID
-	} else if existing != info.ID {
-		// The first path (default, then filename order) intentionally retains
-		// exact-name precedence for legacy restoration. Chooser rows use IDs.
-		return
-	}
 }
 
 func (c *Catalog) finish() {

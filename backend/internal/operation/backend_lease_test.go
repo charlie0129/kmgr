@@ -100,7 +100,8 @@ func TestClusterMutationBackendLeaseSurvivesWorkspaceClose(t *testing.T) {
 	registry := cluster.NewSessionRegistry(factory)
 	t.Cleanup(registry.CloseAll)
 	catalog := mutationLeaseCatalog(t)
-	session, err := registry.Open(catalog, "local")
+	contextID := mutationLeaseContextID(t, catalog, "local")
+	session, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,4 +178,15 @@ current-context: local
 		t.Fatal(err)
 	}
 	return catalog
+}
+
+func mutationLeaseContextID(t *testing.T, catalog *cluster.Catalog, name string) string {
+	t.Helper()
+	for _, info := range catalog.Contexts() {
+		if info.Name == name {
+			return info.ID
+		}
+	}
+	t.Fatalf("context %q was not found", name)
+	return ""
 }

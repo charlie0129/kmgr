@@ -251,7 +251,7 @@ func (s *ClusterService) OpenSession(
 	defer cancel()
 	response := &kmgrv1.OpenSessionResponse{RequestId: request.GetContext().GetRequestId()}
 	if request.GetContextName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "context name is required")
+		return nil, status.Error(codes.InvalidArgument, "context reference is required")
 	}
 
 	catalog, err := s.catalogs.Load(request.GetKubeconfigPaths(), false)
@@ -455,6 +455,3 @@ func (s *ClusterService) ListNamespaces(
 	response.Namespaces = namespaces
 	return response, nil
 }
-
-func (s *ClusterService) Catalogs() *CatalogRegistry         { return s.catalogs }
-func (s *ClusterService) Sessions() *cluster.SessionRegistry { return s.sessions }

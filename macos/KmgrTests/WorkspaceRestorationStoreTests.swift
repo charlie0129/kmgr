@@ -42,7 +42,8 @@ import Testing
     )
 
     let store = WorkspaceRestorationStore(defaults: storage.defaults)
-    try store.replaceAll(with: [first, second])
+    try store.upsert(first)
+    try store.upsert(second)
     let reloaded = WorkspaceRestorationStore(defaults: storage.defaults)
 
     #expect(reloaded.windows == [first, second])
@@ -68,7 +69,7 @@ import Testing
     #expect(WorkspaceRestorationStore(defaults: storage.defaults).windows.isEmpty)
 }
 
-@Test func legacyV1RestorationDefaultsReferenceToDisplayName() throws {
+@Test func restorationWithoutOpaqueContextReferenceIsRejected() throws {
     let legacyJSON = Data("""
     {
       "version": 1,
@@ -80,15 +81,9 @@ import Testing
       "isSidebarVisible": true
     }
     """.utf8)
-    let decoded = try JSONDecoder().decode(
-        ClusterWindowRestorationState.self,
-        from: legacyJSON
-    )
-
-    #expect(decoded.contextName == "production")
-    #expect(decoded.contextReference == "production")
-    #expect(decoded.columnMoveOverrides == nil)
-    #expect(decoded.columnMeasurementOverrides == nil)
+    #expect(throws: DecodingError.self) {
+        _ = try JSONDecoder().decode(ClusterWindowRestorationState.self, from: legacyJSON)
+    }
 }
 
 @Test func restorationRoundTripsOpaqueContextReferenceSeparatelyFromName() throws {
@@ -127,9 +122,7 @@ import Testing
         columns: [ColumnPresentationState(columnID: "name", width: .infinity)]
     )
     #expect(throws: RestorationValidationError.self) {
-        try store.replaceAll(with: [
-            ClusterWindowRestorationRecord(id: "window", state: invalidState),
-        ])
+        try store.upsert(ClusterWindowRestorationRecord(id: "window", state: invalidState))
     }
 
     let invalidOverrides = ClusterWindowRestorationState(

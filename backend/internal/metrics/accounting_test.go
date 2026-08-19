@@ -143,41 +143,32 @@ func TestAcceleratorSuffixDiscoveryIsExactCaseSensitiveAndDisableable(t *testing
 	}
 }
 
-func TestEphemeralStorageDiscoveryAndUnavailableUsage(t *testing.T) {
+func TestEphemeralStorageDiscoveryAndAccounting(t *testing.T) {
 	pod := boundPod("pod", "node", corev1.PodRunning,
 		resourceList(corev1.ResourceEphemeralStorage, "2Gi"), resourceList(corev1.ResourceEphemeralStorage, "4Gi"))
 	if !DiscoverResources(nil, []*corev1.Pod{pod}, AcceleratorConfig{}).EphemeralStorage {
 		t.Fatal("ephemeral-storage present only in Pod was not discovered")
 	}
-	accounting := AccountPod(pod, nil)
-	assertQuantity(t, accounting.Requests, corev1.ResourceEphemeralStorage, "2Gi")
-	assertQuantity(t, accounting.Limits, corev1.ResourceEphemeralStorage, "4Gi")
-	usage := accounting.UsageFor(corev1.ResourceEphemeralStorage)
-	if usage.State != MeasurementUnavailable || usage.HasValue() {
-		t.Fatalf("missing usage = %#v; want unavailable without a value", usage)
-	}
+	requests, limits := EffectivePodResources(pod)
+	assertQuantity(t, requests, corev1.ResourceEphemeralStorage, "2Gi")
+	assertQuantity(t, limits, corev1.ResourceEphemeralStorage, "4Gi")
 }
 
 func TestMeasurementStatesDistinguishUnavailableZeroForbiddenAndStale(t *testing.T) {
 	timestamp := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	measurements := ResourceMeasurements{
-		corev1.ResourceCPU:              CurrentMeasurement(resource.MustParse("0"), "metrics.k8s.io", "pod containers", timestamp),
-		corev1.ResourceMemory:           StaleMeasurement(resource.MustParse("64Mi"), "metrics.k8s.io", "pod containers", timestamp, "last refresh failed"),
-		corev1.ResourceEphemeralStorage: UnavailableMeasurement("metrics API forbidden and no storage provider is configured"),
-	}
-	zero := measurements.For(corev1.ResourceCPU)
+	zero := CurrentMeasurement(resource.MustParse("0"), "metrics.k8s.io", "pod containers", timestamp)
 	if zero.State != MeasurementCurrent || !zero.HasValue() || !zero.Quantity.IsZero() {
 		t.Fatalf("present zero measurement was conflated with unavailable: %#v", zero)
 	}
-	stale := measurements.For(corev1.ResourceMemory)
+	stale := StaleMeasurement(resource.MustParse("64Mi"), "metrics.k8s.io", "pod containers", timestamp, "last refresh failed")
 	if stale.State != MeasurementStale || !stale.HasValue() || stale.Timestamp != timestamp {
 		t.Fatalf("stale measurement lost value or timestamp: %#v", stale)
 	}
-	forbidden := measurements.For(corev1.ResourceEphemeralStorage)
+	forbidden := UnavailableMeasurement("metrics API forbidden and no storage provider is configured")
 	if forbidden.State != MeasurementUnavailable || forbidden.HasValue() || forbidden.Message == "" {
 		t.Fatalf("forbidden measurement = %#v; want unavailable reason", forbidden)
 	}
-	absent := measurements.For("nvidia.com/gpu")
+	absent := UnavailableMeasurement("no usage provider reported this resource")
 	if absent.State != MeasurementUnavailable || absent.HasValue() {
 		t.Fatalf("absent accelerator utilization = %#v; want unavailable", absent)
 	}

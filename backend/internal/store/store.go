@@ -41,7 +41,6 @@ type UIDStore struct {
 	byUID                 map[types.UID]*unstructured.Unstructured
 	byName                map[NamespacedName]types.UID
 	byOwnerUID            map[types.UID]map[types.UID]struct{}
-	byNodeName            map[string]map[types.UID]struct{}
 	bySearchUID           map[types.UID]SearchIdentity
 	byUIDBytes            map[types.UID]int64
 	finiteBytes           int64
@@ -49,11 +48,8 @@ type UIDStore struct {
 	finiteOverflow        bool
 	indexHighWaterObjects int64
 	indexHighWaterOwners  int64
-	indexHighWaterNodes   int64
 	ownerLinkHighWater    map[types.UID]int64
-	nodeLinkHighWater     map[string]int64
 	ownerLinkCapacity     int64
-	nodeLinkCapacity      int64
 	resourceVer           string
 }
 
@@ -62,11 +58,9 @@ func New() *UIDStore {
 		byUID:              make(map[types.UID]*unstructured.Unstructured),
 		byName:             make(map[NamespacedName]types.UID),
 		byOwnerUID:         make(map[types.UID]map[types.UID]struct{}),
-		byNodeName:         make(map[string]map[types.UID]struct{}),
 		bySearchUID:        make(map[types.UID]SearchIdentity),
 		byUIDBytes:         make(map[types.UID]int64),
 		ownerLinkHighWater: make(map[types.UID]int64),
-		nodeLinkHighWater:  make(map[string]int64),
 	}
 }
 
@@ -124,34 +118,10 @@ func (s *UIDStore) Delete(uid types.UID) bool {
 	return true
 }
 
-func (s *UIDStore) Get(uid types.UID) (*unstructured.Unstructured, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	object, ok := s.byUID[uid]
-	return object, ok
-}
-
-func (s *UIDStore) GetByName(namespace, name string) (*unstructured.Unstructured, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	uid, ok := s.byName[NamespacedName{Namespace: namespace, Name: name}]
-	if !ok {
-		return nil, false
-	}
-	object, ok := s.byUID[uid]
-	return object, ok
-}
-
 func (s *UIDStore) Children(ownerUID types.UID) []*unstructured.Unstructured {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.objectsForUIDSetLocked(s.byOwnerUID[ownerUID])
-}
-
-func (s *UIDStore) OnNode(nodeName string) []*unstructured.Unstructured {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.objectsForUIDSetLocked(s.byNodeName[nodeName])
 }
 
 func (s *UIDStore) Len() int {
@@ -355,11 +325,6 @@ func (s *UIDStore) addIndexesLocked(object *unstructured.Unstructured) {
 			s.recordOwnerLinkHighWaterLocked(owner.UID)
 		}
 	}
-	if nodeName, found, _ := unstructured.NestedString(object.Object, "spec", "nodeName"); found && nodeName != "" {
-		if addToIndex(s.byNodeName, nodeName, uid) {
-			s.recordNodeLinkHighWaterLocked(nodeName)
-		}
-	}
 }
 
 func (s *UIDStore) removeIndexesLocked(object *unstructured.Unstructured) {
@@ -369,12 +334,6 @@ func (s *UIDStore) removeIndexesLocked(object *unstructured.Unstructured) {
 		if _, emptied := removeFromIndex(s.byOwnerUID, owner.UID, uid); emptied {
 			s.ownerLinkCapacity -= s.ownerLinkHighWater[owner.UID]
 			delete(s.ownerLinkHighWater, owner.UID)
-		}
-	}
-	if nodeName, found, _ := unstructured.NestedString(object.Object, "spec", "nodeName"); found && nodeName != "" {
-		if _, emptied := removeFromIndex(s.byNodeName, nodeName, uid); emptied {
-			s.nodeLinkCapacity -= s.nodeLinkHighWater[nodeName]
-			delete(s.nodeLinkHighWater, nodeName)
 		}
 	}
 }
@@ -427,7 +386,6 @@ func (s *UIDStore) removeRetainedBytesLocked(uid types.UID) {
 func (s *UIDStore) recordIndexHighWaterLocked() {
 	s.indexHighWaterObjects = max(s.indexHighWaterObjects, int64(len(s.byUID)))
 	s.indexHighWaterOwners = max(s.indexHighWaterOwners, int64(len(s.byOwnerUID)))
-	s.indexHighWaterNodes = max(s.indexHighWaterNodes, int64(len(s.byNodeName)))
 }
 
 func (s *UIDStore) recordOwnerLinkHighWaterLocked(ownerUID types.UID) {
@@ -435,14 +393,6 @@ func (s *UIDStore) recordOwnerLinkHighWaterLocked(ownerUID types.UID) {
 	if previous := s.ownerLinkHighWater[ownerUID]; current > previous {
 		s.ownerLinkHighWater[ownerUID] = current
 		s.ownerLinkCapacity += current - previous
-	}
-}
-
-func (s *UIDStore) recordNodeLinkHighWaterLocked(nodeName string) {
-	current := int64(len(s.byNodeName[nodeName]))
-	if previous := s.nodeLinkHighWater[nodeName]; current > previous {
-		s.nodeLinkHighWater[nodeName] = current
-		s.nodeLinkCapacity += current - previous
 	}
 }
 
@@ -454,14 +404,8 @@ func (s *UIDStore) retainedIndexHighWaterBytesLocked() int64 {
 	result = saturatingRetainedAdd(result, saturatingRetainedMultiply(
 		s.indexHighWaterOwners, topLevelIndexBytesPerOwner,
 	))
-	result = saturatingRetainedAdd(result, saturatingRetainedMultiply(
-		s.indexHighWaterNodes, topLevelIndexBytesPerNode,
-	))
-	result = saturatingRetainedAdd(result, saturatingRetainedMultiply(
-		s.ownerLinkCapacity, nestedIndexBytesPerLink,
-	))
 	return saturatingRetainedAdd(result, saturatingRetainedMultiply(
-		s.nodeLinkCapacity, nestedIndexBytesPerLink,
+		s.ownerLinkCapacity, nestedIndexBytesPerLink,
 	))
 }
 

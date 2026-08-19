@@ -12,7 +12,7 @@ const syntheticStoreRows = 100_000
 var benchmarkUIDStore *UIDStore
 
 // BenchmarkUIDStoreUpsert100K measures the LIST hot path that admits immutable
-// unstructured objects into UID and secondary indexes. Keep object construction
+// unstructured objects into UID, owner, and search indexes. Keep object construction
 // outside the timed section so retained-byte accounting regressions remain
 // visible independently from fixture allocation.
 func BenchmarkUIDStoreUpsert100K(b *testing.B) {

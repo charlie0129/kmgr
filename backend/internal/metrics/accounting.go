@@ -61,46 +61,6 @@ func (m Measurement) HasValue() bool {
 	return m.State == MeasurementCurrent || m.State == MeasurementStale
 }
 
-// ResourceMeasurements retains utilization by exact Kubernetes resource name.
-// Different huge-page sizes and accelerator vendors are never conflated.
-type ResourceMeasurements map[corev1.ResourceName]Measurement
-
-// For returns an exact-key measurement. A missing entry is explicitly
-// unavailable, which is distinct from a present current measurement of zero.
-func (m ResourceMeasurements) For(name corev1.ResourceName) Measurement {
-	measurement, ok := m[name]
-	if !ok {
-		return UnavailableMeasurement("no usage provider reported this resource")
-	}
-	measurement.Quantity = measurement.Quantity.DeepCopy()
-	return measurement
-}
-
-func (m ResourceMeasurements) deepCopy() ResourceMeasurements {
-	if m == nil {
-		return nil
-	}
-	result := make(ResourceMeasurements, len(m))
-	for name, measurement := range m {
-		measurement.Quantity = measurement.Quantity.DeepCopy()
-		result[name] = measurement
-	}
-	return result
-}
-
-// PodAccounting contains the effective scheduler request and limit plus
-// optional, provider-backed actual utilization for one Pod.
-type PodAccounting struct {
-	Requests corev1.ResourceList
-	Limits   corev1.ResourceList
-	Usage    ResourceMeasurements
-}
-
-// UsageFor returns actual utilization for an exact resource name.
-func (a PodAccounting) UsageFor(name corev1.ResourceName) Measurement {
-	return a.Usage.For(name)
-}
-
 // EffectivePodResources applies the Kubernetes scheduling formula for regular
 // containers, restartable and non-restartable init containers, Pod-level
 // resources, and Pod overhead. Status resources are intentionally not used:
@@ -112,12 +72,6 @@ func EffectivePodResources(pod *corev1.Pod) (requests, limits corev1.ResourceLis
 	}
 	options := resourcehelper.PodResourcesOptions{}
 	return resourcehelper.PodRequests(pod, options), resourcehelper.PodLimits(pod, options)
-}
-
-// AccountPod combines effective scheduler accounting with optional usage.
-func AccountPod(pod *corev1.Pod, usage ResourceMeasurements) PodAccounting {
-	requests, limits := EffectivePodResources(pod)
-	return PodAccounting{Requests: requests, Limits: limits, Usage: usage.deepCopy()}
 }
 
 var defaultAcceleratorSuffixes = [...]string{"/gpu", "/ppu", "/dcu"}
@@ -133,11 +87,6 @@ type AcceleratorResourceConfig struct {
 type AcceleratorConfig struct {
 	AutoDetectSuffixes []string                             `json:"autoDetectSuffixes,omitempty" yaml:"autoDetectSuffixes,omitempty"`
 	Resources          map[string]AcceleratorResourceConfig `json:"resources,omitempty" yaml:"resources,omitempty"`
-}
-
-// DefaultAcceleratorSuffixes returns a caller-owned copy of the defaults.
-func DefaultAcceleratorSuffixes() []string {
-	return append([]string(nil), defaultAcceleratorSuffixes[:]...)
 }
 
 // DiscoveredResources lists scheduler-accounted optional resources. Names are

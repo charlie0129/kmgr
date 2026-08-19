@@ -154,15 +154,6 @@ func validateExtractor(key resourceKey, definition ColumnConfiguration) (string,
 }
 
 func builtinValue(value string) (string, bool) {
-	aliases := map[string]string{
-		"pod.status":   "status",
-		"pod.node":     "node",
-		"pod.ready":    "ready",
-		"pod.restarts": "restarts",
-	}
-	if canonical := aliases[value]; canonical != "" {
-		value = canonical
-	}
 	_, known := builtinExtractors[value]
 	return value, known
 }
@@ -172,17 +163,6 @@ func builtinSupportedForResource(key resourceKey, value string) bool {
 }
 
 func metricValue(value string) (string, bool) {
-	aliases := map[string]string{
-		"pod.cpu.usageRequestLimit":               "cpu",
-		"pod.memory.usageRequestLimit":            "memory",
-		"pod.ephemeral-storage.usageRequestLimit": "ephemeral-storage",
-		"node.cpu.usageAllocatable":               "cpu",
-		"node.memory.usageAllocatable":            "memory",
-		"node.ephemeral-storage.usageAllocatable": "ephemeral-storage",
-	}
-	if canonical := aliases[value]; canonical != "" {
-		value = canonical
-	}
 	if _, known := metricExtractors[value]; known {
 		return value, true
 	}
@@ -386,13 +366,6 @@ func (c *CompiledColumns) Version() string {
 	return c.version
 }
 
-func (c *CompiledColumns) Document() ColumnsDocument {
-	if c == nil {
-		return ColumnsDocument{}
-	}
-	return cloneDocument(c.document)
-}
-
 // AcceleratorConfig exposes a caller-owned scheduler-discovery configuration
 // without coupling the view runtime to the configuration package.
 func (c *CompiledColumns) AcceleratorConfig() metrics.AcceleratorConfig {
@@ -400,14 +373,6 @@ func (c *CompiledColumns) AcceleratorConfig() metrics.AcceleratorConfig {
 		return metrics.AcceleratorConfig{}
 	}
 	return acceleratorMetricsConfig(c.document.Accelerators)
-}
-
-func (c *CompiledColumns) View(group, version, resource string) (ViewConfiguration, bool) {
-	if c == nil {
-		return ViewConfiguration{}, false
-	}
-	view, ok := c.views[resourceKey{group: group, version: version, resource: resource}]
-	return cloneView(view.configuration), ok
 }
 
 func (c *CompiledColumns) Resolve(
@@ -557,12 +522,6 @@ func (m *ColumnManager) Version() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.current.Version()
-}
-
-func (m *ColumnManager) Document() ColumnsDocument {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.current.Document()
 }
 
 // AcceleratorConfig returns an immutable exact-resource mapping for backend

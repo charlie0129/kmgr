@@ -30,24 +30,19 @@ func TestUpdatePreservesUIDAndRecreationReplacesIt(t *testing.T) {
 	if change.Created || change.ReplacedUID != "" {
 		t.Fatalf("update change = %#v", change)
 	}
-	if got := s.OnNode("node-a"); len(got) != 0 {
-		t.Fatalf("old node index contains %d objects", len(got))
-	}
 
 	recreated := object("uid-2", "default", "web", "node-b")
 	change = s.Upsert(recreated)
 	if !change.Created || change.ReplacedUID != "uid-1" {
 		t.Fatalf("recreate change = %#v", change)
 	}
-	if _, ok := s.Get("uid-1"); ok {
+	snapshot := s.Snapshot()
+	if len(snapshot) != 1 || snapshot[0].GetUID() != "uid-2" {
 		t.Fatal("old UID remained after same-name recreation")
-	}
-	if got, ok := s.GetByName("default", "web"); !ok || got.GetUID() != "uid-2" {
-		t.Fatalf("name lookup = %v, %v", got, ok)
 	}
 }
 
-func TestIndexesFollowUpdateAndDelete(t *testing.T) {
+func TestOwnerIndexFollowsUpdateAndDelete(t *testing.T) {
 	t.Parallel()
 	s := New()
 	child := object("child", "ns", "pod", "node-a")
@@ -57,14 +52,11 @@ func TestIndexesFollowUpdateAndDelete(t *testing.T) {
 	if got := s.Children("owner-a"); len(got) != 1 || got[0].GetUID() != "child" {
 		t.Fatalf("children = %#v", got)
 	}
-	if got := s.OnNode("node-a"); len(got) != 1 {
-		t.Fatalf("node index = %#v", got)
-	}
 	if !s.Delete("child") || s.Delete("child") {
 		t.Fatal("Delete result did not reflect presence")
 	}
-	if len(s.Children("owner-a")) != 0 || len(s.OnNode("node-a")) != 0 {
-		t.Fatal("secondary indexes survived deletion")
+	if len(s.Children("owner-a")) != 0 {
+		t.Fatal("owner index survived deletion")
 	}
 }
 

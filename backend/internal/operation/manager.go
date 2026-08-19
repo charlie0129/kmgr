@@ -51,10 +51,6 @@ type Status struct {
 	Items          []ItemStatus
 	Err            error
 	Revision       uint64
-
-	// NewResourceVersion remains populated for the first item so callers of
-	// the original single-item manager API remain source compatible.
-	NewResourceVersion string
 }
 
 // TrackedOperation retains only progress, identity, and safe errors. Mutation
@@ -159,12 +155,6 @@ func (o *TrackedOperation) CancelNotStarted() bool {
 	return accepted
 }
 
-func (o *TrackedOperation) Changed() <-chan struct{} {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	return o.changed
-}
-
 func (o *TrackedOperation) update(change func(*Status) bool) bool {
 	o.mu.Lock()
 	if !change(&o.status) {
@@ -248,18 +238,6 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 		operations: make(map[string]*TrackedOperation), ctx: ctx, cancel: cancel,
 		maxTracked: maxTracked, maxTerminal: maxTerminal, terminalRetention: retention, now: time.Now,
 	}
-}
-
-// Start preserves the original single-item API and assigns the historical
-// apply-yaml operation name. New RPCs use StartOne so errors identify the
-// actual mutation being performed.
-func (m *Manager) Start(
-	parent context.Context,
-	operationID string,
-	identity object.Identity,
-	run Runner,
-) (*TrackedOperation, error) {
-	return m.StartOne(parent, operationID, "apply-yaml", identity, run)
 }
 
 func (m *Manager) StartOne(
@@ -398,9 +376,6 @@ func (m *Manager) StartMany(
 				if itemTerminal(update.State) {
 					status.CompletedItems++
 					operation.completedOrder = append(operation.completedOrder, index)
-				}
-				if index == 0 {
-					status.NewResourceVersion = update.NewResourceVersion
 				}
 				return true
 			})

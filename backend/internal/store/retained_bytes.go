@@ -17,7 +17,6 @@ const (
 	objectIndexRetainedBytes    int64 = 512
 	topLevelIndexBytesPerObject int64 = 512
 	topLevelIndexBytesPerOwner  int64 = 256
-	topLevelIndexBytesPerNode   int64 = 256
 	nestedIndexBytesPerLink     int64 = 96
 	maxRetainedBytes                  = math.MaxInt64
 	maxRetainedEstimateDepth          = 256

@@ -126,10 +126,10 @@ func TestPipelineStreamsPaginatedListThenWatchesAndBookmarks(t *testing.T) {
 	if got := uidStore.Len(); got != 3 {
 		t.Fatalf("store length = %d, want 3", got)
 	}
-	if _, ok := uidStore.Get("uid-d"); !ok {
+	if _, ok := snapshotObject(uidStore, "uid-d"); !ok {
 		t.Fatal("watch ADDED object was not stored")
 	}
-	if _, ok := uidStore.Get("uid-b"); ok {
+	if _, ok := snapshotObject(uidStore, "uid-b"); ok {
 		t.Fatal("watch DELETED object remained in the store")
 	}
 
@@ -197,7 +197,7 @@ func TestPipelineResumesWarmStoreWithoutList(t *testing.T) {
 	if got := uidStore.ResourceVersion(); got != "52" {
 		t.Fatalf("store resourceVersion = %q, want 52", got)
 	}
-	object, ok := uidStore.Get("uid-warm")
+	object, ok := snapshotObject(uidStore, "uid-warm")
 	if !ok {
 		t.Fatal("warm object disappeared")
 	}
@@ -294,7 +294,7 @@ func TestPipelineExpiredResumeRelistsWithoutRemovingWarmRowsEarly(t *testing.T) 
 
 	receiveBatch(t, firstRelistPage, "first relist page")
 	receiveSignal(t, lastPageRequested, "last relist page request")
-	if _, ok := uidStore.Get("uid-stale"); !ok {
+	if _, ok := snapshotObject(uidStore, "uid-stale"); !ok {
 		t.Fatal("cached row was removed before the relist completed")
 	}
 	if got := uidStore.ResourceVersion(); got != "" {
@@ -307,10 +307,10 @@ func TestPipelineExpiredResumeRelistsWithoutRemovingWarmRowsEarly(t *testing.T) 
 		t.Fatalf("final relist removals = %v, want [uid-stale]", finalBatch.RemovedUIDs)
 	}
 	assertRunCancelled(t, done)
-	if _, ok := uidStore.Get("uid-stale"); ok {
+	if _, ok := snapshotObject(uidStore, "uid-stale"); ok {
 		t.Fatal("stale cached row survived the completed relist")
 	}
-	if _, ok := uidStore.Get("uid-new"); !ok {
+	if _, ok := snapshotObject(uidStore, "uid-new"); !ok {
 		t.Fatal("last relist page was not applied")
 	}
 	if got := uidStore.ResourceVersion(); got != "21" {
@@ -570,4 +570,13 @@ func podJSON(uid, name, resourceVersion string) map[string]any {
 
 func testObject(uid types.UID, name, resourceVersion string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: podJSON(string(uid), name, resourceVersion)}
+}
+
+func snapshotObject(values *store.UIDStore, uid types.UID) (*unstructured.Unstructured, bool) {
+	for _, object := range values.Snapshot() {
+		if object.GetUID() == uid {
+			return object, true
+		}
+	}
+	return nil, false
 }

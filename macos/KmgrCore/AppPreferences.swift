@@ -121,44 +121,6 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         self.columnsConfigurationPath = columnsConfigurationPath
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case appearance
-        case logs
-        case metricsRefreshSeconds
-        case defaultNamespace
-        case restoreOpenClusterWindows
-        case confirmations
-        case columnsConfigurationPath
-    }
-
-    /// Preferences documents predate the restoration toggle but share the v1
-    /// schema. Preserve those users' settings and apply the documented
-    /// default instead of rejecting the complete document for one absent key.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(
-            appearance: try container.decode(AppearancePreference.self, forKey: .appearance),
-            logs: try container.decode(LogDisplayPreferences.self, forKey: .logs),
-            metricsRefreshSeconds: try container.decode(Int.self, forKey: .metricsRefreshSeconds),
-            defaultNamespace: try container.decode(
-                DefaultNamespacePreference.self,
-                forKey: .defaultNamespace
-            ),
-            restoreOpenClusterWindows: try container.decodeIfPresent(
-                Bool.self,
-                forKey: .restoreOpenClusterWindows
-            ) ?? true,
-            confirmations: try container.decode(
-                ConfirmationPreferences.self,
-                forKey: .confirmations
-            ),
-            columnsConfigurationPath: try container.decode(
-                String.self,
-                forKey: .columnsConfigurationPath
-            )
-        )
-    }
-
     public static var defaultColumnsConfigurationPath: String {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library", isDirectory: true)

@@ -96,24 +96,9 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
     public var isSidebarVisible: Bool
     public var scrollAnchor: ScrollAnchor?
 
-    private enum CodingKeys: String, CodingKey {
-        case version
-        case contextName
-        case contextReference
-        case gvr
-        case namespaceScope
-        case filter
-        case sort
-        case columns
-        case columnMoveOverrides
-        case columnMeasurementOverrides
-        case isSidebarVisible
-        case scrollAnchor
-    }
-
     public init(
         contextName: String,
-        contextReference: String = "",
+        contextReference: String,
         gvr: GVR? = nil,
         namespaceScope: NamespaceScope = .all,
         filter: String = "",
@@ -126,7 +111,7 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
     ) {
         self.version = Self.schemaVersion
         self.contextName = contextName
-        self.contextReference = contextReference.isEmpty ? contextName : contextReference
+        self.contextReference = contextReference
         self.gvr = gvr
         self.namespaceScope = namespaceScope
         self.filter = filter
@@ -136,28 +121,6 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
         self.columnMeasurementOverrides = columnMeasurementOverrides
         self.isSidebarVisible = isSidebarVisible
         self.scrollAnchor = scrollAnchor
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        version = try container.decode(Int.self, forKey: .version)
-        contextName = try container.decode(String.self, forKey: .contextName)
-        contextReference = try container.decodeIfPresent(
-            String.self, forKey: .contextReference
-        ) ?? contextName
-        gvr = try container.decodeIfPresent(GVR.self, forKey: .gvr)
-        namespaceScope = try container.decode(NamespaceScope.self, forKey: .namespaceScope)
-        filter = try container.decode(String.self, forKey: .filter)
-        sort = try container.decode([SortDescriptorState].self, forKey: .sort)
-        columns = try container.decode([ColumnPresentationState].self, forKey: .columns)
-        columnMoveOverrides = try container.decodeIfPresent(
-            [ColumnMoveState].self, forKey: .columnMoveOverrides
-        )
-        columnMeasurementOverrides = try container.decodeIfPresent(
-            [ColumnPresentationState].self, forKey: .columnMeasurementOverrides
-        )
-        isSidebarVisible = try container.decode(Bool.self, forKey: .isSidebarVisible)
-        scrollAnchor = try container.decodeIfPresent(ScrollAnchor.self, forKey: .scrollAnchor)
     }
 
     public func validated() throws -> Self {
@@ -393,37 +356,6 @@ public final class SensitiveBytes: @unchecked Sendable {
 
     deinit {
         storage.resetBytes(in: storage.startIndex..<storage.endIndex)
-    }
-}
-
-/// Diagnostic metadata for a key/value editor. Values are never representable.
-public struct KeyValueEditorDiagnostic: Hashable, Codable, Sendable {
-    public enum ResourceKind: String, Hashable, Codable, Sendable {
-        case configMap
-        case secret
-    }
-
-    public var resourceKind: ResourceKind
-    public var namespace: String
-    public var name: String
-    public var key: String?
-    public var byteCount: Int?
-    public var hasUnsavedChanges: Bool
-
-    public init(
-        resourceKind: ResourceKind,
-        namespace: String,
-        name: String,
-        key: String? = nil,
-        byteCount: Int? = nil,
-        hasUnsavedChanges: Bool = false
-    ) {
-        self.resourceKind = resourceKind
-        self.namespace = namespace
-        self.name = name
-        self.key = key
-        self.byteCount = byteCount
-        self.hasUnsavedChanges = hasUnsavedChanges
     }
 }
 

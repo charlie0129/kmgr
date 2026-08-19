@@ -344,10 +344,6 @@ func (p *Projector) projectOneWithCells(
 	return row, visible
 }
 
-func (p *Projector) projectOneAdmitted(ctx context.Context, object *unstructured.Unstructured) (*kmgrv1.ResourceRow, bool, error) {
-	return p.projectOneAdmittedWithCells(ctx, object, nil)
-}
-
 func (p *Projector) projectOneAdmittedWithCells(
 	ctx context.Context,
 	object *unstructured.Unstructured,
@@ -495,11 +491,6 @@ func (p *Projector) celActivationForObject(object *unstructured.Unstructured) vi
 	}
 }
 
-func (p *Projector) celCell(program *viewcolumns.Program, activation viewcolumns.Activation) *kmgrv1.Cell {
-	cell, _ := p.celCellContext(context.Background(), program, activation)
-	return cell
-}
-
 func (p *Projector) celCellContext(ctx context.Context, program *viewcolumns.Program, activation viewcolumns.Activation) (*kmgrv1.Cell, error) {
 	definition := program.Definition()
 	missing := definition.Missing
@@ -562,10 +553,10 @@ func (p *Projector) metricsForObject(object *unstructured.Unstructured) map[stri
 			activation["limits"] = map[string]any{}
 			return activation
 		}
-		accounting := metrics.AccountPod(&pod, nil)
+		requests, limits := metrics.EffectivePodResources(&pod)
 		activation["accountingAvailable"] = true
-		activation["requests"] = resourceListActivation(accounting.Requests)
-		activation["limits"] = resourceListActivation(accounting.Limits)
+		activation["requests"] = resourceListActivation(requests)
+		activation["limits"] = resourceListActivation(limits)
 		return activation
 	}
 	var node corev1.Node
@@ -647,9 +638,9 @@ func (p *Projector) resourceUsageCell(
 			cell.Tooltip = "Pod resource accounting could not be calculated"
 			return cell
 		}
-		accounting := metrics.AccountPod(&pod, metrics.ResourceMeasurements{resourceName: measurement})
-		request, hasRequest := accounting.Requests[resourceName]
-		limit, hasLimit := accounting.Limits[resourceName]
+		requests, limits := metrics.EffectivePodResources(&pod)
+		request, hasRequest := requests[resourceName]
+		limit, hasLimit := limits[resourceName]
 		if _, exact := exactResourceColumn(p.extractorID(columnID)); exact &&
 			!hasRequest && !hasLimit && !measurement.HasValue() {
 			cell.DisplayText = DefaultMissingCell
@@ -797,13 +788,6 @@ func formatUsageDisplay(
 	}
 	parts = append(parts, formatResourceQuantity(resourceName, request), formatResourceQuantity(resourceName, limit))
 	return strings.Join(parts, " / ")
-}
-
-func exactQuantityDisplay(quantity *resource.Quantity) string {
-	if quantity == nil {
-		return DefaultMissingCell
-	}
-	return quantity.String()
 }
 
 func formatUsageTooltip(

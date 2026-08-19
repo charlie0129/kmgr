@@ -24,15 +24,16 @@ import (
 func TestKubernetesMetricSourceConstructsProvidersWithoutFetching(t *testing.T) {
 	t.Parallel()
 	catalog := metricTestCatalog(t)
+	contextID := metricContextID(t, catalog)
 	registry := cluster.NewSessionRegistry(metricClientFactory{
 		metrics: metricsfake.NewSimpleClientset().MetricsV1beta1(),
 	})
 	t.Cleanup(registry.CloseAll)
-	first, err := registry.Open(catalog, "metrics")
+	first, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := registry.Open(catalog, "metrics")
+	second, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,11 +70,12 @@ func TestKubernetesMetricSourceConstructsProvidersWithoutFetching(t *testing.T) 
 func TestKubernetesMetricSourceBoundsIdleProvidersWithoutDisruptingActiveSharing(t *testing.T) {
 	t.Parallel()
 	catalog := metricTestCatalog(t)
+	contextID := metricContextID(t, catalog)
 	registry := cluster.NewSessionRegistry(metricClientFactory{
 		metrics: metricsfake.NewSimpleClientset().MetricsV1beta1(),
 	})
 	t.Cleanup(registry.CloseAll)
-	session, err := registry.Open(catalog, "metrics")
+	session, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +158,8 @@ func TestKubernetesMetricSourceRejectsIdleSnapshotOverSampleBudget(t *testing.T)
 	})
 	registry := cluster.NewSessionRegistry(metricClientFactory{metrics: client.MetricsV1beta1()})
 	t.Cleanup(registry.CloseAll)
-	session, err := registry.Open(metricTestCatalog(t), "metrics")
+	catalog := metricTestCatalog(t)
+	session, err := registry.Open(catalog, metricContextID(t, catalog))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +218,8 @@ func TestKubernetesMetricSourceUsesKnownDiscoveryAbsence(t *testing.T) {
 
 	registry := cluster.NewSessionRegistry(nil)
 	t.Cleanup(registry.CloseAll)
-	session, err := registry.Open(metricCatalogForServer(t, server.URL), "metrics")
+	catalog := metricCatalogForServer(t, server.URL)
+	session, err := registry.Open(catalog, metricContextID(t, catalog))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,4 +271,15 @@ contexts:
 		t.Fatal(err)
 	}
 	return catalog
+}
+
+func metricContextID(t *testing.T, catalog *cluster.Catalog) string {
+	t.Helper()
+	for _, info := range catalog.Contexts() {
+		if info.Name == "metrics" {
+			return info.ID
+		}
+	}
+	t.Fatal("metrics context was not found")
+	return ""
 }

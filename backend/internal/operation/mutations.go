@@ -24,6 +24,13 @@ type ResourceBackend interface {
 	Resource(object.Identity) (dynamic.ResourceInterface, error)
 }
 
+// DataUpdater is the narrow mutation contract implemented by object.Reader.
+// Sensitive values remain confined to the request/worker path and never enter
+// operation status or diagnostic models.
+type DataUpdater interface {
+	UpdateData(context.Context, object.Identity, string, []object.DataMutation) (object.Data, error)
+}
+
 type MutationBackend interface {
 	YAMLEditor
 	DataUpdater

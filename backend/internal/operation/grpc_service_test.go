@@ -450,8 +450,18 @@ func (e *fakeYAMLEditor) UpdateData(
 ) (object.Data, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.mutations = cloneDataMutations(mutations)
+	e.mutations = cloneTestDataMutations(mutations)
 	return e.dataResult, e.dataErr
+}
+
+func cloneTestDataMutations(values []object.DataMutation) []object.DataMutation {
+	result := make([]object.DataMutation, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Value = append([]byte(nil), value.Value...)
+		result[index].ExpectedContentHash = append([]byte(nil), value.ExpectedContentHash...)
+	}
+	return result
 }
 
 func (e *fakeYAMLEditor) Get(context.Context, object.Identity) (*unstructured.Unstructured, error) {

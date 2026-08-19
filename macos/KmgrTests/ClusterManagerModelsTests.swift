@@ -194,7 +194,7 @@ struct ClusterManagerModelsTests {
         authentication: ClusterAuthenticationAvailability = .supported(hint: "static")
     ) -> ClusterContextSummary {
         ClusterContextSummary(
-            id: id,
+            id: id.isEmpty ? "test-context:\(name)" : id,
             name: name,
             clusterName: cluster,
             serverHostname: host,

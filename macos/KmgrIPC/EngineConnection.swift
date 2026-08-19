@@ -99,10 +99,6 @@ public final class EngineConnection: @unchecked Sendable {
         Kmgr_V1_OperationService.Client(wrapping: try currentClient())
     }
 
-    public func logClient() throws -> Kmgr_V1_LogService.Client<Transport> {
-        Kmgr_V1_LogService.Client(wrapping: try currentClient())
-    }
-
     public func execClient() throws -> Kmgr_V1_ExecService.Client<Transport> {
         Kmgr_V1_ExecService.Client(wrapping: try currentClient())
     }

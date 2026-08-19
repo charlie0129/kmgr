@@ -70,42 +70,6 @@ public protocol WorkspaceResourceProviding: Sendable {
     func closeSession(sessionID: String) async
 }
 
-public struct AnyWorkspaceResourceProvider: WorkspaceResourceProviding {
-    private let discoverOperation: @Sendable (String, Bool) async throws -> ResourceDiscoveryResult
-    private let namespacesOperation: @Sendable (String) async throws -> [String]
-    private let streamOperation: @Sendable (ResourceViewRequest) -> AsyncThrowingStream<ResourceViewMessage, Error>
-    private let cancelOperation: @Sendable (String, String, UInt64) async -> Void
-    private let closeOperation: @Sendable (String) async -> Void
-
-    public init<P: WorkspaceResourceProviding>(_ provider: P) {
-        discoverOperation = provider.discoverResources
-        namespacesOperation = provider.listNamespaces
-        streamOperation = provider.streamView
-        cancelOperation = provider.cancelView
-        closeOperation = provider.closeSession
-    }
-
-    public func discoverResources(sessionID: String, refresh: Bool) async throws -> ResourceDiscoveryResult {
-        try await discoverOperation(sessionID, refresh)
-    }
-
-    public func listNamespaces(sessionID: String) async throws -> [String] {
-        try await namespacesOperation(sessionID)
-    }
-
-    public func streamView(request: ResourceViewRequest) -> AsyncThrowingStream<ResourceViewMessage, Error> {
-        streamOperation(request)
-    }
-
-    public func cancelView(sessionID: String, viewID: String, generation: UInt64) async {
-        await cancelOperation(sessionID, viewID, generation)
-    }
-
-    public func closeSession(sessionID: String) async {
-        await closeOperation(sessionID)
-    }
-}
-
 public struct ResourceViewRequest: Hashable, Sendable {
     public var sessionID: String
     public var viewID: String

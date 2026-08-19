@@ -12,7 +12,6 @@ import (
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 type projectedTableColumn struct {
@@ -232,15 +231,4 @@ func tableTime(value any) (time.Time, bool) {
 	default:
 		return time.Time{}, false
 	}
-}
-
-func cloneTableRows(values map[types.UID][]any) map[string][]any {
-	if len(values) == 0 {
-		return nil
-	}
-	result := make(map[string][]any, len(values))
-	for uid, cells := range values {
-		result[string(uid)] = append([]any(nil), cells...)
-	}
-	return result
 }

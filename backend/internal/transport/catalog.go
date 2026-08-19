@@ -58,13 +58,6 @@ func (r *CatalogRegistry) Load(paths []string, reload bool) (*cluster.Catalog, e
 	return catalog, nil
 }
 
-func (r *CatalogRegistry) Current(paths []string) (*cluster.Catalog, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	catalog := r.entries[catalogKey(paths)]
-	return catalog, catalog != nil
-}
-
 func catalogKey(paths []string) string {
 	if len(paths) == 0 {
 		return "\x00ambient"

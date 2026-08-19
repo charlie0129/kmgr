@@ -15,42 +15,9 @@ const maxUnixSocketPath = 103
 // PrivateEndpoint owns a short-lived, user-only Unix-domain socket and its
 // parent directory. Close removes both after closing the listener.
 type PrivateEndpoint struct {
-	mu              sync.Mutex
-	directory       string
-	socket          string
-	listener        net.Listener
-	removeDirectory bool
-}
-
-func ListenPrivateUnix(baseDirectory string) (*PrivateEndpoint, error) {
-	if baseDirectory == "" {
-		baseDirectory = os.TempDir()
-	}
-
-	directory, err := os.MkdirTemp(baseDirectory, "kmgr.")
-	if err != nil {
-		return nil, fmt.Errorf("create private endpoint directory: %w", err)
-	}
-	cleanup := func() { _ = os.RemoveAll(directory) }
-
-	if err := os.Chmod(directory, 0o700); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("protect private endpoint directory: %w", err)
-	}
-
-	socket := filepath.Join(directory, "e.sock")
-	if len(socket) > maxUnixSocketPath {
-		cleanup()
-		return nil, fmt.Errorf("Unix socket path is too long (%d bytes)", len(socket))
-	}
-
-	endpoint, err := ListenPrivateUnixPath(socket)
-	if err != nil {
-		cleanup()
-		return nil, err
-	}
-	endpoint.removeDirectory = true
-	return endpoint, nil
+	mu       sync.Mutex
+	socket   string
+	listener net.Listener
 }
 
 // ListenPrivateUnixPath listens at a GUI-created path. The parent directory
@@ -99,14 +66,10 @@ func ListenPrivateUnixPath(socket string) (*PrivateEndpoint, error) {
 	}
 
 	return &PrivateEndpoint{
-		directory: directory,
-		socket:    socket,
-		listener:  listener,
+		socket: socket, listener: listener,
 	}, nil
 }
 
-func (e *PrivateEndpoint) Directory() string  { return e.directory }
-func (e *PrivateEndpoint) SocketPath() string { return e.socket }
 func (e *PrivateEndpoint) Listener() net.Listener {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -123,9 +86,7 @@ func (e *PrivateEndpoint) Close() error {
 		e.listener = nil
 	}
 	var removeErr error
-	if e.removeDirectory {
-		removeErr = os.RemoveAll(e.directory)
-	} else if e.socket != "" {
+	if e.socket != "" {
 		removeErr = os.Remove(e.socket)
 		if os.IsNotExist(removeErr) {
 			removeErr = nil

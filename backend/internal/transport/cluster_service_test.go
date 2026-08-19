@@ -144,7 +144,8 @@ func TestOpenSessionDefaultProbeUsesAuthenticatedVersionRequest(t *testing.T) {
 	defer server.Close()
 
 	catalog := serviceProbeCatalog(t, server.URL, "probe-token")
-	probeConfig, err := catalog.RESTConfig("local")
+	contextID := serviceContextID(t, catalog)
+	probeConfig, err := catalog.RESTConfig(contextID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +159,7 @@ func TestOpenSessionDefaultProbeUsesAuthenticatedVersionRequest(t *testing.T) {
 		Sessions: sessions,
 	})
 	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
-		Context: requestContext("authenticated-probe"), ContextName: "local",
+		Context: requestContext("authenticated-probe"), ContextName: contextID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -190,6 +191,7 @@ func TestOpenSessionDefaultProbeHTTP401RollsBackSession(t *testing.T) {
 	defer server.Close()
 
 	catalog := serviceProbeCatalog(t, server.URL, "rejected-token")
+	contextID := serviceContextID(t, catalog)
 	factory := &recordingDefaultServiceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
@@ -197,7 +199,7 @@ func TestOpenSessionDefaultProbeHTTP401RollsBackSession(t *testing.T) {
 		Sessions: sessions,
 	})
 	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
-		Context: requestContext("rejected-probe"), ContextName: "local",
+		Context: requestContext("rejected-probe"), ContextName: contextID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -218,6 +220,7 @@ func TestOpenSessionDefaultProbeHTTP401RollsBackSession(t *testing.T) {
 func TestOpenSessionProbeFailureReturnsStructuredErrorAndRollsBack(t *testing.T) {
 	t.Parallel()
 	catalog := serviceCatalog(t)
+	contextID := serviceContextID(t, catalog)
 	factory := &serviceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
@@ -230,7 +233,7 @@ func TestOpenSessionProbeFailureReturnsStructuredErrorAndRollsBack(t *testing.T)
 	})
 
 	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
-		Context: requestContext("open-failed"), ContextName: "local",
+		Context: requestContext("open-failed"), ContextName: contextID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -248,6 +251,7 @@ func TestOpenSessionProbeFailureReturnsStructuredErrorAndRollsBack(t *testing.T)
 func TestCloseSessionPreservesOnlyPreexistingIndependentLeasesWhenRequested(t *testing.T) {
 	t.Parallel()
 	catalog := serviceCatalog(t)
+	contextID := serviceContextID(t, catalog)
 	factory := &serviceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
@@ -256,7 +260,7 @@ func TestCloseSessionPreservesOnlyPreexistingIndependentLeasesWhenRequested(t *t
 		Prober:   SessionProbeFunc(func(context.Context, *cluster.Session) error { return nil }),
 	})
 	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
-		Context: requestContext("open-preserved"), ContextName: "local",
+		Context: requestContext("open-preserved"), ContextName: contextID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -288,6 +292,7 @@ func TestCloseSessionPreservesOnlyPreexistingIndependentLeasesWhenRequested(t *t
 func TestCloseSessionWithoutPreservationForceCloses(t *testing.T) {
 	t.Parallel()
 	catalog := serviceCatalog(t)
+	contextID := serviceContextID(t, catalog)
 	factory := &serviceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
@@ -296,7 +301,7 @@ func TestCloseSessionWithoutPreservationForceCloses(t *testing.T) {
 		Prober:   SessionProbeFunc(func(context.Context, *cluster.Session) error { return nil }),
 	})
 	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
-		Context: requestContext("open-force"), ContextName: "local",
+		Context: requestContext("open-force"), ContextName: contextID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +331,7 @@ func TestWatchConnectionEmitsInitialAndCoalescedMonotonicTotals(t *testing.T) {
 	catalog := serviceCatalog(t)
 	sessions := cluster.NewSessionRegistry(&serviceFactory{})
 	t.Cleanup(sessions.CloseAll)
-	session, err := sessions.Open(catalog, "local")
+	session, err := sessions.Open(catalog, serviceContextID(t, catalog))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +400,7 @@ func TestWatchConnectionEmitsObservedTransportAndAuthenticationStates(t *testing
 	catalog := serviceCatalog(t)
 	sessions := cluster.NewSessionRegistry(&serviceFactory{})
 	t.Cleanup(sessions.CloseAll)
-	session, err := sessions.Open(catalog, "local")
+	session, err := sessions.Open(catalog, serviceContextID(t, catalog))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +456,7 @@ func TestWatchConnectionLeaseSurvivesPreservingWorkspaceClose(t *testing.T) {
 	catalog := serviceCatalog(t)
 	factory := &serviceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
-	session, err := sessions.Open(catalog, "local")
+	session, err := sessions.Open(catalog, serviceContextID(t, catalog))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,4 +669,15 @@ func mustCatalog(t *testing.T, path string) *cluster.Catalog {
 		t.Fatal(err)
 	}
 	return catalog
+}
+
+func serviceContextID(t *testing.T, catalog *cluster.Catalog) string {
+	t.Helper()
+	for _, info := range catalog.Contexts() {
+		if info.Name == "local" {
+			return info.ID
+		}
+	}
+	t.Fatal("local context was not found")
+	return ""
 }

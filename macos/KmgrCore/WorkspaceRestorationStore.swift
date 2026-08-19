@@ -20,7 +20,7 @@ public struct ClusterWindowRestorationRecord: Hashable, Codable, Sendable, Ident
     public init(
         id: String = UUID().uuidString.lowercased(),
         contextName: String,
-        contextReference: String = ""
+        contextReference: String
     ) {
         self.init(id: id, state: ClusterWindowRestorationState(
             contextName: contextName,
@@ -110,31 +110,6 @@ public final class WorkspaceRestorationStore {
             updated.append(record)
         }
         try persist(updated)
-    }
-
-    /// Atomically checkpoints the complete set, useful during application
-    /// termination after capturing every live workspace.
-    public func replaceAll(with records: [ClusterWindowRestorationRecord]) throws {
-        guard records.count <= Self.maximumOpenWindows else {
-            throw RestorationValidationError(issues: [.init(
-                path: "windows",
-                message: "At most \(Self.maximumOpenWindows) cluster windows can be restored."
-            )])
-        }
-        var identifiers: Set<String> = []
-        var validated: [ClusterWindowRestorationRecord] = []
-        validated.reserveCapacity(records.count)
-        for record in records {
-            let record = try record.validated()
-            guard identifiers.insert(record.id).inserted else {
-                throw RestorationValidationError(issues: [.init(
-                    path: "windows",
-                    message: "Saved cluster window IDs must be unique."
-                )])
-            }
-            validated.append(record)
-        }
-        try persist(validated)
     }
 
     /// Call only for an explicit user close. App termination should retain the

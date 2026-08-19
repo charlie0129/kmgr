@@ -185,7 +185,7 @@ public struct ClusterContextSummary: Identifiable, Hashable, Sendable {
     public var authentication: ClusterAuthenticationAvailability
 
     public init(
-        id: String = "",
+        id: String,
         name: String,
         clusterName: String,
         serverHostname: String,
@@ -194,7 +194,7 @@ public struct ClusterContextSummary: Identifiable, Hashable, Sendable {
         isCurrent: Bool = false,
         authentication: ClusterAuthenticationAvailability = .supported(hint: "")
     ) {
-        self.id = id.isEmpty ? name : id
+        self.id = id
         self.name = name
         self.clusterName = clusterName
         self.serverHostname = serverHostname
@@ -235,14 +235,14 @@ public struct OpenedClusterSession: Hashable, Sendable {
         clusterName: String,
         serverHostname: String,
         defaultNamespace: String,
-        contextReference: String = ""
+        contextReference: String
     ) {
         self.sessionID = sessionID
         self.contextName = contextName
         self.clusterName = clusterName
         self.serverHostname = serverHostname
         self.defaultNamespace = defaultNamespace
-        self.contextReference = contextReference.isEmpty ? contextName : contextReference
+        self.contextReference = contextReference
     }
 }
 
@@ -252,39 +252,6 @@ public struct OpenedClusterSession: Hashable, Sendable {
 public protocol ClusterContextProviding: Sendable {
     func listContexts(reload: Bool) async throws -> [ClusterContextSummary]
     func openContext(reference: String) async throws -> OpenedClusterSession
-}
-
-/// A type-erased provider used by application composition. Its closures make
-/// it possible to swap from a "starting" provider to the live engine without
-/// making AppKit depend on generated gRPC client types.
-public struct AnyClusterContextProvider: ClusterContextProviding {
-    private let listOperation: @Sendable (Bool) async throws -> [ClusterContextSummary]
-    private let openOperation: @Sendable (String) async throws -> OpenedClusterSession
-
-    public init<P: ClusterContextProviding>(_ provider: P) {
-        self.listOperation = { reload in
-            try await provider.listContexts(reload: reload)
-        }
-        self.openOperation = { reference in
-            try await provider.openContext(reference: reference)
-        }
-    }
-
-    public init(
-        listContexts: @escaping @Sendable (Bool) async throws -> [ClusterContextSummary],
-        openContext: @escaping @Sendable (String) async throws -> OpenedClusterSession
-    ) {
-        self.listOperation = listContexts
-        self.openOperation = openContext
-    }
-
-    public func listContexts(reload: Bool) async throws -> [ClusterContextSummary] {
-        try await listOperation(reload)
-    }
-
-    public func openContext(reference: String) async throws -> OpenedClusterSession {
-        try await openOperation(reference)
-    }
 }
 
 public enum ClusterContextListPhase: Hashable, Sendable {

@@ -648,13 +648,6 @@ func relationshipScanProgressToProto(value RelationshipScanProgress) *kmgrv1.Rel
 	return result
 }
 
-func unixMilliseconds(value time.Time) int64 {
-	if value.IsZero() {
-		return 0
-	}
-	return value.UnixMilli()
-}
-
 func objectCursor(request *kmgrv1.WatchObjectRequest, sequence uint64) *kmgrv1.StreamCursor {
 	return &kmgrv1.StreamCursor{
 		StreamId: request.GetObjectStreamId(), Generation: request.GetGeneration(), Sequence: sequence,

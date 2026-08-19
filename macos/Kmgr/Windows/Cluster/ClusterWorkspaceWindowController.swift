@@ -62,7 +62,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 {
     private(set) var session: OpenedClusterSession
     private(set) var isAuthenticated: Bool
-    var restorationID: String { restoration.id }
     var onClose: (() -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?

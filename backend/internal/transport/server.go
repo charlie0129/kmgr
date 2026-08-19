@@ -264,15 +264,3 @@ func (s *Server) Shutdown(timeout time.Duration) {
 		s.sessions.CloseAll()
 	})
 }
-
-// Register installs an additional service before Serve starts. Keeping the
-// registrar narrow preserves this server's authentication/logging policy.
-func (s *Server) Register(register func(grpc.ServiceRegistrar)) {
-	register(s.grpc)
-}
-
-func (s *Server) Engine() *EngineService             { return s.engine }
-func (s *Server) Cluster() *ClusterService           { return s.cluster }
-func (s *Server) Catalogs() *CatalogRegistry         { return s.catalogs }
-func (s *Server) Sessions() *cluster.SessionRegistry { return s.sessions }
-func (s *Server) Views() *view.Runtime               { return s.views }

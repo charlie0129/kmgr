@@ -1005,68 +1005,6 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(!label.displayText.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains))
     }
 
-    @Test("line-number geometry grows at digit boundaries")
-    func lineNumberGeometry() {
-        #expect(LineNumberRulerView.lineCount(in: "") == 1)
-        #expect(LineNumberRulerView.lineCount(in: "one\ntwo") == 2)
-        #expect(LineNumberRulerView.lineCount(in: "one\n") == 2)
-        #expect(LineNumberRulerView.requiredWidth(forLineCount: 100)
-            > LineNumberRulerView.requiredWidth(forLineCount: 99))
-
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
-        let scroll = NSScrollView(frame: textView.frame)
-        scroll.documentView = textView
-        let ruler = LineNumberRulerView(textView: textView, scrollView: scroll)
-        let originalWidth = ruler.ruleThickness
-        textView.string = (1...100).map(String.init).joined(separator: "\n")
-        ruler.textDidChange()
-        #expect(ruler.ruleThickness > originalWidth)
-    }
-
-    @Test("line-number ruler lays out and draws empty trailing and scrolled documents")
-    func lineNumberDrawSmoke() throws {
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 180))
-        scroll.hasVerticalScroller = true
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 1_200))
-        textView.isVerticallyResizable = true
-        textView.textContainer?.widthTracksTextView = true
-        scroll.documentView = textView
-        let ruler = LineNumberRulerView(textView: textView, scrollView: scroll)
-        scroll.verticalRulerView = ruler
-        scroll.hasVerticalRuler = true
-        scroll.rulersVisible = true
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 180),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = scroll
-        window.contentView?.layoutSubtreeIfNeeded()
-
-        for source in ["", "one\n", "one\n\n", (1...200).map(String.init).joined(separator: "\n") + "\n"] {
-            textView.string = source
-            textView.layoutManager?.ensureLayout(for: textView.textContainer!)
-            ruler.textDidChange()
-            let image = NSImage(size: ruler.bounds.size)
-            image.lockFocus()
-            ruler.drawHashMarksAndLabels(in: ruler.bounds)
-            image.unlockFocus()
-        }
-
-        let beforeScroll = try #require(ruler.rulerY(forTextViewY: 300))
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: 240))
-        scroll.reflectScrolledClipView(scroll.contentView)
-        let afterScroll = try #require(ruler.rulerY(forTextViewY: 300))
-        #expect(afterScroll < beforeScroll)
-
-        let image = NSImage(size: ruler.bounds.size)
-        image.lockFocus()
-        ruler.drawHashMarksAndLabels(in: ruler.bounds)
-        image.unlockFocus()
-    }
-
     @Test("Data key table conceals then reveals decoded Secret previews")
     func secretDataKeyTableColumnsAndConcealment() async throws {
         let sentinel = "do-not-render-this-secret-value"

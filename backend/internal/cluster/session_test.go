@@ -29,15 +29,16 @@ func (f *recordingFactory) New(config *rest.Config) (BackendClients, error) {
 func TestSessionRegistryOpensIndependentSessionsWithSharedClients(t *testing.T) {
 	t.Parallel()
 	catalog := testCatalog(t, "https://cluster.example.test")
+	contextID := requireContextNamed(t, catalog, "local").ID
 	factory := &recordingFactory{}
 	registry := NewSessionRegistry(factory)
 	t.Cleanup(registry.CloseAll)
 
-	first, err := registry.Open(catalog, "local")
+	first, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatalf("Open first: %v", err)
 	}
-	second, err := registry.Open(catalog, "local")
+	second, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatalf("Open second: %v", err)
 	}
@@ -81,11 +82,11 @@ func TestDifferentAuthoritiesDoNotShareActivityCounters(t *testing.T) {
 	secondCatalog := testCatalog(t, "https://second.example.test")
 	registry := NewSessionRegistry(&recordingFactory{})
 	t.Cleanup(registry.CloseAll)
-	first, err := registry.Open(firstCatalog, "local")
+	first, err := registry.Open(firstCatalog, requireContextNamed(t, firstCatalog, "local").ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := registry.Open(secondCatalog, "local")
+	second, err := registry.Open(secondCatalog, requireContextNamed(t, secondCatalog, "local").ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,10 +103,10 @@ func TestDifferentCatalogSnapshotsDoNotSilentlyReuseCredentials(t *testing.T) {
 	factory := &recordingFactory{}
 	registry := NewSessionRegistry(factory)
 	t.Cleanup(registry.CloseAll)
-	if _, err := registry.Open(firstCatalog, "local"); err != nil {
+	if _, err := registry.Open(firstCatalog, requireContextNamed(t, firstCatalog, "local").ID); err != nil {
 		t.Fatalf("Open first: %v", err)
 	}
-	if _, err := registry.Open(secondCatalog, "local"); err != nil {
+	if _, err := registry.Open(secondCatalog, requireContextNamed(t, secondCatalog, "local").ID); err != nil {
 		t.Fatalf("Open second: %v", err)
 	}
 	if len(factory.configs) != 2 {
@@ -139,7 +140,7 @@ contexts:
 	catalog := discoverExplicit(t, path)
 	factory := &recordingFactory{}
 	registry := NewSessionRegistry(factory)
-	if _, err := registry.Open(catalog, "local"); err == nil {
+	if _, err := registry.Open(catalog, requireContextNamed(t, catalog, "local").ID); err == nil {
 		t.Fatal("unsupported authentication was accepted")
 	}
 	if len(factory.configs) != 0 {
@@ -150,11 +151,12 @@ contexts:
 func TestSessionRegistryRateLimitCanOnlyChangeWhileIdle(t *testing.T) {
 	t.Parallel()
 	catalog := testCatalog(t, "https://cluster.example.test")
+	contextID := requireContextNamed(t, catalog, "local").ID
 	registry := NewSessionRegistry(&recordingFactory{})
 	if err := registry.SetRateLimit(100, 200); err != nil {
 		t.Fatalf("SetRateLimit idle: %v", err)
 	}
-	session, err := registry.Open(catalog, "local")
+	session, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -170,10 +172,11 @@ func TestSessionRegistryRateLimitCanOnlyChangeWhileIdle(t *testing.T) {
 func TestWorkspaceCloseKeepsSessionUntilIndependentLeasesRelease(t *testing.T) {
 	t.Parallel()
 	catalog := testCatalog(t, "https://cluster.example.test")
+	contextID := requireContextNamed(t, catalog, "local").ID
 	factory := &recordingFactory{}
 	registry := NewSessionRegistry(factory)
 	t.Cleanup(registry.CloseAll)
-	session, err := registry.Open(catalog, "local")
+	session, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -220,10 +223,11 @@ func TestWorkspaceCloseKeepsSessionUntilIndependentLeasesRelease(t *testing.T) {
 func TestForceCloseInvalidatesSessionWithIndependentLease(t *testing.T) {
 	t.Parallel()
 	catalog := testCatalog(t, "https://cluster.example.test")
+	contextID := requireContextNamed(t, catalog, "local").ID
 	factory := &recordingFactory{}
 	registry := NewSessionRegistry(factory)
 	t.Cleanup(registry.CloseAll)
-	session, err := registry.Open(catalog, "local")
+	session, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -250,9 +254,10 @@ func TestForceCloseInvalidatesSessionWithIndependentLease(t *testing.T) {
 func TestWorkspaceCloseWithoutIndependentLeaseDoesNotRetainSession(t *testing.T) {
 	t.Parallel()
 	catalog := testCatalog(t, "https://cluster.example.test")
+	contextID := requireContextNamed(t, catalog, "local").ID
 	factory := &recordingFactory{}
 	registry := NewSessionRegistry(factory)
-	session, err := registry.Open(catalog, "local")
+	session, err := registry.Open(catalog, contextID)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

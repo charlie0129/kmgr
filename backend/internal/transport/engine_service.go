@@ -225,8 +225,6 @@ func (s *EngineService) State() kmgrv1.HealthState {
 	}
 }
 
-func (s *EngineService) InstanceID() string { return s.instanceID }
-
 func newEngineInstanceID() (string, error) {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {

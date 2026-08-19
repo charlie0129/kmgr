@@ -120,12 +120,6 @@ func advanceMetricsPage(
 	return nil
 }
 
-func podSamples(values []metricsapi.PodMetrics) map[string]Sample {
-	result := make(map[string]Sample, len(values))
-	appendPodSamples(result, values)
-	return result
-}
-
 func appendPodSamples(result map[string]Sample, values []metricsapi.PodMetrics) {
 	for index := range values {
 		value := &values[index]
@@ -141,12 +135,6 @@ func appendPodSamples(result map[string]Sample, values []metricsapi.PodMetrics) 
 			MeasuredAt: value.Timestamp.Time, Resources: resources,
 		}
 	}
-}
-
-func nodeSamples(values []metricsapi.NodeMetrics) map[string]Sample {
-	result := make(map[string]Sample, len(values))
-	appendNodeSamples(result, values)
-	return result
 }
 
 func appendNodeSamples(result map[string]Sample, values []metricsapi.NodeMetrics) {

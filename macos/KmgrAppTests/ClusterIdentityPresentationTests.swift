@@ -40,11 +40,6 @@ struct ClusterIdentityPresentationTests {
         let pod = podIdentity()
         let objectProvider = IdentityNoopObjectDetailProvider()
 
-        let logs = LogConfigurationWindowController(
-            session: session,
-            resources: [pod],
-            logProvider: IdentityNoopLogProvider()
-        )
         let exec = ExecConfigurationWindowController(
             session: session,
             podIdentity: pod,
@@ -58,12 +53,11 @@ struct ClusterIdentityPresentationTests {
             coordinator: PortForwardCoordinator(provider: IdentityNoopPortForwardProvider())
         )
 
-        #expect(logs.window?.title == "cluster-a — production/admin@corp — Open Logs")
         #expect(exec.window?.title == "cluster-a — production/admin@corp — Configure Terminal")
         #expect(forward.window?.title ==
             "cluster-a — production/admin@corp — Start Port Forward")
 
-        for controller in [logs, exec, forward] as [NSWindowController] {
+        for controller in [exec, forward] as [NSWindowController] {
             let root = try #require(controller.window?.contentView)
             let values = identityDescendants(of: root)
                 .compactMap { ($0 as? NSTextField)?.stringValue }
@@ -256,15 +250,6 @@ private func identityExecRequest() -> ExecSessionRequest {
 @MainActor
 private func identityDescendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(identityDescendants(of:))
-}
-
-private struct IdentityNoopLogProvider: LogStreamProviding {
-    func streamLogs(request: LogStreamRequest)
-        -> AsyncThrowingStream<LogStreamMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelLogs(sessionID: String, streamID: String, generation: UInt64) async {}
 }
 
 private struct IdentityNoopExecProvider: ExecSessionProviding {

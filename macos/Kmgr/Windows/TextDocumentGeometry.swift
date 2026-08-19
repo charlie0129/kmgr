@@ -161,45 +161,6 @@ struct LogTextLayoutMetrics: Hashable, Sendable {
 /// out text must fit inside that frame.
 @MainActor
 enum TextDocumentGeometry {
-    @MainActor
-    struct ViewportState {
-        fileprivate var origin: NSPoint
-        fileprivate var selection: NSRange
-
-        static func capture(
-            textView: NSTextView,
-            scrollView: NSScrollView
-        ) -> Self {
-            Self(
-                origin: scrollView.contentView.bounds.origin,
-                selection: textView.selectedRange()
-            )
-        }
-
-        func restore(
-            textView: NSTextView,
-            scrollView: NSScrollView
-        ) {
-            let textLength = textView.textStorage?.length ?? 0
-            let location = min(max(0, selection.location), textLength)
-            let available = max(0, textLength - location)
-            textView.setSelectedRange(NSRange(
-                location: location,
-                length: min(max(0, selection.length), available)
-            ))
-
-            let clipView = scrollView.contentView
-            let documentBounds = textView.bounds
-            let maximumX = max(0, documentBounds.width - clipView.bounds.width)
-            let maximumY = max(0, documentBounds.height - clipView.bounds.height)
-            clipView.scroll(to: NSPoint(
-                x: min(max(0, origin.x), maximumX),
-                y: min(max(0, origin.y), maximumY)
-            ))
-            scrollView.reflectScrolledClipView(clipView)
-        }
-    }
-
     static func configure(
         _ textView: NSTextView,
         in scrollView: NSScrollView,

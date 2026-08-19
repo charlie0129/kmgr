@@ -141,19 +141,17 @@ import Testing
     #expect(AppPreferencesDelta(previous: updated, updated: updated).isEmpty)
 }
 
-@Test func olderV1PreferencesDefaultWindowRestorationOn() throws {
+@Test func incompleteCurrentPreferencesAreRejectedInsteadOfMigrated() throws {
     let encoded = try JSONEncoder().encode(AppPreferences())
     var object = try #require(
         JSONSerialization.jsonObject(with: encoded) as? [String: Any]
     )
     object.removeValue(forKey: "restoreOpenClusterWindows")
 
-    let decoded = try JSONDecoder().decode(
-        AppPreferences.self,
-        from: JSONSerialization.data(withJSONObject: object)
-    )
-
-    #expect(decoded.restoreOpenClusterWindows)
+    let data = try JSONSerialization.data(withJSONObject: object)
+    #expect(throws: DecodingError.self) {
+        _ = try JSONDecoder().decode(AppPreferences.self, from: data)
+    }
 }
 
 @Test func keyboardShortcutReferenceMatchesRequiredBindings() {

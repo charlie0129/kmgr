@@ -387,14 +387,6 @@ public extension DataMutationKind {
         return newKey
     }
 
-    var conflictActionDescription: String {
-        switch self {
-        case .set(let key, _, _, _): "save key \(key)"
-        case .delete(let key, _): "delete key \(key)"
-        case .rename(let key, let newKey, _): "rename key \(key) to \(newKey)"
-        }
-    }
-
     /// Rebuilds only the originally requested key mutation against a freshly
     /// fetched key snapshot. The caller supplies the fresh object
     /// resourceVersion separately when submitting the returned mutation.

@@ -80,10 +80,7 @@ current-context: beta
 		t.Fatalf("context names = %v", names)
 	}
 
-	alpha, ok := catalog.Context("alpha")
-	if !ok {
-		t.Fatal("alpha context was not found")
-	}
+	alpha := requireContextNamed(t, catalog, "alpha")
 	if !alpha.Current {
 		t.Error("alpha.Current = false, want true (first file wins for current-context)")
 	}
@@ -100,10 +97,7 @@ current-context: beta
 		t.Errorf("alpha.SourcePaths = %v", alpha.SourcePaths)
 	}
 
-	beta, ok := catalog.Context("beta")
-	if !ok {
-		t.Fatal("beta context was not found")
-	}
+	beta := requireContextNamed(t, catalog, "beta")
 	if beta.Current {
 		t.Error("beta.Current = true, want false")
 	}
@@ -155,20 +149,20 @@ func TestDiscoverFindsTopLevelKubeconfigsThroughSymlinkedHomeDirectory(t *testin
 		t.Fatalf("context count = %d, want 93; names=%v", len(contexts), contextNames(contexts))
 	}
 	for _, name := range []string{"orbstack", "cluster-00", "cluster-89", "yaml-context", "bare-context"} {
-		if _, ok := catalog.Context(name); !ok {
+		if !hasContextNamed(catalog, name) {
 			t.Errorf("context %q was not discovered", name)
 		}
 	}
-	if _, ok := catalog.Context("nested"); ok {
+	if hasContextNamed(catalog, "nested") {
 		t.Fatal("discovery recursed into a subdirectory")
 	}
-	info, _ := catalog.Context("cluster-00")
+	info := requireContextNamed(t, catalog, "cluster-00")
 	if info.ContextSourcePath != filepath.Join(home, ".kube", "cluster-00.kubeconfig") {
 		t.Fatalf("symlinked source provenance = %q", info.ContextSourcePath)
 	}
 }
 
-func TestHomeKubeconfigDiscoveryUsesDefaultThenFilenamePrecedence(t *testing.T) {
+func TestHomeKubeconfigDiscoveryKeepsDefaultAndSiblingContextsDistinct(t *testing.T) {
 	home := t.TempDir()
 	kubeDirectory := filepath.Join(home, ".kube")
 	defaultPath := filepath.Join(kubeDirectory, "config")
@@ -223,22 +217,31 @@ current-context: from-z
 	if err != nil {
 		t.Fatal(err)
 	}
-	duplicate, ok := catalog.Context("duplicate")
-	if !ok || duplicate.ServerHostname != "default.example.test" ||
+	duplicate := requireContextNamedFrom(t, catalog, "duplicate", defaultPath)
+	if duplicate.ServerHostname != "default.example.test" ||
 		duplicate.ContextSourcePath != defaultPath ||
 		duplicate.ClusterSourcePath != defaultPath {
-		t.Fatalf("duplicate precedence/provenance = %#v", duplicate)
+		t.Fatalf("default duplicate provenance = %#v", duplicate)
 	}
-	lexical, ok := catalog.Context("lexical-duplicate")
-	if !ok || lexical.ServerHostname != "a-only.example.test" ||
-		lexical.ContextSourcePath != filepath.Join(kubeDirectory, "a.kubeconfig") {
-		t.Fatalf("lexical duplicate precedence/provenance = %#v", lexical)
+	aPath := filepath.Join(kubeDirectory, "a.kubeconfig")
+	zPath := filepath.Join(kubeDirectory, "z.kubeconfig")
+	aDuplicate := requireContextNamedFrom(t, catalog, "duplicate", aPath)
+	if aDuplicate.ServerHostname != "a-only.example.test" || aDuplicate.Current {
+		t.Fatalf("sibling duplicate binding = %#v", aDuplicate)
 	}
-	fromZ, ok := catalog.Context("from-z")
-	if !ok || fromZ.ServerHostname != "z-only.example.test" {
+	lexicalA := requireContextNamedFrom(t, catalog, "lexical-duplicate", aPath)
+	if lexicalA.ServerHostname != "a-only.example.test" || lexicalA.Current {
+		t.Fatalf("a lexical duplicate binding = %#v", lexicalA)
+	}
+	lexicalZ := requireContextNamedFrom(t, catalog, "lexical-duplicate", zPath)
+	if lexicalZ.ServerHostname != "z-only.example.test" || lexicalZ.Current {
+		t.Fatalf("z lexical duplicate binding = %#v", lexicalZ)
+	}
+	fromZ := requireContextNamed(t, catalog, "from-z")
+	if fromZ.ServerHostname != "z-only.example.test" {
 		t.Fatalf("from-z = %#v", fromZ)
 	}
-	if current, _ := catalog.Context("duplicate"); !current.Current {
+	if current := requireContextNamedFrom(t, catalog, "duplicate", defaultPath); !current.Current {
 		t.Fatalf("default current-context did not retain precedence: %#v", current)
 	}
 }
@@ -264,14 +267,8 @@ func TestHomeDiscoveryBindsEachContextToCredentialsFromItsOwnSource(t *testing.T
 		t.Fatal(err)
 	}
 
-	first, ok := catalog.Context("admin@first")
-	if !ok {
-		t.Fatal("first context was not discovered")
-	}
-	second, ok := catalog.Context("admin@second")
-	if !ok {
-		t.Fatal("second context was not discovered")
-	}
+	first := requireContextNamed(t, catalog, "admin@first")
+	second := requireContextNamed(t, catalog, "admin@second")
 	firstConfig, err := catalog.RESTConfig(first.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -297,7 +294,7 @@ func TestHomeDiscoveryBindsEachContextToCredentialsFromItsOwnSource(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	flatSecond, err := flat.RESTConfig("admin@second")
+	flatSecond, err := flat.RESTConfig(requireContextNamed(t, flat, "admin@second").ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,10 +421,7 @@ current-context: files
 `)
 
 	catalog := discoverExplicit(t, configPath)
-	filesInfo, ok := catalog.Context("files")
-	if !ok {
-		t.Fatal("files context was not found")
-	}
+	filesInfo := requireContextNamed(t, catalog, "files")
 	filesConfig, err := catalog.RESTConfig(filesInfo.ID)
 	if err != nil {
 		t.Fatalf("RESTConfig(files ID) error = %v", err)
@@ -442,7 +436,7 @@ current-context: files
 		t.Errorf("BearerTokenFile = %q, want %q", filesConfig.BearerTokenFile, tokenPath)
 	}
 
-	embeddedConfig, err := catalog.RESTConfig("embedded")
+	embeddedConfig, err := catalog.RESTConfig(requireContextNamed(t, catalog, "embedded").ID)
 	if err != nil {
 		t.Fatalf("RESTConfig(embedded) error = %v", err)
 	}
@@ -454,7 +448,7 @@ current-context: files
 	if embeddedConfig.BearerToken != "embedded-token" {
 		t.Errorf("BearerToken = %q", embeddedConfig.BearerToken)
 	}
-	basicConfig, err := catalog.RESTConfig("basic")
+	basicConfig, err := catalog.RESTConfig(requireContextNamed(t, catalog, "basic").ID)
 	if err != nil {
 		t.Fatalf("RESTConfig(basic) error = %v", err)
 	}
@@ -513,10 +507,7 @@ contexts:
 		"both":     {UnsupportedAuthExec, UnsupportedAuthProvider},
 	}
 	for contextName, wantMechanisms := range checks {
-		contextInfo, ok := catalog.Context(contextName)
-		if !ok {
-			t.Fatalf("context %q was not found", contextName)
-		}
+		contextInfo := requireContextNamed(t, catalog, contextName)
 		if !reflect.DeepEqual(contextInfo.UnsupportedAuthentications, wantMechanisms) {
 			t.Errorf("%s unsupported mechanisms = %v, want %v", contextName, contextInfo.UnsupportedAuthentications, wantMechanisms)
 		}
@@ -564,6 +555,22 @@ contexts:
 	}
 	if !strings.HasPrefix(first.ID, "context_") || !strings.HasPrefix(first.ClusterID, "cluster_") {
 		t.Errorf("unexpected IDs: context=%q cluster=%q", first.ID, first.ClusterID)
+	}
+}
+
+func TestCatalogRejectsDisplayNameReferences(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config")
+	writeFile(t, configPath, kubeconfigForContext("production", "target", "https://example.test"))
+	catalog := discoverExplicit(t, configPath)
+	info := requireContextNamed(t, catalog, "production")
+
+	if _, ok := catalog.Context(info.Name); ok {
+		t.Fatal("Context accepted a display name instead of an opaque ID")
+	}
+	_, err := catalog.RESTConfig(info.Name)
+	var notFoundError *ContextNotFoundError
+	if !errors.As(err, &notFoundError) {
+		t.Fatalf("RESTConfig(display name) error = %T %v", err, err)
 	}
 }
 
@@ -618,8 +625,8 @@ contexts:
 	if names := contextNames(catalog.Contexts()); !reflect.DeepEqual(names, []string{"first", "second"}) {
 		t.Fatalf("context names = %v", names)
 	}
-	info, ok := catalog.Context("first")
-	if !ok || info.ServerHostname != "first.example.test" {
+	info := requireContextNamed(t, catalog, "first")
+	if info.ServerHostname != "first.example.test" {
 		t.Fatalf("first-precedence context = %#v", info)
 	}
 }
@@ -641,6 +648,51 @@ func contextNames(contexts []ContextInfo) []string {
 		names[index] = contextInfo.Name
 	}
 	return names
+}
+
+func requireContextNamed(t *testing.T, catalog *Catalog, name string) ContextInfo {
+	t.Helper()
+	var matches []ContextInfo
+	for _, info := range catalog.Contexts() {
+		if info.Name == name {
+			matches = append(matches, info)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("contexts named %q = %d, want exactly one", name, len(matches))
+	}
+	info, ok := catalog.Context(matches[0].ID)
+	if !ok {
+		t.Fatalf("context ID %q for %q was not found", matches[0].ID, name)
+	}
+	return info
+}
+
+func requireContextNamedFrom(t *testing.T, catalog *Catalog, name, sourcePath string) ContextInfo {
+	t.Helper()
+	var matches []ContextInfo
+	for _, info := range catalog.Contexts() {
+		if info.Name == name && filepath.Clean(info.ContextSourcePath) == filepath.Clean(sourcePath) {
+			matches = append(matches, info)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("contexts named %q from %q = %d, want exactly one", name, sourcePath, len(matches))
+	}
+	info, ok := catalog.Context(matches[0].ID)
+	if !ok {
+		t.Fatalf("context ID %q for %q from %q was not found", matches[0].ID, name, sourcePath)
+	}
+	return info
+}
+
+func hasContextNamed(catalog *Catalog, name string) bool {
+	for _, info := range catalog.Contexts() {
+		if info.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func writeFile(t *testing.T, path, contents string) {

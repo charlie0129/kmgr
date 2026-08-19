@@ -1795,15 +1795,6 @@ func (r *Runtime) consumeSearchSnapshotLocked(key searchSnapshotKey) *completedS
 	return snapshot
 }
 
-func (r *Runtime) revokeSearchSnapshot(key searchSnapshotKey, snapshot *completedSearchSnapshot) {
-	if snapshot == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.removeSearchSnapshotLocked(key, snapshot)
-}
-
 func (r *Runtime) expireSearchSnapshot(key searchSnapshotKey, snapshot *completedSearchSnapshot) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2126,9 +2117,6 @@ func newSubscription(
 	return subscription
 }
 
-func (s *Subscription) Generation() uint64 { return s.generation }
-func (s *Subscription) ViewID() string     { return s.key.viewID }
-
 // Next waits for one coalesced delivery and returns one or more ordered stream
 // events. Snapshot chunks are bounded even when the retained view is huge.
 func (s *Subscription) Next(ctx context.Context) ([]*kmgrv1.ViewEvent, error) {
@@ -2435,25 +2423,6 @@ func (s *Subscription) applyServerTableBatchLocked(batch watcher.Batch) {
 	}
 }
 
-func (s *Subscription) additionalCellsForObjectsLocked(
-	objects []*unstructured.Unstructured,
-) map[string][]*kmgrv1.Cell {
-	if len(s.serverCells) == 0 || len(objects) == 0 {
-		return nil
-	}
-	result := make(map[string][]*kmgrv1.Cell, len(objects))
-	for _, object := range objects {
-		if object == nil {
-			continue
-		}
-		uid := string(object.GetUID())
-		if cells := s.serverCells[uid]; cells != nil {
-			result[uid] = cells
-		}
-	}
-	return result
-}
-
 // seedClientKnownUIDsUnlocked merges the runtime-owned, successfully sent
 // identity contract into a private replacement before it is published. A
 // compatible prior stream's in-flight batch is included conservatively: some
@@ -2590,16 +2559,6 @@ func (s *Subscription) markReconciledLocked() {
 		return
 	}
 	s.pendingReconciliation = true
-}
-
-func (s *Subscription) queueAuthoritativeResnapshot() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	s.markAuthoritativeResnapshotUnlocked()
-	s.scheduleProjectionLocked()
 }
 
 func (s *Subscription) markAuthoritativeResnapshotUnlocked() {
