@@ -129,7 +129,7 @@ func TestRuntimeReturnsWarmSnapshotBeforeResumeAndAvoidsRelist(t *testing.T) {
 	source := &fakeResourceSource{authority: "cluster-a", client: client}
 	runtime, err := NewRuntime(RuntimeConfig{
 		Source: source, ReleaseDelay: 5 * time.Millisecond, BatchDelay: time.Millisecond,
-		SnapshotChunkSize: 1, PipelineTimeout: time.Second,
+		PipelineTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -155,15 +155,12 @@ func TestRuntimeReturnsWarmSnapshotBeforeResumeAndAvoidsRelist(t *testing.T) {
 		t.Fatal(err)
 	}
 	var freshness []kmgrv1.ViewFreshness
-	var snapshotUIDs []string
 	for _, event := range events {
 		if event.GetStatus() != nil {
 			freshness = append(freshness, event.GetStatus().GetFreshness())
 		}
-		for _, row := range event.GetSnapshot().GetRows() {
-			snapshotUIDs = append(snapshotUIDs, row.GetIdentity().GetUid())
-		}
 	}
+	snapshotUIDs := rangeRowUIDs(invalidationRows(second, events))
 	if !slices.Contains(freshness, kmgrv1.ViewFreshness_VIEW_FRESHNESS_STALE) {
 		t.Fatalf("first warm delivery freshness = %v, missing STALE", freshness)
 	}
@@ -318,7 +315,7 @@ func TestRuntimeAcceptsMatchingLateBatchWhilePipelineStopping(t *testing.T) {
 		store: store.New(), client: client, state: resourceStopping, runNumber: 9,
 		subscribers: make(map[*Subscription]struct{}),
 	}
-	subscription := newSubscription(viewKey{sessionID: "session", viewID: "view"}, 1, projector, time.Hour, 100, 100)
+	subscription := newSubscription(viewKey{sessionID: "session", viewID: "view"}, 1, projector, time.Hour, 100)
 	subscription.resource = entry
 	entry.subscribers[subscription] = struct{}{}
 	runtime.mu.Lock()
@@ -406,8 +403,7 @@ func TestRuntimeDropsReleasedResourceRejectedByWarmObjectBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	var freshness []kmgrv1.ViewFreshness
-	var snapshotRows int
-	var sawEmptySnapshot bool
+	var invalidation *kmgrv1.ViewInvalidation
 	for _, event := range events {
 		if status := event.GetStatus(); status != nil {
 			freshness = append(freshness, status.GetFreshness())
@@ -415,15 +411,14 @@ func TestRuntimeDropsReleasedResourceRejectedByWarmObjectBudget(t *testing.T) {
 				t.Fatalf("cold reopen reported warm-cache status: %#v", status)
 			}
 		}
-		if snapshot := event.GetSnapshot(); snapshot != nil {
-			sawEmptySnapshot = snapshot.GetFirstChunk() && snapshot.GetLastChunk() && len(snapshot.GetRows()) == 0
-			snapshotRows += len(snapshot.GetRows())
+		if event.GetInvalidation() != nil {
+			invalidation = event.GetInvalidation()
 		}
 	}
 	if !slices.Contains(freshness, kmgrv1.ViewFreshness_VIEW_FRESHNESS_LOADING) ||
 		slices.Contains(freshness, kmgrv1.ViewFreshness_VIEW_FRESHNESS_STALE) ||
-		!sawEmptySnapshot || snapshotRows != 0 {
-		t.Fatalf("cold initial delivery: freshness=%v, saw empty snapshot=%t, rows=%d", freshness, sawEmptySnapshot, snapshotRows)
+		invalidation == nil || invalidation.GetRowsVisible() != 0 {
+		t.Fatalf("cold initial delivery: freshness=%v, invalidation=%#v", freshness, invalidation)
 	}
 
 	close(secondListGate)
@@ -760,10 +755,9 @@ func TestRuntimeLastSynchronizedSurvivesWarmResumeRelistAndWatch(t *testing.T) {
 	})
 }
 
-func TestSlowSubscriptionFallsBackToBoundedSnapshot(t *testing.T) {
+func TestSlowSubscriptionCoalescesToOneInvalidationWithoutRows(t *testing.T) {
 	projector := newRuntimeTestProjector(t, "", nil)
 	subscription, _ := newControlledProjectionSubscription(projector)
-	subscription.chunkSize = 2
 	subscription.pendingLimit = 2
 	subscription.resource = &resourceRuntime{store: store.New()}
 
@@ -772,20 +766,22 @@ func TestSlowSubscriptionFallsBackToBoundedSnapshot(t *testing.T) {
 		pod("uid-2", "ns", "two", "Running", 0, nil, time.Time{}),
 		pod("uid-3", "ns", "three", "Running", 0, nil, time.Time{}),
 	}
-	// Runtime batches arrive only after watcher has applied them to the
-	// authoritative store. This direct unit-test injection must mirror that
-	// contract so overflow can fall back to a bounded full resnapshot.
 	for _, object := range objects {
 		subscription.resource.store.Upsert(object)
 	}
 	subscription.applyBatch(watcher.Batch{Upserts: objects})
+	for _, object := range objects {
+		subscription.pendingObjects[string(object.GetUID())] = object
+	}
 	subscription.flushProjection()
 	subscription.mu.Lock()
-	if !subscription.resnapshot || len(subscription.pendingUpserts) != 0 {
-		t.Fatalf("slow mailbox state: resnapshot=%v pending=%d", subscription.resnapshot, len(subscription.pendingUpserts))
-	}
 	subscription.signalLocked(true)
+	debugPending := subscription.pendingInvalidation
+	debugRows := len(subscription.rows)
 	subscription.mu.Unlock()
+	if debugRows != 3 || !debugPending {
+		t.Fatalf("projection state rows=%d pending=%t", debugRows, debugPending)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -793,19 +789,17 @@ func TestSlowSubscriptionFallsBackToBoundedSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunks := 0
-	rows := 0
+	invalidations := 0
 	for _, event := range events {
-		if event.GetSnapshot() != nil {
-			chunks++
-			rows += len(event.GetSnapshot().GetRows())
-			if len(event.GetSnapshot().GetRows()) > 2 {
-				t.Fatal("snapshot chunk exceeded configured bound")
+		if invalidation := event.GetInvalidation(); invalidation != nil {
+			invalidations++
+			if invalidation.GetRowsVisible() != 3 || invalidation.GetMaxRangeLength() != DefaultViewRangeLength {
+				t.Fatalf("invalidation = %#v", invalidation)
 			}
 		}
 	}
-	if chunks != 2 || rows != 3 {
-		t.Fatalf("snapshot chunks=%d rows=%d", chunks, rows)
+	if invalidations != 1 {
+		t.Fatalf("invalidation events = %d, want one coalesced event", invalidations)
 	}
 }
 
@@ -817,7 +811,6 @@ func TestStagedSubscriptionEmitsReconciliationAfterCompleteReplacement(t *testin
 		projector,
 		time.Hour,
 		100,
-		100,
 	)
 	subscription.stageUntilReconciled = true
 	subscription.resource = &resourceRuntime{store: store.New()}
@@ -828,8 +821,8 @@ func TestStagedSubscriptionEmitsReconciliationAfterCompleteReplacement(t *testin
 	)
 
 	initial := drainSubscription(t, subscription)
-	if len(initial) != 2 || initial[0].GetStatus() == nil || initial[1].GetSnapshot() == nil {
-		t.Fatalf("initial staged delivery = %#v, want loading status and empty snapshot", initial)
+	if len(initial) != 2 || initial[0].GetStatus() == nil || initial[1].GetInvalidation() == nil {
+		t.Fatalf("initial staged delivery = %#v, want loading status and empty invalidation", initial)
 	}
 	for _, event := range initial {
 		if event.GetReconciled() != nil {
@@ -892,7 +885,6 @@ func TestSubscriptionCapturesNowOnceForWatchBatch(t *testing.T) {
 		projector,
 		time.Hour,
 		100,
-		100,
 	)
 
 	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
@@ -948,6 +940,8 @@ func TestSubscriptionCoalescesReorderBurstToOneFinalOrder(t *testing.T) {
 	}})
 	flushCapturedProjection(t, scheduled)
 	subscription.mu.Lock()
+	presentationBefore := subscription.presentationRevision
+	indexBefore := subscription.indexRevision
 	subscription.signalLocked(true)
 	subscription.mu.Unlock()
 	drainSubscription(t, subscription)
@@ -958,7 +952,7 @@ func TestSubscriptionCoalescesReorderBurstToOneFinalOrder(t *testing.T) {
 		pod("uid-b", "ns", "b", "Running", 7, nil, time.Time{}),
 	}})
 	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
-		pod("uid-a", "ns", "a", "Running", 4, nil, time.Time{}),
+		pod("uid-a", "ns", "a", "Running", 10, nil, time.Time{}),
 		pod("uid-c", "ns", "c", "Running", 9, nil, time.Time{}),
 	}})
 	subscription.mu.Lock()
@@ -970,19 +964,16 @@ func TestSubscriptionCoalescesReorderBurstToOneFinalOrder(t *testing.T) {
 	subscription.mu.Unlock()
 
 	events := drainSubscription(t, subscription)
-	var delta *kmgrv1.RowDelta
-	for _, event := range events {
-		if event.GetDelta() != nil {
-			delta = event.GetDelta()
-		}
-	}
-	if delta == nil || !delta.GetOrderIsComplete() ||
-		!slices.Equal(delta.GetOrderedUids(), []string{"uid-c", "uid-b", "uid-a"}) {
-		t.Fatalf("reorder delta = %#v", delta)
-	}
+	invalidation := firstInvalidation(events)
 	subscription.mu.Lock()
 	passesAfter := subscription.projectionPasses
+	order := append([]string(nil), subscription.order...)
 	subscription.mu.Unlock()
+	if invalidation == nil || invalidation.GetPresentationRevision() <= presentationBefore ||
+		invalidation.GetIndexRevision() <= indexBefore ||
+		!slices.Equal(order, []string{"uid-a", "uid-c", "uid-b"}) {
+		t.Fatalf("reorder invalidation=%#v order=%v", invalidation, order)
+	}
 	if passesAfter != passesBefore+1 {
 		t.Fatalf("reorder burst projection passes = %d, want %d", passesAfter, passesBefore+1)
 	}
@@ -1001,6 +992,8 @@ func TestSubscriptionNonSortUpdateDoesNotRebuildOrResendCompleteOrder(t *testing
 	}})
 	flushCapturedProjection(t, scheduled)
 	subscription.mu.Lock()
+	presentationBefore := subscription.presentationRevision
+	indexBefore := subscription.indexRevision
 	subscription.signalLocked(true)
 	subscription.mu.Unlock()
 	drainSubscription(t, subscription)
@@ -1018,22 +1011,14 @@ func TestSubscriptionNonSortUpdateDoesNotRebuildOrResendCompleteOrder(t *testing
 	subscription.mu.Unlock()
 
 	events := drainSubscription(t, subscription)
-	var delta *kmgrv1.RowDelta
-	for _, event := range events {
-		if event.GetDelta() != nil {
-			delta = event.GetDelta()
-		}
-	}
-	if delta == nil || len(delta.GetUpserts()) != 1 ||
-		delta.GetUpserts()[0].GetIdentity().GetUid() != "uid-a" {
-		t.Fatalf("non-sort update delta = %#v", delta)
-	}
-	if delta.GetOrderIsComplete() || len(delta.GetOrderedUids()) != 0 {
-		t.Fatalf("non-sort update unnecessarily resent complete order = %#v", delta)
-	}
+	invalidation := firstInvalidation(events)
 	subscription.mu.Lock()
 	order := append([]string(nil), subscription.order...)
 	subscription.mu.Unlock()
+	if invalidation == nil || invalidation.GetPresentationRevision() <= presentationBefore ||
+		invalidation.GetIndexRevision() != indexBefore {
+		t.Fatalf("cell-only invalidation=%#v, before=%d/%d", invalidation, presentationBefore, indexBefore)
+	}
 	if !slices.Equal(order, []string{"uid-c", "uid-b", "uid-a"}) {
 		t.Fatalf("stable order after non-sort update = %v", order)
 	}
@@ -1084,6 +1069,10 @@ func TestSubscriptionRemovalIsPromptWhileProjectionBlocked(t *testing.T) {
 	baseline, _ := projector.ProjectOne(pod("uid-old", "ns", "old", "Running", 0, nil, time.Time{}))
 	subscription.initializeRows([]*kmgrv1.ResourceRow{baseline})
 	drainSubscription(t, subscription)
+	subscription.mu.Lock()
+	presentationBefore := subscription.presentationRevision
+	indexBefore := subscription.indexRevision
+	subscription.mu.Unlock()
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -1108,13 +1097,14 @@ func TestSubscriptionRemovalIsPromptWhileProjectionBlocked(t *testing.T) {
 	}
 	subscription.mu.Lock()
 	_, retained := subscription.rows["uid-old"]
-	_, pendingRemoval := subscription.pendingRemoved["uid-old"]
-	orderDirty := subscription.orderDirty
+	stillOrdered := slices.Contains(subscription.order, "uid-old")
+	presentationAfter := subscription.presentationRevision
+	indexAfter := subscription.indexRevision
 	subscription.mu.Unlock()
-	if retained || pendingRemoval == false || orderDirty {
+	if retained || stillOrdered || presentationAfter <= presentationBefore || indexAfter <= indexBefore {
 		close(release)
-		t.Fatalf("prompt removal state: retained=%t pending=%t order_dirty=%t",
-			retained, pendingRemoval, orderDirty)
+		t.Fatalf("prompt removal state: retained=%t ordered=%t revisions=%d/%d -> %d/%d",
+			retained, stillOrdered, presentationBefore, indexBefore, presentationAfter, indexAfter)
 	}
 
 	close(release)
@@ -1261,347 +1251,6 @@ func TestSubscriptionMetricsRevisionRetriesInFlightProjection(t *testing.T) {
 	}
 }
 
-func TestSubscriptionFullReprojectionPreservesTrueRemoval(t *testing.T) {
-	projector := newRuntimeTestProjector(t, "", nil)
-	subscription, scheduled := newControlledProjectionSubscription(projector)
-	entryStore := store.New()
-	subscription.resource = &resourceRuntime{store: entryStore}
-	object := pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{})
-	entryStore.Upsert(object)
-	row, _ := projector.ProjectOne(object)
-	subscription.initializeRows([]*kmgrv1.ResourceRow{row})
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-
-	entryStore.Delete("uid-a")
-	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-a"}})
-	subscription.applyMetrics(metrics.Snapshot{UpdatedAt: time.Unix(200, 0)})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-
-	events := drainSubscription(t, subscription)
-	sawRemoval := false
-	snapshotUIDs := make([]string, 0)
-	for _, event := range events {
-		sawRemoval = sawRemoval || slices.Contains(event.GetDelta().GetRemovedUids(), "uid-a")
-		for _, snapshotRow := range event.GetSnapshot().GetRows() {
-			snapshotUIDs = append(snapshotUIDs, snapshotRow.GetIdentity().GetUid())
-		}
-	}
-	if !sawRemoval || slices.Contains(snapshotUIDs, "uid-a") {
-		t.Fatalf("full reprojection delivery: removal=%t snapshot_uids=%v events=%#v",
-			sawRemoval, snapshotUIDs, events)
-	}
-}
-
-func TestSubscriptionOverflowPreservesUndrainedTrueRemoval(t *testing.T) {
-	projector := newRuntimeTestProjector(t, "", nil)
-	subscription, _ := newControlledProjectionSubscription(projector)
-	subscription.pendingLimit = 2
-	entryStore := store.New()
-	subscription.resource = &resourceRuntime{store: entryStore}
-	removedObject := pod("uid-old", "ns", "old", "Running", 0, nil, time.Time{})
-	removedRow, _ := projector.ProjectOne(removedObject)
-	subscription.initializeRows([]*kmgrv1.ResourceRow{removedRow})
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-
-	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-old"}})
-	objects := []*unstructured.Unstructured{
-		pod("uid-1", "ns", "one", "Running", 0, nil, time.Time{}),
-		pod("uid-2", "ns", "two", "Running", 0, nil, time.Time{}),
-		pod("uid-3", "ns", "three", "Running", 0, nil, time.Time{}),
-	}
-	for _, object := range objects {
-		entryStore.Upsert(object)
-	}
-	subscription.applyBatch(watcher.Batch{Upserts: objects})
-	subscription.flushProjection()
-	subscription.mu.Lock()
-	_, pending := subscription.pendingRemoved["uid-old"]
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-	if !pending {
-		t.Fatal("overflow fallback discarded an undrained Kubernetes removal")
-	}
-
-	events := drainSubscription(t, subscription)
-	for _, event := range events {
-		if slices.Contains(event.GetDelta().GetRemovedUids(), "uid-old") {
-			return
-		}
-	}
-	t.Fatalf("overflow delivery omitted true removal: %#v", events)
-}
-
-func TestSubscriptionInvisibleUpdatesUseOrderInsteadOfRemoval(t *testing.T) {
-	projector := newRuntimeTestProjector(t, "status:running", nil)
-	subscription, scheduled := newControlledProjectionSubscription(projector)
-	visible := pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{})
-	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{visible}})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-
-	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
-		pod("uid-a", "ns", "api", "Pending", 0, nil, time.Time{}),
-	}})
-	flushCapturedProjection(t, scheduled)
-	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
-		pod("uid-a", "ns", "api", "Failed", 0, nil, time.Time{}),
-	}})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-
-	events := drainSubscription(t, subscription)
-	var delta *kmgrv1.RowDelta
-	for _, event := range events {
-		if event.GetDelta() != nil {
-			delta = event.GetDelta()
-		}
-	}
-	if delta == nil || !delta.GetOrderIsComplete() ||
-		slices.Contains(delta.GetOrderedUids(), "uid-a") ||
-		slices.Contains(delta.GetRemovedUids(), "uid-a") {
-		t.Fatalf("invisible update delta = %#v", delta)
-	}
-}
-
-func TestSubscriptionInvisibleUpsertRetainsUndrainedTrueRemoval(t *testing.T) {
-	projector := newRuntimeTestProjector(t, "status:running", nil)
-	subscription, scheduled := newControlledProjectionSubscription(projector)
-	visible, _ := projector.ProjectOne(pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{}))
-	subscription.initializeRows([]*kmgrv1.ResourceRow{visible})
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-
-	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-a"}})
-	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
-		pod("uid-a", "ns", "api", "Pending", 0, nil, time.Time{}),
-	}})
-	flushCapturedProjection(t, scheduled)
-
-	subscription.mu.Lock()
-	_, pending := subscription.pendingRemoved["uid-a"]
-	subscription.mu.Unlock()
-	if !pending {
-		t.Fatal("invisible same-UID upsert canceled an undrained Kubernetes removal")
-	}
-}
-
-func TestSubscriptionDeleteAfterFilterHidingStillEmitsRemoval(t *testing.T) {
-	projector := newRuntimeTestProjector(t, "status:running", nil)
-	subscription, scheduled := newControlledProjectionSubscription(projector)
-	visible := pod("uid-a", "ns", "api", "Running", 0, nil, time.Time{})
-	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{visible}})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-
-	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
-		pod("uid-a", "ns", "api", "Pending", 0, nil, time.Time{}),
-	}})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-
-	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-a"}})
-	events := drainSubscription(t, subscription)
-	for _, event := range events {
-		if slices.Contains(event.GetDelta().GetRemovedUids(), "uid-a") {
-			return
-		}
-	}
-	t.Fatalf("delete after filter hiding omitted removal: %#v", events)
-}
-
-func TestSubscriptionRemovalMailboxIsBoundedByClientKnownUIDs(t *testing.T) {
-	projector := newRuntimeTestProjector(t, "", nil)
-	subscription, scheduled := newControlledProjectionSubscription(projector)
-	subscription.pendingLimit = 2
-	visible := pod("uid-known", "ns", "known", "Running", 0, nil, time.Time{})
-	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{visible}})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-
-	removed := make([]types.UID, 0, 1001)
-	removed = append(removed, "uid-known")
-	for index := range 1000 {
-		removed = append(removed, types.UID(fmt.Sprintf("uid-unseen-%04d", index)))
-	}
-	subscription.applyBatch(watcher.Batch{RemovedUIDs: removed})
-
-	subscription.mu.Lock()
-	pending := len(subscription.pendingRemoved)
-	_, retainedKnown := subscription.pendingRemoved["uid-known"]
-	known := len(subscription.knownUIDs)
-	subscription.mu.Unlock()
-	if pending != 1 || !retainedKnown || known != 1 {
-		t.Fatalf("bounded removal mailbox: pending=%d retained_known=%t known=%d",
-			pending, retainedKnown, known)
-	}
-	events := drainSubscription(t, subscription)
-	found := false
-	for _, event := range events {
-		found = found || slices.Contains(event.GetDelta().GetRemovedUids(), "uid-known")
-	}
-	if !found {
-		t.Fatalf("bounded mailbox did not deliver known removal: %#v", events)
-	}
-	subscription.mu.Lock()
-	known = len(subscription.knownUIDs)
-	subscription.mu.Unlock()
-	if known != 0 {
-		t.Fatalf("delivered removal retained %d client-known UIDs", known)
-	}
-	for _, event := range events {
-		if delta := event.GetDelta(); delta != nil && len(delta.GetUpserts()) == 0 &&
-			len(delta.GetRemovedUids()) == 0 && !delta.GetOrderIsComplete() {
-			t.Fatalf("removal-only drain emitted empty delta: %#v", events)
-		}
-	}
-}
-
-func TestSubscriptionRemovalOverflowUsesBoundedKnownUIDSet(t *testing.T) {
-	projector := newRuntimeTestProjector(t, "", nil)
-	subscription, scheduled := newControlledProjectionSubscription(projector)
-	objects := []*unstructured.Unstructured{
-		pod("uid-1", "ns", "one", "Running", 0, nil, time.Time{}),
-		pod("uid-2", "ns", "two", "Running", 0, nil, time.Time{}),
-		pod("uid-3", "ns", "three", "Running", 0, nil, time.Time{}),
-	}
-	subscription.applyBatch(watcher.Batch{Upserts: objects})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-	subscription.pendingLimit = 2
-
-	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-1", "uid-2", "uid-3"}})
-	subscription.mu.Lock()
-	pending, known := len(subscription.pendingRemoved), len(subscription.knownUIDs)
-	overflow := subscription.removalOverflow
-	resnapshot := subscription.resnapshot
-	subscription.mu.Unlock()
-	if pending != 2 || known != 3 || !overflow || !resnapshot {
-		t.Fatalf("overflow state: pending=%d known=%d overflow=%t resnapshot=%t",
-			pending, known, overflow, resnapshot)
-	}
-
-	events := drainSubscription(t, subscription)
-	var removed []string
-	for _, event := range events {
-		batch := event.GetDelta().GetRemovedUids()
-		if len(batch) > 2 {
-			t.Fatalf("removal delta size = %d, want <= 2", len(batch))
-		}
-		removed = append(removed, batch...)
-	}
-	slices.Sort(removed)
-	if !slices.Equal(removed, []string{"uid-1", "uid-2", "uid-3"}) {
-		t.Fatalf("overflow removals = %v", removed)
-	}
-}
-
-func TestSubscriptionVisibleUpsertCancelsOnlyItsPendingRemoval(t *testing.T) {
-	projector := newRuntimeTestProjector(t, "", nil)
-	subscription, scheduled := newControlledProjectionSubscription(projector)
-	subscription.pendingLimit = 1
-	objects := []*unstructured.Unstructured{
-		pod("uid-a", "ns", "a", "Running", 0, nil, time.Time{}),
-		pod("uid-b", "ns", "b", "Running", 0, nil, time.Time{}),
-	}
-	subscription.pendingLimit = 100
-	subscription.applyBatch(watcher.Batch{Upserts: objects})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-	subscription.pendingLimit = 1
-
-	subscription.applyBatch(watcher.Batch{RemovedUIDs: []types.UID{"uid-a", "uid-b"}})
-	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{
-		pod("uid-a", "ns", "a-revived", "Running", 1, nil, time.Time{}),
-	}})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-
-	events := drainSubscription(t, subscription)
-	var removed []string
-	var upserted []string
-	for _, event := range events {
-		removed = append(removed, event.GetDelta().GetRemovedUids()...)
-		for _, row := range event.GetDelta().GetUpserts() {
-			upserted = append(upserted, row.GetIdentity().GetUid())
-		}
-		for _, row := range event.GetSnapshot().GetRows() {
-			upserted = append(upserted, row.GetIdentity().GetUid())
-		}
-	}
-	if !slices.Equal(removed, []string{"uid-b"}) || !slices.Contains(upserted, "uid-a") {
-		t.Fatalf("revival delivery: removed=%v upserted=%v events=%#v", removed, upserted, events)
-	}
-}
-
-func TestSubscriptionListRemovalsAreBoundedByClientKnownUIDs(t *testing.T) {
-	projector := newRuntimeTestProjector(t, "", nil)
-	subscription, scheduled := newControlledProjectionSubscription(projector)
-	subscription.pendingLimit = 2
-	visible := pod("uid-known", "ns", "known", "Running", 0, nil, time.Time{})
-	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{visible}})
-	flushCapturedProjection(t, scheduled)
-	subscription.mu.Lock()
-	subscription.signalLocked(true)
-	subscription.mu.Unlock()
-	drainSubscription(t, subscription)
-	drainNotify(subscription)
-
-	removed := make([]types.UID, 0, 1001)
-	removed = append(removed, "uid-known")
-	for index := range 1000 {
-		removed = append(removed, types.UID(fmt.Sprintf("uid-unseen-%04d", index)))
-	}
-	subscription.applyBatch(watcher.Batch{FromList: true, RemovedUIDs: removed})
-
-	subscription.mu.Lock()
-	pending, known := len(subscription.pendingRemoved), len(subscription.knownUIDs)
-	overflow := subscription.removalOverflow
-	subscription.mu.Unlock()
-	if pending != 1 || known != 1 || overflow {
-		t.Fatalf("LIST removal state: pending=%d known=%d overflow=%t", pending, known, overflow)
-	}
-	events := drainSubscription(t, subscription)
-	for _, event := range events {
-		if slices.Contains(event.GetDelta().GetRemovedUids(), "uid-known") {
-			return
-		}
-	}
-	t.Fatalf("LIST reconciliation omitted known removal: %#v", events)
-}
-
 func TestSubscriptionIgnoresStaleScheduledFlushAfterManualFlushAndClose(t *testing.T) {
 	projector := newRuntimeTestProjector(t, "", nil)
 	subscription, scheduled := newControlledProjectionSubscription(projector)
@@ -1654,7 +1303,6 @@ func newControlledProjectionSubscription(
 		1,
 		projector,
 		time.Hour,
-		100,
 		100,
 	)
 	scheduled := make(chan func(), 16)
@@ -1926,14 +1574,9 @@ func TestRuntimeOpenSealsInitialSnapshotAndCatchesUpAfterProjectionRace(t *testi
 	if err := result.subscription.AcknowledgeDelivery(firstEvents); err != nil {
 		t.Fatal(err)
 	}
-	var firstUIDs []string
-	for _, event := range firstEvents {
-		for _, row := range event.GetSnapshot().GetRows() {
-			firstUIDs = append(firstUIDs, row.GetIdentity().GetUid())
-		}
-	}
-	if !slices.Contains(firstUIDs, "uid-old") || slices.Contains(firstUIDs, "uid-new") {
-		t.Fatalf("sealed first snapshot UIDs = %v", firstUIDs)
+	sealedInitial := firstInvalidation(firstEvents)
+	if sealedInitial == nil || sealedInitial.GetRowsVisible() != 1 {
+		t.Fatalf("sealed first invalidation = %#v", sealedInitial)
 	}
 	waitForSnapshotUID(t, result.subscription, "uid-new")
 }
@@ -1991,22 +1634,15 @@ func TestRuntimeOpenDeliversDeleteRaceAfterSealedSnapshot(t *testing.T) {
 	defer result.subscription.Close()
 
 	first := drainSubscription(t, result.subscription)
-	var sealed []string
-	for _, event := range first {
-		for _, row := range event.GetSnapshot().GetRows() {
-			sealed = append(sealed, row.GetIdentity().GetUid())
-		}
-	}
-	if !slices.Contains(sealed, "uid-delete") {
-		t.Fatalf("sealed initial UIDs = %v", sealed)
+	sealed := firstInvalidation(first)
+	if sealed == nil || sealed.GetRowsVisible() != 1 {
+		t.Fatalf("sealed initial invalidation = %#v", sealed)
 	}
 	second := drainSubscription(t, result.subscription)
-	var removed []string
-	for _, event := range second {
-		removed = append(removed, event.GetDelta().GetRemovedUids()...)
-	}
-	if !slices.Contains(removed, "uid-delete") {
-		t.Fatalf("authoritative catch-up removals = %v, events=%#v", removed, second)
+	catchup := firstInvalidation(second)
+	if catchup == nil || catchup.GetRowsVisible() != 0 ||
+		catchup.GetIndexRevision() <= sealed.GetIndexRevision() {
+		t.Fatalf("authoritative catch-up invalidation=%#v, sealed=%#v", catchup, sealed)
 	}
 }
 
@@ -2165,68 +1801,6 @@ func TestRuntimeNewerOpenSupersedesPendingAttemptWithoutClosingCommittedView(t *
 	}
 	if _, err := runtime.Open(openView("session", "same", 2)); !errors.Is(err, ErrStaleViewOpen) {
 		t.Fatalf("older generation reopened: %v", err)
-	}
-}
-
-func TestRuntimeReplacementTransfersClientKnownUIDsAndPendingTombstones(t *testing.T) {
-	t.Parallel()
-	client := newScriptedResource()
-	client.listPages = []*unstructured.UnstructuredList{listPage(
-		"rv-live", "", pod("uid-live", "ns", "live", "Running", 0, nil, time.Time{}),
-	)}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source:       &fakeResourceSource{authority: "cluster-a", client: client},
-		ReleaseDelay: time.Hour,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	first, err := runtime.Open(openView("session", "same", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitForSnapshotUID(t, first, "uid-live")
-	first.deliveryState.mu.Lock()
-	first.deliveryState.knownUIDs["uid-deleted"] = struct{}{}
-	first.deliveryState.mu.Unlock()
-	first.resource.store.Delete("uid-deleted")
-
-	second, err := runtime.Open(openView("session", "same", 2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer second.Close()
-	second.mu.Lock()
-	livePending, liveKnown := second.knownUIDs["uid-live"]
-	deletedPending, deletedKnown := second.knownUIDs["uid-deleted"]
-	_, removalQueued := second.pendingRemoved["uid-deleted"]
-	second.mu.Unlock()
-	if !liveKnown || livePending || !deletedKnown || !deletedPending || !removalQueued {
-		t.Fatalf("transferred known live=(%t,%t) deleted=(%t,%t) queued=%t",
-			liveKnown, livePending, deletedKnown, deletedPending, removalQueued)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	initial, err := second.Next(ctx)
-	cancel()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := second.AcknowledgeDelivery(initial); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
-	events, err := second.Next(ctx)
-	cancel()
-	if err != nil {
-		t.Fatal(err)
-	}
-	removed := make([]string, 0)
-	for _, event := range events {
-		removed = append(removed, event.GetDelta().GetRemovedUids()...)
-	}
-	if !slices.Contains(removed, "uid-deleted") {
-		t.Fatalf("replacement removal events = %v", removed)
 	}
 }
 
@@ -2811,16 +2385,9 @@ func waitForSnapshotUID(t *testing.T, subscription *Subscription, uid string) {
 				t.Fatal(acknowledgeErr)
 			}
 		}
-		for _, event := range events {
-			for _, row := range event.GetSnapshot().GetRows() {
-				if row.GetIdentity().GetUid() == uid {
-					return
-				}
-			}
-			for _, row := range event.GetDelta().GetUpserts() {
-				if row.GetIdentity().GetUid() == uid {
-					return
-				}
+		for _, row := range invalidationRows(subscription, events) {
+			if row.GetIdentity().GetUid() == uid {
+				return
 			}
 		}
 	}
@@ -2842,11 +2409,9 @@ func waitForRow(t *testing.T, subscription *Subscription, uid string) *kmgrv1.Re
 				t.Fatal(acknowledgeErr)
 			}
 		}
-		for _, event := range events {
-			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
-				if row.GetIdentity().GetUid() == uid {
-					return row
-				}
+		for _, row := range invalidationRows(subscription, events) {
+			if row.GetIdentity().GetUid() == uid {
+				return row
 			}
 		}
 	}
@@ -2873,15 +2438,13 @@ func waitForUsageAvailable(
 				t.Fatal(acknowledgeErr)
 			}
 		}
-		for _, event := range events {
-			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
-				if row.GetIdentity().GetUid() != uid {
-					continue
-				}
-				cell := cellByID(row, columnID)
-				if cell.GetUsage().GetUsageAvailable() {
-					return cell
-				}
+		for _, row := range invalidationRows(subscription, events) {
+			if row.GetIdentity().GetUid() != uid {
+				continue
+			}
+			cell := cellByID(row, columnID)
+			if cell.GetUsage().GetUsageAvailable() {
+				return cell
 			}
 		}
 	}

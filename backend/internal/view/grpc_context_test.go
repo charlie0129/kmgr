@@ -183,7 +183,7 @@ func TestStreamViewApplicationDeadlineClosesConsumer(t *testing.T) {
 	}
 }
 
-func TestStreamViewAcknowledgesOnlyCompleteSuccessfulSendBatch(t *testing.T) {
+func TestStreamViewStopsAfterFailedInvalidationSend(t *testing.T) {
 	client := newSearchClient()
 	service := newViewContextService(t, client)
 	request := openView("session", "send-failure", 1)
@@ -210,8 +210,8 @@ func TestStreamViewAcknowledgesOnlyCompleteSuccessfulSendBatch(t *testing.T) {
 		if event.GetStatus() != nil {
 			sendKinds = append(sendKinds, "status")
 		}
-		if event.GetSnapshot() != nil {
-			sendKinds = append(sendKinds, "snapshot")
+		if event.GetInvalidation() != nil {
+			sendKinds = append(sendKinds, "invalidation")
 			return sendFailure
 		}
 		return nil
@@ -220,35 +220,14 @@ func TestStreamViewAcknowledgesOnlyCompleteSuccessfulSendBatch(t *testing.T) {
 	if err := service.StreamView(request, stream); !errors.Is(err, sendFailure) {
 		t.Fatalf("stream error = %v, want injected Send failure", err)
 	}
+	if len(sendKinds) != 2 || sendKinds[0] != "status" || sendKinds[1] != "invalidation" {
+		t.Fatalf("send sequence = %v, want successful status then failed invalidation", sendKinds)
+	}
 	service.runtime.mu.Lock()
-	state := service.runtime.deliveryStates[viewKey{sessionID: "session", viewID: "send-failure"}]
+	_, retained := service.runtime.views[viewKey{sessionID: "session", viewID: "send-failure"}]
 	service.runtime.mu.Unlock()
-	if state == nil {
-		t.Fatal("failed stream lost retained delivery state")
-	}
-	state.mu.Lock()
-	_, retained := state.knownUIDs["uid-a"]
-	state.mu.Unlock()
-	if len(sendKinds) != 2 || sendKinds[0] != "status" || sendKinds[1] != "snapshot" {
-		t.Fatalf("send sequence = %v, want successful status then failed snapshot", sendKinds)
-	}
-	if !retained {
-		t.Fatal("partially sent snapshot identity was not retained conservatively")
-	}
-
-	// The batch was not acknowledged, so a compatible generation must still
-	// reconstruct a tombstone if the possibly delivered row is now absent.
-	entry.store.Delete("uid-a")
-	replacementRequest := openView("session", "send-failure", 2)
-	replacementRequest.Context.RequestId = "send-failure-replacement"
-	replacement, err := service.runtime.Open(replacementRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer replacement.Close()
-	drainSubscription(t, replacement)
-	if events := drainSubscription(t, replacement); !containsRemovedUID(events, "uid-a") {
-		t.Fatalf("replacement omitted partial-send tombstone: %#v", events)
+	if retained {
+		t.Fatal("failed StreamView retained its active subscription")
 	}
 }
 

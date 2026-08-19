@@ -36,7 +36,6 @@ import (
 const (
 	DefaultViewReleaseDelay            = 3 * time.Second
 	DefaultViewBatchDelay              = 35 * time.Millisecond
-	DefaultSnapshotChunk               = 500
 	DefaultPendingRowLimit             = 4096
 	DefaultWarmViewLimit               = 24
 	DefaultWarmObjectLimit             = 250_000
@@ -219,7 +218,6 @@ type RuntimeConfig struct {
 	Columns                     ColumnProgramResolver
 	ReleaseDelay                time.Duration
 	BatchDelay                  time.Duration
-	SnapshotChunkSize           int
 	PendingRowLimit             int
 	WarmViewLimit               int
 	WarmObjectLimit             int
@@ -263,15 +261,14 @@ type AcceleratorConfigProvider interface {
 type Runtime struct {
 	mu sync.Mutex
 
-	source            ResourceSource
-	metrics           MetricSource
-	columns           ColumnProgramResolver
-	releaseDelay      time.Duration
-	batchDelay        time.Duration
-	snapshotChunkSize int
-	pendingRowLimit   int
-	pageSize          int64
-	watchTimeout      time.Duration
+	source          ResourceSource
+	metrics         MetricSource
+	columns         ColumnProgramResolver
+	releaseDelay    time.Duration
+	batchDelay      time.Duration
+	pendingRowLimit int
+	pageSize        int64
+	watchTimeout    time.Duration
 
 	resources                      map[resourceKey]*resourceRuntime
 	views                          map[viewKey]*Subscription
@@ -307,9 +304,7 @@ type Runtime struct {
 	latestFilter       map[viewKey]uint64
 	openHistory        []openGeneration
 	openHistoryLimit   int
-	deliveryStates     map[viewKey]*logicalViewDeliveryState
-
-	closed bool
+	closed             bool
 }
 
 // CachedChild identifies an object already retained by a visible or warm
@@ -411,41 +406,18 @@ const (
 )
 
 type openAttempt struct {
-	key           viewKey
-	generation    uint64
-	entry         *resourceRuntime
-	deliveryState *logicalViewDeliveryState
-	cancel        context.CancelFunc
-	released      bool
-	wasWarm       bool
+	key        viewKey
+	generation uint64
+	entry      *resourceRuntime
+	cancel     context.CancelFunc
+	released   bool
+	wasWarm    bool
 }
 
 type openGeneration struct {
 	key            viewKey
 	generation     uint64
 	filterRevision uint64
-}
-
-// deliverySignature identifies the raw Kubernetes identity universe behind a
-// logical UI view. Filter, sort, and columns intentionally do not participate:
-// changing presentation must retain hidden-row identity and selection, while a
-// different authority, GVR, selector, or namespace scope starts clean.
-type deliverySignature struct {
-	resource       resourceKey
-	namespaceScope string
-}
-
-// logicalViewDeliveryState outlives an individual gRPC stream generation.
-// knownUIDs is the conservative set the client may retain. Successful complete
-// Send batches update it exactly; retirement unions identities from an
-// in-flight batch because a partial transport failure cannot prove which
-// already-successful Send calls reached the client. Extra tombstones are safe;
-// forgetting a possibly delivered identity is not. Runtime.mu protects the
-// deliveryStates map and signature replacement; mu protects this contract.
-type logicalViewDeliveryState struct {
-	mu        sync.Mutex
-	signature deliverySignature
-	knownUIDs map[string]struct{}
 }
 
 type viewKey struct {
@@ -470,10 +442,6 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	batchDelay := config.BatchDelay
 	if batchDelay == 0 {
 		batchDelay = DefaultViewBatchDelay
-	}
-	chunkSize := config.SnapshotChunkSize
-	if chunkSize == 0 {
-		chunkSize = DefaultSnapshotChunk
 	}
 	pendingLimit := config.PendingRowLimit
 	if pendingLimit == 0 {
@@ -519,7 +487,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 			}
 		}
 	}
-	if chunkSize <= 0 || pendingLimit <= 0 || warmViews <= 0 || warmObjects <= 0 ||
+	if pendingLimit <= 0 || warmViews <= 0 || warmObjects <= 0 ||
 		warmBytes <= 0 || warmViewsPerAuthority <= 0 || warmObjectsPerAuthority <= 0 ||
 		warmBytesPerAuthority <= 0 {
 		return nil, errors.New("view runtime limits must be positive")
@@ -556,7 +524,6 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		columns:                        config.Columns,
 		releaseDelay:                   releaseDelay,
 		batchDelay:                     batchDelay,
-		snapshotChunkSize:              chunkSize,
 		pendingRowLimit:                pendingLimit,
 		pageSize:                       config.PipelinePageSize,
 		watchTimeout:                   config.PipelineTimeout,
@@ -586,7 +553,6 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		latestOpen:                     make(map[viewKey]uint64),
 		latestFilter:                   make(map[viewKey]uint64),
 		openHistoryLimit:               openHistoryLimit,
-		deliveryStates:                 make(map[viewKey]*logicalViewDeliveryState),
 	}
 	result.startWarmCacheTelemetry()
 	return result, nil
@@ -679,10 +645,6 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		tableObject: requestedTableObject,
 	}
 	streamKey := viewKey{sessionID: sessionID, viewID: viewID}
-	deliveryIdentity := deliverySignature{
-		resource:       key,
-		namespaceScope: canonicalNamespaceScope(projector.spec.Resource, projector.spec.NamespaceScope),
-	}
 
 	openCtx, cancelOpen := context.WithCancel(ctx)
 	attempt := &openAttempt{key: streamKey, generation: request.GetGeneration(), cancel: cancelOpen}
@@ -717,14 +679,6 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			ErrStaleFilter, filterRevision, latestFilter,
 		)
 	}
-	deliveryState := r.deliveryStates[streamKey]
-	if deliveryState == nil || deliveryState.signature != deliveryIdentity {
-		deliveryState = &logicalViewDeliveryState{
-			signature: deliveryIdentity,
-			knownUIDs: make(map[string]struct{}),
-		}
-	}
-	attempt.deliveryState = deliveryState
 	r.latestOpen[streamKey] = request.GetGeneration()
 	r.latestFilter[streamKey] = filterRevision
 	r.openHistory = append(r.openHistory, openGeneration{
@@ -791,8 +745,17 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	var searchSnapshot *completedSearchSnapshot
 	var transientList *transientSearchList
 	if entry == nil && !usesTableStream {
+		handoffResource := key
+		if namespacePlan.exactFanIn {
+			// Explicit resource search uses one all-namespaces scan plus the same
+			// canonical logical-scope key. The exact namespace fan-in that owns the
+			// subsequent live view may consume that full-object handoff; its local
+			// projector removes any out-of-scope objects before publication, and
+			// the first exact LIST reconciles the raw store.
+			handoffResource.namespace = ""
+		}
 		handoffKey := searchSnapshotKey{
-			resource:       key,
+			resource:       handoffResource,
 			namespaceScope: canonicalNamespaceScope(projector.spec.Resource, projector.spec.NamespaceScope),
 		}
 		transientList = r.transientSearchLists[handoffKey]
@@ -817,7 +780,10 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			subscribers: make(map[*Subscription]struct{}),
 		}
 		if searchSnapshot != nil {
-			entry.snapshotComplete = true
+			// A global search LIST has one collection resourceVersion. An exact
+			// namespace fan-in requires a vector checkpoint, so its handoff is a
+			// stale first paint only and must perform the narrow initial LISTs.
+			entry.snapshotComplete = !namespacePlan.exactFanIn
 			entry.lastStatus = watcher.Status{
 				Phase:            watcher.PhaseResuming,
 				Stale:            true,
@@ -858,14 +824,11 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		request.GetGeneration(),
 		projector,
 		r.batchDelay,
-		r.snapshotChunkSize,
 		r.pendingRowLimit,
 	)
 	subscription.runtime = r
 	subscription.resource = entry
 	subscription.stageUntilReconciled = request.GetStageUntilReconciled()
-	subscription.scopeKey = deliveryIdentity.namespaceScope
-	subscription.deliveryState = attempt.deliveryState
 	acceleratorConfig := metrics.AcceleratorConfig{}
 	if provider, ok := r.columns.(AcceleratorConfigProvider); ok {
 		acceleratorConfig = provider.AcceleratorConfig()
@@ -1012,12 +975,11 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		r.openHandoffHook()
 	}
 
-	// Freeze the committed generation before copying its client identity
-	// contract. Runtime lifecycle paths never wait for Subscription.mu while
-	// holding Runtime.mu, so this is the sole nested order: Subscription.mu then
-	// Runtime.mu. A Next or callback that finishes before this latch is reflected
-	// in the copy; work that was already captured but resumes afterward observes
-	// the retired subscription and cannot mutate or deliver from it.
+	// Freeze the committed generation before publication. Runtime lifecycle
+	// paths never wait for Subscription.mu while holding Runtime.mu, so this is
+	// the sole nested order: Subscription.mu then Runtime.mu. Work that resumes
+	// afterward observes the retired subscription and cannot mutate or deliver
+	// from it.
 	if previous != nil {
 		previous.mu.Lock()
 	}
@@ -1025,8 +987,6 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	if captureReplacedProjection {
 		replacedProjection = previous.captureWarmProjectionUnlocked()
 	}
-	subscription.seedClientKnownUIDsUnlocked(previous)
-
 	// Revalidate after acquiring the handoff latch. A newer attempt or lifecycle
 	// close may have won while the old subscription mutex was contended.
 	r.mu.Lock()
@@ -1064,7 +1024,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		// A callback that advanced the revision before publication is no longer
 		// able to target this subscription. A compact warm projection may also
 		// lag raw events already retained in the store. Its catch-up takes a fresh
-		// store snapshot, so it may use the callback's newer completeness state.
+		// store snapshot.
 		subscription.snapshotComplete = entry.snapshotComplete
 		if usedWarmProjection && entry.state == resourceRunning {
 			subscription.warmCatchupRunNumber = entry.runNumber
@@ -1072,9 +1032,6 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		subscription.markAuthoritativeResnapshotUnlocked()
 	} else {
 		subscription.snapshotComplete = snapshotComplete
-		if subscription.snapshotComplete {
-			subscription.reconcileKnownUIDsWithRawObjectsUnlocked(objects)
-		}
 	}
 	replaced := r.views[streamKey]
 	if replaced != nil {
@@ -1096,7 +1053,6 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	entry.warmProjection = nil
 	entry.subscribers[subscription] = struct{}{}
 	r.views[streamKey] = subscription
-	r.deliveryStates[streamKey] = attempt.deliveryState
 	var replacedMetrics *metrics.Subscription
 	if replaced != nil {
 		replacedMetrics = replaced.retireLocked()
@@ -1207,9 +1163,6 @@ func (r *Runtime) trimOpenHistoryLocked() {
 						r.latestFilter[generation.key] = retained.filterRevision
 					}
 				}
-			}
-			if !r.hasOpenHistoryKeyLocked(generation.key) && r.views[generation.key] == nil && r.openings[generation.key] == nil {
-				delete(r.deliveryStates, generation.key)
 			}
 			removed = true
 			break
@@ -1860,7 +1813,6 @@ func (r *Runtime) Close() {
 	clear(r.openings)
 	clear(r.latestOpen)
 	clear(r.latestFilter)
-	clear(r.deliveryStates)
 	r.openHistory = nil
 	subscriptions := make([]*Subscription, 0, len(r.views))
 	for _, subscription := range r.views {
@@ -2176,17 +2128,16 @@ func (r *Runtime) CachedChildren(sessionID, ownerUID string) []CachedChild {
 	return result
 }
 
-// Subscription is a bounded, coalescing mailbox. Slow clients retain at most
-// PendingRowLimit delta rows before falling back to one newest snapshot.
+// Subscription owns one complete filtered/sorted backend presentation and a
+// bounded, coalescing control-event mailbox. Rows never travel through
+// StreamView; clients fetch only revision-pinned viewport ranges.
 type Subscription struct {
-	runtime       *Runtime
-	resource      *resourceRuntime
-	scopeKey      string
-	deliveryState *logicalViewDeliveryState
-	key           viewKey
-	metricPlan    metricViewPlan
-	metrics       *metrics.Subscription
-	metricCancel  context.CancelFunc
+	runtime      *Runtime
+	resource     *resourceRuntime
+	key          viewKey
+	metricPlan   metricViewPlan
+	metrics      *metrics.Subscription
+	metricCancel context.CancelFunc
 
 	mu                      sync.Mutex
 	generation              uint64
@@ -2195,8 +2146,9 @@ type Subscription struct {
 	projectionCacheKey      projectionCacheKey
 	rows                    map[string]*kmgrv1.ResourceRow
 	order                   []string
-	pendingUpserts          map[string]*kmgrv1.ResourceRow
-	pendingRemoved          map[string]struct{}
+	presentationRevision    uint64
+	indexRevision           uint64
+	pendingInvalidation     bool
 	pendingStatuses         []*kmgrv1.ViewStatus
 	pendingError            *kmgrv1.StructuredError
 	pendingSchema           *kmgrv1.ViewSchema
@@ -2208,10 +2160,8 @@ type Subscription struct {
 	serverColumns           []projectedTableColumn
 	serverCells             map[string][]*kmgrv1.Cell
 	optionalResourceHints   optionalResourceStreamHints
-	knownUIDs               map[string]bool
 	inFlightDelivery        *subscriptionDelivery
 	pendingObjects          map[string]*unstructured.Unstructured
-	removalOverflow         bool
 	projectionTimer         *time.Timer
 	projectionScheduled     bool
 	projectionRunning       bool
@@ -2222,8 +2172,9 @@ type Subscription struct {
 	projectedObjects        uint64
 	projectionContext       context.Context
 	cancelProjection        context.CancelFunc
-	// snapshotComplete permits raw-store absence to prove deletion. Cold and
-	// progressive LIST stores remain incomplete until their final page commits.
+	// snapshotComplete records whether this generation crossed an authoritative
+	// initial LIST/WatchList barrier. It gates staged reconciliation and warm
+	// catch-up status; it is not client row-delivery state.
 	snapshotComplete bool
 	// warmCatchupRunNumber identifies an already-running pipeline whose compact
 	// cached rows were sealed as a stale first paint. Once the mandatory full
@@ -2235,13 +2186,10 @@ type Subscription struct {
 	// scheduleProjection is replaced by tests to make coalescing flushes
 	// deterministic. Production uses one batchDelay timer.
 	scheduleProjection func(func()) *time.Timer
-	orderDirty         bool
-	resnapshot         bool
 	notify             chan struct{}
 	done               chan struct{}
 	timer              *time.Timer
 	batchDelay         time.Duration
-	chunkSize          int
 	pendingLimit       int
 	closed             bool
 }
@@ -2249,7 +2197,6 @@ type Subscription struct {
 type subscriptionDelivery struct {
 	generation   uint64
 	lastSequence uint64
-	knownUIDs    map[string]struct{}
 }
 
 func newSubscription(
@@ -2257,27 +2204,24 @@ func newSubscription(
 	generation uint64,
 	projector *Projector,
 	batchDelay time.Duration,
-	chunkSize int,
 	pendingLimit int,
 ) *Subscription {
 	projectionContext, cancelProjection := context.WithCancel(context.Background())
 	subscription := &Subscription{
-		key:                key,
-		generation:         generation,
-		projector:          projector,
-		projectionCacheKey: projector.cacheKey,
-		rows:               make(map[string]*kmgrv1.ResourceRow),
-		pendingUpserts:     make(map[string]*kmgrv1.ResourceRow),
-		pendingRemoved:     make(map[string]struct{}),
-		knownUIDs:          make(map[string]bool),
-		pendingObjects:     make(map[string]*unstructured.Unstructured),
-		notify:             make(chan struct{}, 1),
-		done:               make(chan struct{}),
-		batchDelay:         batchDelay,
-		chunkSize:          chunkSize,
-		pendingLimit:       pendingLimit,
-		projectionContext:  projectionContext,
-		cancelProjection:   cancelProjection,
+		key:                  key,
+		generation:           generation,
+		projector:            projector,
+		projectionCacheKey:   projector.cacheKey,
+		rows:                 make(map[string]*kmgrv1.ResourceRow),
+		presentationRevision: 1,
+		indexRevision:        1,
+		pendingObjects:       make(map[string]*unstructured.Unstructured),
+		notify:               make(chan struct{}, 1),
+		done:                 make(chan struct{}),
+		batchDelay:           batchDelay,
+		pendingLimit:         pendingLimit,
+		projectionContext:    projectionContext,
+		cancelProjection:     cancelProjection,
 	}
 	subscription.scheduleProjection = func(flush func()) *time.Timer {
 		return time.AfterFunc(batchDelay, flush)
@@ -2285,8 +2229,9 @@ func newSubscription(
 	return subscription
 }
 
-// Next waits for one coalesced delivery and returns one or more ordered stream
-// events. Snapshot chunks are bounded even when the retained view is huge.
+// Next waits for one coalesced delivery and returns ordered control events.
+// One batch must be acknowledged before another Next call so concurrent stream
+// consumers cannot reorder cursors.
 func (s *Subscription) Next(ctx context.Context) ([]*kmgrv1.ViewEvent, error) {
 	select {
 	case <-ctx.Done():
@@ -2306,15 +2251,13 @@ func (s *Subscription) Next(ctx context.Context) ([]*kmgrv1.ViewEvent, error) {
 	}
 	events := s.drainLocked()
 	if len(events) != 0 {
-		s.inFlightDelivery = s.deliveryContractLocked(events)
+		s.inFlightDelivery = deliveryContract(events)
 	}
 	return events, nil
 }
 
-// AcknowledgeDelivery commits the exact client identity set only after every
-// event returned by one Next call was sent successfully. A failed or partial
-// gRPC Send leaves the shared contract unchanged, so a compatible replacement
-// generation can reconstruct any required tombstone from the raw store.
+// AcknowledgeDelivery releases the in-flight cursor batch only after every
+// event returned by one Next call was sent successfully.
 func (s *Subscription) AcknowledgeDelivery(events []*kmgrv1.ViewEvent) error {
 	if len(events) == 0 {
 		return nil
@@ -2327,20 +2270,12 @@ func (s *Subscription) AcknowledgeDelivery(events []*kmgrv1.ViewEvent) error {
 		pending.lastSequence != contract.lastSequence {
 		return ErrDeliveryPending
 	}
-	if s.deliveryState != nil {
-		s.deliveryState.mu.Lock()
-		clear(s.deliveryState.knownUIDs)
-		for uid := range pending.knownUIDs {
-			s.deliveryState.knownUIDs[uid] = struct{}{}
-		}
-		s.deliveryState.mu.Unlock()
-	}
 	s.inFlightDelivery = nil
 	return nil
 }
 
 func deliveryContract(events []*kmgrv1.ViewEvent) *subscriptionDelivery {
-	contract := &subscriptionDelivery{knownUIDs: make(map[string]struct{})}
+	contract := &subscriptionDelivery{}
 	for _, event := range events {
 		if event == nil {
 			continue
@@ -2349,63 +2284,8 @@ func deliveryContract(events []*kmgrv1.ViewEvent) *subscriptionDelivery {
 			contract.generation = cursor.GetGeneration()
 			contract.lastSequence = cursor.GetSequence()
 		}
-		if snapshot := event.GetSnapshot(); snapshot != nil {
-			for _, row := range snapshot.GetRows() {
-				if uid := row.GetIdentity().GetUid(); uid != "" {
-					contract.knownUIDs[uid] = struct{}{}
-				}
-			}
-		}
-		if delta := event.GetDelta(); delta != nil {
-			for _, uid := range delta.GetRemovedUids() {
-				delete(contract.knownUIDs, uid)
-			}
-			for _, row := range delta.GetUpserts() {
-				if uid := row.GetIdentity().GetUid(); uid != "" {
-					contract.knownUIDs[uid] = struct{}{}
-				}
-			}
-		}
 	}
 	return contract
-}
-
-func (s *Subscription) deliveryContractLocked(events []*kmgrv1.ViewEvent) *subscriptionDelivery {
-	contract := deliveryContract(events)
-	if s.deliveryState != nil {
-		s.deliveryState.mu.Lock()
-		for uid := range s.deliveryState.knownUIDs {
-			contract.knownUIDs[uid] = struct{}{}
-		}
-		s.deliveryState.mu.Unlock()
-	}
-	applyDeliveryEvents(contract.knownUIDs, events)
-	return contract
-}
-
-func applyDeliveryEvents(knownUIDs map[string]struct{}, events []*kmgrv1.ViewEvent) {
-	for _, event := range events {
-		if event == nil {
-			continue
-		}
-		if snapshot := event.GetSnapshot(); snapshot != nil {
-			for _, row := range snapshot.GetRows() {
-				if uid := row.GetIdentity().GetUid(); uid != "" {
-					knownUIDs[uid] = struct{}{}
-				}
-			}
-		}
-		if delta := event.GetDelta(); delta != nil {
-			for _, uid := range delta.GetRemovedUids() {
-				delete(knownUIDs, uid)
-			}
-			for _, row := range delta.GetUpserts() {
-				if uid := row.GetIdentity().GetUid(); uid != "" {
-					knownUIDs[uid] = struct{}{}
-				}
-			}
-		}
-	}
 }
 
 func (s *Subscription) Close() {
@@ -2473,12 +2353,13 @@ func (s *Subscription) initializeRows(rows []*kmgrv1.ResourceRow) {
 		s.rows[uid] = row
 		s.order = append(s.order, uid)
 	}
-	clear(s.pendingUpserts)
-	clear(s.pendingRemoved)
-	clear(s.knownUIDs)
-	s.removalOverflow = false
-	s.resnapshot = true
-	s.orderDirty = false
+	if s.presentationRevision == 0 {
+		s.presentationRevision = 1
+	}
+	if s.indexRevision == 0 {
+		s.indexRevision = 1
+	}
+	s.pendingInvalidation = true
 	s.signalLocked(true)
 }
 
@@ -2490,16 +2371,17 @@ func (s *Subscription) initializeRows(rows []*kmgrv1.ResourceRow) {
 func (s *Subscription) initializeSealedRows(rows []*kmgrv1.ResourceRow) {
 	clear(s.rows)
 	s.order = s.order[:0]
-	clear(s.pendingUpserts)
-	clear(s.pendingRemoved)
 	s.pendingStatuses = nil
 	s.pendingError = nil
 	s.pendingSchema = nil
 	clear(s.pendingObjects)
-	clear(s.knownUIDs)
-	s.removalOverflow = false
-	s.orderDirty = false
-	s.resnapshot = false
+	s.pendingInvalidation = false
+	if s.presentationRevision == 0 {
+		s.presentationRevision = 1
+	}
+	if s.indexRevision == 0 {
+		s.indexRevision = 1
+	}
 	for _, row := range rows {
 		uid := row.GetIdentity().GetUid()
 		if uid == "" {
@@ -2507,7 +2389,6 @@ func (s *Subscription) initializeSealedRows(rows []*kmgrv1.ResourceRow) {
 		}
 		s.rows[uid] = row
 		s.order = append(s.order, uid)
-		s.knownUIDs[uid] = false
 	}
 }
 
@@ -2591,61 +2472,9 @@ func (s *Subscription) applyServerTableBatchLocked(batch watcher.Batch) {
 	}
 }
 
-// seedClientKnownUIDsUnlocked merges the runtime-owned, successfully sent
-// identity contract into a private replacement before it is published. A
-// compatible prior stream's in-flight batch is included conservatively: some
-// events may have reached the client before a transport failure, even though
-// the whole batch was never acknowledged. The sealed snapshot rows remain in
-// the working set as prospective identities; they do not enter shared state
-// until AcknowledgeDelivery succeeds.
-func (s *Subscription) seedClientKnownUIDsUnlocked(previous *Subscription) {
-	if s.deliveryState == nil {
-		return
-	}
-	s.deliveryState.mu.Lock()
-	defer s.deliveryState.mu.Unlock()
-	for uid := range s.deliveryState.knownUIDs {
-		if uid != "" {
-			s.knownUIDs[uid] = false
-		}
-	}
-	if previous == nil || previous.deliveryState != s.deliveryState || previous.inFlightDelivery == nil {
-		return
-	}
-	for uid := range previous.inFlightDelivery.knownUIDs {
-		if uid != "" {
-			s.knownUIDs[uid] = false
-		}
-	}
-}
-
-// reconcileKnownUIDsWithRawObjectsUnlocked distinguishes filter invisibility
-// from Kubernetes deletion. A UID retained by the client remains known while
-// it exists in the raw store even if the new projection hides it; an absent UID
-// is queued as a true tombstone behind the sealed initial delivery.
-func (s *Subscription) reconcileKnownUIDsWithRawObjectsUnlocked(objects []*unstructured.Unstructured) {
-	present := make(map[string]struct{}, len(objects))
-	for _, object := range objects {
-		if object == nil || object.GetUID() == "" {
-			continue
-		}
-		present[string(object.GetUID())] = struct{}{}
-	}
-	for uid, pendingRemoval := range s.knownUIDs {
-		if _, exists := present[uid]; exists {
-			s.knownUIDs[uid] = false
-			delete(s.pendingRemoved, uid)
-			continue
-		}
-		if !pendingRemoval {
-			s.enqueueRemovalLocked(uid)
-		}
-	}
-}
-
-// sealInitial snapshots the first cached delivery into immutable protobuf
-// events. Later LIST/WATCH/metrics work mutates only the ordinary mailbox and
-// can therefore never overtake or rewrite what the client first observes.
+// sealInitial snapshots the first cached control delivery into immutable
+// protobuf events. Later LIST/WATCH/metrics work mutates only the ordinary
+// mailbox and can therefore never overtake it.
 func (s *Subscription) sealInitial(
 	status *kmgrv1.ViewStatus,
 	rows []*kmgrv1.ResourceRow,
@@ -2680,37 +2509,22 @@ func (s *Subscription) sealInitialUnlocked(
 		})
 	}
 	observedOptionalResources := s.optionalResourceHints.takePendingLocked()
-	if len(rows) == 0 {
-		s.sealedInitial = append(s.sealedInitial, &kmgrv1.ViewEvent{
-			Payload: &kmgrv1.ViewEvent_Snapshot{Snapshot: &kmgrv1.SnapshotChunk{
-				FirstChunk: true, LastChunk: true,
-				ObservedOptionalResourceKeys:          observedOptionalResources.keys,
-				ObservedOptionalResourceKeysTruncated: observedOptionalResources.truncated,
-			}},
-		})
-	} else {
-		for start, index := 0, uint64(0); start < len(rows); start, index = start+s.chunkSize, index+1 {
-			end := min(start+s.chunkSize, len(rows))
-			s.sealedInitial = append(s.sealedInitial, &kmgrv1.ViewEvent{
-				Payload: &kmgrv1.ViewEvent_Snapshot{Snapshot: &kmgrv1.SnapshotChunk{
-					Rows:       append([]*kmgrv1.ResourceRow(nil), rows[start:end]...),
-					FirstChunk: start == 0, LastChunk: end == len(rows),
-					ChunkIndex: index, EstimatedTotalRows: uint64(len(rows)),
-					ObservedOptionalResourceKeys: func() []string {
-						if start == 0 {
-							return observedOptionalResources.keys
-						}
-						return nil
-					}(),
-					ObservedOptionalResourceKeysTruncated: start == 0 && observedOptionalResources.truncated,
-				}},
-			})
-		}
-	}
+	s.sealedInitial = append(s.sealedInitial, &kmgrv1.ViewEvent{
+		Payload: &kmgrv1.ViewEvent_Invalidation{Invalidation: &kmgrv1.ViewInvalidation{
+			PresentationRevision:                  s.presentationRevision,
+			IndexRevision:                         s.indexRevision,
+			RowsVisible:                           uint64(len(s.order)),
+			MaxRangeLength:                        DefaultViewRangeLength,
+			ObservedOptionalResourceKeys:          observedOptionalResources.keys,
+			ObservedOptionalResourceKeysTruncated: observedOptionalResources.truncated,
+		}},
+	})
 	if reconciled {
 		s.sealedInitial = append(s.sealedInitial, &kmgrv1.ViewEvent{
 			Payload: &kmgrv1.ViewEvent_Reconciled{Reconciled: &kmgrv1.ViewReconciled{
-				RowsVisible: uint64(len(rows)),
+				RowsVisible:          uint64(len(s.order)),
+				PresentationRevision: s.presentationRevision,
+				IndexRevision:        s.indexRevision,
 			}},
 		})
 		s.reconciliationDelivered = true
@@ -2750,10 +2564,6 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 	}
 	observedOptionalResourceKeys := s.optionalResourceHints.extract(batch.Upserts)
 	s.flushProjection()
-	var completeObjects []*unstructured.Unstructured
-	if batch.SnapshotComplete && s.resource != nil {
-		completeObjects = s.resource.store.Snapshot()
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -2772,49 +2582,57 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 	clear(s.pendingObjects)
 	s.projectionResnapshot = false
 	batchProjector := s.projector.beginBatch()
+	presentationChanged := false
+	var previousOrder []string
+	orderCandidate := false
+	markOrderCandidate := func() {
+		orderCandidate = true
+		if previousOrder == nil {
+			previousOrder = append([]string(nil), s.order...)
+		}
+	}
 	for _, uid := range batch.RemovedUIDs {
 		key := string(uid)
+		if s.rows[key] == nil {
+			continue
+		}
+		markOrderCandidate()
 		delete(s.rows, key)
-		delete(s.pendingUpserts, key)
-		s.enqueueRemovalLocked(key)
-		s.orderDirty = true
+		presentationChanged = true
 	}
 	for _, object := range batch.Upserts {
+		if object == nil || object.GetUID() == "" {
+			continue
+		}
 		uid := string(object.GetUID())
 		previous := s.rows[uid]
 		row, visible := batchProjector.projectOneWithCells(object, s.serverCells[uid])
 		if !visible {
 			if previous != nil {
+				markOrderCandidate()
 				delete(s.rows, uid)
-				delete(s.pendingUpserts, uid)
-				s.orderDirty = true
+				presentationChanged = true
 			}
 			continue
 		}
-		delete(s.pendingRemoved, uid)
-		if s.knownUIDs != nil {
-			s.knownUIDs[uid] = false
+		if previous == nil || s.projector.compareRows(previous, row) != 0 {
+			markOrderCandidate()
 		}
 		s.rows[uid] = row
-		s.pendingUpserts[uid] = row
-		if previous == nil || s.projector.compareRows(previous, row) != 0 {
-			s.orderDirty = true
+		if previous == nil || !proto.Equal(previous, row) {
+			presentationChanged = true
 		}
 	}
-	if batch.SnapshotComplete {
-		// The store is reconciled before the final LIST callback. Only now can
-		// absence prove deletion for identities retained across generations.
-		s.snapshotComplete = true
-		s.reconcileKnownUIDsWithRawObjectsUnlocked(completeObjects)
-	}
-	if s.orderDirty {
+	indexChanged := false
+	if orderCandidate {
 		s.rebuildOrderLocked()
+		indexChanged = !slices.Equal(previousOrder, s.order)
 	}
-	if len(s.pendingUpserts)+len(s.pendingRemoved) > s.pendingLimit {
-		s.resnapshot = true
-		clear(s.pendingUpserts)
+	if presentationChanged || indexChanged {
+		s.advancePresentationLocked(indexChanged)
 	}
 	if batch.SnapshotComplete {
+		s.snapshotComplete = true
 		s.pendingStatuses = append(s.pendingStatuses, &kmgrv1.ViewStatus{
 			Freshness:              kmgrv1.ViewFreshness_VIEW_FRESHNESS_WATCHING,
 			ObjectsExamined:        uint64(batch.ObjectsListed),
@@ -2847,7 +2665,7 @@ func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
 		s.projectionResnapshot = true
 	}
 	s.optionalResourceHints.observeLocked(observedOptionalResourceKeys)
-	removed := false
+	presentationChanged := false
 	for _, uid := range batch.RemovedUIDs {
 		key := string(uid)
 		if key == "" {
@@ -2861,13 +2679,12 @@ func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
 		if s.projectionRunning && s.resource != nil {
 			s.projectionResnapshot = true
 		}
-		delete(s.rows, key)
-		delete(s.pendingUpserts, key)
-		// The client can retain a filter-hidden identity for selection even
-		// after it is absent from rows. Every valid Kubernetes tombstone must
-		// therefore be delivered, regardless of current projection visibility.
-		if s.enqueueRemovalLocked(key) {
-			removed = true
+		if previous := s.rows[key]; previous != nil {
+			s.order, _ = removeOrderedRow(
+				s.order, s.rows, key, previous, s.projector.compareRows,
+			)
+			delete(s.rows, key)
+			presentationChanged = true
 		}
 	}
 	for _, object := range batch.Upserts {
@@ -2881,7 +2698,8 @@ func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
 		clear(s.pendingObjects)
 		s.projectionResnapshot = true
 	}
-	if removed {
+	if presentationChanged {
+		s.advancePresentationLocked(true)
 		s.signalLocked(true)
 	}
 	if s.pendingSchema != nil {
@@ -2890,28 +2708,6 @@ func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
 	if len(s.pendingObjects) != 0 || s.projectionResnapshot {
 		s.scheduleProjectionLocked()
 	}
-}
-
-func (s *Subscription) enqueueRemovalLocked(uid string) bool {
-	if uid == "" {
-		return false
-	}
-	pending, known := s.knownUIDs[uid]
-	if s.knownUIDs != nil && !known {
-		return false
-	}
-	if len(s.pendingRemoved) < s.pendingLimit {
-		s.pendingRemoved[uid] = struct{}{}
-	} else {
-		s.removalOverflow = true
-	}
-	if s.knownUIDs != nil {
-		s.knownUIDs[uid] = true
-	}
-	if len(s.pendingRemoved) >= s.pendingLimit || s.removalOverflow {
-		s.resnapshot = true
-	}
-	return !pending
 }
 
 func (s *Subscription) scheduleProjectionLocked() {
@@ -2993,7 +2789,6 @@ func (s *Subscription) runProjection() {
 		revision := s.projectionRevision
 		projector := s.projector
 		full := s.projectionResnapshot
-		snapshotComplete := s.snapshotComplete
 		s.projectionResnapshot = false
 		objects := make([]*unstructured.Unstructured, 0, len(s.pendingObjects))
 		for _, object := range s.pendingObjects {
@@ -3035,10 +2830,6 @@ func (s *Subscription) runProjection() {
 			}
 			objects, projectionErr = resource.store.SnapshotContext(projectionContext)
 		}
-		var rawUIDs map[string]struct{}
-		if full && snapshotComplete {
-			rawUIDs = make(map[string]struct{}, len(objects))
-		}
 		var projectedRows map[string]*kmgrv1.ResourceRow
 		if !full {
 			projectedRows = make(map[string]*kmgrv1.ResourceRow, len(objects))
@@ -3056,9 +2847,6 @@ func (s *Subscription) runProjection() {
 					continue
 				}
 				projectedObjects++
-				if rawUIDs != nil {
-					rawUIDs[string(object.GetUID())] = struct{}{}
-				}
 			}
 			if projectionErr == nil {
 				ordered, projectionErr = projector.ProjectContextWithAdditionalCells(
@@ -3082,9 +2870,6 @@ func (s *Subscription) runProjection() {
 				}
 				projectedObjects++
 				uid := string(object.GetUID())
-				if rawUIDs != nil {
-					rawUIDs[uid] = struct{}{}
-				}
 				var row *kmgrv1.ResourceRow
 				var visible bool
 				projectionErr = runProjectionWorker(projectionContext, func() error {
@@ -3149,33 +2934,37 @@ func (s *Subscription) runProjection() {
 			return
 		}
 		if full {
-			s.rows = baseRows
-			s.order = s.order[:0]
+			previousRows := s.rows
+			previousOrder := s.order
+			nextOrder := make([]string, 0, len(ordered))
 			for _, row := range ordered {
-				s.order = append(s.order, row.GetIdentity().GetUid())
+				nextOrder = append(nextOrder, row.GetIdentity().GetUid())
 			}
-			clear(s.pendingUpserts)
-			if s.knownUIDs != nil {
-				for uid, pendingRemoval := range s.knownUIDs {
-					if _, exists := rawUIDs[uid]; exists {
-						s.knownUIDs[uid] = false
-						delete(s.pendingRemoved, uid)
-						continue
-					}
-					if snapshotComplete && !pendingRemoval {
-						s.enqueueRemovalLocked(uid)
-					}
-				}
-				for uid := range s.rows {
-					s.knownUIDs[uid] = false
-					delete(s.pendingRemoved, uid)
-				}
+			presentationChanged := !resourceRowsEqual(previousRows, baseRows)
+			indexChanged := !slices.Equal(previousOrder, nextOrder)
+			s.rows = baseRows
+			s.order = nextOrder
+			if presentationChanged || indexChanged {
+				s.advancePresentationLocked(indexChanged)
 			}
-			s.resnapshot = true
-			s.orderDirty = false
 			s.publishWarmCatchupStatusLocked()
 		} else {
-			orderChanged := false
+			var previousOrder []string
+			orderCandidate := false
+			for _, object := range objects {
+				if object == nil || object.GetUID() == "" {
+					continue
+				}
+				uid := string(object.GetUID())
+				previous, row := s.rows[uid], projectedRows[uid]
+				if (previous == nil) != (row == nil) ||
+					(previous != nil && row != nil && projector.compareRows(previous, row) != 0) {
+					orderCandidate = true
+					previousOrder = append([]string(nil), s.order...)
+					break
+				}
+			}
+			presentationChanged := false
 			for _, object := range objects {
 				if object == nil || object.GetUID() == "" {
 					continue
@@ -3192,9 +2981,8 @@ func (s *Subscription) runProjection() {
 							s.order, s.rows, uid, previous, projector.compareRows,
 						)
 						delete(s.rows, uid)
-						orderChanged = true
+						presentationChanged = true
 					}
-					delete(s.pendingUpserts, uid)
 					continue
 				}
 				rowMoved := previous == nil || projector.compareRows(previous, row) != 0
@@ -3206,25 +2994,23 @@ func (s *Subscription) runProjection() {
 				s.rows[uid] = row
 				if rowMoved {
 					s.order = insertOrderedRow(s.order, s.rows, uid, row, projector.compareRows)
-					orderChanged = true
 				}
-				delete(s.pendingRemoved, uid)
-				if s.knownUIDs != nil {
-					s.knownUIDs[uid] = false
+				if previous == nil || !proto.Equal(previous, row) {
+					presentationChanged = true
 				}
-				s.pendingUpserts[uid] = row
 			}
-			s.orderDirty = s.orderDirty || orderChanged
+			indexChanged := orderCandidate && !slices.Equal(previousOrder, s.order)
+			if presentationChanged || indexChanged {
+				s.advancePresentationLocked(indexChanged)
+			}
 		}
 		// Rows and their complete order changed as one atomic projection
 		// commit. Advance the revision so a concurrent LIST projection that
 		// started from older rows cannot later replace this state.
 		s.projectionRevision++
-		if len(s.pendingUpserts)+len(s.pendingRemoved) > s.pendingLimit {
-			s.resnapshot = true
-			clear(s.pendingUpserts)
+		if s.hasPendingDeliveryLocked() {
+			s.signalLocked(false)
 		}
-		s.signalLocked(false)
 		if len(s.pendingObjects) == 0 && !s.projectionResnapshot {
 			s.projectionRunning = false
 			s.mu.Unlock()
@@ -3305,6 +3091,32 @@ func insertOrderedRow(
 	copy(order[index+1:], order[index:])
 	order[index] = uid
 	return order
+}
+
+func resourceRowsEqual(left, right map[string]*kmgrv1.ResourceRow) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for uid, leftRow := range left {
+		if !proto.Equal(leftRow, right[uid]) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Subscription) advancePresentationLocked(indexChanged bool) {
+	if s.presentationRevision == 0 {
+		s.presentationRevision = 1
+	} else {
+		s.presentationRevision++
+	}
+	if s.indexRevision == 0 {
+		s.indexRevision = 1
+	} else if indexChanged {
+		s.indexRevision++
+	}
+	s.pendingInvalidation = true
 }
 
 func (s *Subscription) rebuildOrderLocked() {
@@ -3389,7 +3201,6 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 		for _, event := range events {
 			event.Cursor = s.cursorLocked()
 		}
-		s.updateKnownUIDsLocked(events)
 		if s.hasPendingDeliveryLocked() {
 			s.signalLocked(true)
 		}
@@ -3404,85 +3215,17 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 		events = append(events, s.statusEventLocked(status))
 	}
 	s.pendingStatuses = nil
-	if s.resnapshot {
-		// WATCH removals deliberately leave tombstones in order so ingestion is
-		// bounded map work. Compact once only when a slow client needs a full
-		// snapshot; ordinary removal deltas need no replacement order because
-		// clients preserve survivor order themselves.
-		if len(s.order) != len(s.rows) {
-			kept := 0
-			for _, uid := range s.order {
-				if s.rows[uid] == nil {
-					continue
-				}
-				s.order[kept] = uid
-				kept++
-			}
-			clear(s.order[kept:])
-			s.order = s.order[:kept]
-		}
-		// Snapshot order controls visibility but does not prove Kubernetes
-		// deletion to clients. Preserve and emit true tombstones separately so
-		// a concurrent metrics/overflow full projection cannot turn a delete
-		// into a hidden ghost row or retained selection.
-		events = s.appendRemovalEventsLocked(events)
+	if s.pendingInvalidation || s.optionalResourceHints.hasPendingLocked() {
 		observedOptionalResources := s.optionalResourceHints.takePendingLocked()
-		if len(s.order) == 0 {
-			events = append(events, s.snapshotEventLocked(&kmgrv1.SnapshotChunk{
-				FirstChunk: true, LastChunk: true,
-				ObservedOptionalResourceKeys:          observedOptionalResources.keys,
-				ObservedOptionalResourceKeysTruncated: observedOptionalResources.truncated,
-			}))
-		} else {
-			for start, index := 0, uint64(0); start < len(s.order); start, index = start+s.chunkSize, index+1 {
-				end := min(start+s.chunkSize, len(s.order))
-				rows := make([]*kmgrv1.ResourceRow, 0, end-start)
-				for _, uid := range s.order[start:end] {
-					rows = append(rows, s.rows[uid])
-				}
-				events = append(events, s.snapshotEventLocked(&kmgrv1.SnapshotChunk{
-					Rows: rows, FirstChunk: start == 0, LastChunk: end == len(s.order),
-					ChunkIndex: index, EstimatedTotalRows: uint64(len(s.order)),
-					ObservedOptionalResourceKeys: func() []string {
-						if start == 0 {
-							return observedOptionalResources.keys
-						}
-						return nil
-					}(),
-					ObservedOptionalResourceKeysTruncated: start == 0 && observedOptionalResources.truncated,
-				}))
-			}
-		}
-		s.resnapshot = false
-		s.orderDirty = false
-		clear(s.pendingUpserts)
-		clear(s.pendingRemoved)
-	} else if len(s.pendingUpserts) != 0 || len(s.pendingRemoved) != 0 || s.removalOverflow || s.orderDirty ||
-		s.optionalResourceHints.hasPendingLocked() {
-		upserts := make([]*kmgrv1.ResourceRow, 0, len(s.pendingUpserts))
-		for _, uid := range s.order {
-			if row := s.pendingUpserts[uid]; row != nil {
-				upserts = append(upserts, row)
-			}
-		}
-		observedOptionalResources := s.optionalResourceHints.takePendingLocked()
-		delta := &kmgrv1.RowDelta{
-			Upserts:                               upserts,
+		events = append(events, s.invalidationEventLocked(&kmgrv1.ViewInvalidation{
+			PresentationRevision:                  s.presentationRevision,
+			IndexRevision:                         s.indexRevision,
+			RowsVisible:                           uint64(len(s.order)),
+			MaxRangeLength:                        DefaultViewRangeLength,
 			ObservedOptionalResourceKeys:          observedOptionalResources.keys,
 			ObservedOptionalResourceKeysTruncated: observedOptionalResources.truncated,
-		}
-		if s.orderDirty {
-			delta.OrderedUids = append([]string(nil), s.order...)
-			delta.OrderIsComplete = true
-		}
-		if len(delta.Upserts) != 0 || delta.OrderIsComplete || len(delta.ObservedOptionalResourceKeys) != 0 ||
-			delta.ObservedOptionalResourceKeysTruncated {
-			events = append(events, s.deltaEventLocked(delta))
-		}
-		events = s.appendRemovalEventsLocked(events)
-		clear(s.pendingUpserts)
-		clear(s.pendingRemoved)
-		s.orderDirty = false
+		}))
+		s.pendingInvalidation = false
 	}
 	if s.pendingError != nil {
 		events = append(events, s.errorEventLocked(s.pendingError))
@@ -3493,83 +3236,12 @@ func (s *Subscription) drainLocked() []*kmgrv1.ViewEvent {
 		s.pendingReconciliation = false
 		s.reconciliationDelivered = true
 	}
-	s.updateKnownUIDsLocked(events)
 	return events
 }
 
 func (s *Subscription) hasPendingDeliveryLocked() bool {
-	return s.pendingSchema != nil || len(s.pendingStatuses) != 0 || s.resnapshot || len(s.pendingUpserts) != 0 ||
-		len(s.pendingRemoved) != 0 || s.removalOverflow || s.orderDirty || s.pendingError != nil ||
-		s.pendingReconciliation || s.optionalResourceHints.hasPendingLocked()
-}
-
-func (s *Subscription) pendingRemovalUIDsLocked() []string {
-	removed := make([]string, 0, len(s.knownUIDs))
-	if s.knownUIDs != nil {
-		for uid, pending := range s.knownUIDs {
-			if pending {
-				removed = append(removed, uid)
-			}
-		}
-		return removed
-	}
-	removed = make([]string, 0, len(s.pendingRemoved))
-	for uid := range s.pendingRemoved {
-		removed = append(removed, uid)
-	}
-	return removed
-}
-
-func (s *Subscription) appendRemovalEventsLocked(events []*kmgrv1.ViewEvent) []*kmgrv1.ViewEvent {
-	if len(s.pendingRemoved) == 0 && !s.removalOverflow && !s.hasKnownPendingRemovalLocked() {
-		return events
-	}
-	removed := s.pendingRemovalUIDsLocked()
-	sort.Strings(removed)
-	limit := max(min(s.chunkSize, s.pendingLimit), 1)
-	for start := 0; start < len(removed); start += limit {
-		end := min(start+limit, len(removed))
-		events = append(events, s.deltaEventLocked(&kmgrv1.RowDelta{
-			RemovedUids: append([]string(nil), removed[start:end]...),
-		}))
-	}
-	return events
-}
-
-func (s *Subscription) hasKnownPendingRemovalLocked() bool {
-	for _, pending := range s.knownUIDs {
-		if pending {
-			return true
-		}
-	}
-	return false
-}
-
-// knownUIDs is the exact set of identities this stream generation may have
-// caused the client to retain, including filter-hidden rows. It bounds a large
-// undrained delete burst to the client-known set and lets snapshot fallback
-// reconstruct exact tombstones without retaining one entry per unseen UID.
-func (s *Subscription) updateKnownUIDsLocked(events []*kmgrv1.ViewEvent) {
-	for _, event := range events {
-		if snapshot := event.GetSnapshot(); snapshot != nil {
-			for _, row := range snapshot.GetRows() {
-				if uid := row.GetIdentity().GetUid(); uid != "" {
-					s.knownUIDs[uid] = false
-				}
-			}
-		}
-		if delta := event.GetDelta(); delta != nil {
-			for _, uid := range delta.GetRemovedUids() {
-				delete(s.knownUIDs, uid)
-			}
-			for _, row := range delta.GetUpserts() {
-				if uid := row.GetIdentity().GetUid(); uid != "" {
-					s.knownUIDs[uid] = false
-				}
-			}
-		}
-	}
-	s.removalOverflow = false
+	return s.pendingSchema != nil || len(s.pendingStatuses) != 0 || s.pendingInvalidation ||
+		s.pendingError != nil || s.pendingReconciliation || s.optionalResourceHints.hasPendingLocked()
 }
 
 func (s *Subscription) cursorLocked() *kmgrv1.StreamCursor {
@@ -3585,12 +3257,8 @@ func (s *Subscription) schemaEventLocked(schema *kmgrv1.ViewSchema) *kmgrv1.View
 	return &kmgrv1.ViewEvent{Cursor: s.cursorLocked(), Payload: &kmgrv1.ViewEvent_Schema{Schema: schema}}
 }
 
-func (s *Subscription) snapshotEventLocked(snapshot *kmgrv1.SnapshotChunk) *kmgrv1.ViewEvent {
-	return &kmgrv1.ViewEvent{Cursor: s.cursorLocked(), Payload: &kmgrv1.ViewEvent_Snapshot{Snapshot: snapshot}}
-}
-
-func (s *Subscription) deltaEventLocked(delta *kmgrv1.RowDelta) *kmgrv1.ViewEvent {
-	return &kmgrv1.ViewEvent{Cursor: s.cursorLocked(), Payload: &kmgrv1.ViewEvent_Delta{Delta: delta}}
+func (s *Subscription) invalidationEventLocked(invalidation *kmgrv1.ViewInvalidation) *kmgrv1.ViewEvent {
+	return &kmgrv1.ViewEvent{Cursor: s.cursorLocked(), Payload: &kmgrv1.ViewEvent_Invalidation{Invalidation: invalidation}}
 }
 
 func (s *Subscription) errorEventLocked(value *kmgrv1.StructuredError) *kmgrv1.ViewEvent {
@@ -3601,7 +3269,9 @@ func (s *Subscription) reconciliationEventLocked() *kmgrv1.ViewEvent {
 	return &kmgrv1.ViewEvent{
 		Cursor: s.cursorLocked(),
 		Payload: &kmgrv1.ViewEvent_Reconciled{Reconciled: &kmgrv1.ViewReconciled{
-			RowsVisible: uint64(len(s.order)),
+			RowsVisible:          uint64(len(s.order)),
+			PresentationRevision: s.presentationRevision,
+			IndexRevision:        s.indexRevision,
 		}},
 	}
 }
@@ -3622,18 +3292,6 @@ func (s *Subscription) close() {
 func (s *Subscription) retireLocked() *metrics.Subscription {
 	if s.closed {
 		return nil
-	}
-	// A failed/partial stream batch may already have reached the client even
-	// though gRPC never returned success for the whole batch. Conservatively
-	// retain every identity that batch could have added. Confirmed removals are
-	// not applied without acknowledgement; the replacement will harmlessly
-	// reconstruct and resend those tombstones from raw-store absence.
-	if s.inFlightDelivery != nil && s.deliveryState != nil {
-		s.deliveryState.mu.Lock()
-		for uid := range s.inFlightDelivery.knownUIDs {
-			s.deliveryState.knownUIDs[uid] = struct{}{}
-		}
-		s.deliveryState.mu.Unlock()
 	}
 	s.inFlightDelivery = nil
 	s.closed = true

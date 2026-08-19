@@ -99,7 +99,7 @@ func TestRuntimeOpenHistoryRetainsAbortedHigherGenerationWhileLowerGenerationAct
 	reopened.Close()
 }
 
-func TestRuntimeOpenHistoryEvictionDropsInactiveDeliveryState(t *testing.T) {
+func TestRuntimeOpenHistoryEvictionDropsInactiveGenerationFences(t *testing.T) {
 	runtime, err := NewRuntime(RuntimeConfig{
 		Source:                &fakeResourceSource{authority: "cluster-a", client: newScriptedResource()},
 		ReleaseDelay:          time.Hour,
@@ -116,14 +116,7 @@ func TestRuntimeOpenHistoryEvictionDropsInactiveDeliveryState(t *testing.T) {
 	}
 	drainSubscription(t, first)
 	firstKey := first.key
-	firstState := first.deliveryState
 	first.Close()
-	runtime.mu.Lock()
-	retainedBeforeEviction := runtime.deliveryStates[firstKey]
-	runtime.mu.Unlock()
-	if retainedBeforeEviction != firstState {
-		t.Fatal("inactive delivery state was lost before its generation history was evicted")
-	}
 
 	second, err := runtime.Open(openView("session", "second", 1))
 	if err != nil {
@@ -131,14 +124,13 @@ func TestRuntimeOpenHistoryEvictionDropsInactiveDeliveryState(t *testing.T) {
 	}
 	second.Close()
 	runtime.mu.Lock()
-	_, retainedAfterEviction := runtime.deliveryStates[firstKey]
 	_, generationRetained := runtime.latestOpen[firstKey]
 	_, filterRetained := runtime.latestFilter[firstKey]
 	runtime.mu.Unlock()
-	if retainedAfterEviction || generationRetained || filterRetained {
+	if generationRetained || filterRetained {
 		t.Fatalf(
-			"evicted logical view retained delivery=%t generation=%t filter=%t",
-			retainedAfterEviction, generationRetained, filterRetained,
+			"evicted logical view retained generation=%t filter=%t",
+			generationRetained, filterRetained,
 		)
 	}
 }

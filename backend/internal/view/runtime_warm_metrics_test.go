@@ -182,7 +182,7 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 			}
 			defer subscription.Close()
 			initial := drainSubscription(t, subscription)
-			assertMetricRowsAvailable(t, initial, uid, PodCPUColumn)
+			assertMetricRowsAvailable(t, subscription, initial, uid, PodCPUColumn)
 			select {
 			case <-fetcher.started:
 			case <-time.After(time.Second):
@@ -209,19 +209,16 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 				if err := subscription.AcknowledgeDelivery(events); err != nil {
 					t.Fatal(err)
 				}
-				for _, event := range events {
-					rows := append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...)
-					for _, row := range rows {
-						if row.GetIdentity().GetUid() != uid {
-							continue
-						}
-						observedCatchup = true
-						cell := cellByID(row, PodCPUColumn)
-						if !cell.GetUsage().GetUsageAvailable() || cell.GetUsage().GetUsed() != 0.25 {
-							t.Fatalf("same-UID warm catch-up regressed usage: %#v", row)
-						}
-						observedFreshObjectState = test.validate(t, cell) || observedFreshObjectState
+				for _, row := range invalidationRows(subscription, events) {
+					if row.GetIdentity().GetUid() != uid {
+						continue
 					}
+					observedCatchup = true
+					cell := cellByID(row, PodCPUColumn)
+					if !cell.GetUsage().GetUsageAvailable() || cell.GetUsage().GetUsed() != 0.25 {
+						t.Fatalf("same-UID warm catch-up regressed usage: %#v", row)
+					}
+					observedFreshObjectState = test.validate(t, cell) || observedFreshObjectState
 				}
 			}
 			if !observedCatchup {
@@ -384,21 +381,19 @@ func warmMetricPod(requestCPU, limitCPU string) *unstructured.Unstructured {
 
 func assertMetricRowsAvailable(
 	t *testing.T,
+	subscription *Subscription,
 	events []*kmgrv1.ViewEvent,
 	uid, columnID string,
 ) bool {
 	t.Helper()
 	found := false
-	for _, event := range events {
-		rows := append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...)
-		for _, row := range rows {
-			if row.GetIdentity().GetUid() != uid {
-				continue
-			}
-			found = true
-			if !cellByID(row, columnID).GetUsage().GetUsageAvailable() {
-				t.Fatalf("same-UID warm catch-up regressed usage: %#v", row)
-			}
+	for _, row := range invalidationRows(subscription, events) {
+		if row.GetIdentity().GetUid() != uid {
+			continue
+		}
+		found = true
+		if !cellByID(row, columnID).GetUsage().GetUsageAvailable() {
+			t.Fatalf("same-UID warm catch-up regressed usage: %#v", row)
 		}
 	}
 	return found
@@ -424,13 +419,10 @@ func waitForUsageUnavailable(
 		if err := subscription.AcknowledgeDelivery(events); err != nil {
 			t.Fatal(err)
 		}
-		for _, event := range events {
-			rows := append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...)
-			for _, row := range rows {
-				if row.GetIdentity().GetUid() == uid &&
-					!cellByID(row, columnID).GetUsage().GetUsageAvailable() {
-					return
-				}
+		for _, row := range invalidationRows(subscription, events) {
+			if row.GetIdentity().GetUid() == uid &&
+				!cellByID(row, columnID).GetUsage().GetUsageAvailable() {
+				return
 			}
 		}
 	}

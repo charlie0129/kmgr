@@ -9,6 +9,8 @@ option swift_prefix = "Kmgr_V1_";
 
 service ViewService {
   rpc StreamView(OpenViewRequest) returns (stream ViewEvent);
+  rpc FetchViewRange(FetchViewRangeRequest) returns (FetchViewRangeResponse);
+  rpc UpdateMetricInterest(UpdateMetricInterestRequest) returns (Acknowledgement);
   rpc CancelView(CancelViewRequest) returns (Acknowledgement);
   rpc PreviewColumn(PreviewColumnRequest) returns (PreviewColumnResponse);
   rpc DiscoverOptionalResources(DiscoverOptionalResourcesRequest) returns (DiscoverOptionalResourcesResponse);
@@ -80,8 +82,8 @@ message OpenViewRequest {
   uint64 generation = 3;
   ViewSpec spec = 4;
   // The client already has a compatible rendered table. The engine must emit
-  // ViewReconciled only after every preceding payload needed to construct one
-  // complete replacement presentation has been delivered.
+  // ViewReconciled only after an authoritative replacement invalidation is
+  // available through FetchViewRange.
   bool stage_until_reconciled = 5;
 }
 
@@ -110,6 +112,9 @@ message ViewStatus {
   int64 last_synchronized_unix_ms = 4;
   bool from_warm_cache = 5;
   string resource_version_hint = 6;
+  // True while metric-backed global order or membership is still being
+  // completed. Display-only viewport metric refreshes do not set this flag.
+  bool metrics_reconciling = 7;
 }
 
 // ViewSchema carries resource-specific columns discovered from the same
@@ -134,53 +139,80 @@ message ViewSchema {
   string revision = 3;
 }
 
-message SnapshotChunk {
-  repeated ResourceRow rows = 1;
-  bool first_chunk = 2;
-  bool last_chunk = 3;
-  uint64 chunk_index = 4;
-  uint64 estimated_total_rows = 5;
+// ViewInvalidation announces the exact backend presentation currently
+// available through FetchViewRange. The presentation revision advances for
+// any cell payload change. The index revision advances only when membership or
+// order changes, allowing selection state to remain stable across cell-only
+// refreshes. Both revisions are nonzero, generation-local, and monotonically
+// increase. An event may repeat both revisions solely to carry new advisory
+// optional-resource keys; repeated revisions do not invalidate cached rows.
+message ViewInvalidation {
+  uint64 presentation_revision = 1;
+  uint64 index_revision = 2;
+  uint64 rows_visible = 3;
+  uint32 max_range_length = 4;
   // Advisory exact Kubernetes ResourceName values newly observed in the raw
-  // core/v1 Pod or Node objects behind this snapshot. Entries are distinct and
-  // sorted. Clients may use them to decide when to repeat cache-only optional
-  // resource discovery; the catalog RPC remains authoritative for metadata.
-  repeated string observed_optional_resource_keys = 6;
-  // True when the advisory key set exceeded its bounded wire budget. Clients
-  // should repeat cache-only discovery even if every retained key is known.
-  bool observed_optional_resource_keys_truncated = 7;
-}
-
-message RowDelta {
-  repeated ResourceRow upserts = 1;
-  repeated string removed_uids = 2;
-  repeated string ordered_uids = 3;
-  bool order_is_complete = 4;
-  // Advisory exact Kubernetes ResourceName values newly observed in raw
-  // core/v1 Pod or Node upserts. This may be populated even when filtering
-  // produces no row upsert. Entries are distinct and sorted.
+  // core/v1 Pod or Node objects. Entries are distinct and sorted. Clients may
+  // use them to decide when to repeat cache-only optional resource discovery;
+  // the catalog RPC remains authoritative for metadata.
   repeated string observed_optional_resource_keys = 5;
   // True when the advisory key set exceeded its bounded wire budget. Clients
   // should repeat cache-only discovery even if every retained key is known.
   bool observed_optional_resource_keys_truncated = 6;
 }
 
-// A generation-local commit barrier. All snapshot/delta events preceding this
-// event form one complete replacement presentation, including the empty case.
-// Clients that requested stage_until_reconciled can build those payloads off
-// screen and replace their retained table atomically when this event arrives.
+message FetchViewRangeRequest {
+  RequestContext context = 1;
+  string view_id = 2;
+  uint64 generation = 3;
+  uint64 presentation_revision = 4;
+  uint64 index_revision = 5;
+  uint64 start_index = 6;
+  uint32 length = 7;
+}
+
+message FetchViewRangeResponse {
+  string request_id = 1;
+  string view_id = 2;
+  uint64 generation = 3;
+  uint64 presentation_revision = 4;
+  uint64 index_revision = 5;
+  uint64 start_index = 6;
+  uint64 rows_visible = 7;
+  repeated ResourceRow rows = 8;
+}
+
+// UpdateMetricInterest is a debounced viewport hint. Index revision pins the
+// numeric range to one exact ordering; stale hints are rejected rather than
+// silently rebound. Swift chooses its visible-range overscan within the
+// advertised max_range_length.
+message UpdateMetricInterestRequest {
+  RequestContext context = 1;
+  string view_id = 2;
+  uint64 generation = 3;
+  uint64 index_revision = 4;
+  uint64 start_index = 5;
+  uint32 length = 6;
+}
+
+// A generation-local commit barrier. The named revisions identify one complete
+// authoritative presentation, including the empty case, available through
+// FetchViewRange. Clients that requested stage_until_reconciled may replace
+// their retained table atomically when this event arrives.
 message ViewReconciled {
   uint64 rows_visible = 1;
+  uint64 presentation_revision = 2;
+  uint64 index_revision = 3;
 }
 
 message ViewEvent {
   StreamCursor cursor = 1;
   oneof payload {
-    SnapshotChunk snapshot = 2;
-    RowDelta delta = 3;
-    ViewStatus status = 4;
-    StructuredError error = 5;
-    ViewReconciled reconciled = 6;
-    ViewSchema schema = 7;
+    ViewStatus status = 2;
+    StructuredError error = 3;
+    ViewReconciled reconciled = 4;
+    ViewSchema schema = 5;
+    ViewInvalidation invalidation = 6;
   }
 }
 

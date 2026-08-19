@@ -254,10 +254,10 @@ func TestRuntimeTableDisableRebuildsRowsWithoutStaleServerCells(t *testing.T) {
 			if schema := event.GetSchema(); schema != nil && !schema.GetServerTable() {
 				rawSchema = true
 			}
-			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
-				if row.GetIdentity().GetUid() == "table-uid" {
-					replacement = row
-				}
+		}
+		for _, row := range invalidationRows(subscription, events) {
+			if row.GetIdentity().GetUid() == "table-uid" {
+				replacement = row
 			}
 		}
 	}
@@ -402,13 +402,12 @@ func waitForRuntimeTableRow(
 			if event.GetSchema() != nil && event.GetSchema().GetServerTable() {
 				gotSchema = event.GetSchema()
 			}
-			rows := append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...)
-			for _, row := range rows {
-				uid := row.GetIdentity().GetUid()
-				observedUIDs[uid] = true
-				if uid == wantUID {
-					gotRow = row
-				}
+		}
+		for _, row := range invalidationRows(subscription, events) {
+			uid := row.GetIdentity().GetUid()
+			observedUIDs[uid] = true
+			if uid == wantUID {
+				gotRow = row
 			}
 		}
 	}
@@ -431,11 +430,9 @@ func waitForRuntimeTableDisplay(
 		if err := subscription.AcknowledgeDelivery(events); err != nil {
 			t.Fatal(err)
 		}
-		for _, event := range events {
-			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
-				if row.GetIdentity().GetUid() == wantUID && rowContainsDisplay(row, wantDisplay) {
-					return row
-				}
+		for _, row := range invalidationRows(subscription, events) {
+			if row.GetIdentity().GetUid() == wantUID && rowContainsDisplay(row, wantDisplay) {
+				return row
 			}
 		}
 	}

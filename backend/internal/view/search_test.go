@@ -508,12 +508,24 @@ func TestCompletedPaginatedSearchSeedsViewAndResumesWatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var snapshotUIDs []string
-	for _, event := range events {
-		for _, row := range event.GetSnapshot().GetRows() {
-			snapshotUIDs = append(snapshotUIDs, row.GetIdentity().GetUid())
-		}
+	if err := subscription.AcknowledgeDelivery(events); err != nil {
+		t.Fatalf("acknowledge initial delivery: %v", err)
 	}
+	// StreamView carries only revision invalidations. Pin the handoff's first
+	// presentation and fetch the complete test-sized range explicitly.
+	invalidation := firstInvalidation(events)
+	if invalidation == nil {
+		t.Fatalf("initial delivery omitted invalidation: %#v", events)
+	}
+	rangeResult, err := runtime.FetchRange(
+		"view-session", "pods", 1,
+		invalidation.GetPresentationRevision(), invalidation.GetIndexRevision(),
+		0, DefaultViewRangeLength,
+	)
+	if err != nil {
+		t.Fatalf("fetch initial view range: %v", err)
+	}
+	snapshotUIDs := rangeRowUIDs(rangeResult.Rows)
 	if !slices.Contains(snapshotUIDs, "one") || !slices.Contains(snapshotUIDs, "two") {
 		t.Fatalf("initial snapshot UIDs = %v", snapshotUIDs)
 	}
@@ -964,7 +976,11 @@ func TestCompletedSearchSnapshotRequiresExactLogicalScopeAndSelectors(t *testing
 				t.Fatal(err)
 			}
 			defer subscription.Close()
-			eventually(t, time.Second, func() bool { return client.listCalls.Load() == 2 })
+			// One completed search LIST plus one exact view LIST for each of the
+			// two selected namespaces. Waiting for the former transient count of
+			// two was timing-sensitive because both namespace streams start in
+			// parallel.
+			eventually(t, time.Second, func() bool { return client.listCalls.Load() == 3 })
 		})
 	}
 }
@@ -1127,7 +1143,7 @@ func TestInProgressSharedListFailureFallbackEmitsNoViewError(t *testing.T) {
 	}
 }
 
-func TestInProgressSharedListSlowViewConsumerIsBounded(t *testing.T) {
+func TestInProgressSharedListSlowViewConsumerCoalescesInvalidations(t *testing.T) {
 	t.Parallel()
 	client := newSearchClient()
 	pages := make([]*unstructured.UnstructuredList, 0, 20)
@@ -1145,7 +1161,7 @@ func TestInProgressSharedListSlowViewConsumerIsBounded(t *testing.T) {
 	client.firstPageGate = make(chan struct{})
 	searchDone := make(chan error, 1)
 	runtime, err := NewRuntime(RuntimeConfig{
-		Source: &fakeResourceSource{authority: "cluster", client: client}, PendingRowLimit: 2,
+		Source: &fakeResourceSource{authority: "cluster", client: client},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1165,10 +1181,19 @@ func TestInProgressSharedListSlowViewConsumerIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	subscription.mu.Lock()
-	defer subscription.mu.Unlock()
-	if len(subscription.pendingUpserts)+len(subscription.pendingRemoved) > 2 || !subscription.resnapshot {
-		t.Fatalf("slow mailbox upserts=%d removed=%d resnapshot=%v",
-			len(subscription.pendingUpserts), len(subscription.pendingRemoved), subscription.resnapshot)
+	rows := len(subscription.rows)
+	pendingInvalidation := subscription.pendingInvalidation
+	pendingStatuses := len(subscription.pendingStatuses)
+	pendingNotifications := len(subscription.notify)
+	subscription.mu.Unlock()
+	if rows != 20 {
+		t.Fatalf("backend presentation rows = %d, want 20", rows)
+	}
+	if !pendingInvalidation || pendingStatuses > 8 || pendingNotifications != 1 {
+		t.Fatalf(
+			"slow control mailbox invalidation=%t statuses=%d notifications=%d, want one coalesced notification and bounded statuses",
+			pendingInvalidation, pendingStatuses, pendingNotifications,
+		)
 	}
 }
 
@@ -1642,6 +1667,8 @@ func TestCompletedSearchSnapshotCanonicalizesNamespaceOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.setPages(listPage("view-rv", ""))
+	client.firstPageGate = make(chan struct{})
 	request := openView("session", "view", 1)
 	request.Spec.NamespaceScope = &kmgrv1.NamespaceScope{Namespaces: []string{"a", "b"}}
 	subscription, err := runtime.Open(request)
@@ -1650,9 +1677,10 @@ func TestCompletedSearchSnapshotCanonicalizesNamespaceOrder(t *testing.T) {
 	}
 	defer subscription.Close()
 	waitForSnapshotUID(t, subscription, "one")
-	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
-	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "search-rv" })
-	if client.listCalls.Load() != 1 || client.lastWatchResourceVersion() != "search-rv" {
+	close(client.firstPageGate)
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 2 })
+	eventually(t, time.Second, func() bool { return client.lastWatchResourceVersion() == "view-rv" })
+	if client.listCalls.Load() != 3 || client.lastWatchResourceVersion() != "view-rv" {
 		t.Fatalf("LIST=%d watch RV=%q", client.listCalls.Load(), client.lastWatchResourceVersion())
 	}
 }

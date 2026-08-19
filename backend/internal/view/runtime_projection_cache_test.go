@@ -27,7 +27,6 @@ func TestRuntimeWarmProjectionReopenBypassesGateAndCatchesUpRawStore(t *testing.
 		Source:              &fakeResourceSource{authority: "cluster-a", client: client},
 		ReleaseDelay:        200 * time.Millisecond,
 		BatchDelay:          time.Millisecond,
-		SnapshotChunkSize:   100,
 		PipelineTimeout:     time.Second,
 		OpenProjectionLimit: 1,
 		openProjectionHook:  func() { synchronousProjections.Add(1) },
@@ -94,17 +93,26 @@ func TestRuntimeWarmProjectionReopenBypassesGateAndCatchesUpRawStore(t *testing.
 	}
 
 	initial := drainSubscription(t, second)
-	var initialUIDs []string
 	var staleFromWarm bool
 	for _, event := range initial {
 		if status := event.GetStatus(); status != nil {
 			staleFromWarm = staleFromWarm || (status.GetFromWarmCache() &&
 				status.GetFreshness() == kmgrv1.ViewFreshness_VIEW_FRESHNESS_STALE)
 		}
-		for _, row := range event.GetSnapshot().GetRows() {
-			initialUIDs = append(initialUIDs, row.GetIdentity().GetUid())
-		}
 	}
+	invalidation := firstInvalidation(initial)
+	if invalidation == nil {
+		t.Fatalf("cached first paint omitted invalidation: %#v", initial)
+	}
+	rangeResult, err := runtime.FetchRange(
+		"session", "second", second.generation,
+		invalidation.GetPresentationRevision(), invalidation.GetIndexRevision(),
+		0, DefaultViewRangeLength,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialUIDs := rangeRowUIDs(rangeResult.Rows)
 	if !staleFromWarm || !slices.Equal(initialUIDs, []string{"uid-b", "uid-a"}) {
 		t.Fatalf("cached first paint stale=%t UIDs=%v", staleFromWarm, initialUIDs)
 	}
@@ -179,7 +187,7 @@ func TestRuntimeWarmProjectionReopensDuringReleaseDebounce(t *testing.T) {
 	}
 	defer second.Close()
 	events := drainSubscription(t, second)
-	if got := snapshotEventUIDs(events); !slices.Equal(got, []string{"uid"}) {
+	if got := snapshotEventUIDs(second, events); !slices.Equal(got, []string{"uid"}) {
 		t.Fatalf("debounce cached UIDs = %v, want [uid]", got)
 	}
 	var staleFromWarm bool
@@ -279,7 +287,7 @@ func TestRuntimeConcurrentCompatibleWarmOpensBothBypassAdmission(t *testing.T) {
 		opened = append(opened, result.subscription)
 	}
 	for _, subscription := range opened {
-		if got := snapshotEventUIDs(drainSubscription(t, subscription)); !slices.Equal(got, []string{"uid"}) {
+		if got := snapshotEventUIDs(subscription, drainSubscription(t, subscription)); !slices.Equal(got, []string{"uid"}) {
 			t.Fatalf("concurrent cached UIDs = %v, want [uid]", got)
 		}
 	}
@@ -321,7 +329,7 @@ func TestRuntimeIncompatibleWarmProjectionUsesNormalProjection(t *testing.T) {
 		t.Fatal("successful incompatible Open retained unusable compact rows")
 	}
 	events := drainSubscription(t, subscription)
-	if got := snapshotEventUIDs(events); !slices.Equal(got, []string{"uid-new"}) {
+	if got := snapshotEventUIDs(subscription, events); !slices.Equal(got, []string{"uid-new"}) {
 		t.Fatalf("incompatible initial projection UIDs = %v, want [uid-new]", got)
 	}
 }
@@ -365,7 +373,7 @@ func TestRuntimeIncompleteWarmProjectionDoesNotInventRemoval(t *testing.T) {
 	}
 	defer subscription.Close()
 	initial := drainSubscription(t, subscription)
-	if got := snapshotEventUIDs(initial); !slices.Equal(got, []string{"uid-stale"}) {
+	if got := snapshotEventUIDs(subscription, initial); !slices.Equal(got, []string{"uid-stale"}) {
 		t.Fatalf("incomplete cached first paint UIDs = %v", got)
 	}
 
@@ -385,20 +393,14 @@ func TestRuntimeIncompleteWarmProjectionDoesNotInventRemoval(t *testing.T) {
 		if err := subscription.AcknowledgeDelivery(events); err != nil {
 			t.Fatal(err)
 		}
-		for _, event := range events {
-			if slices.Contains(event.GetDelta().GetRemovedUids(), "uid-stale") {
-				t.Fatal("incomplete authoritative store invented a Kubernetes deletion")
-			}
-			if snapshot := event.GetSnapshot(); snapshot != nil && snapshot.GetFirstChunk() &&
-				snapshot.GetLastChunk() && len(snapshot.GetRows()) == 0 {
-				return
-			}
+		if invalidation := firstInvalidation(events); invalidation != nil && invalidation.GetRowsVisible() == 0 {
+			return
 		}
 	}
 	t.Fatal("incomplete authoritative catch-up did not publish its empty visible snapshot")
 }
 
-func TestRuntimeCompleteWarmProjectionCatchupEmitsMissingUIDRemoval(t *testing.T) {
+func TestRuntimeCompleteWarmProjectionCatchupInvalidatesMissingUID(t *testing.T) {
 	client := newScriptedResource()
 	runtime, err := NewRuntime(RuntimeConfig{
 		Source:              &fakeResourceSource{authority: "cluster-a", client: client},
@@ -433,7 +435,7 @@ func TestRuntimeCompleteWarmProjectionCatchupEmitsMissingUIDRemoval(t *testing.T
 		t.Fatal(err)
 	}
 	defer subscription.Close()
-	if got := snapshotEventUIDs(drainSubscription(t, subscription)); !slices.Equal(got, []string{"uid-missing"}) {
+	if got := snapshotEventUIDs(subscription, drainSubscription(t, subscription)); !slices.Equal(got, []string{"uid-missing"}) {
 		t.Fatalf("complete cached first paint UIDs = %v", got)
 	}
 	runtime.releaseOpenProjection()
@@ -453,13 +455,11 @@ func TestRuntimeCompleteWarmProjectionCatchupEmitsMissingUIDRemoval(t *testing.T
 		if err := subscription.AcknowledgeDelivery(events); err != nil {
 			t.Fatal(err)
 		}
-		for _, event := range events {
-			if slices.Contains(event.GetDelta().GetRemovedUids(), "uid-missing") {
-				return
-			}
+		if invalidation := firstInvalidation(events); invalidation != nil && invalidation.GetRowsVisible() == 0 {
+			return
 		}
 	}
-	t.Fatal("complete authoritative catch-up did not tombstone missing cached UID")
+	t.Fatal("complete authoritative catch-up did not invalidate missing cached UID")
 }
 
 func TestRuntimeRetirementCancelsWarmCatchupWaitingForAdmission(t *testing.T) {
@@ -579,7 +579,7 @@ func TestRuntimeClosePreservesProjectionAcrossAbortedSameResourceOpen(t *testing
 		t.Fatalf("reopen after aborted opener did not use provisional rows: %v", err)
 	}
 	defer reopened.Close()
-	if got := snapshotEventUIDs(drainSubscription(t, reopened)); !slices.Equal(got, []string{"uid"}) {
+	if got := snapshotEventUIDs(reopened, drainSubscription(t, reopened)); !slices.Equal(got, []string{"uid"}) {
 		t.Fatalf("reopened provisional UIDs = %v, want [uid]", got)
 	}
 	runtime.releaseOpenProjection()
@@ -785,7 +785,7 @@ func TestWarmProjectionCaptureSkipsRawStoreAlreadyAtByteCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	subscription := newSubscription(viewKey{sessionID: "session", viewID: "view"}, 1, projector, time.Hour, 100, 100)
+	subscription := newSubscription(viewKey{sessionID: "session", viewID: "view"}, 1, projector, time.Hour, 100)
 	subscription.runtime = runtime
 	subscription.resource = entry
 	entry.subscribers[subscription] = struct{}{}
@@ -1035,7 +1035,7 @@ func installTwoManualSubscriptions(
 	entry.lastStatus = watcher.Status{ResourceVersion: "rv"}
 	makeSubscription := func(viewID string) *Subscription {
 		subscription := newSubscription(
-			viewKey{sessionID: "session", viewID: viewID}, 1, projector, time.Hour, 100, 100,
+			viewKey{sessionID: "session", viewID: viewID}, 1, projector, time.Hour, 100,
 		)
 		subscription.runtime = runtime
 		subscription.resource = entry
@@ -1063,14 +1063,8 @@ func projectionUIDs(rows []*kmgrv1.ResourceRow) []string {
 	return result
 }
 
-func snapshotEventUIDs(events []*kmgrv1.ViewEvent) []string {
-	var result []string
-	for _, event := range events {
-		for _, row := range event.GetSnapshot().GetRows() {
-			result = append(result, row.GetIdentity().GetUid())
-		}
-	}
-	return result
+func snapshotEventUIDs(subscription *Subscription, events []*kmgrv1.ViewEvent) []string {
+	return rangeRowUIDs(invalidationRows(subscription, events))
 }
 
 func waitForUIDWithoutRemoval(t *testing.T, subscription *Subscription, uid string, preserved ...string) {
@@ -1089,16 +1083,14 @@ func waitForUIDWithoutRemoval(t *testing.T, subscription *Subscription, uid stri
 		if err := subscription.AcknowledgeDelivery(events); err != nil {
 			t.Fatal(err)
 		}
-		for _, event := range events {
-			for _, removed := range event.GetDelta().GetRemovedUids() {
-				if slices.Contains(preserved, removed) {
-					t.Fatalf("authoritative catch-up removed raw-present UID %q", removed)
+		for _, row := range invalidationRows(subscription, events) {
+			if row.GetIdentity().GetUid() == uid {
+				for _, preservedUID := range preserved {
+					if !subscriptionHasUID(subscription, preservedUID) {
+						t.Fatalf("authoritative catch-up lost raw-present UID %q", preservedUID)
+					}
 				}
-			}
-			for _, row := range append(event.GetSnapshot().GetRows(), event.GetDelta().GetUpserts()...) {
-				if row.GetIdentity().GetUid() == uid {
-					return
-				}
+				return
 			}
 		}
 	}

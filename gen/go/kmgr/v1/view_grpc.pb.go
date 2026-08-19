@@ -20,6 +20,8 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	ViewService_StreamView_FullMethodName                = "/kmgr.v1.ViewService/StreamView"
+	ViewService_FetchViewRange_FullMethodName            = "/kmgr.v1.ViewService/FetchViewRange"
+	ViewService_UpdateMetricInterest_FullMethodName      = "/kmgr.v1.ViewService/UpdateMetricInterest"
 	ViewService_CancelView_FullMethodName                = "/kmgr.v1.ViewService/CancelView"
 	ViewService_PreviewColumn_FullMethodName             = "/kmgr.v1.ViewService/PreviewColumn"
 	ViewService_DiscoverOptionalResources_FullMethodName = "/kmgr.v1.ViewService/DiscoverOptionalResources"
@@ -33,6 +35,8 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ViewServiceClient interface {
 	StreamView(ctx context.Context, in *OpenViewRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ViewEvent], error)
+	FetchViewRange(ctx context.Context, in *FetchViewRangeRequest, opts ...grpc.CallOption) (*FetchViewRangeResponse, error)
+	UpdateMetricInterest(ctx context.Context, in *UpdateMetricInterestRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
 	CancelView(ctx context.Context, in *CancelViewRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
 	PreviewColumn(ctx context.Context, in *PreviewColumnRequest, opts ...grpc.CallOption) (*PreviewColumnResponse, error)
 	DiscoverOptionalResources(ctx context.Context, in *DiscoverOptionalResourcesRequest, opts ...grpc.CallOption) (*DiscoverOptionalResourcesResponse, error)
@@ -67,6 +71,26 @@ func (c *viewServiceClient) StreamView(ctx context.Context, in *OpenViewRequest,
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ViewService_StreamViewClient = grpc.ServerStreamingClient[ViewEvent]
+
+func (c *viewServiceClient) FetchViewRange(ctx context.Context, in *FetchViewRangeRequest, opts ...grpc.CallOption) (*FetchViewRangeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FetchViewRangeResponse)
+	err := c.cc.Invoke(ctx, ViewService_FetchViewRange_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *viewServiceClient) UpdateMetricInterest(ctx context.Context, in *UpdateMetricInterestRequest, opts ...grpc.CallOption) (*Acknowledgement, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Acknowledgement)
+	err := c.cc.Invoke(ctx, ViewService_UpdateMetricInterest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 func (c *viewServiceClient) CancelView(ctx context.Context, in *CancelViewRequest, opts ...grpc.CallOption) (*Acknowledgement, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -142,6 +166,8 @@ func (c *viewServiceClient) CancelSearch(ctx context.Context, in *CancelSearchRe
 // for forward compatibility.
 type ViewServiceServer interface {
 	StreamView(*OpenViewRequest, grpc.ServerStreamingServer[ViewEvent]) error
+	FetchViewRange(context.Context, *FetchViewRangeRequest) (*FetchViewRangeResponse, error)
+	UpdateMetricInterest(context.Context, *UpdateMetricInterestRequest) (*Acknowledgement, error)
 	CancelView(context.Context, *CancelViewRequest) (*Acknowledgement, error)
 	PreviewColumn(context.Context, *PreviewColumnRequest) (*PreviewColumnResponse, error)
 	DiscoverOptionalResources(context.Context, *DiscoverOptionalResourcesRequest) (*DiscoverOptionalResourcesResponse, error)
@@ -160,6 +186,12 @@ type UnimplementedViewServiceServer struct{}
 
 func (UnimplementedViewServiceServer) StreamView(*OpenViewRequest, grpc.ServerStreamingServer[ViewEvent]) error {
 	return status.Error(codes.Unimplemented, "method StreamView not implemented")
+}
+func (UnimplementedViewServiceServer) FetchViewRange(context.Context, *FetchViewRangeRequest) (*FetchViewRangeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FetchViewRange not implemented")
+}
+func (UnimplementedViewServiceServer) UpdateMetricInterest(context.Context, *UpdateMetricInterestRequest) (*Acknowledgement, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateMetricInterest not implemented")
 }
 func (UnimplementedViewServiceServer) CancelView(context.Context, *CancelViewRequest) (*Acknowledgement, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelView not implemented")
@@ -210,6 +242,42 @@ func _ViewService_StreamView_Handler(srv interface{}, stream grpc.ServerStream) 
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ViewService_StreamViewServer = grpc.ServerStreamingServer[ViewEvent]
+
+func _ViewService_FetchViewRange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FetchViewRangeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ViewServiceServer).FetchViewRange(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ViewService_FetchViewRange_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ViewServiceServer).FetchViewRange(ctx, req.(*FetchViewRangeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ViewService_UpdateMetricInterest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateMetricInterestRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ViewServiceServer).UpdateMetricInterest(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ViewService_UpdateMetricInterest_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ViewServiceServer).UpdateMetricInterest(ctx, req.(*UpdateMetricInterestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
 
 func _ViewService_CancelView_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CancelViewRequest)
@@ -319,6 +387,14 @@ var ViewService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "kmgr.v1.ViewService",
 	HandlerType: (*ViewServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "FetchViewRange",
+			Handler:    _ViewService_FetchViewRange_Handler,
+		},
+		{
+			MethodName: "UpdateMetricInterest",
+			Handler:    _ViewService_UpdateMetricInterest_Handler,
+		},
 		{
 			MethodName: "CancelView",
 			Handler:    _ViewService_CancelView_Handler,

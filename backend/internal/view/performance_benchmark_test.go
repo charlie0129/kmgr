@@ -149,7 +149,6 @@ func newSyntheticProjectionSubscription(
 		1,
 		projector,
 		time.Hour,
-		1_024,
 		max(len(objects), 1),
 	)
 	subscription.rows = make(map[string]*kmgrv1.ResourceRow, len(rows))

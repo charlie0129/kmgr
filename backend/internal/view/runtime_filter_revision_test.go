@@ -143,12 +143,34 @@ func TestNewFilterRevisionCancelsStaleProjectionAndPublishesOnlyNewestFilter(t *
 	defer newest.Close()
 
 	events := drainSubscription(t, newest)
-	var snapshotUIDs []string
-	for _, event := range events {
-		for _, row := range event.GetSnapshot().GetRows() {
-			snapshotUIDs = append(snapshotUIDs, row.GetIdentity().GetUid())
+	invalidation := firstInvalidation(events)
+	if invalidation == nil {
+		t.Fatalf("newest filter omitted invalidation: %#v", events)
+	}
+	rangeResult, err := runtime.FetchRange(
+		"session", "pods", newest.generation,
+		invalidation.GetPresentationRevision(), invalidation.GetIndexRevision(),
+		0, DefaultViewRangeLength,
+	)
+	if err != nil {
+		// The test's newest open uses a dedicated view generation fence; fetch
+		// through the exact active key after the stream has published it.
+		runtime.mu.Lock()
+		active := runtime.views[viewKey{sessionID: "session", viewID: "pods"}]
+		runtime.mu.Unlock()
+		if active == nil {
+			t.Fatal(err)
+		}
+		rangeResult, err = runtime.FetchRange(
+			"session", "pods", active.generation,
+			invalidation.GetPresentationRevision(), invalidation.GetIndexRevision(),
+			0, DefaultViewRangeLength,
+		)
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
+	snapshotUIDs := rangeRowUIDs(rangeResult.Rows)
 	if !slices.Equal(snapshotUIDs, []string{"uid-beta"}) {
 		t.Fatalf("newest filter snapshot UIDs = %v, want only uid-beta", snapshotUIDs)
 	}
