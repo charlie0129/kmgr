@@ -7,10 +7,14 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
@@ -61,6 +65,102 @@ func TestClientGoResolverSelectsReadyServicePodAndNamedTargetPort(t *testing.T) 
 	}
 	if resolved.Pod.Name != "ready" || resolved.Pod.UID != "c" || resolved.RemotePort != 8083 {
 		t.Fatalf("resolved = %#v", resolved)
+	}
+}
+
+func TestClientGoResolverUsesEndpointSliceAndOneExactPodGet(t *testing.T) {
+	t.Parallel()
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "api", UID: "service-uid"},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromString("http")}},
+		},
+	}
+	pod := readyPod("ready", "pod-uid", 8083)
+	coreClient := fake.NewClientset(service, pod)
+	endpointClient := newEndpointSliceClient(t, service.Name, pod, true)
+
+	resolved, err := (ClientGoTargetResolver{
+		Core: coreClient.CoreV1(), Dynamic: endpointClient,
+	}).Resolve(context.Background(), serviceIdentity("api", "service-uid"), 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Pod.Name != pod.Name || resolved.Pod.UID != pod.UID || resolved.RemotePort != 8083 {
+		t.Fatalf("resolved = %#v", resolved)
+	}
+	if got := actionCount(coreClient.Actions(), "get", "pods"); got != 1 {
+		t.Fatalf("Pod GET calls = %d, want 1", got)
+	}
+	if got := actionCount(coreClient.Actions(), "list", "pods"); got != 0 {
+		t.Fatalf("Pod LIST calls = %d, want 0", got)
+	}
+	actions := endpointClient.Actions()
+	if len(actions) != 1 || actions[0].GetVerb() != "list" ||
+		actions[0].GetResource().Resource != "endpointslices" {
+		t.Fatalf("EndpointSlice actions = %#v", actions)
+	}
+	listAction, ok := actions[0].(clienttesting.ListAction)
+	if !ok || listAction.GetListRestrictions().Labels.String() !=
+		discoveryv1.LabelServiceName+"=api" {
+		t.Fatalf("EndpointSlice list action = %#v", actions[0])
+	}
+}
+
+func TestClientGoResolverFallsBackWhenEndpointSlicesAreForbidden(t *testing.T) {
+	t.Parallel()
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "api", UID: "service-uid"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "api"},
+			Ports:    []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromString("http")}},
+		},
+	}
+	pod := readyPod("ready", "pod-uid", 8083)
+	coreClient := fake.NewClientset(service, pod)
+	endpointClient := newEndpointSliceClient(t, service.Name, pod, true)
+	endpointClient.PrependReactor("list", "endpointslices", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: "discovery.k8s.io", Resource: "endpointslices"},
+			"", errors.New("denied"),
+		)
+	})
+
+	resolved, err := (ClientGoTargetResolver{
+		Core: coreClient.CoreV1(), Dynamic: endpointClient,
+	}).Resolve(context.Background(), serviceIdentity("api", "service-uid"), 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Pod.UID != pod.UID || resolved.RemotePort != 8083 {
+		t.Fatalf("resolved = %#v", resolved)
+	}
+	if got := actionCount(coreClient.Actions(), "list", "pods"); got != 1 {
+		t.Fatalf("Pod LIST calls = %d, want compatibility fallback", got)
+	}
+}
+
+func TestClientGoResolverDoesNotBroadenOnTransientEndpointSliceFailure(t *testing.T) {
+	t.Parallel()
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "api", UID: "service-uid"},
+		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "api"}},
+	}
+	pod := readyPod("ready", "pod-uid", 8083)
+	coreClient := fake.NewClientset(service, pod)
+	endpointClient := newEndpointSliceClient(t, service.Name, pod, true)
+	endpointClient.PrependReactor("list", "endpointslices", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInternalError(errors.New("temporarily unavailable"))
+	})
+
+	_, err := (ClientGoTargetResolver{
+		Core: coreClient.CoreV1(), Dynamic: endpointClient,
+	}).Resolve(context.Background(), serviceIdentity("api", "service-uid"), 80)
+	if err == nil || !strings.Contains(err.Error(), "temporarily unavailable") {
+		t.Fatalf("Resolve error = %v", err)
+	}
+	if got := actionCount(coreClient.Actions(), "list", "pods"); got != 0 {
+		t.Fatalf("Pod LIST calls = %d, want no expensive transient fallback", got)
 	}
 }
 
@@ -158,4 +258,43 @@ func readyPod(name string, uid types.UID, port int32) *corev1.Pod {
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
 		},
 	}
+}
+
+func newEndpointSliceClient(
+	t *testing.T,
+	serviceName string,
+	pod *corev1.Pod,
+	ready bool,
+) *dynamicfake.FakeDynamicClient {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := discoveryv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	return dynamicfake.NewSimpleDynamicClient(scheme, &discoveryv1.EndpointSlice{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: discoveryv1.SchemeGroupVersion.String(), Kind: "EndpointSlice",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: pod.Namespace, Name: serviceName + "-slice",
+			Labels: map[string]string{discoveryv1.LabelServiceName: serviceName},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Conditions: discoveryv1.EndpointConditions{Ready: &ready},
+			TargetRef: &corev1.ObjectReference{
+				Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID,
+			},
+		}},
+	})
+}
+
+func actionCount(actions []clienttesting.Action, verb, resource string) int {
+	count := 0
+	for _, action := range actions {
+		if action.GetVerb() == verb && action.GetResource().Resource == resource {
+			count++
+		}
+	}
+	return count
 }
