@@ -631,7 +631,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	gvr := schema.GroupVersionResource{
 		Group: resource.GetGroup(), Version: resource.GetVersion(), Resource: resource.GetResource(),
 	}
-	serverNamespace, err := serverNamespace(request.GetSpec())
+	namespacePlan, err := planNamespaceStream(request.GetSpec())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
 	}
@@ -649,15 +649,15 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	var authorityID string
 	var client watcher.ListerWatcher
 	var requestedTableObject metav1.IncludeObjectPolicy
-	if tableSource, ok := r.source.(TableResourceSource); ok &&
-		!viewcolumns.HasCuratedNativeColumns(gvr.Group, gvr.Version, gvr.Resource) {
+	_, tableAvailable := r.source.(TableResourceSource)
+	useTable := tableAvailable &&
+		!viewcolumns.HasCuratedNativeColumns(gvr.Group, gvr.Version, gvr.Resource)
+	if useTable {
 		requestedTableObject = tableObjectPolicy(projector)
-		authorityID, client, err = tableSource.OpenTableResource(
-			sessionID, gvr, serverNamespace, requestedTableObject,
-		)
-	} else {
-		authorityID, client, err = r.source.OpenResource(sessionID, gvr, serverNamespace)
 	}
+	authorityID, client, err = openNamespaceStream(
+		r.source, sessionID, gvr, namespacePlan, useTable, requestedTableObject,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -673,7 +673,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		group:       gvr.Group,
 		version:     gvr.Version,
 		resource:    gvr.Resource,
-		namespace:   serverNamespace,
+		namespace:   namespacePlan.cacheNamespace,
 		labels:      query.labelSelector,
 		fields:      query.fieldSelector,
 		tableObject: requestedTableObject,
@@ -872,13 +872,21 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	}
 	subscription.optionalResourceHints = newOptionalResourceStreamHints(entry.key, acceleratorConfig)
 	metricPlan := planMetricView(projector, key.fields)
+	if namespacePlan.exactFanIn && metricPlan.strategy == metricFetchSharedList {
+		if kind, supported := metricKindFor(projector.spec.Resource); supported && kind == metrics.PodMetrics {
+			// Metrics Server cannot select several exact namespaces in one LIST.
+			// Reuse the bounded UID-keyed Pod sample path instead of broadening an
+			// otherwise exact base-resource query to all-namespaces PodMetrics.
+			metricPlan.strategy = metricFetchPodObjects
+		}
+	}
 	subscription.metricPlan = metricPlan
 	var metricProviderLease *metrics.ProviderLease
 	if r.metrics != nil && metricPlan.strategy == metricFetchSharedList {
 		metricKind, _ := metricKindFor(projector.spec.Resource)
 		providerLease, metricErr := r.metrics.OpenMetrics(
 			sessionID, authorityID, metricKind,
-			metricsNamespace(projector.spec.Resource, serverNamespace),
+			metricsNamespace(projector.spec.Resource, namespacePlan.metricNamespace),
 			key.labels,
 		)
 		if metricErr != nil {
@@ -3700,23 +3708,6 @@ func projectorFromProto(
 		ColumnExtractors:                   resolved.Extractors,
 		compiledFilter:                     compiledFilter,
 	})
-}
-
-func serverNamespace(spec *kmgrv1.ViewSpec) (string, error) {
-	if !spec.GetResource().GetNamespaced() {
-		return "", nil
-	}
-	scope := spec.GetNamespaceScope()
-	if scope == nil || (!scope.GetAllNamespaces() && len(scope.GetNamespaces()) == 0) {
-		return "default", nil
-	}
-	if scope.GetAllNamespaces() || len(scope.GetNamespaces()) > 1 {
-		return "", nil
-	}
-	if scope.GetNamespaces()[0] == "" {
-		return "", errors.New("namespace must not be empty")
-	}
-	return scope.GetNamespaces()[0], nil
 }
 
 func statusForWarmEntry(entry *resourceRuntime) *kmgrv1.ViewStatus {

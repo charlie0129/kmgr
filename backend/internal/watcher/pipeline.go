@@ -802,8 +802,16 @@ func (p *Pipeline) watch(ctx context.Context, resourceVersion string, watching S
 }
 
 func (p *Pipeline) applyWatchEvent(event watch.Event, result *watchResult) error {
+	checkpoint := ""
+	if wrapped, ok := event.Object.(*checkpointedWatchObject); ok {
+		if wrapped == nil || wrapped.Object == nil || wrapped.Checkpoint == "" {
+			return fmt.Errorf("%s event has an invalid composite checkpoint", event.Type)
+		}
+		event.Object = wrapped.Object
+		checkpoint = wrapped.Checkpoint
+	}
 	if table, ok := event.Object.(*metav1.Table); ok {
-		return p.applyTableWatchEvent(event.Type, table, result)
+		return p.applyTableWatchEvent(event.Type, table, checkpoint, result)
 	}
 	accessor, err := meta.Accessor(event.Object)
 	if err != nil {
@@ -812,6 +820,10 @@ func (p *Pipeline) applyWatchEvent(event watch.Event, result *watchResult) error
 	resourceVersion := accessor.GetResourceVersion()
 	if resourceVersion == "" {
 		return fmt.Errorf("%s event has no resourceVersion", event.Type)
+	}
+	storeResourceVersion := resourceVersion
+	if checkpoint != "" {
+		storeResourceVersion = checkpoint
 	}
 
 	synchronizedAt := time.Now()
@@ -825,7 +837,7 @@ func (p *Pipeline) applyWatchEvent(event watch.Event, result *watchResult) error
 			return fmt.Errorf("%s event object has no UID", event.Type)
 		}
 		change := p.store.Upsert(object)
-		p.store.SetResourceVersion(resourceVersion)
+		p.store.SetResourceVersion(storeResourceVersion)
 		var removed []types.UID
 		if change.ReplacedUID != "" {
 			removed = []types.UID{change.ReplacedUID}
@@ -833,7 +845,7 @@ func (p *Pipeline) applyWatchEvent(event watch.Event, result *watchResult) error
 		p.emitBatch(Batch{
 			Upserts:         []*unstructured.Unstructured{object},
 			RemovedUIDs:     removed,
-			ResourceVersion: resourceVersion,
+			ResourceVersion: storeResourceVersion,
 			SynchronizedAt:  synchronizedAt,
 		})
 	case watch.Deleted:
@@ -842,16 +854,16 @@ func (p *Pipeline) applyWatchEvent(event watch.Event, result *watchResult) error
 			return errors.New("DELETED event object has no UID")
 		}
 		p.store.Delete(uid)
-		p.store.SetResourceVersion(resourceVersion)
+		p.store.SetResourceVersion(storeResourceVersion)
 		p.emitBatch(Batch{
 			RemovedUIDs:     []types.UID{uid},
-			ResourceVersion: resourceVersion,
+			ResourceVersion: storeResourceVersion,
 			SynchronizedAt:  synchronizedAt,
 		})
 	case watch.Bookmark:
-		p.store.SetResourceVersion(resourceVersion)
+		p.store.SetResourceVersion(storeResourceVersion)
 		p.emitBatch(Batch{
-			ResourceVersion: resourceVersion,
+			ResourceVersion: storeResourceVersion,
 			Bookmark:        true,
 			SynchronizedAt:  synchronizedAt,
 		})
@@ -868,6 +880,7 @@ var errTableSchemaChanged = errors.New("Table column definitions changed")
 func (p *Pipeline) applyTableWatchEvent(
 	eventType watch.EventType,
 	table *metav1.Table,
+	checkpoint string,
 	result *watchResult,
 ) error {
 	if table == nil {
@@ -880,14 +893,18 @@ func (p *Pipeline) applyTableWatchEvent(
 		p.tableColumns = append([]metav1.TableColumnDefinition(nil), table.ColumnDefinitions...)
 	}
 	resourceVersion := table.GetResourceVersion()
+	storeResourceVersion := resourceVersion
+	if checkpoint != "" {
+		storeResourceVersion = checkpoint
+	}
 	if eventType == watch.Bookmark {
 		if resourceVersion == "" {
 			return p.disableMalformedTable("Table BOOKMARK has no resourceVersion")
 		}
 		synchronizedAt := time.Now()
-		p.store.SetResourceVersion(resourceVersion)
+		p.store.SetResourceVersion(storeResourceVersion)
 		p.emitBatch(Batch{
-			ResourceVersion: resourceVersion, Bookmark: true, SynchronizedAt: synchronizedAt,
+			ResourceVersion: storeResourceVersion, Bookmark: true, SynchronizedAt: synchronizedAt,
 		})
 		result.progressed = true
 		result.lastSynchronized = synchronizedAt
@@ -919,9 +936,13 @@ func (p *Pipeline) applyTableWatchEvent(
 	if resourceVersion == "" {
 		return p.disableMalformedTable(fmt.Sprintf("Table %s event has no resourceVersion", eventType))
 	}
+	storeResourceVersion = resourceVersion
+	if checkpoint != "" {
+		storeResourceVersion = checkpoint
+	}
 	synchronizedAt := time.Now()
 	batch := Batch{
-		ResourceVersion: resourceVersion, SynchronizedAt: synchronizedAt,
+		ResourceVersion: storeResourceVersion, SynchronizedAt: synchronizedAt,
 		Table: &TableData{
 			Columns: append([]metav1.TableColumnDefinition(nil), p.tableColumns...),
 			Cells:   map[types.UID][]any{object.GetUID(): append([]any(nil), row.Cells...)},
@@ -938,7 +959,7 @@ func (p *Pipeline) applyTableWatchEvent(
 		p.store.Delete(object.GetUID())
 		batch.RemovedUIDs = []types.UID{object.GetUID()}
 	}
-	p.store.SetResourceVersion(resourceVersion)
+	p.store.SetResourceVersion(storeResourceVersion)
 	p.emitBatch(batch)
 	result.progressed = true
 	result.lastSynchronized = synchronizedAt

@@ -240,7 +240,7 @@ func TestRuntimeColdOpenDefersPersistedTombstoneUntilSnapshotComplete(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			serverScope, err := serverNamespace(request.GetSpec())
+			namespacePlan, err := planNamespaceStream(request.GetSpec())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -249,7 +249,7 @@ func TestRuntimeColdOpenDefersPersistedTombstoneUntilSnapshotComplete(t *testing
 				group:       request.GetSpec().GetResource().GetGroup(),
 				version:     request.GetSpec().GetResource().GetVersion(),
 				resource:    request.GetSpec().GetResource().GetResource(),
-				namespace:   serverScope,
+				namespace:   namespacePlan.cacheNamespace,
 				labels:      request.GetSpec().GetLabelSelector(),
 				fields:      request.GetSpec().GetFieldSelector(),
 			}

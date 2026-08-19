@@ -940,7 +940,7 @@ func installWarmProjectionFixture(
 	if err != nil {
 		t.Fatal(err)
 	}
-	namespace, err := serverNamespace(request.GetSpec())
+	namespacePlan, err := planNamespaceStream(request.GetSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -951,7 +951,7 @@ func installWarmProjectionFixture(
 			group:       resource.GetGroup(),
 			version:     resource.GetVersion(),
 			resource:    resource.GetResource(),
-			namespace:   namespace,
+			namespace:   namespacePlan.cacheNamespace,
 			labels:      request.GetSpec().GetLabelSelector(),
 			fields:      request.GetSpec().GetFieldSelector(),
 		},
