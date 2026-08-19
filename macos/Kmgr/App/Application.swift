@@ -26,6 +26,10 @@ final class Application: NSObject, NSApplicationDelegate {
     /// separate columns configuration path.
     private let tableLayoutStore: TableLayoutStore
     private let engineColumnsConfigurationPath: String
+    /// Helper-owned refresh settings are launch-scoped. Keep the Swift
+    /// viewport-interest cadence on the same value until the next relaunch,
+    /// even if Settings has already persisted a future value.
+    private let engineMetricsRefreshSeconds: Int
     private let columnConfigurationCoordinator: ColumnConfigurationCoordinator
     private let restorationStore: WorkspaceRestorationStore
     private var pendingRestorationNotice: ClusterManagerInitialNotice?
@@ -51,6 +55,7 @@ final class Application: NSObject, NSApplicationDelegate {
         self.preferencesStore = preferences
         self.tableLayoutStore = TableLayoutStore()
         self.engineColumnsConfigurationPath = preferences.current.columnsConfigurationPath
+        self.engineMetricsRefreshSeconds = preferences.current.metricsRefreshSeconds
         self.columnConfigurationCoordinator = ColumnConfigurationCoordinator(
             path: preferences.current.columnsConfigurationPath
         )
@@ -356,6 +361,9 @@ final class Application: NSObject, NSApplicationDelegate {
             tableLayoutStore: tableLayoutStore,
             columnsConfigurationPath: engineColumnsConfigurationPath,
             columnConfigurationCoordinator: columnConfigurationCoordinator,
+            resourceViewportTiming: .production(
+                metricsRefreshSeconds: engineMetricsRefreshSeconds
+            ),
             logDisplayConfiguration: LogDisplayConfiguration(
                 preferences: preferencesStore.current.logs
             ),

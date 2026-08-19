@@ -302,6 +302,178 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(close?.keepIndependentStreams == true)
     }
 
+    @Test("maps token-backed selection gestures, projections, and pages")
+    func mapsSelectionTransport() async throws {
+        let rpc = FakeWorkspaceRPC()
+        let provider = deterministicProvider(rpc: rpc)
+
+        let state = try await provider.applySelectionGesture(
+            sessionID: "session-one",
+            viewID: "view-pods",
+            generation: 9,
+            indexRevision: 11,
+            previousToken: "previous-token",
+            gesture: ResourceSelectionGesture(
+                kind: .shiftExtend,
+                index: 6,
+                additive: true
+            )
+        )
+        #expect(state.token == "selection-token")
+        #expect(state.revision == ResourceSelectionRevision(
+            generation: 9,
+            indexRevision: 11
+        ))
+        #expect(state.selectedCount == 3)
+        #expect(state.anchor == ResourceSelectionAnchor(index: 4, uid: "uid-anchor"))
+        #expect(state.expiresAt == Date(timeIntervalSince1970: 1_300))
+
+        let projection = try await provider.projectSelectionRange(
+            sessionID: "session-one",
+            viewID: "view-pods",
+            generation: 9,
+            indexRevision: 11,
+            startIndex: 4,
+            length: 3,
+            token: state.token
+        )
+        #expect(projection.viewID == "view-pods")
+        #expect(projection.revision == state.revision)
+        #expect(projection.startIndex == 4)
+        #expect(projection.rowsVisible == 7)
+        #expect(projection.state == state)
+        #expect(projection.selected == [true, false, true])
+        #expect(projection.anchorOffset == 0)
+
+        let page = try await provider.fetchSelectionPage(
+            sessionID: "session-one",
+            viewID: "view-pods",
+            token: state.token,
+            offset: 1,
+            limit: 2
+        )
+        #expect(page.state == state)
+        #expect(page.offset == 1)
+        #expect(page.items.map(\.pinnedIndex) == [5, 6])
+        #expect(page.items.map(\.identity.uid) == ["uid-worker", "uid-api"])
+        #expect(page.items.allSatisfy {
+            $0.identity.clusterSessionID == "session-one"
+        })
+        #expect(page.nextOffset == 3)
+        #expect(page.done)
+
+        let gesture = await rpc.capturedSelectionGestureRequest()
+        #expect(gesture?.context.requestID == "workspace-request")
+        #expect(gesture?.context.clusterSessionID == "session-one")
+        #expect(gesture?.context.deadlineUnixMs == 1_030_000)
+        #expect(gesture?.viewID == "view-pods")
+        #expect(gesture?.generation == 9)
+        #expect(gesture?.indexRevision == 11)
+        #expect(gesture?.previousToken == "previous-token")
+        #expect(gesture?.gesture.kind == .shiftExtend)
+        #expect(gesture?.gesture.index == 6)
+        #expect(gesture?.gesture.additive == true)
+
+        let range = await rpc.capturedSelectionRangeRequest()
+        #expect(range?.generation == 9)
+        #expect(range?.indexRevision == 11)
+        #expect(range?.startIndex == 4)
+        #expect(range?.length == 3)
+        #expect(range?.token == "selection-token")
+
+        let pageRequest = await rpc.capturedSelectionPageRequest()
+        #expect(pageRequest?.viewID == "view-pods")
+        #expect(pageRequest?.token == "selection-token")
+        #expect(pageRequest?.offset == 1)
+        #expect(pageRequest?.limit == 2)
+    }
+
+    @Test("accepts an old token projected onto a newer view revision")
+    func acceptsOldSelectionProjection() async throws {
+        let provider = deterministicProvider(rpc: FakeWorkspaceRPC(
+            selectionFault: .projectionOldState
+        ))
+
+        let projection = try await provider.projectSelectionRange(
+            sessionID: "session-one",
+            viewID: "view-pods",
+            generation: 9,
+            indexRevision: 11,
+            startIndex: 4,
+            length: 3,
+            token: "selection-token"
+        )
+
+        #expect(projection.revision == ResourceSelectionRevision(
+            generation: 9,
+            indexRevision: 11
+        ))
+        #expect(projection.state.revision == ResourceSelectionRevision(
+            generation: 7,
+            indexRevision: 8
+        ))
+    }
+
+    @Test("rejects mismatched selection projection metadata and duplicate page identities")
+    func rejectsMalformedSelectionResponses() async {
+        let missingExpiry = deterministicProvider(rpc: FakeWorkspaceRPC(
+            selectionFault: .missingExpiry
+        ))
+        do {
+            _ = try await missingExpiry.applySelectionGesture(
+                sessionID: "session-one",
+                viewID: "view-pods",
+                generation: 9,
+                indexRevision: 11,
+                previousToken: "",
+                gesture: ResourceSelectionGesture(kind: .replace, index: 4)
+            )
+            Issue.record("Expected a selection without an expiry to fail")
+        } catch let issue as ClusterManagerIssue {
+            #expect(issue.category == .internalFailure)
+        } catch {
+            Issue.record("Unexpected selection expiry error type: \(error)")
+        }
+
+        let mismatchedProjection = deterministicProvider(rpc: FakeWorkspaceRPC(
+            selectionFault: .projectionToken
+        ))
+        do {
+            _ = try await mismatchedProjection.projectSelectionRange(
+                sessionID: "session-one",
+                viewID: "view-pods",
+                generation: 9,
+                indexRevision: 11,
+                startIndex: 4,
+                length: 3,
+                token: "selection-token"
+            )
+            Issue.record("Expected mismatched projection selection state to fail")
+        } catch let issue as ClusterManagerIssue {
+            #expect(issue.category == .internalFailure)
+        } catch {
+            Issue.record("Unexpected projection error type: \(error)")
+        }
+
+        let duplicatePage = deterministicProvider(rpc: FakeWorkspaceRPC(
+            selectionFault: .duplicatePageUID
+        ))
+        do {
+            _ = try await duplicatePage.fetchSelectionPage(
+                sessionID: "session-one",
+                viewID: "view-pods",
+                token: "selection-token",
+                offset: 1,
+                limit: 2
+            )
+            Issue.record("Expected duplicate selection identities to fail")
+        } catch let issue as ClusterManagerIssue {
+            #expect(issue.category == .internalFailure)
+        } catch {
+            Issue.record("Unexpected selection page error type: \(error)")
+        }
+    }
+
     @Test("workspace stream fails safely instead of growing past its buffer")
     func boundsWorkspaceStreamBuffer() async throws {
         let eventCount = 20
@@ -505,6 +677,13 @@ struct EngineWorkspaceResourceProviderTests {
     }
 }
 
+private enum FakeSelectionFault: Sendable {
+    case missingExpiry
+    case projectionOldState
+    case projectionToken
+    case duplicatePageUID
+}
+
 private actor FakeWorkspaceRPC: WorkspaceRPC {
     private let resources: [Kmgr_V1_ApiResource]
     private let namespaces: [String]
@@ -513,11 +692,15 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
     private let discoveryError: Kmgr_V1_StructuredError?
     private let discoveryWarning: Kmgr_V1_StructuredError?
     private let discoveryPotentiallyIncomplete: Bool
+    private let selectionFault: FakeSelectionFault?
 
     private var discoverRequest: Kmgr_V1_DiscoverRequest?
     private var namespaceRequest: Kmgr_V1_ListNamespacesRequest?
     private var streamRequest: Kmgr_V1_OpenViewRequest?
     private var rangeRequest: Kmgr_V1_FetchViewRangeRequest?
+    private var selectionGestureRequest: Kmgr_V1_ApplySelectionGestureRequest?
+    private var selectionRangeRequest: Kmgr_V1_ProjectSelectionRangeRequest?
+    private var selectionPageRequest: Kmgr_V1_FetchSelectionPageRequest?
     private var metricInterestRequest: Kmgr_V1_UpdateMetricInterestRequest?
     private var cancelRequest: Kmgr_V1_CancelViewRequest?
     private var closeRequest: Kmgr_V1_CloseSessionRequest?
@@ -529,7 +712,8 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
         rangeRows: [Kmgr_V1_ResourceRow] = [],
         discoveryError: Kmgr_V1_StructuredError? = nil,
         discoveryWarning: Kmgr_V1_StructuredError? = nil,
-        discoveryPotentiallyIncomplete: Bool = false
+        discoveryPotentiallyIncomplete: Bool = false,
+        selectionFault: FakeSelectionFault? = nil
     ) {
         self.resources = resources
         self.namespaces = namespaces
@@ -538,12 +722,22 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
         self.discoveryError = discoveryError
         self.discoveryWarning = discoveryWarning
         self.discoveryPotentiallyIncomplete = discoveryPotentiallyIncomplete
+        self.selectionFault = selectionFault
     }
 
     func capturedDiscoverRequest() -> Kmgr_V1_DiscoverRequest? { discoverRequest }
     func capturedNamespaceRequest() -> Kmgr_V1_ListNamespacesRequest? { namespaceRequest }
     func capturedStreamRequest() -> Kmgr_V1_OpenViewRequest? { streamRequest }
     func capturedRangeRequest() -> Kmgr_V1_FetchViewRangeRequest? { rangeRequest }
+    func capturedSelectionGestureRequest() -> Kmgr_V1_ApplySelectionGestureRequest? {
+        selectionGestureRequest
+    }
+    func capturedSelectionRangeRequest() -> Kmgr_V1_ProjectSelectionRangeRequest? {
+        selectionRangeRequest
+    }
+    func capturedSelectionPageRequest() -> Kmgr_V1_FetchSelectionPageRequest? {
+        selectionPageRequest
+    }
     func capturedMetricInterestRequest() -> Kmgr_V1_UpdateMetricInterestRequest? {
         metricInterestRequest
     }
@@ -619,6 +813,81 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
         return response
     }
 
+    func applySelectionGesture(
+        request: Kmgr_V1_ApplySelectionGestureRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_ApplySelectionGestureResponse {
+        selectionGestureRequest = request
+        var response = Kmgr_V1_ApplySelectionGestureResponse()
+        response.requestID = request.context.requestID
+        response.selection = Self.selectionState(
+            generation: request.generation,
+            indexRevision: request.indexRevision
+        )
+        if selectionFault == .missingExpiry {
+            response.selection.expiresAtUnixMs = 0
+        }
+        return response
+    }
+
+    func projectSelectionRange(
+        request: Kmgr_V1_ProjectSelectionRangeRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_ProjectSelectionRangeResponse {
+        selectionRangeRequest = request
+        var response = Kmgr_V1_ProjectSelectionRangeResponse()
+        response.requestID = request.context.requestID
+        response.viewID = request.viewID
+        response.generation = request.generation
+        response.indexRevision = request.indexRevision
+        response.startIndex = request.startIndex
+        response.rowsVisible = 7
+        response.selection = Self.selectionState(
+            generation: request.generation,
+            indexRevision: request.indexRevision
+        )
+        if selectionFault == .projectionOldState {
+            response.selection.generation = 7
+            response.selection.indexRevision = 8
+        } else if selectionFault == .projectionToken {
+            response.selection.token = "different-selection-token"
+        }
+        response.selected = [true, false, true]
+        response.anchorOffset = 0
+        return response
+    }
+
+    func fetchSelectionPage(
+        request: Kmgr_V1_FetchSelectionPageRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_FetchSelectionPageResponse {
+        selectionPageRequest = request
+        var response = Kmgr_V1_FetchSelectionPageResponse()
+        response.requestID = request.context.requestID
+        response.selection = Self.selectionState(generation: 9, indexRevision: 11)
+        response.offset = request.offset
+        response.items = [
+            Self.selectionPageItem(
+                pinnedIndex: 5,
+                sessionID: request.context.clusterSessionID,
+                name: "worker-0",
+                uid: "uid-worker"
+            ),
+            Self.selectionPageItem(
+                pinnedIndex: 6,
+                sessionID: request.context.clusterSessionID,
+                name: "api-0",
+                uid: "uid-api"
+            ),
+        ]
+        if selectionFault == .duplicatePageUID {
+            response.items[1].identity.uid = response.items[0].identity.uid
+        }
+        response.nextOffset = request.offset + UInt64(response.items.count)
+        response.done = true
+        return response
+    }
+
     func cancelView(
         request: Kmgr_V1_CancelViewRequest,
         timeout: Duration
@@ -639,5 +908,37 @@ private actor FakeWorkspaceRPC: WorkspaceRPC {
         response.requestID = request.context.requestID
         response.accepted = true
         return response
+    }
+
+    private static func selectionState(
+        generation: UInt64,
+        indexRevision: UInt64
+    ) -> Kmgr_V1_SelectionState {
+        var state = Kmgr_V1_SelectionState()
+        state.token = "selection-token"
+        state.generation = generation
+        state.indexRevision = indexRevision
+        state.selectedCount = 3
+        state.anchor.index = 4
+        state.anchor.uid = "uid-anchor"
+        state.expiresAtUnixMs = 1_300_000
+        return state
+    }
+
+    private static func selectionPageItem(
+        pinnedIndex: UInt64,
+        sessionID: String,
+        name: String,
+        uid: String
+    ) -> Kmgr_V1_SelectionPageItem {
+        var item = Kmgr_V1_SelectionPageItem()
+        item.pinnedIndex = pinnedIndex
+        item.identity.clusterSessionID = sessionID
+        item.identity.version = "v1"
+        item.identity.resource = "pods"
+        item.identity.namespace = "apps"
+        item.identity.name = name
+        item.identity.uid = uid
+        return item
     }
 }

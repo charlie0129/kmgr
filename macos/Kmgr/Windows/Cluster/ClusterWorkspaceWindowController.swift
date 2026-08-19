@@ -1449,23 +1449,33 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         let capturedNamespaces = namespaces
         let capturedScope = selectedNamespaceScope()
         let capturedCommandContext = contentController.captureCommandContext()
+        let capturedContentController = contentController
         palettePresentationTask = Task { [weak self, recentObjectStore] in
-            let recentObjects = await recentObjectStore.recent(
+            async let recentObjects = recentObjectStore.recent(
                 sessionID: capturedSession.sessionID
             )
-            guard !Task.isCancelled, let self else { return }
-            palettePresentationTask = nil
-            guard paletteController == nil, session.sessionID == capturedSession.sessionID else {
-                return
+            do {
+                let commandContext = try await capturedContentController
+                    .materializeCommandContext(capturedCommandContext)
+                let recentObjects = await recentObjects
+                guard !Task.isCancelled, let self else { return }
+                palettePresentationTask = nil
+                guard paletteController == nil,
+                    session.sessionID == capturedSession.sessionID
+                else { return }
+                installCommandPalette(
+                    session: capturedSession,
+                    resources: capturedResources,
+                    namespaces: capturedNamespaces,
+                    namespaceScope: capturedScope,
+                    commandContext: commandContext,
+                    recentObjects: recentObjects
+                )
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                palettePresentationTask = nil
+                contentController.showCommandContextError(error)
             }
-            installCommandPalette(
-                session: capturedSession,
-                resources: capturedResources,
-                namespaces: capturedNamespaces,
-                namespaceScope: capturedScope,
-                commandContext: capturedCommandContext,
-                recentObjects: recentObjects
-            )
         }
     }
 
@@ -1551,8 +1561,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func enterObject(_ identity: ResourceIdentity) {
-        guard let returnState = contentController.captureNavigationState(),
-            returnState.selectedUIDs.contains(identity.uid)
+        guard let returnState = contentController.captureNavigationState()
         else { return }
 
         // ConfigMap/Secret Data is selected entirely by exact GVR. Its own
@@ -1563,6 +1572,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             return
         }
         guard ResourceDrillDownPlanner.hasPotentialTarget(identity) else { return }
+        guard let sourceSelectionTicket = contentController
+            .captureSelectionOperationTicket(for: identity)
+        else { return }
 
         let revision = beginObjectOpenTask()
         publishWorkspaceOperation(WorkspaceStatus(
@@ -1582,7 +1594,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 guard !Task.isCancelled, objectOpenRevision == revision else { return }
                 publishWorkspaceOperation(nil)
                 guard detail.identity == identity,
-                    drillDownSourceIsCurrent(identity, returnState: returnState),
+                    drillDownSourceIsCurrent(
+                        returnState: returnState,
+                        selectionTicket: sourceSelectionTicket
+                    ),
                     let plan = ResourceDrillDownPlanner.plan(for: detail)
                 else { return }
 
@@ -1613,8 +1628,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func drillDownSourceIsCurrent(
-        _ identity: ResourceIdentity,
-        returnState: ResourceNavigationState
+        returnState: ResourceNavigationState,
+        selectionTicket: ResourceSelectionOperationTicket
     ) -> Bool {
         guard case .resource = contentController.currentDestination,
             let current = contentController.captureNavigationState()
@@ -1626,7 +1641,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             && current.labelSelector == returnState.labelSelector
             && current.fieldSelector == returnState.fieldSelector
             && current.filter == returnState.filter
-            && current.selectedUIDs.contains(identity.uid)
+            && contentController.selectionOperationTicketIsCurrent(
+                selectionTicket
+            )
     }
 
     private func drillDownDetail(
@@ -2614,10 +2631,15 @@ private enum ResourceStreamOpenReason: String {
 }
 
 struct ResourceViewportTiming: Sendable {
-    static let production = ResourceViewportTiming(
-        scrollDebounce: .milliseconds(80),
-        metricInterestRefresh: .seconds(15)
-    )
+    static let production = production(metricsRefreshSeconds: 15)
+
+    static func production(metricsRefreshSeconds: Int) -> ResourceViewportTiming {
+        precondition(metricsRefreshSeconds > 0)
+        return ResourceViewportTiming(
+            scrollDebounce: .milliseconds(80),
+            metricInterestRefresh: .seconds(metricsRefreshSeconds)
+        )
+    }
 
     var scrollDebounce: Duration
     var metricInterestRefresh: Duration
@@ -2633,6 +2655,39 @@ struct ResourceViewportTiming: Sendable {
     }
 }
 
+private struct PendingResourceSelectionGesture: Sendable {
+    var revision: ResourceSelectionRevision
+    var gesture: ResourceSelectionGesture
+    /// The last absolute row targeted by a numeric gesture. This is separate
+    /// from the backend anchor: it identifies the moving edge for Shift-arrow.
+    var activeEndpoint: UInt64?
+}
+
+private struct ResourceSelectionProjectionTicket: Hashable, Sendable {
+    var token: String
+    var revision: ResourceSelectionRevision
+    var startIndex: UInt64
+    var length: Int
+}
+
+private struct ResourceCommandContextCapture: Sendable {
+    var firstResponder: ResponderContext
+    var token: String?
+    var fallbackIdentities: [ResourceIdentity]
+    var pendingGestureTask: Task<Void, Never>?
+    var networkActionsAllowed: Bool
+}
+
+private struct ResourceSelectionOperationTicket: Equatable, Sendable {
+    enum Authority: Equatable, Sendable {
+        case token(String)
+        case loadedUID(ResourceUID)
+    }
+
+    var sessionID: String
+    var authority: Authority
+}
+
 @MainActor
 private final class ResourceListViewController: NSViewController,
     NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate,
@@ -2640,6 +2695,7 @@ private final class ResourceListViewController: NSViewController,
 {
     private static let autoWidthPolicy = TableColumnAutoWidthPolicy()
     private static let maxPendingOptionalResourceKeys = 256
+    private static let maxPendingSelectionGestures = 256
     /// Selector-bearing filters can change the physical LIST/WATCH key. Wait
     /// for typing to stabilize so intermediate tokens do not create a series
     /// of short-lived Kubernetes streams; Return still commits immediately.
@@ -2739,6 +2795,31 @@ private final class ResourceListViewController: NSViewController,
     private var presentedTableRange: Range<UInt64>?
     private var pendingSelectionTableIndexes: IndexSet?
     private var pendingCommandForLoadingSelection: ResourceTableCommand?
+    /// The immutable backend token is the authority for cardinality and
+    /// command targets. `model.selectedUIDs` is only its loaded-range
+    /// projection for AppKit.
+    private var displayedSelectionState: ResourceSelectionState?
+    /// A token may continue numeric gestures only while its generation and
+    /// index revision still match the current backend ordering.
+    private var selectionContinuationToken: String?
+    private var selectionContinuationRevision: ResourceSelectionRevision?
+    private var committedSelectionEndpoint: UInt64?
+    private var committedSelectionEndpointRevision: ResourceSelectionRevision?
+    private var activeSelectionEndpoint: UInt64?
+    private var activeSelectionEndpointRevision: ResourceSelectionRevision?
+    private var pendingSelectionGestures: [PendingResourceSelectionGesture] = []
+    private var pendingSelectionGestureHead = 0
+    /// Last selection explicitly installed by this controller. AppKit changes
+    /// its indexes before the delegate fallback observes accessibility-driven
+    /// selection, so a rejected overflow gesture needs this bounded snapshot
+    /// to restore the preceding optimistic state exactly.
+    private var lastAcceptedAppKitSelection = IndexSet()
+    private var selectionGestureTask: Task<Void, Never>?
+    private var selectionProjectionTask: Task<Void, Never>?
+    private var selectionProjectionTicket: ResourceSelectionProjectionTicket?
+    private var selectionCommandTask: Task<Void, Never>?
+    private var selectionExpiryTask: Task<Void, Never>?
+    private var columnsSelectionTask: Task<Void, Never>?
     /// Selected identities proven to belong to the current complete backend
     /// index. This stays valid while only the retained viewport moves, so an
     /// offscreen selected row is not mislabeled as hidden by the filter.
@@ -2906,11 +2987,19 @@ private final class ResourceListViewController: NSViewController,
             title = resource?.resource.capitalized ?? "Resources"
         }
         let selected = model.selectedIdentities
-        let networkActionsAllowed = recoveredResourceTrust.permitsNetworkActions(
-            for: selected
-        )
+        let networkActionsAllowed = displayedSelectionState != nil
+            ? (isAuthenticated && resourceCatalogValidated)
+            : recoveredResourceTrust.permitsNetworkActions(for: selected)
         func canUse(_ command: ResourceTableCommand) -> Bool {
-            networkActionsAllowed && isCommandCompatible(command, with: selected)
+            guard networkActionsAllowed else { return false }
+            if let state = displayedSelectionState {
+                return isCommandCompatible(
+                    command,
+                    selectedCount: state.selectedCount,
+                    resource: resource
+                )
+            }
+            return isCommandCompatible(command, with: selected)
         }
         return ContextualShortcutCatalog.resourceList(
             title: title,
@@ -3137,6 +3226,10 @@ private final class ResourceListViewController: NSViewController,
         columnsConfigurationLoadTask = nil
         stopFreshnessAgeUpdates()
         suspend()
+        // `suspend()` is also used for same-list Details navigation and must
+        // retain selection there. `stop()` is terminal and owns cancellation
+        // of every token, gesture, projection, command, expiry, and Columns task.
+        resetSelectionAuthority()
         clearOptionalResourceOverlay()
     }
 
@@ -3155,6 +3248,7 @@ private final class ResourceListViewController: NSViewController,
         streamTask?.cancel()
         streamTask = nil
         stopViewportWork()
+        resetSelectionAuthority()
         rangeCache = nil
         pendingInitialRange = nil
         reconciledRevision = nil
@@ -3182,6 +3276,7 @@ private final class ResourceListViewController: NSViewController,
         streamTask?.cancel()
         streamTask = nil
         stopViewportWork()
+        resetSelectionAuthority()
         rangeCache = nil
         pendingInitialRange = nil
         reconciledRevision = nil
@@ -3221,6 +3316,7 @@ private final class ResourceListViewController: NSViewController,
         recoveredResourceTrust.requireValidation()
         publishContextualShortcutsIfChanged()
         if sessionChanged {
+            resetSelectionAuthority()
             cancelOptionalResourceDiscovery(selecting: nil)
             clearOptionalResourceOverlay()
             if let resource { installEffectiveColumns(for: resource) }
@@ -3269,8 +3365,8 @@ private final class ResourceListViewController: NSViewController,
 
     var currentDestination: WorkspaceDestination? { history.current }
 
-    func captureCommandContext() -> CommandContext {
-        let selected = model.selectedIdentities
+    func captureCommandContext() -> ResourceCommandContextCapture {
+        let fallbackIdentities = model.selectedIdentities
         let window = view.window
         let firstResponder = window?.firstResponder
         let filterOwnsResponder = firstResponder === filterField
@@ -3283,16 +3379,53 @@ private final class ResourceListViewController: NSViewController,
             filterOwnsResponder: filterOwnsResponder,
             tableHasActiveEditor: tableView.currentEditor() != nil
         )
-        return .capturingResourceSelection(
+        return ResourceCommandContextCapture(
             firstResponder: responder,
-            selectedIdentities: selected,
-            hiddenSelectionUIDs: Set(selected.lazy.map(\.uid).filter {
-                !self.selectedUIDsKnownInPresentedIndex.contains($0)
-            }),
-            networkActionsAllowed: recoveredResourceTrust.permitsNetworkActions(
-                for: selected
-            )
+            token: displayedSelectionState?.token,
+            fallbackIdentities: fallbackIdentities,
+            pendingGestureTask: selectionGestureTask,
+            networkActionsAllowed: (displayedSelectionState != nil
+                || selectionGestureTask != nil)
+                ? (isAuthenticated && resourceCatalogValidated)
+                : recoveredResourceTrust.permitsNetworkActions(
+                    for: fallbackIdentities
+                )
         )
+    }
+
+    func materializeCommandContext(
+        _ capture: ResourceCommandContextCapture
+    ) async throws -> CommandContext {
+        if let pendingGestureTask = capture.pendingGestureTask {
+            await pendingGestureTask.value
+        }
+        let token = capture.pendingGestureTask == nil
+            ? capture.token : displayedSelectionState?.token
+        let identities: [ResourceIdentity]
+        if let token, !token.isEmpty {
+            do {
+                identities = try await fetchSelectionIdentities(token: token)
+            } catch {
+                clearDisplayedSelectionIfExpired(error: error, token: token)
+                throw error
+            }
+        } else {
+            identities = capture.fallbackIdentities
+        }
+        return .capturingResourceSelection(
+            firstResponder: capture.firstResponder,
+            selectedIdentities: identities,
+            // Token membership is the immutable filtered snapshot. Computing
+            // hidden status for every offscreen UID would require a second
+            // complete current-index scan and is deliberately not inferred
+            // from the bounded viewport.
+            hiddenSelectionUIDs: [],
+            networkActionsAllowed: capture.networkActionsAllowed
+        )
+    }
+
+    func showCommandContextError(_ error: Error) {
+        show(error: error)
     }
 
     @discardableResult
@@ -3315,14 +3448,23 @@ private final class ResourceListViewController: NSViewController,
             view.window?.makeFirstResponder(tableView)
             return true
         }
-        if !model.selectedUIDs.isEmpty {
-            model.clearSelection()
-            selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
-            suppressSelectionCallbacks = true
-            tableView.deselectAll(nil)
-            suppressSelectionCallbacks = false
-            updateStatusLine()
-            publishContextualShortcutsIfChanged()
+        if (displayedSelectionState?.selectedCount ?? UInt64(model.selectedUIDs.count)) > 0 {
+            if let revision = currentSelectionRevision {
+                enqueueSelectionGesture(
+                    ResourceSelectionGesture(kind: .clear),
+                    revision: revision,
+                    activeEndpoint: nil
+                )
+            } else {
+                model.clearSelection()
+                selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
+                suppressSelectionCallbacks = true
+                tableView.deselectAll(nil)
+                lastAcceptedAppKitSelection = []
+                suppressSelectionCallbacks = false
+                updateStatusLine()
+                publishContextualShortcutsIfChanged()
+            }
             return true
         }
         return false
@@ -3382,7 +3524,7 @@ private final class ResourceListViewController: NSViewController,
     @objc private func performContextMenuCommand(_ sender: NSMenuItem) {
         guard let box = sender.representedObject as? ResourceTableCommandBox else { return }
         guard canPerformCommand(box.command, requiringTableFocus: false) else { NSSound.beep(); return }
-        handle(box.command)
+        performCommand(box.command, requiringTableFocus: false)
     }
 
     func setFilter(_ value: String) {
@@ -3399,6 +3541,38 @@ private final class ResourceListViewController: NSViewController,
 
     func captureNavigationState() -> ResourceNavigationState? {
         navigationState()
+    }
+
+    func captureSelectionOperationTicket(
+        for identity: ResourceIdentity
+    ) -> ResourceSelectionOperationTicket? {
+        guard identity.clusterSessionID == session.sessionID else { return nil }
+        if let state = displayedSelectionState {
+            guard state.selectedCount == 1, !state.token.isEmpty else { return nil }
+            return ResourceSelectionOperationTicket(
+                sessionID: session.sessionID,
+                authority: .token(state.token)
+            )
+        }
+        guard model.selectedIdentities.only?.uid == identity.uid else { return nil }
+        return ResourceSelectionOperationTicket(
+            sessionID: session.sessionID,
+            authority: .loadedUID(identity.uid)
+        )
+    }
+
+    func selectionOperationTicketIsCurrent(
+        _ ticket: ResourceSelectionOperationTicket
+    ) -> Bool {
+        guard ticket.sessionID == session.sessionID else { return false }
+        switch ticket.authority {
+        case .token(let token):
+            return displayedSelectionState?.token == token
+                && displayedSelectionState?.selectedCount == 1
+        case .loadedUID(let uid):
+            return displayedSelectionState == nil
+                && model.selectedIdentities.only?.uid == uid
+        }
     }
 
     func navigateToObject(_ identity: ResourceIdentity, returnState: ResourceNavigationState) {
@@ -3463,6 +3637,100 @@ private final class ResourceListViewController: NSViewController,
     @objc private func showColumns() {
         guard isAuthenticated, resourceCatalogValidated else { NSSound.beep(); return }
         guard let resource else { return }
+        if selectionGestureTask != nil || hasPendingSelectionGestures {
+            showColumnsAfterPendingSelection()
+            return
+        }
+        if let selection = displayedSelectionState {
+            guard selection.selectedCount == 1 else {
+                presentColumns(resource: resource, selectedObject: nil)
+                return
+            }
+            fetchSelectedObjectForColumns(
+                resource: resource,
+                selection: selection
+            )
+            return
+        }
+        presentColumns(
+            resource: resource,
+            selectedObject: model.selectedIdentities.only
+        )
+    }
+
+    private func showColumnsAfterPendingSelection() {
+        guard columnsSelectionTask == nil else { NSSound.beep(); return }
+        let gestureTask = selectionGestureTask
+        columnsSelectionTask = Task { @MainActor [weak self] in
+            await gestureTask?.value
+            guard !Task.isCancelled, let self else { return }
+            columnsSelectionTask = nil
+            showColumns()
+        }
+    }
+
+    private func fetchSelectedObjectForColumns(
+        resource: DiscoveredResource,
+        selection: ResourceSelectionState
+    ) {
+        guard columnsSelectionTask == nil else { NSSound.beep(); return }
+        let provider = self.provider
+        let sessionID = session.sessionID
+        let viewID = self.viewID
+        let resourceID = resource.id
+        columnsSelectionTask = Task { @MainActor [weak self, provider] in
+            do {
+                let page = try await provider.fetchSelectionPage(
+                    sessionID: sessionID,
+                    viewID: viewID,
+                    token: selection.token,
+                    offset: 0,
+                    limit: 1
+                )
+                guard !Task.isCancelled, let self else { return }
+                columnsSelectionTask = nil
+                guard self.session.sessionID == sessionID,
+                    self.viewID == viewID,
+                    self.resource?.id == resourceID,
+                    displayedSelectionState == selection
+                else { return }
+                guard page.state == selection,
+                    page.offset == 0,
+                    page.items.count == 1,
+                    page.nextOffset == 1,
+                    page.done,
+                    page.items[0].identity.clusterSessionID == sessionID,
+                    page.items[0].identity.group == resource.group,
+                    page.items[0].identity.version == resource.version,
+                    page.items[0].identity.resource == resource.resource
+                else {
+                    show(error: selectionPageIssue(
+                        reason: "InvalidColumnsSelection",
+                        message: "The engine returned an inconsistent single-object selection for the Columns preview."
+                    ))
+                    return
+                }
+                presentColumns(
+                    resource: resource,
+                    selectedObject: page.items[0].identity
+                )
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                columnsSelectionTask = nil
+                clearDisplayedSelectionIfExpired(
+                    error: error,
+                    token: selection.token
+                )
+                show(error: error)
+            }
+        }
+    }
+
+    private func presentColumns(
+        resource: DiscoveredResource,
+        selectedObject: ResourceIdentity?
+    ) {
+        guard self.resource?.id == resource.id else { return }
         let resourceID = resource.id
         let resourceGVR = resourceGVR(for: resource)
         let optionalColumns = optionalResourceOverlayState.applies(
@@ -3484,7 +3752,7 @@ private final class ResourceListViewController: NSViewController,
                 sessionID: session.sessionID,
                 resource: resource,
                 namespaceScope: scope,
-                selectedObject: model.selectedIdentities.only
+                selectedObject: selectedObject
             ),
             apply: { [weak self] definitions in
                 self?.applyColumns(definitions, forResourceID: resourceID)
@@ -3613,6 +3881,9 @@ private final class ResourceListViewController: NSViewController,
         viewportUpdateTask = nil
         cancelRangeFetches()
         stopMetricInterestWork()
+        selectionProjectionTask?.cancel()
+        selectionProjectionTask = nil
+        selectionProjectionTicket = nil
         pendingCommandForLoadingSelection = nil
     }
 
@@ -3709,7 +3980,25 @@ private final class ResourceListViewController: NSViewController,
         requestedFilterHighlight = ResourceFilterHighlightParser.parse(
             filterField.stringValue
         )
+        let nextStreamContext = ResourceWarmRowContext(
+            sessionID: session.sessionID,
+            gvr: resourceGVR(for: resource),
+            namespaceSelection: scope
+        )
+        let previousStreamContext = lastStreamContext
         generation &+= 1
+        if previousStreamContext == nextStreamContext {
+            // A new generation has a new numeric ordering even when warm rows
+            // are retained. Keep the immutable displayed token for UID
+            // projection, but require the next modifying gesture to start
+            // fresh.
+            sealSelectionContinuation()
+        } else {
+            // Tokens and restored UID projections belong to one exact
+            // session/GVR/namespace list. Never carry them into another list,
+            // including through history restoration.
+            resetSelectionAuthority()
+        }
         prepareOptionalResourceDiscovery(
             for: resource,
             preservingOptionalResourceDiscoveryState:
@@ -3717,12 +4006,6 @@ private final class ResourceListViewController: NSViewController,
         )
         beginProjectionRequest()
         generationGate.reset()
-        let nextStreamContext = ResourceWarmRowContext(
-            sessionID: session.sessionID,
-            gvr: resourceGVR(for: resource),
-            namespaceSelection: scope
-        )
-        let previousStreamContext = lastStreamContext
         let rowsBeforeOpen = model.orderedVisibleUIDs.count
         let retentionDecision = ResourceWarmRowPolicy.decision(
             existingRowCount: rowsBeforeOpen,
@@ -3937,6 +4220,9 @@ private final class ResourceListViewController: NSViewController,
                 disposition != .rejectedInvalid,
                 disposition != .hintsOnly
             else { break }
+            if case .advanced(indexChanged: true) = disposition {
+                sealSelectionContinuation()
+            }
             cancelRangeFetches()
             pendingInitialRange = nil
             reconciledRevision = nil
@@ -4075,6 +4361,274 @@ private final class ResourceListViewController: NSViewController,
             guard model.selectedUIDs.contains($0.element) else { return nil }
             return tableRow(forModelIndex: $0.offset)
         })
+    }
+
+    private var currentSelectionRevision: ResourceSelectionRevision? {
+        guard let revision = rangeCache?.revision else { return nil }
+        let selectionRevision = ResourceSelectionRevision(
+            generation: revision.generation,
+            indexRevision: revision.index
+        )
+        return selectionRevision.isValid ? selectionRevision : nil
+    }
+
+    /// Numeric input is safe only when the row the user can see belongs to the
+    /// same membership/order revision the backend will resolve. Presentation-
+    /// only cell refreshes deliberately do not block selection continuation.
+    private var interactiveSelectionRevision: ResourceSelectionRevision? {
+        guard let revision = currentSelectionRevision,
+            presentedRangeRevision?.generation == revision.generation,
+            presentedRangeRevision?.index == revision.indexRevision
+        else { return nil }
+        return revision
+    }
+
+    /// Numeric selection state is meaningful only for one exact ordering.
+    /// The displayed token deliberately survives so its UID membership can be
+    /// projected onto the replacement ordering, but no later gesture may
+    /// extend or toggle its old numeric intervals.
+    private func sealSelectionContinuation() {
+        selectionContinuationToken = nil
+        selectionContinuationRevision = nil
+        committedSelectionEndpoint = nil
+        committedSelectionEndpointRevision = nil
+        activeSelectionEndpoint = nil
+        activeSelectionEndpointRevision = nil
+        clearPendingSelectionGestures()
+        pendingSelectionTableIndexes = nil
+        pendingCommandForLoadingSelection = nil
+        selectionProjectionTask?.cancel()
+        selectionProjectionTask = nil
+        selectionProjectionTicket = nil
+        restoreAppKitSelectionFromLoadedModel()
+    }
+
+    private func resetSelectionAuthority() {
+        selectionGestureTask?.cancel()
+        selectionGestureTask = nil
+        selectionProjectionTask?.cancel()
+        selectionProjectionTask = nil
+        selectionCommandTask?.cancel()
+        selectionCommandTask = nil
+        columnsSelectionTask?.cancel()
+        columnsSelectionTask = nil
+        selectionExpiryTask?.cancel()
+        selectionExpiryTask = nil
+        displayedSelectionState = nil
+        selectionContinuationToken = nil
+        selectionContinuationRevision = nil
+        committedSelectionEndpoint = nil
+        committedSelectionEndpointRevision = nil
+        activeSelectionEndpoint = nil
+        activeSelectionEndpointRevision = nil
+        clearPendingSelectionGestures()
+        selectionProjectionTicket = nil
+        pendingSelectionTableIndexes = nil
+        pendingCommandForLoadingSelection = nil
+        pendingSelectionUIDs = nil
+        model.clearSelection()
+        selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
+        let wasSuppressing = suppressSelectionCallbacks
+        suppressSelectionCallbacks = true
+        tableView.deselectAll(nil)
+        lastAcceptedAppKitSelection = []
+        suppressSelectionCallbacks = wasSuppressing
+    }
+
+    private func clearDisplayedSelectionIfExpired(
+        error: Error,
+        token: String
+    ) {
+        guard displayedSelectionState?.token == token,
+            let issue = error as? ClusterManagerIssue,
+            issue.category == .validation,
+            (issue.message.localizedCaseInsensitiveContains("selection token expired")
+                || issue.message.localizedCaseInsensitiveContains("selection token has expired"))
+        else { return }
+        clearDisplayedSelection(token: token)
+    }
+
+    private func clearDisplayedSelection(token: String) {
+        guard displayedSelectionState?.token == token else { return }
+        selectionExpiryTask?.cancel()
+        selectionExpiryTask = nil
+        displayedSelectionState = nil
+        selectionContinuationToken = nil
+        selectionContinuationRevision = nil
+        committedSelectionEndpoint = nil
+        committedSelectionEndpointRevision = nil
+        activeSelectionEndpoint = nil
+        activeSelectionEndpointRevision = nil
+        pendingSelectionTableIndexes = nil
+        model.clearSelection()
+        selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
+        let wasSuppressing = suppressSelectionCallbacks
+        suppressSelectionCallbacks = true
+        tableView.deselectAll(nil)
+        lastAcceptedAppKitSelection = []
+        suppressSelectionCallbacks = wasSuppressing
+        updateStatusLine()
+        publishContextualShortcutsIfChanged()
+    }
+
+    private func scheduleSelectionExpiry(for state: ResourceSelectionState) {
+        selectionExpiryTask?.cancel()
+        selectionExpiryTask = nil
+        guard let expiresAt = state.expiresAt else { return }
+        let token = state.token
+        let delaySeconds = max(0, expiresAt.timeIntervalSinceNow)
+        let delayNanoseconds = Int64(min(
+            delaySeconds * 1_000_000_000,
+            Double(Int64.max)
+        ))
+        selectionExpiryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .nanoseconds(delayNanoseconds))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.clearDisplayedSelection(token: token)
+        }
+    }
+
+    private func scheduleSelectionProjection() {
+        selectionProjectionTask?.cancel()
+        selectionProjectionTask = nil
+        selectionProjectionTicket = nil
+        guard let state = displayedSelectionState,
+            !state.token.isEmpty,
+            let revision = currentSelectionRevision,
+            let presentedRangeRevision,
+            presentedRangeRevision.generation == revision.generation,
+            presentedRangeRevision.index == revision.indexRevision,
+            let range = presentedTableRange,
+            range.count == model.orderedVisibleUIDs.count
+        else { return }
+
+        guard !range.isEmpty else {
+            applyLoadedSelectionProjection(
+                selected: [],
+                anchorOffset: nil,
+                projectedRange: range
+            )
+            return
+        }
+        let ticket = ResourceSelectionProjectionTicket(
+            token: state.token,
+            revision: revision,
+            startIndex: range.lowerBound,
+            length: range.count
+        )
+        selectionProjectionTicket = ticket
+        let provider = self.provider
+        let sessionID = session.sessionID
+        let viewID = self.viewID
+        selectionProjectionTask = Task { @MainActor [weak self, provider] in
+            do {
+                let projection = try await provider.projectSelectionRange(
+                    sessionID: sessionID,
+                    viewID: viewID,
+                    generation: ticket.revision.generation,
+                    indexRevision: ticket.revision.indexRevision,
+                    startIndex: ticket.startIndex,
+                    length: ticket.length,
+                    token: ticket.token
+                )
+                guard !Task.isCancelled else { return }
+                self?.receiveSelectionProjection(projection, ticket: ticket)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.receiveSelectionProjectionFailure(error, ticket: ticket)
+            }
+        }
+    }
+
+    private func receiveSelectionProjection(
+        _ projection: ResourceSelectionProjection,
+        ticket: ResourceSelectionProjectionTicket
+    ) {
+        guard selectionProjectionTicket == ticket,
+            let displayedState = displayedSelectionState,
+            displayedState.token == ticket.token,
+            currentSelectionRevision == ticket.revision,
+            presentedRangeRevision.map({
+                $0.generation == ticket.revision.generation
+                    && $0.index == ticket.revision.indexRevision
+            }) == true,
+            presentedTableRange == ticket.startIndex..<(
+                ticket.startIndex + UInt64(ticket.length)
+            ),
+            projection.viewID == viewID,
+            projection.revision == ticket.revision,
+            projection.startIndex == ticket.startIndex,
+            projection.rowsVisible == tableRowsVisible,
+            projection.state == displayedState,
+            projection.selected.count == ticket.length
+        else { return }
+        selectionProjectionTask = nil
+        selectionProjectionTicket = nil
+        // The store returns the token's fixed origin metadata on every
+        // projection. It can differ from the newer ordering in `ticket`, but
+        // must remain byte-for-byte stable for this immutable token.
+        applyLoadedSelectionProjection(
+            selected: projection.selected,
+            anchorOffset: projection.anchorOffset,
+            projectedRange: ticket.startIndex..<(
+                ticket.startIndex + UInt64(ticket.length)
+            )
+        )
+        updateStatusLine()
+        publishContextualShortcutsIfChanged()
+    }
+
+    private func receiveSelectionProjectionFailure(
+        _ error: Error,
+        ticket: ResourceSelectionProjectionTicket
+    ) {
+        guard selectionProjectionTicket == ticket else { return }
+        selectionProjectionTask = nil
+        selectionProjectionTicket = nil
+        guard currentSelectionRevision == ticket.revision,
+            displayedSelectionState?.token == ticket.token
+        else { return }
+        clearDisplayedSelectionIfExpired(error: error, token: ticket.token)
+        show(error: error)
+    }
+
+    private func applyLoadedSelectionProjection(
+        selected: [Bool],
+        anchorOffset: Int?,
+        projectedRange: Range<UInt64>
+    ) {
+        guard selected.count == model.orderedVisibleUIDs.count else { return }
+        let selectedUIDs = Set(zip(model.orderedVisibleUIDs, selected).compactMap {
+            $0.1 ? $0.0 : nil
+        })
+        let anchorUID = anchorOffset.flatMap {
+            model.orderedVisibleUIDs.indices.contains($0)
+                ? model.orderedVisibleUIDs[$0] : nil
+        }
+        model.restoreSelection(uids: selectedUIDs, anchorUID: anchorUID)
+        selectedUIDsKnownInPresentedIndex = selectedUIDs
+
+        if let pending = pendingSelectionTableIndexes {
+            let unresolved = pending.filter {
+                guard $0 >= 0 else { return false }
+                return !projectedRange.contains(UInt64($0))
+            }
+            pendingSelectionTableIndexes = unresolved.isEmpty
+                ? nil : IndexSet(unresolved)
+        }
+        var tableSelection = selectedTableRowIndexes()
+        if let pendingSelectionTableIndexes {
+            tableSelection.formUnion(pendingSelectionTableIndexes)
+        }
+        let wasSuppressing = suppressSelectionCallbacks
+        suppressSelectionCallbacks = true
+        tableView.selectRowIndexes(tableSelection, byExtendingSelection: false)
+        lastAcceptedAppKitSelection = tableView.selectedRowIndexes
+        suppressSelectionCallbacks = wasSuppressing
     }
 
     private func scheduleViewportUpdate(immediate: Bool = false) {
@@ -4313,7 +4867,10 @@ private final class ResourceListViewController: NSViewController,
                 priorRowIndex: 0
             )
         }
-        let confirmedRemovals = removedUIDs.subtracting(model.selectedUIDs)
+        // Backend selection tokens retain offscreen identities. The bounded
+        // frontend model must not keep evicted rows alive merely because they
+        // were selected in a previous viewport.
+        let confirmedRemovals = removedUIDs
         let plan = model.apply(
             ResourceRowBatch(
                 upserts: range.rows,
@@ -4373,12 +4930,14 @@ private final class ResourceListViewController: NSViewController,
                 + " presentation=\(range.revision.presentation)"
                 + " index=\(range.revision.index)"
         )
+        scheduleSelectionProjection()
         if request != nil { updateStatusLine() }
         runPendingSelectionCommandIfReady()
     }
 
     private func runPendingSelectionCommandIfReady() {
-        guard pendingSelectionTableIndexes == nil,
+        guard selectionGestureTask == nil,
+            !hasPendingSelectionGestures,
             let command = pendingCommandForLoadingSelection
         else { return }
         pendingCommandForLoadingSelection = nil
@@ -4409,32 +4968,6 @@ private final class ResourceListViewController: NSViewController,
             model.restoreSelection(uids: pendingSelectionUIDs)
             if chunkIsComplete { self.pendingSelectionUIDs = nil }
             restoredSelection = true
-        }
-        if var pendingIndexes = pendingSelectionTableIndexes {
-            let resolvedModelIndexes = pendingIndexes.compactMap {
-                modelIndex(forTableRow: $0)
-            }
-            if !resolvedModelIndexes.isEmpty {
-                var selectedUIDs = model.selectedUIDs
-                for modelIndex in resolvedModelIndexes {
-                    selectedUIDs.insert(model.orderedVisibleUIDs[modelIndex])
-                    if let tableRow = tableRow(forModelIndex: modelIndex) {
-                        pendingIndexes.remove(tableRow)
-                    }
-                }
-                let anchorUID = tableView.selectedRow >= 0
-                    ? modelIndex(forTableRow: tableView.selectedRow).map {
-                        model.orderedVisibleUIDs[$0]
-                    }
-                    : nil
-                model.restoreSelection(
-                    uids: selectedUIDs,
-                    anchorUID: anchorUID
-                )
-                pendingSelectionTableIndexes = pendingIndexes.isEmpty
-                    ? nil : pendingIndexes
-                restoredSelection = true
-            }
         }
         guard restoredSelection else { return plan }
         return ResourceTableUpdatePlan(
@@ -4496,6 +5029,7 @@ private final class ResourceListViewController: NSViewController,
                 byExtendingSelection: false
             )
         }
+        lastAcceptedAppKitSelection = tableView.selectedRowIndexes
         suppressSelectionCallbacks = wasSuppressingSelectionCallbacks
         tableSignposter.endInterval(
             PerformanceSignpostCatalog.resourceTableReload,
@@ -4979,13 +5513,9 @@ private final class ResourceListViewController: NSViewController,
         } else {
             sortLabel.stringValue = "Unsorted"
         }
-        let selectedCount = model.selectedUIDs.count
-        let hiddenSelectionCount = model.selectedUIDs.subtracting(
-            selectedUIDsKnownInPresentedIndex
-        ).count
-        let selection = hiddenSelectionCount > 0
-            ? "\(selectedCount) selected (\(hiddenSelectionCount) hidden by filter)"
-            : "\(selectedCount) selected"
+        let selectedCount = displayedSelectionState?.selectedCount
+            ?? UInt64(model.selectedUIDs.count)
+        let selection = "\(selectedCount.formatted()) selected"
         let authoritativeRowCount = resourceViewStatus?.rowsVisible
             ?? UInt64(model.orderedVisibleUIDs.count)
         var statusParts = [
@@ -5281,6 +5811,7 @@ private final class ResourceListViewController: NSViewController,
             projectedSelection,
             byExtendingSelection: false
         )
+        lastAcceptedAppKitSelection = tableView.selectedRowIndexes
     }
 
     private var installedColumnDefinitions: [ColumnDefinition] {
@@ -5974,55 +6505,325 @@ private final class ResourceListViewController: NSViewController,
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !suppressSelectionCallbacks else { return }
-        pendingCommandForLoadingSelection = nil
-        let selectedTableRows = tableView.selectedRowIndexes
-        let selectedModelRows = selectedTableRows.compactMap {
-            modelIndex(forTableRow: $0)
+        // Mouse and keyboard gestures normally arrive through
+        // ResourceTableView before AppKit mutates its local indexes. Keep this
+        // delegate as an accessibility/programmatic fallback, translating the
+        // resulting cursor to one backend replace/clear gesture instead of
+        // treating AppKit's loaded rows as selection authority.
+        let row = tableView.selectedRow
+        _ = performSelectionGesture(ResourceTableSelectionGesture(
+            row: row >= 0 ? row : nil,
+            modifiers: [],
+            keyboardDirection: nil
+        ))
+    }
+
+    private func performSelectionGesture(_ gesture: ResourceTableSelectionGesture) -> Bool {
+        guard let revision = interactiveSelectionRevision else {
+            // Warm rows can remain visible between an invalidation and its
+            // replacement range. Never let AppKit mutate local indexes while
+            // those rows do not match the backend's interactive ordering.
+            if presentedTableRange != nil || tableRowsVisible > 0 {
+                NSSound.beep()
+                restoreAppKitSelectionFromLoadedModel()
+                return true
+            }
+            return false
         }
-        let unresolvedRows = selectedTableRows.filter {
-            modelIndex(forTableRow: $0) == nil
+
+        let targetIndex: UInt64?
+        if let direction = gesture.keyboardDirection {
+            let endpoint = activeSelectionEndpointRevision == revision
+                ? activeSelectionEndpoint
+                : nil
+            let fallback = tableView.selectedRow >= 0
+                ? UInt64(tableView.selectedRow) : nil
+            guard let current = endpoint ?? fallback, tableRowsVisible > 0 else {
+                return false
+            }
+            if direction == .down {
+                targetIndex = min(current + 1, tableRowsVisible - 1)
+            } else {
+                targetIndex = current > 0 ? current - 1 : 0
+            }
+        } else {
+            targetIndex = gesture.row.flatMap { row in
+                guard row >= 0, UInt64(row) < tableRowsVisible else { return nil }
+                return UInt64(row)
+            }
         }
-        pendingSelectionTableIndexes = unresolvedRows.isEmpty
-            ? nil : IndexSet(unresolvedRows)
-        model.replaceSelectionFromVisibleRows(
-            indexes: selectedModelRows,
-            anchorIndex: modelIndex(forTableRow: tableView.selectedRow)
+
+        let backendGesture: ResourceSelectionGesture
+        if let targetIndex {
+            if gesture.modifiers.contains(.shift) {
+                backendGesture = ResourceSelectionGesture(
+                    kind: .shiftExtend,
+                    index: targetIndex,
+                    additive: gesture.modifiers.contains(.command)
+                )
+            } else if gesture.modifiers.contains(.command) {
+                backendGesture = ResourceSelectionGesture(
+                    kind: .commandToggle,
+                    index: targetIndex
+                )
+            } else {
+                backendGesture = ResourceSelectionGesture(
+                    kind: .replace,
+                    index: targetIndex
+                )
+            }
+        } else {
+            backendGesture = ResourceSelectionGesture(kind: .clear)
+        }
+        _ = enqueueSelectionGesture(
+            backendGesture,
+            revision: revision,
+            activeEndpoint: targetIndex
         )
-        selectedUIDsKnownInPresentedIndex = model.selectedUIDs
-        if !unresolvedRows.isEmpty {
-            scheduleViewportUpdate(immediate: true)
+        return true
+    }
+
+    @discardableResult
+    private func enqueueSelectionGesture(
+        _ gesture: ResourceSelectionGesture,
+        revision: ResourceSelectionRevision,
+        activeEndpoint: UInt64?
+    ) -> Bool {
+        guard pendingSelectionGestureCount < Self.maxPendingSelectionGestures else {
+            // Consume overflow without allowing AppKit's delegate-first
+            // accessibility fallback to publish a selection the backend will
+            // never serialize. The active endpoint and token remain untouched.
+            NSSound.beep()
+            let wasSuppressing = suppressSelectionCallbacks
+            suppressSelectionCallbacks = true
+            tableView.selectRowIndexes(
+                lastAcceptedAppKitSelection,
+                byExtendingSelection: false
+            )
+            suppressSelectionCallbacks = wasSuppressing
+            return false
         }
+        pendingCommandForLoadingSelection = nil
+        pendingSelectionGestures.append(PendingResourceSelectionGesture(
+            revision: revision,
+            gesture: gesture,
+            activeEndpoint: activeEndpoint
+        ))
+        if let activeEndpoint {
+            activeSelectionEndpoint = activeEndpoint
+            activeSelectionEndpointRevision = revision
+        } else if gesture.kind == .clear || gesture.kind == .commandAll {
+            activeSelectionEndpoint = nil
+            activeSelectionEndpointRevision = nil
+        }
+        installPendingSelectionPlaceholder(
+            gesture: gesture,
+            targetIndex: activeEndpoint
+        )
+        startSelectionGestureQueueIfNeeded()
+        updateStatusLine()
+        return true
+    }
+
+    private func installPendingSelectionPlaceholder(
+        gesture: ResourceSelectionGesture,
+        targetIndex: UInt64?
+    ) {
+        let wasSuppressing = suppressSelectionCallbacks
+        suppressSelectionCallbacks = true
+        defer { suppressSelectionCallbacks = wasSuppressing }
+        switch gesture.kind {
+        case .clear:
+            pendingSelectionTableIndexes = nil
+            tableView.deselectAll(nil)
+            lastAcceptedAppKitSelection = []
+        case .commandAll:
+            // Never materialize an IndexSet for the complete backend table.
+            // Loaded membership is installed by the bounded projection RPC.
+            break
+        case .replace, .commandToggle, .shiftExtend:
+            guard let targetIndex, targetIndex <= UInt64(Int.max) else { return }
+            let row = Int(targetIndex)
+            if gesture.kind == .replace {
+                pendingSelectionTableIndexes = nil
+            }
+            if modelIndex(forTableRow: row) == nil {
+                pendingSelectionTableIndexes = IndexSet(integer: row)
+            }
+            var indexes = tableView.selectedRowIndexes
+            switch gesture.kind {
+            case .replace:
+                indexes = IndexSet(integer: row)
+            case .commandToggle:
+                if indexes.contains(row) { indexes.remove(row) } else { indexes.insert(row) }
+            case .shiftExtend:
+                // The backend anchor owns the true (potentially enormous)
+                // range. Highlight only the moving edge until projection.
+                indexes.insert(row)
+            case .commandAll, .clear:
+                break
+            }
+            tableView.selectRowIndexes(indexes, byExtendingSelection: false)
+            lastAcceptedAppKitSelection = tableView.selectedRowIndexes
+            tableView.scrollRowToVisible(row)
+            if modelIndex(forTableRow: row) == nil {
+                scheduleViewportUpdate(immediate: true)
+            }
+        }
+    }
+
+    private func startSelectionGestureQueueIfNeeded() {
+        guard selectionGestureTask == nil, hasPendingSelectionGestures else {
+            return
+        }
+        let provider = self.provider
+        selectionGestureTask = Task { @MainActor [weak self, provider] in
+            guard let self else { return }
+            while !Task.isCancelled,
+                let pending = popPendingSelectionGesture()
+            {
+                guard currentSelectionRevision == pending.revision else {
+                    discardSelectionPlaceholder(for: pending)
+                    continue
+                }
+                let previousToken = usableSelectionContinuationToken(
+                    for: pending.revision
+                )
+                do {
+                    let state = try await provider.applySelectionGesture(
+                        sessionID: session.sessionID,
+                        viewID: viewID,
+                        generation: pending.revision.generation,
+                        indexRevision: pending.revision.indexRevision,
+                        previousToken: previousToken,
+                        gesture: pending.gesture
+                    )
+                    guard !Task.isCancelled else { return }
+                    receiveSelectionGesture(state, pending: pending)
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    receiveSelectionGestureFailure(error, pending: pending)
+                }
+            }
+            guard !Task.isCancelled else { return }
+            selectionGestureTask = nil
+            runPendingSelectionCommandIfReady()
+        }
+    }
+
+    private func receiveSelectionGesture(
+        _ state: ResourceSelectionState,
+        pending: PendingResourceSelectionGesture
+    ) {
+        guard !state.token.isEmpty, state.revision == pending.revision else {
+            discardSelectionPlaceholder(for: pending)
+            return
+        }
+        displayedSelectionState = state
+        scheduleSelectionExpiry(for: state)
+        if currentSelectionRevision == pending.revision {
+            selectionContinuationToken = state.token
+            selectionContinuationRevision = pending.revision
+            committedSelectionEndpoint = pending.activeEndpoint
+            committedSelectionEndpointRevision = pending.activeEndpoint == nil
+                ? nil : pending.revision
+        } else {
+            selectionContinuationToken = nil
+            selectionContinuationRevision = nil
+        }
+        scheduleSelectionProjection()
         updateStatusLine()
         publishContextualShortcutsIfChanged()
     }
 
-    private func performSelectionGesture(_ gesture: ResourceTableSelectionGesture) -> Bool {
-        let modelRow = gesture.keyboardDirection.map {
-            model.selectionExtensionDestinationIndex(movingDown: $0 == .down)
-        } ?? gesture.row.flatMap(modelIndex(forTableRow:))
-        guard model.applySelectionGesture(
-            clickedIndex: modelRow,
-            modifiers: gesture.modifiers
-        ) else { return false }
-        selectedUIDsKnownInPresentedIndex.formIntersection(model.selectedUIDs)
-        selectedUIDsKnownInPresentedIndex.formUnion(
-            model.orderedVisibleUIDs.lazy.filter {
-                self.model.selectedUIDs.contains($0)
-            }
-        )
-        var selectedIndexes = selectedTableRowIndexes()
+    private func receiveSelectionGestureFailure(
+        _ error: Error,
+        pending: PendingResourceSelectionGesture
+    ) {
+        discardSelectionPlaceholder(for: pending)
+        clearPendingSelectionGestures()
+        pendingSelectionTableIndexes = nil
+        pendingCommandForLoadingSelection = nil
+        if committedSelectionEndpointRevision == pending.revision {
+            activeSelectionEndpoint = committedSelectionEndpoint
+            activeSelectionEndpointRevision = committedSelectionEndpointRevision
+        } else {
+            activeSelectionEndpoint = nil
+            activeSelectionEndpointRevision = nil
+        }
+        restoreAppKitSelectionFromLoadedModel()
+        scheduleSelectionProjection()
+        guard currentSelectionRevision == pending.revision else { return }
+        show(error: error)
+    }
+
+    private func discardSelectionPlaceholder(
+        for pending: PendingResourceSelectionGesture
+    ) {
+        guard let target = pending.activeEndpoint,
+            target <= UInt64(Int.max),
+            var placeholders = pendingSelectionTableIndexes
+        else { return }
+        placeholders.remove(Int(target))
+        pendingSelectionTableIndexes = placeholders.isEmpty ? nil : placeholders
+    }
+
+    private var hasPendingSelectionGestures: Bool {
+        pendingSelectionGestureHead < pendingSelectionGestures.count
+    }
+
+    private var pendingSelectionGestureCount: Int {
+        pendingSelectionGestures.count - pendingSelectionGestureHead
+    }
+
+    private func popPendingSelectionGesture() -> PendingResourceSelectionGesture? {
+        guard hasPendingSelectionGestures else {
+            clearPendingSelectionGestures()
+            return nil
+        }
+        let gesture = pendingSelectionGestures[pendingSelectionGestureHead]
+        pendingSelectionGestureHead += 1
+        if pendingSelectionGestureHead == pendingSelectionGestures.count {
+            clearPendingSelectionGestures()
+        } else if pendingSelectionGestureHead >= 64,
+            pendingSelectionGestureHead * 2 >= pendingSelectionGestures.count
+        {
+            pendingSelectionGestures.removeFirst(pendingSelectionGestureHead)
+            pendingSelectionGestureHead = 0
+        }
+        return gesture
+    }
+
+    private func clearPendingSelectionGestures() {
+        pendingSelectionGestures.removeAll(keepingCapacity: true)
+        pendingSelectionGestureHead = 0
+    }
+
+    private func usableSelectionContinuationToken(
+        for revision: ResourceSelectionRevision
+    ) -> String {
+        guard selectionContinuationRevision == revision,
+            let token = selectionContinuationToken,
+            displayedSelectionState?.token == token,
+            displayedSelectionState?.expiresAt.map({ $0 > Date() }) ?? true
+        else {
+            selectionContinuationToken = nil
+            selectionContinuationRevision = nil
+            return ""
+        }
+        return token
+    }
+
+    private func restoreAppKitSelectionFromLoadedModel() {
+        var indexes = selectedTableRowIndexes()
         if let pendingSelectionTableIndexes {
-            selectedIndexes.formUnion(pendingSelectionTableIndexes)
+            indexes.formUnion(pendingSelectionTableIndexes)
         }
+        let wasSuppressing = suppressSelectionCallbacks
         suppressSelectionCallbacks = true
-        tableView.selectRowIndexes(selectedIndexes, byExtendingSelection: false)
-        suppressSelectionCallbacks = false
-        if let modelRow, let tableRow = tableRow(forModelIndex: modelRow) {
-            tableView.scrollRowToVisible(tableRow)
-        }
-        updateStatusLine()
-        publishContextualShortcutsIfChanged()
-        return true
+        tableView.selectRowIndexes(indexes, byExtendingSelection: false)
+        lastAcceptedAppKitSelection = tableView.selectedRowIndexes
+        suppressSelectionCallbacks = wasSuppressing
     }
 
     func tableView(
@@ -6096,18 +6897,11 @@ private final class ResourceListViewController: NSViewController,
     }
 
     @objc private func openSelectedObjectFromTable() {
-        guard canPerformCommand(.open, requiringTableFocus: false) else {
-            NSSound.beep()
-            return
-        }
-        openSelectedObject(initialTab: .automatic)
+        performCommand(.open, requiringTableFocus: false)
     }
 
     @objc private func enterSelectedObjectFromTable() {
-        guard canPerformCommand(.enter, requiringTableFocus: false),
-            let identity = model.selectedIdentities.only
-        else { return }
-        onEnterObject?(identity)
+        performCommand(.enter, requiringTableFocus: false)
     }
 
     private func openSelectedObject(
@@ -6170,18 +6964,12 @@ private final class ResourceListViewController: NSViewController,
             else { NSSound.beep(); return }
             onConfigureExec?(PodExecTarget(pod: identity))
         case .selectAll:
-            model.selectAllVisible()
-            selectedUIDsKnownInPresentedIndex.formUnion(
-                model.orderedVisibleUIDs
+            guard let revision = interactiveSelectionRevision else { return }
+            enqueueSelectionGesture(
+                ResourceSelectionGesture(kind: .commandAll),
+                revision: revision,
+                activeEndpoint: nil
             )
-            suppressSelectionCallbacks = true
-            tableView.selectRowIndexes(
-                selectedTableRowIndexes(),
-                byExtendingSelection: false
-            )
-            suppressSelectionCallbacks = false
-            updateStatusLine()
-            publishContextualShortcutsIfChanged()
         case .delete:
             let hidden = hiddenSelectionUIDs ?? Set(
                 selected.lazy.map(\.uid).filter {
@@ -6219,9 +7007,18 @@ private final class ResourceListViewController: NSViewController,
             }
         case .moveDown, .moveUp:
             let delta = command == .moveDown ? 1 : -1
-            let next = min(max(tableView.selectedRow + delta, 0), max(0, tableView.numberOfRows - 1))
-            tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
-            tableView.scrollRowToVisible(next)
+            let current = activeSelectionEndpointRevision == currentSelectionRevision
+                ? activeSelectionEndpoint.map(Int.init)
+                : (tableView.selectedRow >= 0 ? tableView.selectedRow : nil)
+            let next = min(
+                max((current ?? (delta > 0 ? -1 : 1)) + delta, 0),
+                max(0, tableView.numberOfRows - 1)
+            )
+            _ = performSelectionGesture(ResourceTableSelectionGesture(
+                row: next,
+                modifiers: [],
+                keyboardDirection: nil
+            ))
         case .extendDown, .extendUp:
             _ = performSelectionGesture(ResourceTableSelectionGesture(
                 row: nil,
@@ -6242,15 +7039,179 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func performCommand(_ command: ResourceTableCommand) {
+        performCommand(command, requiringTableFocus: true)
+    }
+
+    private func performCommand(
+        _ command: ResourceTableCommand,
+        requiringTableFocus: Bool
+    ) {
         if command.requiresMaterializedSelection,
-            pendingSelectionTableIndexes?.isEmpty == false
+            (selectionGestureTask != nil || hasPendingSelectionGestures)
         {
             pendingCommandForLoadingSelection = command
-            scheduleViewportUpdate(immediate: true)
             return
         }
-        guard canPerformCommand(command) else { NSSound.beep(); return }
-        handle(command)
+        guard canPerformCommand(command, requiringTableFocus: requiringTableFocus)
+        else { NSSound.beep(); return }
+        guard command.requiresMaterializedSelection else {
+            handle(command, identities: [])
+            return
+        }
+        guard let selection = displayedSelectionState,
+            !selection.token.isEmpty
+        else {
+            let identities = model.selectedIdentities
+            guard isCommandCompatible(command, with: identities) else {
+                NSSound.beep()
+                return
+            }
+            let hidden = Set(identities.lazy.map(\.uid).filter {
+                !self.selectedUIDsKnownInPresentedIndex.contains($0)
+            })
+            handle(
+                command,
+                identities: identities,
+                hiddenSelectionUIDs: hidden
+            )
+            return
+        }
+        materializeSelection(for: command, token: selection.token)
+    }
+
+    private func materializeSelection(
+        for command: ResourceTableCommand,
+        token: String
+    ) {
+        guard selectionCommandTask == nil else { NSSound.beep(); return }
+        let provider = self.provider
+        let sessionID = session.sessionID
+        let viewID = self.viewID
+        selectionCommandTask = Task { @MainActor [weak self, provider] in
+            guard let self else { return }
+            do {
+                let identities = try await fetchSelectionIdentities(
+                    token: token,
+                    sessionID: sessionID,
+                    viewID: viewID,
+                    provider: provider
+                )
+                guard !Task.isCancelled else { return }
+                selectionCommandTask = nil
+                guard identities.allSatisfy({
+                    $0.clusterSessionID == sessionID
+                }), isCommandCompatible(command, with: identities) else {
+                    NSSound.beep()
+                    return
+                }
+                handle(command, identities: identities, hiddenSelectionUIDs: [])
+            } catch {
+                guard !Task.isCancelled else { return }
+                selectionCommandTask = nil
+                clearDisplayedSelectionIfExpired(error: error, token: token)
+                show(error: error)
+            }
+        }
+    }
+
+    private func fetchSelectionIdentities(
+        token: String,
+        sessionID: String? = nil,
+        viewID: String? = nil,
+        provider suppliedProvider: (any WorkspaceResourceProviding)? = nil
+    ) async throws -> [ResourceIdentity] {
+        let provider = suppliedProvider ?? self.provider
+        let sessionID = sessionID ?? session.sessionID
+        let viewID = viewID ?? self.viewID
+        var identities: [ResourceIdentity] = []
+        var offset: UInt64 = 0
+        var expectedState: ResourceSelectionState?
+        var previousPinnedIndex: UInt64?
+        var seenUIDs: Set<ResourceUID> = []
+        while !Task.isCancelled {
+            let page = try await provider.fetchSelectionPage(
+                sessionID: sessionID,
+                viewID: viewID,
+                token: token,
+                offset: offset,
+                limit: ResourceSelectionPage.protocolMaximumPageSize
+            )
+            let (expectedNextOffset, overflow) = offset.addingReportingOverflow(
+                UInt64(page.items.count)
+            )
+            guard page.state.token == token,
+                page.offset == offset,
+                !overflow,
+                page.nextOffset == expectedNextOffset
+            else {
+                throw selectionPageIssue(
+                    reason: "InvalidSelectionPage",
+                    message: "The engine returned an inconsistent selection page."
+                )
+            }
+            if let expectedState {
+                guard page.state == expectedState else {
+                    throw selectionPageIssue(
+                        reason: "SelectionChangedWhilePaging",
+                        message: "The immutable selection metadata changed while it was being read."
+                    )
+                }
+            } else {
+                expectedState = page.state
+                // This path intentionally still materializes targets for the
+                // existing command handlers. Bound speculative reservation so
+                // corrupt metadata cannot request an enormous allocation.
+                identities.reserveCapacity(Int(min(
+                    page.state.selectedCount,
+                    1_000_000
+                )))
+            }
+            for item in page.items {
+                guard previousPinnedIndex.map({ item.pinnedIndex > $0 }) ?? true,
+                    item.identity.clusterSessionID == sessionID,
+                    seenUIDs.insert(item.identity.uid).inserted
+                else {
+                    throw selectionPageIssue(
+                        reason: "InvalidSelectionIdentity",
+                        message: "The engine returned a duplicate, out-of-order, or cross-session selection identity."
+                    )
+                }
+                previousPinnedIndex = item.pinnedIndex
+                identities.append(item.identity)
+            }
+            offset = page.nextOffset
+            if page.done {
+                guard offset == page.state.selectedCount,
+                    UInt64(identities.count) == page.state.selectedCount
+                else {
+                    throw selectionPageIssue(
+                        reason: "IncompleteSelectionPage",
+                        message: "The engine ended selection paging before every identity was returned."
+                    )
+                }
+                return identities
+            }
+            guard !page.items.isEmpty else {
+                throw selectionPageIssue(
+                    reason: "EmptySelectionPage",
+                    message: "The engine returned an empty non-final selection page."
+                )
+            }
+        }
+        throw CancellationError()
+    }
+
+    private func selectionPageIssue(
+        reason: String,
+        message: String
+    ) -> ClusterManagerIssue {
+        ClusterManagerIssue(
+            category: .validation,
+            reason: reason,
+            message: message,
+            retryable: false,
+            operation: "fetch resource selection page"
+        )
     }
 
     /// Executes a palette operation against the immutable identity snapshot
@@ -6274,7 +7235,14 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func isCommandCompatible(_ command: ResourceTableCommand) -> Bool {
-        isCommandCompatible(command, with: model.selectedIdentities)
+        if let state = displayedSelectionState {
+            return isCommandCompatible(
+                command,
+                selectedCount: state.selectedCount,
+                resource: resource
+            )
+        }
+        return isCommandCompatible(command, with: model.selectedIdentities)
     }
 
     private func canPerformCommand(
@@ -6282,6 +7250,24 @@ private final class ResourceListViewController: NSViewController,
         requiringTableFocus: Bool
     ) -> Bool {
         if requiringTableFocus, view.window?.firstResponder !== tableView { return false }
+        if let state = displayedSelectionState {
+            let compatible = isCommandCompatible(
+                command,
+                selectedCount: state.selectedCount,
+                resource: resource
+            )
+            guard compatible else { return false }
+            switch command {
+            case .focusFilter, .selectAll, .moveDown, .moveUp,
+                .extendDown, .extendUp:
+                return true
+            default:
+                // The token was issued only by the authenticated engine for
+                // this session/view. Final identity and command compatibility
+                // are checked again after every immutable page is fetched.
+                return isAuthenticated && resourceCatalogValidated
+            }
+        }
         let selected = model.selectedIdentities
         let isLocalOnly: Bool
         switch command {
@@ -6297,6 +7283,63 @@ private final class ResourceListViewController: NSViewController,
             return false
         }
         return isCommandCompatible(command, with: selected)
+    }
+
+    private func isCommandCompatible(
+        _ command: ResourceTableCommand,
+        selectedCount: UInt64,
+        resource: DiscoveredResource?
+    ) -> Bool {
+        let exactlyOne = selectedCount == 1
+        let nonempty = selectedCount > 0
+        let group = resource?.group ?? ""
+        let version = resource?.version ?? ""
+        let name = resource?.resource ?? ""
+        switch command {
+        case .enter:
+            guard exactlyOne, let resource else { return false }
+            let identity = ResourceIdentity(
+                clusterSessionID: session.sessionID,
+                group: resource.group,
+                version: resource.version,
+                resource: resource.resource,
+                namespace: resource.namespaced ? "_" : "",
+                name: "_",
+                uid: "_"
+            )
+            return ResourceDrillDownPlanner.hasPotentialTarget(identity)
+        case .open, .openYAML, .openYAMLSnapshot, .openEvents:
+            return exactlyOne
+        case .openLogs, .openPreviousLogs:
+            guard nonempty, selectedCount <= 128 else { return false }
+            if group.isEmpty, version == "v1", name == "pods" { return true }
+            if group == "apps", version == "v1" {
+                return ["deployments", "statefulsets", "daemonsets", "replicasets"]
+                    .contains(name)
+            }
+            return group == "batch" && version == "v1"
+                && ["jobs", "cronjobs"].contains(name)
+        case .openExec, .configureExec:
+            return exactlyOne && group.isEmpty && version == "v1" && name == "pods"
+        case .startPortForward:
+            return exactlyOne && group.isEmpty && version == "v1"
+                && (name == "pods" || name == "services")
+        case .delete:
+            return nonempty
+        case .scale:
+            return exactlyOne && resource?.namespaced == true
+                && ["deployments", "statefulsets", "replicasets"].contains(name)
+        case .restart:
+            return exactlyOne && group == "apps" && version == "v1"
+                && ["deployments", "statefulsets", "daemonsets"].contains(name)
+        case .editMetadata:
+            return exactlyOne
+        case .copyName, .copyNamespacedName, .copyReference:
+            return nonempty
+        case .focusFilter, .selectAll, .moveDown, .moveUp,
+            .extendDown, .extendUp:
+            return true
+        }
     }
 
     private func isCommandCompatible(
@@ -6399,9 +7442,9 @@ private final class ResourceTableView: NSTableView {
 
     /// A nil-targeted Edit > Select All command resolves to NSTableView before
     /// `keyDown(with:)` gets a chance to translate Command-A. Route that
-    /// responder action through the UID-owned model so selected rows hidden by
-    /// the current filter are retained. Model-to-AppKit projection uses the
-    /// explicit `super` seam below to avoid recursively dispatching the command.
+    /// responder action through the backend token authority so Command-A covers
+    /// unloaded rows without constructing a full AppKit IndexSet. Projection
+    /// uses the explicit `super` seam below to avoid recursive dispatch.
     override func selectAll(_ sender: Any?) {
         guard currentEditor() == nil, let onCommand else {
             super.selectAll(sender)
@@ -6417,10 +7460,11 @@ private final class ResourceTableView: NSTableView {
             modifiers: Self.selectionModifiers(from: event.modifierFlags),
             keyboardDirection: nil
         )
-        if !gesture.modifiers.isEmpty,
-            onSelectionGesture?(gesture) == true
-        {
+        if onSelectionGesture?(gesture) == true {
             window?.makeFirstResponder(self)
+            if row >= 0, event.clickCount == 2 {
+                onCommand?(.enter)
+            }
             return
         }
         super.mouseDown(with: event)

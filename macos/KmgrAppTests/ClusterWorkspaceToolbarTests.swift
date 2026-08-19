@@ -2316,6 +2316,7 @@ func makeColumnPropagationWorkspace(
     session: OpenedClusterSession,
     provider: any WorkspaceResourceProviding,
     optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
+    objectDetailProvider: (any ObjectDetailProviding)? = nil,
     columnsConfigurationPath: String,
     columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
     columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
@@ -2340,7 +2341,8 @@ func makeColumnPropagationWorkspace(
         connectionActivityProvider: NoopConnectionActivityProvider(),
         optionalResourceCatalogProvider: optionalResourceCatalogProvider,
         objectSearchProvider: NoopObjectSearchProvider(),
-        objectDetailProvider: NoopToolbarObjectDetailProvider(),
+        objectDetailProvider:
+            objectDetailProvider ?? NoopToolbarObjectDetailProvider(),
         operationProvider: NoopOperationProvider(),
         logProvider: NoopLogProvider(),
         execProvider: NoopExecProvider(),

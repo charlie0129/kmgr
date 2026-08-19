@@ -28,6 +28,21 @@ public protocol WorkspaceRPC: Sendable {
         timeout: Duration
     ) async throws -> Kmgr_V1_FetchViewRangeResponse
 
+    func applySelectionGesture(
+        request: Kmgr_V1_ApplySelectionGestureRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_ApplySelectionGestureResponse
+
+    func projectSelectionRange(
+        request: Kmgr_V1_ProjectSelectionRangeRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_ProjectSelectionRangeResponse
+
+    func fetchSelectionPage(
+        request: Kmgr_V1_FetchSelectionPageRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_FetchSelectionPageResponse
+
     func updateMetricInterest(
         request: Kmgr_V1_UpdateMetricInterestRequest,
         timeout: Duration
@@ -109,6 +124,36 @@ public struct EngineWorkspaceRPC: WorkspaceRPC {
         timeout: Duration
     ) async throws -> Kmgr_V1_FetchViewRangeResponse {
         try await connection.viewClient().fetchViewRange(
+            request,
+            options: callOptions(timeout: timeout)
+        )
+    }
+
+    public func applySelectionGesture(
+        request: Kmgr_V1_ApplySelectionGestureRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_ApplySelectionGestureResponse {
+        try await connection.viewClient().applySelectionGesture(
+            request,
+            options: callOptions(timeout: timeout)
+        )
+    }
+
+    public func projectSelectionRange(
+        request: Kmgr_V1_ProjectSelectionRangeRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_ProjectSelectionRangeResponse {
+        try await connection.viewClient().projectSelectionRange(
+            request,
+            options: callOptions(timeout: timeout)
+        )
+    }
+
+    public func fetchSelectionPage(
+        request: Kmgr_V1_FetchSelectionPageRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_FetchSelectionPageResponse {
+        try await connection.viewClient().fetchSelectionPage(
             request,
             options: callOptions(timeout: timeout)
         )
@@ -468,6 +513,209 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         }
     }
 
+    public func applySelectionGesture(
+        sessionID: String,
+        viewID: String,
+        generation: UInt64,
+        indexRevision: UInt64,
+        previousToken: String,
+        gesture: ResourceSelectionGesture
+    ) async throws -> ResourceSelectionState {
+        do {
+            try Self.validateSelectionScope(
+                sessionID: sessionID,
+                viewID: viewID,
+                token: previousToken,
+                tokenMayBeEmpty: true
+            )
+            try Self.validateSelectionRevision(
+                generation: generation,
+                indexRevision: indexRevision,
+                operation: "apply resource selection gesture"
+            )
+            let rpcGesture = try Self.selectionGesture(from: gesture)
+
+            var request = Kmgr_V1_ApplySelectionGestureRequest()
+            request.context = makeRequestContext(
+                sessionID: sessionID,
+                timeout: unaryTimeout
+            )
+            request.viewID = viewID
+            request.generation = generation
+            request.indexRevision = indexRevision
+            request.previousToken = previousToken
+            request.gesture = rpcGesture
+
+            let response = try await rpc.applySelectionGesture(
+                request: request,
+                timeout: unaryTimeout
+            )
+            try validateResponseID(
+                response.requestID,
+                expected: request.context.requestID,
+                operation: "apply resource selection gesture"
+            )
+            let state = try Self.selectionState(from: response.selection)
+            guard response.hasSelection,
+                state.revision == ResourceSelectionRevision(
+                    generation: generation,
+                    indexRevision: indexRevision
+                )
+            else {
+                throw Self.validationIssue(
+                    reason: "SelectionRevisionMismatch",
+                    message: "The engine returned selection state for a different resource-view ordering.",
+                    operation: "apply resource selection gesture",
+                    category: .internalFailure
+                )
+            }
+            return state
+        } catch {
+            throw EngineClusterContextProvider.issue(
+                from: error,
+                contextName: "",
+                operation: "apply resource selection gesture"
+            )
+        }
+    }
+
+    public func projectSelectionRange(
+        sessionID: String,
+        viewID: String,
+        generation: UInt64,
+        indexRevision: UInt64,
+        startIndex: UInt64,
+        length: Int,
+        token: String
+    ) async throws -> ResourceSelectionProjection {
+        do {
+            try Self.validateSelectionScope(
+                sessionID: sessionID,
+                viewID: viewID,
+                token: token
+            )
+            try Self.validateSelectionRevision(
+                generation: generation,
+                indexRevision: indexRevision,
+                operation: "project resource selection range"
+            )
+            guard (1...ResourceViewInvalidation.protocolMaximumRangeLength)
+                .contains(length)
+            else {
+                throw Self.validationIssue(
+                    reason: "InvalidSelectionProjectionRange",
+                    message: "A projection length from 1 through 512 is required.",
+                    operation: "project resource selection range"
+                )
+            }
+
+            var request = Kmgr_V1_ProjectSelectionRangeRequest()
+            request.context = makeRequestContext(
+                sessionID: sessionID,
+                timeout: unaryTimeout
+            )
+            request.viewID = viewID
+            request.generation = generation
+            request.indexRevision = indexRevision
+            request.startIndex = startIndex
+            request.length = UInt32(length)
+            request.token = token
+
+            let response = try await rpc.projectSelectionRange(
+                request: request,
+                timeout: unaryTimeout
+            )
+            try validateResponseID(
+                response.requestID,
+                expected: request.context.requestID,
+                operation: "project resource selection range"
+            )
+            try Self.validateSelectionProjection(response, for: request)
+            return ResourceSelectionProjection(
+                viewID: response.viewID,
+                revision: ResourceSelectionRevision(
+                    generation: response.generation,
+                    indexRevision: response.indexRevision
+                ),
+                startIndex: response.startIndex,
+                rowsVisible: response.rowsVisible,
+                state: try Self.selectionState(from: response.selection),
+                selected: response.selected,
+                anchorOffset: response.hasAnchorOffset
+                    ? Int(response.anchorOffset) : nil
+            )
+        } catch {
+            throw EngineClusterContextProvider.issue(
+                from: error,
+                contextName: "",
+                operation: "project resource selection range"
+            )
+        }
+    }
+
+    public func fetchSelectionPage(
+        sessionID: String,
+        viewID: String,
+        token: String,
+        offset: UInt64,
+        limit: Int
+    ) async throws -> ResourceSelectionPage {
+        do {
+            try Self.validateSelectionScope(
+                sessionID: sessionID,
+                viewID: viewID,
+                token: token
+            )
+            guard (1...ResourceSelectionPage.protocolMaximumPageSize).contains(limit)
+            else {
+                throw Self.validationIssue(
+                    reason: "InvalidSelectionPage",
+                    message: "A selection page limit from 1 through 1,024 is required.",
+                    operation: "fetch resource selection page"
+                )
+            }
+
+            var request = Kmgr_V1_FetchSelectionPageRequest()
+            request.context = makeRequestContext(
+                sessionID: sessionID,
+                timeout: unaryTimeout
+            )
+            request.viewID = viewID
+            request.token = token
+            request.offset = offset
+            request.limit = UInt32(limit)
+
+            let response = try await rpc.fetchSelectionPage(
+                request: request,
+                timeout: unaryTimeout
+            )
+            try validateResponseID(
+                response.requestID,
+                expected: request.context.requestID,
+                operation: "fetch resource selection page"
+            )
+            try Self.validateSelectionPage(response, for: request)
+            return ResourceSelectionPage(
+                state: try Self.selectionState(from: response.selection),
+                offset: response.offset,
+                items: response.items.map { item in
+                    ResourceSelectionPageItem(
+                        pinnedIndex: item.pinnedIndex,
+                        identity: Self.identity(from: item.identity)
+                    )
+                },
+                nextOffset: response.nextOffset,
+                done: response.done
+            )
+        } catch {
+            throw EngineClusterContextProvider.issue(
+                from: error,
+                contextName: "",
+                operation: "fetch resource selection page"
+            )
+        }
+    }
+
     public func closeSession(sessionID: String) async {
         var request = Kmgr_V1_CloseSessionRequest()
         request.context = makeRequestContext(
@@ -740,6 +988,250 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         }
     }
 
+    private static func validateSelectionScope(
+        sessionID: String,
+        viewID: String,
+        token: String,
+        tokenMayBeEmpty: Bool = false
+    ) throws {
+        let sessionIsValid = !sessionID.isEmpty
+            && sessionID.trimmingCharacters(in: .whitespacesAndNewlines) == sessionID
+        let viewIsValid = !viewID.isEmpty
+            && viewID.trimmingCharacters(in: .whitespacesAndNewlines) == viewID
+        let tokenIsValid = (tokenMayBeEmpty && token.isEmpty)
+            || (!token.isEmpty
+                && token.trimmingCharacters(in: .whitespacesAndNewlines) == token)
+        guard sessionIsValid, viewIsValid, tokenIsValid else {
+            throw validationIssue(
+                reason: "InvalidSelectionScope",
+                message: "A trimmed session, view, and selection token are required.",
+                operation: "resource selection"
+            )
+        }
+    }
+
+    private static func validateSelectionRevision(
+        generation: UInt64,
+        indexRevision: UInt64,
+        operation: String
+    ) throws {
+        guard generation > 0, indexRevision > 0 else {
+            throw validationIssue(
+                reason: "InvalidSelectionRevision",
+                message: "Nonzero generation and index revisions are required.",
+                operation: operation
+            )
+        }
+    }
+
+    private static func selectionGesture(
+        from gesture: ResourceSelectionGesture
+    ) throws -> Kmgr_V1_SelectionGesture {
+        let kind: Kmgr_V1_SelectionGestureKind
+        let index: UInt64
+        switch gesture.kind {
+        case .replace:
+            kind = .replace
+            index = try selectionGestureIndex(gesture)
+        case .commandToggle:
+            kind = .commandToggle
+            index = try selectionGestureIndex(gesture)
+        case .shiftExtend:
+            kind = .shiftExtend
+            index = try selectionGestureIndex(gesture)
+        case .commandAll:
+            kind = .commandAll
+            index = 0
+        case .clear:
+            kind = .clear
+            index = 0
+        }
+
+        let targetsRow = switch gesture.kind {
+        case .replace, .commandToggle, .shiftExtend: true
+        case .commandAll, .clear: false
+        }
+        guard targetsRow == (gesture.index != nil),
+            gesture.kind == .shiftExtend || !gesture.additive
+        else {
+            throw validationIssue(
+                reason: "InvalidSelectionGesture",
+                message: "Only row gestures accept an index, and only Shift extension may be additive.",
+                operation: "apply resource selection gesture"
+            )
+        }
+
+        var result = Kmgr_V1_SelectionGesture()
+        result.kind = kind
+        result.index = index
+        result.additive = gesture.additive
+        return result
+    }
+
+    private static func selectionGestureIndex(
+        _ gesture: ResourceSelectionGesture
+    ) throws -> UInt64 {
+        guard let index = gesture.index else {
+            throw validationIssue(
+                reason: "InvalidSelectionGesture",
+                message: "This selection gesture requires an absolute row index.",
+                operation: "apply resource selection gesture"
+            )
+        }
+        return index
+    }
+
+    private static func selectionState(
+        from state: Kmgr_V1_SelectionState
+    ) throws -> ResourceSelectionState {
+        let revision = ResourceSelectionRevision(
+            generation: state.generation,
+            indexRevision: state.indexRevision
+        )
+        let tokenIsValid = !state.token.isEmpty
+            && state.token.trimmingCharacters(in: .whitespacesAndNewlines) == state.token
+        let anchor: ResourceSelectionAnchor?
+        if state.hasAnchor {
+            let uid = state.anchor.uid
+            guard !uid.isEmpty,
+                uid.trimmingCharacters(in: .whitespacesAndNewlines) == uid
+            else {
+                throw validationIssue(
+                    reason: "InvalidSelectionState",
+                    message: "The engine returned an invalid selection anchor.",
+                    operation: "resource selection",
+                    category: .internalFailure
+                )
+            }
+            anchor = ResourceSelectionAnchor(
+                index: state.anchor.index,
+                uid: ResourceUID(uid)
+            )
+        } else {
+            anchor = nil
+        }
+        guard tokenIsValid, revision.isValid, state.expiresAtUnixMs > 0 else {
+            throw validationIssue(
+                reason: "InvalidSelectionState",
+                message: "The engine returned invalid selection token metadata.",
+                operation: "resource selection",
+                category: .internalFailure
+            )
+        }
+        return ResourceSelectionState(
+            token: state.token,
+            revision: revision,
+            selectedCount: state.selectedCount,
+            anchor: anchor,
+            expiresAt: Date(
+                timeIntervalSince1970:
+                    Double(state.expiresAtUnixMs) / 1_000
+            )
+        )
+    }
+
+    private static func validateSelectionProjection(
+        _ response: Kmgr_V1_ProjectSelectionRangeResponse,
+        for request: Kmgr_V1_ProjectSelectionRangeRequest
+    ) throws {
+        guard response.viewID == request.viewID,
+            response.generation == request.generation,
+            response.indexRevision == request.indexRevision,
+            response.startIndex == request.startIndex,
+            response.startIndex <= response.rowsVisible,
+            response.hasSelection
+        else {
+            throw validationIssue(
+                reason: "SelectionProjectionRevisionMismatch",
+                message: "The engine returned selection membership for a different resource-view ordering.",
+                operation: "project resource selection range",
+                category: .internalFailure
+            )
+        }
+        let available = response.rowsVisible - response.startIndex
+        let expectedCount = min(UInt64(request.length), available)
+        guard UInt64(response.selected.count) == expectedCount else {
+            throw validationIssue(
+                reason: "SelectionProjectionLengthMismatch",
+                message: "The engine returned incomplete selection membership.",
+                operation: "project resource selection range",
+                category: .internalFailure
+            )
+        }
+        let state = try selectionState(from: response.selection)
+        guard state.token == request.token,
+            !response.hasAnchorOffset
+                || Int(response.anchorOffset) < response.selected.count
+        else {
+            throw validationIssue(
+                reason: "InvalidSelectionProjection",
+                message: "The engine returned membership for a different token or an invalid anchor offset.",
+                operation: "project resource selection range",
+                category: .internalFailure
+            )
+        }
+    }
+
+    private static func validateSelectionPage(
+        _ response: Kmgr_V1_FetchSelectionPageResponse,
+        for request: Kmgr_V1_FetchSelectionPageRequest
+    ) throws {
+        guard response.hasSelection else {
+            throw validationIssue(
+                reason: "InvalidSelectionPage",
+                message: "The engine returned a selection page without token metadata.",
+                operation: "fetch resource selection page",
+                category: .internalFailure
+            )
+        }
+        let state = try selectionState(from: response.selection)
+        let (expectedNextOffset, overflow) = response.offset.addingReportingOverflow(
+            UInt64(response.items.count)
+        )
+        guard state.token == request.token,
+            response.offset == request.offset,
+            response.items.count <= Int(request.limit),
+            !overflow,
+            response.nextOffset == expectedNextOffset,
+            response.nextOffset <= state.selectedCount,
+            response.done == (response.nextOffset == state.selectedCount),
+            response.offset <= state.selectedCount,
+            response.offset == state.selectedCount || !response.items.isEmpty
+        else {
+            throw validationIssue(
+                reason: "InvalidSelectionPage",
+                message: "The engine returned inconsistent selection page bounds.",
+                operation: "fetch resource selection page",
+                category: .internalFailure
+            )
+        }
+
+        var previousIndex: UInt64?
+        var seenUIDs: Set<String> = []
+        for item in response.items {
+            let identity = item.identity
+            guard item.hasIdentity,
+                identity.clusterSessionID == request.context.clusterSessionID,
+                !identity.version.isEmpty,
+                !identity.resource.isEmpty,
+                !identity.name.isEmpty,
+                !identity.uid.isEmpty,
+                identity.uid.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == identity.uid,
+                seenUIDs.insert(identity.uid).inserted,
+                previousIndex.map({ $0 < item.pinnedIndex }) ?? true
+            else {
+                throw validationIssue(
+                    reason: "InvalidSelectionPageIdentity",
+                    message: "The engine returned an invalid or unordered selected resource identity.",
+                    operation: "fetch resource selection page",
+                    category: .internalFailure
+                )
+            }
+            previousIndex = item.pinnedIndex
+        }
+    }
+
     private static func validationIssue(
         reason: String,
         message: String,
@@ -757,16 +1249,22 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
 
     private static func row(from row: Kmgr_V1_ResourceRow) -> ResourceRow {
         ResourceRow(
-            identity: ResourceIdentity(
-                clusterSessionID: row.identity.clusterSessionID,
-                group: row.identity.group,
-                version: row.identity.version,
-                resource: row.identity.resource,
-                namespace: row.identity.namespace,
-                name: row.identity.name,
-                uid: ResourceUID(row.identity.uid)
-            ),
+            identity: identity(from: row.identity),
             cells: row.cells.map(cell(from:))
+        )
+    }
+
+    private static func identity(
+        from identity: Kmgr_V1_ResourceIdentity
+    ) -> ResourceIdentity {
+        ResourceIdentity(
+            clusterSessionID: identity.clusterSessionID,
+            group: identity.group,
+            version: identity.version,
+            resource: identity.resource,
+            namespace: identity.namespace,
+            name: identity.name,
+            uid: ResourceUID(identity.uid)
         )
     }
 

@@ -74,6 +74,33 @@ public protocol WorkspaceResourceProviding: Sendable {
         request: ResourceMetricInterestRequest
     ) async throws
 
+    func applySelectionGesture(
+        sessionID: String,
+        viewID: String,
+        generation: UInt64,
+        indexRevision: UInt64,
+        previousToken: String,
+        gesture: ResourceSelectionGesture
+    ) async throws -> ResourceSelectionState
+
+    func projectSelectionRange(
+        sessionID: String,
+        viewID: String,
+        generation: UInt64,
+        indexRevision: UInt64,
+        startIndex: UInt64,
+        length: Int,
+        token: String
+    ) async throws -> ResourceSelectionProjection
+
+    func fetchSelectionPage(
+        sessionID: String,
+        viewID: String,
+        token: String,
+        offset: UInt64,
+        limit: Int
+    ) async throws -> ResourceSelectionPage
+
     func cancelView(sessionID: String, viewID: String, generation: UInt64) async
     func closeSession(sessionID: String) async
 }
@@ -301,6 +328,187 @@ public struct ResourceMetricInterestRequest: Hashable, Sendable {
         generation > 0
             && indexRevision > 0
             && (1...ResourceViewInvalidation.protocolMaximumRangeLength).contains(length)
+    }
+}
+
+/// One user selection action against an exact resource-view ordering.
+public struct ResourceSelectionGesture: Hashable, Sendable {
+    public enum Kind: Hashable, Sendable {
+        case replace
+        case commandToggle
+        case shiftExtend
+        case commandAll
+        case clear
+    }
+
+    public var kind: Kind
+    /// Required by row-targeting gestures and absent for command-all/clear.
+    public var index: UInt64?
+    /// Command-Shift extension. Meaningful only for `shiftExtend`.
+    public var additive: Bool
+
+    public init(kind: Kind, index: UInt64? = nil, additive: Bool = false) {
+        self.kind = kind
+        self.index = index
+        self.additive = additive
+    }
+}
+
+public struct ResourceSelectionRevision: Hashable, Sendable {
+    public var generation: UInt64
+    public var indexRevision: UInt64
+
+    public init(generation: UInt64, indexRevision: UInt64) {
+        self.generation = generation
+        self.indexRevision = indexRevision
+    }
+
+    public var isValid: Bool { generation > 0 && indexRevision > 0 }
+}
+
+public struct ResourceSelectionAnchor: Hashable, Sendable {
+    public var index: UInt64
+    public var uid: ResourceUID
+
+    public init(index: UInt64, uid: ResourceUID) {
+        self.index = index
+        self.uid = uid
+    }
+}
+
+/// Immutable token metadata returned after every selection gesture.
+public struct ResourceSelectionState: Hashable, Sendable {
+    public var token: String
+    public var revision: ResourceSelectionRevision
+    public var selectedCount: UInt64
+    public var anchor: ResourceSelectionAnchor?
+    public var expiresAt: Date?
+
+    public init(
+        token: String,
+        revision: ResourceSelectionRevision,
+        selectedCount: UInt64,
+        anchor: ResourceSelectionAnchor? = nil,
+        expiresAt: Date? = nil
+    ) {
+        self.token = token
+        self.revision = revision
+        self.selectedCount = selectedCount
+        self.anchor = anchor
+        self.expiresAt = expiresAt
+    }
+
+    public var generation: UInt64 { revision.generation }
+    public var indexRevision: UInt64 { revision.indexRevision }
+}
+
+/// UID-based membership for one bounded range of the current view.
+public struct ResourceSelectionProjection: Hashable, Sendable {
+    public var viewID: String
+    public var revision: ResourceSelectionRevision
+    public var startIndex: UInt64
+    public var rowsVisible: UInt64
+    public var state: ResourceSelectionState
+    public var selected: [Bool]
+    /// Offset in `selected` when the token anchor is visible in this range.
+    public var anchorOffset: Int?
+
+    public init(
+        viewID: String,
+        revision: ResourceSelectionRevision,
+        startIndex: UInt64,
+        rowsVisible: UInt64,
+        state: ResourceSelectionState,
+        selected: [Bool],
+        anchorOffset: Int? = nil
+    ) {
+        self.viewID = viewID
+        self.revision = revision
+        self.startIndex = startIndex
+        self.rowsVisible = rowsVisible
+        self.state = state
+        self.selected = selected
+        self.anchorOffset = anchorOffset
+    }
+}
+
+public struct ResourceSelectionPageItem: Hashable, Sendable {
+    public var pinnedIndex: UInt64
+    public var identity: ResourceIdentity
+
+    public init(pinnedIndex: UInt64, identity: ResourceIdentity) {
+        self.pinnedIndex = pinnedIndex
+        self.identity = identity
+    }
+}
+
+/// One bounded page of identities from an immutable selection token.
+public struct ResourceSelectionPage: Hashable, Sendable {
+    public static let protocolMaximumPageSize = 1_024
+
+    public var state: ResourceSelectionState
+    public var offset: UInt64
+    public var items: [ResourceSelectionPageItem]
+    public var nextOffset: UInt64
+    public var done: Bool
+
+    public init(
+        state: ResourceSelectionState,
+        offset: UInt64,
+        items: [ResourceSelectionPageItem],
+        nextOffset: UInt64,
+        done: Bool
+    ) {
+        self.state = state
+        self.offset = offset
+        self.items = items
+        self.nextOffset = nextOffset
+        self.done = done
+    }
+}
+
+public extension WorkspaceResourceProviding {
+    func applySelectionGesture(
+        sessionID: String,
+        viewID: String,
+        generation: UInt64,
+        indexRevision: UInt64,
+        previousToken: String,
+        gesture: ResourceSelectionGesture
+    ) async throws -> ResourceSelectionState {
+        throw selectionUnavailable(operation: "apply resource selection gesture")
+    }
+
+    func projectSelectionRange(
+        sessionID: String,
+        viewID: String,
+        generation: UInt64,
+        indexRevision: UInt64,
+        startIndex: UInt64,
+        length: Int,
+        token: String
+    ) async throws -> ResourceSelectionProjection {
+        throw selectionUnavailable(operation: "project resource selection range")
+    }
+
+    func fetchSelectionPage(
+        sessionID: String,
+        viewID: String,
+        token: String,
+        offset: UInt64,
+        limit: Int
+    ) async throws -> ResourceSelectionPage {
+        throw selectionUnavailable(operation: "fetch resource selection page")
+    }
+
+    private func selectionUnavailable(operation: String) -> ClusterManagerIssue {
+        ClusterManagerIssue(
+            category: .unavailable,
+            reason: "SelectionTransportUnavailable",
+            message: "This workspace provider does not expose token-backed resource selection.",
+            retryable: false,
+            operation: operation
+        )
     }
 }
 
