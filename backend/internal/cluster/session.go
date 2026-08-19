@@ -10,14 +10,11 @@ import (
 	"net/http"
 	"sync"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/util/flowcontrol"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
 )
@@ -33,7 +30,6 @@ type BackendClients struct {
 	Metadata  metadata.Interface
 	Core      coreclient.CoreV1Interface
 	Metrics   metricsclient.MetricsV1beta1Interface
-	Mapper    meta.ResettableRESTMapper
 	Close     func()
 }
 
@@ -73,14 +69,12 @@ func (DefaultClientFactory) New(config *rest.Config) (BackendClients, error) {
 		closeHTTPClient(httpClient)
 		return BackendClients{}, fmt.Errorf("construct Kubernetes Metrics API client: %w", err)
 	}
-	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(discoveryClient))
 	return BackendClients{
 		Dynamic:   dynamicClient,
 		Discovery: discoveryClient,
 		Metadata:  metadataClient,
 		Core:      coreClient,
 		Metrics:   metricsClient,
-		Mapper:    mapper,
 		Close:     func() { closeHTTPClient(httpClient) },
 	}, nil
 }
@@ -512,9 +506,6 @@ func (r *SessionRegistry) closeBackendLocked(key backendKey, backend *sharedBack
 		return ""
 	}
 	backend.namespaceNames.close()
-	if backend.clients.Mapper != nil {
-		backend.clients.Mapper.Reset()
-	}
 	if backend.clients.Close != nil {
 		backend.clients.Close()
 	}
@@ -567,7 +558,6 @@ func (s *Session) Core() coreclient.CoreV1Interface        { return s.backend.cl
 func (s *Session) Metrics() metricsclient.MetricsV1beta1Interface {
 	return s.backend.clients.Metrics
 }
-func (s *Session) Mapper() meta.RESTMapper { return s.backend.clients.Mapper }
 func (s *Session) APIActivity() *APIActivity {
 	if s == nil || s.backend == nil {
 		return nil

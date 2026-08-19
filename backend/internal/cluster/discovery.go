@@ -341,12 +341,6 @@ func (s *Session) DiscoverResourcesCached(ctx context.Context, refresh bool) (Re
 	}
 	return s.backend.discovery.resolve(ctx, refresh, func(loadContext context.Context) (ResourceDiscovery, error) {
 		result, err := DiscoverResourcesWithClient(loadContext, s.Discovery())
-		if err == nil && refresh && s.backend.clients.Mapper != nil {
-			// The mapper is authority-shared, just like this cache. Reset it in
-			// the coalesced leader so a catalog refresh invalidates REST mappings
-			// exactly once without making every waiting workspace repeat the work.
-			s.backend.clients.Mapper.Reset()
-		}
 		return result, err
 	})
 }
