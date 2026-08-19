@@ -90,24 +90,6 @@ type SelectionSnapshot struct {
 	retainedBytes int64
 }
 
-// NewSelectionSnapshot validates and freezes one complete ordered identity
-// index. Kubernetes UIDs must be nonempty and unique, and all identities must
-// belong to the same GVR.
-func NewSelectionSnapshot(
-	generation, indexRevision uint64,
-	identities []SelectionIdentity,
-) (*SelectionSnapshot, error) {
-	if generation == 0 || indexRevision == 0 {
-		return nil, fmt.Errorf(
-			"%w: generation and index revision must be nonzero",
-			ErrInvalidSelectionSnapshot,
-		)
-	}
-	frozen := make([]SelectionIdentity, len(identities))
-	copy(frozen, identities)
-	return newOwnedSelectionSnapshot(generation, indexRevision, frozen)
-}
-
 // newOwnedSelectionSnapshot consumes identities. Runtime uses it after
 // capturing and cloning a private value slice, avoiding a second potentially
 // large identity-array allocation while preserving NewSelectionSnapshot's

@@ -43,18 +43,6 @@ type DeleteResourceProvider interface {
 // Kubernetes request is dispatched for the item.
 type DeleteProgress func(index int, state ItemState, result DeleteResult) bool
 
-// DeleteMany captures exact identities before execution and applies UID
-// preconditions to every request. Cancellation prevents not-yet-started work;
-// already dispatched destructive requests are never retried automatically.
-func DeleteMany(
-	ctx context.Context,
-	client DeleteResourceProvider,
-	targets []DeleteTarget,
-	options DeleteOptions,
-) []DeleteResult {
-	return DeleteManyWithProgress(ctx, client, targets, options, nil)
-}
-
 func DeleteManyWithProgress(
 	ctx context.Context,
 	client DeleteResourceProvider,

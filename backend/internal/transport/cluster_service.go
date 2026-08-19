@@ -27,12 +27,6 @@ type SessionProber interface {
 	Probe(context.Context, *cluster.Session) error
 }
 
-type SessionProbeFunc func(context.Context, *cluster.Session) error
-
-func (f SessionProbeFunc) Probe(ctx context.Context, session *cluster.Session) error {
-	return f(ctx, session)
-}
-
 type versionProber struct{}
 
 func (versionProber) Probe(ctx context.Context, session *cluster.Session) error {

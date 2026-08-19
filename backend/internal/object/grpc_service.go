@@ -23,11 +23,11 @@ var _ kmgrv1.ObjectServiceServer = (*GRPCService)(nil)
 
 type GRPCService struct {
 	kmgrv1.UnimplementedObjectServiceServer
-	reader          *Reader
-	metricsProvider DetailMetricsProvider
-	watchRetryDelay func(int) time.Duration
-	scanMu          sync.Mutex
-	scans           map[relationshipScanKey]context.CancelFunc
+	reader                   *Reader
+	containerMetricsProvider PodContainerMetricsProvider
+	watchRetryDelay          func(int) time.Duration
+	scanMu                   sync.Mutex
+	scans                    map[relationshipScanKey]context.CancelFunc
 }
 
 type relationshipScanKey struct {
@@ -47,7 +47,7 @@ type objectWatchStreamSendError struct {
 func (e *objectWatchStreamSendError) Error() string { return e.err.Error() }
 func (e *objectWatchStreamSendError) Unwrap() error { return e.err }
 
-func NewGRPCService(reader *Reader, metricsProviders ...DetailMetricsProvider) (*GRPCService, error) {
+func NewGRPCService(reader *Reader, metricsProviders ...PodContainerMetricsProvider) (*GRPCService, error) {
 	if reader == nil {
 		return nil, errors.New("object reader must not be nil")
 	}
@@ -59,7 +59,7 @@ func NewGRPCService(reader *Reader, metricsProviders ...DetailMetricsProvider) (
 		watchRetryDelay: objectWatchRetryDelay,
 	}
 	if len(metricsProviders) == 1 {
-		service.metricsProvider = metricsProviders[0]
+		service.containerMetricsProvider = metricsProviders[0]
 	}
 	return service, nil
 }
@@ -87,15 +87,16 @@ func (s *GRPCService) GetObject(
 		}, nil
 	}
 	response := detailResponse(requestID, request.GetIdentity(), detail)
-	if request.GetIncludeMetrics() && s.metricsProvider != nil {
-		// Metrics are optional enrichment. Authentication, discovery, or
-		// Metrics API failures must not turn a successful authoritative object
-		// read into a failed detail page. Providers may still return safe
-		// scheduler accounting when measured usage is unavailable.
-		values, _ := s.metricsProvider.Metrics(operationContext, identity, detail.object)
-		response.Metrics = values.Resources
+	if request.GetIncludeMetrics() && s.containerMetricsProvider != nil {
+		// Container metrics are optional enrichment. Metrics API failures must
+		// not turn a successful authoritative object read into a failed detail
+		// page. Providers may still return safe scheduler accounting when
+		// measured usage is unavailable.
+		values, _ := s.containerMetricsProvider.ContainerMetrics(
+			operationContext, identity, detail.object,
+		)
 		for _, container := range response.Containers {
-			container.Metrics = values.ContainerResources[container.GetName()]
+			container.Metrics = values[container.GetName()]
 		}
 	}
 	return response, nil

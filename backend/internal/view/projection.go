@@ -240,19 +240,6 @@ func (p *Projector) ProjectContextWithAdditionalCells(
 	return rows, nil
 }
 
-// projectBounded is kept separate from Kubernetes row logic so the worker
-// ceiling can be tested deterministically. Each index is visited exactly once;
-// callers own distinct result slots and therefore need no per-row lock.
-func projectBounded(count, workerLimit int, project func(index int)) {
-	if project == nil {
-		return
-	}
-	_ = projectBoundedContext(context.Background(), count, workerLimit, func(index int) error {
-		project(index)
-		return nil
-	})
-}
-
 func projectBoundedContext(ctx context.Context, count, workerLimit int, project func(index int) error) error {
 	if ctx == nil {
 		return errors.New("projection context must not be nil")

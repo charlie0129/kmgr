@@ -318,10 +318,6 @@ func metricColumnResource(resource ResourceType, columnID string) (corev1.Resour
 	return "", false
 }
 
-func metricColumnID(resourceName corev1.ResourceName) string {
-	return metricResourceColumnPrefix + string(resourceName)
-}
-
 // metricDependency describes every way optional Metrics API values can affect
 // one projection. Display-only enrichment may be fetched lazily for a bounded
 // viewport; order or membership dependencies require complete candidate

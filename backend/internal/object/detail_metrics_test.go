@@ -17,27 +17,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	clienttesting "k8s.io/client-go/testing"
 	metricsapi "k8s.io/metrics/pkg/apis/metrics/v1beta1"
-	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
-	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
 )
 
-func TestGRPCGetObjectRequestsOptionalMetricsOnlyWhenIncluded(t *testing.T) {
+func TestGRPCGetObjectRequestsOptionalContainerMetricsOnlyWhenIncluded(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Pod", "pods", "team-a", "api", "pod-uid")
 	value.Object["spec"] = map[string]any{"containers": []any{
 		map[string]any{"name": "app"},
 	}}
-	provider := &recordingDetailMetricsProvider{values: DetailMetrics{
-		Resources: []*kmgrv1.ResourceUsageValue{{
-			ResourceName: string(corev1.ResourceCPU), UsageAvailable: true, Used: 0.25,
+	provider := &recordingPodContainerMetricsProvider{values: map[string][]*kmgrv1.ResourceUsageValue{
+		"app": {{
+			ResourceName: string(corev1.ResourceCPU), UsageAvailable: true, Used: 0.2,
 		}},
-		ContainerResources: map[string][]*kmgrv1.ResourceUsageValue{
-			"app": {{
-				ResourceName: string(corev1.ResourceCPU), UsageAvailable: true, Used: 0.2,
-			}},
-		},
 	}}
 	service, err := NewGRPCService(testReader(t, value), provider)
 	if err != nil {
@@ -48,44 +40,36 @@ func TestGRPCGetObjectRequestsOptionalMetricsOnlyWhenIncluded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.calls != 0 || len(withoutMetrics.GetMetrics()) != 0 {
-		t.Fatalf("excluded metrics: calls=%d values=%#v", provider.calls, withoutMetrics.GetMetrics())
-	}
-	if len(withoutMetrics.GetContainers()) != 1 ||
+	if provider.calls != 0 || len(withoutMetrics.GetContainers()) != 1 ||
 		len(withoutMetrics.GetContainers()[0].GetMetrics()) != 0 {
-		t.Fatalf("base container detail = %#v", withoutMetrics.GetContainers())
+		t.Fatalf("excluded container metrics: calls=%d containers=%#v", provider.calls, withoutMetrics.GetContainers())
 	}
 
 	withMetrics, err := service.GetObject(context.Background(), detailMetricsRequest(true))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.calls != 1 || len(withMetrics.GetMetrics()) != 1 ||
-		withMetrics.GetMetrics()[0].GetUsed() != 0.25 {
-		t.Fatalf("included metrics: calls=%d values=%#v", provider.calls, withMetrics.GetMetrics())
-	}
-	if len(withMetrics.GetContainers()) != 1 ||
+	if provider.calls != 1 || len(withMetrics.GetContainers()) != 1 ||
 		withMetrics.GetContainers()[0].GetName() != "app" ||
+		len(withMetrics.GetContainers()[0].GetMetrics()) != 1 ||
 		withMetrics.GetContainers()[0].GetMetrics()[0].GetUsed() != 0.2 {
-		t.Fatalf("container metrics = %#v", withMetrics.GetContainers())
+		t.Fatalf("included container metrics: calls=%d containers=%#v", provider.calls, withMetrics.GetContainers())
 	}
 	if provider.object == nil || string(provider.object.GetUID()) != "pod-uid" {
 		t.Fatalf("provider object = %#v", provider.object)
 	}
 }
 
-func TestGRPCGetObjectMetricsFailureKeepsAuthoritativeBaseDetail(t *testing.T) {
+func TestGRPCGetObjectContainerMetricsFailureKeepsAuthoritativeBaseDetail(t *testing.T) {
 	resource := schema.GroupResource{Group: "metrics.k8s.io", Resource: "pods"}
 	for name, metricsErr := range map[string]error{
-		"forbidden": apierrors.NewForbidden(
-			resource, "api", errors.New("sensitive upstream response"),
-		),
-		"missing": apierrors.NewNotFound(resource, "api"),
+		"forbidden": apierrors.NewForbidden(resource, "api", errors.New("sensitive upstream response")),
+		"missing":   apierrors.NewNotFound(resource, "api"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			value := kubernetesObject("v1", "Pod", "pods", "team-a", "api", "pod-uid")
-			provider := &recordingDetailMetricsProvider{err: metricsErr}
+			provider := &recordingPodContainerMetricsProvider{err: metricsErr}
 			service, err := NewGRPCService(testReader(t, value), provider)
 			if err != nil {
 				t.Fatal(err)
@@ -96,14 +80,14 @@ func TestGRPCGetObjectMetricsFailureKeepsAuthoritativeBaseDetail(t *testing.T) {
 				t.Fatal(err)
 			}
 			if provider.calls != 1 || response.GetError() != nil || len(response.GetYamlUtf8()) == 0 ||
-				len(response.GetSummaryFields()) == 0 || len(response.GetMetrics()) != 0 {
+				len(response.GetSummaryFields()) == 0 {
 				t.Fatalf("degraded detail response = %#v (calls=%d)", response, provider.calls)
 			}
 		})
 	}
 }
 
-func TestKubernetesDetailMetricsProviderAccountsPodAndPreservesExactResources(t *testing.T) {
+func TestKubernetesPodContainerMetricsProviderUsesSharedCacheAndExactResources(t *testing.T) {
 	t.Parallel()
 	measuredAt := time.Date(2026, 8, 14, 9, 30, 0, 0, time.UTC)
 	pod := &corev1.Pod{
@@ -129,7 +113,7 @@ func TestKubernetesDetailMetricsProviderAccountsPodAndPreservesExactResources(t 
 			},
 		}}},
 	}
-	metric := &metricsapi.PodMetrics{
+	cache := &fakePodMetricsDetailResolver{value: &metricsapi.PodMetrics{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "api", UID: types.UID("pod-uid")},
 		Timestamp:  metav1.NewTime(measuredAt),
 		Containers: []metricsapi.ContainerMetrics{
@@ -141,95 +125,12 @@ func TestKubernetesDetailMetricsProviderAccountsPodAndPreservesExactResources(t 
 				corev1.ResourceCPU: resource.MustParse("2500n"),
 			}},
 		},
-	}
-	client := metricsfake.NewSimpleClientset()
-	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
-		return true, metric.DeepCopy(), nil
-	})
-	provider := &KubernetesDetailMetricsProvider{clients: &fakeDetailMetricsClientResolver{
-		client: client.MetricsV1beta1(),
 	}}
-	identity := Identity{
-		SessionID: "session", Version: "v1", Resource: "pods", Namespace: "team-a",
-		Name: "api", UID: "pod-uid",
-	}
-
-	values, err := provider.Metrics(context.Background(), identity, unstructuredForDetailMetrics(t, pod))
+	provider, err := NewKubernetesPodContainerMetricsProvider(cache)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cpu := detailUsageByName(t, values.Resources, corev1.ResourceCPU)
-	if !cpu.GetUsageAvailable() || !nearlyEqual(cpu.GetUsed(), 0.000004) ||
-		cpu.GetRequested() != 0.25 || cpu.GetLimit() != 1 || cpu.GetUnit() != "cores" ||
-		!nearlyEqual(cpu.GetSortValue(), 0.000004) ||
-		cpu.GetMeasuredAtUnixMs() != measuredAt.UnixMilli() ||
-		cpu.GetProvider() != metrics.MetricsAPIGroupVersion || cpu.GetMeasurementScope() != "pod containers" {
-		t.Fatalf("CPU detail metric = %#v", cpu)
-	}
-	memory := detailUsageByName(t, values.Resources, corev1.ResourceMemory)
-	if memory.GetUsed() != 5*1024*1024 || memory.GetRequested() != 64*1024*1024 ||
-		memory.GetLimit() != 128*1024*1024 || memory.GetUnit() != "bytes" ||
-		memory.GetSortValue() != 5*1024*1024 {
-		t.Fatalf("memory detail metric = %#v", memory)
-	}
-	hugePages := detailUsageByName(t, values.Resources, "hugepages-2Mi")
-	if hugePages.GetUsageAvailable() || hugePages.GetRequested() != 1024*1024*1024 ||
-		hugePages.GetLimit() != 2*1024*1024*1024 || hugePages.GetUnit() != "bytes" ||
-		hugePages.GetSortValue() != 1024*1024*1024 {
-		t.Fatalf("huge-page detail metric = %#v", hugePages)
-	}
-	accelerator := detailUsageByName(t, values.Resources, "aliyun.com/ppu")
-	if accelerator.GetUsageAvailable() || accelerator.GetRequested() != 1 ||
-		accelerator.GetLimit() != 2 || accelerator.GetUnit() != "count" ||
-		accelerator.GetSortValue() != 1 {
-		t.Fatalf("accelerator detail metric = %#v", accelerator)
-	}
-	containerCPU := detailUsageByName(t, values.ContainerResources["app"], corev1.ResourceCPU)
-	if !containerCPU.GetUsageAvailable() || !nearlyEqual(containerCPU.GetUsed(), 0.0000015) ||
-		containerCPU.GetRequested() != 0.25 || containerCPU.GetLimit() != 1 ||
-		containerCPU.GetMeasurementScope() != "container app" {
-		t.Fatalf("container CPU detail metric = %#v", containerCPU)
-	}
-	containerMemory := detailUsageByName(
-		t, values.ContainerResources["app"], corev1.ResourceMemory,
-	)
-	if containerMemory.GetUsed() != 5*1024*1024 ||
-		containerMemory.GetRequested() != 64*1024*1024 ||
-		containerMemory.GetLimit() != 128*1024*1024 {
-		t.Fatalf("container memory detail metric = %#v", containerMemory)
-	}
-	if _, found := values.ContainerResources["sidecar"]; found {
-		t.Fatalf("metrics-only container entered authoritative detail: %#v", values.ContainerResources)
-	}
-}
-
-func TestKubernetesDetailMetricsProviderUsesSharedDetailedPodCache(t *testing.T) {
-	t.Parallel()
-	pod := &corev1.Pod{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "team-a", Name: "api", UID: "pod-uid",
-		},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
-	}
-	metric := &metricsapi.PodMetrics{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "api", UID: "pod-uid"},
-		Containers: []metricsapi.ContainerMetrics{{
-			Name: "app", Usage: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse("125m"),
-			},
-		}},
-	}
-	directClient := metricsfake.NewSimpleClientset()
-	directClient.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
-		return true, nil, errors.New("unexpected direct PodMetrics GET")
-	})
-	cache := &fakePodMetricsDetailResolver{value: metric}
-	provider := &KubernetesDetailMetricsProvider{
-		clients:        &fakeDetailMetricsClientResolver{client: directClient.MetricsV1beta1()},
-		podDetailCache: cache,
-	}
-	values, err := provider.Metrics(context.Background(), Identity{
+	values, err := provider.ContainerMetrics(context.Background(), Identity{
 		SessionID: "session", Version: "v1", Resource: "pods", Namespace: "team-a",
 		Name: "api", UID: "pod-uid",
 	}, unstructuredForDetailMetrics(t, pod))
@@ -237,86 +138,68 @@ func TestKubernetesDetailMetricsProviderUsesSharedDetailedPodCache(t *testing.T)
 		t.Fatal(err)
 	}
 	if cache.calls != 1 || cache.sessionID != "session" ||
-		cache.reference != (metrics.PodReference{Namespace: "team-a", Name: "api", UID: "pod-uid"}) ||
-		len(directClient.Actions()) != 0 {
-		t.Fatalf("cache call = %#v; direct actions = %#v", cache, directClient.Actions())
+		cache.reference != (metrics.PodReference{Namespace: "team-a", Name: "api", UID: "pod-uid"}) {
+		t.Fatalf("cache call = %#v", cache)
 	}
-	cpu := detailUsageByName(t, values.ContainerResources["app"], corev1.ResourceCPU)
-	if !cpu.GetUsageAvailable() || cpu.GetUsed() != 0.125 {
-		t.Fatalf("cached container CPU = %#v", cpu)
+	cpu := detailUsageByName(t, values["app"], corev1.ResourceCPU)
+	if !cpu.GetUsageAvailable() || !nearlyEqual(cpu.GetUsed(), 0.0000015) ||
+		cpu.GetRequested() != 0.25 || cpu.GetLimit() != 1 || cpu.GetUnit() != "cores" ||
+		!nearlyEqual(cpu.GetSortValue(), 0.0000015) ||
+		cpu.GetMeasuredAtUnixMs() != measuredAt.UnixMilli() ||
+		cpu.GetProvider() != metrics.MetricsAPIGroupVersion || cpu.GetMeasurementScope() != "container app" {
+		t.Fatalf("container CPU metric = %#v", cpu)
+	}
+	memory := detailUsageByName(t, values["app"], corev1.ResourceMemory)
+	if memory.GetUsed() != 5*1024*1024 || memory.GetRequested() != 64*1024*1024 ||
+		memory.GetLimit() != 128*1024*1024 || memory.GetUnit() != "bytes" {
+		t.Fatalf("container memory metric = %#v", memory)
+	}
+	hugePages := detailUsageByName(t, values["app"], "hugepages-2Mi")
+	if hugePages.GetUsageAvailable() || hugePages.GetRequested() != 1024*1024*1024 ||
+		hugePages.GetLimit() != 2*1024*1024*1024 || hugePages.GetUnit() != "bytes" {
+		t.Fatalf("container huge-page metric = %#v", hugePages)
+	}
+	accelerator := detailUsageByName(t, values["app"], "aliyun.com/ppu")
+	if accelerator.GetUsageAvailable() || accelerator.GetRequested() != 1 ||
+		accelerator.GetLimit() != 2 || accelerator.GetUnit() != "count" {
+		t.Fatalf("container accelerator metric = %#v", accelerator)
+	}
+	if _, found := values["sidecar"]; found {
+		t.Fatalf("metrics-only container entered authoritative detail: %#v", values)
 	}
 }
 
-func TestKubernetesDetailMetricsProviderUsesNodeAllocatableAsCapacity(t *testing.T) {
+func TestKubernetesPodContainerMetricsProviderDoesNotFetchForNonPod(t *testing.T) {
 	t.Parallel()
-	node := &corev1.Node{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Node"},
-		ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-uid"), ResourceVersion: "10"},
-		Status: corev1.NodeStatus{
-			Allocatable: corev1.ResourceList{
-				corev1.ResourceCPU:                   resource.MustParse("3900m"),
-				corev1.ResourceMemory:                resource.MustParse("7Gi"),
-				corev1.ResourceName("hugepages-1Gi"): resource.MustParse("2Gi"),
-			},
-			Capacity: corev1.ResourceList{
-				corev1.ResourceCPU:                   resource.MustParse("4"),
-				corev1.ResourceMemory:                resource.MustParse("8Gi"),
-				corev1.ResourceName("hugepages-1Gi"): resource.MustParse("4Gi"),
-			},
-		},
-	}
-	metric := &metricsapi.NodeMetrics{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-uid")},
-		Timestamp:  metav1.NewTime(time.Unix(100, 0)),
-		Usage: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("1500n"),
-			corev1.ResourceMemory: resource.MustParse("1Gi"),
-		},
-	}
-	client := metricsfake.NewSimpleClientset()
-	client.PrependReactor("get", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
-		return true, metric.DeepCopy(), nil
-	})
-	provider := &KubernetesDetailMetricsProvider{clients: &fakeDetailMetricsClientResolver{
-		client: client.MetricsV1beta1(),
-	}}
-	values, err := provider.Metrics(context.Background(), Identity{
-		SessionID: "session", Version: "v1", Resource: "nodes", Name: "node-a", UID: "node-uid",
-	}, unstructuredForDetailMetrics(t, node))
+	cache := &fakePodMetricsDetailResolver{}
+	provider, err := NewKubernetesPodContainerMetricsProvider(cache)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cpu := detailUsageByName(t, values.Resources, corev1.ResourceCPU)
-	if !nearlyEqual(cpu.GetUsed(), 0.0000015) || !nearlyEqual(cpu.GetCapacity(), 3.9) ||
-		cpu.GetRequested() != 0 || cpu.Requested != nil || !nearlyEqual(cpu.GetSortValue(), 0.0000015) {
-		t.Fatalf("Node CPU detail metric = %#v", cpu)
-	}
-	hugePages := detailUsageByName(t, values.Resources, "hugepages-1Gi")
-	if hugePages.GetUsageAvailable() || hugePages.GetCapacity() != 2*1024*1024*1024 ||
-		hugePages.GetUnit() != "bytes" || hugePages.GetSortValue() != 2*1024*1024*1024 {
-		t.Fatalf("Node huge-page detail metric = %#v", hugePages)
+	values, err := provider.ContainerMetrics(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "nodes", Name: "node-a", UID: "node-uid",
+	}, unstructuredForDetailMetrics(t, &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-a", UID: "node-uid",
+	}}))
+	if err != nil || len(values) != 0 || cache.calls != 0 {
+		t.Fatalf("non-Pod result=%#v err=%v cache calls=%d", values, err, cache.calls)
 	}
 }
 
-func TestKubernetesDetailMetricsProviderRejectsRecreatedMetricsObject(t *testing.T) {
+func TestKubernetesPodContainerMetricsProviderRejectsRecreatedMetricsObject(t *testing.T) {
 	t.Parallel()
-	pod := &corev1.Pod{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "team-a", Name: "api", UID: types.UID("old-uid"),
-		},
-	}
-	metric := &metricsapi.PodMetrics{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "api", UID: types.UID("new-uid")},
-	}
-	client := metricsfake.NewSimpleClientset()
-	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
-		return true, metric.DeepCopy(), nil
-	})
-	provider := &KubernetesDetailMetricsProvider{clients: &fakeDetailMetricsClientResolver{
-		client: client.MetricsV1beta1(),
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "team-a", Name: "api", UID: types.UID("old-uid"),
 	}}
-	_, err := provider.Metrics(context.Background(), Identity{
+	provider, err := NewKubernetesPodContainerMetricsProvider(&fakePodMetricsDetailResolver{
+		value: &metricsapi.PodMetrics{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "team-a", Name: "api", UID: types.UID("new-uid"),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.ContainerMetrics(context.Background(), Identity{
 		SessionID: "session", Version: "v1", Resource: "pods", Namespace: "team-a",
 		Name: "api", UID: "old-uid",
 	}, unstructuredForDetailMetrics(t, pod))
@@ -326,37 +209,7 @@ func TestKubernetesDetailMetricsProviderRejectsRecreatedMetricsObject(t *testing
 	}
 }
 
-func TestKubernetesDetailMetricsProviderSkipsGetForKnownMetricsAPIAbsence(t *testing.T) {
-	t.Parallel()
-	pod := &corev1.Pod{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "team-a", Name: "api", UID: types.UID("pod-uid"),
-		},
-	}
-	resolver := &fakeDetailMetricsClientResolver{availabilityKnown: true}
-	provider := &KubernetesDetailMetricsProvider{clients: resolver}
-	values, err := provider.Metrics(context.Background(), Identity{
-		SessionID: "session", Version: "v1", Resource: "pods", Namespace: "team-a",
-		Name: "api", UID: "pod-uid",
-	}, unstructuredForDetailMetrics(t, pod))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(values.Resources) != 2 || resolver.availabilityCalls != 1 || resolver.clientCalls != 0 {
-		t.Fatalf(
-			"known-absent result: values=%#v availability calls=%d client calls=%d",
-			values, resolver.availabilityCalls, resolver.clientCalls,
-		)
-	}
-	for _, value := range values.Resources {
-		if value.GetUsageAvailable() || value.Requested != nil || value.Limit != nil {
-			t.Fatalf("known-absent accounting should not invent quantities: %#v", value)
-		}
-	}
-}
-
-func TestGRPCGetObjectKeepsSchedulerAccountingWhenMeasuredUsageFails(t *testing.T) {
+func TestGRPCGetObjectKeepsContainerAccountingWhenMeasuredUsageFails(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Pod", "pods", "team-a", "api", "pod-uid")
 	value.Object["spec"] = map[string]any{"containers": []any{map[string]any{
@@ -365,16 +218,13 @@ func TestGRPCGetObjectKeepsSchedulerAccountingWhenMeasuredUsageFails(t *testing.
 			"cpu": "250m", "memory": "64Mi", "hugepages-2Mi": "1Gi",
 		}},
 	}}}
-	client := metricsfake.NewSimpleClientset()
-	client.PrependReactor("get", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewForbidden(
-			schema.GroupResource{Group: "metrics.k8s.io", Resource: "pods"},
-			"api", errors.New("metrics access denied"),
-		)
-	})
-	provider := &KubernetesDetailMetricsProvider{clients: &fakeDetailMetricsClientResolver{
-		client: client.MetricsV1beta1(),
-	}}
+	provider, err := NewKubernetesPodContainerMetricsProvider(&fakePodMetricsDetailResolver{err: apierrors.NewForbidden(
+		schema.GroupResource{Group: "metrics.k8s.io", Resource: "pods"},
+		"api", errors.New("metrics access denied"),
+	)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	service, err := NewGRPCService(testReader(t, value), provider)
 	if err != nil {
 		t.Fatal(err)
@@ -384,28 +234,26 @@ func TestGRPCGetObjectKeepsSchedulerAccountingWhenMeasuredUsageFails(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.GetError() != nil {
-		t.Fatalf("detail failed with optional Metrics API: %#v", response.GetError())
+	if response.GetError() != nil || len(response.GetContainers()) != 1 {
+		t.Fatalf("degraded container detail = %#v", response)
 	}
-	cpu := detailUsageByName(t, response.GetMetrics(), corev1.ResourceCPU)
-	memory := detailUsageByName(t, response.GetMetrics(), corev1.ResourceMemory)
-	hugePages := detailUsageByName(t, response.GetMetrics(), "hugepages-2Mi")
+	containerMetrics := response.GetContainers()[0].GetMetrics()
+	cpu := detailUsageByName(t, containerMetrics, corev1.ResourceCPU)
+	memory := detailUsageByName(t, containerMetrics, corev1.ResourceMemory)
+	hugePages := detailUsageByName(t, containerMetrics, "hugepages-2Mi")
 	if cpu.GetUsageAvailable() || cpu.GetRequested() != 0.25 || cpu.GetSortValue() != 0.25 ||
 		memory.GetUsageAvailable() || memory.GetRequested() != 64*1024*1024 ||
 		memory.GetSortValue() != 64*1024*1024 || hugePages.GetUsageAvailable() ||
 		hugePages.GetRequested() != 1024*1024*1024 ||
 		hugePages.GetSortValue() != 1024*1024*1024 {
-		t.Fatalf("degraded scheduler accounting = %#v", response.GetMetrics())
+		t.Fatalf("degraded container accounting = %#v", containerMetrics)
 	}
-	if len(response.GetContainers()) != 1 {
-		t.Fatalf("degraded container detail = %#v", response.GetContainers())
-	}
-	containerCPU := detailUsageByName(
-		t, response.GetContainers()[0].GetMetrics(), corev1.ResourceCPU,
-	)
-	if containerCPU.GetUsageAvailable() || containerCPU.GetRequested() != 0.25 ||
-		containerCPU.GetSortValue() != 0.25 {
-		t.Fatalf("degraded container CPU = %#v", containerCPU)
+}
+
+func TestNewKubernetesPodContainerMetricsProviderRejectsNilResolver(t *testing.T) {
+	t.Parallel()
+	if _, err := NewKubernetesPodContainerMetricsProvider(nil); err == nil {
+		t.Fatal("nil Pod metrics resolver was accepted")
 	}
 }
 
@@ -420,30 +268,21 @@ func detailMetricsRequest(include bool) *kmgrv1.GetObjectRequest {
 	}
 }
 
-type recordingDetailMetricsProvider struct {
+type recordingPodContainerMetricsProvider struct {
 	calls  int
 	object *unstructured.Unstructured
-	values DetailMetrics
+	values map[string][]*kmgrv1.ResourceUsageValue
 	err    error
 }
 
-func (p *recordingDetailMetricsProvider) Metrics(
+func (p *recordingPodContainerMetricsProvider) ContainerMetrics(
 	_ context.Context,
 	_ Identity,
 	object *unstructured.Unstructured,
-) (DetailMetrics, error) {
+) (map[string][]*kmgrv1.ResourceUsageValue, error) {
 	p.calls++
 	p.object = object
 	return p.values, p.err
-}
-
-type fakeDetailMetricsClientResolver struct {
-	client            metricsclient.MetricsV1beta1Interface
-	availability      bool
-	availabilityKnown bool
-	availabilityErr   error
-	availabilityCalls int
-	clientCalls       int
 }
 
 type fakePodMetricsDetailResolver struct {
@@ -466,18 +305,6 @@ func (r *fakePodMetricsDetailResolver) ResolvePodMetricsDetail(
 		return nil, r.err
 	}
 	return r.value.DeepCopy(), r.err
-}
-
-func (r *fakeDetailMetricsClientResolver) CachedMetricsAPIAvailability(
-	string,
-) (available, known bool, err error) {
-	r.availabilityCalls++
-	return r.availability, r.availabilityKnown, r.availabilityErr
-}
-
-func (r *fakeDetailMetricsClientResolver) MetricsClient(string) (metricsclient.MetricsV1beta1Interface, error) {
-	r.clientCalls++
-	return r.client, nil
 }
 
 func unstructuredForDetailMetrics(t *testing.T, value runtime.Object) *unstructured.Unstructured {

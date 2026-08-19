@@ -132,12 +132,12 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		return nil, err
 	}
 	objectReader.SetCachedChildSource(relationshipCacheAdapter{runtime: viewRuntime})
-	detailMetrics, err := object.NewKubernetesDetailMetricsProvider(sessions, metricSource)
+	containerMetrics, err := object.NewKubernetesPodContainerMetricsProvider(metricSource)
 	if err != nil {
 		viewRuntime.Close()
 		return nil, err
 	}
-	objectService, err := object.NewGRPCService(objectReader, detailMetrics)
+	objectService, err := object.NewGRPCService(objectReader, containerMetrics)
 	if err != nil {
 		viewRuntime.Close()
 		return nil, err

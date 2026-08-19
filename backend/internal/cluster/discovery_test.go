@@ -22,6 +22,15 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+// DiscoverResources is the uncached test seam. Production discovery always
+// goes through Session.DiscoverResourcesCached so authorities share work.
+func DiscoverResources(ctx context.Context, session *Session) (ResourceDiscovery, error) {
+	if session == nil || session.Discovery() == nil {
+		return ResourceDiscovery{}, errors.New("cluster session discovery client is unavailable")
+	}
+	return DiscoverResourcesWithClient(ctx, session.Discovery())
+}
+
 func TestDiscoverResourcesFiltersSubresourcesAndNonListableKinds(t *testing.T) {
 	t.Parallel()
 	session := discoveryTestSession(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -21,15 +21,6 @@ type Getter interface {
 	PodUID(context.Context, string, string) (types.UID, error)
 }
 
-type GetterFunc func(context.Context, string, string) (types.UID, error)
-
-func (f GetterFunc) PodUID(
-	ctx context.Context,
-	namespace, name string,
-) (types.UID, error) {
-	return f(ctx, namespace, name)
-}
-
 // MetadataGetter uses client-go's PartialObjectMetadata negotiation. It keeps
 // the authority's shared transport, rate limiter, credentials, and RBAC GET
 // semantics while avoiding a complete Pod payload.

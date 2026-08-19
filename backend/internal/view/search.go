@@ -571,19 +571,6 @@ func includesSearchNamespace(namespace string, resource ResourceType, scope Name
 	return slices.Contains(scope.Namespaces, namespace)
 }
 
-func rankSearchObjects(query SearchQuery, objects []*unstructured.Unstructured, limit int, stale bool) []*kmgrv1.SearchResult {
-	seen := newBoundedSearchResults(limit)
-	for _, value := range objects {
-		if !includesSearchNamespace(value.GetNamespace(), query.Resource, query.NamespaceScope) {
-			continue
-		}
-		if rank, match := searchRank(query.Query, value.GetNamespace(), value.GetName()); match {
-			seen.Add(makeSearchResult(query.SessionID, query.Resource, value, rank, stale))
-		}
-	}
-	return seen.Sorted()
-}
-
 func searchRank(query, namespace, name string) (float64, bool) {
 	name = strings.ToLower(name)
 	return searchRankNormalized(

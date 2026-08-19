@@ -312,21 +312,6 @@ type discoveryEndpointResult struct {
 	failures      []DiscoveryFailure
 }
 
-// DiscoverResources returns listable, non-subresource API resources in stable
-// GVR order. Discovery is an explicit connection action and is never triggered
-// merely by rendering the sidebar.
-//
-// DiscoveryInterface's convenience methods are contextless. Use its existing
-// REST client directly so the exact client-go authentication, TLS, proxy, rate
-// limiting, and transport wrappers remain in force while cancellation and
-// deadlines propagate to every HTTP request.
-func DiscoverResources(ctx context.Context, session *Session) (ResourceDiscovery, error) {
-	if session == nil || session.Discovery() == nil {
-		return ResourceDiscovery{}, errors.New("cluster session discovery client is unavailable")
-	}
-	return DiscoverResourcesWithClient(ctx, session.Discovery())
-}
-
 // DiscoverResourcesCached returns the discovery catalog shared by every
 // session using the same Kubernetes backend. refresh starts or joins an
 // authority-wide refresh while leaving the last successful snapshot available

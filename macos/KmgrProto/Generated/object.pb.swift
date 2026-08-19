@@ -279,83 +279,55 @@ public struct Kmgr_V1_PodContainerDetail: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_GetObjectResponse: @unchecked Sendable {
+public struct Kmgr_V1_GetObjectResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  public var requestID: String {
-    get {return _storage._requestID}
-    set {_uniqueStorage()._requestID = newValue}
-  }
+  public var requestID: String = String()
 
   public var identity: Kmgr_V1_ResourceIdentity {
-    get {return _storage._identity ?? Kmgr_V1_ResourceIdentity()}
-    set {_uniqueStorage()._identity = newValue}
+    get {return _identity ?? Kmgr_V1_ResourceIdentity()}
+    set {_identity = newValue}
   }
   /// Returns true if `identity` has been explicitly set.
-  public var hasIdentity: Bool {return _storage._identity != nil}
+  public var hasIdentity: Bool {return self._identity != nil}
   /// Clears the value of `identity`. Subsequent reads from it will return its default value.
-  public mutating func clearIdentity() {_uniqueStorage()._identity = nil}
+  public mutating func clearIdentity() {self._identity = nil}
 
-  public var resourceVersion: String {
-    get {return _storage._resourceVersion}
-    set {_uniqueStorage()._resourceVersion = newValue}
-  }
+  public var resourceVersion: String = String()
 
-  public var yamlUtf8: Data {
-    get {return _storage._yamlUtf8}
-    set {_uniqueStorage()._yamlUtf8 = newValue}
-  }
+  public var yamlUtf8: Data = Data()
 
-  public var summaryFields: [Kmgr_V1_ObjectSummaryField] {
-    get {return _storage._summaryFields}
-    set {_uniqueStorage()._summaryFields = newValue}
-  }
+  public var summaryFields: [Kmgr_V1_ObjectSummaryField] = []
 
-  public var labels: [Kmgr_V1_StringMapEntry] {
-    get {return _storage._labels}
-    set {_uniqueStorage()._labels = newValue}
-  }
+  public var labels: [Kmgr_V1_StringMapEntry] = []
 
-  public var annotations: [Kmgr_V1_StringMapEntry] {
-    get {return _storage._annotations}
-    set {_uniqueStorage()._annotations = newValue}
-  }
-
-  public var metrics: [Kmgr_V1_ResourceUsageValue] {
-    get {return _storage._metrics}
-    set {_uniqueStorage()._metrics = newValue}
-  }
+  public var annotations: [Kmgr_V1_StringMapEntry] = []
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _storage._error ?? Kmgr_V1_StructuredError()}
-    set {_uniqueStorage()._error = newValue}
+    get {return _error ?? Kmgr_V1_StructuredError()}
+    set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return _storage._error != nil}
+  public var hasError: Bool {return self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
-  public mutating func clearError() {_uniqueStorage()._error = nil}
+  public mutating func clearError() {self._error = nil}
 
-  public var containers: [Kmgr_V1_PodContainerDetail] {
-    get {return _storage._containers}
-    set {_uniqueStorage()._containers = newValue}
-  }
+  public var containers: [Kmgr_V1_PodContainerDetail] = []
 
   /// Canonical Kubernetes label selector for the Pods selected by this
   /// workload, Service, or ReplicationController. Empty means no safe,
   /// restrictive Pod selector is available; clients must not interpret it as
   /// "all Pods".
-  public var podLabelSelector: String {
-    get {return _storage._podLabelSelector}
-    set {_uniqueStorage()._podLabelSelector = newValue}
-  }
+  public var podLabelSelector: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
-  fileprivate var _storage = _StorageClass.defaultInstance
+  fileprivate var _identity: Kmgr_V1_ResourceIdentity? = nil
+  fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
 public struct Kmgr_V1_WatchObjectRequest: Sendable {
@@ -395,47 +367,48 @@ public struct Kmgr_V1_WatchObjectRequest: Sendable {
   fileprivate var _identity: Kmgr_V1_ResourceIdentity? = nil
 }
 
-public struct Kmgr_V1_ObjectEvent: Sendable {
+public struct Kmgr_V1_ObjectEvent: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var cursor: Kmgr_V1_StreamCursor {
-    get {return _cursor ?? Kmgr_V1_StreamCursor()}
-    set {_cursor = newValue}
+    get {return _storage._cursor ?? Kmgr_V1_StreamCursor()}
+    set {_uniqueStorage()._cursor = newValue}
   }
   /// Returns true if `cursor` has been explicitly set.
-  public var hasCursor: Bool {return self._cursor != nil}
+  public var hasCursor: Bool {return _storage._cursor != nil}
   /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
-  public mutating func clearCursor() {self._cursor = nil}
+  public mutating func clearCursor() {_uniqueStorage()._cursor = nil}
 
-  public var type: Kmgr_V1_ObjectEventType = .unspecified
+  public var type: Kmgr_V1_ObjectEventType {
+    get {return _storage._type}
+    set {_uniqueStorage()._type = newValue}
+  }
 
   public var object: Kmgr_V1_GetObjectResponse {
-    get {return _object ?? Kmgr_V1_GetObjectResponse()}
-    set {_object = newValue}
+    get {return _storage._object ?? Kmgr_V1_GetObjectResponse()}
+    set {_uniqueStorage()._object = newValue}
   }
   /// Returns true if `object` has been explicitly set.
-  public var hasObject: Bool {return self._object != nil}
+  public var hasObject: Bool {return _storage._object != nil}
   /// Clears the value of `object`. Subsequent reads from it will return its default value.
-  public mutating func clearObject() {self._object = nil}
+  public mutating func clearObject() {_uniqueStorage()._object = nil}
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
-    set {_error = newValue}
+    get {return _storage._error ?? Kmgr_V1_StructuredError()}
+    set {_uniqueStorage()._error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {return _storage._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
-  public mutating func clearError() {self._error = nil}
+  public mutating func clearError() {_uniqueStorage()._error = nil}
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
-  fileprivate var _cursor: Kmgr_V1_StreamCursor? = nil
-  fileprivate var _object: Kmgr_V1_GetObjectResponse? = nil
-  fileprivate var _error: Kmgr_V1_StructuredError? = nil
+  fileprivate var _storage = _StorageClass.defaultInstance
 }
 
 public struct Kmgr_V1_GetRelationshipsRequest: Sendable {
@@ -983,139 +956,78 @@ extension Kmgr_V1_PodContainerDetail: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Kmgr_V1_GetObjectResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".GetObjectResponse"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}identity\0\u{3}resource_version\0\u{3}yaml_utf8\0\u{3}summary_fields\0\u{1}labels\0\u{1}annotations\0\u{1}metrics\0\u{1}error\0\u{1}containers\0\u{3}pod_label_selector\0")
-
-  fileprivate class _StorageClass {
-    var _requestID: String = String()
-    var _identity: Kmgr_V1_ResourceIdentity? = nil
-    var _resourceVersion: String = String()
-    var _yamlUtf8: Data = Data()
-    var _summaryFields: [Kmgr_V1_ObjectSummaryField] = []
-    var _labels: [Kmgr_V1_StringMapEntry] = []
-    var _annotations: [Kmgr_V1_StringMapEntry] = []
-    var _metrics: [Kmgr_V1_ResourceUsageValue] = []
-    var _error: Kmgr_V1_StructuredError? = nil
-    var _containers: [Kmgr_V1_PodContainerDetail] = []
-    var _podLabelSelector: String = String()
-
-      // This property is used as the initial default value for new instances of the type.
-      // The type itself is protecting the reference to its storage via CoW semantics.
-      // This will force a copy to be made of this reference when the first mutation occurs;
-      // hence, it is safe to mark this as `nonisolated(unsafe)`.
-      static nonisolated(unsafe) let defaultInstance = _StorageClass()
-
-    private init() {}
-
-    init(copying source: _StorageClass) {
-      _requestID = source._requestID
-      _identity = source._identity
-      _resourceVersion = source._resourceVersion
-      _yamlUtf8 = source._yamlUtf8
-      _summaryFields = source._summaryFields
-      _labels = source._labels
-      _annotations = source._annotations
-      _metrics = source._metrics
-      _error = source._error
-      _containers = source._containers
-      _podLabelSelector = source._podLabelSelector
-    }
-  }
-
-  fileprivate mutating func _uniqueStorage() -> _StorageClass {
-    if !isKnownUniquelyReferenced(&_storage) {
-      _storage = _StorageClass(copying: _storage)
-    }
-    return _storage
-  }
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}identity\0\u{3}resource_version\0\u{3}yaml_utf8\0\u{3}summary_fields\0\u{1}labels\0\u{1}annotations\0\u{2}\u{2}error\0\u{1}containers\0\u{3}pod_label_selector\0\u{b}metrics\0\u{c}\u{8}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    _ = _uniqueStorage()
-    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
-      while let fieldNumber = try decoder.nextFieldNumber() {
-        // The use of inline closures is to circumvent an issue where the compiler
-        // allocates stack space for every case branch when no optimizations are
-        // enabled. https://github.com/apple/swift-protobuf/issues/1034
-        switch fieldNumber {
-        case 1: try { try decoder.decodeSingularStringField(value: &_storage._requestID) }()
-        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._identity) }()
-        case 3: try { try decoder.decodeSingularStringField(value: &_storage._resourceVersion) }()
-        case 4: try { try decoder.decodeSingularBytesField(value: &_storage._yamlUtf8) }()
-        case 5: try { try decoder.decodeRepeatedMessageField(value: &_storage._summaryFields) }()
-        case 6: try { try decoder.decodeRepeatedMessageField(value: &_storage._labels) }()
-        case 7: try { try decoder.decodeRepeatedMessageField(value: &_storage._annotations) }()
-        case 8: try { try decoder.decodeRepeatedMessageField(value: &_storage._metrics) }()
-        case 9: try { try decoder.decodeSingularMessageField(value: &_storage._error) }()
-        case 10: try { try decoder.decodeRepeatedMessageField(value: &_storage._containers) }()
-        case 11: try { try decoder.decodeSingularStringField(value: &_storage._podLabelSelector) }()
-        default: break
-        }
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._identity) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.resourceVersion) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.yamlUtf8) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.summaryFields) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.labels) }()
+      case 7: try { try decoder.decodeRepeatedMessageField(value: &self.annotations) }()
+      case 9: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      case 10: try { try decoder.decodeRepeatedMessageField(value: &self.containers) }()
+      case 11: try { try decoder.decodeSingularStringField(value: &self.podLabelSelector) }()
+      default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every if/case branch local when no optimizations
-      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-      // https://github.com/apple/swift-protobuf/issues/1182
-      if !_storage._requestID.isEmpty {
-        try visitor.visitSingularStringField(value: _storage._requestID, fieldNumber: 1)
-      }
-      try { if let v = _storage._identity {
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
-      } }()
-      if !_storage._resourceVersion.isEmpty {
-        try visitor.visitSingularStringField(value: _storage._resourceVersion, fieldNumber: 3)
-      }
-      if !_storage._yamlUtf8.isEmpty {
-        try visitor.visitSingularBytesField(value: _storage._yamlUtf8, fieldNumber: 4)
-      }
-      if !_storage._summaryFields.isEmpty {
-        try visitor.visitRepeatedMessageField(value: _storage._summaryFields, fieldNumber: 5)
-      }
-      if !_storage._labels.isEmpty {
-        try visitor.visitRepeatedMessageField(value: _storage._labels, fieldNumber: 6)
-      }
-      if !_storage._annotations.isEmpty {
-        try visitor.visitRepeatedMessageField(value: _storage._annotations, fieldNumber: 7)
-      }
-      if !_storage._metrics.isEmpty {
-        try visitor.visitRepeatedMessageField(value: _storage._metrics, fieldNumber: 8)
-      }
-      try { if let v = _storage._error {
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
-      } }()
-      if !_storage._containers.isEmpty {
-        try visitor.visitRepeatedMessageField(value: _storage._containers, fieldNumber: 10)
-      }
-      if !_storage._podLabelSelector.isEmpty {
-        try visitor.visitSingularStringField(value: _storage._podLabelSelector, fieldNumber: 11)
-      }
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    try { if let v = self._identity {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    if !self.resourceVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.resourceVersion, fieldNumber: 3)
+    }
+    if !self.yamlUtf8.isEmpty {
+      try visitor.visitSingularBytesField(value: self.yamlUtf8, fieldNumber: 4)
+    }
+    if !self.summaryFields.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.summaryFields, fieldNumber: 5)
+    }
+    if !self.labels.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.labels, fieldNumber: 6)
+    }
+    if !self.annotations.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.annotations, fieldNumber: 7)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
+    } }()
+    if !self.containers.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.containers, fieldNumber: 10)
+    }
+    if !self.podLabelSelector.isEmpty {
+      try visitor.visitSingularStringField(value: self.podLabelSelector, fieldNumber: 11)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Kmgr_V1_GetObjectResponse, rhs: Kmgr_V1_GetObjectResponse) -> Bool {
-    if lhs._storage !== rhs._storage {
-      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
-        let _storage = _args.0
-        let rhs_storage = _args.1
-        if _storage._requestID != rhs_storage._requestID {return false}
-        if _storage._identity != rhs_storage._identity {return false}
-        if _storage._resourceVersion != rhs_storage._resourceVersion {return false}
-        if _storage._yamlUtf8 != rhs_storage._yamlUtf8 {return false}
-        if _storage._summaryFields != rhs_storage._summaryFields {return false}
-        if _storage._labels != rhs_storage._labels {return false}
-        if _storage._annotations != rhs_storage._annotations {return false}
-        if _storage._metrics != rhs_storage._metrics {return false}
-        if _storage._error != rhs_storage._error {return false}
-        if _storage._containers != rhs_storage._containers {return false}
-        if _storage._podLabelSelector != rhs_storage._podLabelSelector {return false}
-        return true
-      }
-      if !storagesAreEqual {return false}
-    }
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs._identity != rhs._identity {return false}
+    if lhs.resourceVersion != rhs.resourceVersion {return false}
+    if lhs.yamlUtf8 != rhs.yamlUtf8 {return false}
+    if lhs.summaryFields != rhs.summaryFields {return false}
+    if lhs.labels != rhs.labels {return false}
+    if lhs.annotations != rhs.annotations {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.containers != rhs.containers {return false}
+    if lhs.podLabelSelector != rhs.podLabelSelector {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1179,46 +1091,88 @@ extension Kmgr_V1_ObjectEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
   public static let protoMessageName: String = _protobuf_package + ".ObjectEvent"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}type\0\u{1}object\0\u{1}error\0")
 
+  fileprivate class _StorageClass {
+    var _cursor: Kmgr_V1_StreamCursor? = nil
+    var _type: Kmgr_V1_ObjectEventType = .unspecified
+    var _object: Kmgr_V1_GetObjectResponse? = nil
+    var _error: Kmgr_V1_StructuredError? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _cursor = source._cursor
+      _type = source._type
+      _object = source._object
+      _error = source._error
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularMessageField(value: &self._cursor) }()
-      case 2: try { try decoder.decodeSingularEnumField(value: &self.type) }()
-      case 3: try { try decoder.decodeSingularMessageField(value: &self._object) }()
-      case 4: try { try decoder.decodeSingularMessageField(value: &self._error) }()
-      default: break
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._cursor) }()
+        case 2: try { try decoder.decodeSingularEnumField(value: &_storage._type) }()
+        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._object) }()
+        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._error) }()
+        default: break
+        }
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    try { if let v = self._cursor {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
-    } }()
-    if self.type != .unspecified {
-      try visitor.visitSingularEnumField(value: self.type, fieldNumber: 2)
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      try { if let v = _storage._cursor {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+      } }()
+      if _storage._type != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._type, fieldNumber: 2)
+      }
+      try { if let v = _storage._object {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+      } }()
+      try { if let v = _storage._error {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+      } }()
     }
-    try { if let v = self._object {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
-    } }()
-    try { if let v = self._error {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
-    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Kmgr_V1_ObjectEvent, rhs: Kmgr_V1_ObjectEvent) -> Bool {
-    if lhs._cursor != rhs._cursor {return false}
-    if lhs.type != rhs.type {return false}
-    if lhs._object != rhs._object {return false}
-    if lhs._error != rhs._error {return false}
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._cursor != rhs_storage._cursor {return false}
+        if _storage._type != rhs_storage._type {return false}
+        if _storage._object != rhs_storage._object {return false}
+        if _storage._error != rhs_storage._error {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -175,22 +175,11 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     condition.displayText = "True"
     condition.transitionTimeUnixMs = 1_755_427_785_123
     response.summaryFields = [condition]
-    var usage = Kmgr_V1_ResourceUsageValue()
-    usage.used = 0
-    usage.usageAvailable = true
-    usage.requested = 0
-    usage.sortValue = 0
-    response.metrics = [usage]
     await rpc.installObject(response)
 
     let detail = try await EngineObjectDetailProvider(
         rpc: rpc, identifier: { "request" }
     ).getObject(identity: identity(name: "api", uid: "uid-api"))
-    #expect(detail.metrics.first?.usage == 0)
-    #expect(detail.metrics.first?.request == 0)
-    #expect(detail.metrics.first?.limit == nil)
-    #expect(detail.metrics.first?.capacity == nil)
-    #expect(detail.metrics.first?.sortValue == 0)
     #expect(detail.yamlUTF8 == Data("kind: Deployment\n".utf8))
     #expect(
         detail.podLabelSelector

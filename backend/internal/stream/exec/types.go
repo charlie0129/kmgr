@@ -109,20 +109,8 @@ type Resolver interface {
 	Resolve(sessionID string) (ResolvedSession, error)
 }
 
-type ResolverFunc func(string) (ResolvedSession, error)
-
-func (f ResolverFunc) Resolve(sessionID string) (ResolvedSession, error) {
-	return f(sessionID)
-}
-
 type ExecutorFactory interface {
 	New(*rest.Config, string, func()) (remotecommand.Executor, error)
-}
-
-type ExecutorFactoryFunc func(*rest.Config, string, func()) (remotecommand.Executor, error)
-
-func (f ExecutorFactoryFunc) New(config *rest.Config, requestURL string, ready func()) (remotecommand.Executor, error) {
-	return f(config, requestURL, ready)
 }
 
 type UIDMismatchError struct {

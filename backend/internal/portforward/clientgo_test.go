@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -82,7 +81,7 @@ func TestUIDPinnedForwardRejectsReplacementAfterUpgradeBeforeLocalListener(t *te
 	}}
 
 	running, err := startUIDPinnedClientGoForward(
-		context.Background(), dialer, podidentity.GetterFunc(func(
+		context.Background(), dialer, podUIDGetterFunc(func(
 			ctx context.Context, namespace, name string,
 		) (types.UID, error) {
 			pod, err := client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})

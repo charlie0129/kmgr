@@ -73,7 +73,6 @@ public struct ObjectDetail: Hashable, Sendable {
     public var summaryFields: [ObjectSummaryField]
     public var labels: [String: String]
     public var annotations: [String: String]
-    public var metrics: [ResourceUsageValue]
     public var containers: [PodContainerDetail]
     /// Canonical Kubernetes label selector for Pods related to this supported
     /// built-in workload or Service. Empty means no safe restrictive selector
@@ -87,7 +86,6 @@ public struct ObjectDetail: Hashable, Sendable {
         summaryFields: [ObjectSummaryField] = [],
         labels: [String: String] = [:],
         annotations: [String: String] = [:],
-        metrics: [ResourceUsageValue] = [],
         containers: [PodContainerDetail] = [],
         podLabelSelector: String = ""
     ) {
@@ -97,7 +95,6 @@ public struct ObjectDetail: Hashable, Sendable {
         self.summaryFields = summaryFields
         self.labels = labels
         self.annotations = annotations
-        self.metrics = metrics
         self.containers = containers
         self.podLabelSelector = podLabelSelector
     }

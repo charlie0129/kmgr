@@ -309,8 +309,7 @@ struct YAMLSnapshotWindowControllerTests {
         let previous = ObjectDetail(
             identity: identity,
             resourceVersion: "rv-1",
-            yamlUTF8: Data(source.utf8),
-            metrics: [ResourceUsageValue(usage: 1, unit: "core", resourceName: "cpu")]
+            yamlUTF8: Data(source.utf8)
         )
         let emptyUpdate = ObjectDetail(
             identity: identity,
@@ -319,7 +318,6 @@ struct YAMLSnapshotWindowControllerTests {
         )
         let merged = ObjectDetailWatchPresentation.merging(emptyUpdate, previous: previous)
         #expect(merged.yamlUTF8 == previous.yamlUTF8)
-        #expect(merged.metrics.isEmpty)
 
         let provider = SnapshotObjectDetailProvider(details: [previous])
         let detail = ObjectDetailViewController(

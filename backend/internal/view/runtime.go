@@ -900,8 +900,9 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			defer metricProviderLease.Close()
 		}
 	} else if metricPlan.strategy == metricFetchPodObjects {
-		// A point-cache subscription will attach here in the next milestone.
-		// Leaving usage unavailable is preferable to silently broadening a
+		// The exact point cache is driven later by revision-pinned viewport
+		// interests, or by complete candidate coverage when metrics affect order
+		// or membership. Start unavailable rather than ever broadening a
 		// field-selected Pod query into an all-scope PodMetrics LIST.
 		projector = projector.WithMetrics(metrics.Snapshot{
 			State: metrics.MeasurementUnavailable,
@@ -1214,15 +1215,6 @@ func (r *Runtime) trimOpenHistoryLocked() {
 			return
 		}
 	}
-}
-
-func (r *Runtime) hasOpenHistoryKeyLocked(key viewKey) bool {
-	for _, retained := range r.openHistory {
-		if retained.key == key {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *Runtime) startResourceLocked(entry *resourceRuntime) ([]*Subscription, *kmgrv1.StructuredError) {
@@ -1899,32 +1891,6 @@ func (r *Runtime) Close() {
 	}
 }
 
-// installSearchSnapshot retains one completed, validated LIST for a short
-// handoff window. Entry and aggregate object budgets evict the oldest
-// snapshots first. It returns the installed identity so a failed final emit
-// can revoke exactly that snapshot without deleting a newer replacement.
-func (r *Runtime) installSearchSnapshot(
-	key searchSnapshotKey,
-	snapshotStore *store.UIDStore,
-) (*completedSearchSnapshot, bool) {
-	if snapshotStore == nil || snapshotStore.ResourceVersion() == "" {
-		return nil, false
-	}
-	objectCount := snapshotStore.Len()
-	if objectCount > r.searchSnapshotObjectLimit {
-		return nil, false
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	now := time.Now()
-	if !r.installCompletedSearchSnapshotLocked(key, snapshotStore, now) {
-		return nil, false
-	}
-	snapshot := r.searchSnapshots[key]
-	return snapshot, true
-}
-
 func (r *Runtime) consumeSearchSnapshotLocked(key searchSnapshotKey) *completedSearchSnapshot {
 	snapshot := r.searchSnapshots[key]
 	if snapshot == nil {
@@ -2415,30 +2381,6 @@ func (s *Subscription) applyMetrics(snapshot metrics.Snapshot) {
 	s.mu.Unlock()
 }
 
-// initializeRows is called only before the subscription is published in the
-// runtime lifecycle graph. Keeping initialization lock-free avoids acquiring
-// Subscription.mu while Runtime.mu protects that publication.
-func (s *Subscription) initializeRows(rows []*kmgrv1.ResourceRow) {
-	clear(s.rows)
-	s.order = s.order[:0]
-	for _, row := range rows {
-		uid := row.GetIdentity().GetUid()
-		if uid == "" {
-			continue
-		}
-		s.rows[uid] = row
-		s.order = append(s.order, uid)
-	}
-	if s.presentationRevision == 0 {
-		s.presentationRevision = 1
-	}
-	if s.indexRevision == 0 {
-		s.indexRevision = 1
-	}
-	s.pendingInvalidation = true
-	s.signalLocked(true)
-}
-
 // initializeSealedRows prepares the private state for an Open handoff. The
 // initial rows are considered client-retainable immediately because the sealed
 // delivery cannot be replaced once the subscription is published. Unlike the
@@ -2546,22 +2488,6 @@ func (s *Subscription) applyServerTableBatchLocked(batch watcher.Batch) {
 	for uid, values := range batch.Table.Cells {
 		s.serverCells[string(uid)] = projectTableCells(s.serverColumns, values, now)
 	}
-}
-
-// sealInitial snapshots the first cached control delivery into immutable
-// protobuf events. Later LIST/WATCH/metrics work mutates only the ordinary
-// mailbox and can therefore never overtake it.
-func (s *Subscription) sealInitial(
-	status *kmgrv1.ViewStatus,
-	rows []*kmgrv1.ResourceRow,
-	reconciled bool,
-) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	s.sealInitialUnlocked(status, rows, reconciled)
 }
 
 func (s *Subscription) sealInitialUnlocked(

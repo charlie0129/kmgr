@@ -136,12 +136,6 @@ type Resolver interface {
 	Resolve(sessionID string) (ResolvedSession, error)
 }
 
-type ResolverFunc func(string) (ResolvedSession, error)
-
-func (f ResolverFunc) Resolve(sessionID string) (ResolvedSession, error) {
-	return f(sessionID)
-}
-
 // ClientGoSource opens a Pod log subresource using the typed client-go API.
 // Kubernetes does not offer a UID precondition for this subresource, so it
 // verifies the current Pod UID immediately before opening the request.

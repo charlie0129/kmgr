@@ -18,6 +18,15 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
+func DeleteMany(
+	ctx context.Context,
+	client DeleteResourceProvider,
+	targets []DeleteTarget,
+	options DeleteOptions,
+) []DeleteResult {
+	return DeleteManyWithProgress(ctx, client, targets, options, nil)
+}
+
 func TestDeleteManyAppliesExactUIDPreconditionsAndReturnsPartialFailures(t *testing.T) {
 	t.Parallel()
 	client := &recordingProvider{errors: map[string]error{"forbidden": fmt.Errorf("forbidden")}}

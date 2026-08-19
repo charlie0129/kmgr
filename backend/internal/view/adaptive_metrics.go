@@ -284,12 +284,3 @@ func podMetricReferences(objects []*unstructured.Unstructured) ([]metrics.PodRef
 	}
 	return references, uids
 }
-
-func cloneMetricSample(sample metrics.Sample) metrics.Sample {
-	resources := make(map[string]int64, len(sample.Resources))
-	for name, value := range sample.Resources {
-		resources[name] = value
-	}
-	sample.Resources = resources
-	return sample
-}

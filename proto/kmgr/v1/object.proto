@@ -66,7 +66,8 @@ message GetObjectResponse {
   repeated ObjectSummaryField summary_fields = 5;
   repeated StringMapEntry labels = 6;
   repeated StringMapEntry annotations = 7;
-  repeated ResourceUsageValue metrics = 8;
+  reserved 8;
+  reserved "metrics";
   StructuredError error = 9;
   repeated PodContainerDetail containers = 10;
   // Canonical Kubernetes label selector for the Pods selected by this

@@ -7,38 +7,26 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	metricsapi "k8s.io/metrics/pkg/apis/metrics/v1beta1"
-	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
 )
 
-// DetailMetricsProvider is the optional enrichment seam for GetObject. The
-// object is the same fresh, UID-validated object used to form the base detail;
-// providers must never fetch a replacement object by namespace/name.
-type DetailMetrics struct {
-	Resources          []*kmgrv1.ResourceUsageValue
-	ContainerResources map[string][]*kmgrv1.ResourceUsageValue
-}
-
-type DetailMetricsProvider interface {
-	Metrics(
+// PodContainerMetricsProvider is the optional enrichment seam for the
+// explicit Pod container table. The object is the same fresh, UID-validated
+// Pod used to form the base detail; providers must never fetch a replacement
+// object by namespace/name.
+type PodContainerMetricsProvider interface {
+	ContainerMetrics(
 		ctx context.Context,
 		identity Identity,
 		object *unstructured.Unstructured,
-	) (DetailMetrics, error)
-}
-
-type detailMetricsClientResolver interface {
-	CachedMetricsAPIAvailability(sessionID string) (available, known bool, err error)
-	MetricsClient(sessionID string) (metricsclient.MetricsV1beta1Interface, error)
+	) (map[string][]*kmgrv1.ResourceUsageValue, error)
 }
 
 // PodMetricsDetailResolver is the shared authority cache seam used by the
@@ -52,169 +40,56 @@ type PodMetricsDetailResolver interface {
 	) (*metricsapi.PodMetrics, error)
 }
 
-// KubernetesDetailMetricsProvider reads the optional Metrics API through a
-// client derived from the selected authoritative cluster session. It performs
-// no I/O until Metrics is called for a Pod or Node detail request.
-type KubernetesDetailMetricsProvider struct {
-	clients        detailMetricsClientResolver
-	podDetailCache PodMetricsDetailResolver
+// KubernetesPodContainerMetricsProvider resolves exact Pod samples through
+// the authority-owned cache shared with viewport metrics. It performs no I/O
+// until the explicit Pod container table requests enrichment.
+type KubernetesPodContainerMetricsProvider struct {
+	podMetrics PodMetricsDetailResolver
 }
 
-func NewKubernetesDetailMetricsProvider(
-	sessions *cluster.SessionRegistry,
-	resolvers ...PodMetricsDetailResolver,
-) (*KubernetesDetailMetricsProvider, error) {
-	if sessions == nil {
-		return nil, errors.New("cluster session registry must not be nil")
+func NewKubernetesPodContainerMetricsProvider(
+	podMetrics PodMetricsDetailResolver,
+) (*KubernetesPodContainerMetricsProvider, error) {
+	if podMetrics == nil {
+		return nil, errors.New("Pod metrics detail resolver must not be nil")
 	}
-	provider := &KubernetesDetailMetricsProvider{
-		clients: &sessionDetailMetricsClients{sessions: sessions},
-	}
-	if len(resolvers) > 1 {
-		return nil, errors.New("at most one Pod metrics detail resolver may be configured")
-	}
-	if len(resolvers) == 1 {
-		provider.podDetailCache = resolvers[0]
-	}
-	return provider, nil
+	return &KubernetesPodContainerMetricsProvider{podMetrics: podMetrics}, nil
 }
 
-type sessionDetailMetricsClients struct {
-	sessions *cluster.SessionRegistry
-}
-
-func (r *sessionDetailMetricsClients) CachedMetricsAPIAvailability(
-	sessionID string,
-) (available, known bool, err error) {
-	if r == nil || r.sessions == nil {
-		return false, false, ErrSessionNotFound
-	}
-	session, ok := r.sessions.Get(sessionID)
-	if !ok {
-		return false, false, ErrSessionNotFound
-	}
-	available, known = session.CachedMetricsAPIAvailability()
-	return available, known, nil
-}
-
-func (r *sessionDetailMetricsClients) MetricsClient(
-	sessionID string,
-) (metricsclient.MetricsV1beta1Interface, error) {
-	if r == nil || r.sessions == nil {
-		return nil, ErrSessionNotFound
-	}
-	session, ok := r.sessions.Get(sessionID)
-	if !ok {
-		return nil, ErrSessionNotFound
-	}
-
-	client := session.Metrics()
-	if client == nil {
-		return nil, errors.New("cluster Metrics API client is unavailable")
-	}
-	return client, nil
-}
-
-func (p *KubernetesDetailMetricsProvider) Metrics(
+func (p *KubernetesPodContainerMetricsProvider) ContainerMetrics(
 	ctx context.Context,
 	identity Identity,
 	object *unstructured.Unstructured,
-) (DetailMetrics, error) {
-	if p == nil || p.clients == nil {
-		return DetailMetrics{}, errors.New("object detail metrics provider is unavailable")
+) (map[string][]*kmgrv1.ResourceUsageValue, error) {
+	if p == nil || p.podMetrics == nil {
+		return nil, errors.New("Pod container metrics provider is unavailable")
 	}
 	if err := validateObjectUID(object, identity); err != nil {
-		return DetailMetrics{}, err
+		return nil, err
+	}
+	if identity.Group != "" || identity.Version != "v1" || identity.Resource != "pods" {
+		return nil, nil
 	}
 
-	kind := metricsKindForIdentity(identity)
-	if kind == 0 {
-		return DetailMetrics{}, nil
+	var pod corev1.Pod
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &pod); err != nil {
+		return nil, fmt.Errorf("decode Pod for container resource accounting: %w", err)
 	}
+	accounting := podContainerResourceUsage(&pod, nil)
 
-	var (
-		accounting DetailMetrics
-		pod        corev1.Pod
-		node       corev1.Node
-	)
-	switch kind {
-	case metrics.PodMetrics:
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &pod); err != nil {
-			return DetailMetrics{}, fmt.Errorf("decode Pod for resource accounting: %w", err)
-		}
-		accounting.Resources = podResourceUsage(&pod, nil)
-		accounting.ContainerResources = podContainerResourceUsage(&pod, nil)
-	case metrics.NodeMetrics:
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &node); err != nil {
-			return DetailMetrics{}, fmt.Errorf("decode Node for resource accounting: %w", err)
-		}
-		accounting.Resources = nodeResourceUsage(&node, nil)
-	}
-
-	available, known, err := p.clients.CachedMetricsAPIAvailability(identity.SessionID)
+	value, err := p.podMetrics.ResolvePodMetricsDetail(ctx, identity.SessionID, metrics.PodReference{
+		Namespace: identity.Namespace, Name: identity.Name, UID: types.UID(identity.UID),
+	})
 	if err != nil {
 		return accounting, err
 	}
-	if known && !available {
-		// Discovery is an explicit workspace action. Consume only its cached
-		// conclusion here; this detail path must never start discovery itself.
-		// Requests, limits, and allocatable remain useful without measured usage.
+	if value == nil {
 		return accounting, nil
 	}
-	client, err := p.clients.MetricsClient(identity.SessionID)
-	if err != nil {
+	if err := validateMetricsUID(value.GetUID(), identity); err != nil {
 		return accounting, err
 	}
-
-	switch kind {
-	case metrics.PodMetrics:
-		var value *metricsapi.PodMetrics
-		if p.podDetailCache != nil {
-			value, err = p.podDetailCache.ResolvePodMetricsDetail(ctx, identity.SessionID, metrics.PodReference{
-				Namespace: identity.Namespace, Name: identity.Name, UID: types.UID(identity.UID),
-			})
-		} else {
-			value, err = client.PodMetricses(identity.Namespace).Get(ctx, identity.Name, metav1.GetOptions{})
-		}
-		if err != nil {
-			return accounting, err
-		}
-		if value == nil {
-			return accounting, nil
-		}
-		if err := validateMetricsUID(value.GetUID(), identity); err != nil {
-			return accounting, err
-		}
-		return DetailMetrics{
-			Resources:          podResourceUsage(&pod, value),
-			ContainerResources: podContainerResourceUsage(&pod, value),
-		}, nil
-	case metrics.NodeMetrics:
-		value, err := client.NodeMetricses().Get(ctx, identity.Name, metav1.GetOptions{})
-		if err != nil {
-			return accounting, err
-		}
-		if err := validateMetricsUID(value.GetUID(), identity); err != nil {
-			return accounting, err
-		}
-		return DetailMetrics{Resources: nodeResourceUsage(&node, value)}, nil
-	default:
-		return DetailMetrics{}, nil
-	}
-}
-
-func metricsKindForIdentity(identity Identity) metrics.APIKind {
-	if identity.Group != "" || identity.Version != "v1" {
-		return 0
-	}
-	switch identity.Resource {
-	case "pods":
-		return metrics.PodMetrics
-	case "nodes":
-		return metrics.NodeMetrics
-	default:
-		return 0
-	}
+	return podContainerResourceUsage(&pod, value), nil
 }
 
 func validateMetricsUID(actual types.UID, identity Identity) error {
@@ -227,20 +102,6 @@ func validateMetricsUID(actual types.UID, identity Identity) error {
 		ExpectedUID: identity.UID, ActualUID: string(actual),
 		Namespace: identity.Namespace, Name: identity.Name,
 	}
-}
-
-func podResourceUsage(pod *corev1.Pod, value *metricsapi.PodMetrics) []*kmgrv1.ResourceUsageValue {
-	requests, limits := metrics.EffectivePodResources(pod)
-	usage := make(corev1.ResourceList)
-	if value != nil {
-		for _, container := range value.Containers {
-			addQuantities(usage, container.Usage)
-		}
-	}
-	return resourceUsageValues(
-		usage, requests, limits, nil,
-		metrics.MetricsAPIGroupVersion, "pod containers", metricsTimestamp(value),
-	)
 }
 
 func podContainerResourceUsage(
@@ -287,7 +148,6 @@ func podContainerResourceUsage(
 			usageByName[container.name],
 			container.resources.Requests,
 			container.resources.Limits,
-			nil,
 			metrics.MetricsAPIGroupVersion,
 			"container "+container.name,
 			metricsTimestamp(value),
@@ -296,53 +156,15 @@ func podContainerResourceUsage(
 	return result
 }
 
-func nodeResourceUsage(node *corev1.Node, value *metricsapi.NodeMetrics) []*kmgrv1.ResourceUsageValue {
-	usage := corev1.ResourceList(nil)
-	if value != nil {
-		usage = value.Usage
-	}
-	allocatable := corev1.ResourceList(nil)
-	physicalCapacity := corev1.ResourceList(nil)
-	if node != nil {
-		allocatable = node.Status.Allocatable
-		physicalCapacity = node.Status.Capacity
-	}
-	// ResourceUsageValue has one denominator slot. Consistent with Node table
-	// cells and the product rules, that slot carries allocatable. Physical
-	// capacity still participates in exact-key discovery, but cannot be sent as
-	// a second quantity without changing the protocol.
-	return resourceUsageValuesWithNames(
-		usage, nil, nil, allocatable, physicalCapacity,
-		metrics.MetricsAPIGroupVersion, "node", metricsTimestamp(value),
-	)
-}
-
-func metricsTimestamp(value any) int64 {
-	switch current := value.(type) {
-	case *metricsapi.PodMetrics:
-		if current != nil && !current.Timestamp.IsZero() {
-			return current.Timestamp.UnixMilli()
-		}
-	case *metricsapi.NodeMetrics:
-		if current != nil && !current.Timestamp.IsZero() {
-			return current.Timestamp.UnixMilli()
-		}
+func metricsTimestamp(value *metricsapi.PodMetrics) int64 {
+	if value != nil && !value.Timestamp.IsZero() {
+		return value.Timestamp.UnixMilli()
 	}
 	return 0
 }
 
 func resourceUsageValues(
-	usage, requests, limits, capacity corev1.ResourceList,
-	provider, scope string,
-	measuredAt int64,
-) []*kmgrv1.ResourceUsageValue {
-	return resourceUsageValuesWithNames(
-		usage, requests, limits, capacity, nil, provider, scope, measuredAt,
-	)
-}
-
-func resourceUsageValuesWithNames(
-	usage, requests, limits, capacity, additionalNames corev1.ResourceList,
+	usage, requests, limits corev1.ResourceList,
 	provider, scope string,
 	measuredAt int64,
 ) []*kmgrv1.ResourceUsageValue {
@@ -350,7 +172,7 @@ func resourceUsageValuesWithNames(
 		corev1.ResourceCPU:    {},
 		corev1.ResourceMemory: {},
 	}
-	for _, values := range []corev1.ResourceList{usage, requests, limits, capacity, additionalNames} {
+	for _, values := range []corev1.ResourceList{usage, requests, limits} {
 		for name := range values {
 			names[name] = struct{}{}
 		}
@@ -380,9 +202,6 @@ func resourceUsageValuesWithNames(
 		}
 		if quantity, found := limits[name]; found {
 			item.Limit = detailNumberPointer(detailQuantityNumeric(quantity))
-		}
-		if quantity, found := capacity[name]; found {
-			item.Capacity = detailNumberPointer(detailQuantityNumeric(quantity))
 		}
 		setDetailUsageSortValue(item)
 		result = append(result, item)
@@ -434,7 +253,5 @@ func setDetailUsageSortValue(value *kmgrv1.ResourceUsageValue) {
 		value.SortValue = detailNumberPointer(value.GetRequested())
 	case value.Limit != nil:
 		value.SortValue = detailNumberPointer(value.GetLimit())
-	case value.Capacity != nil:
-		value.SortValue = detailNumberPointer(value.GetCapacity())
 	}
 }

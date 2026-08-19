@@ -262,7 +262,7 @@ func readyPod(name string, uid types.UID, port int32) *corev1.Pod {
 }
 
 func fakePodUIDGetter(client *fake.Clientset) podidentity.Getter {
-	return podidentity.GetterFunc(func(
+	return podUIDGetterFunc(func(
 		ctx context.Context, namespace, name string,
 	) (types.UID, error) {
 		pod, err := client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})

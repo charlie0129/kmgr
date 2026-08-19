@@ -635,7 +635,6 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                 response.annotations.map { ($0.key, $0.value) },
                 uniquingKeysWith: { _, latest in latest }
             ),
-            metrics: response.metrics.map(usage),
             containers: response.containers.compactMap(container),
             podLabelSelector: response.podLabelSelector
         )

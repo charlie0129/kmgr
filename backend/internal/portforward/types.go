@@ -200,7 +200,3 @@ type Forwarder interface {
 type Backoff interface {
 	Wait(context.Context, int) error
 }
-
-type BackoffFunc func(context.Context, int) error
-
-func (f BackoffFunc) Wait(ctx context.Context, attempt int) error { return f(ctx, attempt) }
