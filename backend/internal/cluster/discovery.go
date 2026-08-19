@@ -4,15 +4,20 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 
+	apidiscoveryv2 "k8s.io/api/apidiscovery/v2"
+	apidiscoveryv2beta1 "k8s.io/api/apidiscovery/v2beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/discovery"
@@ -22,6 +27,17 @@ import (
 const (
 	discoveryParallelism  = 8
 	namespaceListPageSize = int64(500)
+
+	aggregatedDiscoveryAcceptHeader = discovery.AcceptV2 + "," + discovery.AcceptV2Beta1 + "," + discovery.AcceptV1
+)
+
+var (
+	aggregatedDiscoveryV2GVK = schema.GroupVersionKind{
+		Group: "apidiscovery.k8s.io", Version: "v2", Kind: "APIGroupDiscoveryList",
+	}
+	aggregatedDiscoveryV2Beta1GVK = schema.GroupVersionKind{
+		Group: "apidiscovery.k8s.io", Version: "v2beta1", Kind: "APIGroupDiscoveryList",
+	}
 )
 
 type APIResource struct {
@@ -282,6 +298,20 @@ type resourceListResult struct {
 	err   error
 }
 
+type discoveryCatalogPlan struct {
+	fallbackTargets []discoveryTarget
+	preferred       map[string]string
+	resourceLists   []*metav1.APIResourceList
+	failures        []DiscoveryFailure
+}
+
+type discoveryEndpointResult struct {
+	preferred     map[string]string
+	resourceLists map[string]*metav1.APIResourceList
+	needsFallback map[string]discoveryTarget
+	failures      []DiscoveryFailure
+}
+
 // DiscoverResources returns listable, non-subresource API resources in stable
 // GVR order. Discovery is an explicit connection action and is never triggered
 // merely by rendering the sidebar.
@@ -352,15 +382,19 @@ func DiscoverResourcesWithClient(
 		return ResourceDiscovery{}, err
 	}
 
-	targets, preferred, failures, err := discoverTargets(ctx, restClient)
+	plan, err := discoverCatalog(ctx, restClient)
 	if err != nil {
 		return ResourceDiscovery{}, err
 	}
-	resourceLists, resourceFailures, successfulLists, err := fetchResourceLists(ctx, restClient, targets)
+	fallbackLists, resourceFailures, successfulFallbacks, err := fetchResourceLists(
+		ctx, restClient, plan.fallbackTargets,
+	)
 	if err != nil {
 		return ResourceDiscovery{}, err
 	}
-	failures = append(failures, resourceFailures...)
+	resourceLists := append(plan.resourceLists, fallbackLists...)
+	successfulLists := len(plan.resourceLists) + successfulFallbacks
+	failures := append(plan.failures, resourceFailures...)
 	sort.Slice(failures, func(i, j int) bool { return failures[i].Target < failures[j].Target })
 
 	if len(failures) != 0 && successfulLists == 0 {
@@ -397,7 +431,7 @@ func DiscoverResourcesWithClient(
 				Verbs:            sortedUnique(resource.Verbs),
 				ShortNames:       sortedUnique(resource.ShortNames),
 				Categories:       sortedUnique(resource.Categories),
-				PreferredVersion: preferred[groupVersion.Group] == groupVersion.Version,
+				PreferredVersion: plan.preferred[groupVersion.Group] == groupVersion.Version,
 			})
 		}
 	}
@@ -415,88 +449,322 @@ func DiscoverResourcesWithClient(
 	}, nil
 }
 
-func discoverTargets(
+func discoverCatalog(
 	ctx context.Context,
 	restClient rest.Interface,
-) ([]discoveryTarget, map[string]string, []DiscoveryFailure, error) {
-	preferred := map[string]string{}
-	failures := make([]DiscoveryFailure, 0, 2)
-	targets := make([]discoveryTarget, 0)
-	seen := make(map[string]struct{})
-	appendTarget := func(target discoveryTarget) {
-		name := target.name()
-		if _, exists := seen[name]; exists {
-			return
+) (discoveryCatalogPlan, error) {
+	plan := discoveryCatalogPlan{preferred: make(map[string]string)}
+	resourceLists := make(map[string]*metav1.APIResourceList)
+	fallbackTargets := make(map[string]discoveryTarget)
+	merge := func(result discoveryEndpointResult) {
+		plan.failures = append(plan.failures, result.failures...)
+		for group, version := range result.preferred {
+			if _, exists := plan.preferred[group]; !exists {
+				plan.preferred[group] = version
+			}
 		}
-		seen[name] = struct{}{}
-		targets = append(targets, target)
+		for name, list := range result.resourceLists {
+			if list != nil {
+				resourceLists[name] = list
+				delete(fallbackTargets, name)
+			}
+		}
+		for name, target := range result.needsFallback {
+			if resourceLists[name] == nil {
+				fallbackTargets[name] = target
+			}
+		}
 	}
 
-	legacy := &metav1.APIVersions{}
-	err := restClient.Get().AbsPath("/api").SetHeader("Accept", discovery.AcceptV1).Do(ctx).Into(legacy)
+	core, err := fetchDiscoveryEndpoint(ctx, restClient, "/api")
 	switch {
 	case err == nil:
-		for _, version := range legacy.Versions {
-			if !validDiscoveryVersion(version) {
-				failures = append(failures, DiscoveryFailure{
-					Target: "core/invalid-version",
-					Err:    errors.New("the core discovery document contained an invalid API version"),
-				})
-				continue
-			}
-			appendTarget(discoveryTarget{version: version, path: "/api/" + version})
-		}
-		if slices.Contains(legacy.Versions, "v1") {
-			preferred[""] = "v1"
-		} else if len(legacy.Versions) != 0 {
-			preferred[""] = legacy.Versions[0]
-		}
+		merge(core)
 	case ctx.Err() != nil:
-		return nil, nil, nil, ctx.Err()
+		return discoveryCatalogPlan{}, ctx.Err()
 	case apierrors.IsNotFound(err):
 		// Match client-go's tolerance for aggregated API servers without /api.
 	default:
-		failures = append(failures, DiscoveryFailure{Target: "/api", Err: err})
+		plan.failures = append(plan.failures, DiscoveryFailure{Target: "/api", Err: err})
 	}
 
-	groups := &metav1.APIGroupList{}
-	err = restClient.Get().AbsPath("/apis").SetHeader("Accept", discovery.AcceptV1).Do(ctx).Into(groups)
+	apis, err := fetchDiscoveryEndpoint(ctx, restClient, "/apis")
 	switch {
 	case err == nil:
-		for index := range groups.Groups {
-			group := &groups.Groups[index]
-			if len(utilvalidation.IsDNS1123Subdomain(group.Name)) != 0 {
-				failures = append(failures, DiscoveryFailure{
-					Target: "apis/invalid-group",
-					Err:    errors.New("the API discovery document contained an invalid group name"),
-				})
+		merge(apis)
+	case ctx.Err() != nil:
+		return discoveryCatalogPlan{}, ctx.Err()
+	default:
+		plan.failures = append(plan.failures, DiscoveryFailure{Target: "/apis", Err: err})
+	}
+
+	listNames := make([]string, 0, len(resourceLists))
+	for name := range resourceLists {
+		listNames = append(listNames, name)
+	}
+	sort.Strings(listNames)
+	for _, name := range listNames {
+		plan.resourceLists = append(plan.resourceLists, resourceLists[name])
+	}
+	targetNames := make([]string, 0, len(fallbackTargets))
+	for name := range fallbackTargets {
+		targetNames = append(targetNames, name)
+	}
+	sort.Strings(targetNames)
+	for _, name := range targetNames {
+		plan.fallbackTargets = append(plan.fallbackTargets, fallbackTargets[name])
+	}
+	return plan, nil
+}
+
+func fetchDiscoveryEndpoint(
+	ctx context.Context,
+	restClient rest.Interface,
+	path string,
+) (discoveryEndpointResult, error) {
+	var contentType string
+	body, err := restClient.Get().
+		AbsPath(path).
+		SetHeader("Accept", aggregatedDiscoveryAcceptHeader).
+		Do(ctx).
+		ContentType(&contentType).
+		Raw()
+	if err != nil {
+		return discoveryEndpointResult{}, err
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return discoveryEndpointResult{}, fmt.Errorf("parse discovery content type from %s: %w", path, err)
+	}
+	if mediaType != k8sruntime.ContentTypeJSON {
+		return discoveryEndpointResult{}, fmt.Errorf(
+			"unsupported discovery content type %q from %s", mediaType, path,
+		)
+	}
+	if matchesDiscoveryContentType(contentType, aggregatedDiscoveryV2GVK) {
+		if err := requireDiscoveryJSONField(body, "items", path); err != nil {
+			return discoveryEndpointResult{}, err
+		}
+		var value apidiscoveryv2.APIGroupDiscoveryList
+		if err := json.Unmarshal(body, &value); err != nil {
+			return discoveryEndpointResult{}, fmt.Errorf("decode aggregated discovery v2 from %s: %w", path, err)
+		}
+		_, lists, stale := discovery.SplitGroupsAndResources(value)
+		return aggregatedDiscoveryEndpointV2(value, lists, stale), nil
+	}
+	if matchesDiscoveryContentType(contentType, aggregatedDiscoveryV2Beta1GVK) {
+		if err := requireDiscoveryJSONField(body, "items", path); err != nil {
+			return discoveryEndpointResult{}, err
+		}
+		var value apidiscoveryv2beta1.APIGroupDiscoveryList
+		if err := json.Unmarshal(body, &value); err != nil {
+			return discoveryEndpointResult{}, fmt.Errorf("decode aggregated discovery v2beta1 from %s: %w", path, err)
+		}
+		_, lists, stale := discovery.SplitGroupsAndResourcesV2Beta1(value)
+		return aggregatedDiscoveryEndpointV2Beta1(value, lists, stale), nil
+	}
+	return legacyDiscoveryEndpoint(path, body)
+}
+
+func matchesDiscoveryContentType(contentType string, gvk schema.GroupVersionKind) bool {
+	matches, err := discovery.ContentTypeIsGVK(contentType, gvk)
+	return err == nil && matches
+}
+
+func aggregatedDiscoveryEndpointV2(
+	value apidiscoveryv2.APIGroupDiscoveryList,
+	lists map[schema.GroupVersion]*metav1.APIResourceList,
+	stale map[schema.GroupVersion]error,
+) discoveryEndpointResult {
+	groups := make([]aggregatedDiscoveryGroup, 0, len(value.Items))
+	for _, group := range value.Items {
+		versions := make([]string, 0, len(group.Versions))
+		for _, version := range group.Versions {
+			versions = append(versions, version.Version)
+		}
+		groups = append(groups, aggregatedDiscoveryGroup{name: group.Name, versions: versions})
+	}
+	return aggregatedDiscoveryEndpoint(groups, lists, stale)
+}
+
+func aggregatedDiscoveryEndpointV2Beta1(
+	value apidiscoveryv2beta1.APIGroupDiscoveryList,
+	lists map[schema.GroupVersion]*metav1.APIResourceList,
+	stale map[schema.GroupVersion]error,
+) discoveryEndpointResult {
+	groups := make([]aggregatedDiscoveryGroup, 0, len(value.Items))
+	for _, group := range value.Items {
+		versions := make([]string, 0, len(group.Versions))
+		for _, version := range group.Versions {
+			versions = append(versions, version.Version)
+		}
+		groups = append(groups, aggregatedDiscoveryGroup{name: group.Name, versions: versions})
+	}
+	return aggregatedDiscoveryEndpoint(groups, lists, stale)
+}
+
+type aggregatedDiscoveryGroup struct {
+	name     string
+	versions []string
+}
+
+func aggregatedDiscoveryEndpoint(
+	groups []aggregatedDiscoveryGroup,
+	lists map[schema.GroupVersion]*metav1.APIResourceList,
+	stale map[schema.GroupVersion]error,
+) discoveryEndpointResult {
+	result := discoveryEndpointResult{
+		preferred: make(map[string]string), resourceLists: make(map[string]*metav1.APIResourceList),
+		needsFallback: make(map[string]discoveryTarget),
+	}
+	seen := make(map[string]struct{})
+	for _, group := range groups {
+		if group.name != "" && len(utilvalidation.IsDNS1123Subdomain(group.name)) != 0 {
+			result.failures = append(result.failures, DiscoveryFailure{
+				Target: "apis/invalid-group",
+				Err:    errors.New("the API discovery document contained an invalid group name"),
+			})
+			continue
+		}
+		for _, version := range group.versions {
+			if !validDiscoveryVersion(version) {
+				result.failures = append(result.failures, invalidDiscoveryVersionFailure(group.name))
 				continue
 			}
-			if group.PreferredVersion.Version != "" {
-				preferred[group.Name] = group.PreferredVersion.Version
+			target := discoveryTargetFor(group.name, version)
+			name := target.name()
+			if _, duplicate := seen[name]; duplicate {
+				continue
 			}
-			for _, version := range group.Versions {
-				parsed, parseErr := schema.ParseGroupVersion(version.GroupVersion)
-				if parseErr != nil || parsed.Group != group.Name || parsed.Version != version.Version ||
-					!validDiscoveryVersion(version.Version) {
-					failures = append(failures, DiscoveryFailure{
-						Target: group.Name + "/invalid-version",
-						Err:    errors.New("the API discovery document contained an invalid group version"),
-					})
-					continue
-				}
-				appendTarget(discoveryTarget{
-					group: group.Name, version: version.Version,
-					path: "/apis/" + group.Name + "/" + version.Version,
-				})
+			seen[name] = struct{}{}
+			if _, preferred := result.preferred[group.name]; !preferred {
+				// Aggregated versions are ordered by server preference. Preserve
+				// that declared preference even while its stale representation is
+				// being refreshed; a failed fallback must not relabel a different
+				// API version as the server's preferred version.
+				result.preferred[group.name] = version
+			}
+			gv := schema.GroupVersion{Group: group.name, Version: version}
+			if _, isStale := stale[gv]; isStale {
+				result.needsFallback[name] = target
+				continue
+			}
+			if list := lists[gv]; list != nil {
+				result.resourceLists[name] = list
+			} else {
+				result.needsFallback[name] = target
 			}
 		}
-	case ctx.Err() != nil:
-		return nil, nil, nil, ctx.Err()
-	default:
-		failures = append(failures, DiscoveryFailure{Target: "/apis", Err: err})
 	}
-	return targets, preferred, failures, nil
+	return result
+}
+
+func legacyDiscoveryEndpoint(path string, body []byte) (discoveryEndpointResult, error) {
+	if path == "/api" {
+		if err := requireDiscoveryJSONField(body, "versions", path); err != nil {
+			return discoveryEndpointResult{}, err
+		}
+		var versions metav1.APIVersions
+		if err := json.Unmarshal(body, &versions); err != nil {
+			return discoveryEndpointResult{}, fmt.Errorf("decode legacy discovery from /api: %w", err)
+		}
+		result := discoveryEndpointResult{
+			preferred: make(map[string]string), resourceLists: make(map[string]*metav1.APIResourceList),
+			needsFallback: make(map[string]discoveryTarget),
+		}
+		firstValidVersion := ""
+		for _, version := range versions.Versions {
+			if !validDiscoveryVersion(version) {
+				result.failures = append(result.failures, invalidDiscoveryVersionFailure(""))
+				continue
+			}
+			target := discoveryTargetFor("", version)
+			if firstValidVersion == "" {
+				firstValidVersion = version
+			}
+			result.needsFallback[target.name()] = target
+		}
+		if slices.Contains(versions.Versions, "v1") {
+			result.preferred[""] = "v1"
+		} else if firstValidVersion != "" {
+			result.preferred[""] = firstValidVersion
+		}
+		return result, nil
+	}
+
+	if err := requireDiscoveryJSONField(body, "groups", path); err != nil {
+		return discoveryEndpointResult{}, err
+	}
+	var groups metav1.APIGroupList
+	if err := json.Unmarshal(body, &groups); err != nil {
+		return discoveryEndpointResult{}, fmt.Errorf("decode legacy discovery from /apis: %w", err)
+	}
+	result := discoveryEndpointResult{
+		preferred: make(map[string]string), resourceLists: make(map[string]*metav1.APIResourceList),
+		needsFallback: make(map[string]discoveryTarget),
+	}
+	seen := make(map[string]struct{})
+	for index := range groups.Groups {
+		group := &groups.Groups[index]
+		if len(utilvalidation.IsDNS1123Subdomain(group.Name)) != 0 {
+			result.failures = append(result.failures, DiscoveryFailure{
+				Target: "apis/invalid-group",
+				Err:    errors.New("the API discovery document contained an invalid group name"),
+			})
+			continue
+		}
+		if group.PreferredVersion.Version != "" {
+			result.preferred[group.Name] = group.PreferredVersion.Version
+		}
+		for _, version := range group.Versions {
+			parsed, parseErr := schema.ParseGroupVersion(version.GroupVersion)
+			if parseErr != nil || parsed.Group != group.Name || parsed.Version != version.Version ||
+				!validDiscoveryVersion(version.Version) {
+				result.failures = append(result.failures, invalidDiscoveryVersionFailure(group.Name))
+				continue
+			}
+			target := discoveryTargetFor(group.Name, version.Version)
+			if _, duplicate := seen[target.name()]; duplicate {
+				continue
+			}
+			seen[target.name()] = struct{}{}
+			result.needsFallback[target.name()] = target
+		}
+	}
+	return result, nil
+}
+
+func requireDiscoveryJSONField(body []byte, field, path string) error {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return fmt.Errorf("decode discovery document from %s: %w", path, err)
+	}
+	if _, exists := envelope[field]; !exists {
+		return fmt.Errorf("discovery document from %s is missing %q", path, field)
+	}
+	return nil
+}
+
+func invalidDiscoveryVersionFailure(group string) DiscoveryFailure {
+	if group == "" {
+		return DiscoveryFailure{
+			Target: "core/invalid-version",
+			Err:    errors.New("the core discovery document contained an invalid API version"),
+		}
+	}
+	return DiscoveryFailure{
+		Target: group + "/invalid-version",
+		Err:    errors.New("the API discovery document contained an invalid group version"),
+	}
+}
+
+func discoveryTargetFor(group, version string) discoveryTarget {
+	if group == "" {
+		return discoveryTarget{version: version, path: "/api/" + version}
+	}
+	return discoveryTarget{
+		group: group, version: version, path: "/apis/" + group + "/" + version,
+	}
 }
 
 func fetchResourceLists(
