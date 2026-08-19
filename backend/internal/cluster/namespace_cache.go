@@ -5,22 +5,28 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"time"
 )
 
 var errNamespaceNameCacheClosed = errors.New("namespace name cache is closed")
 
+const defaultNamespaceNameCacheFreshness = 30 * time.Second
+
 // namespaceNameCache belongs to one shared Kubernetes backend. The first
 // caller waits for a coalesced LIST. Once a successful snapshot exists, callers
-// receive a clone immediately while at most one refresh runs in the background.
-// There is deliberately no TTL: each read is the refresh event, and the cache
-// lives exactly as long as the shared backend.
+// receive a clone immediately. An expired snapshot starts at most one refresh
+// in the background, while fresh hits remain API-free. The cache lives exactly
+// as long as the shared backend.
 type namespaceNameCache struct {
 	mu sync.Mutex
 
-	names  []string
-	ready  bool
-	flight *namespaceNameFlight
-	closed bool
+	names              []string
+	ready              bool
+	lastSuccessfulLoad time.Time
+	freshnessInterval  time.Duration
+	now                func() time.Time
+	flight             *namespaceNameFlight
+	closed             bool
 }
 
 type namespaceNameFlight struct {
@@ -53,7 +59,7 @@ func (c *namespaceNameCache) load(
 	}
 	if c.ready {
 		cached := slices.Clone(c.names)
-		if c.flight == nil {
+		if c.flight == nil && !c.isFreshLocked() {
 			c.startLocked(ctx, loader)
 		}
 		c.mu.Unlock()
@@ -96,6 +102,7 @@ func (c *namespaceNameCache) refresh(
 ) {
 	names, err := loader(ctx)
 	flight.cancel()
+	completedAt := c.currentTime()
 	if err == nil {
 		// ListNamespaces already produces this form. Normalizing again keeps the
 		// cache's compact sorted-name contract independent of a future loader.
@@ -113,6 +120,7 @@ func (c *namespaceNameCache) refresh(
 		if !c.closed {
 			c.names = slices.Clone(names)
 			c.ready = true
+			c.lastSuccessfulLoad = completedAt
 		}
 	}
 	if c.flight == flight {
@@ -134,11 +142,30 @@ func (c *namespaceNameCache) close() {
 	c.closed = true
 	c.names = nil
 	c.ready = false
+	c.lastSuccessfulLoad = time.Time{}
 	flight := c.flight
 	c.mu.Unlock()
 	if flight != nil {
 		flight.cancel()
 	}
+}
+
+func (c *namespaceNameCache) isFreshLocked() bool {
+	if c.lastSuccessfulLoad.IsZero() {
+		return false
+	}
+	interval := c.freshnessInterval
+	if interval <= 0 {
+		interval = defaultNamespaceNameCacheFreshness
+	}
+	return c.currentTime().Before(c.lastSuccessfulLoad.Add(interval))
+}
+
+func (c *namespaceNameCache) currentTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 // detachedRefreshContext survives completion of the unary RPC that triggered

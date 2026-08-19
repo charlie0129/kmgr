@@ -98,6 +98,7 @@ func TestNamespaceNameCacheCoalescesColdMissesAndClonesResults(t *testing.T) {
 
 func TestNamespaceNamesAreSharedByBackendAndRefreshStaleSnapshot(t *testing.T) {
 	t.Parallel()
+	clock := newNamespaceNameCacheTestClock()
 	var calls atomic.Int64
 	refreshStarted := make(chan struct{})
 	releaseRefresh := make(chan struct{})
@@ -118,6 +119,8 @@ func TestNamespaceNamesAreSharedByBackendAndRefreshStaleSnapshot(t *testing.T) {
 		}
 	}))
 	t.Cleanup(session.backend.namespaceNames.close)
+	session.backend.namespaceNames.now = clock.Now
+	session.backend.namespaceNames.freshnessInterval = time.Minute
 	sibling := &Session{backend: session.backend}
 
 	initial, err := session.ListNamespacesCached(context.Background())
@@ -127,6 +130,7 @@ func TestNamespaceNamesAreSharedByBackendAndRefreshStaleSnapshot(t *testing.T) {
 	if !slices.Equal(initial, []string{"alpha", "old"}) {
 		t.Fatalf("initial names = %v", initial)
 	}
+	clock.Advance(time.Minute)
 
 	stale, err := sibling.ListNamespacesCached(context.Background())
 	if err != nil {
@@ -166,6 +170,94 @@ func TestNamespaceNamesAreSharedByBackendAndRefreshStaleSnapshot(t *testing.T) {
 	}
 }
 
+func TestNamespaceNameCacheFreshHitsDoNotReloadAndExpiryCoalescesRefresh(t *testing.T) {
+	t.Parallel()
+	clock := newNamespaceNameCacheTestClock()
+	cache := namespaceNameCache{
+		now:               clock.Now,
+		freshnessInterval: time.Minute,
+	}
+	defer cache.close()
+
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var calls atomic.Int64
+	loader := func(ctx context.Context) ([]string, error) {
+		switch calls.Add(1) {
+		case 1:
+			return []string{"stable"}, nil
+		case 2:
+			close(refreshStarted)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-releaseRefresh:
+				return []string{"refreshed"}, nil
+			}
+		default:
+			return nil, errors.New("unexpected namespace refresh")
+		}
+	}
+
+	if _, err := cache.load(context.Background(), loader); err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		names, err := cache.load(context.Background(), loader)
+		if err != nil || !slices.Equal(names, []string{"stable"}) {
+			t.Fatalf("fresh cache hit = %v, %v", names, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fresh cache loader calls = %d, want 1", got)
+	}
+	cache.mu.Lock()
+	freshFlight := cache.flight
+	cache.mu.Unlock()
+	if freshFlight != nil {
+		t.Fatal("fresh cache hit started a refresh")
+	}
+
+	// The interval is a freshness duration, so equality is expired.
+	clock.Advance(time.Minute)
+	names, err := cache.load(context.Background(), loader)
+	if err != nil || !slices.Equal(names, []string{"stable"}) {
+		t.Fatalf("expired cache hit = %v, %v", names, err)
+	}
+	select {
+	case <-refreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expired cache hit did not start a refresh")
+	}
+	cache.mu.Lock()
+	refresh := cache.flight
+	cache.mu.Unlock()
+	if refresh == nil {
+		t.Fatal("expired cache refresh was not retained in flight")
+	}
+	for range 10 {
+		names, err := cache.load(context.Background(), loader)
+		if err != nil || !slices.Equal(names, []string{"stable"}) {
+			t.Fatalf("coalesced stale cache hit = %v, %v", names, err)
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expired cache loader calls = %d, want 2", got)
+	}
+	close(releaseRefresh)
+	select {
+	case <-refresh.done:
+	case <-time.After(time.Second):
+		t.Fatal("namespace refresh did not finish")
+	}
+	cache.mu.Lock()
+	cached := slices.Clone(cache.names)
+	cache.mu.Unlock()
+	if !slices.Equal(cached, []string{"refreshed"}) {
+		t.Fatalf("refreshed cache names = %v", cached)
+	}
+}
+
 func TestNamespaceNameCacheNeverCachesFailures(t *testing.T) {
 	t.Parallel()
 	var cache namespaceNameCache
@@ -193,7 +285,11 @@ func TestNamespaceNameCacheNeverCachesFailures(t *testing.T) {
 
 func TestNamespaceNameCacheKeepsStaleSnapshotAfterRefreshFailure(t *testing.T) {
 	t.Parallel()
-	var cache namespaceNameCache
+	clock := newNamespaceNameCacheTestClock()
+	cache := namespaceNameCache{
+		now:               clock.Now,
+		freshnessInterval: time.Minute,
+	}
 	defer cache.close()
 	refreshStarted := make(chan struct{})
 	releaseRefresh := make(chan struct{})
@@ -225,6 +321,7 @@ func TestNamespaceNameCacheKeepsStaleSnapshotAfterRefreshFailure(t *testing.T) {
 	if _, err := cache.load(context.Background(), loader); err != nil {
 		t.Fatal(err)
 	}
+	clock.Advance(time.Minute)
 	stale, err := cache.load(context.Background(), loader)
 	if err != nil || !slices.Equal(stale, []string{"stable"}) {
 		t.Fatalf("stale cache hit = %v, %v", stale, err)
@@ -278,6 +375,27 @@ func TestNamespaceNameCacheKeepsStaleSnapshotAfterRefreshFailure(t *testing.T) {
 	if !slices.Equal(cached, []string{"new"}) || calls.Load() != 3 {
 		t.Fatalf("recovered cache/calls = %v/%d", cached, calls.Load())
 	}
+}
+
+type namespaceNameCacheTestClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newNamespaceNameCacheTestClock() *namespaceNameCacheTestClock {
+	return &namespaceNameCacheTestClock{now: time.Unix(1_000, 0)}
+}
+
+func (c *namespaceNameCacheTestClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *namespaceNameCacheTestClock) Advance(duration time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(duration)
 }
 
 func TestNamespaceNameCacheCloseCancelsRefreshAndRejectsNewLoads(t *testing.T) {
