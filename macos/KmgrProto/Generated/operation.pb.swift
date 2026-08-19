@@ -405,6 +405,147 @@ public struct Kmgr_V1_DeleteTarget: Sendable {
   fileprivate var _identity: Kmgr_V1_ResourceIdentity? = nil
 }
 
+/// Resolves bounded confirmation facts for an immutable selection token against
+/// one exact current view index. The engine computes hidden_count; clients must
+/// never infer that offscreen or stale selected identities are still visible.
+public struct Kmgr_V1_PrepareDeleteSelectionRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var viewID: String = String()
+
+  public var selectionToken: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
+
+  public var previewLimit: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+}
+
+public struct Kmgr_V1_PrepareDeleteSelectionResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var viewID: String = String()
+
+  public var selectionToken: String = String()
+
+  public var generation: UInt64 = 0
+
+  public var indexRevision: UInt64 = 0
+
+  public var selectedCount: UInt64 = 0
+
+  public var hiddenCount: UInt64 = 0
+
+  public var expiresAtUnixMs: Int64 = 0
+
+  public var resource: Kmgr_V1_ResourceType {
+    get {return _resource ?? Kmgr_V1_ResourceType()}
+    set {_resource = newValue}
+  }
+  /// Returns true if `resource` has been explicitly set.
+  public var hasResource: Bool {return self._resource != nil}
+  /// Clears the value of `resource`. Subsequent reads from it will return its default value.
+  public mutating func clearResource() {self._resource = nil}
+
+  public var preview: [Kmgr_V1_DeleteTarget] = []
+
+  public var previewTruncated: Bool = false
+
+  public var error: Kmgr_V1_StructuredError {
+    get {return _error ?? Kmgr_V1_StructuredError()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {return self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _resource: Kmgr_V1_ResourceType? = nil
+  fileprivate var _error: Kmgr_V1_StructuredError? = nil
+}
+
+/// Starts a delete directly from the engine-owned immutable selection. Count
+/// and GVR are confirmation preconditions and are revalidated with token scope
+/// and expiry before the engine accepts the operation.
+public struct Kmgr_V1_DeleteSelectionRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var operationID: String = String()
+
+  public var viewID: String = String()
+
+  public var selectionToken: String = String()
+
+  public var selectedCount: UInt64 = 0
+
+  public var resource: Kmgr_V1_ResourceType {
+    get {return _resource ?? Kmgr_V1_ResourceType()}
+    set {_resource = newValue}
+  }
+  /// Returns true if `resource` has been explicitly set.
+  public var hasResource: Bool {return self._resource != nil}
+  /// Clears the value of `resource`. Subsequent reads from it will return its default value.
+  public mutating func clearResource() {self._resource = nil}
+
+  public var propagationPolicy: Kmgr_V1_PropagationPolicy = .unspecified
+
+  public var gracePeriodSeconds: Int64 {
+    get {return _gracePeriodSeconds ?? 0}
+    set {_gracePeriodSeconds = newValue}
+  }
+  /// Returns true if `gracePeriodSeconds` has been explicitly set.
+  public var hasGracePeriodSeconds: Bool {return self._gracePeriodSeconds != nil}
+  /// Clears the value of `gracePeriodSeconds`. Subsequent reads from it will return its default value.
+  public mutating func clearGracePeriodSeconds() {self._gracePeriodSeconds = nil}
+
+  public var maxConcurrency: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+  fileprivate var _resource: Kmgr_V1_ResourceType? = nil
+  fileprivate var _gracePeriodSeconds: Int64? = nil
+}
+
 public struct Kmgr_V1_DeleteRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -775,6 +916,17 @@ public struct Kmgr_V1_OperationEvent: Sendable {
   public var hasError: Bool {return self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
+
+  /// Aggregate-only operations intentionally do not retain or replay one
+  /// identity/status record per selected object. item_results then contains
+  /// only a bounded delta of useful failure/cancellation details.
+  public var aggregateOnly: Bool = false
+
+  /// Number of non-success terminal details not retained because the aggregate
+  /// operation reached its bounded detail budget or completed unnamed work
+  /// after an early producer failure/cancellation. Successful identities are
+  /// aggregate-only by design and are not counted here.
+  public var omittedItemResults: UInt32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1225,6 +1377,228 @@ extension Kmgr_V1_DeleteTarget: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
   public static func ==(lhs: Kmgr_V1_DeleteTarget, rhs: Kmgr_V1_DeleteTarget) -> Bool {
     if lhs._identity != rhs._identity {return false}
     if lhs.hiddenByFilter != rhs.hiddenByFilter {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_PrepareDeleteSelectionRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PrepareDeleteSelectionRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{3}selection_token\0\u{1}generation\0\u{3}index_revision\0\u{3}preview_limit\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.selectionToken) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.previewLimit) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 2)
+    }
+    if !self.selectionToken.isEmpty {
+      try visitor.visitSingularStringField(value: self.selectionToken, fieldNumber: 3)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 4)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 5)
+    }
+    if self.previewLimit != 0 {
+      try visitor.visitSingularUInt32Field(value: self.previewLimit, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_PrepareDeleteSelectionRequest, rhs: Kmgr_V1_PrepareDeleteSelectionRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.selectionToken != rhs.selectionToken {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.previewLimit != rhs.previewLimit {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_PrepareDeleteSelectionResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PrepareDeleteSelectionResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}view_id\0\u{3}selection_token\0\u{1}generation\0\u{3}index_revision\0\u{3}selected_count\0\u{3}hidden_count\0\u{3}expires_at_unix_ms\0\u{1}resource\0\u{1}preview\0\u{3}preview_truncated\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.selectionToken) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.indexRevision) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.selectedCount) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.hiddenCount) }()
+      case 8: try { try decoder.decodeSingularInt64Field(value: &self.expiresAtUnixMs) }()
+      case 9: try { try decoder.decodeSingularMessageField(value: &self._resource) }()
+      case 10: try { try decoder.decodeRepeatedMessageField(value: &self.preview) }()
+      case 11: try { try decoder.decodeSingularBoolField(value: &self.previewTruncated) }()
+      case 12: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 2)
+    }
+    if !self.selectionToken.isEmpty {
+      try visitor.visitSingularStringField(value: self.selectionToken, fieldNumber: 3)
+    }
+    if self.generation != 0 {
+      try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 4)
+    }
+    if self.indexRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.indexRevision, fieldNumber: 5)
+    }
+    if self.selectedCount != 0 {
+      try visitor.visitSingularUInt64Field(value: self.selectedCount, fieldNumber: 6)
+    }
+    if self.hiddenCount != 0 {
+      try visitor.visitSingularUInt64Field(value: self.hiddenCount, fieldNumber: 7)
+    }
+    if self.expiresAtUnixMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.expiresAtUnixMs, fieldNumber: 8)
+    }
+    try { if let v = self._resource {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
+    } }()
+    if !self.preview.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.preview, fieldNumber: 10)
+    }
+    if self.previewTruncated != false {
+      try visitor.visitSingularBoolField(value: self.previewTruncated, fieldNumber: 11)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_PrepareDeleteSelectionResponse, rhs: Kmgr_V1_PrepareDeleteSelectionResponse) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.selectionToken != rhs.selectionToken {return false}
+    if lhs.generation != rhs.generation {return false}
+    if lhs.indexRevision != rhs.indexRevision {return false}
+    if lhs.selectedCount != rhs.selectedCount {return false}
+    if lhs.hiddenCount != rhs.hiddenCount {return false}
+    if lhs.expiresAtUnixMs != rhs.expiresAtUnixMs {return false}
+    if lhs._resource != rhs._resource {return false}
+    if lhs.preview != rhs.preview {return false}
+    if lhs.previewTruncated != rhs.previewTruncated {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_DeleteSelectionRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeleteSelectionRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}operation_id\0\u{3}view_id\0\u{3}selection_token\0\u{3}selected_count\0\u{1}resource\0\u{3}propagation_policy\0\u{3}grace_period_seconds\0\u{3}max_concurrency\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.viewID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.selectionToken) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.selectedCount) }()
+      case 6: try { try decoder.decodeSingularMessageField(value: &self._resource) }()
+      case 7: try { try decoder.decodeSingularEnumField(value: &self.propagationPolicy) }()
+      case 8: try { try decoder.decodeSingularInt64Field(value: &self._gracePeriodSeconds) }()
+      case 9: try { try decoder.decodeSingularUInt32Field(value: &self.maxConcurrency) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.operationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
+    }
+    if !self.viewID.isEmpty {
+      try visitor.visitSingularStringField(value: self.viewID, fieldNumber: 3)
+    }
+    if !self.selectionToken.isEmpty {
+      try visitor.visitSingularStringField(value: self.selectionToken, fieldNumber: 4)
+    }
+    if self.selectedCount != 0 {
+      try visitor.visitSingularUInt64Field(value: self.selectedCount, fieldNumber: 5)
+    }
+    try { if let v = self._resource {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    } }()
+    if self.propagationPolicy != .unspecified {
+      try visitor.visitSingularEnumField(value: self.propagationPolicy, fieldNumber: 7)
+    }
+    try { if let v = self._gracePeriodSeconds {
+      try visitor.visitSingularInt64Field(value: v, fieldNumber: 8)
+    } }()
+    if self.maxConcurrency != 0 {
+      try visitor.visitSingularUInt32Field(value: self.maxConcurrency, fieldNumber: 9)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_DeleteSelectionRequest, rhs: Kmgr_V1_DeleteSelectionRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.operationID != rhs.operationID {return false}
+    if lhs.viewID != rhs.viewID {return false}
+    if lhs.selectionToken != rhs.selectionToken {return false}
+    if lhs.selectedCount != rhs.selectedCount {return false}
+    if lhs._resource != rhs._resource {return false}
+    if lhs.propagationPolicy != rhs.propagationPolicy {return false}
+    if lhs._gracePeriodSeconds != rhs._gracePeriodSeconds {return false}
+    if lhs.maxConcurrency != rhs.maxConcurrency {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1776,7 +2150,7 @@ extension Kmgr_V1_OperationItemResult: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Kmgr_V1_OperationEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".OperationEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{3}operation_id\0\u{1}state\0\u{3}completed_items\0\u{3}total_items\0\u{3}item_results\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{3}operation_id\0\u{1}state\0\u{3}completed_items\0\u{3}total_items\0\u{3}item_results\0\u{1}error\0\u{3}aggregate_only\0\u{3}omitted_item_results\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1791,6 +2165,8 @@ extension Kmgr_V1_OperationEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageI
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self.totalItems) }()
       case 6: try { try decoder.decodeRepeatedMessageField(value: &self.itemResults) }()
       case 7: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      case 8: try { try decoder.decodeSingularBoolField(value: &self.aggregateOnly) }()
+      case 9: try { try decoder.decodeSingularUInt32Field(value: &self.omittedItemResults) }()
       default: break
       }
     }
@@ -1822,6 +2198,12 @@ extension Kmgr_V1_OperationEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     try { if let v = self._error {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
     } }()
+    if self.aggregateOnly != false {
+      try visitor.visitSingularBoolField(value: self.aggregateOnly, fieldNumber: 8)
+    }
+    if self.omittedItemResults != 0 {
+      try visitor.visitSingularUInt32Field(value: self.omittedItemResults, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1833,6 +2215,8 @@ extension Kmgr_V1_OperationEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if lhs.totalItems != rhs.totalItems {return false}
     if lhs.itemResults != rhs.itemResults {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.aggregateOnly != rhs.aggregateOnly {return false}
+    if lhs.omittedItemResults != rhs.omittedItemResults {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

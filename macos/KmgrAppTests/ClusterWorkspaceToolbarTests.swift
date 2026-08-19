@@ -845,7 +845,7 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
 
         try await waitUntil { table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
         try await waitUntil {
             controller.contextualShortcutSnapshot?.contextID == "resource-list"
@@ -899,7 +899,7 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
 
         try await waitUntil { resourceTable.numberOfRows == 1 }
-        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: resourceTable)
         #expect(window.makeFirstResponder(resourceTable))
         controller.enterResource(nil)
 
@@ -959,10 +959,7 @@ struct ClusterWorkspaceToolbarTests {
                     .compactMap { $0 as? NSTableView }
                     .first { $0.accessibilityLabel() == "Kubernetes resources" })
                 try await waitUntil { resourceTable.numberOfRows == 1 }
-                resourceTable.selectRowIndexes(
-                    IndexSet(integer: 0),
-                    byExtendingSelection: false
-                )
+                try await selectResourceRow(0, in: resourceTable)
                 #expect(window.makeFirstResponder(resourceTable))
                 controller.enterResource(nil)
 
@@ -1036,7 +1033,7 @@ struct ClusterWorkspaceToolbarTests {
             .compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
         try await waitUntil { resourceTable.numberOfRows == 1 }
-        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: resourceTable)
         #expect(window.makeFirstResponder(resourceTable))
         controller.enterResource(nil)
         try await waitUntilAsync { await detailProvider.dataCallCount() == 1 }
@@ -1092,7 +1089,7 @@ struct ClusterWorkspaceToolbarTests {
                 && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
-        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: resourceTable)
         #expect(window.makeFirstResponder(resourceTable))
         controller.enterResource(nil)
         try await waitUntil {
@@ -1167,7 +1164,7 @@ struct ClusterWorkspaceToolbarTests {
             provider.streamRequestCount == 1
                 && resourceTable.numberOfRows == 3
         }
-        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: resourceTable)
         #expect(window.makeFirstResponder(resourceTable))
         controller.enterResource(nil)
         try await waitUntil {
@@ -1229,7 +1226,7 @@ struct ClusterWorkspaceToolbarTests {
                 && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
-        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: resourceTable)
         #expect(window.makeFirstResponder(resourceTable))
         controller.enterResource(nil)
         try await waitUntil {
@@ -1283,7 +1280,7 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
 
         try await waitUntil { table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
         table.keyDown(with: try workspaceLetterKey("s"))
         try await waitUntil { opened != nil }
@@ -1327,7 +1324,7 @@ struct ClusterWorkspaceToolbarTests {
         let resourceTable = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
         try await waitUntil { resourceTable.numberOfRows == 1 }
-        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: resourceTable)
         #expect(window.makeFirstResponder(resourceTable))
         controller.enterResource(nil)
 
@@ -1383,7 +1380,7 @@ struct ClusterWorkspaceToolbarTests {
         let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
         try await waitUntil { table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
 
         table.keyDown(with: try workspaceLetterKey("y"))
@@ -1426,7 +1423,7 @@ struct ClusterWorkspaceToolbarTests {
         let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
         try await waitUntil { table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
         try await waitUntil {
             controller.contextualShortcutSnapshot?.items.map(\.keys).contains("D") == true
@@ -1467,7 +1464,7 @@ struct ClusterWorkspaceToolbarTests {
         let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
         try await waitUntil { table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
 
         controller.enterResource(nil)
@@ -1511,7 +1508,7 @@ struct ClusterWorkspaceToolbarTests {
         let resourceTable = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
         try await waitUntil { resourceTable.numberOfRows == 1 }
-        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: resourceTable)
         #expect(window.makeFirstResponder(resourceTable))
         controller.enterResource(nil)
         try await waitUntil {
@@ -1566,7 +1563,7 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
 
         try await waitUntil { table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
         controller.enterResource(nil)
         try await waitUntil { namespaceControl.titleOfSelectedItem == "payments" }
@@ -1624,7 +1621,7 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.identifier?.rawValue == "workspace-status-line" })
 
         try await waitUntil { provider.streamRequests.count == 1 && table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
         controller.enterResource(nil)
 
@@ -1672,7 +1669,7 @@ struct ClusterWorkspaceToolbarTests {
         let resourceTable = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
         try await waitUntil { resourceTable.numberOfRows == 1 }
-        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: resourceTable)
         #expect(window.makeFirstResponder(resourceTable))
         controller.enterResource(nil)
         try await waitUntil {
@@ -1721,7 +1718,7 @@ struct ClusterWorkspaceToolbarTests {
         controller.onOpenLogWindow = { opened = $0 }
 
         try await waitUntil { table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
         table.keyDown(with: try workspaceLetterKey("l"))
         try await waitUntil { opened != nil }
@@ -1758,7 +1755,7 @@ struct ClusterWorkspaceToolbarTests {
         controller.onOpenLogWindow = { opened = $0 }
 
         try await waitUntil { table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
         table.keyDown(with: try workspaceLetterKey("l", modifiers: [.shift]))
         try await waitUntil { opened != nil }
@@ -1785,7 +1782,7 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
 
         try await waitUntil { provider.streamRequests.count == 1 && table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
         controller.openResourceEvents(nil)
 
@@ -1819,7 +1816,7 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
 
         try await waitUntil { table.numberOfRows == 1 }
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await selectResourceRow(0, in: table)
         #expect(window.makeFirstResponder(table))
 
         let logs = NSMenuItem(
@@ -1853,8 +1850,8 @@ struct ClusterWorkspaceToolbarTests {
         #expect(menu.item(withTitle: "Edit Labels / Annotations…") != nil)
     }
 
-    @Test("Edit Select All retains selection hidden by the active filter")
-    func responderSelectAllRetainsHiddenSelection() async throws {
+    @Test("Edit Select All starts a fresh selection after the filter changes")
+    func responderSelectAllStartsFreshAfterFilterChange() async throws {
         let controller = makeWorkspace(provider: SelectAllFilterWorkspaceResourceProvider())
         controller.showWindow(nil)
         defer { controller.close() }
@@ -1866,19 +1863,22 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.identifier?.rawValue == "workspace-status-line" })
 
         try await waitUntil { table.numberOfRows == 2 }
-        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
-        try await waitUntil { status.stringValue.contains("1 selected") }
+        try await selectResourceRow(1, in: table)
 
         try triggerResourceFilterChange(in: window, value: "name:api")
         try await waitUntil {
             table.numberOfRows == 1
-                && status.stringValue.contains("1 selected (1 hidden by filter)")
+                && status.stringValue.contains("1 selected")
+                && table.selectedRowIndexes.isEmpty
         }
 
         #expect(window.makeFirstResponder(table))
         #expect(table.tryToPerform(#selector(NSResponder.selectAll(_:)), with: nil))
-        #expect(status.stringValue.contains("2 selected (1 hidden by filter)"))
-        #expect(table.selectedRowIndexes == IndexSet(integer: 0))
+        try await waitUntil {
+            status.stringValue.contains("1 selected")
+                && table.selectedRowIndexes == IndexSet(integer: 0)
+        }
+        #expect(!status.stringValue.contains("2 selected"))
     }
 
     @Test("workspace footer shows resource freshness age and background progress")
@@ -1937,7 +1937,8 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
 
         try await waitUntil {
-            status.stringValue.hasSuffix(" · Watching") && table.numberOfRows == 1
+            status.stringValue.hasSuffix(" · Watching")
+                && resourceRowIsMaterialized(0, in: table)
         }
         try triggerResourceFilterChange(
             in: try #require(controller.window),
@@ -2317,6 +2318,7 @@ func makeColumnPropagationWorkspace(
     provider: any WorkspaceResourceProviding,
     optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
     objectDetailProvider: (any ObjectDetailProviding)? = nil,
+    operationProvider: (any ResourceOperationProviding)? = nil,
     columnsConfigurationPath: String,
     columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
     columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
@@ -2343,7 +2345,7 @@ func makeColumnPropagationWorkspace(
         objectSearchProvider: NoopObjectSearchProvider(),
         objectDetailProvider:
             objectDetailProvider ?? NoopToolbarObjectDetailProvider(),
-        operationProvider: NoopOperationProvider(),
+        operationProvider: operationProvider ?? NoopOperationProvider(),
         logProvider: NoopLogProvider(),
         execProvider: NoopExecProvider(),
         portForwards: portForwards,
@@ -3410,6 +3412,52 @@ private func workspaceLetterKey(
         isARepeat: false,
         keyCode: 1
     ))
+}
+
+@MainActor
+private func selectResourceRow(
+    _ row: Int,
+    in table: NSTableView
+) async throws {
+    let root = try #require(table.window?.contentView)
+    let status = try #require(descendants(of: root)
+        .compactMap { $0 as? NSTextField }
+        .first { $0.identifier?.rawValue == "workspace-status-line" })
+    try await waitUntil {
+        resourceRowIsMaterialized(row, in: table)
+    }
+    let delegate = table.delegate
+    table.delegate = nil
+    table.selectRowIndexes(
+        IndexSet(integer: row),
+        byExtendingSelection: false
+    )
+    table.delegate = delegate
+    await Task.yield()
+    delegate?.tableViewSelectionDidChange?(Notification(
+        name: NSTableView.selectionDidChangeNotification,
+        object: table
+    ))
+    try await waitUntil {
+        table.selectedRowIndexes == IndexSet(integer: row)
+            && status.stringValue.contains("1 selected")
+    }
+}
+
+@MainActor
+private func resourceRowIsMaterialized(
+    _ row: Int,
+    in table: NSTableView
+) -> Bool {
+    guard table.numberOfRows > row,
+        let cell = table.view(
+            atColumn: 0,
+            row: row,
+            makeIfNecessary: true
+        ) as? NSTableCellView,
+        let text = cell.textField?.stringValue
+    else { return false }
+    return !text.isEmpty && text != "Loading…"
 }
 
 @MainActor

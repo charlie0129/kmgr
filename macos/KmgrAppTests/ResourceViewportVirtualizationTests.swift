@@ -174,6 +174,147 @@ struct ResourceViewportVirtualizationTests {
         #expect(applications[2].previousToken == applications[1].state.token)
     }
 
+    @Test("Command-K captures a 250k Command-A without paging and deletes by token")
+    func hugePaletteDeleteStaysBounded() async throws {
+        let provider = ControlledViewportWorkspaceProvider(rowCount: 250_000)
+        let operationProvider = CapturingViewportSelectionDeleteProvider()
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "selection-huge-palette-delete",
+            operationProvider: operationProvider
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let table = try resourceTable(in: controller)
+        try await waitForViewport {
+            table.numberOfRows == 250_000
+                && self.cellText(in: table, row: 0) == "pod-0"
+        }
+
+        controller.window?.makeFirstResponder(table)
+        table.selectAll(nil)
+        try await waitForViewport {
+            provider.selectionApplications.last?.state.selectedCount == 250_000
+        }
+        #expect(table.selectedRowIndexes.count <= 512)
+
+        controller.showCommandPalette(nil)
+        let paletteTable = try await waitForPaletteTable(in: controller)
+        #expect(provider.selectionPageRequests.isEmpty)
+        // A WATCH reorder after capture must not revoke the immutable token.
+        // Preparation uses the newer current revision for its exact hidden
+        // count, while the captured token/count/GVR remain unchanged.
+        provider.emitInvalidation(presentationRevision: 2, indexRevision: 2)
+        try await waitForViewport {
+            provider.fetchRequests.contains { $0.revision.index == 2 }
+        }
+        try activatePaletteRow(named: "Delete…", in: paletteTable)
+        try await waitForViewport {
+            operationProvider.preparedSelections.count == 1
+        }
+
+        let captured = try #require(operationProvider.preparedSelections.first)
+        #expect(captured.selectedCount == 250_000)
+        #expect(captured.token == provider.selectionApplications.last?.state.token)
+        #expect(provider.selectionPageRequests.isEmpty)
+        let sheet = try #require(controller.window?.attachedSheet)
+        let previewTable = try #require(viewportDescendants(of: sheet.contentView!)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Resources awaiting deletion" })
+        #expect(previewTable.numberOfRows <= 64)
+
+        var foundDeleteButton: NSButton?
+        try await waitForViewport {
+            foundDeleteButton = viewportDescendants(of: sheet.contentView!)
+                .compactMap { $0 as? NSButton }
+                .first { $0.title == "Delete" && $0.isEnabled }
+            return foundDeleteButton != nil
+        }
+        let deleteButton = try #require(foundDeleteButton)
+        deleteButton.performClick(nil)
+        try await waitForViewport {
+            operationProvider.deletedSelections == [captured]
+        }
+        #expect(provider.selectionPageRequests.isEmpty)
+    }
+
+    @Test("Command-K gesture fence cannot be retargeted by a later gesture")
+    func paletteSelectionFenceIsImmutable() async throws {
+        let provider = ControlledViewportWorkspaceProvider(rowCount: 10_000)
+        let operationProvider = CapturingViewportSelectionDeleteProvider()
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "selection-palette-fence",
+            operationProvider: operationProvider
+        )
+        controller.showWindow(nil)
+        defer {
+            provider.releaseDelayedSelectionApplication()
+            controller.close()
+        }
+        let table = try resourceTable(in: controller)
+        try await waitForViewport {
+            table.numberOfRows == 10_000
+                && self.cellText(in: table, row: 0) == "pod-0"
+        }
+
+        controller.window?.makeFirstResponder(table)
+        provider.delayNextSelectionApplication()
+        table.selectRowIndexes(IndexSet(integer: 5), byExtendingSelection: false)
+        try await waitForViewport { provider.hasDelayedSelection }
+
+        // Command-K fences the accepted queue at row 5. Row 6 is accepted
+        // afterward and may update the live table, but cannot mutate the
+        // palette's immutable operation target.
+        controller.showCommandPalette(nil)
+        table.selectRowIndexes(IndexSet(integer: 6), byExtendingSelection: false)
+        provider.releaseDelayedSelectionApplication()
+        try await waitForViewport { provider.selectionApplications.count == 2 }
+        let fencedToken = provider.selectionApplications[0].state.token
+        let laterToken = provider.selectionApplications[1].state.token
+        #expect(fencedToken != laterToken)
+
+        let paletteTable = try await waitForPaletteTable(in: controller)
+        try activatePaletteRow(named: "Delete…", in: paletteTable)
+        try await waitForViewport {
+            operationProvider.preparedSelections.count == 1
+        }
+        #expect(operationProvider.preparedSelections.first?.token == fencedToken)
+        #expect(operationProvider.preparedSelections.first?.token != laterToken)
+        #expect(provider.selectionPageRequests.isEmpty)
+    }
+
+    @Test("direct table Delete passes the immutable token without identity paging")
+    func directTableDeleteUsesToken() async throws {
+        let provider = ControlledViewportWorkspaceProvider(rowCount: 10_000)
+        let operationProvider = CapturingViewportSelectionDeleteProvider()
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "selection-direct-delete",
+            operationProvider: operationProvider
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let table = try resourceTable(in: controller)
+        try await waitForViewport {
+            table.numberOfRows == 10_000
+                && self.cellText(in: table, row: 0) == "pod-0"
+        }
+
+        controller.window?.makeFirstResponder(table)
+        table.selectAll(nil)
+        try await waitForViewport {
+            provider.selectionApplications.last?.state.selectedCount == 10_000
+        }
+        let token = try #require(provider.selectionApplications.last?.state.token)
+        controller.deleteResourceSelection(nil)
+        try await waitForViewport {
+            operationProvider.preparedSelections.count == 1
+        }
+        #expect(operationProvider.preparedSelections.first?.token == token)
+        #expect(provider.selectionPageRequests.isEmpty)
+    }
+
     @Test("a stalled selection RPC retains at most 256 queued gestures")
     func selectionGestureQueueIsBounded() async throws {
         let provider = ControlledViewportWorkspaceProvider(rowCount: 10_000)
@@ -800,7 +941,8 @@ struct ResourceViewportVirtualizationTests {
     private func makeViewportWorkspace(
         provider: ControlledViewportWorkspaceProvider,
         suffix: String,
-        objectDetailProvider: (any ObjectDetailProviding)? = nil
+        objectDetailProvider: (any ObjectDetailProviding)? = nil,
+        operationProvider: (any ResourceOperationProviding)? = nil
     ) -> ClusterWorkspaceWindowController {
         makeColumnPropagationWorkspace(
             session: OpenedClusterSession(
@@ -814,6 +956,7 @@ struct ResourceViewportVirtualizationTests {
             optionalResourceCatalogProvider:
                 NoopViewportOptionalResourceCatalogProvider(),
             objectDetailProvider: objectDetailProvider,
+            operationProvider: operationProvider,
             columnsConfigurationPath:
                 "/tmp/kmgr-\(suffix)-\(UUID().uuidString).yaml",
             resourceViewportTiming: ResourceViewportTiming(
@@ -914,6 +1057,39 @@ struct ResourceViewportVirtualizationTests {
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
         scrollView.reflectScrolledClipView(scrollView.contentView)
         table.layoutSubtreeIfNeeded()
+    }
+
+    private func waitForPaletteTable(
+        in controller: ClusterWorkspaceWindowController
+    ) async throws -> NSTableView {
+        var result: NSTableView?
+        try await waitForViewport {
+            result = controller.window?.childWindows?.compactMap { $0.contentView }
+                .flatMap(viewportDescendants(of:))
+                .compactMap { $0 as? NSTableView }
+                .first { $0.accessibilityLabel() == "Command palette results" }
+            return result != nil
+        }
+        return try #require(result)
+    }
+
+    private func activatePaletteRow(
+        named title: String,
+        in table: NSTableView
+    ) throws {
+        let row = try #require((0..<table.numberOfRows).first { row in
+            guard let cell = table.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: true
+            ) else { return false }
+            return viewportDescendants(of: cell)
+                .compactMap { $0 as? NSTextField }
+                .first?.stringValue == title
+        })
+        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        let action = try #require(table.doubleAction)
+        #expect(NSApp.sendAction(action, to: table.target, from: table))
     }
 
     private func cellText(in table: NSTableView, row: Int) -> String? {
@@ -1508,6 +1684,105 @@ private struct ViewportObjectDetailProvider: ObjectDetailProviding {
     ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
         throw CancellationError()
     }
+}
+
+private final class CapturingViewportSelectionDeleteProvider:
+    ResourceOperationProviding, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var storedPreparedSelections: [ResourceSelectionDeleteReference] = []
+    private var storedDeletedSelections: [ResourceSelectionDeleteReference] = []
+
+    var preparedSelections: [ResourceSelectionDeleteReference] {
+        lock.withLock { storedPreparedSelections }
+    }
+
+    var deletedSelections: [ResourceSelectionDeleteReference] {
+        lock.withLock { storedDeletedSelections }
+    }
+
+    func prepareDeleteSelection(
+        selection: ResourceSelectionDeleteReference,
+        currentRevision: ResourceSelectionRevision,
+        previewLimit: Int
+    ) async throws -> ResourceSelectionDeletePreparation {
+        lock.withLock { storedPreparedSelections.append(selection) }
+        let previewCount = min(previewLimit, 64)
+        return ResourceSelectionDeletePreparation(
+            selection: selection,
+            currentRevision: currentRevision,
+            hiddenCount: 17,
+            expiresAt: Date().addingTimeInterval(300),
+            preview: (0..<previewCount).map { index in
+                ResourceDeleteTarget(identity: ResourceIdentity(
+                    clusterSessionID: selection.sessionID,
+                    group: selection.gvr.group,
+                    version: selection.gvr.version,
+                    resource: selection.gvr.resource,
+                    namespace: "default",
+                    name: "preview-\(index)",
+                    uid: ResourceUID("preview-uid-\(index)")
+                ))
+            },
+            previewTruncated: selection.selectedCount > UInt64(previewCount)
+        )
+    }
+
+    func deleteSelection(
+        selection: ResourceSelectionDeleteReference,
+        options: ResourceDeleteOptions
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        lock.withLock { storedDeletedSelections.append(selection) }
+        let total = UInt32(selection.selectedCount)
+        return AsyncThrowingStream { continuation in
+            continuation.yield(OperationProgress(
+                cursor: StreamCursor(generation: 1, sequence: 1),
+                operationID: "viewport-token-delete",
+                state: .succeeded,
+                completedItems: total,
+                totalItems: total,
+                itemResults: [],
+                aggregateOnly: true
+            ))
+            continuation.finish()
+        }
+    }
+
+    func deleteResources(
+        targets: [ResourceDeleteTarget],
+        options: ResourceDeleteOptions
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func scaleResource(
+        identity: ResourceIdentity,
+        replicas: Int32,
+        expectedResourceVersion: String
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func rolloutRestart(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func updateMetadata(
+        identity: ResourceIdentity,
+        expectedResourceVersion: String,
+        changes: ResourceMetadataChanges
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw CancellationError()
+    }
+
+    func cancelOperation(
+        sessionID: String,
+        operationID: String,
+        cancelNotStartedOnly: Bool
+    ) async throws {}
 }
 
 @MainActor

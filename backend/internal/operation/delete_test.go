@@ -194,6 +194,115 @@ func TestDeleteManyDeadlineCancelsKubernetesAndQueuedTargets(t *testing.T) {
 	}
 }
 
+func TestDeletePagedConsumesBoundedPagesAndAppliesExactUIDPreconditions(t *testing.T) {
+	const total = 1_001
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	source := &recordingDeletePageSource{total: total, gvr: gvr}
+	client := &recordingProvider{}
+	var completed atomic.Uint32
+	err := DeletePagedWithProgress(
+		context.Background(), client, total, source,
+		DeleteOptions{
+			PropagationPolicy: metav1.DeletePropagationBackground,
+			MaxConcurrency:    7,
+		},
+		func(_ DeleteTarget, state ItemState, _ DeleteResult) bool {
+			if itemTerminal(state) {
+				completed.Add(1)
+			}
+			return true
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Load() != total || source.maxLimit > deleteSelectionPageSize ||
+		source.calls != 4 {
+		t.Fatalf(
+			"completed=%d page calls=%d maximum limit=%d",
+			completed.Load(), source.calls, source.maxLimit,
+		)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.calls) != total {
+		t.Fatalf("delete calls = %d, want %d", len(client.calls), total)
+	}
+	for _, call := range client.calls {
+		if call.options.Preconditions == nil || call.options.Preconditions.UID == nil ||
+			*call.options.Preconditions.UID != types.UID("uid-"+call.name) {
+			t.Fatalf("delete call lacks exact UID precondition: %#v", call)
+		}
+	}
+}
+
+func TestDeletePagedStopsAfterSourceFailure(t *testing.T) {
+	sourceErr := errors.New("selection page unavailable")
+	source := &recordingDeletePageSource{
+		total: 600, gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+		failOffset: deleteSelectionPageSize, err: sourceErr,
+	}
+	err := DeletePagedWithProgress(
+		context.Background(), &recordingProvider{}, 600, source,
+		DeleteOptions{PropagationPolicy: metav1.DeletePropagationBackground, MaxConcurrency: 1},
+		nil,
+	)
+	if !errors.Is(err, sourceErr) {
+		t.Fatalf("page failure = %v, want %v", err, sourceErr)
+	}
+}
+
+func TestDeletePagedCancellationStopsBeforeResolvingAnotherPage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	source := &recordingDeletePageSource{
+		total: 600, gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	client := &recordingProvider{}
+	err := DeletePagedWithProgress(
+		ctx, client, 600, source,
+		DeleteOptions{PropagationPolicy: metav1.DeletePropagationBackground},
+		nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled page deletion = %v, want context cancellation", err)
+	}
+	if source.calls != 0 {
+		t.Fatalf("cancelled deletion resolved %d selection pages", source.calls)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.calls) != 0 {
+		t.Fatalf("cancelled deletion reached Kubernetes: %#v", client.calls)
+	}
+}
+
+type recordingDeletePageSource struct {
+	total      uint32
+	gvr        schema.GroupVersionResource
+	failOffset uint64
+	err        error
+	calls      int
+	maxLimit   uint32
+}
+
+func (s *recordingDeletePageSource) Page(offset uint64, limit uint32) ([]DeleteTarget, error) {
+	s.calls++
+	s.maxLimit = max(s.maxLimit, limit)
+	if s.err != nil && offset >= s.failOffset {
+		return nil, s.err
+	}
+	end := min(offset+uint64(limit), uint64(s.total))
+	result := make([]DeleteTarget, 0, end-offset)
+	for index := offset; index < end; index++ {
+		name := fmt.Sprintf("pod-%d", index)
+		result = append(result, DeleteTarget{Identity: deleteIdentity(
+			s.gvr, "ns", name, "uid-"+name,
+		)})
+	}
+	return result, nil
+}
+
 type deleteCall struct {
 	namespace string
 	name      string

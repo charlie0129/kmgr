@@ -6,6 +6,93 @@ import Testing
 
 @Suite("Engine operation provider")
 struct EngineOperationProviderTests {
+    @Test("prepares and deletes an immutable selection without uploading identities")
+    func mapsTokenBackedSelectionDelete() async throws {
+        var first = Kmgr_V1_DeleteTarget()
+        first.identity = Self.protoIdentity(name: "api-a", uid: "uid-a")
+        var second = Kmgr_V1_DeleteTarget()
+        second.identity = Self.protoIdentity(name: "api-b", uid: "uid-b")
+        second.hiddenByFilter = true
+        var prepared = Kmgr_V1_PrepareDeleteSelectionResponse()
+        prepared.selectedCount = 3
+        prepared.hiddenCount = 1
+        prepared.expiresAtUnixMs = 2_000_000
+        prepared.resource.group = "apps"
+        prepared.resource.version = "v1"
+        prepared.resource.resource = "deployments"
+        prepared.preview = [first, second]
+        prepared.previewTruncated = true
+
+        var terminal = Kmgr_V1_OperationEvent()
+        terminal.cursor.sequence = 1
+        terminal.state = .succeeded
+        terminal.completedItems = 3
+        terminal.totalItems = 3
+        terminal.aggregateOnly = true
+        let rpc = FakeOperationRPC(events: [terminal], selectionPreparation: prepared)
+        let provider = deterministicProvider(rpc: rpc)
+        let selection = ResourceSelectionDeleteReference(
+            sessionID: "session-one",
+            viewID: "view-one",
+            token: "immutable-selection-token",
+            selectedCount: 3,
+            gvr: GVR(group: "apps", version: "v1", resource: "deployments")
+        )
+        let revision = ResourceSelectionRevision(generation: 7, indexRevision: 11)
+
+        let confirmation = try await provider.prepareDeleteSelection(
+            selection: selection,
+            currentRevision: revision,
+            previewLimit: 2
+        )
+        #expect(confirmation.selection == selection)
+        #expect(confirmation.currentRevision == revision)
+        #expect(confirmation.hiddenCount == 1)
+        #expect(confirmation.expiresAt == Date(timeIntervalSince1970: 2_000))
+        #expect(confirmation.preview.map(\.identity.uid.rawValue) == ["uid-a", "uid-b"])
+        #expect(confirmation.preview.map(\.hiddenByFilter) == [false, true])
+        #expect(confirmation.previewTruncated)
+
+        let prepareRequest = try #require(await rpc.capturedPrepareDeleteSelection())
+        #expect(prepareRequest.context.clusterSessionID == "session-one")
+        #expect(prepareRequest.viewID == "view-one")
+        #expect(prepareRequest.selectionToken == "immutable-selection-token")
+        #expect(prepareRequest.generation == 7)
+        #expect(prepareRequest.indexRevision == 11)
+        #expect(prepareRequest.previewLimit == 2)
+
+        let stream = try await provider.deleteSelection(
+            selection: selection,
+            options: ResourceDeleteOptions(
+                propagationPolicy: .foreground,
+                gracePeriodSeconds: 0,
+                maxConcurrency: 6
+            )
+        )
+        var progress: [OperationProgress] = []
+        for try await value in stream { progress.append(value) }
+        let request = try #require(await rpc.capturedDeleteSelection())
+        #expect(request.context.clusterSessionID == "session-one")
+        #expect(request.context.deadlineUnixMs == 87_400_000)
+        #expect(request.viewID == "view-one")
+        #expect(request.selectionToken == "immutable-selection-token")
+        #expect(request.selectedCount == 3)
+        #expect(request.resource.group == "apps")
+        #expect(request.resource.version == "v1")
+        #expect(request.resource.resource == "deployments")
+        #expect(request.propagationPolicy == .foreground)
+        #expect(request.hasGracePeriodSeconds)
+        #expect(request.gracePeriodSeconds == 0)
+        #expect(request.maxConcurrency == 6)
+        #expect(await rpc.capturedDelete() == nil)
+        #expect(await rpc.capturedDeleteManyStart() == nil)
+        #expect(progress.count == 1)
+        #expect(progress[0].aggregateOnly)
+        #expect(progress[0].completedItems == 3)
+        #expect(progress[0].itemResults.isEmpty)
+        #expect(progress[0].omittedItemResults == 0)
+    }
+
     @Test("maps UID-pinned bulk delete and preserves skipped progress")
     func mapsDeleteAndProgress() async throws {
         let rpc = FakeOperationRPC(events: [Self.progressEvent()])
@@ -61,14 +148,28 @@ struct EngineOperationProviderTests {
 
     @Test("uploads large delete selections through bounded streaming RPC")
     func streamsLargeDeleteSelection() async throws {
-        let rpc = FakeOperationRPC()
-        let provider = deterministicProvider(rpc: rpc)
         let targets = (0..<513).map { index in
             ResourceDeleteTarget(identity: Self.identity(
                 name: "api-\(index)",
                 uid: ResourceUID("uid-\(index)")
             ))
         }
+        var terminal = Kmgr_V1_OperationEvent()
+        terminal.cursor.sequence = 1
+        terminal.state = .succeeded
+        terminal.completedItems = UInt32(targets.count)
+        terminal.totalItems = UInt32(targets.count)
+        terminal.itemResults = targets.map { target in
+            var result = Kmgr_V1_OperationItemResult()
+            result.identity = Self.protoIdentity(
+                name: target.identity.name,
+                uid: target.identity.uid.rawValue
+            )
+            result.state = .succeeded
+            return result
+        }
+        let rpc = FakeOperationRPC(events: [terminal])
+        let provider = deterministicProvider(rpc: rpc)
 
         let stream = try await provider.deleteResources(
             targets: targets,
@@ -95,6 +196,12 @@ struct EngineOperationProviderTests {
         let events = (1...40).map { sequence in
             var event = Self.progressEvent()
             event.cursor.sequence = UInt64(sequence)
+            if sequence < 40 {
+                event.state = .running
+                event.completedItems = 0
+                event.itemResults = []
+                event.clearError()
+            }
             return event
         }
         let rpc = FakeOperationRPC(events: events)
@@ -133,7 +240,15 @@ struct EngineOperationProviderTests {
             replicas: 2,
             expectedResourceVersion: "rv-current"
         )
-        for try await _ in stream {}
+        do {
+            for try await _ in stream {}
+            Issue.record("Expected progress to end before a terminal event")
+        } catch let issue as ClusterManagerIssue {
+            #expect(issue.category == .internalFailure)
+            #expect(issue.reason == "OperationProgressEndedBeforeTerminal")
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
 
         var attempts = 0
         while await rpc.capturedCancel() == nil, attempts < 100 {
@@ -144,6 +259,48 @@ struct EngineOperationProviderTests {
         #expect(cancellation.context.clusterSessionID == "session-one")
         #expect(cancellation.operationID == "operation-token")
         #expect(!cancellation.cancelNotStartedOnly)
+    }
+
+    @Test("rejects progress after the first terminal event without cancelling completed work")
+    func rejectsProgressAfterTerminal() async throws {
+        var result = Kmgr_V1_OperationItemResult()
+        result.identity = Self.protoIdentity(name: "api", uid: "uid-api")
+        result.state = .succeeded
+
+        var terminal = Kmgr_V1_OperationEvent()
+        terminal.cursor.sequence = 1
+        terminal.state = .succeeded
+        terminal.completedItems = 1
+        terminal.totalItems = 1
+        terminal.itemResults = [result]
+
+        var afterTerminal = Kmgr_V1_OperationEvent()
+        afterTerminal.cursor.sequence = 2
+        afterTerminal.state = .running
+        afterTerminal.completedItems = 1
+        afterTerminal.totalItems = 1
+
+        let rpc = FakeOperationRPC(events: [terminal, afterTerminal])
+        let provider = deterministicProvider(rpc: rpc)
+        let stream = try await provider.scaleResource(
+            identity: Self.identity(),
+            replicas: 2,
+            expectedResourceVersion: "rv-current"
+        )
+        var received: [OperationState] = []
+        do {
+            for try await progress in stream { received.append(progress.state) }
+            Issue.record("Expected progress after a terminal event to be rejected")
+        } catch let issue as ClusterManagerIssue {
+            #expect(issue.category == .internalFailure)
+            #expect(issue.reason == "OperationProgressEnvelopeMismatch")
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+
+        #expect(received == [.succeeded])
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await rpc.capturedCancel() == nil)
     }
 
     @Test("maps scale, rollout restart, and deterministic metadata entries")
@@ -202,6 +359,17 @@ struct EngineOperationProviderTests {
         await expectValidation {
             _ = try await provider.deleteResources(
                 targets: [ResourceDeleteTarget(identity: first), ResourceDeleteTarget(identity: otherSession)],
+                options: ResourceDeleteOptions()
+            )
+        }
+        var duplicateUID = first
+        duplicateUID.name = "recreated-api"
+        await expectValidation {
+            _ = try await provider.deleteResources(
+                targets: [
+                    ResourceDeleteTarget(identity: first),
+                    ResourceDeleteTarget(identity: duplicateUID),
+                ],
                 options: ResourceDeleteOptions()
             )
         }
@@ -330,6 +498,259 @@ struct EngineOperationProviderTests {
             do {
                 for try await _ in stream {}
                 Issue.record("Expected invalid progress sequence for \(sequences)")
+            } catch let issue as ClusterManagerIssue {
+                #expect(issue.category == .internalFailure)
+                #expect(issue.reason == "OperationProgressEnvelopeMismatch")
+            }
+        }
+    }
+
+    @Test("exact progress requires unique terminal results for every target")
+    func rejectsInvalidExactItemDeltas() async throws {
+        let first = Self.protoIdentity(name: "api-a", uid: "uid-a")
+        let second = Self.protoIdentity(name: "api-b", uid: "uid-b")
+
+        func result(
+            _ identity: Kmgr_V1_ResourceIdentity,
+            state: Kmgr_V1_OperationItemState = .succeeded
+        ) -> Kmgr_V1_OperationItemResult {
+            var value = Kmgr_V1_OperationItemResult()
+            value.identity = identity
+            value.state = state
+            return value
+        }
+
+        func event(
+            sequence: UInt64,
+            state: Kmgr_V1_OperationState,
+            completed: UInt32,
+            results: [Kmgr_V1_OperationItemResult]
+        ) -> Kmgr_V1_OperationEvent {
+            var value = Kmgr_V1_OperationEvent()
+            value.cursor.sequence = sequence
+            value.state = state
+            value.completedItems = completed
+            value.totalItems = 2
+            value.itemResults = results
+            return value
+        }
+
+        let cases = [
+            [event(
+                sequence: 1,
+                state: .unspecified,
+                completed: 0,
+                results: []
+            )],
+            [event(
+                sequence: 1,
+                state: .UNRECOGNIZED(99),
+                completed: 0,
+                results: []
+            )],
+            [event(
+                sequence: 1,
+                state: .succeeded,
+                completed: 2,
+                results: [result(first), result(first)]
+            )],
+            [event(
+                sequence: 1,
+                state: .running,
+                completed: 1,
+                results: [result(first)]
+            ), event(
+                sequence: 2,
+                state: .succeeded,
+                completed: 2,
+                results: [result(first), result(second)]
+            )],
+            [event(
+                sequence: 1,
+                state: .running,
+                completed: 1,
+                results: [result(first)]
+            ), event(
+                sequence: 2,
+                state: .running,
+                completed: 1,
+                results: [result(second)]
+            )],
+            [event(
+                sequence: 1,
+                state: .succeeded,
+                completed: 2,
+                results: [result(first, state: .running), result(second)]
+            )],
+            [event(
+                sequence: 1,
+                state: .succeeded,
+                completed: 2,
+                results: [result(first)]
+            )],
+            [event(
+                sequence: 1,
+                state: .succeeded,
+                completed: 2,
+                results: [result(first), result(second, state: .failed)]
+            )],
+            [event(
+                sequence: 1,
+                state: .partiallySucceeded,
+                completed: 2,
+                results: [result(first), result(second)]
+            )],
+            [event(
+                sequence: 1,
+                state: .cancelled,
+                completed: 2,
+                results: [
+                    result(first, state: .failed),
+                    result(second, state: .failed),
+                ]
+            )],
+            [event(
+                sequence: 1,
+                state: .failed,
+                completed: 2,
+                results: [
+                    result(first, state: .cancelled),
+                    result(second, state: .skipped),
+                ]
+            )],
+        ]
+
+        for events in cases {
+            let rpc = FakeOperationRPC(events: events)
+            let provider = deterministicProvider(rpc: rpc)
+            let stream = try await provider.deleteResources(
+                targets: [
+                    ResourceDeleteTarget(identity: Self.identity(
+                        name: "api-a", uid: "uid-a"
+                    )),
+                    ResourceDeleteTarget(identity: Self.identity(
+                        name: "api-b", uid: "uid-b"
+                    )),
+                ],
+                options: ResourceDeleteOptions()
+            )
+            do {
+                for try await _ in stream {}
+                Issue.record("Expected invalid exact operation progress")
+            } catch let issue as ClusterManagerIssue {
+                #expect(issue.category == .internalFailure)
+                #expect(issue.reason == "OperationProgressEnvelopeMismatch")
+            } catch {
+                Issue.record("Unexpected error type: \(error)")
+            }
+        }
+    }
+
+    @Test("exact progress accepts bounded terminal-result deltas")
+    func acceptsExactItemDeltas() async throws {
+        var firstResult = Kmgr_V1_OperationItemResult()
+        firstResult.identity = Self.protoIdentity(name: "api-a", uid: "uid-a")
+        firstResult.state = .succeeded
+        var secondResult = Kmgr_V1_OperationItemResult()
+        secondResult.identity = Self.protoIdentity(name: "api-b", uid: "uid-b")
+        secondResult.state = .skipped
+
+        var firstEvent = Kmgr_V1_OperationEvent()
+        firstEvent.cursor.sequence = 1
+        firstEvent.state = .running
+        firstEvent.completedItems = 2
+        firstEvent.totalItems = 2
+        firstEvent.itemResults = [firstResult]
+        var terminal = Kmgr_V1_OperationEvent()
+        terminal.cursor.sequence = 2
+        terminal.state = .partiallySucceeded
+        terminal.completedItems = 2
+        terminal.totalItems = 2
+        terminal.itemResults = [secondResult]
+
+        let rpc = FakeOperationRPC(events: [firstEvent, terminal])
+        let provider = deterministicProvider(rpc: rpc)
+        let stream = try await provider.deleteResources(
+            targets: [
+                ResourceDeleteTarget(identity: Self.identity(
+                    name: "api-a", uid: "uid-a"
+                )),
+                ResourceDeleteTarget(identity: Self.identity(
+                    name: "api-b", uid: "uid-b"
+                )),
+            ],
+            options: ResourceDeleteOptions()
+        )
+        var progress: [OperationProgress] = []
+        for try await value in stream { progress.append(value) }
+
+        #expect(progress.map(\.state) == [.running, .partiallySucceeded])
+        #expect(progress.flatMap(\.itemResults).map(\.identity.uid.rawValue)
+            == ["uid-a", "uid-b"])
+        #expect(await rpc.capturedCancel() == nil)
+    }
+
+    @Test("aggregate progress rejects impossible and non-monotonic counters")
+    func rejectsInvalidAggregateProgressCounters() async throws {
+        var failure = Kmgr_V1_OperationItemResult()
+        failure.identity = Self.protoIdentity(name: "api-a", uid: "uid-a")
+        failure.state = .failed
+
+        func event(
+            sequence: UInt64,
+            completed: UInt32,
+            total: UInt32 = 3,
+            omitted: UInt32 = 0,
+            state: Kmgr_V1_OperationState = .running,
+            details: [Kmgr_V1_OperationItemResult] = []
+        ) -> Kmgr_V1_OperationEvent {
+            var value = Kmgr_V1_OperationEvent()
+            value.cursor.sequence = sequence
+            value.state = state
+            value.completedItems = completed
+            value.totalItems = total
+            value.aggregateOnly = true
+            value.omittedItemResults = omitted
+            value.itemResults = details
+            return value
+        }
+
+        let cases: [[Kmgr_V1_OperationEvent]] = [
+            [event(sequence: 1, completed: 2, total: 1)],
+            [event(sequence: 1, completed: 1, total: 4)],
+            [event(sequence: 1, completed: 2, omitted: 3)],
+            [event(sequence: 1, completed: 2, omitted: 2, details: [failure])],
+            [event(sequence: 1, completed: 2), event(sequence: 2, completed: 1)],
+            [event(sequence: 1, completed: 1, omitted: 1),
+             event(sequence: 2, completed: 2, omitted: 0)],
+            [event(sequence: 1, completed: 1, details: [failure]),
+             event(sequence: 2, completed: 1, details: [failure])],
+            [event(sequence: 1, completed: 1, details: [failure]),
+             event(sequence: 2, completed: 2, details: [failure])],
+            [event(sequence: 1, completed: 1, total: 3),
+             event(sequence: 2, completed: 2, total: 4)],
+            [event(sequence: 1, completed: 3, omitted: 1, state: .succeeded)],
+            [event(sequence: 1, completed: 3, state: .partiallySucceeded)],
+            [event(sequence: 1, completed: 3, omitted: 2, state: .failed)],
+            [event(sequence: 1, completed: 3, omitted: 2, state: .cancelled)],
+        ]
+        let selection = ResourceSelectionDeleteReference(
+            sessionID: "session-one",
+            viewID: "view-one",
+            token: "selection-token",
+            selectedCount: 3,
+            gvr: GVR(group: "apps", version: "v1", resource: "deployments")
+        )
+        for events in cases {
+            let rpc = FakeOperationRPC(events: events)
+            let provider = deterministicProvider(rpc: rpc)
+            let stream = try await provider.deleteSelection(
+                selection: selection,
+                options: ResourceDeleteOptions()
+            )
+            do {
+                for try await _ in stream {}
+                Issue.record("Expected invalid aggregate progress counters")
             } catch let issue as ClusterManagerIssue {
                 #expect(issue.category == .internalFailure)
                 #expect(issue.reason == "OperationProgressEnvelopeMismatch")
@@ -468,6 +889,9 @@ private actor FakeOperationRPC: OperationRPC {
     private let events: [Kmgr_V1_OperationEvent]
     private let watchMode: WatchMode
     private let cancelAccepted: Bool
+    private let selectionPreparation: Kmgr_V1_PrepareDeleteSelectionResponse?
+    private var prepareDeleteSelectionRequest: Kmgr_V1_PrepareDeleteSelectionRequest?
+    private var deleteSelectionRequest: Kmgr_V1_DeleteSelectionRequest?
     private var deleteRequest: Kmgr_V1_DeleteRequest?
     private var deleteManyStart: Kmgr_V1_DeleteManyStart?
     private var deleteManyTargets: [Kmgr_V1_DeleteTarget] = []
@@ -482,14 +906,20 @@ private actor FakeOperationRPC: OperationRPC {
         startMode: StartMode = .accepted,
         events: [Kmgr_V1_OperationEvent] = [],
         watchMode: WatchMode = .valid,
-        cancelAccepted: Bool = true
+        cancelAccepted: Bool = true,
+        selectionPreparation: Kmgr_V1_PrepareDeleteSelectionResponse? = nil
     ) {
         self.startMode = startMode
         self.events = events
         self.watchMode = watchMode
         self.cancelAccepted = cancelAccepted
+        self.selectionPreparation = selectionPreparation
     }
 
+    func capturedPrepareDeleteSelection() -> Kmgr_V1_PrepareDeleteSelectionRequest? {
+        prepareDeleteSelectionRequest
+    }
+    func capturedDeleteSelection() -> Kmgr_V1_DeleteSelectionRequest? { deleteSelectionRequest }
     func capturedDelete() -> Kmgr_V1_DeleteRequest? { deleteRequest }
     func capturedDeleteManyStart() -> Kmgr_V1_DeleteManyStart? { deleteManyStart }
     func capturedDeleteManyTargets() -> [Kmgr_V1_DeleteTarget] { deleteManyTargets }
@@ -501,8 +931,31 @@ private actor FakeOperationRPC: OperationRPC {
     func capturedCancel() -> Kmgr_V1_CancelOperationRequest? { cancelRequest }
 
     func mutationCallCount() -> Int {
-        [deleteRequest != nil, deleteManyStart != nil, scaleRequest != nil, restartRequest != nil, metadataRequest != nil]
+        [deleteSelectionRequest != nil, deleteRequest != nil, deleteManyStart != nil,
+         scaleRequest != nil, restartRequest != nil, metadataRequest != nil]
             .filter { $0 }.count
+    }
+
+    func prepareDeleteSelection(
+        request: Kmgr_V1_PrepareDeleteSelectionRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_PrepareDeleteSelectionResponse {
+        prepareDeleteSelectionRequest = request
+        var response = selectionPreparation ?? Kmgr_V1_PrepareDeleteSelectionResponse()
+        response.requestID = request.context.requestID
+        response.viewID = request.viewID
+        response.selectionToken = request.selectionToken
+        response.generation = request.generation
+        response.indexRevision = request.indexRevision
+        return response
+    }
+
+    func deleteSelection(
+        request: Kmgr_V1_DeleteSelectionRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_StartOperationResponse {
+        deleteSelectionRequest = request
+        return startResponse(requestID: request.context.requestID, operationID: request.operationID)
     }
 
     func delete(

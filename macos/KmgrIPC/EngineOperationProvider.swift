@@ -3,9 +3,24 @@ import GRPCCore
 import KmgrCore
 import KmgrProto
 
+private enum ExpectedOperationItems: Sendable {
+    case exact(Set<ResourceIdentity>)
+    case aggregate(sessionID: String, gvr: GVR, totalItems: UInt32)
+}
+
 /// Narrow seam for verifying operation protobuf mapping without starting the
 /// engine helper.
 public protocol OperationRPC: Sendable {
+    func prepareDeleteSelection(
+        request: Kmgr_V1_PrepareDeleteSelectionRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_PrepareDeleteSelectionResponse
+
+    func deleteSelection(
+        request: Kmgr_V1_DeleteSelectionRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_StartOperationResponse
+
     func delete(
         request: Kmgr_V1_DeleteRequest,
         timeout: Duration
@@ -50,6 +65,26 @@ public struct EngineOperationRPC: OperationRPC {
 
     public init(connection: EngineConnection) {
         self.connection = connection
+    }
+
+    public func prepareDeleteSelection(
+        request: Kmgr_V1_PrepareDeleteSelectionRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_PrepareDeleteSelectionResponse {
+        try await connection.operationClient().prepareDeleteSelection(
+            request,
+            options: callOptions(timeout)
+        )
+    }
+
+    public func deleteSelection(
+        request: Kmgr_V1_DeleteSelectionRequest,
+        timeout: Duration
+    ) async throws -> Kmgr_V1_StartOperationResponse {
+        try await connection.operationClient().deleteSelection(
+            request,
+            options: callOptions(timeout)
+        )
     }
 
     public func delete(
@@ -162,6 +197,7 @@ public struct EngineOperationRPC: OperationRPC {
 
 public struct EngineOperationProvider: ResourceOperationProviding {
     private static let maximumDeleteConcurrency: UInt32 = 16
+    private static let maximumSelectionDeletePreview = 64
     private static let maximumUnaryDeleteTargets = 512
     private static let maximumDeleteTargets = 250_000
     private static let deleteTargetChunkSize = 128
@@ -211,6 +247,169 @@ public struct EngineOperationProvider: ResourceOperationProviding {
         self.requestID = requestID
     }
 
+    public func prepareDeleteSelection(
+        selection: ResourceSelectionDeleteReference,
+        currentRevision: ResourceSelectionRevision,
+        previewLimit: Int
+    ) async throws -> ResourceSelectionDeletePreparation {
+        let operation = "prepare selection deletion"
+        do {
+            try Self.validateSelectionDeleteReference(selection, operation: operation)
+            guard currentRevision.isValid else {
+                throw Self.validationIssue(
+                    reason: "InvalidSelectionRevision",
+                    message: "A current resource-view generation and index revision are required.",
+                    operation: operation
+                )
+            }
+            guard (1...Self.maximumSelectionDeletePreview).contains(previewLimit) else {
+                throw Self.validationIssue(
+                    reason: "InvalidSelectionPreviewLimit",
+                    message: "Selection deletion preview must contain between 1 and \(Self.maximumSelectionDeletePreview) resources.",
+                    operation: operation
+                )
+            }
+            var request = Kmgr_V1_PrepareDeleteSelectionRequest()
+            request.context = makeContext(sessionID: selection.sessionID, timeout: unaryTimeout)
+            request.viewID = selection.viewID
+            request.selectionToken = selection.token
+            request.generation = currentRevision.generation
+            request.indexRevision = currentRevision.indexRevision
+            request.previewLimit = UInt32(previewLimit)
+            let response = try await rpc.prepareDeleteSelection(
+                request: request,
+                timeout: unaryTimeout
+            )
+            try Self.validateResponseID(
+                response.requestID,
+                expected: request.context.requestID,
+                operation: operation
+            )
+            if response.hasError {
+                throw EngineClusterContextProvider.issue(from: response.error)
+            }
+            guard response.viewID == selection.viewID,
+                response.selectionToken == selection.token,
+                response.generation == currentRevision.generation,
+                response.indexRevision == currentRevision.indexRevision,
+                response.selectedCount == selection.selectedCount,
+                Self.gvr(response.resource) == selection.gvr,
+                response.hiddenCount <= response.selectedCount,
+                response.preview.count <= previewLimit,
+                response.preview.count <= Int(response.selectedCount),
+                response.previewTruncated == (UInt64(response.preview.count) < response.selectedCount)
+            else {
+                throw Self.validationIssue(
+                    reason: "SelectionConfirmationEnvelopeMismatch",
+                    message: "The engine returned confirmation facts for a different selection or resource view.",
+                    operation: operation,
+                    category: .internalFailure
+                )
+            }
+            let preview = try response.preview.map { target in
+                guard target.hasIdentity else {
+                    throw Self.validationIssue(
+                        reason: "SelectionConfirmationEnvelopeMismatch",
+                        message: "The engine returned a selection preview without an identity.",
+                        operation: operation,
+                        category: .internalFailure
+                    )
+                }
+                let identity = Self.identity(target.identity)
+                try Self.validateIdentity(identity, operation: operation)
+                guard identity.clusterSessionID == selection.sessionID,
+                    GVR(
+                        group: identity.group,
+                        version: identity.version,
+                        resource: identity.resource
+                    ) == selection.gvr
+                else {
+                    throw Self.validationIssue(
+                        reason: "SelectionConfirmationEnvelopeMismatch",
+                        message: "The engine returned a preview identity outside the confirmed selection scope.",
+                        operation: operation,
+                        category: .internalFailure
+                    )
+                }
+                return ResourceDeleteTarget(
+                    identity: identity,
+                    hiddenByFilter: target.hiddenByFilter
+                )
+            }
+            guard Set(preview.map(\.identity.uid)).count == preview.count else {
+                throw Self.validationIssue(
+                    reason: "SelectionConfirmationEnvelopeMismatch",
+                    message: "The engine returned duplicate identities in the selection preview.",
+                    operation: operation,
+                    category: .internalFailure
+                )
+            }
+            let expiresAt = Date(
+                timeIntervalSince1970: TimeInterval(response.expiresAtUnixMs) / 1_000
+            )
+            guard response.expiresAtUnixMs > 0, expiresAt > now() else {
+                throw ClusterManagerIssue(
+                    category: .conflict,
+                    reason: "SelectionTokenExpired",
+                    message: "The selection expired. Select the resources again before deleting.",
+                    operation: operation
+                )
+            }
+            return ResourceSelectionDeletePreparation(
+                selection: selection,
+                currentRevision: currentRevision,
+                hiddenCount: response.hiddenCount,
+                expiresAt: expiresAt,
+                preview: preview,
+                previewTruncated: response.previewTruncated
+            )
+        } catch {
+            throw Self.issue(error, operation: operation)
+        }
+    }
+
+    public func deleteSelection(
+        selection: ResourceSelectionDeleteReference,
+        options: ResourceDeleteOptions
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        let operation = "delete selection"
+        do {
+            try Self.validateSelectionDeleteReference(selection, operation: operation)
+            try Self.validateDeleteOptions(options, operation: operation)
+            let operationID = requestID()
+            var request = Kmgr_V1_DeleteSelectionRequest()
+            request.context = makeContext(sessionID: selection.sessionID, timeout: streamTimeout)
+            request.operationID = operationID
+            request.viewID = selection.viewID
+            request.selectionToken = selection.token
+            request.selectedCount = selection.selectedCount
+            request.resource = Self.protoResource(selection.gvr)
+            request.propagationPolicy = Self.propagation(options.propagationPolicy)
+            if let grace = options.gracePeriodSeconds {
+                request.gracePeriodSeconds = grace
+            }
+            request.maxConcurrency = options.maxConcurrency
+            let response = try await rpc.deleteSelection(request: request, timeout: unaryTimeout)
+            try Self.validateStart(
+                response,
+                requestID: request.context.requestID,
+                operationID: operationID,
+                operation: operation
+            )
+            return operationStream(
+                sessionID: selection.sessionID,
+                operationID: operationID,
+                expectedItems: .aggregate(
+                    sessionID: selection.sessionID,
+                    gvr: selection.gvr,
+                    totalItems: UInt32(selection.selectedCount)
+                )
+            )
+        } catch {
+            throw Self.issue(error, operation: operation)
+        }
+    }
+
     public func deleteResources(
         targets: [ResourceDeleteTarget],
         options: ResourceDeleteOptions
@@ -226,7 +425,7 @@ public struct EngineOperationProvider: ResourceOperationProviding {
             }
             let sessionID = first.identity.clusterSessionID
             try Self.validateIdentity(first.identity, operation: operation)
-            var seen: Set<ResourceIdentity> = []
+            var seenUIDs: Set<ResourceUID> = []
             for target in targets {
                 try Self.validateIdentity(target.identity, operation: operation)
                 guard target.identity.clusterSessionID == sessionID else {
@@ -236,10 +435,10 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                         operation: operation
                     )
                 }
-                guard seen.insert(target.identity).inserted else {
+                guard seenUIDs.insert(target.identity.uid).inserted else {
                     throw Self.validationIssue(
                         reason: "DuplicateDeleteTarget",
-                        message: "The delete selection contains the same resource identity more than once.",
+                        message: "The delete selection contains the same resource UID more than once.",
                         operation: operation
                     )
                 }
@@ -251,20 +450,7 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                     operation: operation
                 )
             }
-            if let grace = options.gracePeriodSeconds, grace < 0 {
-                throw Self.validationIssue(
-                    reason: "InvalidGracePeriod",
-                    message: "The deletion grace period must not be negative.",
-                    operation: operation
-                )
-            }
-            guard options.maxConcurrency <= Self.maximumDeleteConcurrency else {
-                throw Self.validationIssue(
-                    reason: "InvalidDeleteConcurrency",
-                    message: "Delete concurrency must be between 0 and \(Self.maximumDeleteConcurrency).",
-                    operation: operation
-                )
-            }
+            try Self.validateDeleteOptions(options, operation: operation)
 
             let operationID = requestID()
             // A large, bounded selection can legitimately take much longer
@@ -315,7 +501,7 @@ public struct EngineOperationProvider: ResourceOperationProviding {
             return operationStream(
                 sessionID: sessionID,
                 operationID: operationID,
-                expectedIdentities: Set(targets.map(\.identity))
+                expectedItems: .exact(Set(targets.map(\.identity)))
             )
         } catch {
             throw Self.issue(error, operation: operation)
@@ -358,7 +544,7 @@ public struct EngineOperationProvider: ResourceOperationProviding {
             return operationStream(
                 sessionID: identity.clusterSessionID,
                 operationID: operationID,
-                expectedIdentities: [identity]
+                expectedItems: .exact([identity])
             )
         } catch {
             throw Self.issue(error, operation: operation)
@@ -404,7 +590,7 @@ public struct EngineOperationProvider: ResourceOperationProviding {
             return operationStream(
                 sessionID: identity.clusterSessionID,
                 operationID: operationID,
-                expectedIdentities: [identity]
+                expectedItems: .exact([identity])
             )
         } catch {
             throw Self.issue(error, operation: operation)
@@ -454,7 +640,7 @@ public struct EngineOperationProvider: ResourceOperationProviding {
             return operationStream(
                 sessionID: identity.clusterSessionID,
                 operationID: operationID,
-                expectedIdentities: [identity]
+                expectedItems: .exact([identity])
             )
         } catch {
             throw Self.issue(error, operation: operation)
@@ -502,7 +688,7 @@ public struct EngineOperationProvider: ResourceOperationProviding {
     private func operationStream(
         sessionID: String,
         operationID: String,
-        expectedIdentities: Set<ResourceIdentity>
+        expectedItems: ExpectedOperationItems
     ) -> AsyncThrowingStream<OperationProgress, Error> {
         let streamID = requestID()
         var request = Kmgr_V1_WatchOperationRequest()
@@ -517,7 +703,7 @@ public struct EngineOperationProvider: ResourceOperationProviding {
         let limit = maximumBufferedMessages
         let now = self.now
         let requestID = self.requestID
-        let lifetime = OperationWatchLifetime()
+        let lifetime = OperationWatchLifetime(expectedItems: expectedItems)
 
         return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(limit)) { continuation in
             let task = Task.detached(priority: .userInitiated) {
@@ -525,13 +711,9 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                     try await rpc.watch(request: requestValue, timeout: timeout) { event in
                         guard event.cursor.streamID == streamID,
                             event.cursor.generation == requestValue.generation,
-                            lifetime.accept(sequence: event.cursor.sequence),
                             event.operationID == operationID,
-                            event.itemResults.allSatisfy({ result in
-                                result.hasIdentity && expectedIdentities.contains(
-                                    Self.identity(result.identity)
-                                )
-                            })
+                            Self.validateOperationItems(event, expected: expectedItems),
+                            lifetime.accept(event: event)
                         else {
                             throw OperationBridgeError.progressEnvelopeMismatch
                         }
@@ -544,6 +726,9 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                             to: continuation,
                             limit: limit
                         )
+                    }
+                    guard lifetime.hasTerminal else {
+                        throw OperationBridgeError.progressEndedBeforeTerminal
                     }
                     continuation.finish()
                 } catch {
@@ -593,6 +778,73 @@ public struct EngineOperationProvider: ResourceOperationProviding {
             @unknown default:
                 throw OperationBridgeError.bufferExceeded(limit)
             }
+        }
+    }
+
+    private static func validateOperationItems(
+        _ event: Kmgr_V1_OperationEvent,
+        expected: ExpectedOperationItems
+    ) -> Bool {
+        guard specifiedOperationState(event.state),
+            event.totalItems > 0,
+            event.completedItems <= event.totalItems,
+            event.omittedItemResults <= event.completedItems,
+            !operationState(event.state).isTerminal
+                || event.completedItems == event.totalItems
+        else { return false }
+        switch expected {
+        case .exact(let identities):
+            return !event.aggregateOnly
+                && event.totalItems == UInt32(identities.count)
+                && event.omittedItemResults == 0
+                && UInt64(event.itemResults.count) <= UInt64(event.completedItems)
+                && event.itemResults.allSatisfy { result in
+                    result.hasIdentity
+                        && terminalItemState(result.state)
+                        && identities.contains(identity(result.identity))
+                }
+        case .aggregate(let sessionID, let gvr, let totalItems):
+            guard event.aggregateOnly,
+                event.totalItems == totalItems,
+                UInt64(event.itemResults.count) + UInt64(event.omittedItemResults)
+                    <= UInt64(event.completedItems)
+            else { return false }
+            return event.itemResults.allSatisfy { result in
+                guard result.hasIdentity,
+                    [.failed, .skipped, .cancelled].contains(result.state)
+                else { return false }
+                let value = identity(result.identity)
+                return value.clusterSessionID == sessionID
+                    && !value.name.isEmpty
+                    && !value.uid.rawValue.isEmpty
+                    && GVR(
+                        group: value.group,
+                        version: value.version,
+                        resource: value.resource
+                    ) == gvr
+            }
+        }
+    }
+
+    private static func specifiedOperationState(
+        _ value: Kmgr_V1_OperationState
+    ) -> Bool {
+        switch value {
+        case .pending, .running, .succeeded, .partiallySucceeded, .failed, .cancelled:
+            return true
+        case .unspecified, .UNRECOGNIZED:
+            return false
+        }
+    }
+
+    private static func terminalItemState(
+        _ value: Kmgr_V1_OperationItemState
+    ) -> Bool {
+        switch value {
+        case .succeeded, .failed, .skipped, .cancelled:
+            return true
+        case .pending, .running, .unspecified, .UNRECOGNIZED:
+            return false
         }
     }
 
@@ -674,6 +926,65 @@ public struct EngineOperationProvider: ResourceOperationProviding {
         }
     }
 
+    private static func validateSelectionDeleteReference(
+        _ selection: ResourceSelectionDeleteReference,
+        operation: String
+    ) throws {
+        try validateSessionID(selection.sessionID, operation: operation)
+        guard !selection.viewID.isEmpty,
+            selection.viewID.trimmingCharacters(in: .whitespacesAndNewlines) == selection.viewID,
+            !selection.token.isEmpty,
+            selection.token.trimmingCharacters(in: .whitespacesAndNewlines) == selection.token
+        else {
+            throw validationIssue(
+                reason: "InvalidSelectionReference",
+                message: "A canonical resource-view ID and immutable selection token are required.",
+                operation: operation
+            )
+        }
+        guard selection.selectedCount > 0,
+            selection.selectedCount <= UInt64(UInt32.max)
+        else {
+            throw validationIssue(
+                reason: "InvalidSelectionCount",
+                message: "The selection count is outside the supported aggregate progress range.",
+                operation: operation
+            )
+        }
+        guard !selection.gvr.version.isEmpty,
+            !selection.gvr.resource.isEmpty,
+            selection.gvr.group.trimmingCharacters(in: .whitespacesAndNewlines) == selection.gvr.group,
+            selection.gvr.version.trimmingCharacters(in: .whitespacesAndNewlines) == selection.gvr.version,
+            selection.gvr.resource.trimmingCharacters(in: .whitespacesAndNewlines) == selection.gvr.resource
+        else {
+            throw validationIssue(
+                reason: "InvalidSelectionResource",
+                message: "The selection requires an exact canonical group, version, and resource.",
+                operation: operation
+            )
+        }
+    }
+
+    private static func validateDeleteOptions(
+        _ options: ResourceDeleteOptions,
+        operation: String
+    ) throws {
+        if let grace = options.gracePeriodSeconds, grace < 0 {
+            throw validationIssue(
+                reason: "InvalidGracePeriod",
+                message: "The deletion grace period must not be negative.",
+                operation: operation
+            )
+        }
+        guard options.maxConcurrency <= maximumDeleteConcurrency else {
+            throw validationIssue(
+                reason: "InvalidDeleteConcurrency",
+                message: "Delete concurrency must be between 0 and \(maximumDeleteConcurrency).",
+                operation: operation
+            )
+        }
+    }
+
     private static func validateSessionID(_ value: String, operation: String) throws {
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw validationIssue(
@@ -737,6 +1048,18 @@ public struct EngineOperationProvider: ResourceOperationProviding {
         return result
     }
 
+    private static func protoResource(_ value: GVR) -> Kmgr_V1_ResourceType {
+        var result = Kmgr_V1_ResourceType()
+        result.group = value.group
+        result.version = value.version
+        result.resource = value.resource
+        return result
+    }
+
+    private static func gvr(_ value: Kmgr_V1_ResourceType) -> GVR {
+        GVR(group: value.group, version: value.version, resource: value.resource)
+    }
+
     private static func identity(
         _ value: Kmgr_V1_ResourceIdentity
     ) -> ResourceIdentity {
@@ -792,6 +1115,8 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                         : nil
                 )
             },
+            aggregateOnly: value.aggregateOnly,
+            omittedItemResults: value.omittedItemResults,
             issue: value.hasError
                 ? EngineClusterContextProvider.issue(from: value.error)
                 : nil
@@ -853,6 +1178,13 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                 message: "The engine returned progress for a different operation stream.",
                 operation: operation
             )
+        case OperationBridgeError.progressEndedBeforeTerminal:
+            return ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "OperationProgressEndedBeforeTerminal",
+                message: "The engine ended operation progress before a terminal event.",
+                operation: operation
+            )
         case OperationBridgeError.bufferExceeded(let limit):
             return ClusterManagerIssue(
                 category: .resourceExhausted,
@@ -880,21 +1212,163 @@ public struct EngineOperationProvider: ResourceOperationProviding {
 
 private enum OperationBridgeError: Error {
     case progressEnvelopeMismatch
+    case progressEndedBeforeTerminal
     case bufferExceeded(Int)
 }
 
 private final class OperationWatchLifetime: @unchecked Sendable {
+    private static let maximumAggregateDetails = 256
+
     private let lock = NSLock()
     private var terminal = false
     private var cancellationClaimed = false
     private var lastSequence: UInt64 = 0
+    private var lastCompleted: UInt32 = 0
+    private var lastOmitted: UInt32 = 0
+    private var totalItems: UInt32?
+    private var aggregateDetailUIDs: Set<String> = []
+    private let expectedExactUIDs: Set<String>?
+    private var seenExactUIDs: Set<String> = []
+    private var exactSucceeded = 0
+    private var exactFailed = 0
+    private var exactCancelled = 0
 
-    func accept(sequence: UInt64) -> Bool {
+    init(expectedItems: ExpectedOperationItems) {
+        switch expectedItems {
+        case .exact(let identities):
+            expectedExactUIDs = Set(identities.lazy.map { $0.uid.rawValue })
+        case .aggregate:
+            expectedExactUIDs = nil
+        }
+    }
+
+    func accept(event: Kmgr_V1_OperationEvent) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard sequence > lastSequence else { return false }
-        lastSequence = sequence
+        guard !terminal,
+            event.cursor.sequence > lastSequence,
+            event.completedItems >= lastCompleted,
+            event.omittedItemResults >= lastOmitted,
+            totalItems == nil || totalItems == event.totalItems
+        else { return false }
+        var exactEventUIDs: Set<String> = []
+        var eventSucceeded = 0
+        var eventFailed = 0
+        var eventCancelled = 0
+        if let expectedExactUIDs {
+            exactEventUIDs.reserveCapacity(event.itemResults.count)
+            for result in event.itemResults {
+                let uid = result.identity.uid
+                guard expectedExactUIDs.contains(uid),
+                    !seenExactUIDs.contains(uid),
+                    exactEventUIDs.insert(uid).inserted
+                else { return false }
+                switch result.state {
+                case .succeeded:
+                    eventSucceeded += 1
+                case .failed:
+                    eventFailed += 1
+                case .skipped, .cancelled:
+                    eventCancelled += 1
+                case .pending, .running, .unspecified, .UNRECOGNIZED:
+                    return false
+                }
+            }
+            guard UInt64(seenExactUIDs.count) + UInt64(exactEventUIDs.count)
+                <= UInt64(event.completedItems)
+            else { return false }
+            guard !Self.isTerminal(event.state)
+                || seenExactUIDs.count + exactEventUIDs.count
+                    == expectedExactUIDs.count
+            else { return false }
+            if Self.isTerminal(event.state) {
+                guard Self.exactTerminalState(
+                    succeeded: exactSucceeded + eventSucceeded,
+                    failed: exactFailed + eventFailed,
+                    cancelled: exactCancelled + eventCancelled
+                ) == event.state
+                else { return false }
+            }
+        }
+
+        var nextAggregateUIDs = aggregateDetailUIDs
+        if event.aggregateOnly {
+            for result in event.itemResults {
+                guard result.hasIdentity,
+                    !result.identity.uid.isEmpty,
+                    nextAggregateUIDs.insert(result.identity.uid).inserted,
+                    nextAggregateUIDs.count <= Self.maximumAggregateDetails
+                else { return false }
+            }
+            let nonSuccess = UInt64(nextAggregateUIDs.count)
+                + UInt64(event.omittedItemResults)
+            guard nonSuccess <= UInt64(event.completedItems),
+                aggregateTerminalCountersAreValid(
+                    state: event.state,
+                    nonSuccess: nonSuccess,
+                    totalItems: event.totalItems
+                )
+            else { return false }
+        }
+        lastSequence = event.cursor.sequence
+        lastCompleted = event.completedItems
+        lastOmitted = event.omittedItemResults
+        totalItems = event.totalItems
+        if expectedExactUIDs != nil {
+            seenExactUIDs.formUnion(exactEventUIDs)
+            exactSucceeded += eventSucceeded
+            exactFailed += eventFailed
+            exactCancelled += eventCancelled
+        } else if event.aggregateOnly {
+            aggregateDetailUIDs = nextAggregateUIDs
+        }
         return true
+    }
+
+    var hasTerminal: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return terminal
+    }
+
+    private func aggregateTerminalCountersAreValid(
+        state: Kmgr_V1_OperationState,
+        nonSuccess: UInt64,
+        totalItems: UInt32
+    ) -> Bool {
+        switch state {
+        case .succeeded:
+            return nonSuccess == 0
+        case .partiallySucceeded:
+            return nonSuccess > 0 && nonSuccess < UInt64(totalItems)
+        case .failed, .cancelled:
+            return nonSuccess == UInt64(totalItems)
+        case .pending, .running:
+            return true
+        case .unspecified, .UNRECOGNIZED:
+            return false
+        }
+    }
+
+    private static func isTerminal(_ state: Kmgr_V1_OperationState) -> Bool {
+        switch state {
+        case .succeeded, .partiallySucceeded, .failed, .cancelled:
+            return true
+        case .pending, .running, .unspecified, .UNRECOGNIZED:
+            return false
+        }
+    }
+
+    private static func exactTerminalState(
+        succeeded: Int,
+        failed: Int,
+        cancelled: Int
+    ) -> Kmgr_V1_OperationState {
+        let total = succeeded + failed + cancelled
+        if succeeded == total { return .succeeded }
+        if succeeded > 0 { return .partiallySucceeded }
+        if failed > 0 { return .failed }
+        return .cancelled
     }
 
     func markTerminal() {

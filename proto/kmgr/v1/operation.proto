@@ -12,6 +12,8 @@ service OperationService {
   rpc PrepareYamlEdit(PrepareYamlEditRequest) returns (PrepareYamlEditResponse);
   rpc ApplyYaml(ApplyYamlRequest) returns (StartOperationResponse);
   rpc UpdateData(UpdateDataRequest) returns (StartOperationResponse);
+  rpc PrepareDeleteSelection(PrepareDeleteSelectionRequest) returns (PrepareDeleteSelectionResponse);
+  rpc DeleteSelection(DeleteSelectionRequest) returns (StartOperationResponse);
   rpc Delete(DeleteRequest) returns (StartOperationResponse);
   rpc DeleteMany(stream DeleteManyRequest) returns (StartOperationResponse);
   rpc Scale(ScaleRequest) returns (StartOperationResponse);
@@ -92,6 +94,48 @@ message UpdateDataRequest {
 message DeleteTarget {
   ResourceIdentity identity = 1;
   bool hidden_by_filter = 2;
+}
+
+// Resolves bounded confirmation facts for an immutable selection token against
+// one exact current view index. The engine computes hidden_count; clients must
+// never infer that offscreen or stale selected identities are still visible.
+message PrepareDeleteSelectionRequest {
+  RequestContext context = 1;
+  string view_id = 2;
+  string selection_token = 3;
+  uint64 generation = 4;
+  uint64 index_revision = 5;
+  uint32 preview_limit = 6;
+}
+
+message PrepareDeleteSelectionResponse {
+  string request_id = 1;
+  string view_id = 2;
+  string selection_token = 3;
+  uint64 generation = 4;
+  uint64 index_revision = 5;
+  uint64 selected_count = 6;
+  uint64 hidden_count = 7;
+  int64 expires_at_unix_ms = 8;
+  ResourceType resource = 9;
+  repeated DeleteTarget preview = 10;
+  bool preview_truncated = 11;
+  StructuredError error = 12;
+}
+
+// Starts a delete directly from the engine-owned immutable selection. Count
+// and GVR are confirmation preconditions and are revalidated with token scope
+// and expiry before the engine accepts the operation.
+message DeleteSelectionRequest {
+  RequestContext context = 1;
+  string operation_id = 2;
+  string view_id = 3;
+  string selection_token = 4;
+  uint64 selected_count = 5;
+  ResourceType resource = 6;
+  PropagationPolicy propagation_policy = 7;
+  optional int64 grace_period_seconds = 8;
+  uint32 max_concurrency = 9;
 }
 
 message DeleteRequest {
@@ -206,6 +250,15 @@ message OperationEvent {
   // replays terminal results from the beginning in bounded chunks.
   repeated OperationItemResult item_results = 6;
   StructuredError error = 7;
+  // Aggregate-only operations intentionally do not retain or replay one
+  // identity/status record per selected object. item_results then contains
+  // only a bounded delta of useful failure/cancellation details.
+  bool aggregate_only = 8;
+  // Number of non-success terminal details not retained because the aggregate
+  // operation reached its bounded detail budget or completed unnamed work
+  // after an early producer failure/cancellation. Successful identities are
+  // aggregate-only by design and are not counted here.
+  uint32 omitted_item_results = 9;
 }
 
 message CancelOperationRequest {

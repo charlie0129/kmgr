@@ -786,6 +786,336 @@ func (x *DeleteTarget) GetHiddenByFilter() bool {
 	return false
 }
 
+// Resolves bounded confirmation facts for an immutable selection token against
+// one exact current view index. The engine computes hidden_count; clients must
+// never infer that offscreen or stale selected identities are still visible.
+type PrepareDeleteSelectionRequest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Context        *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	ViewId         string                 `protobuf:"bytes,2,opt,name=view_id,json=viewId,proto3" json:"view_id,omitempty"`
+	SelectionToken string                 `protobuf:"bytes,3,opt,name=selection_token,json=selectionToken,proto3" json:"selection_token,omitempty"`
+	Generation     uint64                 `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
+	IndexRevision  uint64                 `protobuf:"varint,5,opt,name=index_revision,json=indexRevision,proto3" json:"index_revision,omitempty"`
+	PreviewLimit   uint32                 `protobuf:"varint,6,opt,name=preview_limit,json=previewLimit,proto3" json:"preview_limit,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *PrepareDeleteSelectionRequest) Reset() {
+	*x = PrepareDeleteSelectionRequest{}
+	mi := &file_kmgr_v1_operation_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareDeleteSelectionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareDeleteSelectionRequest) ProtoMessage() {}
+
+func (x *PrepareDeleteSelectionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_operation_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareDeleteSelectionRequest.ProtoReflect.Descriptor instead.
+func (*PrepareDeleteSelectionRequest) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *PrepareDeleteSelectionRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *PrepareDeleteSelectionRequest) GetViewId() string {
+	if x != nil {
+		return x.ViewId
+	}
+	return ""
+}
+
+func (x *PrepareDeleteSelectionRequest) GetSelectionToken() string {
+	if x != nil {
+		return x.SelectionToken
+	}
+	return ""
+}
+
+func (x *PrepareDeleteSelectionRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *PrepareDeleteSelectionRequest) GetIndexRevision() uint64 {
+	if x != nil {
+		return x.IndexRevision
+	}
+	return 0
+}
+
+func (x *PrepareDeleteSelectionRequest) GetPreviewLimit() uint32 {
+	if x != nil {
+		return x.PreviewLimit
+	}
+	return 0
+}
+
+type PrepareDeleteSelectionResponse struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	RequestId        string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	ViewId           string                 `protobuf:"bytes,2,opt,name=view_id,json=viewId,proto3" json:"view_id,omitempty"`
+	SelectionToken   string                 `protobuf:"bytes,3,opt,name=selection_token,json=selectionToken,proto3" json:"selection_token,omitempty"`
+	Generation       uint64                 `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
+	IndexRevision    uint64                 `protobuf:"varint,5,opt,name=index_revision,json=indexRevision,proto3" json:"index_revision,omitempty"`
+	SelectedCount    uint64                 `protobuf:"varint,6,opt,name=selected_count,json=selectedCount,proto3" json:"selected_count,omitempty"`
+	HiddenCount      uint64                 `protobuf:"varint,7,opt,name=hidden_count,json=hiddenCount,proto3" json:"hidden_count,omitempty"`
+	ExpiresAtUnixMs  int64                  `protobuf:"varint,8,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
+	Resource         *ResourceType          `protobuf:"bytes,9,opt,name=resource,proto3" json:"resource,omitempty"`
+	Preview          []*DeleteTarget        `protobuf:"bytes,10,rep,name=preview,proto3" json:"preview,omitempty"`
+	PreviewTruncated bool                   `protobuf:"varint,11,opt,name=preview_truncated,json=previewTruncated,proto3" json:"preview_truncated,omitempty"`
+	Error            *StructuredError       `protobuf:"bytes,12,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *PrepareDeleteSelectionResponse) Reset() {
+	*x = PrepareDeleteSelectionResponse{}
+	mi := &file_kmgr_v1_operation_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareDeleteSelectionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareDeleteSelectionResponse) ProtoMessage() {}
+
+func (x *PrepareDeleteSelectionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_operation_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareDeleteSelectionResponse.ProtoReflect.Descriptor instead.
+func (*PrepareDeleteSelectionResponse) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *PrepareDeleteSelectionResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *PrepareDeleteSelectionResponse) GetViewId() string {
+	if x != nil {
+		return x.ViewId
+	}
+	return ""
+}
+
+func (x *PrepareDeleteSelectionResponse) GetSelectionToken() string {
+	if x != nil {
+		return x.SelectionToken
+	}
+	return ""
+}
+
+func (x *PrepareDeleteSelectionResponse) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *PrepareDeleteSelectionResponse) GetIndexRevision() uint64 {
+	if x != nil {
+		return x.IndexRevision
+	}
+	return 0
+}
+
+func (x *PrepareDeleteSelectionResponse) GetSelectedCount() uint64 {
+	if x != nil {
+		return x.SelectedCount
+	}
+	return 0
+}
+
+func (x *PrepareDeleteSelectionResponse) GetHiddenCount() uint64 {
+	if x != nil {
+		return x.HiddenCount
+	}
+	return 0
+}
+
+func (x *PrepareDeleteSelectionResponse) GetExpiresAtUnixMs() int64 {
+	if x != nil {
+		return x.ExpiresAtUnixMs
+	}
+	return 0
+}
+
+func (x *PrepareDeleteSelectionResponse) GetResource() *ResourceType {
+	if x != nil {
+		return x.Resource
+	}
+	return nil
+}
+
+func (x *PrepareDeleteSelectionResponse) GetPreview() []*DeleteTarget {
+	if x != nil {
+		return x.Preview
+	}
+	return nil
+}
+
+func (x *PrepareDeleteSelectionResponse) GetPreviewTruncated() bool {
+	if x != nil {
+		return x.PreviewTruncated
+	}
+	return false
+}
+
+func (x *PrepareDeleteSelectionResponse) GetError() *StructuredError {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+// Starts a delete directly from the engine-owned immutable selection. Count
+// and GVR are confirmation preconditions and are revalidated with token scope
+// and expiry before the engine accepts the operation.
+type DeleteSelectionRequest struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Context            *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	OperationId        string                 `protobuf:"bytes,2,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	ViewId             string                 `protobuf:"bytes,3,opt,name=view_id,json=viewId,proto3" json:"view_id,omitempty"`
+	SelectionToken     string                 `protobuf:"bytes,4,opt,name=selection_token,json=selectionToken,proto3" json:"selection_token,omitempty"`
+	SelectedCount      uint64                 `protobuf:"varint,5,opt,name=selected_count,json=selectedCount,proto3" json:"selected_count,omitempty"`
+	Resource           *ResourceType          `protobuf:"bytes,6,opt,name=resource,proto3" json:"resource,omitempty"`
+	PropagationPolicy  PropagationPolicy      `protobuf:"varint,7,opt,name=propagation_policy,json=propagationPolicy,proto3,enum=kmgr.v1.PropagationPolicy" json:"propagation_policy,omitempty"`
+	GracePeriodSeconds *int64                 `protobuf:"varint,8,opt,name=grace_period_seconds,json=gracePeriodSeconds,proto3,oneof" json:"grace_period_seconds,omitempty"`
+	MaxConcurrency     uint32                 `protobuf:"varint,9,opt,name=max_concurrency,json=maxConcurrency,proto3" json:"max_concurrency,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *DeleteSelectionRequest) Reset() {
+	*x = DeleteSelectionRequest{}
+	mi := &file_kmgr_v1_operation_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteSelectionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteSelectionRequest) ProtoMessage() {}
+
+func (x *DeleteSelectionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_operation_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteSelectionRequest.ProtoReflect.Descriptor instead.
+func (*DeleteSelectionRequest) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *DeleteSelectionRequest) GetContext() *RequestContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *DeleteSelectionRequest) GetOperationId() string {
+	if x != nil {
+		return x.OperationId
+	}
+	return ""
+}
+
+func (x *DeleteSelectionRequest) GetViewId() string {
+	if x != nil {
+		return x.ViewId
+	}
+	return ""
+}
+
+func (x *DeleteSelectionRequest) GetSelectionToken() string {
+	if x != nil {
+		return x.SelectionToken
+	}
+	return ""
+}
+
+func (x *DeleteSelectionRequest) GetSelectedCount() uint64 {
+	if x != nil {
+		return x.SelectedCount
+	}
+	return 0
+}
+
+func (x *DeleteSelectionRequest) GetResource() *ResourceType {
+	if x != nil {
+		return x.Resource
+	}
+	return nil
+}
+
+func (x *DeleteSelectionRequest) GetPropagationPolicy() PropagationPolicy {
+	if x != nil {
+		return x.PropagationPolicy
+	}
+	return PropagationPolicy_PROPAGATION_POLICY_UNSPECIFIED
+}
+
+func (x *DeleteSelectionRequest) GetGracePeriodSeconds() int64 {
+	if x != nil && x.GracePeriodSeconds != nil {
+		return *x.GracePeriodSeconds
+	}
+	return 0
+}
+
+func (x *DeleteSelectionRequest) GetMaxConcurrency() uint32 {
+	if x != nil {
+		return x.MaxConcurrency
+	}
+	return 0
+}
+
 type DeleteRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	Context            *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
@@ -800,7 +1130,7 @@ type DeleteRequest struct {
 
 func (x *DeleteRequest) Reset() {
 	*x = DeleteRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[7]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -812,7 +1142,7 @@ func (x *DeleteRequest) String() string {
 func (*DeleteRequest) ProtoMessage() {}
 
 func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[7]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -825,7 +1155,7 @@ func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{7}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *DeleteRequest) GetContext() *RequestContext {
@@ -887,7 +1217,7 @@ type DeleteManyRequest struct {
 
 func (x *DeleteManyRequest) Reset() {
 	*x = DeleteManyRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[8]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -899,7 +1229,7 @@ func (x *DeleteManyRequest) String() string {
 func (*DeleteManyRequest) ProtoMessage() {}
 
 func (x *DeleteManyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[8]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -912,7 +1242,7 @@ func (x *DeleteManyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteManyRequest.ProtoReflect.Descriptor instead.
 func (*DeleteManyRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{8}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DeleteManyRequest) GetSequence() uint64 {
@@ -977,7 +1307,7 @@ type DeleteManyStart struct {
 
 func (x *DeleteManyStart) Reset() {
 	*x = DeleteManyStart{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[9]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -989,7 +1319,7 @@ func (x *DeleteManyStart) String() string {
 func (*DeleteManyStart) ProtoMessage() {}
 
 func (x *DeleteManyStart) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[9]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1002,7 +1332,7 @@ func (x *DeleteManyStart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteManyStart.ProtoReflect.Descriptor instead.
 func (*DeleteManyStart) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{9}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DeleteManyStart) GetContext() *RequestContext {
@@ -1057,7 +1387,7 @@ type DeleteTargetChunk struct {
 
 func (x *DeleteTargetChunk) Reset() {
 	*x = DeleteTargetChunk{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[10]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1069,7 +1399,7 @@ func (x *DeleteTargetChunk) String() string {
 func (*DeleteTargetChunk) ProtoMessage() {}
 
 func (x *DeleteTargetChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[10]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1082,7 +1412,7 @@ func (x *DeleteTargetChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteTargetChunk.ProtoReflect.Descriptor instead.
 func (*DeleteTargetChunk) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{10}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DeleteTargetChunk) GetStartIndex() uint32 {
@@ -1112,7 +1442,7 @@ type ScaleRequest struct {
 
 func (x *ScaleRequest) Reset() {
 	*x = ScaleRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[11]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1124,7 +1454,7 @@ func (x *ScaleRequest) String() string {
 func (*ScaleRequest) ProtoMessage() {}
 
 func (x *ScaleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[11]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1137,7 +1467,7 @@ func (x *ScaleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScaleRequest.ProtoReflect.Descriptor instead.
 func (*ScaleRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{11}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ScaleRequest) GetContext() *RequestContext {
@@ -1187,7 +1517,7 @@ type RolloutRestartRequest struct {
 
 func (x *RolloutRestartRequest) Reset() {
 	*x = RolloutRestartRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[12]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1199,7 +1529,7 @@ func (x *RolloutRestartRequest) String() string {
 func (*RolloutRestartRequest) ProtoMessage() {}
 
 func (x *RolloutRestartRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[12]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1212,7 +1542,7 @@ func (x *RolloutRestartRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RolloutRestartRequest.ProtoReflect.Descriptor instead.
 func (*RolloutRestartRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{12}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *RolloutRestartRequest) GetContext() *RequestContext {
@@ -1259,7 +1589,7 @@ type UpdateMetadataRequest struct {
 
 func (x *UpdateMetadataRequest) Reset() {
 	*x = UpdateMetadataRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[13]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1271,7 +1601,7 @@ func (x *UpdateMetadataRequest) String() string {
 func (*UpdateMetadataRequest) ProtoMessage() {}
 
 func (x *UpdateMetadataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[13]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1284,7 +1614,7 @@ func (x *UpdateMetadataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateMetadataRequest.ProtoReflect.Descriptor instead.
 func (*UpdateMetadataRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{13}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *UpdateMetadataRequest) GetContext() *RequestContext {
@@ -1355,7 +1685,7 @@ type StartOperationResponse struct {
 
 func (x *StartOperationResponse) Reset() {
 	*x = StartOperationResponse{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[14]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1367,7 +1697,7 @@ func (x *StartOperationResponse) String() string {
 func (*StartOperationResponse) ProtoMessage() {}
 
 func (x *StartOperationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[14]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1380,7 +1710,7 @@ func (x *StartOperationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartOperationResponse.ProtoReflect.Descriptor instead.
 func (*StartOperationResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{14}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *StartOperationResponse) GetRequestId() string {
@@ -1423,7 +1753,7 @@ type WatchOperationRequest struct {
 
 func (x *WatchOperationRequest) Reset() {
 	*x = WatchOperationRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[15]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1435,7 +1765,7 @@ func (x *WatchOperationRequest) String() string {
 func (*WatchOperationRequest) ProtoMessage() {}
 
 func (x *WatchOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[15]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1448,7 +1778,7 @@ func (x *WatchOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchOperationRequest.ProtoReflect.Descriptor instead.
 func (*WatchOperationRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{15}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *WatchOperationRequest) GetContext() *RequestContext {
@@ -1491,7 +1821,7 @@ type OperationItemResult struct {
 
 func (x *OperationItemResult) Reset() {
 	*x = OperationItemResult{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[16]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1503,7 +1833,7 @@ func (x *OperationItemResult) String() string {
 func (*OperationItemResult) ProtoMessage() {}
 
 func (x *OperationItemResult) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[16]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1516,7 +1846,7 @@ func (x *OperationItemResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationItemResult.ProtoReflect.Descriptor instead.
 func (*OperationItemResult) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{16}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *OperationItemResult) GetIdentity() *ResourceIdentity {
@@ -1557,15 +1887,24 @@ type OperationEvent struct {
 	// A bounded delta. Each terminal item is emitted exactly once per watch;
 	// clients merge results by ResourceIdentity.uid. A newly attached watch
 	// replays terminal results from the beginning in bounded chunks.
-	ItemResults   []*OperationItemResult `protobuf:"bytes,6,rep,name=item_results,json=itemResults,proto3" json:"item_results,omitempty"`
-	Error         *StructuredError       `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ItemResults []*OperationItemResult `protobuf:"bytes,6,rep,name=item_results,json=itemResults,proto3" json:"item_results,omitempty"`
+	Error       *StructuredError       `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
+	// Aggregate-only operations intentionally do not retain or replay one
+	// identity/status record per selected object. item_results then contains
+	// only a bounded delta of useful failure/cancellation details.
+	AggregateOnly bool `protobuf:"varint,8,opt,name=aggregate_only,json=aggregateOnly,proto3" json:"aggregate_only,omitempty"`
+	// Number of non-success terminal details not retained because the aggregate
+	// operation reached its bounded detail budget or completed unnamed work
+	// after an early producer failure/cancellation. Successful identities are
+	// aggregate-only by design and are not counted here.
+	OmittedItemResults uint32 `protobuf:"varint,9,opt,name=omitted_item_results,json=omittedItemResults,proto3" json:"omitted_item_results,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *OperationEvent) Reset() {
 	*x = OperationEvent{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[17]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1577,7 +1916,7 @@ func (x *OperationEvent) String() string {
 func (*OperationEvent) ProtoMessage() {}
 
 func (x *OperationEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[17]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1590,7 +1929,7 @@ func (x *OperationEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationEvent.ProtoReflect.Descriptor instead.
 func (*OperationEvent) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{17}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *OperationEvent) GetCursor() *StreamCursor {
@@ -1642,6 +1981,20 @@ func (x *OperationEvent) GetError() *StructuredError {
 	return nil
 }
 
+func (x *OperationEvent) GetAggregateOnly() bool {
+	if x != nil {
+		return x.AggregateOnly
+	}
+	return false
+}
+
+func (x *OperationEvent) GetOmittedItemResults() uint32 {
+	if x != nil {
+		return x.OmittedItemResults
+	}
+	return 0
+}
+
 type CancelOperationRequest struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	Context              *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
@@ -1653,7 +2006,7 @@ type CancelOperationRequest struct {
 
 func (x *CancelOperationRequest) Reset() {
 	*x = CancelOperationRequest{}
-	mi := &file_kmgr_v1_operation_proto_msgTypes[18]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1665,7 +2018,7 @@ func (x *CancelOperationRequest) String() string {
 func (*CancelOperationRequest) ProtoMessage() {}
 
 func (x *CancelOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_operation_proto_msgTypes[18]
+	mi := &file_kmgr_v1_operation_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1678,7 +2031,7 @@ func (x *CancelOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelOperationRequest.ProtoReflect.Descriptor instead.
 func (*CancelOperationRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{18}
+	return file_kmgr_v1_operation_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *CancelOperationRequest) GetContext() *RequestContext {
@@ -1757,7 +2110,44 @@ const file_kmgr_v1_operation_proto_rawDesc = "" +
 	"\tmutations\x18\x05 \x03(\v2\x15.kmgr.v1.DataMutationR\tmutations\"o\n" +
 	"\fDeleteTarget\x125\n" +
 	"\bidentity\x18\x01 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12(\n" +
-	"\x10hidden_by_filter\x18\x02 \x01(\bR\x0ehiddenByFilter\"\xda\x02\n" +
+	"\x10hidden_by_filter\x18\x02 \x01(\bR\x0ehiddenByFilter\"\x80\x02\n" +
+	"\x1dPrepareDeleteSelectionRequest\x121\n" +
+	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x17\n" +
+	"\aview_id\x18\x02 \x01(\tR\x06viewId\x12'\n" +
+	"\x0fselection_token\x18\x03 \x01(\tR\x0eselectionToken\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x04 \x01(\x04R\n" +
+	"generation\x12%\n" +
+	"\x0eindex_revision\x18\x05 \x01(\x04R\rindexRevision\x12#\n" +
+	"\rpreview_limit\x18\x06 \x01(\rR\fpreviewLimit\"\x80\x04\n" +
+	"\x1ePrepareDeleteSelectionResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
+	"\aview_id\x18\x02 \x01(\tR\x06viewId\x12'\n" +
+	"\x0fselection_token\x18\x03 \x01(\tR\x0eselectionToken\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x04 \x01(\x04R\n" +
+	"generation\x12%\n" +
+	"\x0eindex_revision\x18\x05 \x01(\x04R\rindexRevision\x12%\n" +
+	"\x0eselected_count\x18\x06 \x01(\x04R\rselectedCount\x12!\n" +
+	"\fhidden_count\x18\a \x01(\x04R\vhiddenCount\x12+\n" +
+	"\x12expires_at_unix_ms\x18\b \x01(\x03R\x0fexpiresAtUnixMs\x121\n" +
+	"\bresource\x18\t \x01(\v2\x15.kmgr.v1.ResourceTypeR\bresource\x12/\n" +
+	"\apreview\x18\n" +
+	" \x03(\v2\x15.kmgr.v1.DeleteTargetR\apreview\x12+\n" +
+	"\x11preview_truncated\x18\v \x01(\bR\x10previewTruncated\x12.\n" +
+	"\x05error\x18\f \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\xce\x03\n" +
+	"\x16DeleteSelectionRequest\x121\n" +
+	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12!\n" +
+	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12\x17\n" +
+	"\aview_id\x18\x03 \x01(\tR\x06viewId\x12'\n" +
+	"\x0fselection_token\x18\x04 \x01(\tR\x0eselectionToken\x12%\n" +
+	"\x0eselected_count\x18\x05 \x01(\x04R\rselectedCount\x121\n" +
+	"\bresource\x18\x06 \x01(\v2\x15.kmgr.v1.ResourceTypeR\bresource\x12I\n" +
+	"\x12propagation_policy\x18\a \x01(\x0e2\x1a.kmgr.v1.PropagationPolicyR\x11propagationPolicy\x125\n" +
+	"\x14grace_period_seconds\x18\b \x01(\x03H\x00R\x12gracePeriodSeconds\x88\x01\x01\x12'\n" +
+	"\x0fmax_concurrency\x18\t \x01(\rR\x0emaxConcurrencyB\x17\n" +
+	"\x15_grace_period_seconds\"\xda\x02\n" +
 	"\rDeleteRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12/\n" +
@@ -1820,7 +2210,7 @@ const file_kmgr_v1_operation_proto_rawDesc = "" +
 	"\bidentity\x18\x01 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x121\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x1b.kmgr.v1.OperationItemStateR\x05state\x12.\n" +
 	"\x05error\x18\x03 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\x120\n" +
-	"\x14new_resource_version\x18\x04 \x01(\tR\x12newResourceVersion\"\xcc\x02\n" +
+	"\x14new_resource_version\x18\x04 \x01(\tR\x12newResourceVersion\"\xa5\x03\n" +
 	"\x0eOperationEvent\x12-\n" +
 	"\x06cursor\x18\x01 \x01(\v2\x15.kmgr.v1.StreamCursorR\x06cursor\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12-\n" +
@@ -1829,7 +2219,9 @@ const file_kmgr_v1_operation_proto_rawDesc = "" +
 	"\vtotal_items\x18\x05 \x01(\rR\n" +
 	"totalItems\x12?\n" +
 	"\fitem_results\x18\x06 \x03(\v2\x1c.kmgr.v1.OperationItemResultR\vitemResults\x12.\n" +
-	"\x05error\x18\a \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\xa5\x01\n" +
+	"\x05error\x18\a \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\x12%\n" +
+	"\x0eaggregate_only\x18\b \x01(\bR\raggregateOnly\x120\n" +
+	"\x14omitted_item_results\x18\t \x01(\rR\x12omittedItemResults\"\xa5\x01\n" +
 	"\x16CancelOperationRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x125\n" +
@@ -1854,12 +2246,14 @@ const file_kmgr_v1_operation_proto_rawDesc = "" +
 	"\x1eOPERATION_ITEM_STATE_SUCCEEDED\x10\x03\x12\x1f\n" +
 	"\x1bOPERATION_ITEM_STATE_FAILED\x10\x04\x12 \n" +
 	"\x1cOPERATION_ITEM_STATE_SKIPPED\x10\x05\x12\"\n" +
-	"\x1eOPERATION_ITEM_STATE_CANCELLED\x10\x062\x8e\x06\n" +
+	"\x1eOPERATION_ITEM_STATE_CANCELLED\x10\x062\xce\a\n" +
 	"\x10OperationService\x12T\n" +
 	"\x0fPrepareYamlEdit\x12\x1f.kmgr.v1.PrepareYamlEditRequest\x1a .kmgr.v1.PrepareYamlEditResponse\x12G\n" +
 	"\tApplyYaml\x12\x19.kmgr.v1.ApplyYamlRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12I\n" +
 	"\n" +
-	"UpdateData\x12\x1a.kmgr.v1.UpdateDataRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12A\n" +
+	"UpdateData\x12\x1a.kmgr.v1.UpdateDataRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12i\n" +
+	"\x16PrepareDeleteSelection\x12&.kmgr.v1.PrepareDeleteSelectionRequest\x1a'.kmgr.v1.PrepareDeleteSelectionResponse\x12S\n" +
+	"\x0fDeleteSelection\x12\x1f.kmgr.v1.DeleteSelectionRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12A\n" +
 	"\x06Delete\x12\x16.kmgr.v1.DeleteRequest\x1a\x1f.kmgr.v1.StartOperationResponse\x12K\n" +
 	"\n" +
 	"DeleteMany\x12\x1a.kmgr.v1.DeleteManyRequest\x1a\x1f.kmgr.v1.StartOperationResponse(\x01\x12?\n" +
@@ -1882,107 +2276,122 @@ func file_kmgr_v1_operation_proto_rawDescGZIP() []byte {
 }
 
 var file_kmgr_v1_operation_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_kmgr_v1_operation_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_kmgr_v1_operation_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_kmgr_v1_operation_proto_goTypes = []any{
-	(DataMutationType)(0),           // 0: kmgr.v1.DataMutationType
-	(OperationState)(0),             // 1: kmgr.v1.OperationState
-	(OperationItemState)(0),         // 2: kmgr.v1.OperationItemState
-	(*PrepareYamlEditRequest)(nil),  // 3: kmgr.v1.PrepareYamlEditRequest
-	(*SemanticDiffEntry)(nil),       // 4: kmgr.v1.SemanticDiffEntry
-	(*PrepareYamlEditResponse)(nil), // 5: kmgr.v1.PrepareYamlEditResponse
-	(*ApplyYamlRequest)(nil),        // 6: kmgr.v1.ApplyYamlRequest
-	(*DataMutation)(nil),            // 7: kmgr.v1.DataMutation
-	(*UpdateDataRequest)(nil),       // 8: kmgr.v1.UpdateDataRequest
-	(*DeleteTarget)(nil),            // 9: kmgr.v1.DeleteTarget
-	(*DeleteRequest)(nil),           // 10: kmgr.v1.DeleteRequest
-	(*DeleteManyRequest)(nil),       // 11: kmgr.v1.DeleteManyRequest
-	(*DeleteManyStart)(nil),         // 12: kmgr.v1.DeleteManyStart
-	(*DeleteTargetChunk)(nil),       // 13: kmgr.v1.DeleteTargetChunk
-	(*ScaleRequest)(nil),            // 14: kmgr.v1.ScaleRequest
-	(*RolloutRestartRequest)(nil),   // 15: kmgr.v1.RolloutRestartRequest
-	(*UpdateMetadataRequest)(nil),   // 16: kmgr.v1.UpdateMetadataRequest
-	(*StartOperationResponse)(nil),  // 17: kmgr.v1.StartOperationResponse
-	(*WatchOperationRequest)(nil),   // 18: kmgr.v1.WatchOperationRequest
-	(*OperationItemResult)(nil),     // 19: kmgr.v1.OperationItemResult
-	(*OperationEvent)(nil),          // 20: kmgr.v1.OperationEvent
-	(*CancelOperationRequest)(nil),  // 21: kmgr.v1.CancelOperationRequest
-	(*RequestContext)(nil),          // 22: kmgr.v1.RequestContext
-	(*ResourceIdentity)(nil),        // 23: kmgr.v1.ResourceIdentity
-	(CellSeverity)(0),               // 24: kmgr.v1.CellSeverity
-	(*StructuredError)(nil),         // 25: kmgr.v1.StructuredError
-	(DataEntryKind)(0),              // 26: kmgr.v1.DataEntryKind
-	(PropagationPolicy)(0),          // 27: kmgr.v1.PropagationPolicy
-	(*StringMapEntry)(nil),          // 28: kmgr.v1.StringMapEntry
-	(*StreamCursor)(nil),            // 29: kmgr.v1.StreamCursor
-	(*Acknowledgement)(nil),         // 30: kmgr.v1.Acknowledgement
+	(DataMutationType)(0),                  // 0: kmgr.v1.DataMutationType
+	(OperationState)(0),                    // 1: kmgr.v1.OperationState
+	(OperationItemState)(0),                // 2: kmgr.v1.OperationItemState
+	(*PrepareYamlEditRequest)(nil),         // 3: kmgr.v1.PrepareYamlEditRequest
+	(*SemanticDiffEntry)(nil),              // 4: kmgr.v1.SemanticDiffEntry
+	(*PrepareYamlEditResponse)(nil),        // 5: kmgr.v1.PrepareYamlEditResponse
+	(*ApplyYamlRequest)(nil),               // 6: kmgr.v1.ApplyYamlRequest
+	(*DataMutation)(nil),                   // 7: kmgr.v1.DataMutation
+	(*UpdateDataRequest)(nil),              // 8: kmgr.v1.UpdateDataRequest
+	(*DeleteTarget)(nil),                   // 9: kmgr.v1.DeleteTarget
+	(*PrepareDeleteSelectionRequest)(nil),  // 10: kmgr.v1.PrepareDeleteSelectionRequest
+	(*PrepareDeleteSelectionResponse)(nil), // 11: kmgr.v1.PrepareDeleteSelectionResponse
+	(*DeleteSelectionRequest)(nil),         // 12: kmgr.v1.DeleteSelectionRequest
+	(*DeleteRequest)(nil),                  // 13: kmgr.v1.DeleteRequest
+	(*DeleteManyRequest)(nil),              // 14: kmgr.v1.DeleteManyRequest
+	(*DeleteManyStart)(nil),                // 15: kmgr.v1.DeleteManyStart
+	(*DeleteTargetChunk)(nil),              // 16: kmgr.v1.DeleteTargetChunk
+	(*ScaleRequest)(nil),                   // 17: kmgr.v1.ScaleRequest
+	(*RolloutRestartRequest)(nil),          // 18: kmgr.v1.RolloutRestartRequest
+	(*UpdateMetadataRequest)(nil),          // 19: kmgr.v1.UpdateMetadataRequest
+	(*StartOperationResponse)(nil),         // 20: kmgr.v1.StartOperationResponse
+	(*WatchOperationRequest)(nil),          // 21: kmgr.v1.WatchOperationRequest
+	(*OperationItemResult)(nil),            // 22: kmgr.v1.OperationItemResult
+	(*OperationEvent)(nil),                 // 23: kmgr.v1.OperationEvent
+	(*CancelOperationRequest)(nil),         // 24: kmgr.v1.CancelOperationRequest
+	(*RequestContext)(nil),                 // 25: kmgr.v1.RequestContext
+	(*ResourceIdentity)(nil),               // 26: kmgr.v1.ResourceIdentity
+	(CellSeverity)(0),                      // 27: kmgr.v1.CellSeverity
+	(*StructuredError)(nil),                // 28: kmgr.v1.StructuredError
+	(DataEntryKind)(0),                     // 29: kmgr.v1.DataEntryKind
+	(*ResourceType)(nil),                   // 30: kmgr.v1.ResourceType
+	(PropagationPolicy)(0),                 // 31: kmgr.v1.PropagationPolicy
+	(*StringMapEntry)(nil),                 // 32: kmgr.v1.StringMapEntry
+	(*StreamCursor)(nil),                   // 33: kmgr.v1.StreamCursor
+	(*Acknowledgement)(nil),                // 34: kmgr.v1.Acknowledgement
 }
 var file_kmgr_v1_operation_proto_depIdxs = []int32{
-	22, // 0: kmgr.v1.PrepareYamlEditRequest.context:type_name -> kmgr.v1.RequestContext
-	23, // 1: kmgr.v1.PrepareYamlEditRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	24, // 2: kmgr.v1.SemanticDiffEntry.severity:type_name -> kmgr.v1.CellSeverity
-	23, // 3: kmgr.v1.PrepareYamlEditResponse.identity:type_name -> kmgr.v1.ResourceIdentity
+	25, // 0: kmgr.v1.PrepareYamlEditRequest.context:type_name -> kmgr.v1.RequestContext
+	26, // 1: kmgr.v1.PrepareYamlEditRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	27, // 2: kmgr.v1.SemanticDiffEntry.severity:type_name -> kmgr.v1.CellSeverity
+	26, // 3: kmgr.v1.PrepareYamlEditResponse.identity:type_name -> kmgr.v1.ResourceIdentity
 	4,  // 4: kmgr.v1.PrepareYamlEditResponse.diff:type_name -> kmgr.v1.SemanticDiffEntry
-	25, // 5: kmgr.v1.PrepareYamlEditResponse.validation_errors:type_name -> kmgr.v1.StructuredError
-	25, // 6: kmgr.v1.PrepareYamlEditResponse.error:type_name -> kmgr.v1.StructuredError
-	22, // 7: kmgr.v1.ApplyYamlRequest.context:type_name -> kmgr.v1.RequestContext
-	23, // 8: kmgr.v1.ApplyYamlRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	28, // 5: kmgr.v1.PrepareYamlEditResponse.validation_errors:type_name -> kmgr.v1.StructuredError
+	28, // 6: kmgr.v1.PrepareYamlEditResponse.error:type_name -> kmgr.v1.StructuredError
+	25, // 7: kmgr.v1.ApplyYamlRequest.context:type_name -> kmgr.v1.RequestContext
+	26, // 8: kmgr.v1.ApplyYamlRequest.identity:type_name -> kmgr.v1.ResourceIdentity
 	0,  // 9: kmgr.v1.DataMutation.type:type_name -> kmgr.v1.DataMutationType
-	26, // 10: kmgr.v1.DataMutation.entry_kind:type_name -> kmgr.v1.DataEntryKind
-	22, // 11: kmgr.v1.UpdateDataRequest.context:type_name -> kmgr.v1.RequestContext
-	23, // 12: kmgr.v1.UpdateDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	29, // 10: kmgr.v1.DataMutation.entry_kind:type_name -> kmgr.v1.DataEntryKind
+	25, // 11: kmgr.v1.UpdateDataRequest.context:type_name -> kmgr.v1.RequestContext
+	26, // 12: kmgr.v1.UpdateDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
 	7,  // 13: kmgr.v1.UpdateDataRequest.mutations:type_name -> kmgr.v1.DataMutation
-	23, // 14: kmgr.v1.DeleteTarget.identity:type_name -> kmgr.v1.ResourceIdentity
-	22, // 15: kmgr.v1.DeleteRequest.context:type_name -> kmgr.v1.RequestContext
-	9,  // 16: kmgr.v1.DeleteRequest.targets:type_name -> kmgr.v1.DeleteTarget
-	27, // 17: kmgr.v1.DeleteRequest.propagation_policy:type_name -> kmgr.v1.PropagationPolicy
-	12, // 18: kmgr.v1.DeleteManyRequest.start:type_name -> kmgr.v1.DeleteManyStart
-	13, // 19: kmgr.v1.DeleteManyRequest.targets:type_name -> kmgr.v1.DeleteTargetChunk
-	22, // 20: kmgr.v1.DeleteManyStart.context:type_name -> kmgr.v1.RequestContext
-	27, // 21: kmgr.v1.DeleteManyStart.propagation_policy:type_name -> kmgr.v1.PropagationPolicy
-	9,  // 22: kmgr.v1.DeleteTargetChunk.targets:type_name -> kmgr.v1.DeleteTarget
-	22, // 23: kmgr.v1.ScaleRequest.context:type_name -> kmgr.v1.RequestContext
-	23, // 24: kmgr.v1.ScaleRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	22, // 25: kmgr.v1.RolloutRestartRequest.context:type_name -> kmgr.v1.RequestContext
-	23, // 26: kmgr.v1.RolloutRestartRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	22, // 27: kmgr.v1.UpdateMetadataRequest.context:type_name -> kmgr.v1.RequestContext
-	23, // 28: kmgr.v1.UpdateMetadataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	28, // 29: kmgr.v1.UpdateMetadataRequest.labels:type_name -> kmgr.v1.StringMapEntry
-	28, // 30: kmgr.v1.UpdateMetadataRequest.annotations:type_name -> kmgr.v1.StringMapEntry
-	25, // 31: kmgr.v1.StartOperationResponse.error:type_name -> kmgr.v1.StructuredError
-	22, // 32: kmgr.v1.WatchOperationRequest.context:type_name -> kmgr.v1.RequestContext
-	23, // 33: kmgr.v1.OperationItemResult.identity:type_name -> kmgr.v1.ResourceIdentity
-	2,  // 34: kmgr.v1.OperationItemResult.state:type_name -> kmgr.v1.OperationItemState
-	25, // 35: kmgr.v1.OperationItemResult.error:type_name -> kmgr.v1.StructuredError
-	29, // 36: kmgr.v1.OperationEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	1,  // 37: kmgr.v1.OperationEvent.state:type_name -> kmgr.v1.OperationState
-	19, // 38: kmgr.v1.OperationEvent.item_results:type_name -> kmgr.v1.OperationItemResult
-	25, // 39: kmgr.v1.OperationEvent.error:type_name -> kmgr.v1.StructuredError
-	22, // 40: kmgr.v1.CancelOperationRequest.context:type_name -> kmgr.v1.RequestContext
-	3,  // 41: kmgr.v1.OperationService.PrepareYamlEdit:input_type -> kmgr.v1.PrepareYamlEditRequest
-	6,  // 42: kmgr.v1.OperationService.ApplyYaml:input_type -> kmgr.v1.ApplyYamlRequest
-	8,  // 43: kmgr.v1.OperationService.UpdateData:input_type -> kmgr.v1.UpdateDataRequest
-	10, // 44: kmgr.v1.OperationService.Delete:input_type -> kmgr.v1.DeleteRequest
-	11, // 45: kmgr.v1.OperationService.DeleteMany:input_type -> kmgr.v1.DeleteManyRequest
-	14, // 46: kmgr.v1.OperationService.Scale:input_type -> kmgr.v1.ScaleRequest
-	15, // 47: kmgr.v1.OperationService.RolloutRestart:input_type -> kmgr.v1.RolloutRestartRequest
-	16, // 48: kmgr.v1.OperationService.UpdateMetadata:input_type -> kmgr.v1.UpdateMetadataRequest
-	18, // 49: kmgr.v1.OperationService.WatchOperation:input_type -> kmgr.v1.WatchOperationRequest
-	21, // 50: kmgr.v1.OperationService.CancelOperation:input_type -> kmgr.v1.CancelOperationRequest
-	5,  // 51: kmgr.v1.OperationService.PrepareYamlEdit:output_type -> kmgr.v1.PrepareYamlEditResponse
-	17, // 52: kmgr.v1.OperationService.ApplyYaml:output_type -> kmgr.v1.StartOperationResponse
-	17, // 53: kmgr.v1.OperationService.UpdateData:output_type -> kmgr.v1.StartOperationResponse
-	17, // 54: kmgr.v1.OperationService.Delete:output_type -> kmgr.v1.StartOperationResponse
-	17, // 55: kmgr.v1.OperationService.DeleteMany:output_type -> kmgr.v1.StartOperationResponse
-	17, // 56: kmgr.v1.OperationService.Scale:output_type -> kmgr.v1.StartOperationResponse
-	17, // 57: kmgr.v1.OperationService.RolloutRestart:output_type -> kmgr.v1.StartOperationResponse
-	17, // 58: kmgr.v1.OperationService.UpdateMetadata:output_type -> kmgr.v1.StartOperationResponse
-	20, // 59: kmgr.v1.OperationService.WatchOperation:output_type -> kmgr.v1.OperationEvent
-	30, // 60: kmgr.v1.OperationService.CancelOperation:output_type -> kmgr.v1.Acknowledgement
-	51, // [51:61] is the sub-list for method output_type
-	41, // [41:51] is the sub-list for method input_type
-	41, // [41:41] is the sub-list for extension type_name
-	41, // [41:41] is the sub-list for extension extendee
-	0,  // [0:41] is the sub-list for field type_name
+	26, // 14: kmgr.v1.DeleteTarget.identity:type_name -> kmgr.v1.ResourceIdentity
+	25, // 15: kmgr.v1.PrepareDeleteSelectionRequest.context:type_name -> kmgr.v1.RequestContext
+	30, // 16: kmgr.v1.PrepareDeleteSelectionResponse.resource:type_name -> kmgr.v1.ResourceType
+	9,  // 17: kmgr.v1.PrepareDeleteSelectionResponse.preview:type_name -> kmgr.v1.DeleteTarget
+	28, // 18: kmgr.v1.PrepareDeleteSelectionResponse.error:type_name -> kmgr.v1.StructuredError
+	25, // 19: kmgr.v1.DeleteSelectionRequest.context:type_name -> kmgr.v1.RequestContext
+	30, // 20: kmgr.v1.DeleteSelectionRequest.resource:type_name -> kmgr.v1.ResourceType
+	31, // 21: kmgr.v1.DeleteSelectionRequest.propagation_policy:type_name -> kmgr.v1.PropagationPolicy
+	25, // 22: kmgr.v1.DeleteRequest.context:type_name -> kmgr.v1.RequestContext
+	9,  // 23: kmgr.v1.DeleteRequest.targets:type_name -> kmgr.v1.DeleteTarget
+	31, // 24: kmgr.v1.DeleteRequest.propagation_policy:type_name -> kmgr.v1.PropagationPolicy
+	15, // 25: kmgr.v1.DeleteManyRequest.start:type_name -> kmgr.v1.DeleteManyStart
+	16, // 26: kmgr.v1.DeleteManyRequest.targets:type_name -> kmgr.v1.DeleteTargetChunk
+	25, // 27: kmgr.v1.DeleteManyStart.context:type_name -> kmgr.v1.RequestContext
+	31, // 28: kmgr.v1.DeleteManyStart.propagation_policy:type_name -> kmgr.v1.PropagationPolicy
+	9,  // 29: kmgr.v1.DeleteTargetChunk.targets:type_name -> kmgr.v1.DeleteTarget
+	25, // 30: kmgr.v1.ScaleRequest.context:type_name -> kmgr.v1.RequestContext
+	26, // 31: kmgr.v1.ScaleRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	25, // 32: kmgr.v1.RolloutRestartRequest.context:type_name -> kmgr.v1.RequestContext
+	26, // 33: kmgr.v1.RolloutRestartRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	25, // 34: kmgr.v1.UpdateMetadataRequest.context:type_name -> kmgr.v1.RequestContext
+	26, // 35: kmgr.v1.UpdateMetadataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	32, // 36: kmgr.v1.UpdateMetadataRequest.labels:type_name -> kmgr.v1.StringMapEntry
+	32, // 37: kmgr.v1.UpdateMetadataRequest.annotations:type_name -> kmgr.v1.StringMapEntry
+	28, // 38: kmgr.v1.StartOperationResponse.error:type_name -> kmgr.v1.StructuredError
+	25, // 39: kmgr.v1.WatchOperationRequest.context:type_name -> kmgr.v1.RequestContext
+	26, // 40: kmgr.v1.OperationItemResult.identity:type_name -> kmgr.v1.ResourceIdentity
+	2,  // 41: kmgr.v1.OperationItemResult.state:type_name -> kmgr.v1.OperationItemState
+	28, // 42: kmgr.v1.OperationItemResult.error:type_name -> kmgr.v1.StructuredError
+	33, // 43: kmgr.v1.OperationEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	1,  // 44: kmgr.v1.OperationEvent.state:type_name -> kmgr.v1.OperationState
+	22, // 45: kmgr.v1.OperationEvent.item_results:type_name -> kmgr.v1.OperationItemResult
+	28, // 46: kmgr.v1.OperationEvent.error:type_name -> kmgr.v1.StructuredError
+	25, // 47: kmgr.v1.CancelOperationRequest.context:type_name -> kmgr.v1.RequestContext
+	3,  // 48: kmgr.v1.OperationService.PrepareYamlEdit:input_type -> kmgr.v1.PrepareYamlEditRequest
+	6,  // 49: kmgr.v1.OperationService.ApplyYaml:input_type -> kmgr.v1.ApplyYamlRequest
+	8,  // 50: kmgr.v1.OperationService.UpdateData:input_type -> kmgr.v1.UpdateDataRequest
+	10, // 51: kmgr.v1.OperationService.PrepareDeleteSelection:input_type -> kmgr.v1.PrepareDeleteSelectionRequest
+	12, // 52: kmgr.v1.OperationService.DeleteSelection:input_type -> kmgr.v1.DeleteSelectionRequest
+	13, // 53: kmgr.v1.OperationService.Delete:input_type -> kmgr.v1.DeleteRequest
+	14, // 54: kmgr.v1.OperationService.DeleteMany:input_type -> kmgr.v1.DeleteManyRequest
+	17, // 55: kmgr.v1.OperationService.Scale:input_type -> kmgr.v1.ScaleRequest
+	18, // 56: kmgr.v1.OperationService.RolloutRestart:input_type -> kmgr.v1.RolloutRestartRequest
+	19, // 57: kmgr.v1.OperationService.UpdateMetadata:input_type -> kmgr.v1.UpdateMetadataRequest
+	21, // 58: kmgr.v1.OperationService.WatchOperation:input_type -> kmgr.v1.WatchOperationRequest
+	24, // 59: kmgr.v1.OperationService.CancelOperation:input_type -> kmgr.v1.CancelOperationRequest
+	5,  // 60: kmgr.v1.OperationService.PrepareYamlEdit:output_type -> kmgr.v1.PrepareYamlEditResponse
+	20, // 61: kmgr.v1.OperationService.ApplyYaml:output_type -> kmgr.v1.StartOperationResponse
+	20, // 62: kmgr.v1.OperationService.UpdateData:output_type -> kmgr.v1.StartOperationResponse
+	11, // 63: kmgr.v1.OperationService.PrepareDeleteSelection:output_type -> kmgr.v1.PrepareDeleteSelectionResponse
+	20, // 64: kmgr.v1.OperationService.DeleteSelection:output_type -> kmgr.v1.StartOperationResponse
+	20, // 65: kmgr.v1.OperationService.Delete:output_type -> kmgr.v1.StartOperationResponse
+	20, // 66: kmgr.v1.OperationService.DeleteMany:output_type -> kmgr.v1.StartOperationResponse
+	20, // 67: kmgr.v1.OperationService.Scale:output_type -> kmgr.v1.StartOperationResponse
+	20, // 68: kmgr.v1.OperationService.RolloutRestart:output_type -> kmgr.v1.StartOperationResponse
+	20, // 69: kmgr.v1.OperationService.UpdateMetadata:output_type -> kmgr.v1.StartOperationResponse
+	23, // 70: kmgr.v1.OperationService.WatchOperation:output_type -> kmgr.v1.OperationEvent
+	34, // 71: kmgr.v1.OperationService.CancelOperation:output_type -> kmgr.v1.Acknowledgement
+	60, // [60:72] is the sub-list for method output_type
+	48, // [48:60] is the sub-list for method input_type
+	48, // [48:48] is the sub-list for extension type_name
+	48, // [48:48] is the sub-list for extension extendee
+	0,  // [0:48] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_operation_proto_init() }
@@ -1992,19 +2401,20 @@ func file_kmgr_v1_operation_proto_init() {
 	}
 	file_kmgr_v1_common_proto_init()
 	file_kmgr_v1_object_proto_init()
-	file_kmgr_v1_operation_proto_msgTypes[7].OneofWrappers = []any{}
-	file_kmgr_v1_operation_proto_msgTypes[8].OneofWrappers = []any{
+	file_kmgr_v1_operation_proto_msgTypes[9].OneofWrappers = []any{}
+	file_kmgr_v1_operation_proto_msgTypes[10].OneofWrappers = []any{}
+	file_kmgr_v1_operation_proto_msgTypes[11].OneofWrappers = []any{
 		(*DeleteManyRequest_Start)(nil),
 		(*DeleteManyRequest_Targets)(nil),
 	}
-	file_kmgr_v1_operation_proto_msgTypes[9].OneofWrappers = []any{}
+	file_kmgr_v1_operation_proto_msgTypes[12].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_operation_proto_rawDesc), len(file_kmgr_v1_operation_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   19,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

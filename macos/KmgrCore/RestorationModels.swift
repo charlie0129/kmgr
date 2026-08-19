@@ -323,6 +323,12 @@ public struct CommandContext: Hashable, Sendable {
     public let firstResponder: ResponderContext
     public let selectedIdentities: [ResourceIdentity]
     public let hiddenSelectionUIDs: Set<ResourceUID>
+    /// Engine-owned immutable selection captured at the Command-K event. When
+    /// present, `selectedIdentities` deliberately stays empty so presenting a
+    /// palette is constant-space even for a whole-cluster Command-A.
+    public let selectionReference: ResourceSelectionDeleteReference?
+    public let selectionRevision: ResourceSelectionRevision?
+    public let selectionIsNamespaced: Bool
     public let logCompatibleSelection: Bool
     public let execCompatibleSelection: Bool
     public let portForwardCompatibleSelection: Bool
@@ -333,6 +339,9 @@ public struct CommandContext: Hashable, Sendable {
         firstResponder: ResponderContext,
         selectedIdentities: [ResourceIdentity] = [],
         hiddenSelectionUIDs: Set<ResourceUID> = [],
+        selectionReference: ResourceSelectionDeleteReference? = nil,
+        selectionRevision: ResourceSelectionRevision? = nil,
+        selectionIsNamespaced: Bool = false,
         logCompatibleSelection: Bool = false,
         execCompatibleSelection: Bool = false,
         portForwardCompatibleSelection: Bool = false,
@@ -344,11 +353,29 @@ public struct CommandContext: Hashable, Sendable {
         self.hiddenSelectionUIDs = hiddenSelectionUIDs.intersection(
             Set(selectedIdentities.map(\.uid))
         )
+        self.selectionReference = selectionReference
+        self.selectionRevision = selectionRevision
+        self.selectionIsNamespaced = selectionIsNamespaced
         self.logCompatibleSelection = logCompatibleSelection
         self.execCompatibleSelection = execCompatibleSelection
         self.portForwardCompatibleSelection = portForwardCompatibleSelection
         self.activeEditorHasChanges = activeEditorHasChanges
         self.networkActionsAllowed = networkActionsAllowed
+    }
+
+    public var selectedCount: UInt64 {
+        selectionReference?.selectedCount ?? UInt64(selectedIdentities.count)
+    }
+
+    public var selectionGVR: GVR? {
+        if let selectionReference { return selectionReference.gvr }
+        guard let first = selectedIdentities.first,
+            selectedIdentities.allSatisfy({
+                $0.group == first.group && $0.version == first.version
+                    && $0.resource == first.resource
+            })
+        else { return nil }
+        return GVR(group: first.group, version: first.version, resource: first.resource)
     }
 
     /// Builds one immutable value snapshot for resource-table commands. The
@@ -383,6 +410,42 @@ public struct CommandContext: Hashable, Sendable {
             networkActionsAllowed: networkActionsAllowed
         )
     }
+
+    /// Captures only immutable token metadata. Operations that intrinsically
+    /// need identities may page this token after activation; delete can pass
+    /// it straight to the engine without ever materializing the selection.
+    public static func capturingTokenSelection(
+        firstResponder: ResponderContext,
+        selectionReference: ResourceSelectionDeleteReference,
+        selectionRevision: ResourceSelectionRevision,
+        selectionIsNamespaced: Bool,
+        networkActionsAllowed: Bool = true
+    ) -> Self {
+        let gvr = selectionReference.gvr
+        let count = selectionReference.selectedCount
+        let isPod = gvr.group.isEmpty && gvr.version == "v1"
+            && gvr.resource == "pods"
+        let logCompatible = count > 0 && count <= 128 && (
+            isPod
+                || (gvr.group == "apps" && gvr.version == "v1"
+                    && ["deployments", "statefulsets", "daemonsets", "replicasets"]
+                        .contains(gvr.resource))
+                || (gvr.group == "batch" && gvr.version == "v1"
+                    && ["jobs", "cronjobs"].contains(gvr.resource))
+        )
+        return Self(
+            firstResponder: firstResponder,
+            selectionReference: selectionReference,
+            selectionRevision: selectionRevision,
+            selectionIsNamespaced: selectionIsNamespaced,
+            logCompatibleSelection: logCompatible,
+            execCompatibleSelection: count == 1 && isPod,
+            portForwardCompatibleSelection: count == 1
+                && gvr.group.isEmpty && gvr.version == "v1"
+                && (gvr.resource == "pods" || gvr.resource == "services"),
+            networkActionsAllowed: networkActionsAllowed
+        )
+    }
 }
 
 public enum CommandValidator {
@@ -390,7 +453,7 @@ public enum CommandValidator {
     /// responder routing remains authoritative; table-only shortcuts are not
     /// considered valid while an editor, filter, or terminal owns focus.
     public static func isEnabled(_ command: CommandID, in context: CommandContext) -> Bool {
-        let count = context.selectedIdentities.count
+        let count = context.selectedCount
         switch command {
         case .copyName, .copyNamespacedName, .copyReference, .selectAll,
             .focusFilter:
@@ -411,9 +474,11 @@ public enum CommandValidator {
         case .delete:
             return context.firstResponder == .resourceTable && count > 0
         case .scale:
-            return context.firstResponder == .resourceTable && count == 1 && isScalable(context.selectedIdentities[0])
+            return context.firstResponder == .resourceTable && count == 1
+                && isScalable(context)
         case .restart:
-            return context.firstResponder == .resourceTable && count == 1 && supportsRestart(context.selectedIdentities[0])
+            return context.firstResponder == .resourceTable && count == 1
+                && supportsRestart(context)
         case .editMetadata:
             return context.firstResponder == .resourceTable && count == 1
         case .copyName, .copyNamespacedName, .copyReference:
@@ -426,13 +491,19 @@ public enum CommandValidator {
         }
     }
 
-    private static func isScalable(_ identity: ResourceIdentity) -> Bool {
-        !identity.namespace.isEmpty
-            && ["deployments", "statefulsets", "replicasets"].contains(identity.resource)
+    private static func isScalable(_ context: CommandContext) -> Bool {
+        guard context.selectionIsNamespaced || context.selectedIdentities.first.map({
+            !$0.namespace.isEmpty
+        }) == true else { return false }
+        return context.selectionGVR.map {
+            ["deployments", "statefulsets", "replicasets"].contains($0.resource)
+        } == true
     }
 
-    private static func supportsRestart(_ identity: ResourceIdentity) -> Bool {
-        identity.group == "apps" && identity.version == "v1"
-            && ["deployments", "statefulsets", "daemonsets"].contains(identity.resource)
+    private static func supportsRestart(_ context: CommandContext) -> Bool {
+        context.selectionGVR.map {
+            $0.group == "apps" && $0.version == "v1"
+                && ["deployments", "statefulsets", "daemonsets"].contains($0.resource)
+        } == true
     }
 }

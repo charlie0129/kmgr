@@ -137,6 +137,58 @@ public struct ResourceDeleteOptions: Hashable, Sendable {
     }
 }
 
+/// Immutable engine-owned selection used by bounded confirmation and direct
+/// deletion. The client retains no complete identity array for this path.
+public struct ResourceSelectionDeleteReference: Hashable, Sendable {
+    public var sessionID: String
+    public var viewID: String
+    public var token: String
+    public var selectedCount: UInt64
+    public var gvr: GVR
+
+    public init(
+        sessionID: String,
+        viewID: String,
+        token: String,
+        selectedCount: UInt64,
+        gvr: GVR
+    ) {
+        self.sessionID = sessionID
+        self.viewID = viewID
+        self.token = token
+        self.selectedCount = selectedCount
+        self.gvr = gvr
+    }
+}
+
+/// Exact, bounded facts for one destructive confirmation. `hiddenCount` was
+/// computed by the engine against `currentRevision`; it is never inferred from
+/// the bounded preview or the local viewport.
+public struct ResourceSelectionDeletePreparation: Hashable, Sendable {
+    public var selection: ResourceSelectionDeleteReference
+    public var currentRevision: ResourceSelectionRevision
+    public var hiddenCount: UInt64
+    public var expiresAt: Date
+    public var preview: [ResourceDeleteTarget]
+    public var previewTruncated: Bool
+
+    public init(
+        selection: ResourceSelectionDeleteReference,
+        currentRevision: ResourceSelectionRevision,
+        hiddenCount: UInt64,
+        expiresAt: Date,
+        preview: [ResourceDeleteTarget],
+        previewTruncated: Bool
+    ) {
+        self.selection = selection
+        self.currentRevision = currentRevision
+        self.hiddenCount = hiddenCount
+        self.expiresAt = expiresAt
+        self.preview = preview
+        self.previewTruncated = previewTruncated
+    }
+}
+
 public struct ResourceMetadataChanges: Hashable, Sendable {
     public var labels: [String: String]
     public var annotations: [String: String]
@@ -165,6 +217,17 @@ public struct ResourceMetadataChanges: Hashable, Sendable {
 /// accepted them. The operation ID is present on every progress value and can
 /// be passed to `cancelOperation` for an explicit user cancellation.
 public protocol ResourceOperationProviding: Sendable {
+    func prepareDeleteSelection(
+        selection: ResourceSelectionDeleteReference,
+        currentRevision: ResourceSelectionRevision,
+        previewLimit: Int
+    ) async throws -> ResourceSelectionDeletePreparation
+
+    func deleteSelection(
+        selection: ResourceSelectionDeleteReference,
+        options: ResourceDeleteOptions
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error>
+
     func deleteResources(
         targets: [ResourceDeleteTarget],
         options: ResourceDeleteOptions
@@ -192,4 +255,31 @@ public protocol ResourceOperationProviding: Sendable {
         operationID: String,
         cancelNotStartedOnly: Bool
     ) async throws
+}
+
+public extension ResourceOperationProviding {
+    func prepareDeleteSelection(
+        selection: ResourceSelectionDeleteReference,
+        currentRevision: ResourceSelectionRevision,
+        previewLimit: Int
+    ) async throws -> ResourceSelectionDeletePreparation {
+        throw ClusterManagerIssue(
+            category: .unavailable,
+            reason: "SelectionDeleteUnavailable",
+            message: "This operation provider does not support token-backed selection deletion.",
+            operation: "prepare selection deletion"
+        )
+    }
+
+    func deleteSelection(
+        selection: ResourceSelectionDeleteReference,
+        options: ResourceDeleteOptions
+    ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
+        throw ClusterManagerIssue(
+            category: .unavailable,
+            reason: "SelectionDeleteUnavailable",
+            message: "This operation provider does not support token-backed selection deletion.",
+            operation: "delete selection"
+        )
+    }
 }

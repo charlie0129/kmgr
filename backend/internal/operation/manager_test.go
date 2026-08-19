@@ -3,11 +3,17 @@ package operation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/charlie0129/kmgr/backend/internal/object"
+	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const highCardinalityOperationItems = 100_000
@@ -454,6 +460,290 @@ func TestManagerHighCardinalityProgressIsLinearAndExactlyReplayable(t *testing.T
 	if status.State != StateSucceeded || status.CompletedItems != highCardinalityOperationItems ||
 		len(status.Items) != highCardinalityOperationItems || len(seen) != highCardinalityOperationItems {
 		t.Fatalf("large terminal status state=%v completed=%d items=%d seen=%d", status.State, status.CompletedItems, len(status.Items), len(seen))
+	}
+}
+
+func TestManagerAggregateProgressRetainsOnlyBoundedFailureDetails(t *testing.T) {
+	const total = 10_000
+	manager := NewManager()
+	t.Cleanup(manager.Close)
+	operation, err := manager.StartAggregate(
+		context.Background(), "aggregate-delete", "delete", "session", total,
+		func(_ context.Context, report AggregateReporter) error {
+			for index := range total {
+				identity := operationTestIdentity(
+					fmt.Sprintf("pod-%d", index), fmt.Sprintf("uid-%d", index),
+				)
+				if !report(identity, ItemUpdate{State: ItemStateRunning}) {
+					return errors.New("aggregate running claim was rejected")
+				}
+				update := ItemUpdate{State: ItemStateSucceeded}
+				if index%10 == 0 {
+					update = ItemUpdate{State: ItemStateFailed, Err: errors.New("delete failed")}
+				}
+				if !report(identity, update) {
+					return errors.New("aggregate terminal report was rejected")
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-operation.Done()
+	status := operation.Status()
+	if !status.AggregateOnly || status.CompletedItems != total || status.TotalItems != total ||
+		status.State != StatePartiallySucceeded {
+		t.Fatalf("aggregate status = %#v", status)
+	}
+	if len(status.Items) != DefaultMaxAggregateResults ||
+		status.RetainedItemResults != DefaultMaxAggregateResults ||
+		status.OmittedItemResults != total/10-DefaultMaxAggregateResults {
+		t.Fatalf(
+			"retained=%d retained count=%d omitted=%d",
+			len(status.Items), status.RetainedItemResults, status.OmittedItemResults,
+		)
+	}
+	if status.Items[0].Identity.UID != "uid-0" || status.Items[1].Identity.UID != "uid-10" {
+		t.Fatalf("failure detail order = %#v", status.Items[:2])
+	}
+	_, first, next, _ := operation.Progress(0, 17)
+	if len(first) != 17 || next != 17 {
+		t.Fatalf("first progress page = %d, next = %d", len(first), next)
+	}
+	if operation.CancelNotStarted() {
+		t.Fatal("aggregate operation accepted unsupported pending-only cancellation")
+	}
+}
+
+func TestManagerAggregateRunnerExitAccountsForUnnamedRemainder(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Close)
+	operation, err := manager.StartAggregate(
+		context.Background(), "aggregate-short", "delete", "session", 4,
+		func(_ context.Context, report AggregateReporter) error {
+			identity := operationTestIdentity("pod", "uid")
+			if !report(identity, ItemUpdate{State: ItemStateSucceeded}) {
+				t.Fatal("aggregate success report was rejected")
+			}
+			return errors.New("selection page failed")
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-operation.Done()
+	status := operation.Status()
+	if status.State != StatePartiallySucceeded || status.CompletedItems != 4 ||
+		status.OmittedItemResults != 3 || status.Err == nil {
+		t.Fatalf("aggregate short status = %#v", status)
+	}
+}
+
+func TestManagerAggregateSnapshotsBoundedErrorsWithoutHiddenPayloads(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Close)
+	itemErr := &aggregateHiddenPayloadError{
+		message: strings.Repeat("failure ", maxAggregateErrorTextBytes),
+		payload: make([]byte, DefaultMaxAggregateBytes*2),
+	}
+	runnerErr := &aggregateHiddenPayloadError{
+		message: strings.Repeat("runner failure ", maxAggregateErrorTextBytes),
+		payload: make([]byte, DefaultMaxAggregateBytes*2),
+	}
+	operation, err := manager.StartAggregate(
+		context.Background(), "aggregate-error-snapshot", "delete", "session", 2,
+		func(_ context.Context, report AggregateReporter) error {
+			if !report(
+				operationTestIdentity("pod", "uid"),
+				ItemUpdate{State: ItemStateFailed, Err: itemErr},
+			) {
+				return errors.New("aggregate failure report was rejected")
+			}
+			return runnerErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-operation.Done()
+	status := operation.Status()
+	if len(status.Items) != 1 || status.Items[0].Err == nil || status.Err == nil {
+		t.Fatalf("aggregate error status = %#v", status)
+	}
+	var retainedPayload *aggregateHiddenPayloadError
+	if errors.As(status.Items[0].Err, &retainedPayload) ||
+		errors.As(status.Err, &retainedPayload) {
+		t.Fatal("aggregate status retained a concrete hidden-payload error")
+	}
+	if len(status.Items[0].Err.Error()) > maxAggregateErrorTextBytes ||
+		len(status.Err.Error()) > maxAggregateErrorTextBytes ||
+		!strings.HasPrefix(status.Err.Error(), "runner failure ") {
+		t.Fatalf(
+			"snapshot item bytes=%d terminal bytes=%d",
+			len(status.Items[0].Err.Error()), len(status.Err.Error()),
+		)
+	}
+	if status.retainedItemBytes != retainedAggregateItemBytes(status.Items[0]) ||
+		status.retainedItemBytes > DefaultMaxAggregateBytes {
+		t.Fatalf(
+			"aggregate retained bytes = %d, maximum = %d",
+			status.retainedItemBytes, DefaultMaxAggregateBytes,
+		)
+	}
+}
+
+func TestAggregateAccountingConstantsCoverRetainedStructures(t *testing.T) {
+	if size := int(unsafe.Sizeof(ItemStatus{})); size > aggregateItemSlotBytes {
+		t.Fatalf("ItemStatus size = %d, reserved slot = %d", size, aggregateItemSlotBytes)
+	}
+	if size := int(unsafe.Sizeof(aggregateTextError{})); size > aggregateTextErrorBytes {
+		t.Fatalf("text error size = %d, reserved = %d", size, aggregateTextErrorBytes)
+	}
+	fixedAPIStatusSize := int(unsafe.Sizeof(aggregateAPIStatusSnapshot{})) +
+		int(unsafe.Sizeof(metav1.StatusDetails{}))
+	if fixedAPIStatusSize > aggregateAPIStatusFixedBytes {
+		t.Fatalf(
+			"API status fixed size = %d, reserved = %d",
+			fixedAPIStatusSize, aggregateAPIStatusFixedBytes,
+		)
+	}
+	if size := int(unsafe.Sizeof(metav1.StatusCause{})); size > aggregateAPIStatusCauseBytes {
+		t.Fatalf("API status cause size = %d, reserved = %d", size, aggregateAPIStatusCauseBytes)
+	}
+	snapshot := newAggregateAPIStatusSnapshot(metav1.Status{
+		Reason: metav1.StatusReasonForbidden, Code: 403,
+		Details: &metav1.StatusDetails{
+			Causes: make([]metav1.StatusCause, maxAggregateAPIStatusCauses),
+		},
+	}).(*aggregateAPIStatusSnapshot)
+	if len(snapshot.status.Details.Causes) != 0 ||
+		cap(snapshot.status.Details.Causes) != maxAggregateAPIStatusCauses ||
+		snapshot.aggregateRetainedBytes() < aggregateAPIStatusFixedBytes+
+			maxAggregateAPIStatusCauses*aggregateAPIStatusCauseBytes {
+		t.Fatalf(
+			"blank cause accounting len=%d cap=%d bytes=%d",
+			len(snapshot.status.Details.Causes), cap(snapshot.status.Details.Causes),
+			snapshot.aggregateRetainedBytes(),
+		)
+	}
+}
+
+func TestAggregateAPIStatusSnapshotPreservesStructuredDiagnostics(t *testing.T) {
+	const (
+		rawStatusMessage = "raw server response secret"
+		rawCauseMessage  = "raw validation cause secret"
+	)
+	tests := []struct {
+		name          string
+		reason        metav1.StatusReason
+		code          int32
+		wantCategory  kmgrv1.ErrorCategory
+		wantReason    string
+		wantRetryable bool
+		retryAfter    int32
+	}{
+		{
+			name: "forbidden", reason: metav1.StatusReasonForbidden, code: 403,
+			wantCategory: kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHORIZATION,
+			wantReason:   "Forbidden",
+		},
+		{
+			name: "unauthorized", reason: metav1.StatusReasonUnauthorized, code: 401,
+			wantCategory: kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION,
+			wantReason:   "AuthenticationRejected",
+		},
+		{
+			name: "not found", reason: metav1.StatusReasonNotFound, code: 404,
+			wantCategory: kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND,
+			wantReason:   "NotFound",
+		},
+		{
+			name: "conflict", reason: metav1.StatusReasonConflict, code: 409,
+			wantCategory: kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT,
+			wantReason:   "ApplyConflict",
+		},
+		{
+			name: "retryable timeout", reason: metav1.StatusReasonServerTimeout, code: 504,
+			wantCategory: kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL,
+			wantReason:   "ServerTimeout", wantRetryable: true, retryAfter: 7,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			original := &apierrors.StatusError{ErrStatus: metav1.Status{
+				Status: metav1.StatusFailure, Message: rawStatusMessage,
+				Reason: test.reason, Code: test.code,
+				Details: &metav1.StatusDetails{
+					Name: "settings", Group: "apps", Kind: "Deployment",
+					RetryAfterSeconds: test.retryAfter,
+					Causes: []metav1.StatusCause{{
+						Type: metav1.CauseTypeForbidden, Field: "spec.replicas",
+						Message: rawCauseMessage,
+					}},
+				},
+			}}
+			snapshot := snapshotAggregateError(original)
+			structured := structuredOperationError(snapshot, nil, "delete")
+			if structured.GetCategory() != test.wantCategory ||
+				structured.GetReason() != test.wantReason ||
+				structured.GetHttpStatusCode() != test.code ||
+				structured.GetRetryable() != test.wantRetryable ||
+				structured.GetRetryAfterMs() != int64(test.retryAfter)*1000 {
+				t.Fatalf("structured snapshot = %#v", structured)
+			}
+			details := structured.GetKubernetesStatus()
+			if details.GetName() != "settings" || details.GetGroup() != "apps" ||
+				details.GetKind() != "Deployment" || len(details.GetCauses()) != 1 ||
+				details.GetCauses()[0].GetReason() != "FieldValueForbidden" ||
+				details.GetCauses()[0].GetField() != "spec.replicas" {
+				t.Fatalf("safe snapshot details = %#v", details)
+			}
+			if encoded := structured.String(); strings.Contains(encoded, rawStatusMessage) ||
+				strings.Contains(encoded, rawCauseMessage) {
+				t.Fatal("structured snapshot retained raw Kubernetes messages")
+			}
+		})
+	}
+}
+
+type aggregateHiddenPayloadError struct {
+	message string
+	payload []byte
+}
+
+func (e *aggregateHiddenPayloadError) Error() string { return e.message }
+
+func TestManagerAggregateCancellationCancelsWholeCounterOnlyOperation(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Close)
+	started := make(chan struct{})
+	operation, err := manager.StartAggregate(
+		context.Background(), "aggregate-cancel", "delete", "session", 4,
+		func(ctx context.Context, report AggregateReporter) error {
+			if !report(
+				operationTestIdentity("pod", "uid"),
+				ItemUpdate{State: ItemStateRunning},
+			) {
+				return errors.New("aggregate running claim was rejected")
+			}
+			close(started)
+			<-ctx.Done()
+			return context.Cause(ctx)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	operation.Cancel()
+	<-operation.Done()
+	status := operation.Status()
+	if status.State != StateCancelled || status.CompletedItems != 4 ||
+		status.OmittedItemResults != 4 || !errors.Is(status.Err, context.Canceled) ||
+		len(status.Items) != 0 {
+		t.Fatalf("aggregate cancellation status = %#v", status)
 	}
 }
 

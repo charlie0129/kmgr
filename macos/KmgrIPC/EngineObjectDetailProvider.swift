@@ -605,6 +605,8 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                         ? EngineClusterContextProvider.issue(from: result.error) : nil
                 )
             },
+            aggregateOnly: value.aggregateOnly,
+            omittedItemResults: value.omittedItemResults,
             issue: value.hasError ? EngineClusterContextProvider.issue(from: value.error) : nil
         )
     }

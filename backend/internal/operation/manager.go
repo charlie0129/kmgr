@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charlie0129/kmgr/backend/internal/object"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 type State uint8
@@ -40,17 +45,27 @@ type ItemStatus struct {
 }
 
 type Status struct {
-	OperationID    string
-	Operation      string
-	SessionID      string
-	ContextName    string
-	Identity       object.Identity
-	State          State
-	CompletedItems uint32
-	TotalItems     uint32
-	Items          []ItemStatus
-	Err            error
-	Revision       uint64
+	OperationID         string
+	Operation           string
+	SessionID           string
+	ContextName         string
+	Identity            object.Identity
+	State               State
+	CompletedItems      uint32
+	TotalItems          uint32
+	Items               []ItemStatus
+	AggregateOnly       bool
+	RetainedItemResults uint32
+	OmittedItemResults  uint32
+	Err                 error
+	Revision            uint64
+
+	// Aggregate-only counters never leave the engine. They replace the dense
+	// one-status-per-identity array for token-backed operations.
+	succeededItems    uint32
+	failedItems       uint32
+	cancelledItems    uint32
+	retainedItemBytes int
 }
 
 // TrackedOperation retains only progress, identity, and safe errors. Mutation
@@ -87,6 +102,19 @@ func (o *TrackedOperation) Snapshot() (Status, <-chan struct{}) {
 func (o *TrackedOperation) Progress(offset, maxItems int) (Status, []ItemStatus, int, <-chan struct{}) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
+	if o.status.AggregateOnly {
+		if offset < 0 || offset > len(o.status.Items) {
+			offset = 0
+		}
+		if maxItems < 1 {
+			maxItems = 1
+		}
+		end := min(offset+maxItems, len(o.status.Items))
+		items := append([]ItemStatus(nil), o.status.Items[offset:end]...)
+		summary := o.status
+		summary.Items = nil
+		return summary, items, end, o.changed
+	}
 	if offset < 0 || offset > len(o.completedOrder) {
 		offset = 0
 	}
@@ -131,6 +159,12 @@ func (o *TrackedOperation) SetContextName(value string) {
 func (o *TrackedOperation) CancelNotStarted() bool {
 	accepted := false
 	o.update(func(status *Status) bool {
+		if status.AggregateOnly {
+			// Aggregate operations deliberately do not retain the queue/running
+			// state of every identity. Exact pending-only cancellation is therefore
+			// unavailable; callers may still request ordinary operation cancellation.
+			return false
+		}
 		for index := range status.Items {
 			if status.Items[index].State != ItemStatePending {
 				continue
@@ -138,6 +172,7 @@ func (o *TrackedOperation) CancelNotStarted() bool {
 			status.Items[index].State = ItemStateCancelled
 			status.Items[index].Err = context.Canceled
 			status.CompletedItems++
+			status.RetainedItemResults++
 			o.completedOrder = append(o.completedOrder, index)
 			accepted = true
 		}
@@ -182,6 +217,13 @@ type ItemUpdate struct {
 type Reporter func(index int, update ItemUpdate) bool
 type MultiRunner func(context.Context, Reporter) error
 
+// AggregateReporter atomically claims work and reports terminal results
+// without assigning a dense manager index to every identity. Running reports
+// are claims only; terminal failures/cancellations may be retained as bounded
+// detail deltas, while successful identities are represented by counters.
+type AggregateReporter func(identity object.Identity, update ItemUpdate) bool
+type AggregateRunner func(context.Context, AggregateReporter) error
+
 type Manager struct {
 	mu                sync.RWMutex
 	operations        map[string]*TrackedOperation
@@ -196,9 +238,19 @@ type Manager struct {
 }
 
 const (
-	DefaultMaxTrackedOperations  = 512
-	DefaultMaxTerminalOperations = 256
-	DefaultTerminalRetention     = 15 * time.Minute
+	DefaultMaxTrackedOperations   = 512
+	DefaultMaxTerminalOperations  = 256
+	DefaultTerminalRetention      = 15 * time.Minute
+	DefaultMaxAggregateResults    = 256
+	DefaultMaxAggregateBytes      = 1 << 20
+	maxAggregateErrorTextBytes    = 16 << 10
+	aggregateItemSlotBytes        = 256
+	aggregateTextErrorBytes       = 64
+	aggregateAPIStatusFixedBytes  = 1 << 10
+	aggregateAPIStatusCauseBytes  = 128
+	maxAggregateAPIStatusCauses   = 64
+	maxAggregateStatusReasonBytes = 256
+	maxAggregateStatusDetailBytes = 2 << 10
 )
 
 var (
@@ -300,57 +352,17 @@ func (m *Manager) StartMany(
 		items[index] = ItemStatus{Identity: identity, State: ItemStatePending}
 	}
 
-	// Keep the caller as the direct parent so its exact Deadline remains
-	// visible to Kubernetes. Manager shutdown is the second cancellation
-	// source and is bridged with its original cause.
-	operationParent, releaseParent := context.WithCancelCause(parent)
-	stopManager := context.AfterFunc(m.ctx, func() {
-		releaseParent(context.Cause(m.ctx))
+	operation, ctx, finish, err := m.register(parent, Status{
+		OperationID: operationID, Operation: operationName, SessionID: identities[0].SessionID,
+		Identity: identities[0], State: StatePending, TotalItems: uint32(len(items)),
+		Items: items, Revision: 1,
 	})
-	ctx, cancel := context.WithCancel(operationParent)
-	operation := &TrackedOperation{
-		status: Status{
-			OperationID: operationID, Operation: operationName, SessionID: identities[0].SessionID,
-			Identity: identities[0], State: StatePending, TotalItems: uint32(len(items)),
-			Items: items, Revision: 1,
-		},
-		done: make(chan struct{}), changed: make(chan struct{}), cancel: cancel,
+	if err != nil {
+		return nil, err
 	}
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		stopManager()
-		releaseParent(context.Canceled)
-		cancel()
-		return nil, ErrManagerClosed
-	}
-	m.evictTerminalLocked(m.now())
-	if _, duplicate := m.operations[operationID]; duplicate {
-		m.mu.Unlock()
-		stopManager()
-		releaseParent(context.Canceled)
-		cancel()
-		return nil, fmt.Errorf("operation ID %q already exists", operationID)
-	}
-	m.evictForCapacityLocked()
-	if m.maxTracked >= 0 && len(m.operations) >= m.maxTracked {
-		m.mu.Unlock()
-		stopManager()
-		releaseParent(context.Canceled)
-		cancel()
-		return nil, ErrManagerFull
-	}
-	m.operations[operationID] = operation
-	m.mu.Unlock()
 
 	go func() {
-		defer func() {
-			stopManager()
-			releaseParent(context.Canceled)
-			cancel()
-			m.recordTerminal(operationID, operation)
-			close(operation.done)
-		}()
+		defer finish()
 		operation.update(func(status *Status) bool {
 			if status.State != StatePending || status.CompletedItems == status.TotalItems {
 				return false
@@ -375,6 +387,7 @@ func (m *Manager) StartMany(
 				status.Items[index].Err = update.Err
 				if itemTerminal(update.State) {
 					status.CompletedItems++
+					status.RetainedItemResults++
 					operation.completedOrder = append(operation.completedOrder, index)
 				}
 				return true
@@ -399,6 +412,7 @@ func (m *Manager) StartMany(
 					status.Items[index].Err = errors.New("operation worker exited without reporting a result")
 				}
 				status.CompletedItems++
+				status.RetainedItemResults++
 				operation.completedOrder = append(operation.completedOrder, index)
 			}
 			status.State = aggregateState(status.Items, cause)
@@ -409,6 +423,183 @@ func (m *Manager) StartMany(
 		})
 	}()
 	return operation, nil
+}
+
+// StartAggregate tracks high-cardinality work by counters plus a bounded set
+// of useful non-success details. It never allocates one manager slot per item.
+func (m *Manager) StartAggregate(
+	parent context.Context,
+	operationID string,
+	operationName string,
+	sessionID string,
+	totalItems uint32,
+	run AggregateRunner,
+) (*TrackedOperation, error) {
+	if parent == nil {
+		return nil, errors.New("operation parent context must not be nil")
+	}
+	if operationID == "" {
+		return nil, errors.New("operation ID must not be empty")
+	}
+	if operationName == "" {
+		return nil, errors.New("operation name must not be empty")
+	}
+	if sessionID == "" {
+		return nil, errors.New("operation session ID must not be empty")
+	}
+	if totalItems == 0 {
+		return nil, errors.New("operation must contain at least one item")
+	}
+	if run == nil {
+		return nil, errors.New("aggregate operation runner must not be nil")
+	}
+
+	operation, ctx, finish, err := m.register(parent, Status{
+		OperationID: operationID, Operation: operationName, SessionID: sessionID,
+		State: StatePending, TotalItems: totalItems, AggregateOnly: true, Revision: 1,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		defer finish()
+		operation.update(func(status *Status) bool {
+			if status.State != StatePending {
+				return false
+			}
+			status.State = StateRunning
+			return true
+		})
+		report := func(identity object.Identity, update ItemUpdate) bool {
+			if update.State == ItemStateRunning {
+				return context.Cause(ctx) == nil
+			}
+			if !itemTerminal(update.State) || identity.Validate() != nil {
+				return false
+			}
+			return operation.update(func(status *Status) bool {
+				if status.CompletedItems >= status.TotalItems {
+					return false
+				}
+				status.CompletedItems++
+				switch update.State {
+				case ItemStateSucceeded:
+					status.succeededItems++
+				case ItemStateFailed:
+					status.failedItems++
+				case ItemStateSkipped, ItemStateCancelled:
+					status.cancelledItems++
+				}
+				if update.State != ItemStateSucceeded {
+					item := ItemStatus{
+						Identity: identity, State: update.State,
+						NewResourceVersion: update.NewResourceVersion,
+					}
+					newCapacity, capacityBytes := aggregateItemCapacityGrowth(status.Items)
+					remainingBytes := DefaultMaxAggregateBytes - status.retainedItemBytes
+					minimumItemBytes := capacityBytes + retainedAggregateItemDynamicBytes(item)
+					if len(status.Items) < DefaultMaxAggregateResults &&
+						minimumItemBytes <= remainingBytes {
+						item.Err = snapshotAggregateError(update.Err)
+						itemBytes := capacityBytes + retainedAggregateItemDynamicBytes(item)
+						if itemBytes > remainingBytes {
+							status.OmittedItemResults++
+							return true
+						}
+						if newCapacity > cap(status.Items) {
+							resized := make([]ItemStatus, len(status.Items), newCapacity)
+							copy(resized, status.Items)
+							status.Items = resized
+						}
+						status.Items = append(status.Items, item)
+						status.retainedItemBytes += itemBytes
+						status.RetainedItemResults++
+					} else {
+						status.OmittedItemResults++
+					}
+				}
+				return true
+			})
+		}
+		runnerErr := run(ctx, report)
+		runnerErrSnapshot := snapshotAggregateError(runnerErr)
+		operation.update(func(status *Status) bool {
+			cause := context.Cause(ctx)
+			causeSnapshot := snapshotAggregateError(cause)
+			remaining := status.TotalItems - status.CompletedItems
+			if remaining > 0 {
+				status.CompletedItems += remaining
+				status.OmittedItemResults += remaining
+				if cause != nil {
+					status.cancelledItems += remaining
+				} else {
+					status.failedItems += remaining
+				}
+			}
+			status.State = aggregateCounterState(status, cause)
+			if status.State != StateSucceeded {
+				status.Err = firstOperationError(
+					status.Items, runnerErrSnapshot, causeSnapshot,
+				)
+				if status.Err == nil {
+					status.Err = errors.New("one or more operation items did not succeed")
+				}
+			}
+			return true
+		})
+	}()
+	return operation, nil
+}
+
+// register installs common operation lifetime and capacity ownership. The
+// returned finish function must run exactly once from the operation goroutine.
+func (m *Manager) register(
+	parent context.Context,
+	initial Status,
+) (*TrackedOperation, context.Context, func(), error) {
+	// Keep the caller as the direct parent so its exact Deadline remains
+	// visible to Kubernetes. Manager shutdown is the second cancellation
+	// source and is bridged with its original cause.
+	operationParent, releaseParent := context.WithCancelCause(parent)
+	stopManager := context.AfterFunc(m.ctx, func() {
+		releaseParent(context.Cause(m.ctx))
+	})
+	ctx, cancel := context.WithCancel(operationParent)
+	operation := &TrackedOperation{
+		status: initial, done: make(chan struct{}), changed: make(chan struct{}), cancel: cancel,
+	}
+	reject := func(err error) (*TrackedOperation, context.Context, func(), error) {
+		stopManager()
+		releaseParent(context.Canceled)
+		cancel()
+		return nil, nil, nil, err
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return reject(ErrManagerClosed)
+	}
+	m.evictTerminalLocked(m.now())
+	if _, duplicate := m.operations[initial.OperationID]; duplicate {
+		m.mu.Unlock()
+		return reject(fmt.Errorf("operation ID %q already exists", initial.OperationID))
+	}
+	m.evictForCapacityLocked()
+	if m.maxTracked >= 0 && len(m.operations) >= m.maxTracked {
+		m.mu.Unlock()
+		return reject(ErrManagerFull)
+	}
+	m.operations[initial.OperationID] = operation
+	m.mu.Unlock()
+	finish := func() {
+		stopManager()
+		releaseParent(context.Canceled)
+		cancel()
+		m.recordTerminal(initial.OperationID, operation)
+		close(operation.done)
+	}
+	return operation, ctx, finish, nil
 }
 
 func validItemTransition(current, next ItemState) bool {
@@ -451,6 +642,267 @@ func aggregateState(items []ItemStatus, cause error) State {
 		return StateCancelled
 	}
 	return StateFailed
+}
+
+func aggregateCounterState(status *Status, cause error) State {
+	if status == nil || status.CompletedItems != status.TotalItems {
+		return StateFailed
+	}
+	if status.succeededItems == status.TotalItems {
+		return StateSucceeded
+	}
+	if status.succeededItems > 0 {
+		return StatePartiallySucceeded
+	}
+	if status.failedItems > 0 {
+		return StateFailed
+	}
+	if status.cancelledItems == status.TotalItems || cause != nil {
+		return StateCancelled
+	}
+	return StateFailed
+}
+
+// aggregateItemSlotBytes is deliberately larger than ItemStatus on supported
+// architectures. Explicit capacity growth plus this reservation accounts for
+// the complete slice backing allocation, including unused capacity, instead
+// of assuming append capacity equals the current result count.
+func aggregateItemCapacityGrowth(items []ItemStatus) (int, int) {
+	if len(items) < cap(items) {
+		return cap(items), 0
+	}
+	if cap(items) >= DefaultMaxAggregateResults {
+		return cap(items), 0
+	}
+	newCapacity := max(1, cap(items)*2)
+	newCapacity = min(newCapacity, DefaultMaxAggregateResults)
+	return newCapacity, (newCapacity - cap(items)) * aggregateItemSlotBytes
+}
+
+func retainedAggregateItemBytes(item ItemStatus) int {
+	return aggregateItemSlotBytes + retainedAggregateItemDynamicBytes(item)
+}
+
+func retainedAggregateItemDynamicBytes(item ItemStatus) int {
+	bytes := len(item.Identity.SessionID) + len(item.Identity.Group) + len(item.Identity.Version) +
+		len(item.Identity.Resource) + len(item.Identity.Namespace) + len(item.Identity.Name) +
+		len(item.Identity.UID) + len(item.NewResourceVersion)
+	if item.Err != nil {
+		bytes += retainedAggregateErrorBytes(item.Err)
+	}
+	return bytes
+}
+
+type aggregateRetainedError interface {
+	error
+	aggregateRetainedBytes() int
+}
+
+type aggregateTextError struct {
+	text string
+}
+
+func (e *aggregateTextError) Error() string { return e.text }
+
+func (e *aggregateTextError) aggregateRetainedBytes() int {
+	return aggregateTextErrorBytes + len(e.text)
+}
+
+type aggregateAPIStatusSnapshot struct {
+	text      string
+	status    metav1.Status
+	textBytes int
+}
+
+var _ apierrors.APIStatus = (*aggregateAPIStatusSnapshot)(nil)
+
+func (e *aggregateAPIStatusSnapshot) Error() string { return e.text }
+
+func (e *aggregateAPIStatusSnapshot) Status() metav1.Status {
+	result := e.status
+	if e.status.Details != nil {
+		details := *e.status.Details
+		details.Causes = append([]metav1.StatusCause(nil), e.status.Details.Causes...)
+		result.Details = &details
+	}
+	return result
+}
+
+func (e *aggregateAPIStatusSnapshot) aggregateRetainedBytes() int {
+	causeCapacity := 0
+	if e.status.Details != nil {
+		causeCapacity = cap(e.status.Details.Causes)
+	}
+	return aggregateAPIStatusFixedBytes +
+		causeCapacity*aggregateAPIStatusCauseBytes + e.textBytes
+}
+
+func retainedAggregateErrorBytes(err error) int {
+	if retained, ok := err.(aggregateRetainedError); ok {
+		return retained.aggregateRetainedBytes()
+	}
+	// Safe process-wide sentinels allocate no per-operation payload. Charging
+	// one text-error header and their message is conservative and keeps this
+	// helper safe if another bounded error type reaches it later.
+	return aggregateTextErrorBytes + len(err.Error())
+}
+
+// snapshotAggregateError severs every reference to a concrete provider error
+// before aggregate status can retain it. Kubernetes statuses preserve only
+// bounded machine semantics and safe detail fields; ordinary errors become
+// owned bounded text. Raw API messages, response bodies, and other hidden
+// payloads never enter retained operation state.
+func snapshotAggregateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, ErrManagerClosed):
+		return ErrManagerClosed
+	case errors.Is(err, ErrManagerFull):
+		return ErrManagerFull
+	case errors.Is(err, object.ErrInvalidIdentity):
+		return object.ErrInvalidIdentity
+	case errors.Is(err, object.ErrInvalidYAML):
+		return object.ErrInvalidYAML
+	case errors.Is(err, object.ErrYAMLForceOwnershipUnsupported):
+		return object.ErrYAMLForceOwnershipUnsupported
+	case errors.Is(err, object.ErrUnsupportedDataObject):
+		return object.ErrUnsupportedDataObject
+	case errors.Is(err, object.ErrSessionNotFound):
+		return object.ErrSessionNotFound
+	}
+	var apiStatus apierrors.APIStatus
+	if errors.As(err, &apiStatus) {
+		return newAggregateAPIStatusSnapshot(apiStatus.Status())
+	}
+	return &aggregateTextError{text: boundedAggregateErrorText(err.Error())}
+}
+
+type aggregateErrorTextBudget struct {
+	remaining int
+	used      int
+}
+
+func (b *aggregateErrorTextBudget) take(value string, fieldLimit int) string {
+	limit := min(b.remaining, fieldLimit)
+	if limit <= 0 || value == "" {
+		return ""
+	}
+	result := boundedOwnedUTF8Text(value, limit)
+	b.remaining -= len(result)
+	b.used += len(result)
+	return result
+}
+
+func newAggregateAPIStatusSnapshot(source metav1.Status) error {
+	budget := aggregateErrorTextBudget{remaining: maxAggregateErrorTextBytes}
+	result := &aggregateAPIStatusSnapshot{}
+	result.text = budget.take(
+		safeAggregateAPIStatusText(source.Reason, source.Code),
+		maxAggregateErrorTextBytes,
+	)
+	result.status = metav1.Status{
+		Status: metav1.StatusFailure,
+		Reason: metav1.StatusReason(budget.take(
+			string(source.Reason), maxAggregateStatusReasonBytes,
+		)),
+		Code: source.Code,
+	}
+	if source.Details != nil {
+		sourceDetails := source.Details
+		details := &metav1.StatusDetails{
+			Name:  budget.take(sourceDetails.Name, maxAggregateStatusDetailBytes),
+			Group: budget.take(sourceDetails.Group, maxAggregateStatusDetailBytes),
+			Kind:  budget.take(sourceDetails.Kind, maxAggregateStatusDetailBytes),
+			UID: types.UID(budget.take(
+				string(sourceDetails.UID), maxAggregateStatusDetailBytes,
+			)),
+			RetryAfterSeconds: sourceDetails.RetryAfterSeconds,
+		}
+		causeLimit := min(len(sourceDetails.Causes), maxAggregateAPIStatusCauses)
+		details.Causes = make([]metav1.StatusCause, 0, causeLimit)
+		for _, sourceCause := range sourceDetails.Causes[:causeLimit] {
+			cause := metav1.StatusCause{
+				Type: metav1.CauseType(budget.take(
+					string(sourceCause.Type), maxAggregateStatusReasonBytes,
+				)),
+				Field: budget.take(sourceCause.Field, maxAggregateStatusDetailBytes),
+			}
+			if cause.Type == "" && cause.Field == "" {
+				continue
+			}
+			details.Causes = append(details.Causes, cause)
+		}
+		result.status.Details = details
+	}
+	result.textBytes = budget.used
+	return result
+}
+
+func safeAggregateAPIStatusText(reason metav1.StatusReason, code int32) string {
+	switch reason {
+	case metav1.StatusReasonForbidden:
+		return "Kubernetes API request was forbidden."
+	case metav1.StatusReasonUnauthorized:
+		return "Kubernetes API request was unauthorized."
+	case metav1.StatusReasonNotFound:
+		return "Kubernetes API resource was not found."
+	case metav1.StatusReasonConflict:
+		return "Kubernetes API resource changed concurrently."
+	case metav1.StatusReasonInvalid, metav1.StatusReasonBadRequest:
+		return "Kubernetes API request was invalid."
+	default:
+		if code > 0 {
+			return fmt.Sprintf("Kubernetes API request failed with HTTP status %d.", code)
+		}
+		return "Kubernetes API request failed."
+	}
+}
+
+func boundedAggregateErrorText(value string) string {
+	return boundedOwnedUTF8Text(value, maxAggregateErrorTextBytes)
+}
+
+func boundedOwnedUTF8Text(value string, maximumBytes int) string {
+	const suffix = "... [truncated]"
+	if maximumBytes <= 0 || value == "" {
+		return ""
+	}
+	truncated := len(value) > maximumBytes
+	limit := len(value)
+	marker := ""
+	if truncated {
+		limit = maximumBytes
+		if maximumBytes > len(suffix) {
+			marker = suffix
+			limit -= len(marker)
+		}
+		for limit > 0 && !utf8.RuneStart(value[limit]) {
+			limit--
+		}
+	}
+	bounded := strings.ToValidUTF8(value[:limit], "\uFFFD")
+	if truncated {
+		bounded += marker
+	}
+	if len(bounded) > maximumBytes {
+		marker = ""
+		limit = maximumBytes
+		if maximumBytes > len(suffix) {
+			marker = suffix
+			limit -= len(marker)
+		}
+		for limit > 0 && !utf8.RuneStart(bounded[limit]) {
+			limit--
+		}
+		bounded = bounded[:limit] + marker
+	}
+	return strings.Clone(bounded)
 }
 
 func firstOperationError(items []ItemStatus, values ...error) error {

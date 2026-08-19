@@ -14,6 +14,14 @@ struct ResourceColumnsRequest {
     var apply: @MainActor ([ColumnDefinition]) -> Void
 }
 
+enum DeleteResourcesRequest {
+    case explicit([ResourceDeleteTarget])
+    case selection(
+        reference: ResourceSelectionDeleteReference,
+        currentRevision: ResourceSelectionRevision
+    )
+}
+
 struct ColumnPresentationState: Hashable {
     var columnID: String
     var width: Double
@@ -237,8 +245,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onConfigureExec = { [weak self] target in
             self?.showExecConfiguration(target)
         }
-        workspaceController.onDelete = { [weak self] targets in
-            self?.showDeleteResources(targets)
+        workspaceController.onDelete = { [weak self] request in
+            self?.showDeleteResources(request)
         }
         workspaceController.onMutate = { [weak self] identity, mutation in
             self?.showResourceMutation(identity, mutation: mutation)
@@ -573,13 +581,19 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         controller.beginSheet(for: window)
     }
 
-    private func showDeleteResources(_ targets: [ResourceDeleteTarget]) {
+    private func showDeleteResources(_ request: DeleteResourcesRequest) {
         guard let window, deleteResourcesController == nil else { NSSound.beep(); return }
         let controller = DeleteResourcesWindowController(
             session: session,
-            targets: targets,
+            request: request,
             provider: operationProvider,
-            tableLayoutStore: tableLayoutStore
+            tableLayoutStore: tableLayoutStore,
+            currentSelectionRevision: { [weak workspaceController] reference, revision in
+                workspaceController?.currentSelectionRevision(
+                    reference,
+                    capturedGeneration: revision.generation
+                )
+            }
         )
         controller.onDismiss = { [weak self, weak controller] in
             guard self?.deleteResourcesController === controller else { return }
@@ -751,7 +765,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((PodExecTarget) -> Void)?
     var onConfigureExec: ((PodExecTarget) -> Void)?
-    var onDelete: (([ResourceDeleteTarget]) -> Void)?
+    var onDelete: ((DeleteResourcesRequest) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: ((ClusterWindowRestorationState) -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
@@ -885,8 +899,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onConfigureExec = { [weak self] target in
             self?.onConfigureExec?(target)
         }
-        contentController.onDelete = { [weak self] targets in
-            self?.onDelete?(targets)
+        contentController.onDelete = { [weak self] request in
+            self?.onDelete?(request)
         }
         contentController.onMutate = { [weak self] identity, mutation in
             self?.onMutate?(identity, mutation)
@@ -1419,6 +1433,26 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         return contentController.isCommandCompatible(command)
     }
 
+    func selectionScopeIsValid(
+        _ reference: ResourceSelectionDeleteReference,
+        capturedGeneration: UInt64
+    ) -> Bool {
+        contentController.selectionScopeIsValid(
+            reference,
+            capturedGeneration: capturedGeneration
+        )
+    }
+
+    func currentSelectionRevision(
+        _ reference: ResourceSelectionDeleteReference,
+        capturedGeneration: UInt64
+    ) -> ResourceSelectionRevision? {
+        contentController.currentSelectionRevision(
+            reference,
+            capturedGeneration: capturedGeneration
+        )
+    }
+
     private func performNetworkCommand(_ command: ResourceTableCommand) {
         if let action = command.subresourceNetworkAction,
             let podContainerController
@@ -1440,10 +1474,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         guard palettePresentationTask == nil else { return }
 
-        // Capture responder, scope, discovery snapshot, and full UID-pinned
-        // identities synchronously at the Command-K event. Fetching recents is
+        // Capture responder, scope, discovery snapshot, and immutable selection
+        // metadata synchronously at the Command-K event. Fetching recents is
         // asynchronous, so reading any of these values afterward could target
-        // a different selection or responder.
+        // a different selection or responder. Complete identities remain in the
+        // engine unless the activated command intrinsically needs them.
         let capturedSession = session
         let capturedResources = resources
         let capturedNamespaces = namespaces
@@ -1536,9 +1571,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             NSSound.beep()
             return
         }
-        guard capturedContext.selectedIdentities.allSatisfy({
-            $0.clusterSessionID == session.sessionID
-        }) else {
+        guard capturedContext.selectionReference?.sessionID == session.sessionID
+                || (capturedContext.selectionReference == nil
+                    && capturedContext.selectedIdentities.allSatisfy({
+                        $0.clusterSessionID == session.sessionID
+                    }))
+        else {
             // A helper generation change invalidates the session portion of
             // every captured identity. Never rebind and replay an operation.
             NSSound.beep()
@@ -1546,8 +1584,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.performCapturedCommand(
             operation.resourceTableCommand,
-            identities: capturedContext.selectedIdentities,
-            hiddenSelectionUIDs: capturedContext.hiddenSelectionUIDs
+            context: capturedContext
         )
     }
 
@@ -2656,11 +2693,35 @@ struct ResourceViewportTiming: Sendable {
 }
 
 private struct PendingResourceSelectionGesture: Sendable {
+    var sequence: UInt64
     var revision: ResourceSelectionRevision
     var gesture: ResourceSelectionGesture
     /// The last absolute row targeted by a numeric gesture. This is separate
     /// from the backend anchor: it identifies the moving edge for Shift-arrow.
     var activeEndpoint: UInt64?
+}
+
+@MainActor
+private final class ResourceSelectionGestureFence {
+    private var result: Result<ResourceSelectionState, Error>?
+    private var continuations: [CheckedContinuation<ResourceSelectionState, Error>] = []
+
+    func value() async throws -> ResourceSelectionState {
+        if let result { return try result.get() }
+        return try await withCheckedThrowingContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func resolve(_ result: Result<ResourceSelectionState, Error>) {
+        guard self.result == nil else { return }
+        self.result = result
+        let continuations = self.continuations
+        self.continuations.removeAll(keepingCapacity: false)
+        for continuation in continuations {
+            continuation.resume(with: result)
+        }
+    }
 }
 
 private struct ResourceSelectionProjectionTicket: Hashable, Sendable {
@@ -2670,11 +2731,16 @@ private struct ResourceSelectionProjectionTicket: Hashable, Sendable {
     var length: Int
 }
 
-private struct ResourceCommandContextCapture: Sendable {
+private struct ResourceCommandContextCapture {
     var firstResponder: ResponderContext
-    var token: String?
+    var selectionState: ResourceSelectionState?
+    var selectionFence: ResourceSelectionGestureFence?
     var fallbackIdentities: [ResourceIdentity]
-    var pendingGestureTask: Task<Void, Never>?
+    var sessionID: String
+    var viewID: String
+    var gvr: GVR?
+    var resourceIsNamespaced: Bool
+    var currentRevision: ResourceSelectionRevision?
     var networkActionsAllowed: Bool
 }
 
@@ -2809,6 +2875,9 @@ private final class ResourceListViewController: NSViewController,
     private var activeSelectionEndpointRevision: ResourceSelectionRevision?
     private var pendingSelectionGestures: [PendingResourceSelectionGesture] = []
     private var pendingSelectionGestureHead = 0
+    private var nextSelectionGestureSequence: UInt64 = 0
+    private var lastEnqueuedSelectionGestureSequence: UInt64?
+    private var selectionGestureFences: [UInt64: [ResourceSelectionGestureFence]] = [:]
     /// Last selection explicitly installed by this controller. AppKit changes
     /// its indexes before the delegate fallback observes accessibility-driven
     /// selection, so a rejected overflow gesture needs this bounded snapshot
@@ -2875,7 +2944,7 @@ private final class ResourceListViewController: NSViewController,
     var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((PodExecTarget) -> Void)?
     var onConfigureExec: ((PodExecTarget) -> Void)?
-    var onDelete: (([ResourceDeleteTarget]) -> Void)?
+    var onDelete: ((DeleteResourcesRequest) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: (() -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
@@ -3379,11 +3448,28 @@ private final class ResourceListViewController: NSViewController,
             filterOwnsResponder: filterOwnsResponder,
             tableHasActiveEditor: tableView.currentEditor() != nil
         )
+        let selectionFence: ResourceSelectionGestureFence?
+        if selectionGestureTask != nil || hasPendingSelectionGestures,
+            let sequence = lastEnqueuedSelectionGestureSequence
+        {
+            let fence = ResourceSelectionGestureFence()
+            selectionGestureFences[sequence, default: []].append(fence)
+            selectionFence = fence
+        } else {
+            selectionFence = nil
+        }
         return ResourceCommandContextCapture(
             firstResponder: responder,
-            token: displayedSelectionState?.token,
+            selectionState: selectionFence == nil ? displayedSelectionState : nil,
+            selectionFence: selectionFence,
             fallbackIdentities: fallbackIdentities,
-            pendingGestureTask: selectionGestureTask,
+            sessionID: session.sessionID,
+            viewID: viewID,
+            gvr: resource.map {
+                GVR(group: $0.group, version: $0.version, resource: $0.resource)
+            },
+            resourceIsNamespaced: resource?.namespaced ?? false,
+            currentRevision: currentSelectionRevision,
             networkActionsAllowed: (displayedSelectionState != nil
                 || selectionGestureTask != nil)
                 ? (isAuthenticated && resourceCatalogValidated)
@@ -3396,31 +3482,45 @@ private final class ResourceListViewController: NSViewController,
     func materializeCommandContext(
         _ capture: ResourceCommandContextCapture
     ) async throws -> CommandContext {
-        if let pendingGestureTask = capture.pendingGestureTask {
-            await pendingGestureTask.value
-        }
-        let token = capture.pendingGestureTask == nil
-            ? capture.token : displayedSelectionState?.token
-        let identities: [ResourceIdentity]
-        if let token, !token.isEmpty {
-            do {
-                identities = try await fetchSelectionIdentities(token: token)
-            } catch {
-                clearDisplayedSelectionIfExpired(error: error, token: token)
-                throw error
+        let selectionState = try await capture.selectionFence?.value()
+            ?? capture.selectionState
+        if let selectionState,
+            !selectionState.token.isEmpty,
+            let gvr = capture.gvr,
+            let currentRevision = capture.currentRevision
+        {
+            guard selectionState.expiresAt.map({ $0 > Date() }) ?? true else {
+                throw selectionExpiredIssue()
             }
-        } else {
-            identities = capture.fallbackIdentities
+            return .capturingTokenSelection(
+                firstResponder: capture.firstResponder,
+                selectionReference: ResourceSelectionDeleteReference(
+                    sessionID: capture.sessionID,
+                    viewID: capture.viewID,
+                    token: selectionState.token,
+                    selectedCount: selectionState.selectedCount,
+                    gvr: gvr
+                ),
+                selectionRevision: currentRevision,
+                selectionIsNamespaced: capture.resourceIsNamespaced,
+                networkActionsAllowed: capture.networkActionsAllowed
+            )
         }
         return .capturingResourceSelection(
             firstResponder: capture.firstResponder,
-            selectedIdentities: identities,
-            // Token membership is the immutable filtered snapshot. Computing
-            // hidden status for every offscreen UID would require a second
-            // complete current-index scan and is deliberately not inferred
-            // from the bounded viewport.
+            selectedIdentities: capture.fallbackIdentities,
             hiddenSelectionUIDs: [],
             networkActionsAllowed: capture.networkActionsAllowed
+        )
+    }
+
+    private func selectionExpiredIssue() -> ClusterManagerIssue {
+        ClusterManagerIssue(
+            category: .validation,
+            reason: "SelectionExpired",
+            message: "The captured selection expired. Reselect the resources and try again.",
+            retryable: false,
+            operation: "use captured resource selection"
         )
     }
 
@@ -4388,6 +4488,7 @@ private final class ResourceListViewController: NSViewController,
     /// projected onto the replacement ordering, but no later gesture may
     /// extend or toggle its old numeric intervals.
     private func sealSelectionContinuation() {
+        failSelectionGestureFences(error: selectionScopeChangedIssue())
         selectionContinuationToken = nil
         selectionContinuationRevision = nil
         committedSelectionEndpoint = nil
@@ -4404,6 +4505,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func resetSelectionAuthority() {
+        failSelectionGestureFences(error: selectionScopeChangedIssue())
         selectionGestureTask?.cancel()
         selectionGestureTask = nil
         selectionProjectionTask?.cancel()
@@ -6604,7 +6706,12 @@ private final class ResourceListViewController: NSViewController,
             return false
         }
         pendingCommandForLoadingSelection = nil
+        nextSelectionGestureSequence &+= 1
+        if nextSelectionGestureSequence == 0 { nextSelectionGestureSequence = 1 }
+        let sequence = nextSelectionGestureSequence
+        lastEnqueuedSelectionGestureSequence = sequence
         pendingSelectionGestures.append(PendingResourceSelectionGesture(
+            sequence: sequence,
             revision: revision,
             gesture: gesture,
             activeEndpoint: activeEndpoint
@@ -6684,6 +6791,10 @@ private final class ResourceListViewController: NSViewController,
             {
                 guard currentSelectionRevision == pending.revision else {
                     discardSelectionPlaceholder(for: pending)
+                    resolveSelectionGestureFences(
+                        sequence: pending.sequence,
+                        result: .failure(selectionScopeChangedIssue())
+                    )
                     continue
                 }
                 let previousToken = usableSelectionContinuationToken(
@@ -6700,9 +6811,17 @@ private final class ResourceListViewController: NSViewController,
                     )
                     guard !Task.isCancelled else { return }
                     receiveSelectionGesture(state, pending: pending)
+                    resolveSelectionGestureFences(
+                        sequence: pending.sequence,
+                        result: .success(state)
+                    )
                 } catch {
                     guard !Task.isCancelled else { return }
                     receiveSelectionGestureFailure(error, pending: pending)
+                    failSelectionGestureFences(
+                        fromSequence: pending.sequence,
+                        error: error
+                    )
                 }
             }
             guard !Task.isCancelled else { return }
@@ -6797,6 +6916,37 @@ private final class ResourceListViewController: NSViewController,
     private func clearPendingSelectionGestures() {
         pendingSelectionGestures.removeAll(keepingCapacity: true)
         pendingSelectionGestureHead = 0
+    }
+
+    private func resolveSelectionGestureFences(
+        sequence: UInt64,
+        result: Result<ResourceSelectionState, Error>
+    ) {
+        let fences = selectionGestureFences.removeValue(forKey: sequence) ?? []
+        for fence in fences { fence.resolve(result) }
+    }
+
+    private func failSelectionGestureFences(
+        fromSequence: UInt64 = 0,
+        error: Error
+    ) {
+        let sequences = selectionGestureFences.keys.filter { $0 >= fromSequence }
+        for sequence in sequences {
+            resolveSelectionGestureFences(
+                sequence: sequence,
+                result: .failure(error)
+            )
+        }
+    }
+
+    private func selectionScopeChangedIssue() -> ClusterManagerIssue {
+        ClusterManagerIssue(
+            category: .validation,
+            reason: "SelectionScopeChanged",
+            message: "The resource view changed before the selection was captured. Reselect the resources and try again.",
+            retryable: false,
+            operation: "capture resource selection"
+        )
     }
 
     private func usableSelectionContinuationToken(
@@ -6983,7 +7133,7 @@ private final class ResourceListViewController: NSViewController,
                 )
             }
             guard !targets.isEmpty else { NSSound.beep(); return }
-            onDelete?(targets)
+            onDelete?(.explicit(targets))
         case .scale:
             guard let identity = selected.only else { return }
             onMutate?(identity, .scale)
@@ -7076,7 +7226,39 @@ private final class ResourceListViewController: NSViewController,
             )
             return
         }
+        if command == .delete {
+            guard let request = tokenDeleteRequest(for: selection) else {
+                show(error: selectionExpiredIssue())
+                return
+            }
+            onDelete?(request)
+            return
+        }
         materializeSelection(for: command, token: selection.token)
+    }
+
+    private func tokenDeleteRequest(
+        for selection: ResourceSelectionState
+    ) -> DeleteResourcesRequest? {
+        guard let resource,
+            let currentRevision = currentSelectionRevision,
+            !selection.token.isEmpty,
+            selection.expiresAt.map({ $0 > Date() }) ?? true
+        else { return nil }
+        return .selection(
+            reference: ResourceSelectionDeleteReference(
+                sessionID: session.sessionID,
+                viewID: viewID,
+                token: selection.token,
+                selectedCount: selection.selectedCount,
+                gvr: GVR(
+                    group: resource.group,
+                    version: resource.version,
+                    resource: resource.resource
+                )
+            ),
+            currentRevision: currentRevision
+        )
     }
 
     private func materializeSelection(
@@ -7214,10 +7396,132 @@ private final class ResourceListViewController: NSViewController,
         )
     }
 
-    /// Executes a palette operation against the immutable identity snapshot
-    /// captured when Command-K was pressed. This deliberately bypasses current
-    /// responder/selection validation; the captured CommandContext has already
-    /// been validated and the full identities remain the operation targets.
+    /// Executes against the immutable Command-K snapshot. Token-backed delete
+    /// stays aggregate; only actions that intrinsically consume identities
+    /// page the captured token, and do so after activation.
+    func performCapturedCommand(
+        _ command: ResourceTableCommand,
+        context: CommandContext
+    ) {
+        guard let reference = context.selectionReference else {
+            handle(
+                command,
+                identities: context.selectedIdentities,
+                hiddenSelectionUIDs: context.hiddenSelectionUIDs
+            )
+            return
+        }
+        guard let capturedRevision = context.selectionRevision else {
+            show(error: selectionScopeChangedIssue())
+            return
+        }
+        if command == .delete {
+            guard let revision = currentSelectionRevision(
+                reference,
+                capturedGeneration: capturedRevision.generation
+            ) else {
+                show(error: selectionScopeChangedIssue())
+                return
+            }
+            onDelete?(.selection(
+                reference: reference,
+                currentRevision: revision
+            ))
+            return
+        }
+        guard selectionScopeIsValid(
+            reference,
+            capturedGeneration: capturedRevision.generation
+        ) else {
+            show(error: selectionScopeChangedIssue())
+            return
+        }
+        materializeCapturedSelection(
+            for: command,
+            reference: reference,
+            capturedGeneration: capturedRevision.generation
+        )
+    }
+
+    func selectionScopeIsValid(
+        _ reference: ResourceSelectionDeleteReference,
+        capturedGeneration: UInt64
+    ) -> Bool {
+        guard isAuthenticated,
+            resourceCatalogValidated,
+            reference.sessionID == session.sessionID,
+            reference.viewID == viewID,
+            currentSelectionRevision?.generation == capturedGeneration,
+            let resource
+        else { return false }
+        return reference.gvr == GVR(
+            group: resource.group,
+            version: resource.version,
+            resource: resource.resource
+        )
+    }
+
+    func currentSelectionRevision(
+        _ reference: ResourceSelectionDeleteReference,
+        capturedGeneration _: UInt64
+    ) -> ResourceSelectionRevision? {
+        guard isAuthenticated,
+            resourceCatalogValidated,
+            reference.sessionID == session.sessionID,
+            reference.viewID == viewID,
+            let revision = currentSelectionRevision,
+            let resource,
+            reference.gvr == GVR(
+                group: resource.group,
+                version: resource.version,
+                resource: resource.resource
+            )
+        else { return nil }
+        return revision
+    }
+
+    private func materializeCapturedSelection(
+        for command: ResourceTableCommand,
+        reference: ResourceSelectionDeleteReference,
+        capturedGeneration: UInt64
+    ) {
+        guard selectionCommandTask == nil else { NSSound.beep(); return }
+        let provider = self.provider
+        selectionCommandTask = Task { @MainActor [weak self, provider] in
+            guard let self else { return }
+            do {
+                let identities = try await fetchSelectionIdentities(
+                    token: reference.token,
+                    sessionID: reference.sessionID,
+                    viewID: reference.viewID,
+                    provider: provider
+                )
+                guard !Task.isCancelled else { return }
+                selectionCommandTask = nil
+                guard selectionScopeIsValid(
+                    reference,
+                    capturedGeneration: capturedGeneration
+                ),
+                    identities.allSatisfy({
+                    $0.clusterSessionID == reference.sessionID
+                }), isCommandCompatible(command, with: identities) else {
+                    show(error: selectionScopeChangedIssue())
+                    return
+                }
+                handle(command, identities: identities, hiddenSelectionUIDs: [])
+            } catch {
+                guard !Task.isCancelled else { return }
+                selectionCommandTask = nil
+                clearDisplayedSelectionIfExpired(
+                    error: error,
+                    token: reference.token
+                )
+                show(error: error)
+            }
+        }
+    }
+
+    /// Test-only/legacy hook for explicit UID snapshots.
     func performCapturedCommand(
         _ command: ResourceTableCommand,
         identities: [ResourceIdentity],

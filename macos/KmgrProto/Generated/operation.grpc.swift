@@ -59,6 +59,32 @@ public enum Kmgr_V1_OperationService: Sendable {
                 type: .unary
             )
         }
+        /// Namespace for "PrepareDeleteSelection" metadata.
+        public enum PrepareDeleteSelection: Sendable {
+            /// Request type for "PrepareDeleteSelection".
+            public typealias Input = Kmgr_V1_PrepareDeleteSelectionRequest
+            /// Response type for "PrepareDeleteSelection".
+            public typealias Output = Kmgr_V1_PrepareDeleteSelectionResponse
+            /// Descriptor for "PrepareDeleteSelection".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.OperationService"),
+                method: "PrepareDeleteSelection",
+                type: .unary
+            )
+        }
+        /// Namespace for "DeleteSelection" metadata.
+        public enum DeleteSelection: Sendable {
+            /// Request type for "DeleteSelection".
+            public typealias Input = Kmgr_V1_DeleteSelectionRequest
+            /// Response type for "DeleteSelection".
+            public typealias Output = Kmgr_V1_StartOperationResponse
+            /// Descriptor for "DeleteSelection".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.OperationService"),
+                method: "DeleteSelection",
+                type: .unary
+            )
+        }
         /// Namespace for "Delete" metadata.
         public enum Delete: Sendable {
             /// Request type for "Delete".
@@ -155,6 +181,8 @@ public enum Kmgr_V1_OperationService: Sendable {
             PrepareYamlEdit.descriptor,
             ApplyYaml.descriptor,
             UpdateData.descriptor,
+            PrepareDeleteSelection.descriptor,
+            DeleteSelection.descriptor,
             Delete.descriptor,
             DeleteMany.descriptor,
             Scale.descriptor,
@@ -233,6 +261,44 @@ extension Kmgr_V1_OperationService {
         func updateData<Result>(
             request: GRPCCore.ClientRequest<Kmgr_V1_UpdateDataRequest>,
             serializer: some GRPCCore.MessageSerializer<Kmgr_V1_UpdateDataRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_StartOperationResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "PrepareDeleteSelection" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_PrepareDeleteSelectionRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_PrepareDeleteSelectionRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_PrepareDeleteSelectionResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func prepareDeleteSelection<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_PrepareDeleteSelectionRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_PrepareDeleteSelectionRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_PrepareDeleteSelectionResponse>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_PrepareDeleteSelectionResponse>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "DeleteSelection" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_DeleteSelectionRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_DeleteSelectionRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_StartOperationResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func deleteSelection<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_DeleteSelectionRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_DeleteSelectionRequest>,
             deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_StartOperationResponse>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result
@@ -471,6 +537,66 @@ extension Kmgr_V1_OperationService {
             try await self.client.unary(
                 request: request,
                 descriptor: Kmgr_V1_OperationService.Method.UpdateData.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "PrepareDeleteSelection" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_PrepareDeleteSelectionRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_PrepareDeleteSelectionRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_PrepareDeleteSelectionResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func prepareDeleteSelection<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_PrepareDeleteSelectionRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_PrepareDeleteSelectionRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_PrepareDeleteSelectionResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_PrepareDeleteSelectionResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Kmgr_V1_OperationService.Method.PrepareDeleteSelection.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
+        /// Call the "DeleteSelection" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_DeleteSelectionRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_DeleteSelectionRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_StartOperationResponse` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func deleteSelection<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_DeleteSelectionRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_DeleteSelectionRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_StartOperationResponse>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result = { response in
+                try response.message
+            }
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.unary(
+                request: request,
+                descriptor: Kmgr_V1_OperationService.Method.DeleteSelection.descriptor,
                 serializer: serializer,
                 deserializer: deserializer,
                 options: options,
@@ -766,6 +892,56 @@ extension Kmgr_V1_OperationService.ClientProtocol {
         )
     }
 
+    /// Call the "PrepareDeleteSelection" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_PrepareDeleteSelectionRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func prepareDeleteSelection<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_PrepareDeleteSelectionRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_PrepareDeleteSelectionResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.prepareDeleteSelection(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_PrepareDeleteSelectionRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_PrepareDeleteSelectionResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "DeleteSelection" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_DeleteSelectionRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func deleteSelection<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_DeleteSelectionRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        try await self.deleteSelection(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_DeleteSelectionRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_StartOperationResponse>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
     /// Call the "Delete" method.
     ///
     /// - Parameters:
@@ -1024,6 +1200,64 @@ extension Kmgr_V1_OperationService.ClientProtocol {
             metadata: metadata
         )
         return try await self.updateData(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "PrepareDeleteSelection" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func prepareDeleteSelection<Result>(
+        _ message: Kmgr_V1_PrepareDeleteSelectionRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_PrepareDeleteSelectionResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_PrepareDeleteSelectionRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.prepareDeleteSelection(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "DeleteSelection" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func deleteSelection<Result>(
+        _ message: Kmgr_V1_DeleteSelectionRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_StartOperationResponse>) async throws -> Result = { response in
+            try response.message
+        }
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_DeleteSelectionRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.deleteSelection(
             request: request,
             options: options,
             onResponse: handleResponse

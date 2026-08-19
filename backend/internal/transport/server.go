@@ -170,6 +170,13 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		viewRuntime.Close()
 		return nil, err
 	}
+	if err := operationService.ConfigureSelectionDeletes(
+		operation.ViewSelectionDeleteProvider{Runtime: viewRuntime},
+	); err != nil {
+		operationManager.Close()
+		viewRuntime.Close()
+		return nil, err
+	}
 	logManager, err := streamlogs.NewManager(streamlogs.Config{
 		Resolver:           streamlogs.ClusterResolver{Sessions: sessions},
 		MaxConcurrentOpens: options.LogSourceOpenConcurrency,

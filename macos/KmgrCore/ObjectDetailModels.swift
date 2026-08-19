@@ -412,6 +412,10 @@ public struct OperationProgress: Hashable, Sendable {
     public var completedItems: UInt32
     public var totalItems: UInt32
     public var itemResults: [OperationItemResult]
+    public var aggregateOnly: Bool
+    /// Non-success details omitted after the engine's bounded aggregate detail
+    /// budget was reached. Successful aggregate identities are not counted.
+    public var omittedItemResults: UInt32
     public var issue: ClusterManagerIssue?
 
     public init(
@@ -421,6 +425,8 @@ public struct OperationProgress: Hashable, Sendable {
         completedItems: UInt32,
         totalItems: UInt32,
         itemResults: [OperationItemResult],
+        aggregateOnly: Bool = false,
+        omittedItemResults: UInt32 = 0,
         issue: ClusterManagerIssue? = nil
     ) {
         self.cursor = cursor
@@ -429,6 +435,8 @@ public struct OperationProgress: Hashable, Sendable {
         self.completedItems = completedItems
         self.totalItems = totalItems
         self.itemResults = itemResults
+        self.aggregateOnly = aggregateOnly
+        self.omittedItemResults = omittedItemResults
         self.issue = issue
     }
 }

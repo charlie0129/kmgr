@@ -19,16 +19,18 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	OperationService_PrepareYamlEdit_FullMethodName = "/kmgr.v1.OperationService/PrepareYamlEdit"
-	OperationService_ApplyYaml_FullMethodName       = "/kmgr.v1.OperationService/ApplyYaml"
-	OperationService_UpdateData_FullMethodName      = "/kmgr.v1.OperationService/UpdateData"
-	OperationService_Delete_FullMethodName          = "/kmgr.v1.OperationService/Delete"
-	OperationService_DeleteMany_FullMethodName      = "/kmgr.v1.OperationService/DeleteMany"
-	OperationService_Scale_FullMethodName           = "/kmgr.v1.OperationService/Scale"
-	OperationService_RolloutRestart_FullMethodName  = "/kmgr.v1.OperationService/RolloutRestart"
-	OperationService_UpdateMetadata_FullMethodName  = "/kmgr.v1.OperationService/UpdateMetadata"
-	OperationService_WatchOperation_FullMethodName  = "/kmgr.v1.OperationService/WatchOperation"
-	OperationService_CancelOperation_FullMethodName = "/kmgr.v1.OperationService/CancelOperation"
+	OperationService_PrepareYamlEdit_FullMethodName        = "/kmgr.v1.OperationService/PrepareYamlEdit"
+	OperationService_ApplyYaml_FullMethodName              = "/kmgr.v1.OperationService/ApplyYaml"
+	OperationService_UpdateData_FullMethodName             = "/kmgr.v1.OperationService/UpdateData"
+	OperationService_PrepareDeleteSelection_FullMethodName = "/kmgr.v1.OperationService/PrepareDeleteSelection"
+	OperationService_DeleteSelection_FullMethodName        = "/kmgr.v1.OperationService/DeleteSelection"
+	OperationService_Delete_FullMethodName                 = "/kmgr.v1.OperationService/Delete"
+	OperationService_DeleteMany_FullMethodName             = "/kmgr.v1.OperationService/DeleteMany"
+	OperationService_Scale_FullMethodName                  = "/kmgr.v1.OperationService/Scale"
+	OperationService_RolloutRestart_FullMethodName         = "/kmgr.v1.OperationService/RolloutRestart"
+	OperationService_UpdateMetadata_FullMethodName         = "/kmgr.v1.OperationService/UpdateMetadata"
+	OperationService_WatchOperation_FullMethodName         = "/kmgr.v1.OperationService/WatchOperation"
+	OperationService_CancelOperation_FullMethodName        = "/kmgr.v1.OperationService/CancelOperation"
 )
 
 // OperationServiceClient is the client API for OperationService service.
@@ -38,6 +40,8 @@ type OperationServiceClient interface {
 	PrepareYamlEdit(ctx context.Context, in *PrepareYamlEditRequest, opts ...grpc.CallOption) (*PrepareYamlEditResponse, error)
 	ApplyYaml(ctx context.Context, in *ApplyYamlRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
 	UpdateData(ctx context.Context, in *UpdateDataRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
+	PrepareDeleteSelection(ctx context.Context, in *PrepareDeleteSelectionRequest, opts ...grpc.CallOption) (*PrepareDeleteSelectionResponse, error)
+	DeleteSelection(ctx context.Context, in *DeleteSelectionRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
 	DeleteMany(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[DeleteManyRequest, StartOperationResponse], error)
 	Scale(ctx context.Context, in *ScaleRequest, opts ...grpc.CallOption) (*StartOperationResponse, error)
@@ -79,6 +83,26 @@ func (c *operationServiceClient) UpdateData(ctx context.Context, in *UpdateDataR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StartOperationResponse)
 	err := c.cc.Invoke(ctx, OperationService_UpdateData_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *operationServiceClient) PrepareDeleteSelection(ctx context.Context, in *PrepareDeleteSelectionRequest, opts ...grpc.CallOption) (*PrepareDeleteSelectionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrepareDeleteSelectionResponse)
+	err := c.cc.Invoke(ctx, OperationService_PrepareDeleteSelection_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *operationServiceClient) DeleteSelection(ctx context.Context, in *DeleteSelectionRequest, opts ...grpc.CallOption) (*StartOperationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartOperationResponse)
+	err := c.cc.Invoke(ctx, OperationService_DeleteSelection_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +198,8 @@ type OperationServiceServer interface {
 	PrepareYamlEdit(context.Context, *PrepareYamlEditRequest) (*PrepareYamlEditResponse, error)
 	ApplyYaml(context.Context, *ApplyYamlRequest) (*StartOperationResponse, error)
 	UpdateData(context.Context, *UpdateDataRequest) (*StartOperationResponse, error)
+	PrepareDeleteSelection(context.Context, *PrepareDeleteSelectionRequest) (*PrepareDeleteSelectionResponse, error)
+	DeleteSelection(context.Context, *DeleteSelectionRequest) (*StartOperationResponse, error)
 	Delete(context.Context, *DeleteRequest) (*StartOperationResponse, error)
 	DeleteMany(grpc.ClientStreamingServer[DeleteManyRequest, StartOperationResponse]) error
 	Scale(context.Context, *ScaleRequest) (*StartOperationResponse, error)
@@ -199,6 +225,12 @@ func (UnimplementedOperationServiceServer) ApplyYaml(context.Context, *ApplyYaml
 }
 func (UnimplementedOperationServiceServer) UpdateData(context.Context, *UpdateDataRequest) (*StartOperationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateData not implemented")
+}
+func (UnimplementedOperationServiceServer) PrepareDeleteSelection(context.Context, *PrepareDeleteSelectionRequest) (*PrepareDeleteSelectionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PrepareDeleteSelection not implemented")
+}
+func (UnimplementedOperationServiceServer) DeleteSelection(context.Context, *DeleteSelectionRequest) (*StartOperationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSelection not implemented")
 }
 func (UnimplementedOperationServiceServer) Delete(context.Context, *DeleteRequest) (*StartOperationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Delete not implemented")
@@ -292,6 +324,42 @@ func _OperationService_UpdateData_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OperationServiceServer).UpdateData(ctx, req.(*UpdateDataRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OperationService_PrepareDeleteSelection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrepareDeleteSelectionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OperationServiceServer).PrepareDeleteSelection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OperationService_PrepareDeleteSelection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OperationServiceServer).PrepareDeleteSelection(ctx, req.(*PrepareDeleteSelectionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OperationService_DeleteSelection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSelectionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OperationServiceServer).DeleteSelection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OperationService_DeleteSelection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OperationServiceServer).DeleteSelection(ctx, req.(*DeleteSelectionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -422,6 +490,14 @@ var OperationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateData",
 			Handler:    _OperationService_UpdateData_Handler,
+		},
+		{
+			MethodName: "PrepareDeleteSelection",
+			Handler:    _OperationService_PrepareDeleteSelection_Handler,
+		},
+		{
+			MethodName: "DeleteSelection",
+			Handler:    _OperationService_DeleteSelection_Handler,
 		},
 		{
 			MethodName: "Delete",

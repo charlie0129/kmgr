@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	"github.com/charlie0129/kmgr/backend/internal/object"
+	"github.com/charlie0129/kmgr/backend/internal/view"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -41,12 +43,76 @@ type YAMLEditor interface {
 	ApplyYAML(context.Context, object.Identity, []byte, string, bool) (object.AppliedYAML, error)
 }
 
+type SelectionDeleteProvider interface {
+	PrepareSelectionDelete(
+		ctx context.Context,
+		sessionID, viewID, token string,
+		generation, indexRevision uint64,
+		previewLimit uint32,
+	) (view.SelectionDeleteDescription, error)
+	AcquireSelectionLease(sessionID, viewID, token string) (SelectionDeleteLease, error)
+}
+
+type SelectionDeleteLease interface {
+	State() view.SelectionState
+	Resource() (view.SelectionResource, bool)
+	MaxPageSize() uint32
+	Page(offset uint64, limit uint32) (view.SelectionPage, error)
+	Release()
+}
+
+// ViewSelectionDeleteProvider adapts the shared view runtime without exposing
+// its concrete lease type to the operation service or tests.
+type ViewSelectionDeleteProvider struct {
+	Runtime *view.Runtime
+}
+
+func (p ViewSelectionDeleteProvider) PrepareSelectionDelete(
+	ctx context.Context,
+	sessionID, viewID, token string,
+	generation, indexRevision uint64,
+	previewLimit uint32,
+) (view.SelectionDeleteDescription, error) {
+	if p.Runtime == nil {
+		return view.SelectionDeleteDescription{}, view.ErrSelectionStoreUnavailable
+	}
+	return p.Runtime.PrepareSelectionDelete(
+		ctx, sessionID, viewID, token, generation, indexRevision, previewLimit,
+	)
+}
+
+func (p ViewSelectionDeleteProvider) AcquireSelectionLease(
+	sessionID, viewID, token string,
+) (SelectionDeleteLease, error) {
+	if p.Runtime == nil {
+		return nil, view.ErrSelectionStoreUnavailable
+	}
+	return p.Runtime.AcquireSelectionLease(sessionID, viewID, token)
+}
+
 type GRPCService struct {
 	kmgrv1.UnimplementedOperationServiceServer
-	backend  MutationBackend
-	acquirer MutationBackendAcquirer
-	manager  *Manager
-	now      func() time.Time
+	backend    MutationBackend
+	acquirer   MutationBackendAcquirer
+	selections SelectionDeleteProvider
+	manager    *Manager
+	now        func() time.Time
+}
+
+// ConfigureSelectionDeletes wires the shared resource-view selection runtime
+// before the gRPC server starts accepting requests.
+func (s *GRPCService) ConfigureSelectionDeletes(provider SelectionDeleteProvider) error {
+	if s == nil {
+		return errors.New("operation service is nil")
+	}
+	if provider == nil {
+		return errors.New("selection delete provider must not be nil")
+	}
+	if s.selections != nil {
+		return errors.New("selection delete provider is already configured")
+	}
+	s.selections = provider
+	return nil
 }
 
 func NewGRPCService(
@@ -223,6 +289,160 @@ func (s *GRPCService) UpdateData(
 		)
 		return response, nil
 	}
+	response.Accepted = true
+	return response, nil
+}
+
+func (s *GRPCService) PrepareDeleteSelection(
+	ctx context.Context,
+	request *kmgrv1.PrepareDeleteSelectionRequest,
+) (*kmgrv1.PrepareDeleteSelectionResponse, error) {
+	requestID, prepareContext, cancel, err := operationRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	response := &kmgrv1.PrepareDeleteSelectionResponse{
+		RequestId: requestID, ViewId: request.GetViewId(),
+		SelectionToken: request.GetSelectionToken(), Generation: request.GetGeneration(),
+		IndexRevision: request.GetIndexRevision(),
+	}
+	if s.selections == nil {
+		response.Error = s.selectionDeleteError(
+			view.ErrSelectionStoreUnavailable, "prepare-delete-selection",
+			request.GetContext().GetClusterSessionId(),
+		)
+		return response, nil
+	}
+	description, err := s.selections.PrepareSelectionDelete(
+		prepareContext,
+		request.GetContext().GetClusterSessionId(), request.GetViewId(),
+		request.GetSelectionToken(), request.GetGeneration(), request.GetIndexRevision(),
+		request.GetPreviewLimit(),
+	)
+	if err != nil {
+		response.Error = s.selectionDeleteError(
+			err, "prepare-delete-selection", request.GetContext().GetClusterSessionId(),
+		)
+		return response, nil
+	}
+	response.SelectedCount = description.State.SelectedCount
+	response.HiddenCount = description.HiddenCount
+	response.ExpiresAtUnixMs = description.State.ExpiresAt.UnixMilli()
+	response.Resource = selectionResourceToProto(description.Resource)
+	response.PreviewTruncated = uint64(len(description.Preview)) < description.State.SelectedCount
+	response.Preview = make([]*kmgrv1.DeleteTarget, 0, len(description.Preview))
+	for _, item := range description.Preview {
+		response.Preview = append(response.Preview, &kmgrv1.DeleteTarget{
+			Identity: selectionIdentityToProto(
+				request.GetContext().GetClusterSessionId(), item.Identity,
+			),
+			HiddenByFilter: item.Hidden,
+		})
+	}
+	return response, nil
+}
+
+func (s *GRPCService) DeleteSelection(
+	ctx context.Context,
+	request *kmgrv1.DeleteSelectionRequest,
+) (*kmgrv1.StartOperationResponse, error) {
+	requestID, _, requestCancel, err := operationRequestContext(ctx, request.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer requestCancel()
+	response := &kmgrv1.StartOperationResponse{
+		RequestId: requestID, OperationId: request.GetOperationId(),
+	}
+	if request.GetOperationId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "operation ID is required")
+	}
+	if s.selections == nil {
+		response.Error = s.selectionDeleteError(
+			view.ErrSelectionStoreUnavailable, "delete", request.GetContext().GetClusterSessionId(),
+		)
+		return response, nil
+	}
+	if request.GetSelectedCount() == 0 || request.GetSelectedCount() > math.MaxUint32 {
+		response.Error = s.structuredError(&ValidationError{
+			Field: "selected_count", Message: fmt.Sprintf(
+				"selected count must be between 1 and %d", uint64(math.MaxUint32),
+			),
+		}, nil, "delete", request.GetContext().GetClusterSessionId())
+		return response, nil
+	}
+	expectedResource, err := selectionResourceFromProto(request.GetResource())
+	if err != nil {
+		response.Error = s.structuredError(err, nil, "delete", request.GetContext().GetClusterSessionId())
+		return response, nil
+	}
+	options, err := deleteSelectionOptionsFromProto(request)
+	if err != nil {
+		response.Error = s.structuredError(err, nil, "delete", request.GetContext().GetClusterSessionId())
+		return response, nil
+	}
+
+	// Acquire the relatively expensive Kubernetes authority first, then make
+	// token expiry the final admission gate immediately before manager start.
+	parent, cancel, err := acceptedMutationContext(request.GetContext())
+	if err != nil {
+		response.Error = s.structuredError(err, nil, "delete", request.GetContext().GetClusterSessionId())
+		return response, nil
+	}
+	acquired, err := s.acquireMutationBackend(request.GetContext().GetClusterSessionId())
+	if err != nil {
+		cancel()
+		response.Error = s.structuredError(err, nil, "delete", request.GetContext().GetClusterSessionId())
+		return response, nil
+	}
+	lease, err := s.selections.AcquireSelectionLease(
+		request.GetContext().GetClusterSessionId(), request.GetViewId(), request.GetSelectionToken(),
+	)
+	if err != nil {
+		cancel()
+		acquired.Release()
+		response.Error = s.selectionDeleteError(err, "delete", request.GetContext().GetClusterSessionId())
+		return response, nil
+	}
+	state := lease.State()
+	actualResource, hasResource := lease.Resource()
+	if state.SelectedCount != request.GetSelectedCount() || !hasResource || actualResource != expectedResource {
+		lease.Release()
+		cancel()
+		acquired.Release()
+		response.Error = s.selectionDeleteError(
+			view.ErrSelectionSnapshotConflict, "delete", request.GetContext().GetClusterSessionId(),
+		)
+		return response, nil
+	}
+
+	source := selectionDeletePageSource{
+		lease: lease, sessionID: request.GetContext().GetClusterSessionId(),
+		expectedResource: expectedResource,
+	}
+	operation, err := s.manager.StartAggregate(
+		parent, request.GetOperationId(), "delete", request.GetContext().GetClusterSessionId(),
+		uint32(state.SelectedCount),
+		func(ctx context.Context, report AggregateReporter) error {
+			defer lease.Release()
+			return DeletePagedWithProgress(
+				ctx, acquired.Backend, uint32(state.SelectedCount), source, options,
+				func(target DeleteTarget, itemState ItemState, result DeleteResult) bool {
+					return report(target.Identity, ItemUpdate{State: itemState, Err: result.Err})
+				},
+			)
+		},
+	)
+	if err != nil {
+		lease.Release()
+		cancel()
+		acquired.Release()
+		response.Error = s.structuredError(err, nil, "delete", request.GetContext().GetClusterSessionId())
+		return response, nil
+	}
+	operation.SetContextName(acquired.ContextName)
+	releaseAcceptedMutationContext(operation, cancel, acquired.Release)
 	response.Accepted = true
 	return response, nil
 }
@@ -543,14 +763,17 @@ func (s *GRPCService) WatchOperation(
 	}
 	var sequence uint64
 	var lastState State
+	var lastCompletedItems uint32
+	var lastOmittedItemResults uint32
 	completedOffset := 0
 	for {
 		current, candidates, _, changed := operation.Progress(completedOffset, maxOperationEventItems)
+		retainedResults := int(current.RetainedItemResults)
 		if len(candidates) > 0 {
 			items, consumed := operationItemResults(candidates, current.Operation, current.ContextName)
 			completedOffset += consumed
 			eventState := current.State
-			if terminalState(eventState) && completedOffset < int(current.CompletedItems) {
+			if terminalState(eventState) && completedOffset < retainedResults {
 				eventState = StateRunning
 			}
 			sequence++
@@ -558,16 +781,23 @@ func (s *GRPCService) WatchOperation(
 				return err
 			}
 			lastState = eventState
+			lastCompletedItems = current.CompletedItems
+			lastOmittedItemResults = current.OmittedItemResults
 			continue
 		}
-		if sequence == 0 || current.State != lastState {
+		aggregateCountersAdvanced := current.AggregateOnly &&
+			(current.CompletedItems > lastCompletedItems ||
+				current.OmittedItemResults > lastOmittedItemResults)
+		if sequence == 0 || current.State != lastState || aggregateCountersAdvanced {
 			sequence++
 			if err := stream.Send(operationEvent(request, sequence, current, current.State, nil)); err != nil {
 				return err
 			}
 			lastState = current.State
+			lastCompletedItems = current.CompletedItems
+			lastOmittedItemResults = current.OmittedItemResults
 		}
-		if terminalState(current.State) && completedOffset == int(current.CompletedItems) {
+		if terminalState(current.State) && completedOffset == retainedResults {
 			return nil
 		}
 		select {
@@ -687,6 +917,7 @@ func operationEvent(
 		},
 		OperationId: value.OperationID, State: protoOperationState(state), CompletedItems: value.CompletedItems,
 		TotalItems: value.TotalItems, ItemResults: items, Error: operationError,
+		AggregateOnly: value.AggregateOnly, OmittedItemResults: value.OmittedItemResults,
 	}
 }
 
@@ -882,6 +1113,144 @@ func clearDataMutations(values []object.DataMutation) {
 	}
 }
 
+type selectionDeletePageSource struct {
+	lease            SelectionDeleteLease
+	sessionID        string
+	expectedResource view.SelectionResource
+}
+
+func (s selectionDeletePageSource) Page(offset uint64, limit uint32) ([]DeleteTarget, error) {
+	if s.lease == nil {
+		return nil, errors.New("selection lease is unavailable")
+	}
+	maxPageSize := s.lease.MaxPageSize()
+	if maxPageSize == 0 {
+		return nil, errors.New("selection lease page limit is unavailable")
+	}
+	limit = min(limit, maxPageSize)
+	page, err := s.lease.Page(offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]DeleteTarget, 0, len(page.Items))
+	for _, item := range page.Items {
+		identity := object.Identity{
+			SessionID: s.sessionID,
+			Group:     item.Identity.Group,
+			Version:   item.Identity.Version,
+			Resource:  item.Identity.Resource,
+			Namespace: item.Identity.Namespace,
+			Name:      item.Identity.Name,
+			UID:       item.Identity.UID,
+		}
+		if identity.Group != s.expectedResource.Group ||
+			identity.Version != s.expectedResource.Version ||
+			identity.Resource != s.expectedResource.Resource {
+			return nil, fmt.Errorf("selection page contains an unexpected GVR")
+		}
+		if err := identity.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid selection delete identity: %w", err)
+		}
+		result = append(result, DeleteTarget{Identity: identity})
+	}
+	return result, nil
+}
+
+func selectionResourceFromProto(value *kmgrv1.ResourceType) (view.SelectionResource, error) {
+	if value == nil {
+		return view.SelectionResource{}, &ValidationError{
+			Field: "resource", Message: "selection resource GVR is required",
+		}
+	}
+	resource := view.SelectionResource{
+		Group: value.GetGroup(), Version: value.GetVersion(), Resource: value.GetResource(),
+	}
+	if strings.TrimSpace(resource.Group) != resource.Group || resource.Version == "" ||
+		strings.TrimSpace(resource.Version) != resource.Version || resource.Resource == "" ||
+		strings.TrimSpace(resource.Resource) != resource.Resource {
+		return view.SelectionResource{}, &ValidationError{
+			Field: "resource", Message: "selection resource group, version, and resource must be canonical",
+		}
+	}
+	return resource, nil
+}
+
+func selectionResourceToProto(value view.SelectionResource) *kmgrv1.ResourceType {
+	return &kmgrv1.ResourceType{
+		Group: value.Group, Version: value.Version, Resource: value.Resource,
+	}
+}
+
+func selectionIdentityToProto(sessionID string, value view.SelectionIdentity) *kmgrv1.ResourceIdentity {
+	return &kmgrv1.ResourceIdentity{
+		ClusterSessionId: sessionID,
+		Group:            value.Group,
+		Version:          value.Version,
+		Resource:         value.Resource,
+		Namespace:        value.Namespace,
+		Name:             value.Name,
+		Uid:              value.UID,
+	}
+}
+
+func (s *GRPCService) selectionDeleteError(
+	err error,
+	operation string,
+	sessionID string,
+) *kmgrv1.StructuredError {
+	contextName := ""
+	if provider, ok := s.backend.(mutationContextNameProvider); ok {
+		contextName, _ = provider.ContextName(sessionID)
+	}
+	result := &kmgrv1.StructuredError{
+		Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL,
+		Reason:   "SelectionDeleteUnavailable", Message: "The selected resources could not be resolved safely.",
+		Operation: operation, ContextName: contextName,
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CANCELLED
+		result.Reason = "SelectionPreparationCancelled"
+		result.Message = "Preparing the selection for deletion was cancelled."
+	case errors.Is(err, context.DeadlineExceeded):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TIMEOUT
+		result.Reason = "SelectionPreparationTimedOut"
+		result.Message = "Preparing the selection for deletion timed out."
+		result.Retryable = true
+	case errors.Is(err, view.ErrSelectionTokenExpired):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		result.Reason = "SelectionTokenExpired"
+		result.Message = "The selection expired. Select the resources again before deleting."
+	case errors.Is(err, view.ErrSelectionTokenNotFound), errors.Is(err, view.ErrSelectionScopeMismatch):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		result.Reason = "SelectionTokenUnavailable"
+		result.Message = "The selection is no longer available in this resource view."
+	case errors.Is(err, view.ErrStaleViewGeneration), errors.Is(err, view.ErrStaleViewRevision),
+		errors.Is(err, view.ErrViewNotFound), errors.Is(err, view.ErrViewClosed):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		result.Reason = "SelectionViewChanged"
+		result.Message = "The resource view changed while preparing deletion. Review the current selection again."
+	case errors.Is(err, view.ErrSelectionSnapshotConflict):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		result.Reason = "SelectionConfirmationMismatch"
+		result.Message = "The confirmed selection count or resource type no longer matches the immutable selection."
+	case errors.Is(err, view.ErrInvalidSelectionScope), errors.Is(err, view.ErrInvalidSelectionPage),
+		errors.Is(err, view.ErrInvalidViewRange):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_VALIDATION
+		result.Reason = "InvalidSelectionDeleteRequest"
+		result.Message = "The selection deletion request is invalid."
+	case errors.Is(err, view.ErrSelectionCapacityExhausted):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
+		result.Reason = "SelectionCapacityExhausted"
+		result.Message = "The engine selection capacity is temporarily exhausted."
+	case errors.Is(err, view.ErrSelectionStoreUnavailable):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
+		result.Reason = "SelectionTransportUnavailable"
+		result.Message = "Token-backed selection deletion is unavailable."
+	}
+	return result
+}
+
 func deleteTargetsFromProto(values []*kmgrv1.DeleteTarget, sessionID string) ([]DeleteTarget, []object.Identity, error) {
 	if len(values) == 0 {
 		return nil, nil, &ValidationError{Field: "targets", Message: "at least one delete target is required"}
@@ -973,6 +1342,39 @@ func deleteManyOptionsFromProto(request *kmgrv1.DeleteManyStart) (DeleteOptions,
 	if options.MaxConcurrency < 0 || options.MaxConcurrency > MaxDeleteConcurrency {
 		return DeleteOptions{}, &ValidationError{
 			Field: "max_concurrency", Message: fmt.Sprintf("delete concurrency must be between 0 and %d", MaxDeleteConcurrency),
+		}
+	}
+	return options, nil
+}
+
+func deleteSelectionOptionsFromProto(request *kmgrv1.DeleteSelectionRequest) (DeleteOptions, error) {
+	options := DeleteOptions{MaxConcurrency: int(request.GetMaxConcurrency())}
+	switch request.GetPropagationPolicy() {
+	case kmgrv1.PropagationPolicy_PROPAGATION_POLICY_BACKGROUND:
+		options.PropagationPolicy = metav1.DeletePropagationBackground
+	case kmgrv1.PropagationPolicy_PROPAGATION_POLICY_FOREGROUND:
+		options.PropagationPolicy = metav1.DeletePropagationForeground
+	case kmgrv1.PropagationPolicy_PROPAGATION_POLICY_ORPHAN:
+		options.PropagationPolicy = metav1.DeletePropagationOrphan
+	default:
+		return DeleteOptions{}, &ValidationError{
+			Field: "propagation_policy", Message: "delete propagation policy is required",
+		}
+	}
+	if request.GracePeriodSeconds != nil {
+		grace := request.GetGracePeriodSeconds()
+		if grace < 0 {
+			return DeleteOptions{}, &ValidationError{
+				Field: "grace_period_seconds", Message: "grace period must not be negative",
+			}
+		}
+		options.GracePeriodSeconds = &grace
+	}
+	if options.MaxConcurrency < 0 || options.MaxConcurrency > MaxDeleteConcurrency {
+		return DeleteOptions{}, &ValidationError{
+			Field: "max_concurrency", Message: fmt.Sprintf(
+				"delete concurrency must be between 0 and %d", MaxDeleteConcurrency,
+			),
 		}
 	}
 	return options, nil

@@ -274,6 +274,7 @@ type selectionTokenRecord struct {
 	anchor    *uint64
 	expiresAt time.Time
 	bytes     int64
+	leaseRefs int
 }
 
 type selectionStoreDependencies struct {
@@ -620,6 +621,12 @@ func (s *SelectionStore) removeExpiredLocked(now time.Time) {
 }
 
 func (s *SelectionStore) removeTokenLocked(token string, record *selectionTokenRecord) {
+	if record.leaseRefs > 0 {
+		// An accepted destructive operation owns the immutable token record until
+		// its worker exits. Expiry makes it unavailable to new consumers but does
+		// not invalidate or under-account the already acquired memory.
+		return
+	}
 	delete(s.tokens, token)
 	s.tokenBytes -= record.bytes
 	record.snapshot.refs--

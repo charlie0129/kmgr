@@ -106,8 +106,13 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
 
         static func operationDetail(
             _ operation: PaletteOperation,
-            selection: [ResourceIdentity]
+            context: CommandContext
         ) -> String {
+            let selection = context.selectedIdentities
+            if let reference = context.selectionReference {
+                let noun = reference.selectedCount == 1 ? "resource" : "resources"
+                return "\(reference.selectedCount.formatted()) captured \(noun) · immutable token"
+            }
             guard let only = selection.first, selection.count == 1 else {
                 return "\(selection.count.formatted()) captured resources"
             }
@@ -212,7 +217,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         if case .operation(let operation) = item {
             detail = Item.operationDetail(
                 operation,
-                selection: context.commandContext.selectedIdentities
+                context: context.commandContext
             )
         } else {
             detail = item.detail

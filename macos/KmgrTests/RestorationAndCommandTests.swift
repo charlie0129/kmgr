@@ -104,6 +104,32 @@ func destructiveTableCommandIsDisabledWhileTyping(responder: ResponderContext) {
     #expect(CommandValidator.isEnabled(.restart, in: context(pod)) == false)
 }
 
+@Test func tokenCommandContextValidatesFromCountAndGVRWithoutIdentities() {
+    let context = CommandContext.capturingTokenSelection(
+        firstResponder: .resourceTable,
+        selectionReference: ResourceSelectionDeleteReference(
+            sessionID: "session",
+            viewID: "view",
+            token: "selection-token",
+            selectedCount: 250_000,
+            gvr: GVR(group: "apps", version: "v1", resource: "deployments")
+        ),
+        selectionRevision: ResourceSelectionRevision(
+            generation: 4,
+            indexRevision: 9
+        ),
+        selectionIsNamespaced: true
+    )
+
+    #expect(context.selectedIdentities.isEmpty)
+    #expect(context.selectedCount == 250_000)
+    #expect(CommandValidator.isEnabled(.delete, in: context))
+    #expect(CommandValidator.isEnabled(.copyName, in: context))
+    #expect(CommandValidator.isEnabled(.openDetails, in: context) == false)
+    #expect(CommandValidator.isEnabled(.openLogs, in: context) == false)
+    #expect(CommandValidator.isEnabled(.scale, in: context) == false)
+}
+
 @Test func commandSaveBelongsOnlyToActiveDirtyEditor() {
     let dirtyYAML = CommandContext(firstResponder: .yamlEditor, activeEditorHasChanges: true)
     let cleanYAML = CommandContext(firstResponder: .yamlEditor, activeEditorHasChanges: false)
