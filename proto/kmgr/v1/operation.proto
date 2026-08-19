@@ -34,6 +34,12 @@ message SemanticDiffEntry {
   string before_summary = 2;
   string after_summary = 3;
   CellSeverity severity = 4;
+  // Decoded values exist only for the explicit core/v1 Secret edit confirmation flow.
+  // The presence flags distinguish an absent key from a present empty value.
+  bytes before_decoded_secret_value = 5;
+  bool has_before_decoded_secret_value = 6;
+  bytes after_decoded_secret_value = 7;
+  bool has_after_decoded_secret_value = 8;
 }
 
 message PrepareYamlEditResponse {
@@ -44,6 +50,9 @@ message PrepareYamlEditResponse {
   bytes normalized_yaml_utf8 = 5;
   string current_resource_version = 6;
   StructuredError error = 7;
+  // Three-context-line display diff, bounded to 16 KiB by the engine.
+  bytes unified_diff_utf8 = 8;
+  bool unified_diff_truncated = 9;
 }
 
 message ApplyYamlRequest {

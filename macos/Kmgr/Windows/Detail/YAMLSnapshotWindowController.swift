@@ -431,7 +431,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
                     expectedResourceVersion: editingBasis.resourceVersion,
                     forceFieldOwnership: false
                 )
-                guard confirm(diff: prepared.diff) else {
+                guard confirm(prepared: prepared) else {
                     statusLabel.stringValue = "Save cancelled"
                     return
                 }
@@ -489,18 +489,13 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         updateEditingControls()
     }
 
-    private func confirm(diff: [SemanticDiffEntry]) -> Bool {
-        guard !diff.isEmpty else { return true }
-        let alert = NSAlert()
-        alert.messageText = "Apply \(diff.count) YAML change\(diff.count == 1 ? "" : "s")?"
-        let changes = diff.prefix(12).map {
-            "\($0.path): \($0.beforeSummary) → \($0.afterSummary)"
-        }.joined(separator: "\n")
-        let target = ClusterIdentityPresentation(session: session).targetDetails(identity)
-        alert.informativeText = "\(target)\n\nChanges:\n\(changes)"
-        alert.addButton(withTitle: "Apply")
-        alert.addButton(withTitle: "Keep Editing")
-        return alert.runModal() == .alertFirstButtonReturn
+    private func confirm(prepared: PreparedYAMLEdit) -> Bool {
+        guard !prepared.diff.isEmpty else { return true }
+        let controller = YAMLDiffConfirmationWindowController(
+            targetDetails: ClusterIdentityPresentation(session: session).targetDetails(identity),
+            prepared: prepared
+        )
+        return controller.runModal() == .apply
     }
 
     private func finishYAMLEdit() {

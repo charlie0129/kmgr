@@ -221,6 +221,16 @@ public struct Kmgr_V1_SemanticDiffEntry: Sendable {
 
   public var severity: Kmgr_V1_CellSeverity = .unspecified
 
+  /// Decoded values exist only for the explicit core/v1 Secret edit confirmation flow.
+  /// The presence flags distinguish an absent key from a present empty value.
+  public var beforeDecodedSecretValue: Data = Data()
+
+  public var hasBeforeDecodedSecretValue_p: Bool = false
+
+  public var afterDecodedSecretValue: Data = Data()
+
+  public var hasAfterDecodedSecretValue_p: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -258,6 +268,11 @@ public struct Kmgr_V1_PrepareYamlEditResponse: Sendable {
   public var hasError: Bool {return self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
+
+  /// Three-context-line display diff, bounded to 16 KiB by the engine.
+  public var unifiedDiffUtf8: Data = Data()
+
+  public var unifiedDiffTruncated: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -866,7 +881,7 @@ extension Kmgr_V1_PrepareYamlEditRequest: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Kmgr_V1_SemanticDiffEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SemanticDiffEntry"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}path\0\u{3}before_summary\0\u{3}after_summary\0\u{1}severity\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}path\0\u{3}before_summary\0\u{3}after_summary\0\u{1}severity\0\u{3}before_decoded_secret_value\0\u{3}has_before_decoded_secret_value\0\u{3}after_decoded_secret_value\0\u{3}has_after_decoded_secret_value\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -878,6 +893,10 @@ extension Kmgr_V1_SemanticDiffEntry: SwiftProtobuf.Message, SwiftProtobuf._Messa
       case 2: try { try decoder.decodeSingularStringField(value: &self.beforeSummary) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.afterSummary) }()
       case 4: try { try decoder.decodeSingularEnumField(value: &self.severity) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.beforeDecodedSecretValue) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.hasBeforeDecodedSecretValue_p) }()
+      case 7: try { try decoder.decodeSingularBytesField(value: &self.afterDecodedSecretValue) }()
+      case 8: try { try decoder.decodeSingularBoolField(value: &self.hasAfterDecodedSecretValue_p) }()
       default: break
       }
     }
@@ -896,6 +915,18 @@ extension Kmgr_V1_SemanticDiffEntry: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if self.severity != .unspecified {
       try visitor.visitSingularEnumField(value: self.severity, fieldNumber: 4)
     }
+    if !self.beforeDecodedSecretValue.isEmpty {
+      try visitor.visitSingularBytesField(value: self.beforeDecodedSecretValue, fieldNumber: 5)
+    }
+    if self.hasBeforeDecodedSecretValue_p != false {
+      try visitor.visitSingularBoolField(value: self.hasBeforeDecodedSecretValue_p, fieldNumber: 6)
+    }
+    if !self.afterDecodedSecretValue.isEmpty {
+      try visitor.visitSingularBytesField(value: self.afterDecodedSecretValue, fieldNumber: 7)
+    }
+    if self.hasAfterDecodedSecretValue_p != false {
+      try visitor.visitSingularBoolField(value: self.hasAfterDecodedSecretValue_p, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -904,6 +935,10 @@ extension Kmgr_V1_SemanticDiffEntry: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if lhs.beforeSummary != rhs.beforeSummary {return false}
     if lhs.afterSummary != rhs.afterSummary {return false}
     if lhs.severity != rhs.severity {return false}
+    if lhs.beforeDecodedSecretValue != rhs.beforeDecodedSecretValue {return false}
+    if lhs.hasBeforeDecodedSecretValue_p != rhs.hasBeforeDecodedSecretValue_p {return false}
+    if lhs.afterDecodedSecretValue != rhs.afterDecodedSecretValue {return false}
+    if lhs.hasAfterDecodedSecretValue_p != rhs.hasAfterDecodedSecretValue_p {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -911,7 +946,7 @@ extension Kmgr_V1_SemanticDiffEntry: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 extension Kmgr_V1_PrepareYamlEditResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PrepareYamlEditResponse"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}identity\0\u{1}diff\0\u{3}validation_errors\0\u{3}normalized_yaml_utf8\0\u{3}current_resource_version\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}identity\0\u{1}diff\0\u{3}validation_errors\0\u{3}normalized_yaml_utf8\0\u{3}current_resource_version\0\u{1}error\0\u{3}unified_diff_utf8\0\u{3}unified_diff_truncated\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -926,6 +961,8 @@ extension Kmgr_V1_PrepareYamlEditResponse: SwiftProtobuf.Message, SwiftProtobuf.
       case 5: try { try decoder.decodeSingularBytesField(value: &self.normalizedYamlUtf8) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.currentResourceVersion) }()
       case 7: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      case 8: try { try decoder.decodeSingularBytesField(value: &self.unifiedDiffUtf8) }()
+      case 9: try { try decoder.decodeSingularBoolField(value: &self.unifiedDiffTruncated) }()
       default: break
       }
     }
@@ -957,6 +994,12 @@ extension Kmgr_V1_PrepareYamlEditResponse: SwiftProtobuf.Message, SwiftProtobuf.
     try { if let v = self._error {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
     } }()
+    if !self.unifiedDiffUtf8.isEmpty {
+      try visitor.visitSingularBytesField(value: self.unifiedDiffUtf8, fieldNumber: 8)
+    }
+    if self.unifiedDiffTruncated != false {
+      try visitor.visitSingularBoolField(value: self.unifiedDiffTruncated, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -968,6 +1011,8 @@ extension Kmgr_V1_PrepareYamlEditResponse: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.normalizedYamlUtf8 != rhs.normalizedYamlUtf8 {return false}
     if lhs.currentResourceVersion != rhs.currentResourceVersion {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.unifiedDiffUtf8 != rhs.unifiedDiffUtf8 {return false}
+    if lhs.unifiedDiffTruncated != rhs.unifiedDiffTruncated {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

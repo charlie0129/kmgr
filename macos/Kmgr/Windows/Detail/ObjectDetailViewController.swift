@@ -296,6 +296,25 @@ enum ObjectDetailWatchPresentation {
     }
 }
 
+@MainActor
+private final class ObjectDetailYAMLTextView: NSTextView {
+    var onPlainEditShortcut: (() -> Bool)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([
+            .shift, .command, .control, .option,
+        ])
+        if !isEditable,
+            modifiers.isEmpty,
+            event.charactersIgnoringModifiers?.lowercased() == "e",
+            onPlainEditShortcut?() == true
+        {
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
 /// A fresh, UID-authoritative detail surface. It replaces the table area in a
 /// workspace; no inspector or bottom drawer is introduced.
 @MainActor
@@ -330,9 +349,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let cancelRelationshipScanButton = NSButton(
         title: "Cancel Scan", target: nil, action: nil
     )
-    private lazy var yamlScrollView = NSTextView.scrollablePlainDocumentContentTextView()
-    private lazy var yamlTextView: NSTextView = {
-        guard let textView = yamlScrollView.documentView as? NSTextView else {
+    private lazy var yamlScrollView =
+        ObjectDetailYAMLTextView.scrollablePlainDocumentContentTextView()
+    private lazy var yamlTextView: ObjectDetailYAMLTextView = {
+        guard let textView = yamlScrollView.documentView as? ObjectDetailYAMLTextView else {
             preconditionFailure("AppKit did not create a YAML document text view")
         }
         return textView
@@ -661,6 +681,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         yamlTextView.isAutomaticDashSubstitutionEnabled = false
         yamlTextView.allowsUndo = true
         yamlTextView.delegate = self
+        yamlTextView.onPlainEditShortcut = { [weak self] in
+            guard let self,
+                segmented.selectedSegment == ObjectDetailInitialTab.yaml.segment,
+                detail != nil,
+                !isEditingYAML,
+                editButton.isEnabled
+            else { return false }
+            beginYAMLEdit()
+            return true
+        }
         yamlTextView.setAccessibilityLabel("Kubernetes object YAML")
         yamlTextView.textContainerInset = NSSize(width: 10, height: 10)
         yamlScrollView.hasVerticalScroller = true
@@ -916,8 +946,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func installWatchUpdate(_ updated: ObjectDetail) {
         statusLabel.toolTip = nil
-        guard updated.identity.uid == identity.uid, !isEditingYAML else {
-            if isEditingYAML {
+        guard updated.identity.uid == identity.uid else { return }
+        if isEditingYAML {
+            if updated.resourceVersion != detail?.resourceVersion {
                 statusLabel.stringValue = "Server object changed · local YAML edit preserved"
                 statusLabel.textColor = .systemOrange
             }
@@ -1104,7 +1135,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     expectedResourceVersion: detail.resourceVersion,
                     forceFieldOwnership: false
                 )
-                guard confirm(diff: prepared.diff) else {
+                guard confirm(prepared: prepared) else {
                     statusLabel.stringValue = "Save cancelled"
                     return
                 }
@@ -1141,19 +1172,13 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         updateYAMLEditControls()
     }
 
-    private func confirm(diff: [SemanticDiffEntry]) -> Bool {
-        guard !diff.isEmpty else { return true }
-        let alert = NSAlert()
-        alert.messageText = "Apply \(diff.count) YAML change\(diff.count == 1 ? "" : "s")?"
-        let changes = diff.prefix(12).map {
-            "\($0.path): \($0.beforeSummary) → \($0.afterSummary)"
-        }.joined(separator: "\n")
-        alert.informativeText = confirmationInformativeText(
-            note: "Changes:\n\(changes)"
+    private func confirm(prepared: PreparedYAMLEdit) -> Bool {
+        guard !prepared.diff.isEmpty else { return true }
+        let controller = YAMLDiffConfirmationWindowController(
+            targetDetails: mutationConfirmationIdentityText,
+            prepared: prepared
         )
-        alert.addButton(withTitle: "Apply")
-        alert.addButton(withTitle: "Keep Editing")
-        return alert.runModal() == .alertFirstButtonReturn
+        return controller.runModal() == .apply
     }
 
     private func finishYAMLEdit() {

@@ -13,6 +13,8 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     var watchRequest: Kmgr_V1_WatchObjectRequest?
     var relationshipScanRequest: Kmgr_V1_ScanRelationshipsRequest?
     var relationshipCancelRequest: Kmgr_V1_CancelRelationshipScanRequest?
+    var yamlPreparation = Kmgr_V1_PrepareYamlEditResponse()
+    var yamlPreparationRequest: Kmgr_V1_PrepareYamlEditRequest?
     var operationCancelRequest: Kmgr_V1_CancelOperationRequest?
     var operationWatchRequest: Kmgr_V1_WatchOperationRequest?
     var operationEvents: [Kmgr_V1_OperationEvent] = []
@@ -71,7 +73,12 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     func prepareYAML(
         _ request: Kmgr_V1_PrepareYamlEditRequest,
         timeout: Duration
-    ) async throws -> Kmgr_V1_PrepareYamlEditResponse { .init() }
+    ) async throws -> Kmgr_V1_PrepareYamlEditResponse {
+        yamlPreparationRequest = request
+        var value = yamlPreparation
+        value.requestID = request.context.requestID
+        return value
+    }
 
     func applyYAML(
         _ request: Kmgr_V1_ApplyYamlRequest,
@@ -132,6 +139,12 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     }
     func capturedRelationshipCancel() -> Kmgr_V1_CancelRelationshipScanRequest? {
         relationshipCancelRequest
+    }
+    func installYAMLPreparation(_ value: Kmgr_V1_PrepareYamlEditResponse) {
+        yamlPreparation = value
+    }
+    func capturedYAMLPreparation() -> Kmgr_V1_PrepareYamlEditRequest? {
+        yamlPreparationRequest
     }
     func capturedOperationCancel() -> Kmgr_V1_CancelOperationRequest? {
         operationCancelRequest
@@ -282,6 +295,60 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(request?.identity.uid == "uid-api")
     #expect(request?.resourceVersion == "rv-1")
     #expect(request?.context.clusterSessionID == "session")
+}
+
+@Test func objectDetailProviderMapsPreparedYAMLDiffAndTransientSecretValues() async throws {
+    let rpc = ObjectDetailRPCCapture()
+    var changedSecret = Kmgr_V1_SemanticDiffEntry()
+    changedSecret.path = "/data/token"
+    changedSecret.beforeSummary = "5 decoded bytes"
+    changedSecret.afterSummary = "3 decoded bytes"
+    changedSecret.severity = .warning
+    changedSecret.beforeDecodedSecretValue = Data()
+    changedSecret.hasBeforeDecodedSecretValue_p = true
+    changedSecret.afterDecodedSecretValue = Data([0x00, 0x41, 0xff])
+    changedSecret.hasAfterDecodedSecretValue_p = true
+    var absentSecretValues = Kmgr_V1_SemanticDiffEntry()
+    absentSecretValues.path = "/metadata/labels/app"
+    absentSecretValues.beforeDecodedSecretValue = Data("ignored".utf8)
+    absentSecretValues.afterDecodedSecretValue = Data("ignored".utf8)
+    var response = Kmgr_V1_PrepareYamlEditResponse()
+    response.normalizedYamlUtf8 = Data("kind: Secret\n".utf8)
+    response.currentResourceVersion = "rv-2"
+    response.diff = [changedSecret, absentSecretValues]
+    response.unifiedDiffUtf8 = Data("@@ -1 +1 @@\n-old\n+new\n".utf8)
+    response.unifiedDiffTruncated = true
+    await rpc.installYAMLPreparation(response)
+
+    let yaml = Data("kind: Secret\n".utf8)
+    let prepared = try await EngineObjectDetailProvider(
+        rpc: rpc,
+        identifier: { "prepare-request" }
+    ).prepareYAML(
+        identity: identity(name: "credentials", uid: "secret-1"),
+        yamlUTF8: yaml,
+        expectedResourceVersion: "rv-1",
+        forceFieldOwnership: true
+    )
+
+    #expect(prepared.normalizedYAMLUTF8 == yaml)
+    #expect(prepared.currentResourceVersion == "rv-2")
+    #expect(prepared.unifiedDiffUTF8 == response.unifiedDiffUtf8)
+    #expect(prepared.unifiedDiffTruncated)
+    #expect(prepared.diff[0].severity == .warning)
+    #expect(secretData(prepared.diff[0].beforeDecodedSecretValue) == Data())
+    #expect(
+        secretData(prepared.diff[0].afterDecodedSecretValue)
+            == Data([0x00, 0x41, 0xff])
+    )
+    #expect(prepared.diff[1].beforeDecodedSecretValue == nil)
+    #expect(prepared.diff[1].afterDecodedSecretValue == nil)
+    let request = try #require(await rpc.capturedYAMLPreparation())
+    #expect(request.context.requestID == "prepare-request")
+    #expect(request.identity.uid == "secret-1")
+    #expect(request.yamlUtf8 == yaml)
+    #expect(request.expectedResourceVersion == "rv-1")
+    #expect(request.forceFieldOwnership)
 }
 
 @Test func objectDetailOperationStreamCancellationCancelsAcceptedMutation() async throws {
@@ -463,6 +530,10 @@ private func waitForObjectDetailCondition(
         try await Task.sleep(for: .milliseconds(2))
     }
     Issue.record("Timed out waiting for object-detail operation lifecycle")
+}
+
+private func secretData(_ value: SensitiveBytes?) -> Data? {
+    value?.withUnsafeBytes { Data($0) }
 }
 
 private func protoIdentity(

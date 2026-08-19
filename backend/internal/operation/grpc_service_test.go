@@ -1,6 +1,7 @@
 package operation
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,18 +24,32 @@ import (
 
 func TestPrepareYamlEditReturnsValidationAndSemanticDiff(t *testing.T) {
 	t.Parallel()
+	beforeSecret := []byte("old decoded value")
+	afterSecret := []byte("new decoded value")
 	editor := &fakeYAMLEditor{prepared: object.PreparedYAML{
 		CurrentResourceVersion: "rv-1", NormalizedYAML: []byte("kind: ConfigMap\n"),
-		Diff: []object.SemanticDiff{{Path: "data.mode", BeforeSummary: "slow", AfterSummary: "fast"}},
+		UnifiedDiff: []byte("--- server\n+++ edited\n"), UnifiedDiffTruncated: true,
+		Diff: []object.SemanticDiff{{
+			Path: "data.mode", BeforeSummary: "<redacted>", AfterSummary: "<redacted>",
+			BeforeDecodedSecretValue: beforeSecret, HasBeforeDecodedSecretValue: true,
+			AfterDecodedSecretValue: afterSecret, HasAfterDecodedSecretValue: true,
+		}},
 	}}
 	service := testOperationService(t, editor)
 	response, err := service.PrepareYamlEdit(context.Background(), &kmgrv1.PrepareYamlEditRequest{
 		Context: operationContext("prepare"), Identity: operationIdentity(), YamlUtf8: []byte("yaml"),
 		ExpectedResourceVersion: "rv-1",
 	})
-	if err != nil || response.GetError() != nil || len(response.GetDiff()) != 1 ||
-		response.GetDiff()[0].GetPath() != "data.mode" || response.GetCurrentResourceVersion() != "rv-1" {
-		t.Fatalf("response = %#v, error = %v", response, err)
+	if err != nil || response.GetError() != nil || len(response.GetDiff()) != 1 {
+		t.Fatalf("unexpected prepare response envelope: error = %v", err)
+	}
+	entry := response.GetDiff()[0]
+	if entry.GetPath() != "data.mode" || response.GetCurrentResourceVersion() != "rv-1" ||
+		!bytes.Equal(response.GetUnifiedDiffUtf8(), editor.prepared.UnifiedDiff) ||
+		!response.GetUnifiedDiffTruncated() ||
+		!entry.GetHasBeforeDecodedSecretValue() || !bytes.Equal(entry.GetBeforeDecodedSecretValue(), beforeSecret) ||
+		!entry.GetHasAfterDecodedSecretValue() || !bytes.Equal(entry.GetAfterDecodedSecretValue(), afterSecret) {
+		t.Fatal("prepare response did not preserve the transient YAML diff fields")
 	}
 
 	editor.err = &object.YAMLIdentityMismatchError{Field: "metadata.name", Expected: "settings", Actual: "other"}

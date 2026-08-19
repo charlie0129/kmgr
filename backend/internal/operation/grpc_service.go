@@ -117,10 +117,16 @@ func (s *GRPCService) PrepareYamlEdit(
 	}
 	response.NormalizedYamlUtf8 = append([]byte(nil), prepared.NormalizedYAML...)
 	response.CurrentResourceVersion = prepared.CurrentResourceVersion
+	response.UnifiedDiffUtf8 = append([]byte(nil), prepared.UnifiedDiff...)
+	response.UnifiedDiffTruncated = prepared.UnifiedDiffTruncated
 	for _, entry := range prepared.Diff {
 		response.Diff = append(response.Diff, &kmgrv1.SemanticDiffEntry{
 			Path: entry.Path, BeforeSummary: entry.BeforeSummary, AfterSummary: entry.AfterSummary,
-			Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			Severity:                    kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			BeforeDecodedSecretValue:    append([]byte(nil), entry.BeforeDecodedSecretValue...),
+			HasBeforeDecodedSecretValue: entry.HasBeforeDecodedSecretValue,
+			AfterDecodedSecretValue:     append([]byte(nil), entry.AfterDecodedSecretValue...),
+			HasAfterDecodedSecretValue:  entry.HasAfterDecodedSecretValue,
 		})
 	}
 	return response, nil

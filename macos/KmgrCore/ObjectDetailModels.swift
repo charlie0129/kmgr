@@ -302,38 +302,53 @@ public struct ObjectData: Sendable {
     }
 }
 
-public struct SemanticDiffEntry: Hashable, Sendable {
+/// Secret values are carried only for the transient edit-confirmation flow.
+/// They deliberately use `SensitiveBytes`, keeping them out of printable,
+/// hashable, codable, and restoration-friendly value models.
+public struct SemanticDiffEntry: Sendable {
     public var path: String
     public var beforeSummary: String
     public var afterSummary: String
     public var severity: CellSeverity
+    public let beforeDecodedSecretValue: SensitiveBytes?
+    public let afterDecodedSecretValue: SensitiveBytes?
 
     public init(
         path: String,
         beforeSummary: String,
         afterSummary: String,
-        severity: CellSeverity = .normal
+        severity: CellSeverity = .normal,
+        beforeDecodedSecretValue: SensitiveBytes? = nil,
+        afterDecodedSecretValue: SensitiveBytes? = nil
     ) {
         self.path = path
         self.beforeSummary = beforeSummary
         self.afterSummary = afterSummary
         self.severity = severity
+        self.beforeDecodedSecretValue = beforeDecodedSecretValue
+        self.afterDecodedSecretValue = afterDecodedSecretValue
     }
 }
 
-public struct PreparedYAMLEdit: Hashable, Sendable {
+public struct PreparedYAMLEdit: Sendable {
     public var normalizedYAMLUTF8: Data
     public var currentResourceVersion: String
     public var diff: [SemanticDiffEntry]
+    public var unifiedDiffUTF8: Data
+    public var unifiedDiffTruncated: Bool
 
     public init(
         normalizedYAMLUTF8: Data,
         currentResourceVersion: String,
-        diff: [SemanticDiffEntry]
+        diff: [SemanticDiffEntry],
+        unifiedDiffUTF8: Data = Data(),
+        unifiedDiffTruncated: Bool = false
     ) {
         self.normalizedYAMLUTF8 = normalizedYAMLUTF8
         self.currentResourceVersion = currentResourceVersion
         self.diff = diff
+        self.unifiedDiffUTF8 = unifiedDiffUTF8
+        self.unifiedDiffTruncated = unifiedDiffTruncated
     }
 }
 

@@ -1,7 +1,9 @@
 package object
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -94,6 +97,117 @@ status:
 	}
 	if len(prepared.Diff) != 1 || prepared.Diff[0].Path != "spec.replicas" {
 		t.Fatalf("diff = %#v", prepared.Diff)
+	}
+}
+
+func TestPrepareYAMLBuildsContextDiffAndCarriesDecodedSecretChanges(t *testing.T) {
+	t.Parallel()
+	current := kubernetesObject("v1", "Secret", "secrets", "ns", "credentials", "uid")
+	oldToken := []byte("old decoded token\nsecond line")
+	newToken := []byte("new decoded token\nsecond line")
+	current.Object["type"] = "Opaque"
+	current.Object["data"] = map[string]any{
+		"token":  base64.StdEncoding.EncodeToString(oldToken),
+		"binary": base64.StdEncoding.EncodeToString([]byte{0x00, 0xff, 0x10}),
+	}
+	reader, client := fakeYAMLReader(t, current)
+	client.PrependReactor("patch", "secrets", func(action ktesting.Action) (bool, runtime.Object, error) {
+		result := current.DeepCopy()
+		result.Object["data"].(map[string]any)["token"] = base64.StdEncoding.EncodeToString(newToken)
+		return true, result, nil
+	})
+	identity := Identity{
+		SessionID: "session", Version: "v1", Resource: "secrets",
+		Namespace: "ns", Name: "credentials", UID: "uid",
+	}
+	yaml := []byte(`apiVersion: v1
+kind: Secret
+metadata:
+  name: credentials
+  namespace: ns
+  uid: uid
+  resourceVersion: rv-1
+type: Opaque
+data:
+  binary: AP8Q
+  token: bmV3IGRlY29kZWQgdG9rZW4Kc2Vjb25kIGxpbmU=
+`)
+	prepared, err := reader.PrepareYAML(context.Background(), identity, yaml, "rv-1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.UnifiedDiffTruncated {
+		t.Fatal("small Secret diff was unexpectedly truncated")
+	}
+	displayDiff := string(prepared.UnifiedDiff)
+	for _, forbidden := range []string{
+		string(oldToken), string(newToken),
+		base64.StdEncoding.EncodeToString(oldToken),
+		base64.StdEncoding.EncodeToString(newToken),
+	} {
+		if strings.Contains(displayDiff, forbidden) {
+			t.Fatal("display diff leaked decoded or base64 Secret content")
+		}
+	}
+	if !strings.Contains(displayDiff, "--- server") ||
+		!strings.Contains(displayDiff, "+++ edited") ||
+		!strings.Contains(displayDiff, "see decoded diff below") {
+		t.Fatal("unified display diff is missing its headers or Secret placeholder")
+	}
+	for _, entry := range prepared.Diff {
+		if entry.Path != "data.token" {
+			continue
+		}
+		if !entry.HasBeforeDecodedSecretValue || !entry.HasAfterDecodedSecretValue ||
+			!bytes.Equal(entry.BeforeDecodedSecretValue, oldToken) ||
+			!bytes.Equal(entry.AfterDecodedSecretValue, newToken) {
+			t.Fatal("decoded Secret diff did not retain the expected transient values")
+		}
+		if entry.BeforeSummary != "<redacted>" || entry.AfterSummary != "<redacted>" {
+			t.Fatalf("Secret summaries = %#v", entry)
+		}
+		return
+	}
+	t.Fatal("data.token diff not found")
+}
+
+func TestSemanticSecretDiffCarriesFirstKeyAdditionAndLastKeyDeletion(t *testing.T) {
+	t.Parallel()
+	withoutData := kubernetesObject("v1", "Secret", "secrets", "ns", "credentials", "uid")
+	withData := withoutData.DeepCopy()
+	withData.Object["data"] = map[string]any{
+		"empty": "",
+		"token": base64.StdEncoding.EncodeToString([]byte("decoded token")),
+	}
+
+	added := semanticYAMLDiff(withoutData, withData, true)
+	assertDecodedSecretDiff(t, added, "data.empty", nil, false, []byte{}, true)
+	assertDecodedSecretDiff(
+		t, added, "data.token", nil, false, []byte("decoded token"), true,
+	)
+
+	deleted := semanticYAMLDiff(withData, withoutData, true)
+	assertDecodedSecretDiff(t, deleted, "data.empty", []byte{}, true, nil, false)
+	assertDecodedSecretDiff(
+		t, deleted, "data.token", []byte("decoded token"), true, nil, false,
+	)
+}
+
+func TestUnifiedYAMLDisplayDiffIsUTF8AndBounded(t *testing.T) {
+	t.Parallel()
+	before := kubernetesObject("example.io/v1", "Widget", "widgets", "ns", "sample", "uid")
+	after := before.DeepCopy()
+	before.Object["spec"] = map[string]any{"payload": strings.Repeat("界", 10_000)}
+	after.Object["spec"] = map[string]any{"payload": strings.Repeat("語", 10_000)}
+	diff, truncated, err := unifiedYAMLDisplayDiff(before, after, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated || len(diff) > maximumUnifiedYAMLDiffBytes || !utf8.Valid(diff) {
+		t.Fatalf("bounded diff: bytes=%d truncated=%t utf8=%t", len(diff), truncated, utf8.Valid(diff))
+	}
+	if !strings.HasSuffix(string(diff), "... unified diff truncated for display ...\n") {
+		t.Fatalf("truncation marker missing from tail %q", diff[max(0, len(diff)-80):])
 	}
 }
 
@@ -607,6 +721,31 @@ func assertSemanticDiff(t *testing.T, values []SemanticDiff, path, before, after
 		}
 	}
 	t.Fatalf("diff %q not found in %#v", path, values)
+}
+
+func assertDecodedSecretDiff(
+	t *testing.T,
+	values []SemanticDiff,
+	path string,
+	before []byte,
+	hasBefore bool,
+	after []byte,
+	hasAfter bool,
+) {
+	t.Helper()
+	for _, value := range values {
+		if value.Path != path {
+			continue
+		}
+		if value.HasBeforeDecodedSecretValue != hasBefore ||
+			!bytes.Equal(value.BeforeDecodedSecretValue, before) ||
+			value.HasAfterDecodedSecretValue != hasAfter ||
+			!bytes.Equal(value.AfterDecodedSecretValue, after) {
+			t.Fatalf("decoded Secret diff %q has incorrect transient value state", path)
+		}
+		return
+	}
+	t.Fatalf("decoded Secret diff %q not found", path)
 }
 
 type recordedHTTPRequest struct {

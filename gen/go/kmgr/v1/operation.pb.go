@@ -277,8 +277,14 @@ type SemanticDiffEntry struct {
 	BeforeSummary string                 `protobuf:"bytes,2,opt,name=before_summary,json=beforeSummary,proto3" json:"before_summary,omitempty"`
 	AfterSummary  string                 `protobuf:"bytes,3,opt,name=after_summary,json=afterSummary,proto3" json:"after_summary,omitempty"`
 	Severity      CellSeverity           `protobuf:"varint,4,opt,name=severity,proto3,enum=kmgr.v1.CellSeverity" json:"severity,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Decoded values exist only for the explicit core/v1 Secret edit confirmation flow.
+	// The presence flags distinguish an absent key from a present empty value.
+	BeforeDecodedSecretValue    []byte `protobuf:"bytes,5,opt,name=before_decoded_secret_value,json=beforeDecodedSecretValue,proto3" json:"before_decoded_secret_value,omitempty"`
+	HasBeforeDecodedSecretValue bool   `protobuf:"varint,6,opt,name=has_before_decoded_secret_value,json=hasBeforeDecodedSecretValue,proto3" json:"has_before_decoded_secret_value,omitempty"`
+	AfterDecodedSecretValue     []byte `protobuf:"bytes,7,opt,name=after_decoded_secret_value,json=afterDecodedSecretValue,proto3" json:"after_decoded_secret_value,omitempty"`
+	HasAfterDecodedSecretValue  bool   `protobuf:"varint,8,opt,name=has_after_decoded_secret_value,json=hasAfterDecodedSecretValue,proto3" json:"has_after_decoded_secret_value,omitempty"`
+	unknownFields               protoimpl.UnknownFields
+	sizeCache                   protoimpl.SizeCache
 }
 
 func (x *SemanticDiffEntry) Reset() {
@@ -339,6 +345,34 @@ func (x *SemanticDiffEntry) GetSeverity() CellSeverity {
 	return CellSeverity_CELL_SEVERITY_UNSPECIFIED
 }
 
+func (x *SemanticDiffEntry) GetBeforeDecodedSecretValue() []byte {
+	if x != nil {
+		return x.BeforeDecodedSecretValue
+	}
+	return nil
+}
+
+func (x *SemanticDiffEntry) GetHasBeforeDecodedSecretValue() bool {
+	if x != nil {
+		return x.HasBeforeDecodedSecretValue
+	}
+	return false
+}
+
+func (x *SemanticDiffEntry) GetAfterDecodedSecretValue() []byte {
+	if x != nil {
+		return x.AfterDecodedSecretValue
+	}
+	return nil
+}
+
+func (x *SemanticDiffEntry) GetHasAfterDecodedSecretValue() bool {
+	if x != nil {
+		return x.HasAfterDecodedSecretValue
+	}
+	return false
+}
+
 type PrepareYamlEditResponse struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
 	RequestId              string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -348,8 +382,11 @@ type PrepareYamlEditResponse struct {
 	NormalizedYamlUtf8     []byte                 `protobuf:"bytes,5,opt,name=normalized_yaml_utf8,json=normalizedYamlUtf8,proto3" json:"normalized_yaml_utf8,omitempty"`
 	CurrentResourceVersion string                 `protobuf:"bytes,6,opt,name=current_resource_version,json=currentResourceVersion,proto3" json:"current_resource_version,omitempty"`
 	Error                  *StructuredError       `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Three-context-line display diff, bounded to 16 KiB by the engine.
+	UnifiedDiffUtf8      []byte `protobuf:"bytes,8,opt,name=unified_diff_utf8,json=unifiedDiffUtf8,proto3" json:"unified_diff_utf8,omitempty"`
+	UnifiedDiffTruncated bool   `protobuf:"varint,9,opt,name=unified_diff_truncated,json=unifiedDiffTruncated,proto3" json:"unified_diff_truncated,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *PrepareYamlEditResponse) Reset() {
@@ -429,6 +466,20 @@ func (x *PrepareYamlEditResponse) GetError() *StructuredError {
 		return x.Error
 	}
 	return nil
+}
+
+func (x *PrepareYamlEditResponse) GetUnifiedDiffUtf8() []byte {
+	if x != nil {
+		return x.UnifiedDiffUtf8
+	}
+	return nil
+}
+
+func (x *PrepareYamlEditResponse) GetUnifiedDiffTruncated() bool {
+	if x != nil {
+		return x.UnifiedDiffTruncated
+	}
+	return false
 }
 
 type ApplyYamlRequest struct {
@@ -1661,12 +1712,16 @@ const file_kmgr_v1_operation_proto_rawDesc = "" +
 	"\bidentity\x18\x02 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12\x1b\n" +
 	"\tyaml_utf8\x18\x03 \x01(\fR\byamlUtf8\x12:\n" +
 	"\x19expected_resource_version\x18\x04 \x01(\tR\x17expectedResourceVersion\x122\n" +
-	"\x15force_field_ownership\x18\x05 \x01(\bR\x13forceFieldOwnership\"\xa6\x01\n" +
+	"\x15force_field_ownership\x18\x05 \x01(\bR\x13forceFieldOwnership\"\xac\x03\n" +
 	"\x11SemanticDiffEntry\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12%\n" +
 	"\x0ebefore_summary\x18\x02 \x01(\tR\rbeforeSummary\x12#\n" +
 	"\rafter_summary\x18\x03 \x01(\tR\fafterSummary\x121\n" +
-	"\bseverity\x18\x04 \x01(\x0e2\x15.kmgr.v1.CellSeverityR\bseverity\"\x82\x03\n" +
+	"\bseverity\x18\x04 \x01(\x0e2\x15.kmgr.v1.CellSeverityR\bseverity\x12=\n" +
+	"\x1bbefore_decoded_secret_value\x18\x05 \x01(\fR\x18beforeDecodedSecretValue\x12D\n" +
+	"\x1fhas_before_decoded_secret_value\x18\x06 \x01(\bR\x1bhasBeforeDecodedSecretValue\x12;\n" +
+	"\x1aafter_decoded_secret_value\x18\a \x01(\fR\x17afterDecodedSecretValue\x12B\n" +
+	"\x1ehas_after_decoded_secret_value\x18\b \x01(\bR\x1ahasAfterDecodedSecretValue\"\xe4\x03\n" +
 	"\x17PrepareYamlEditResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x125\n" +
@@ -1675,7 +1730,9 @@ const file_kmgr_v1_operation_proto_rawDesc = "" +
 	"\x11validation_errors\x18\x04 \x03(\v2\x18.kmgr.v1.StructuredErrorR\x10validationErrors\x120\n" +
 	"\x14normalized_yaml_utf8\x18\x05 \x01(\fR\x12normalizedYamlUtf8\x128\n" +
 	"\x18current_resource_version\x18\x06 \x01(\tR\x16currentResourceVersion\x12.\n" +
-	"\x05error\x18\a \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\xd1\x02\n" +
+	"\x05error\x18\a \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\x12*\n" +
+	"\x11unified_diff_utf8\x18\b \x01(\fR\x0funifiedDiffUtf8\x124\n" +
+	"\x16unified_diff_truncated\x18\t \x01(\bR\x14unifiedDiffTruncated\"\xd1\x02\n" +
 	"\x10ApplyYamlRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x125\n" +

@@ -426,9 +426,17 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                         path: value.path,
                         beforeSummary: value.beforeSummary,
                         afterSummary: value.afterSummary,
-                        severity: Self.severity(value.severity)
+                        severity: Self.severity(value.severity),
+                        beforeDecodedSecretValue:
+                            value.hasBeforeDecodedSecretValue_p
+                            ? SensitiveBytes(value.beforeDecodedSecretValue) : nil,
+                        afterDecodedSecretValue:
+                            value.hasAfterDecodedSecretValue_p
+                            ? SensitiveBytes(value.afterDecodedSecretValue) : nil
                     )
-                }
+                },
+                unifiedDiffUTF8: response.unifiedDiffUtf8,
+                unifiedDiffTruncated: response.unifiedDiffTruncated
             )
         } catch {
             throw Self.issue(error, operation: "prepare YAML edit")

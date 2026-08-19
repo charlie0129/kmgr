@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/pmezard/go-difflib/difflib"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -23,6 +26,8 @@ import (
 )
 
 const YAMLFieldManager = "kmgr"
+
+const maximumUnifiedYAMLDiffBytes = 16 << 10
 
 var (
 	ErrInvalidYAML                   = errors.New("YAML does not contain exactly one Kubernetes object")
@@ -40,9 +45,13 @@ func (e *YAMLIdentityMismatchError) Error() string {
 }
 
 type SemanticDiff struct {
-	Path          string
-	BeforeSummary string
-	AfterSummary  string
+	Path                        string
+	BeforeSummary               string
+	AfterSummary                string
+	BeforeDecodedSecretValue    []byte
+	HasBeforeDecodedSecretValue bool
+	AfterDecodedSecretValue     []byte
+	HasAfterDecodedSecretValue  bool
 }
 
 type PreparedYAML struct {
@@ -50,6 +59,8 @@ type PreparedYAML struct {
 	CurrentResourceVersion string
 	NormalizedYAML         []byte
 	Diff                   []SemanticDiff
+	UnifiedDiff            []byte
+	UnifiedDiffTruncated   bool
 }
 
 type AppliedYAML struct {
@@ -92,9 +103,20 @@ func (r *Reader) PrepareYAML(
 			return PreparedYAML{}, err
 		}
 	}
+	secret := identity.Group == "" && identity.Version == "v1" && identity.Resource == "secrets"
+	unifiedDiff, unifiedDiffTruncated, err := unifiedYAMLDisplayDiff(
+		prepared.current, dryRun, secret,
+	)
+	if err != nil {
+		return PreparedYAML{}, fmt.Errorf("build YAML display diff: %w", err)
+	}
 	return PreparedYAML{
 		Identity: identity, CurrentResourceVersion: prepared.current.GetResourceVersion(),
-		NormalizedYAML: prepared.normalized, Diff: semanticYAMLDiff(prepared.current, dryRun),
+		NormalizedYAML: prepared.normalized,
+		Diff: semanticYAMLDiff(
+			prepared.current, dryRun, secret,
+		),
+		UnifiedDiff: unifiedDiff, UnifiedDiffTruncated: unifiedDiffTruncated,
 	}, nil
 }
 
@@ -414,11 +436,11 @@ func validateYAMLIdentity(
 	return nil
 }
 
-func semanticYAMLDiff(before, after *unstructured.Unstructured) []SemanticDiff {
+func semanticYAMLDiff(before, after *unstructured.Unstructured, secret bool) []SemanticDiff {
 	left := sanitizeDiffObject(before)
 	right := sanitizeDiffObject(after)
 	result := make([]SemanticDiff, 0, 16)
-	appendSemanticDiff(&result, "", left, right)
+	appendSemanticDiff(&result, "", left, right, secret)
 	return result
 }
 
@@ -434,12 +456,23 @@ func sanitizeDiffObject(value *unstructured.Unstructured) map[string]any {
 	return copy.Object
 }
 
-func appendSemanticDiff(result *[]SemanticDiff, path string, before, after any) {
+func appendSemanticDiff(result *[]SemanticDiff, path string, before, after any, secret bool) {
 	if reflect.DeepEqual(before, after) || len(*result) >= 200 {
 		return
 	}
 	left, leftMap := before.(map[string]any)
 	right, rightMap := after.(map[string]any)
+	// A Secret may legitimately gain its first data key or lose its last one.
+	// Descend through a one-sided data map so those transitions still carry the
+	// explicitly requested decoded bytes instead of collapsing to a map count.
+	if secret && path == "data" {
+		if _, missing := before.(missingSemanticDiffValue); missing {
+			left, leftMap = map[string]any{}, true
+		}
+		if _, missing := after.(missingSemanticDiffValue); missing {
+			right, rightMap = map[string]any{}, true
+		}
+	}
 	if leftMap && rightMap {
 		keys := make([]string, 0, len(left)+len(right))
 		seen := make(map[string]struct{}, len(left)+len(right))
@@ -466,13 +499,117 @@ func appendSemanticDiff(result *[]SemanticDiff, path string, before, after any) 
 			if !rightExists {
 				rightValue = missingSemanticDiffValue{}
 			}
-			appendSemanticDiff(result, child, leftValue, rightValue)
+			appendSemanticDiff(result, child, leftValue, rightValue, secret)
 		}
 		return
 	}
-	*result = append(*result, SemanticDiff{
+	entry := SemanticDiff{
 		Path: path, BeforeSummary: summarizeDiffValue(before, path), AfterSummary: summarizeDiffValue(after, path),
+	}
+	if secret && strings.HasPrefix(path, "data.") {
+		entry.BeforeDecodedSecretValue, entry.HasBeforeDecodedSecretValue = decodedSecretValue(before)
+		entry.AfterDecodedSecretValue, entry.HasAfterDecodedSecretValue = decodedSecretValue(after)
+	}
+	*result = append(*result, entry)
+}
+
+func decodedSecretValue(value any) ([]byte, bool) {
+	if _, missing := value.(missingSemanticDiffValue); missing {
+		return nil, false
+	}
+	switch typed := value.(type) {
+	case string:
+		decoded, err := base64.StdEncoding.DecodeString(typed)
+		if err != nil {
+			return nil, false
+		}
+		return decoded, true
+	case []byte:
+		return append([]byte(nil), typed...), true
+	default:
+		return nil, false
+	}
+}
+
+func unifiedYAMLDisplayDiff(
+	before, after *unstructured.Unstructured,
+	secret bool,
+) ([]byte, bool, error) {
+	left, err := yamlDiffDocument(before, secret)
+	if err != nil {
+		return nil, false, err
+	}
+	right, err := yamlDiffDocument(after, secret)
+	if err != nil {
+		return nil, false, err
+	}
+	output := boundedYAMLDiffWriter{limit: maximumUnifiedYAMLDiffBytes}
+	err = difflib.WriteUnifiedDiff(&output, difflib.UnifiedDiff{
+		A: difflib.SplitLines(string(left)), B: difflib.SplitLines(string(right)),
+		FromFile: "server", ToFile: "edited", Context: 3,
 	})
+	if err != nil {
+		return nil, false, err
+	}
+	if !output.truncated {
+		return output.value, false, nil
+	}
+	marker := []byte("\n... unified diff truncated for display ...\n")
+	limit := maximumUnifiedYAMLDiffBytes - len(marker)
+	for limit > 0 && !utf8.Valid(output.value[:limit]) {
+		limit--
+	}
+	bounded := make([]byte, 0, maximumUnifiedYAMLDiffBytes)
+	bounded = append(bounded, output.value[:limit]...)
+	bounded = append(bounded, marker...)
+	return bounded, true, nil
+}
+
+// boundedYAMLDiffWriter reports successful writes after its display budget is
+// full so difflib can finish its comparison without retaining an unbounded
+// rendered result. The caller appends a visible truncation marker afterward.
+type boundedYAMLDiffWriter struct {
+	value     []byte
+	limit     int
+	truncated bool
+}
+
+func (w *boundedYAMLDiffWriter) Write(value []byte) (int, error) {
+	written := len(value)
+	remaining := w.limit - len(w.value)
+	if remaining <= 0 {
+		w.truncated = w.truncated || written > 0
+		return written, nil
+	}
+	if written > remaining {
+		w.value = append(w.value, value[:remaining]...)
+		w.truncated = true
+		return written, nil
+	}
+	w.value = append(w.value, value...)
+	return written, nil
+}
+
+func yamlDiffDocument(value *unstructured.Unstructured, secret bool) ([]byte, error) {
+	display := sanitizeDiffObject(value)
+	if secret {
+		if data, ok := display["data"].(map[string]any); ok {
+			for key, encoded := range data {
+				decoded, valid := decodedSecretValue(encoded)
+				if !valid {
+					data[key] = "<decoded value unavailable>"
+					continue
+				}
+				digest := sha256.Sum256(decoded)
+				data[key] = fmt.Sprintf(
+					"<decoded %d bytes · SHA-256 %x · see decoded diff below>",
+					len(decoded), digest[:6],
+				)
+			}
+		}
+		delete(display, "stringData")
+	}
+	return sigyaml.Marshal(display)
 }
 
 type missingSemanticDiffValue struct{}

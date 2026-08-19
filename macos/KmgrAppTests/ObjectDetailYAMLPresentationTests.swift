@@ -520,6 +520,136 @@ struct ObjectDetailYAMLPresentationTests {
         })
     }
 
+    @Test("plain e starts editing from the read-only YAML view")
+    func plainEStartsYAMLEditing() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: "configmaps",
+            namespace: "dev",
+            name: "settings",
+            uid: ResourceUID("uid")
+        )
+        let source = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: settings\n"
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: LoadedObjectDetailProvider(
+                detail: ObjectDetail(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    yamlUTF8: Data(source.utf8)
+                ),
+                data: ObjectData(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    entries: [],
+                    secret: false
+                )
+            ),
+            initialTab: .yaml
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let editor = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Kubernetes object YAML" })
+        let buttons = descendants(of: controller.view).compactMap { $0 as? NSButton }
+        let edit = try #require(buttons.first { $0.title == "Edit" })
+        let save = try #require(buttons.first { $0.title == "Save" })
+        let cancel = try #require(buttons.first { $0.title == "Cancel" })
+        try await waitUntil { editor.string == source }
+
+        editor.keyDown(with: try yamlKeyEvent("e", modifiers: [.command]))
+        #expect(!editor.isEditable)
+        #expect(!edit.isHidden)
+
+        editor.keyDown(with: try yamlKeyEvent("e"))
+        #expect(editor.isEditable)
+        #expect(edit.isHidden)
+        #expect(!save.isHidden)
+        #expect(!cancel.isHidden)
+    }
+
+    @Test("YAML editing reports only WATCH resource-version changes")
+    func yamlEditingWatchConflictRequiresDifferentResourceVersion() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let source = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n"
+        let watch = ControlledObjectWatch()
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: LoadedObjectDetailProvider(
+                detail: ObjectDetail(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    yamlUTF8: Data(source.utf8)
+                ),
+                data: ObjectData(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    entries: [],
+                    secret: false
+                ),
+                objectWatch: watch.stream()
+            ),
+            initialTab: .yaml
+        )
+        controller.loadView()
+        let editor = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Kubernetes object YAML" })
+        let edit = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSButton }
+            .first { $0.title == "Edit" })
+        let status = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.stringValue == "Loading…" })
+        controller.viewDidAppear()
+        defer {
+            Task { await watch.finish() }
+            controller.stop()
+        }
+        try await waitUntil {
+            editor.string == source && status.stringValue == "Resource version rv-1"
+        }
+        try await waitUntilAsync { await watch.numberOfRequests() == 1 }
+        edit.performClick(nil)
+
+        await watch.send(.updated(
+            cursor: StreamCursor(generation: 1, sequence: 1),
+            detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-1",
+                yamlUTF8: Data(source.utf8)
+            )
+        ))
+        try await waitUntilAsync { await watch.numberOfRequests() == 2 }
+        #expect(status.stringValue == "Resource version rv-1")
+        #expect(status.textColor == .secondaryLabelColor)
+
+        await watch.send(.updated(
+            cursor: StreamCursor(generation: 1, sequence: 2),
+            detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-2",
+                yamlUTF8: Data(source.utf8)
+            )
+        ))
+        try await waitUntilAsync { await watch.numberOfRequests() == 3 }
+        #expect(status.stringValue == "Server object changed · local YAML edit preserved")
+        #expect(status.textColor == .systemOrange)
+    }
+
     @Test("detail scroll documents receive visible geometry instead of remaining zero-sized")
     func detailDocumentGeometry() async throws {
         let identity = ResourceIdentity(
@@ -1348,6 +1478,44 @@ private actor YAMLSaveObjectDetailProvider: ObjectDetailProviding {
     }
 }
 
+private actor ControlledObjectWatch {
+    private var queued: [ObjectWatchEvent] = []
+    private var waiter: CheckedContinuation<ObjectWatchEvent?, Never>?
+    private var requestCount = 0
+    private var finished = false
+
+    nonisolated func stream() -> AsyncThrowingStream<ObjectWatchEvent, Error> {
+        AsyncThrowingStream(unfolding: { await self.next() })
+    }
+
+    func send(_ event: ObjectWatchEvent) {
+        guard !finished else { return }
+        if let waiter {
+            self.waiter = nil
+            waiter.resume(returning: event)
+        } else {
+            queued.append(event)
+        }
+    }
+
+    func finish() {
+        guard !finished else { return }
+        finished = true
+        let waiter = self.waiter
+        self.waiter = nil
+        waiter?.resume(returning: nil)
+    }
+
+    func numberOfRequests() -> Int { requestCount }
+
+    private func next() async -> ObjectWatchEvent? {
+        requestCount += 1
+        if !queued.isEmpty { return queued.removeFirst() }
+        guard !finished else { return nil }
+        return await withCheckedContinuation { waiter = $0 }
+    }
+}
+
 private final class YAMLPresentationBuilderProbe: @unchecked Sendable {
     private let lock = NSLock()
     private let blockedBuildGate = DispatchSemaphore(value: 0)
@@ -1539,6 +1707,25 @@ private struct LoadedObjectDetailProvider: ObjectDetailProviding {
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
+}
+
+@MainActor
+private func yamlKeyEvent(
+    _ characters: String,
+    modifiers: NSEvent.ModifierFlags = []
+) throws -> NSEvent {
+    try #require(NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: modifiers,
+        timestamp: 0,
+        windowNumber: 0,
+        context: nil,
+        characters: characters,
+        charactersIgnoringModifiers: characters,
+        isARepeat: false,
+        keyCode: 14
+    ))
 }
 
 @MainActor
