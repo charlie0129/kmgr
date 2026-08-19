@@ -836,6 +836,117 @@ func TestDefaultPodAndNodeColumnsActivateMetrics(t *testing.T) {
 	}
 }
 
+func TestMetricDependenciesSeparateDisplayOrderAndMembership(t *testing.T) {
+	t.Parallel()
+	podResource := ResourceType{
+		Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+	}
+	tests := []struct {
+		name string
+		spec ProjectionSpec
+		want metricDependency
+	}{
+		{
+			name: "no metric display",
+			spec: ProjectionSpec{ColumnIDs: []string{"name"}},
+		},
+		{
+			name: "display only",
+			spec: ProjectionSpec{ColumnIDs: []string{"name", PodCPUColumn}},
+			want: metricDependency{display: true},
+		},
+		{
+			name: "metric sort requires complete order coverage",
+			spec: ProjectionSpec{
+				ColumnIDs: []string{"name", PodCPUColumn},
+				Sort:      []SortDescriptor{{ColumnID: PodCPUColumn, Descending: true}},
+			},
+			want: metricDependency{display: true, order: true},
+		},
+		{
+			name: "nonmetric sort remains display only",
+			spec: ProjectionSpec{
+				ColumnIDs: []string{"name", PodCPUColumn},
+				Sort:      []SortDescriptor{{ColumnID: "name"}},
+			},
+			want: metricDependency{display: true},
+		},
+		{
+			name: "bare text can change membership",
+			spec: ProjectionSpec{
+				ColumnIDs:        []string{"name", PodCPUColumn},
+				FilterExpression: "500m",
+			},
+			want: metricDependency{display: true, membership: true},
+		},
+		{
+			name: "structured filters do not read rendered metric cells",
+			spec: ProjectionSpec{
+				ColumnIDs:        []string{"name", PodCPUColumn},
+				FilterExpression: "status:Running label:app==api",
+			},
+			want: metricDependency{display: true},
+		},
+		{
+			name: "exact scheduler resource is not a metric display",
+			spec: ProjectionSpec{ColumnIDs: []string{metricColumnID("nvidia.com/gpu")}},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			test.spec.ClusterSessionID = "session-a"
+			test.spec.Resource = podResource
+			projector, err := NewProjector(test.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := metricDependencies(projector)
+			if got != test.want {
+				t.Fatalf("metric dependencies = %#v, want %#v", got, test.want)
+			}
+			if got.requiresCompleteCoverage() != (test.want.order || test.want.membership) {
+				t.Fatalf("complete-coverage classification = %#v", got)
+			}
+		})
+	}
+}
+
+func TestMetricViewPlanNeverBroadensFieldSelectedPods(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		ColumnIDs: []string{"name", PodCPUColumn},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := planMetricView(projector, "spec.nodeName=node-a"); got.strategy != metricFetchPodObjects || !got.dependency.display {
+		t.Fatalf("field-selected Pod metric plan = %#v", got)
+	}
+	if got := planMetricView(projector, ""); got.strategy != metricFetchSharedList {
+		t.Fatalf("unselected Pod metric plan = %#v", got)
+	}
+
+	plain, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		ColumnIDs: []string{"name"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := planMetricView(plain, "spec.nodeName=node-a"); got.strategy != metricFetchDisabled {
+		t.Fatalf("nonmetric field-selected Pod plan = %#v", got)
+	}
+}
+
 func TestExactAllocationColumnsDoNotActivateMetricsProvider(t *testing.T) {
 	t.Parallel()
 	for _, resourceType := range []ResourceType{

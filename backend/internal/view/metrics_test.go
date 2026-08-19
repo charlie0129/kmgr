@@ -39,17 +39,24 @@ func TestKubernetesMetricSourceConstructsProvidersWithoutFetching(t *testing.T) 
 	}
 	authority := first.Context().ID + "/shared"
 	source := &KubernetesMetricSource{Sessions: registry, RefreshInterval: time.Hour}
-	firstLease, err := source.OpenMetrics(first.ID(), authority, metrics.PodMetrics, "team-a")
+	firstLease, err := source.OpenMetrics(
+		first.ID(), authority, metrics.PodMetrics, "team-a", "app=api",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer firstLease.Close()
-	secondLease, err := source.OpenMetrics(second.ID(), authority, metrics.PodMetrics, "team-a")
+	secondLease, err := source.OpenMetrics(
+		second.ID(), authority, metrics.PodMetrics, "team-a", "app=api",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer secondLease.Close()
-	key := metricProviderKey{authorityID: authority, kind: metrics.PodMetrics, namespace: "team-a"}
+	key := metricProviderKey{
+		authorityID: authority, kind: metrics.PodMetrics,
+		namespace: "team-a", labels: "app=api",
+	}
 	entry := source.providers[key]
 	if entry == nil || len(source.providers) != 1 {
 		t.Fatal("same authority/kind/namespace did not share one metrics provider")
@@ -57,7 +64,24 @@ func TestKubernetesMetricSourceConstructsProvidersWithoutFetching(t *testing.T) 
 	if entry.provider.ConsumerCount() != 0 {
 		t.Fatal("constructing a provider created a network consumer")
 	}
-	nodeLease, err := source.OpenMetrics(first.ID(), authority, metrics.NodeMetrics, "")
+	differentLease, err := source.OpenMetrics(
+		first.ID(), authority, metrics.PodMetrics, "team-a", "app=worker",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer differentLease.Close()
+	differentKey := metricProviderKey{
+		authorityID: authority, kind: metrics.PodMetrics,
+		namespace: "team-a", labels: "app=worker",
+	}
+	if source.providers[differentKey] == nil || source.providers[differentKey] == entry ||
+		len(source.providers) != 2 {
+		t.Fatal("different Pod label selectors shared one metrics provider")
+	}
+	nodeLease, err := source.OpenMetrics(
+		first.ID(), authority, metrics.NodeMetrics, "", "ignored=selector",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +109,9 @@ func TestKubernetesMetricSourceBoundsIdleProvidersWithoutDisruptingActiveSharing
 		IdleProviderLimit: 1, IdleSampleLimit: 100,
 	}
 
-	activeLease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "active")
+	activeLease, err := source.OpenMetrics(
+		session.ID(), authority, metrics.PodMetrics, "active", "",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,14 +124,18 @@ func TestKubernetesMetricSourceBoundsIdleProvidersWithoutDisruptingActiveSharing
 		t.Fatal("active provider did not fetch")
 	}
 
-	firstIdleLease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "idle-a")
+	firstIdleLease, err := source.OpenMetrics(
+		session.ID(), authority, metrics.PodMetrics, "idle-a", "",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	firstIdleKey := metricProviderKey{authorityID: authority, kind: metrics.PodMetrics, namespace: "idle-a"}
 	firstIdleProvider := source.providers[firstIdleKey].provider
 	firstIdleLease.Close()
-	secondIdleLease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "idle-b")
+	secondIdleLease, err := source.OpenMetrics(
+		session.ID(), authority, metrics.PodMetrics, "idle-b", "",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +159,9 @@ func TestKubernetesMetricSourceBoundsIdleProvidersWithoutDisruptingActiveSharing
 		t.Fatalf("authority cleanup released %d active providers", released)
 	}
 
-	sharedLease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "active")
+	sharedLease, err := source.OpenMetrics(
+		session.ID(), authority, metrics.PodMetrics, "active", "",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +200,9 @@ func TestKubernetesMetricSourceRejectsIdleSnapshotOverSampleBudget(t *testing.T)
 		Sessions: registry, RefreshInterval: time.Hour,
 		IdleProviderLimit: 8, IdleSampleLimit: 1,
 	}
-	lease, err := source.OpenMetrics(session.ID(), authority, metrics.PodMetrics, "oversized")
+	lease, err := source.OpenMetrics(
+		session.ID(), authority, metrics.PodMetrics, "oversized", "",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +262,7 @@ func TestKubernetesMetricSourceUsesKnownDiscoveryAbsence(t *testing.T) {
 	}
 	provider, err := (&KubernetesMetricSource{
 		Sessions: registry, RefreshInterval: time.Hour,
-	}).OpenMetrics(session.ID(), "authority", metrics.PodMetrics, "team-a")
+	}).OpenMetrics(session.ID(), "authority", metrics.PodMetrics, "team-a", "")
 	if provider != nil || !errors.Is(err, metrics.ErrMetricsAPIUnavailable) {
 		t.Fatalf("known-absent Metrics API result = (%#v, %v)", provider, err)
 	}

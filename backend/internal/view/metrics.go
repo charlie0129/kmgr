@@ -9,6 +9,7 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
+	viewfilter "github.com/charlie0129/kmgr/backend/internal/view/filter"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -36,7 +37,7 @@ type MetricSource interface {
 	OpenMetrics(
 		sessionID, authorityID string,
 		kind metrics.APIKind,
-		namespace string,
+		namespace, labelSelector string,
 	) (*metrics.ProviderLease, error)
 }
 
@@ -62,6 +63,7 @@ type metricProviderKey struct {
 	authorityID string
 	kind        metrics.APIKind
 	namespace   string
+	labels      string
 }
 
 type metricProviderEntry struct {
@@ -74,7 +76,7 @@ type metricProviderEntry struct {
 func (s *KubernetesMetricSource) OpenMetrics(
 	sessionID, authorityID string,
 	kind metrics.APIKind,
-	namespace string,
+	namespace, labelSelector string,
 ) (*metrics.ProviderLease, error) {
 	if s == nil || s.Sessions == nil {
 		return nil, errors.New("cluster session registry is unavailable")
@@ -93,7 +95,17 @@ func (s *KubernetesMetricSource) OpenMetrics(
 		// unknown and is allowed to degrade through the normal provider path.
 		return nil, metrics.ErrMetricsAPIUnavailable
 	}
-	key := metricProviderKey{authorityID: authorityID, kind: kind, namespace: namespace}
+	if kind != metrics.PodMetrics {
+		// NodeMetrics does not have a label-selected view today. Keeping the
+		// unused selector out of its key prevents accidental provider splits.
+		labelSelector = ""
+	}
+	key := metricProviderKey{
+		authorityID: authorityID,
+		kind:        kind,
+		namespace:   namespace,
+		labels:      labelSelector,
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -113,6 +125,7 @@ func (s *KubernetesMetricSource) OpenMetrics(
 	}
 	provider, err := metrics.NewProvider(metrics.KubernetesFetcher{
 		Client: client, Kind: kind, Namespace: namespace,
+		LabelSelector: labelSelector,
 	}, s.RefreshInterval)
 	if err != nil {
 		return nil, err
@@ -257,35 +270,105 @@ func metricColumnID(resourceName corev1.ResourceName) string {
 	return metricResourceColumnPrefix + string(resourceName)
 }
 
-func needsMetricProvider(projector *Projector) bool {
+// metricDependency describes every way optional Metrics API values can affect
+// one projection. Display-only enrichment may be fetched lazily for a bounded
+// viewport; order or membership dependencies require complete candidate
+// coverage before the projection can be considered reconciled.
+type metricDependency struct {
+	display    bool
+	order      bool
+	membership bool
+}
+
+func (d metricDependency) requiresCompleteCoverage() bool {
+	return d.order || d.membership
+}
+
+type metricFetchStrategy uint8
+
+const (
+	metricFetchDisabled metricFetchStrategy = iota
+	metricFetchSharedList
+	// metricFetchPodObjects is the point-cache hook for Pod views whose base
+	// resource query contains a field selector. Metrics Server cannot apply
+	// that selector, so this strategy must never fall through to a broad LIST.
+	metricFetchPodObjects
+)
+
+type metricViewPlan struct {
+	dependency metricDependency
+	strategy   metricFetchStrategy
+}
+
+func planMetricView(projector *Projector, fieldSelector string) metricViewPlan {
+	dependency := metricDependencies(projector)
+	if !dependency.display {
+		return metricViewPlan{dependency: dependency, strategy: metricFetchDisabled}
+	}
+	kind, _ := metricKindFor(projector.spec.Resource)
+	if kind == metrics.PodMetrics && strings.TrimSpace(fieldSelector) != "" {
+		return metricViewPlan{dependency: dependency, strategy: metricFetchPodObjects}
+	}
+	return metricViewPlan{dependency: dependency, strategy: metricFetchSharedList}
+}
+
+func metricDependencies(projector *Projector) metricDependency {
+	if projector == nil {
+		return metricDependency{}
+	}
+	if _, supported := metricKindFor(projector.spec.Resource); !supported {
+		return metricDependency{}
+	}
+
+	metricColumns := make(map[string]struct{})
+	for _, displayID := range projector.spec.ColumnIDs {
+		if metricColumnDependsOnProvider(projector, displayID) {
+			metricColumns[displayID] = struct{}{}
+		}
+	}
+	dependency := metricDependency{display: len(metricColumns) != 0}
+	if !dependency.display {
+		return dependency
+	}
+	for _, descriptor := range projector.spec.Sort {
+		if _, metric := metricColumns[descriptor.ColumnID]; metric {
+			dependency.order = true
+			break
+		}
+	}
+	for _, term := range projector.filter.Terms() {
+		if term.Kind == viewfilter.Text {
+			// Bare text searches every rendered cell. If any such cell is backed
+			// by metrics, absent samples can change projection membership.
+			dependency.membership = true
+			break
+		}
+	}
+	return dependency
+}
+
+func metricColumnDependsOnProvider(projector *Projector, displayID string) bool {
 	if projector == nil {
 		return false
 	}
-	if _, supported := metricKindFor(projector.spec.Resource); !supported {
+	if program := projector.spec.CELPrograms[displayID]; program != nil {
+		return program.UsesMetrics()
+	}
+	columnID := projector.extractorID(displayID)
+	if source := projector.extractorSource(displayID); source != "" && source != "metric" {
 		return false
 	}
-	for _, displayID := range projector.spec.ColumnIDs {
-		if program := projector.spec.CELPrograms[displayID]; program != nil {
-			if program.UsesMetrics() {
-				return true
-			}
-			continue
-		}
-		columnID := projector.extractorID(displayID)
-		if source := projector.extractorSource(displayID); source != "" && source != "metric" {
-			continue
-		}
-		// Exact huge-page and extended-resource columns are scheduler
-		// values sourced from the row object. Metrics Server does not supply their
-		// utilization, so an exact-resource-only view must not wake that provider.
-		if _, found := exactResourceColumn(columnID); found {
-			continue
-		}
-		if _, metric := metricColumnResource(projector.spec.Resource, columnID); metric {
-			return true
-		}
+	// Exact huge-page and extended-resource columns are scheduler values sourced
+	// from the row object. Metrics Server does not supply their utilization.
+	if _, found := exactResourceColumn(columnID); found {
+		return false
 	}
-	return false
+	_, metric := metricColumnResource(projector.spec.Resource, columnID)
+	return metric
+}
+
+func needsMetricProvider(projector *Projector) bool {
+	return metricDependencies(projector).display
 }
 
 func exactResourceColumn(columnID string) (corev1.ResourceName, bool) {

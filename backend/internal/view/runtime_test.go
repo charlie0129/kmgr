@@ -2531,14 +2531,40 @@ type fakeMetricSource struct {
 	provider *metrics.Provider
 	err      error
 	opens    atomic.Int64
+	mu       sync.Mutex
+	requests []fakeMetricOpenRequest
 }
 
-func (s *fakeMetricSource) OpenMetrics(string, string, metrics.APIKind, string) (*metrics.ProviderLease, error) {
+func (s *fakeMetricSource) OpenMetrics(
+	sessionID, authorityID string,
+	kind metrics.APIKind,
+	namespace, labelSelector string,
+) (*metrics.ProviderLease, error) {
 	s.opens.Add(1)
+	s.mu.Lock()
+	s.requests = append(s.requests, fakeMetricOpenRequest{
+		sessionID: sessionID, authorityID: authorityID, kind: kind,
+		namespace: namespace, labelSelector: labelSelector,
+	})
+	s.mu.Unlock()
 	if s.err != nil || s.provider == nil {
 		return nil, s.err
 	}
 	return s.provider.Acquire()
+}
+
+type fakeMetricOpenRequest struct {
+	sessionID     string
+	authorityID   string
+	kind          metrics.APIKind
+	namespace     string
+	labelSelector string
+}
+
+func (s *fakeMetricSource) metricRequests() []fakeMetricOpenRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]fakeMetricOpenRequest(nil), s.requests...)
 }
 
 type metricFetcherFunc func(context.Context) (map[string]metrics.Sample, error)

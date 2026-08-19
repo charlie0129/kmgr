@@ -34,9 +34,10 @@ const (
 // Sample keys are UID when the API supplies one, otherwise namespace/name for
 // Pods and name for Nodes. Exact Kubernetes resource names remain separate.
 type KubernetesFetcher struct {
-	Client    metricsclient.MetricsV1beta1Interface
-	Kind      APIKind
-	Namespace string
+	Client        metricsclient.MetricsV1beta1Interface
+	Kind          APIKind
+	Namespace     string
+	LabelSelector string
 }
 
 func (f KubernetesFetcher) Fetch(ctx context.Context) (map[string]Sample, error) {
@@ -45,7 +46,11 @@ func (f KubernetesFetcher) Fetch(ctx context.Context) (map[string]Sample, error)
 	}
 	switch f.Kind {
 	case PodMetrics:
-		return fetchPodMetricPages(ctx, f.Client.PodMetricses(f.Namespace))
+		return fetchPodMetricPages(
+			ctx,
+			f.Client.PodMetricses(f.Namespace),
+			f.LabelSelector,
+		)
 	case NodeMetrics:
 		return fetchNodeMetricPages(ctx, f.Client.NodeMetricses())
 	default:
@@ -56,9 +61,13 @@ func (f KubernetesFetcher) Fetch(ctx context.Context) (map[string]Sample, error)
 func fetchPodMetricPages(
 	ctx context.Context,
 	client metricsclient.PodMetricsInterface,
+	labelSelector string,
 ) (map[string]Sample, error) {
 	result := make(map[string]Sample)
-	options := metav1.ListOptions{Limit: metricsListPageSize}
+	options := metav1.ListOptions{
+		LabelSelector: labelSelector,
+		Limit:         metricsListPageSize,
+	}
 	seenContinueTokens := make(map[string]struct{})
 	for {
 		if err := ctx.Err(); err != nil {

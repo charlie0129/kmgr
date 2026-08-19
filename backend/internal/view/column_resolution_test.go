@@ -84,6 +84,67 @@ func TestRuntimeConfiguredAliasesDriveMetricProviderLazily(t *testing.T) {
 	}
 }
 
+func TestRuntimeMetricPlanPassesLabelsAndNeverBroadensFieldSelectedPods(t *testing.T) {
+	t.Parallel()
+	provider, err := metrics.NewProvider(
+		metricFetcherFunc(func(context.Context) (map[string]metrics.Sample, error) {
+			return map[string]metrics.Sample{}, nil
+		}),
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricSource := &fakeMetricSource{provider: provider}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{
+			authority: "cluster-a", client: newScriptedResource(),
+		},
+		Metrics: metricSource, BatchDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	sharedRequest := openView("session", "label-selected", 1)
+	sharedRequest.Spec.ColumnIds = []string{"name", PodCPUColumn}
+	sharedRequest.Spec.LabelSelector = "tier=frontend,app==api"
+	shared, err := runtime.Open(sharedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shared.Close()
+	requests := metricSource.metricRequests()
+	if len(requests) != 1 || requests[0].kind != metrics.PodMetrics ||
+		requests[0].namespace != "ns" ||
+		requests[0].labelSelector != "app=api,tier=frontend" {
+		t.Fatalf("shared metric requests = %#v", requests)
+	}
+	if shared.metricPlan.strategy != metricFetchSharedList {
+		t.Fatalf("label-selected metric plan = %#v", shared.metricPlan)
+	}
+
+	fieldRequest := openView("session", "field-selected", 1)
+	fieldRequest.Spec.ColumnIds = []string{"name", PodCPUColumn}
+	fieldRequest.Spec.FilterExpression = "field:spec.nodeName==node-a"
+	fieldSelected, err := runtime.Open(fieldRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fieldSelected.Close()
+	if got := metricSource.opens.Load(); got != 1 {
+		t.Fatalf("metrics LIST providers opened = %d, want only label-selected view", got)
+	}
+	if got := metricSource.metricRequests(); len(got) != 1 {
+		t.Fatalf("field-selected Pod opened broad metrics provider: %#v", got)
+	}
+	if fieldSelected.metricPlan.strategy != metricFetchPodObjects ||
+		!fieldSelected.metricPlan.dependency.display {
+		t.Fatalf("field-selected metric plan = %#v", fieldSelected.metricPlan)
+	}
+}
+
 type staticColumnResolver struct {
 	resolution viewcolumns.Resolution
 }

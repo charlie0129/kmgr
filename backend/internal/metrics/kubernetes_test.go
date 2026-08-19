@@ -137,11 +137,19 @@ func TestKubernetesMetricsFetcherPaginatesPodsAndNodes(t *testing.T) {
 		case "":
 			return true, &metricsapi.PodMetricsList{
 				ListMeta: metav1.ListMeta{Continue: "pods-next"},
-				Items:    []metricsapi.PodMetrics{{ObjectMeta: metav1.ObjectMeta{UID: "pod-one"}}},
+				Items: []metricsapi.PodMetrics{{ObjectMeta: metav1.ObjectMeta{
+					UID: "pod-one", Labels: map[string]string{
+						"app": "api", "tier": "frontend",
+					},
+				}}},
 			}, nil
 		case "pods-next":
 			return true, &metricsapi.PodMetricsList{
-				Items: []metricsapi.PodMetrics{{ObjectMeta: metav1.ObjectMeta{UID: "pod-two"}}},
+				Items: []metricsapi.PodMetrics{{ObjectMeta: metav1.ObjectMeta{
+					UID: "pod-two", Labels: map[string]string{
+						"app": "api", "tier": "frontend",
+					},
+				}}},
 			}, nil
 		default:
 			t.Fatalf("unexpected Pod continuation %q", options.Continue)
@@ -167,14 +175,22 @@ func TestKubernetesMetricsFetcherPaginatesPodsAndNodes(t *testing.T) {
 		}
 	})
 	for _, test := range []struct {
-		kind     APIKind
-		resource string
-		want     []string
+		kind          APIKind
+		resource      string
+		labelSelector string
+		want          []string
 	}{
-		{kind: PodMetrics, resource: "pods", want: []string{"pod-one", "pod-two"}},
+		{
+			kind: PodMetrics, resource: "pods",
+			labelSelector: "app=api,tier=frontend",
+			want:          []string{"pod-one", "pod-two"},
+		},
 		{kind: NodeMetrics, resource: "nodes", want: []string{"node-one", "node-two"}},
 	} {
-		samples, err := (KubernetesFetcher{Client: client.MetricsV1beta1(), Kind: test.kind}).Fetch(context.Background())
+		samples, err := (KubernetesFetcher{
+			Client: client.MetricsV1beta1(), Kind: test.kind,
+			LabelSelector: test.labelSelector,
+		}).Fetch(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -185,7 +201,9 @@ func TestKubernetesMetricsFetcherPaginatesPodsAndNodes(t *testing.T) {
 		}
 		options := optionsByResource[test.resource]
 		if len(options) != 2 || options[0].Limit != metricsListPageSize || options[0].Continue != "" ||
-			options[1].Limit != metricsListPageSize || options[1].Continue != test.resource+"-next" {
+			options[1].Limit != metricsListPageSize || options[1].Continue != test.resource+"-next" ||
+			options[0].LabelSelector != test.labelSelector ||
+			options[1].LabelSelector != test.labelSelector {
 			t.Fatalf("%s list options = %#v", test.resource, options)
 		}
 	}

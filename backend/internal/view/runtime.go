@@ -842,12 +842,15 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		acceleratorConfig = provider.AcceleratorConfig()
 	}
 	subscription.optionalResourceHints = newOptionalResourceStreamHints(entry.key, acceleratorConfig)
+	metricPlan := planMetricView(projector, key.fields)
+	subscription.metricPlan = metricPlan
 	var metricProviderLease *metrics.ProviderLease
-	if r.metrics != nil && needsMetricProvider(projector) {
+	if r.metrics != nil && metricPlan.strategy == metricFetchSharedList {
 		metricKind, _ := metricKindFor(projector.spec.Resource)
 		providerLease, metricErr := r.metrics.OpenMetrics(
 			sessionID, authorityID, metricKind,
 			metricsNamespace(projector.spec.Resource, serverNamespace),
+			key.labels,
 		)
 		if metricErr != nil {
 			// Optional metrics setup cannot fail the base resource view. The
@@ -861,6 +864,14 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			metricProviderLease = providerLease
 			defer metricProviderLease.Close()
 		}
+	} else if metricPlan.strategy == metricFetchPodObjects {
+		// A point-cache subscription will attach here in the next milestone.
+		// Leaving usage unavailable is preferable to silently broadening a
+		// field-selected Pod query into an all-scope PodMetrics LIST.
+		projector = projector.WithMetrics(metrics.Snapshot{
+			State: metrics.MeasurementUnavailable,
+		})
+		subscription.projector = projector
 	}
 	if metricProviderLease == nil {
 		projector = subscription.projector
@@ -2136,6 +2147,7 @@ type Subscription struct {
 	scopeKey      string
 	deliveryState *logicalViewDeliveryState
 	key           viewKey
+	metricPlan    metricViewPlan
 	metrics       *metrics.Subscription
 	metricCancel  context.CancelFunc
 
