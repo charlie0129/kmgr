@@ -27,6 +27,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private(set) var identity: ResourceIdentity
     private var session: OpenedClusterSession?
     private let provider: any ObjectDetailProviding
+    private let tableLayoutStore: TableLayoutStore
     private let dataFileReader: @Sendable (URL) throws -> Data
     private let dataFileWriter: @Sendable (Data, URL) throws -> Void
 
@@ -60,6 +61,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private var terminalObjectState = false
     private var conflictedKey: String?
     private let drafts = DataEditorDraftStore()
+    private var tableLayoutBinding: TableLayoutBinding?
 
     private var loadTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
@@ -79,6 +81,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         identity: ResourceIdentity,
         provider: any ObjectDetailProviding,
         session: OpenedClusterSession? = nil,
+        tableLayoutStore: TableLayoutStore? = nil,
         dataFileReader: @escaping @Sendable (URL) throws -> Data = {
             try DataValueFileIO.readBounded(from: $0)
         },
@@ -90,6 +93,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         self.identity = identity
         self.session = session
         self.provider = provider
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.dataFileReader = dataFileReader
         self.dataFileWriter = dataFileWriter
         super.init(nibName: nil, bundle: nil)
@@ -288,6 +292,11 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         keysTable.allowsMultipleSelection = false
         keysTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         keysTable.setAccessibilityLabel("ConfigMap or Secret data keys and values")
+        tableLayoutBinding = TableLayoutBinding(
+            tableView: keysTable,
+            surface: .objectDataKeys,
+            store: tableLayoutStore
+        )
         keysTable.onToggleReveal = { [weak self] in self?.toggleSecretReveal() }
         keysTable.onBack = { [weak self] in self?.onBack?() }
         let keyScroll = NSScrollView()

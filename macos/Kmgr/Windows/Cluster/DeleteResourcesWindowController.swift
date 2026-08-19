@@ -10,7 +10,9 @@ final class DeleteResourcesWindowController: NSWindowController,
     private let session: OpenedClusterSession
     private let targets: [ResourceDeleteTarget]
     private let provider: any ResourceOperationProviding
+    private let tableLayoutStore: TableLayoutStore
     private let tableView = NSTableView()
+    private var tableLayoutBinding: TableLayoutBinding?
     private let advancedButton = NSButton(
         title: "Advanced", target: nil, action: nil
     )
@@ -33,12 +35,14 @@ final class DeleteResourcesWindowController: NSWindowController,
     init(
         session: OpenedClusterSession,
         targets: [ResourceDeleteTarget],
-        provider: any ResourceOperationProviding
+        provider: any ResourceOperationProviding,
+        tableLayoutStore: TableLayoutStore? = nil
     ) {
         precondition(!targets.isEmpty)
         self.session = session
         self.targets = targets
         self.provider = provider
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 780, height: 520),
             styleMask: [.titled, .closable, .resizable],
@@ -112,6 +116,11 @@ final class DeleteResourcesWindowController: NSWindowController,
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsEmptySelection = true
         tableView.setAccessibilityLabel("Resources awaiting deletion")
+        tableLayoutBinding = TableLayoutBinding(
+            tableView: tableView,
+            surface: .deleteConfirmation,
+            store: tableLayoutStore
+        )
         let scroll = NSScrollView()
         scroll.documentView = tableView
         scroll.hasVerticalScroller = true

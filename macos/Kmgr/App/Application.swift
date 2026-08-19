@@ -21,6 +21,10 @@ final class Application: NSObject, NSApplicationDelegate {
     private let logProvider: any LogStreamProviding
     private let execProvider: any ExecSessionProviding
     private let preferencesStore: AppPreferencesStore
+    /// One process-wide store keeps fixed-table layouts synchronized across
+    /// every window. Resource-list layouts remain scoped by exact GVR in the
+    /// separate columns configuration path.
+    private let tableLayoutStore: TableLayoutStore
     private let engineColumnsConfigurationPath: String
     private let restorationStore: WorkspaceRestorationStore
     private var pendingRestorationNotice: ClusterManagerInitialNotice?
@@ -44,6 +48,7 @@ final class Application: NSObject, NSApplicationDelegate {
     override init() {
         let preferences = AppPreferencesStore()
         self.preferencesStore = preferences
+        self.tableLayoutStore = TableLayoutStore()
         self.engineColumnsConfigurationPath = preferences.current.columnsConfigurationPath
         var engineConfiguration = EngineSupervisor.Configuration.bundled()
         engineConfiguration.columnsConfigurationPath = preferences.current.columnsConfigurationPath
@@ -89,7 +94,8 @@ final class Application: NSObject, NSApplicationDelegate {
         )
         self.portForwardCoordinator = portForwards
         self.portForwardsWindowController = PortForwardsWindowController(
-            coordinator: portForwards
+            coordinator: portForwards,
+            tableLayoutStore: tableLayoutStore
         )
         self.contextualShortcutsCoordinator = ContextualShortcutsCoordinator(
             application: .shared
@@ -234,6 +240,10 @@ final class Application: NSObject, NSApplicationDelegate {
             }
         }
         isTerminating = true
+        // Column resize/move writes are intentionally coalesced. Flush before
+        // beginning asynchronous engine shutdown so the final presentation is
+        // durable even when termination happens inside the debounce window.
+        _ = tableLayoutStore.flushPendingSave()
         contextualShortcutsCoordinator.stop()
         if let engineStateObserver {
             engineSupervisor.removeStateObserver(engineStateObserver)
@@ -250,6 +260,10 @@ final class Application: NSObject, NSApplicationDelegate {
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        _ = tableLayoutStore.flushPendingSave()
     }
 
     func applicationShouldHandleReopen(
@@ -279,7 +293,8 @@ final class Application: NSObject, NSApplicationDelegate {
         pendingRestorationNotice = nil
         let controller = ClusterManagerWindowController(
             provider: clusterContextProvider,
-            initialNotice: initialNotice
+            initialNotice: initialNotice,
+            tableLayoutStore: tableLayoutStore
         )
         let identifier = ObjectIdentifier(controller)
         chooserControllers[identifier] = controller
@@ -320,6 +335,7 @@ final class Application: NSObject, NSApplicationDelegate {
             logProvider: logProvider,
             execProvider: execProvider,
             portForwards: portForwardCoordinator,
+            tableLayoutStore: tableLayoutStore,
             columnsConfigurationPath: engineColumnsConfigurationPath,
             logDisplayConfiguration: LogDisplayConfiguration(
                 preferences: preferencesStore.current.logs
@@ -500,7 +516,8 @@ final class Application: NSObject, NSApplicationDelegate {
             discoveredColumns: request.discoveredColumns,
             previewProvider: columnPreviewProvider,
             previewContext: request.previewContext,
-            configurationPath: configurationPath
+            configurationPath: configurationPath,
+            tableLayoutStore: tableLayoutStore
         )
         controller.onDraftChanged = request.apply
         controller.onSaved = { [weak self] definitions in

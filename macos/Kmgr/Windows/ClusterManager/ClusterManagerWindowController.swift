@@ -24,12 +24,14 @@ final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate
     init(
         provider: any ClusterContextProviding,
         initialNotice: ClusterManagerInitialNotice? = nil,
-        closesAfterOpening: Bool = true
+        closesAfterOpening: Bool = true,
+        tableLayoutStore: TableLayoutStore? = nil
     ) {
         self.closesAfterOpening = closesAfterOpening
         self.managerViewController = ClusterManagerViewController(
             provider: provider,
-            initialNotice: initialNotice
+            initialNotice: initialNotice,
+            tableLayoutStore: tableLayoutStore ?? TableLayoutStore()
         )
 
         let window = NSWindow(
@@ -109,6 +111,7 @@ private final class ClusterManagerViewController: NSViewController,
 
     private let provider: any ClusterContextProviding
     private let initialNotice: ClusterManagerInitialNotice?
+    private let tableLayoutStore: TableLayoutStore
     private var model = ClusterManagerModel()
     private var loadTask: Task<Void, Never>?
     private var openTask: Task<Void, Never>?
@@ -136,15 +139,18 @@ private final class ClusterManagerViewController: NSViewController,
     private let countLabel = NSTextField(labelWithString: "")
     private let openProgress = NSProgressIndicator()
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
+    private var tableLayoutBinding: TableLayoutBinding?
     private var separatorBelowIssueConstraint: NSLayoutConstraint?
     private var separatorBelowTableConstraint: NSLayoutConstraint?
 
     init(
         provider: any ClusterContextProviding,
-        initialNotice: ClusterManagerInitialNotice?
+        initialNotice: ClusterManagerInitialNotice?,
+        tableLayoutStore: TableLayoutStore
     ) {
         self.provider = provider
         self.initialNotice = initialNotice
+        self.tableLayoutStore = tableLayoutStore
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -194,6 +200,11 @@ private final class ClusterManagerViewController: NSViewController,
         revealButton.setContentHuggingPriority(.required, for: .horizontal)
 
         configureTable()
+        tableLayoutBinding = TableLayoutBinding(
+            tableView: tableView,
+            surface: .clusterContexts,
+            store: tableLayoutStore
+        )
         configureStateView()
         configureIssueView()
 

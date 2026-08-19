@@ -31,14 +31,21 @@ final class PodContainerListViewController: NSViewController,
 
     private let pod: ResourceIdentity
     private let containers: [PodContainerDetail]
+    private let tableLayoutStore: TableLayoutStore
     private let tableView = PodContainerTableView()
     private let countLabel = NSTextField(labelWithString: "")
     private let actionButton = NSButton(title: "", target: nil, action: nil)
     private var networkActionsEnabled = true
+    private var tableLayoutBinding: TableLayoutBinding?
 
-    init(pod: ResourceIdentity, containers: [PodContainerDetail]) {
+    init(
+        pod: ResourceIdentity,
+        containers: [PodContainerDetail],
+        tableLayoutStore: TableLayoutStore? = nil
+    ) {
         self.pod = pod
         self.containers = containers
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -75,6 +82,11 @@ final class PodContainerListViewController: NSViewController,
         header.translatesAutoresizingMaskIntoConstraints = false
 
         configureTable()
+        tableLayoutBinding = TableLayoutBinding(
+            tableView: tableView,
+            surface: .podContainers,
+            store: tableLayoutStore
+        )
         let scroll = NSScrollView()
         scroll.documentView = tableView
         scroll.hasVerticalScroller = true

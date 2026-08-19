@@ -6,6 +6,7 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
     NSTableViewDataSource, NSTableViewDelegate
 {
     private let coordinator: PortForwardCoordinator
+    private let tableLayoutStore: TableLayoutStore
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(labelWithString: "No port-forwards")
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
@@ -15,9 +16,14 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
     private var records: [PortForwardRecord] = []
     private var observerToken: UUID?
     private var helperGenerationAvailable = false
+    private var tableLayoutBinding: TableLayoutBinding?
 
-    init(coordinator: PortForwardCoordinator) {
+    init(
+        coordinator: PortForwardCoordinator,
+        tableLayoutStore: TableLayoutStore? = nil
+    ) {
         self.coordinator = coordinator
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 520),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -40,6 +46,15 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
+
+    deinit {
+        let coordinator = coordinator
+        if let observerToken {
+            Task { @MainActor in
+                coordinator.removeObserver(observerToken)
+            }
+        }
+    }
 
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
@@ -139,6 +154,11 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
         tableView.rowSizeStyle = .medium
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         tableView.setAccessibilityLabel("App-wide Kubernetes port-forwards")
+        tableLayoutBinding = TableLayoutBinding(
+            tableView: tableView,
+            surface: .portForwards,
+            store: tableLayoutStore
+        )
 
         let scrollView = NSScrollView()
         scrollView.documentView = tableView

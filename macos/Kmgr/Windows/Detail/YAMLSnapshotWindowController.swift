@@ -14,6 +14,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     private(set) var identity: ResourceIdentity
     private var session: OpenedClusterSession
     private let provider: any ObjectDetailProviding
+    private let tableLayoutStore: TableLayoutStore
     private var refreshTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var refreshRevision: UInt64 = 0
@@ -42,11 +43,13 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     init(
         session: OpenedClusterSession,
         identity: ResourceIdentity,
-        provider: any ObjectDetailProviding
+        provider: any ObjectDetailProviding,
+        tableLayoutStore: TableLayoutStore? = nil
     ) {
         self.session = session
         self.identity = identity
         self.provider = provider
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
 
         // This factory supplies AppKit's complete plain-document TextKit stack,
         // including the clip view, scrollers, and document sizing behavior.
@@ -493,7 +496,8 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         guard !prepared.diff.isEmpty else { return true }
         let controller = YAMLDiffConfirmationWindowController(
             targetDetails: ClusterIdentityPresentation(session: session).targetDetails(identity),
-            prepared: prepared
+            prepared: prepared,
+            tableLayoutStore: tableLayoutStore
         )
         return controller.runModal() == .apply
     }

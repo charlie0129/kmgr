@@ -86,6 +86,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let logProvider: any LogStreamProviding
     private let execProvider: any ExecSessionProviding
     private let portForwards: PortForwardCoordinator
+    private let tableLayoutStore: TableLayoutStore
     private let columnsConfigurationPath: String
     private let logDisplayConfiguration: LogDisplayConfiguration
     private let confirmationPreferences: @MainActor () -> ConfirmationPreferences
@@ -114,6 +115,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         logProvider: any LogStreamProviding,
         execProvider: any ExecSessionProviding,
         portForwards: PortForwardCoordinator,
+        tableLayoutStore: TableLayoutStore? = nil,
         columnsConfigurationPath: String,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
         logDisplayConfiguration: LogDisplayConfiguration,
@@ -139,6 +141,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.execProvider = execProvider
         self.restoration = restoration
         self.portForwards = portForwards
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.columnsConfigurationPath = columnsConfigurationPath
         self.logDisplayConfiguration = logDisplayConfiguration
         self.confirmationPreferences = confirmationPreferences
@@ -168,6 +171,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             objectDetailProvider: objectDetailProvider,
             recentObjectStore: recentObjectStore,
             portForwards: portForwards,
+            tableLayoutStore: self.tableLayoutStore,
             columnsConfigurationPath: columnsConfigurationPath,
             columnsConfigurationLoader: columnsConfigurationLoader,
             namespacePickerPresenter: namespacePickerPresenter,
@@ -323,7 +327,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         let controller = YAMLSnapshotWindowController(
             session: session,
             identity: identity,
-            provider: objectDetailProvider
+            provider: objectDetailProvider,
+            tableLayoutStore: tableLayoutStore
         )
         controller.onClose = { [weak self, weak controller] in
             guard self?.yamlSnapshotWindowControllers[identity.uid] === controller else { return }
@@ -505,7 +510,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         let controller = DeleteResourcesWindowController(
             session: session,
             targets: targets,
-            provider: operationProvider
+            provider: operationProvider,
+            tableLayoutStore: tableLayoutStore
         )
         controller.onDismiss = { [weak self, weak controller] in
             guard self?.deleteResourcesController === controller else { return }
@@ -632,6 +638,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let objectDetailProvider: any ObjectDetailProviding
     private let recentObjectStore: RecentObjectStore
     private let portForwards: PortForwardCoordinator
+    private let tableLayoutStore: TableLayoutStore
     private let columnsConfigurationPath: String
     private let namespacePickerPresenter: NamespacePickerPresenter
     private let namespacePickerKeyWindowCheck: NamespacePickerKeyWindowCheck
@@ -692,6 +699,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         objectDetailProvider: any ObjectDetailProviding,
         recentObjectStore: RecentObjectStore,
         portForwards: PortForwardCoordinator,
+        tableLayoutStore: TableLayoutStore,
         columnsConfigurationPath: String,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
         namespacePickerPresenter: @escaping NamespacePickerPresenter,
@@ -706,6 +714,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.objectDetailProvider = objectDetailProvider
         self.recentObjectStore = recentObjectStore
         self.portForwards = portForwards
+        self.tableLayoutStore = tableLayoutStore
         self.columnsConfigurationPath = columnsConfigurationPath
         self.namespacePickerPresenter = namespacePickerPresenter
         self.namespacePickerKeyWindowCheck = namespacePickerKeyWindowCheck
@@ -1556,7 +1565,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.suspend()
         let controller = PodContainerListViewController(
             pod: pod,
-            containers: containers
+            containers: containers,
+            tableLayoutStore: tableLayoutStore
         )
         controller.onBack = { [weak self] in self?.goBack() }
         controller.onOpenLogs = { [weak self] request in self?.onOpenLogs?(request) }
@@ -1595,7 +1605,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         let controller = ObjectDataViewController(
             identity: identity,
             provider: objectDetailProvider,
-            session: session
+            session: session,
+            tableLayoutStore: tableLayoutStore
         )
         controller.onBack = { [weak self] in self?.goBack() }
         dataController = controller
@@ -1629,7 +1640,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             identity: identity,
             provider: objectDetailProvider,
             initialTab: initialTab,
-            session: session
+            session: session,
+            tableLayoutStore: tableLayoutStore
         )
         controller.onBack = { [weak self] in self?.goBack() }
         detailController = controller

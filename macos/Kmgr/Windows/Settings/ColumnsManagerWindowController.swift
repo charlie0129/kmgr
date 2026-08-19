@@ -36,6 +36,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private let previewProvider: any ColumnPreviewProviding
     private let previewContext: ColumnPreviewContext
     private let fileStore: ColumnConfigurationFileStore
+    private let tableLayoutStore: TableLayoutStore
     private let windowDismissal: WindowDismissal
     private var configurationDocument: ColumnsConfigurationDocument
     private var draft: ResourceColumnDraft
@@ -61,6 +62,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
     private let reloadButton = NSButton(title: "Reload File", target: nil, action: nil)
     private let openButton = NSButton(title: "Open in Editor", target: nil, action: nil)
     private let saveButton = NSButton(title: "Save", target: nil, action: nil)
+    private var tableLayoutBinding: TableLayoutBinding?
 
     /// Called after every safe draft change so a resource table can preview
     /// the new order and enabled state before it is persisted.
@@ -76,6 +78,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         previewProvider: any ColumnPreviewProviding,
         previewContext: ColumnPreviewContext,
         configurationPath: String = AppPreferences.defaultColumnsConfigurationPath,
+        tableLayoutStore: TableLayoutStore? = nil,
         windowDismissal: WindowDismissal = .appKit
     ) {
         let mergedDefaults = Self.mergingDiscoveredColumns(
@@ -89,6 +92,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         self.defaultColumns = mergedDefaults
         self.previewProvider = previewProvider
         self.previewContext = previewContext
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.windowDismissal = windowDismissal
         fileStore = ColumnConfigurationFileStore(path: configurationPath)
 
@@ -280,6 +284,11 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         tableView.target = self
         tableView.doubleAction = #selector(editSelected)
         tableView.setAccessibilityLabel("Columns for \(resourceTitle)")
+        tableLayoutBinding = TableLayoutBinding(
+            tableView: tableView,
+            surface: .columnsManager,
+            store: tableLayoutStore
+        )
 
         let scrollView = NSScrollView()
         scrollView.documentView = tableView
@@ -469,7 +478,8 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         guard catalogController == nil, let parent = window else { return }
         let picker = NativeColumnPickerWindowController(
             match: match,
-            existingColumns: draft.columns
+            existingColumns: draft.columns,
+            tableLayoutStore: tableLayoutStore
         )
         picker.onCommit = { [weak self] definition in
             guard let self else { return }
@@ -701,12 +711,19 @@ final class NativeColumnPickerWindowController: NSWindowController,
     private let exactTitleField = NSTextField()
     private let addExactButton = NSButton(title: "Add Exact Resource Disabled", target: nil, action: nil)
     private let exactErrorLabel = NSTextField(wrappingLabelWithString: "")
+    private let tableLayoutStore: TableLayoutStore
+    private var tableLayoutBinding: TableLayoutBinding?
 
     var onCommit: ((ColumnDefinition) -> Void)?
     var onDismiss: (() -> Void)?
 
-    init(match: ColumnResourceMatch, existingColumns: [ColumnDefinition]) {
+    init(
+        match: ColumnResourceMatch,
+        existingColumns: [ColumnDefinition],
+        tableLayoutStore: TableLayoutStore? = nil
+    ) {
         self.match = match
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         draft = ResourceColumnDraft(match: match, columns: existingColumns)
         exactResourceSupported = NativeColumnCatalog.supportsExactResources(
             group: match.group,
@@ -829,6 +846,11 @@ final class NativeColumnPickerWindowController: NSWindowController,
         tableView.target = self
         tableView.doubleAction = #selector(addSelected)
         tableView.setAccessibilityLabel("Available built-in and metric columns")
+        tableLayoutBinding = TableLayoutBinding(
+            tableView: tableView,
+            surface: .nativeColumnPicker,
+            store: tableLayoutStore
+        )
 
         let scrollView = NSScrollView()
         scrollView.documentView = tableView

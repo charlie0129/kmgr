@@ -18,12 +18,19 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
     private let pathsTable = NSTableView()
     private let diffScrollView: NSScrollView
     private let diffTextView: NSTextView
+    private let tableLayoutStore: TableLayoutStore
+    private var tableLayoutBinding: TableLayoutBinding?
     private var modalChoice = Choice.keepEditing
     private var isRunningModal = false
 
-    init(targetDetails: String, prepared: PreparedYAMLEdit) {
+    init(
+        targetDetails: String,
+        prepared: PreparedYAMLEdit,
+        tableLayoutStore: TableLayoutStore? = nil
+    ) {
         let presentation = YAMLDiffPresentation(prepared: prepared)
         changedPaths = presentation.changedPaths
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
 
         let scrollView = NSTextView.scrollablePlainDocumentContentTextView()
         guard let textView = scrollView.documentView as? NSTextView else {
@@ -248,6 +255,11 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
         pathsTable.rowHeight = 22
         pathsTable.usesAlternatingRowBackgroundColors = true
         pathsTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        tableLayoutBinding = TableLayoutBinding(
+            tableView: pathsTable,
+            surface: .yamlDiffPaths,
+            store: tableLayoutStore
+        )
     }
 
     private func configureDiffTextView(with presentation: YAMLDiffPresentation) {

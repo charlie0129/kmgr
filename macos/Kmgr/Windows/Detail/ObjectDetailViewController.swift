@@ -324,6 +324,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private(set) var identity: ResourceIdentity
     private var session: OpenedClusterSession?
     private let provider: any ObjectDetailProviding
+    private let tableLayoutStore: TableLayoutStore
     private let initialTab: ObjectDetailInitialTab
     private let yamlPresentationBuilder:
         @Sendable (Data) -> YAMLManagedFieldsPresentation
@@ -389,6 +390,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var relationships: [ObjectRelationship] = []
     private var relationshipsLoaded = false
     private var childrenPotentiallyIncomplete = true
+    private var summaryTableLayoutBinding: TableLayoutBinding?
+    private var relationshipsTableLayoutBinding: TableLayoutBinding?
     private var watchGate = GenerationSequenceGate()
     private var terminalObjectState = false
 
@@ -399,6 +402,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         provider: any ObjectDetailProviding,
         initialTab: ObjectDetailInitialTab = .automatic,
         session: OpenedClusterSession? = nil,
+        tableLayoutStore: TableLayoutStore? = nil,
         yamlPresentationBuilder: @escaping @Sendable (Data)
             -> YAMLManagedFieldsPresentation = {
             YAMLManagedFieldsPresentation(yamlUTF8: $0)
@@ -408,6 +412,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         self.session = session
         self.provider = provider
         self.initialTab = initialTab
+        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.yamlPresentationBuilder = yamlPresentationBuilder
         super.init(nibName: nil, bundle: nil)
     }
@@ -479,10 +484,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func updateSummaryTableGeometry() {
         let width = max(1, summaryScrollView.contentSize.width)
+        summaryTableLayoutBinding?.fitLastColumn(to: width)
         if abs(summaryTable.frame.width - width) > 0.5 {
             summaryTable.setFrameSize(NSSize(width: width, height: summaryTable.frame.height))
         }
-        summaryTable.sizeLastColumnToFit()
     }
 
     func stop() {
@@ -611,6 +616,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         summaryScrollView.hasHorizontalScroller = false
         summaryScrollView.autohidesScrollers = true
         summaryScrollView.identifier = .init("object-detail-summary-scroll")
+        summaryTableLayoutBinding = TableLayoutBinding(
+            tableView: summaryTable,
+            surface: .objectSummary,
+            store: tableLayoutStore
+        )
     }
 
     private func configureRelationships() {
@@ -626,6 +636,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relationshipsScrollView.documentView = relationshipsTable
         relationshipsScrollView.hasVerticalScroller = true
         relationshipsScrollView.hasHorizontalScroller = true
+        relationshipsTableLayoutBinding = TableLayoutBinding(
+            tableView: relationshipsTable,
+            surface: .objectRelationships,
+            store: tableLayoutStore
+        )
         relationshipsCoverageLabel.textColor = .secondaryLabelColor
         relationshipsCoverageLabel.lineBreakMode = .byTruncatingTail
         scanRelationshipsButton.target = self
@@ -1176,7 +1191,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         guard !prepared.diff.isEmpty else { return true }
         let controller = YAMLDiffConfirmationWindowController(
             targetDetails: mutationConfirmationIdentityText,
-            prepared: prepared
+            prepared: prepared,
+            tableLayoutStore: tableLayoutStore
         )
         return controller.runModal() == .apply
     }
