@@ -322,8 +322,8 @@ struct ClusterWorkspaceToolbarTests {
         #expect(accessibilityValue?.contains("Download 0 B/s, upload 0 B/s") == true)
     }
 
-    @Test("connection activity sits at the far right of the resource status bar")
-    func connectionActivityUsesResourceFooter() throws {
+    @Test("connection activity sits at the far right of the persistent workspace status bar")
+    func connectionActivityUsesWorkspaceFooter() throws {
         let controller = makeWorkspace()
         controller.showWindow(nil)
         defer { controller.close() }
@@ -332,10 +332,10 @@ struct ClusterWorkspaceToolbarTests {
         root.layoutSubtreeIfNeeded()
 
         let statusBar = try #require(descendants(of: root).first {
-            $0.identifier?.rawValue == "resource-status-bar"
+            $0.identifier?.rawValue == "workspace-status-bar"
         } as? NSStackView)
         let status = try #require(descendants(of: statusBar).compactMap { $0 as? NSTextField }
-            .first { $0.identifier?.rawValue == "resource-status-line" })
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
         let activity = try #require(descendants(of: statusBar).first {
             $0.accessibilityLabel() == "Kubernetes API connection activity"
         })
@@ -345,8 +345,8 @@ struct ClusterWorkspaceToolbarTests {
 
         #expect(statusFrame.maxX <= activityFrame.minX)
         #expect(abs(statusFrame.midY - activityFrame.midY) < 2)
-        #expect(abs(activityFrame.maxX - statusBar.bounds.maxX) < 1)
-        #expect(statusBar.fittingSize.height <= 20)
+        #expect(abs(activityFrame.maxX - statusBar.bounds.maxX + 8) < 1)
+        #expect(statusBar.fittingSize.height <= 24)
     }
 
     @Test("sidebar section material spans the full outline row")
@@ -417,11 +417,11 @@ struct ClusterWorkspaceToolbarTests {
         let filter = try #require(views.compactMap { $0 as? NSSearchField }.first {
             $0.accessibilityLabel() == "Filter Kubernetes resources"
         })
-        let freshness = try #require(views.compactMap { $0 as? NSTextField }.first {
-            $0.accessibilityLabel() == "Resource freshness"
+        let status = try #require(views.compactMap { $0 as? NSTextField }.first {
+            $0.accessibilityLabel() == "Workspace status"
         })
         let progress = try #require(views.compactMap { $0 as? NSProgressIndicator }.first {
-            $0.accessibilityLabel() == "Resource view update in progress"
+            $0.accessibilityLabel() == "Workspace operation in progress"
         })
         let columns = try #require(views.compactMap { $0 as? NSButton }.first {
             $0.title == "Columns…"
@@ -439,7 +439,7 @@ struct ClusterWorkspaceToolbarTests {
         #expect(table.accessibilityRole() == .table)
         #expect(table.allowsMultipleSelection)
         #expect(filter.accessibilityLabel() == "Filter Kubernetes resources")
-        #expect(freshness.accessibilityLabel() == "Resource freshness")
+        #expect(status.accessibilityLabel() == "Workspace status")
         #expect(progress.accessibilityRole() == .busyIndicator)
         #expect(columns.title == "Columns…")
         #expect(forwards.title.contains("Forwards"))
@@ -1035,17 +1035,14 @@ struct ClusterWorkspaceToolbarTests {
         let resourceTable = try #require(descendants(of: root)
             .compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
-        let freshness = try #require(descendants(of: root)
-            .compactMap { $0 as? NSTextField }
-            .first { $0.accessibilityLabel() == "Resource freshness" })
         let statusLine = try #require(descendants(of: root)
             .compactMap { $0 as? NSTextField }
-            .first { $0.identifier?.rawValue == "resource-status-line" })
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
 
         try await waitUntil {
             provider.streamRequestCount == 1
                 && resourceTable.numberOfRows == 993
-                && freshness.stringValue == "Watching"
+                && statusLine.stringValue.hasSuffix(" · Watching")
         }
         resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         #expect(window.makeFirstResponder(resourceTable))
@@ -1059,29 +1056,29 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil {
             provider.streamRequestCount == 2
                 && resourceTable.numberOfRows == 993
-                && freshness.stringValue.hasPrefix("Resuming…")
+                && statusLine.stringValue.contains("Resuming…")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
-        #expect(freshness.stringValue != "Loading…")
+        #expect(!statusLine.stringValue.hasSuffix(" · Loading…"))
         try await Task.sleep(for: .milliseconds(100))
         #expect(resourceTable.numberOfRows == 993)
 
         provider.releasePartialRows()
         try await Task.sleep(for: .milliseconds(100))
         #expect(resourceTable.numberOfRows == 993)
-        #expect(freshness.stringValue.hasPrefix("Resuming…"))
+        #expect(statusLine.stringValue.contains("Resuming…"))
 
         provider.releaseAuthoritativeRows()
         try await waitUntil {
             resourceTable.numberOfRows == 993
-                && freshness.stringValue == "Watching"
+                && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.hasPrefix("993 objects")
         }
 
         provider.removeAllRows()
         try await waitUntil {
             resourceTable.numberOfRows == 0
-                && freshness.stringValue == "Watching"
+                && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.hasPrefix("0 objects")
         }
     }
@@ -1114,9 +1111,9 @@ struct ClusterWorkspaceToolbarTests {
         let resourceTable = try #require(descendants(of: root)
             .compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
-        let freshness = try #require(descendants(of: root)
+        let statusLine = try #require(descendants(of: root)
             .compactMap { $0 as? NSTextField }
-            .first { $0.accessibilityLabel() == "Resource freshness" })
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
 
         try await waitUntil {
             provider.streamRequestCount == 1
@@ -1134,7 +1131,7 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil {
             provider.streamRequestCount == 2
                 && resourceTable.numberOfRows == 3
-                && freshness.stringValue.hasPrefix("Resuming…")
+                && statusLine.stringValue.contains("Resuming…")
         }
         try await Task.sleep(for: .milliseconds(100))
         #expect(resourceTable.numberOfRows == 3)
@@ -1142,7 +1139,7 @@ struct ClusterWorkspaceToolbarTests {
         provider.releaseAuthoritativeEmpty()
         try await waitUntil {
             resourceTable.numberOfRows == 0
-                && freshness.stringValue == "Watching"
+                && statusLine.stringValue.hasSuffix(" · Watching")
         }
     }
 
@@ -1174,17 +1171,14 @@ struct ClusterWorkspaceToolbarTests {
         let resourceTable = try #require(descendants(of: root)
             .compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
-        let freshness = try #require(descendants(of: root)
-            .compactMap { $0 as? NSTextField }
-            .first { $0.accessibilityLabel() == "Resource freshness" })
         let statusLine = try #require(descendants(of: root)
             .compactMap { $0 as? NSTextField }
-            .first { $0.identifier?.rawValue == "resource-status-line" })
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
 
         try await waitUntil {
             provider.streamRequestCount == 1
                 && resourceTable.numberOfRows == 993
-                && freshness.stringValue == "Watching"
+                && statusLine.stringValue.hasSuffix(" · Watching")
         }
         resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         #expect(window.makeFirstResponder(resourceTable))
@@ -1198,7 +1192,7 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil {
             provider.streamRequestCount == 2
                 && resourceTable.numberOfRows == 993
-                && freshness.stringValue != "Loading…"
+                && !statusLine.stringValue.hasSuffix(" · Loading…")
                 && statusLine.stringValue.contains("1 selected")
         }
         #expect(resourceTable.selectedRowIndexes == IndexSet(integer: 0))
@@ -1208,7 +1202,7 @@ struct ClusterWorkspaceToolbarTests {
         provider.releaseAuthoritativeRows()
         try await waitUntil {
             resourceTable.numberOfRows == 993
-                && freshness.stringValue == "Watching"
+                && statusLine.stringValue.hasSuffix(" · Watching")
                 && statusLine.stringValue.contains("1 selected")
         }
         #expect(resourceTable.selectedRowIndexes == IndexSet(integer: 0))
@@ -1574,7 +1568,7 @@ struct ClusterWorkspaceToolbarTests {
         let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
         let statusLine = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
-            .first { $0.identifier?.rawValue == "resource-status-line" })
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
 
         try await waitUntil { provider.streamRequests.count == 1 && table.numberOfRows == 1 }
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
@@ -1816,7 +1810,7 @@ struct ClusterWorkspaceToolbarTests {
         let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
         let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
-            .first { $0.identifier?.rawValue == "resource-status-line" })
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
 
         try await waitUntil { table.numberOfRows == 2 }
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
@@ -1834,8 +1828,8 @@ struct ClusterWorkspaceToolbarTests {
         #expect(table.selectedRowIndexes == IndexSet(integer: 0))
     }
 
-    @Test("resource freshness header shows cached age and background progress")
-    func resourceFreshnessHeader() async throws {
+    @Test("workspace footer shows resource freshness age and background progress")
+    func resourceFreshnessFooter() async throws {
         let synchronizedAt = Date(timeIntervalSinceNow: -18)
         let provider = HeaderStatusWorkspaceResourceProvider(
             statuses: [
@@ -1859,12 +1853,12 @@ struct ClusterWorkspaceToolbarTests {
         let root = try #require(controller.window?.contentView)
         let label = try #require(descendants(of: root)
             .compactMap { $0 as? NSTextField }
-            .first { $0.accessibilityLabel() == "Resource freshness" })
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
         let progress = try #require(descendants(of: root)
             .compactMap { $0 as? NSProgressIndicator }
-            .first { $0.accessibilityLabel() == "Resource view update in progress" })
+            .first { $0.identifier?.rawValue == "workspace-status-progress" })
 
-        try await waitUntil { label.stringValue.hasPrefix("Reconnecting…") }
+        try await waitUntil { label.stringValue.contains("Reconnecting…") }
         #expect(label.stringValue.contains("last synchronized"))
         #expect(label.stringValue.contains("old"))
         #expect(!progress.isHidden)
@@ -1879,9 +1873,9 @@ struct ClusterWorkspaceToolbarTests {
         controller.showWindow(nil)
         defer { controller.close() }
         let root = try #require(controller.window?.contentView)
-        let freshness = try #require(descendants(of: root)
+        let status = try #require(descendants(of: root)
             .compactMap { $0 as? NSTextField }
-            .first { $0.accessibilityLabel() == "Resource freshness" })
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
         let filter = try #require(descendants(of: root)
             .compactMap { $0 as? NSSearchField }
             .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
@@ -1890,7 +1884,7 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
 
         try await waitUntil {
-            freshness.stringValue == "Watching" && table.numberOfRows == 1
+            status.stringValue.hasSuffix(" · Watching") && table.numberOfRows == 1
         }
         try triggerResourceFilterChange(
             in: try #require(controller.window),
@@ -1898,7 +1892,7 @@ struct ClusterWorkspaceToolbarTests {
         )
         #expect(provider.streamRequestCount == 1)
         #expect(table.numberOfRows == 1)
-        #expect(freshness.stringValue == "Filtering… · last good rows")
+        #expect(status.stringValue.contains("Filtering… · last good rows"))
         try await waitUntil(timeout: .milliseconds(120)) {
             provider.cancelRequestCount == 1
         }
@@ -1910,11 +1904,11 @@ struct ClusterWorkspaceToolbarTests {
 
         #expect(filter.stringValue == "unknown:value")
         #expect(table.numberOfRows == 1)
-        #expect(freshness.stringValue == "Invalid filter · last good rows")
-        #expect(freshness.accessibilityValue() == "Invalid filter · last good rows")
-        let issueLabel = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
-            .first { $0.stringValue.contains("Unknown filter term unknown") })
-        #expect(issueLabel.toolTip?.contains("Operation: compile resource filter") == true)
+        #expect(status.stringValue.contains("Invalid filter · last good rows"))
+        #expect(status.accessibilityValue()?.contains(
+            "Invalid filter · last good rows"
+        ) == true)
+        #expect(status.toolTip?.contains("Operation: compile resource filter") == true)
     }
 
     @Test("invalid initial filter never presents as loading or disconnected")
@@ -1936,21 +1930,20 @@ struct ClusterWorkspaceToolbarTests {
         controller.showWindow(nil)
         defer { controller.close() }
         let root = try #require(controller.window?.contentView)
-        let freshness = try #require(descendants(of: root)
+        let status = try #require(descendants(of: root)
             .compactMap { $0 as? NSTextField }
-            .first { $0.accessibilityLabel() == "Resource freshness" })
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
         let filter = try #require(descendants(of: root)
             .compactMap { $0 as? NSSearchField }
             .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
 
         try await waitUntil {
-            freshness.stringValue == "Invalid filter"
-                && descendants(of: root).compactMap { ($0 as? NSTextField)?.stringValue }
-                    .contains { $0.contains("Unknown filter term unknown") }
+            status.stringValue.contains("Invalid filter")
+                && status.stringValue.contains("Unknown filter term unknown")
         }
 
         #expect(filter.stringValue == "unknown:value")
-        #expect(freshness.accessibilityValue() == "Invalid filter")
+        #expect(status.accessibilityValue()?.contains("Invalid filter") == true)
     }
 }
 
@@ -3392,7 +3385,7 @@ private func apiDiscoveryStatus(in window: NSWindow) -> NSTextField? {
     guard let root = window.contentView else { return nil }
     return descendants(of: root)
         .compactMap { $0 as? NSTextField }
-        .first { $0.accessibilityLabel() == "API resource discovery status" }
+        .first { $0.identifier?.rawValue == "workspace-status-line" }
 }
 
 @MainActor

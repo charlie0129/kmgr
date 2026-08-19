@@ -339,10 +339,7 @@ struct ObjectDetailYAMLPresentationTests {
             ))
         }
         try await waitUntil {
-            descendants(of: controller.view).contains {
-                ($0 as? NSTextField)?.stringValue
-                    == "Watching · resource version rv-64"
-            }
+            controller.workspaceStatus.text == "Watching · resource version rv-64"
         }
 
         // A busy watch must leave the last complete presentation and its
@@ -611,16 +608,14 @@ struct ObjectDetailYAMLPresentationTests {
         let edit = try #require(descendants(of: controller.view)
             .compactMap { $0 as? NSButton }
             .first { $0.title == "Edit" })
-        let status = try #require(descendants(of: controller.view)
-            .compactMap { $0 as? NSTextField }
-            .first { $0.stringValue == "Loading…" })
         controller.viewDidAppear()
         defer {
             Task { await watch.finish() }
             controller.stop()
         }
         try await waitUntil {
-            editor.string == source && status.stringValue == "Resource version rv-1"
+            editor.string == source
+                && controller.workspaceStatus.text == "Resource version rv-1"
         }
         try await waitUntilAsync { await watch.numberOfRequests() == 1 }
         edit.performClick(nil)
@@ -634,8 +629,8 @@ struct ObjectDetailYAMLPresentationTests {
             )
         ))
         try await waitUntilAsync { await watch.numberOfRequests() == 2 }
-        #expect(status.stringValue == "Resource version rv-1")
-        #expect(status.textColor == .secondaryLabelColor)
+        #expect(controller.workspaceStatus.text == "Resource version rv-1")
+        #expect(controller.workspaceStatus.severity == .informational)
 
         await watch.send(.updated(
             cursor: StreamCursor(generation: 1, sequence: 2),
@@ -646,8 +641,9 @@ struct ObjectDetailYAMLPresentationTests {
             )
         ))
         try await waitUntilAsync { await watch.numberOfRequests() == 3 }
-        #expect(status.stringValue == "Server object changed · local YAML edit preserved")
-        #expect(status.textColor == .systemOrange)
+        #expect(controller.workspaceStatus.text
+            == "Server object changed · local YAML edit preserved")
+        #expect(controller.workspaceStatus.severity == .warning)
     }
 
     @Test("detail scroll documents receive visible geometry instead of remaining zero-sized")
@@ -831,9 +827,7 @@ struct ObjectDetailYAMLPresentationTests {
         let segmented = try #require(descendants(of: controller.view)
             .compactMap { $0 as? NSSegmentedControl }.first)
         try await waitUntil {
-            descendants(of: controller.view).contains {
-                ($0 as? NSTextField)?.stringValue == "Resource version rv-1"
-            }
+            controller.workspaceStatus.text == "Resource version rv-1"
         }
         #expect(segmented.selectedSegment == 0)
 

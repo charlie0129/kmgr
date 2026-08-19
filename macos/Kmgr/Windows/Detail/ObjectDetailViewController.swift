@@ -319,7 +319,7 @@ private final class ObjectDetailYAMLTextView: NSTextView {
 /// workspace; no inspector or bottom drawer is introduced.
 @MainActor
 final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
-    NSTableViewDelegate, NSTextViewDelegate
+    NSTableViewDelegate, NSTextViewDelegate, WorkspaceStatusPublishing
 {
     private(set) var identity: ResourceIdentity
     private var session: OpenedClusterSession?
@@ -334,7 +334,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         target: nil,
         action: nil
     )
-    private let statusLabel = NSTextField(labelWithString: "Loading…")
     private let contentContainer = NSView()
     private let summaryTable = CopyableSummaryTableView()
     private let summaryScrollView = NSScrollView()
@@ -396,6 +395,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var terminalObjectState = false
 
     var onBack: (() -> Void)?
+    private(set) var workspaceStatus = WorkspaceStatus("Loading…", busy: true)
+    var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
 
     init(
         identity: ResourceIdentity,
@@ -444,10 +445,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         segmented.selectedSegment = initialTab.segment
         segmented.target = self
         segmented.action = #selector(tabChanged)
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.lineBreakMode = .byTruncatingTail
 
-        let header = NSStackView(views: [backButton, breadcrumb, NSView(), segmented, statusLabel])
+        let header = NSStackView(views: [backButton, breadcrumb, NSView(), segmented])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
@@ -521,11 +520,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         recoveryTask = nil
         cancelYAMLPresentationPreparation()
         activeRelationshipScan = nil
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = isEditingYAML
-            ? "Engine disconnected · local edit preserved"
-            : "Engine disconnected · reopening this UID when ready"
-        statusLabel.textColor = .systemOrange
+        publishStatus(WorkspaceStatus(
+            isEditingYAML
+                ? "Engine disconnected · local edit preserved"
+                : "Engine disconnected · reopening this UID when ready",
+            severity: .warning
+        ))
         editButton.isEnabled = false
         saveButton.isEnabled = false
         disableEditingAfterDeletion()
@@ -542,9 +542,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         session = recoveredSession
         var reboundIdentity = identity
         reboundIdentity.clusterSessionID = recoveredSession.sessionID
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = "Reopening this UID…"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus("Reopening this UID…", busy: true))
         recoveryTask = Task { [weak self, provider] in
             guard let self else { return }
             defer { recoveryTask = nil }
@@ -556,9 +554,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             } catch {
                 guard !Task.isCancelled else { return }
                 let presentation = UserFacingErrorPresentation(error)
-                statusLabel.stringValue = presentation.inlineText
-                statusLabel.toolTip = presentation.detailedText
-                statusLabel.textColor = .systemRed
+                publishStatus(WorkspaceStatus(
+                    presentation.inlineText,
+                    severity: .error,
+                    toolTip: presentation.detailedText
+                ))
                 completion(.failure(error))
             }
         }
@@ -782,9 +782,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func loadObject() {
         guard loadTask == nil else { return }
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = "Loading…"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus("Loading…", busy: true))
         loadTask = Task { [weak self, provider, identity] in
             guard let self else { return }
             defer { loadTask = nil }
@@ -803,8 +801,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         self.detail = detail
         installYAML(detail.yamlUTF8)
         renderSummary(detail)
-        statusLabel.stringValue = "Resource version \(detail.resourceVersion)"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus("Resource version \(detail.resourceVersion)"))
         startObjectWatch(resourceVersion: detail.resourceVersion)
     }
 
@@ -838,10 +835,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         startObjectWatch(resourceVersion: updatedDetail.resourceVersion)
         relationshipsLoaded = false
         tabChanged()
-        statusLabel.stringValue = preserveYAML
-            ? "Reconnected · server refreshed · local YAML edit preserved"
-            : "Reconnected · resource version \(updatedDetail.resourceVersion)"
-        statusLabel.textColor = preserveYAML ? .systemOrange : .secondaryLabelColor
+        publishStatus(WorkspaceStatus(
+            preserveYAML
+                ? "Reconnected · server refreshed · local YAML edit preserved"
+                : "Reconnected · resource version \(updatedDetail.resourceVersion)",
+            severity: preserveYAML ? .warning : .informational
+        ))
     }
 
     private func renderSummary(_ detail: ObjectDetail) {
@@ -924,30 +923,34 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     switch event {
                     case .status(_, let currentVersion):
                         if !currentVersion.isEmpty {
-                            statusLabel.toolTip = nil
-                            statusLabel.stringValue = "Watching · resource version \(currentVersion)"
-                            statusLabel.textColor = .secondaryLabelColor
+                            publishStatus(WorkspaceStatus(
+                                "Watching · resource version \(currentVersion)"
+                            ))
                         }
                     case .updated(_, let updated):
                         installWatchUpdate(updated)
                     case .deleted(_, _):
                         terminalObjectState = true
-                        statusLabel.toolTip = nil
-                        statusLabel.stringValue = "Deleted · this UID no longer exists"
-                        statusLabel.textColor = .systemRed
+                        publishStatus(WorkspaceStatus(
+                            "Deleted · this UID no longer exists",
+                            severity: .error
+                        ))
                         disableEditingAfterDeletion()
                     case .failure(_, let issue):
                         if issue.reason == "ObjectRecreated" || issue.reason == "NotFound" {
                             terminalObjectState = true
-                            statusLabel.toolTip = nil
-                            statusLabel.stringValue = "Unavailable · same-name objects are not substituted for this UID"
-                            statusLabel.textColor = .systemRed
+                            publishStatus(WorkspaceStatus(
+                                "Unavailable · same-name objects are not substituted for this UID",
+                                severity: .error
+                            ))
                             disableEditingAfterDeletion()
                         } else {
                             let presentation = issue.userFacingPresentation
-                            statusLabel.stringValue = presentation.inlineText
-                            statusLabel.toolTip = presentation.detailedText
-                            statusLabel.textColor = .systemOrange
+                            publishStatus(WorkspaceStatus(
+                                presentation.inlineText,
+                                severity: .warning,
+                                toolTip: presentation.detailedText
+                            ))
                         }
                     }
                 }
@@ -960,12 +963,13 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func installWatchUpdate(_ updated: ObjectDetail) {
-        statusLabel.toolTip = nil
         guard updated.identity.uid == identity.uid else { return }
         if isEditingYAML {
             if updated.resourceVersion != detail?.resourceVersion {
-                statusLabel.stringValue = "Server object changed · local YAML edit preserved"
-                statusLabel.textColor = .systemOrange
+                publishStatus(WorkspaceStatus(
+                    "Server object changed · local YAML edit preserved",
+                    severity: .warning
+                ))
             }
             return
         }
@@ -973,8 +977,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         detail = presented
         installYAML(presented.yamlUTF8)
         renderSummary(presented)
-        statusLabel.stringValue = "Watching · resource version \(updated.resourceVersion)"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus(
+            "Watching · resource version \(updated.resourceVersion)"
+        ))
     }
 
     private func disableEditingAfterDeletion() {
@@ -984,8 +989,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func loadRelationshipsIfNeeded() {
         guard !relationshipsLoaded, relationshipsTask == nil else { return }
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = "Loading relationships…"
+        publishStatus(WorkspaceStatus("Loading relationships…", busy: true))
         relationshipsTask = Task { [weak self, provider, identity] in
             guard let self else { return }
             defer { relationshipsTask = nil }
@@ -1000,10 +1004,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 relationshipsLoaded = true
                 relationshipsTable.reloadData()
                 updateRelationshipCoverageLabel()
-                statusLabel.stringValue = relationships.isEmpty
-                    ? "No relationships found in current caches"
-                    : "\(relationships.count) relationship\(relationships.count == 1 ? "" : "s")"
-                statusLabel.textColor = .secondaryLabelColor
+                publishStatus(WorkspaceStatus(
+                    relationships.isEmpty
+                        ? "No relationships found in current caches"
+                        : "\(relationships.count) relationship\(relationships.count == 1 ? "" : "s")"
+                ))
             } catch {
                 guard !Task.isCancelled else { return }
                 show(error: error)
@@ -1030,9 +1035,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
         scanRelationshipsButton.isHidden = true
         cancelRelationshipScanButton.isHidden = false
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = "Starting relationship scan…"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus("Starting relationship scan…", busy: true))
         relationshipScanTask = Task { [weak self, provider, identity] in
             guard let self else { return }
             defer {
@@ -1052,23 +1055,28 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     childrenPotentiallyIncomplete = message.progress.potentiallyIncomplete
                     updateRelationshipCoverageLabel()
                     if message.progress.complete {
-                        statusLabel.stringValue = message.progress.potentiallyIncomplete
-                            ? "Scan finished with \(message.progress.resourcesFailed) inaccessible resource type(s) · results potentially incomplete"
-                            : "Scan complete · \(message.progress.objectsExamined.formatted()) objects examined"
-                        statusLabel.textColor = message.progress.potentiallyIncomplete
-                            ? .systemOrange : .secondaryLabelColor
+                        publishStatus(WorkspaceStatus(
+                            message.progress.potentiallyIncomplete
+                                ? "Scan finished with \(message.progress.resourcesFailed) inaccessible resource type(s) · results potentially incomplete"
+                                : "Scan complete · \(message.progress.objectsExamined.formatted()) objects examined",
+                            severity: message.progress.potentiallyIncomplete
+                                ? .warning : .informational,
+                            toolTip: message.warning?.userFacingPresentation.detailedText
+                        ))
                     } else {
                         let current = message.progress.currentResource.isEmpty
                             ? "discovering resources" : message.progress.currentResource
-                        statusLabel.stringValue = "Scanning \(message.progress.resourcesScanned)/\(message.progress.resourcesTotal) · \(message.progress.objectsExamined.formatted()) objects · \(current)"
-                        statusLabel.textColor = message.warning == nil
-                            ? .secondaryLabelColor : .systemOrange
+                        publishStatus(WorkspaceStatus(
+                            "Scanning \(message.progress.resourcesScanned)/\(message.progress.resourcesTotal) · \(message.progress.objectsExamined.formatted()) objects · \(current)",
+                            severity: message.warning == nil ? .informational : .warning,
+                            busy: true,
+                            toolTip: message.warning?.userFacingPresentation.detailedText
+                        ))
                     }
                 }
             } catch {
                 guard !Task.isCancelled else {
-                    statusLabel.stringValue = "Relationship scan cancelled"
-                    statusLabel.textColor = .secondaryLabelColor
+                    publishStatus(WorkspaceStatus("Relationship scan cancelled"))
                     return
                 }
                 childrenPotentiallyIncomplete = true
@@ -1135,8 +1143,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     @objc private func saveYAML() {
         guard let detail, operationTask == nil else { return }
         let edited = Data(yamlTextView.string.utf8)
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = "Validating…"
+        publishStatus(WorkspaceStatus("Validating…", busy: true))
         operationTask = Task { [weak self, provider, identity] in
             guard let self else { return }
             defer {
@@ -1151,7 +1158,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     forceFieldOwnership: false
                 )
                 guard confirm(prepared: prepared) else {
-                    statusLabel.stringValue = "Save cancelled"
+                    publishStatus(WorkspaceStatus("Save cancelled"))
                     return
                 }
                 let stream = try await provider.applyYAML(
@@ -1161,7 +1168,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     forceFieldOwnership: false
                 )
                 for try await progress in stream {
-                    statusLabel.stringValue = "Saving… \(progress.completedItems)/\(progress.totalItems)"
+                    publishStatus(WorkspaceStatus(
+                        "Saving… \(progress.completedItems)/\(progress.totalItems)",
+                        busy: !progress.state.isTerminal
+                    ))
                     if progress.state.isTerminal {
                         if progress.state == .succeeded {
                             originalYAML = prepared.normalizedYAMLUTF8
@@ -1531,9 +1541,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func show(error: Error) {
         let presentation = UserFacingErrorPresentation(error)
-        statusLabel.stringValue = presentation.inlineText
-        statusLabel.toolTip = presentation.detailedText
-        statusLabel.textColor = .systemRed
+        publishStatus(WorkspaceStatus(
+            presentation.inlineText,
+            severity: .error,
+            toolTip: presentation.detailedText
+        ))
+    }
+
+    private func publishStatus(_ status: WorkspaceStatus) {
+        workspaceStatus = status
+        onWorkspaceStatusChanged?(status)
     }
 
     @objc private func backPressed() { onBack?() }

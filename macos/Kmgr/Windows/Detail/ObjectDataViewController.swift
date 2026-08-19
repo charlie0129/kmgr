@@ -5,7 +5,7 @@ import KmgrCore
 /// UID-pinned Data GET and every decoded value remains process-memory-only.
 @MainActor
 final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
-    NSTableViewDelegate, NSTextViewDelegate
+    NSTableViewDelegate, NSTextViewDelegate, WorkspaceStatusPublishing
 {
     private enum KeyRow {
         case stored(ObjectDataEntry)
@@ -31,7 +31,6 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private let dataFileReader: @Sendable (URL) throws -> Data
     private let dataFileWriter: @Sendable (Data, URL) throws -> Void
 
-    private let statusLabel = NSTextField(labelWithString: "Loading Data…")
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
     private let splitView = NSSplitView()
     private let keysTable = ObjectDataKeysTableView()
@@ -72,6 +71,8 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private var conflictController: DataConflictWindowController?
 
     var onBack: (() -> Void)?
+    private(set) var workspaceStatus = WorkspaceStatus("Loading Data…", busy: true)
+    var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
 
     var contextualShortcutSnapshot: ContextualShortcutSnapshot {
         ContextualShortcutCatalog.dataEditor(secret: isSecretObject)
@@ -128,15 +129,12 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         let breadcrumb = NSTextField(labelWithString: breadcrumbText)
         breadcrumb.font = .systemFont(ofSize: 15, weight: .semibold)
         breadcrumb.lineBreakMode = .byTruncatingMiddle
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         retryButton.target = self
         retryButton.action = #selector(retryLoad)
         retryButton.isHidden = true
 
         let header = NSStackView(views: [
-            backButton, breadcrumb, NSView(), statusLabel, retryButton,
+            backButton, breadcrumb, NSView(), retryButton,
         ])
         header.orientation = .horizontal
         header.alignment = .centerY
@@ -204,11 +202,12 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         authorityUnavailable = true
         setSecretReveal(false)
         displaySelectedData()
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = hasAnyDraftChanges
-            ? "Engine disconnected · local Data edits preserved and locked"
-            : "Engine disconnected · reopening this UID when ready"
-        statusLabel.textColor = .systemOrange
+        publishStatus(WorkspaceStatus(
+            hasAnyDraftChanges
+                ? "Engine disconnected · local Data edits preserved and locked"
+                : "Engine disconnected · reopening this UID when ready",
+            severity: .warning
+        ))
         retryButton.isHidden = true
         updateControls()
     }
@@ -221,9 +220,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         session = recoveredSession
         identity.clusterSessionID = recoveredSession.sessionID
         let rebound = identity
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = "Reopening Data for this UID…"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus("Reopening Data for this UID…", busy: true))
         retryButton.isHidden = true
         recoveryTask = Task { [weak self, provider] in
             guard let self else { return }
@@ -379,9 +376,10 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         if lockingUntilInstalled { authoritativeRefreshInFlight = true }
         authorityUnavailable = false
         retryButton.isHidden = true
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = objectData == nil ? "Loading Data…" : "Refreshing Data…"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus(
+            objectData == nil ? "Loading Data…" : "Refreshing Data…",
+            busy: true
+        ))
         updateControls()
         loadTask = Task { [weak self, provider, identity] in
             guard let self else { return }
@@ -398,9 +396,10 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
                     preservingDrafts: preservingDrafts,
                     preferredKey: preferredKey
                 )
-                statusLabel.stringValue = successMessage
-                    ?? "Resource version \(current.resourceVersion) · \(current.entries.count.formatted()) key\(current.entries.count == 1 ? "" : "s")"
-                statusLabel.textColor = .secondaryLabelColor
+                publishStatus(WorkspaceStatus(
+                    successMessage
+                        ?? "Resource version \(current.resourceVersion) · \(current.entries.count.formatted()) key\(current.entries.count == 1 ? "" : "s")"
+                ))
             } catch {
                 guard !Task.isCancelled else { return }
                 authorityUnavailable = true
@@ -417,10 +416,12 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         )
         setSecretReveal(false)
         displaySelectedData()
-        statusLabel.stringValue = hasAnyDraftChanges
-            ? "Reconnected · current Data loaded · local edits preserved"
-            : "Reconnected · resource version \(current.resourceVersion)"
-        statusLabel.textColor = hasAnyDraftChanges ? .systemOrange : .secondaryLabelColor
+        publishStatus(WorkspaceStatus(
+            hasAnyDraftChanges
+                ? "Reconnected · current Data loaded · local edits preserved"
+                : "Reconnected · resource version \(current.resourceVersion)",
+            severity: hasAnyDraftChanges ? .warning : .informational
+        ))
     }
 
     private func install(
@@ -826,22 +827,30 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func showMissingDraftStatus() {
-        statusLabel.stringValue = "Conflict · key missing on server · local draft preserved · Save Key recreates it"
-        statusLabel.textColor = .systemOrange
+        publishStatus(WorkspaceStatus(
+            "Conflict · key missing on server · local draft preserved · Save Key recreates it",
+            severity: .warning
+        ))
     }
 
     private func showValidation(_ message: String) {
-        statusLabel.stringValue = message
-        statusLabel.textColor = .systemRed
+        publishStatus(WorkspaceStatus(message, severity: .error))
         NSSound.beep()
     }
 
     private func show(error: Error, allowsRetry: Bool = false) {
         let presentation = UserFacingErrorPresentation(error)
-        statusLabel.stringValue = presentation.inlineText
-        statusLabel.toolTip = presentation.detailedText
-        statusLabel.textColor = .systemRed
+        publishStatus(WorkspaceStatus(
+            presentation.inlineText,
+            severity: .error,
+            toolTip: presentation.detailedText
+        ))
         retryButton.isHidden = !allowsRetry
+    }
+
+    private func publishStatus(_ status: WorkspaceStatus) {
+        workspaceStatus = status
+        onWorkspaceStatusChanged?(status)
     }
 
     @objc private func backPressed() { onBack?() }
@@ -866,8 +875,7 @@ extension ObjectDataViewController {
             valueTextView.undoManager?.removeAllActions()
             updateControls()
         }
-        statusLabel.stringValue = "Local key changes reverted"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus("Local key changes reverted"))
     }
 
     @objc private func addDataKey() {
@@ -1008,10 +1016,11 @@ extension ObjectDataViewController {
         if let row = editorRows.firstIndex(where: { $0.key == key }) {
             reloadRows([row])
         }
-        statusLabel.stringValue = drafts.contains(key)
-            ? "Loaded \(bytes.count.formatted()) bytes locally for \(key)"
-            : "Selected file matches the saved value for \(key)"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus(
+            drafts.contains(key)
+                ? "Loaded \(bytes.count.formatted()) bytes locally for \(key)"
+                : "Selected file matches the saved value for \(key)"
+        ))
     }
 
     private func chooseImportedFile(_ completion: @escaping (URL) -> Void) {
@@ -1064,8 +1073,7 @@ extension ObjectDataViewController {
             defer { protected.resetBytes(in: protected.startIndex..<protected.endIndex) }
             try writer(protected, url)
         } completion: { [weak self] _ in
-            self?.statusLabel.stringValue = "Exported \(key)"
-            self?.statusLabel.textColor = .secondaryLabelColor
+            self?.publishStatus(WorkspaceStatus("Exported \(key)"))
         }
     }
 
@@ -1077,8 +1085,7 @@ extension ObjectDataViewController {
         guard dataFileTask == nil else { return }
         dataFileGeneration &+= 1
         let generation = dataFileGeneration
-        statusLabel.stringValue = status
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus(status, busy: true))
         dataFileTask = Task { [weak self] in
             do {
                 let value = try await Self.performDataFileOperation(operation)
@@ -1148,9 +1155,7 @@ extension ObjectDataViewController {
             conflictedKey = nil
             reloadSelectedRow()
         }
-        statusLabel.toolTip = nil
-        statusLabel.stringValue = "Saving key/value data…"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus("Saving key/value data…", busy: true))
         operationTask = Task { [weak self, provider, identity] in
             guard let self else { return }
             defer {
@@ -1208,8 +1213,11 @@ extension ObjectDataViewController {
         mutation: DataMutationKind,
         successMessage: String
     ) async {
-        statusLabel.stringValue = "Conflict detected · loading the current key…"
-        statusLabel.textColor = .systemOrange
+        publishStatus(WorkspaceStatus(
+            "Conflict detected · loading the current key…",
+            severity: .warning,
+            busy: true
+        ))
         do {
             let currentData = try await provider.getData(identity: identity)
             guard !Task.isCancelled else { return }
@@ -1241,8 +1249,10 @@ extension ObjectDataViewController {
         } catch {
             conflictedKey = mutation.sourceKey
             reloadSelectedRow()
-            statusLabel.stringValue = "Conflict · current server data could not be loaded · local edit preserved"
-            statusLabel.textColor = .systemRed
+            publishStatus(WorkspaceStatus(
+                "Conflict · current server data could not be loaded · local edit preserved",
+                severity: .error
+            ))
         }
     }
 
@@ -1254,8 +1264,10 @@ extension ObjectDataViewController {
         retryPlan: DataConflictRetryPlan
     ) {
         guard let window = view.window else {
-            statusLabel.stringValue = "Conflict · local edit preserved"
-            statusLabel.textColor = .systemOrange
+            publishStatus(WorkspaceStatus(
+                "Conflict · local edit preserved",
+                severity: .warning
+            ))
             return
         }
         let displays = conflictDisplays(
@@ -1293,12 +1305,12 @@ extension ObjectDataViewController {
             case .reload:
                 conflictedKey = nil
                 installCurrentDataAfterConflict(currentData, selecting: mutation.sourceKey)
-                statusLabel.stringValue = "Reloaded current server data"
-                statusLabel.textColor = .secondaryLabelColor
+                publishStatus(WorkspaceStatus("Reloaded current server data"))
             case .copyLocal:
                 copyLocalConflictValueToPasteboard(mutation: mutation)
-                statusLabel.stringValue = "Copied local value · local edit preserved"
-                statusLabel.textColor = .secondaryLabelColor
+                publishStatus(WorkspaceStatus(
+                    "Copied local value · local edit preserved"
+                ))
             case .retry:
                 guard case .retry(let retryMutation) = retryPlan else { return }
                 conflictedKey = nil
@@ -1309,8 +1321,10 @@ extension ObjectDataViewController {
                     recoverConflicts: true
                 )
             case .keepEditing:
-                statusLabel.stringValue = "Conflict · local edit preserved"
-                statusLabel.textColor = .systemOrange
+                publishStatus(WorkspaceStatus(
+                    "Conflict · local edit preserved",
+                    severity: .warning
+                ))
             }
         }
         conflictController = controller

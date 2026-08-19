@@ -322,10 +322,8 @@ struct ObjectDetailDataDraftTests {
         let table = try dataKeysTable(in: controller.view)
         let retry = try #require(dataButtons(in: controller.view).first { $0.title == "Retry" })
         try await waitForCondition { !retry.isHidden }
-        let status = try #require(draftDescendants(of: controller.view)
-            .compactMap { $0 as? NSTextField }
-            .first { $0.stringValue.contains("Data request failed") })
-        #expect(status.toolTip?.contains("DataUnavailable") == true)
+        #expect(controller.workspaceStatus.text.contains("Data request failed"))
+        #expect(controller.workspaceStatus.toolTip?.contains("DataUnavailable") == true)
         #expect(table.numberOfRows == 0)
 
         retry.performClick(nil)

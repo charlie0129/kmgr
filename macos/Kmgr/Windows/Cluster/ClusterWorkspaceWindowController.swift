@@ -718,6 +718,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let contentController: ResourceListViewController
     private let namespaceControl = NSPopUpButton(frame: .zero, pullsDown: false)
     private let connectionActivityView: ClusterConnectionActivityView
+    private let rightPaneController: WorkspaceRightPaneViewController
     private let connectionActivityStreamID = UUID().uuidString.lowercased()
     private var connectionActivityTask: Task<Void, Never>?
     private var connectionActivityGate = GenerationSequenceGate()
@@ -792,6 +793,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.onShowPortForwards = onShowPortForwards
         let connectionActivityView = ClusterConnectionActivityView()
         self.connectionActivityView = connectionActivityView
+        let rightPaneController = WorkspaceRightPaneViewController(
+            connectionActivityView: connectionActivityView
+        )
+        self.rightPaneController = rightPaneController
         sidebarController = ResourceSidebarViewController(
             session: session,
             isAuthenticated: isAuthenticated,
@@ -804,10 +809,22 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             columnsConfigurationPath: columnsConfigurationPath,
             columnConfigurationCoordinator: columnConfigurationCoordinator,
-            columnsConfigurationLoader: columnsConfigurationLoader,
-            connectionActivityView: connectionActivityView
+            columnsConfigurationLoader: columnsConfigurationLoader
         )
         super.init(nibName: nil, bundle: nil)
+
+        bindStatusPublisher(contentController)
+        rightPaneController.setContent(
+            contentController,
+            initialStatus: contentController.workspaceStatus
+        )
+        sidebarController.onWorkspaceStatusChanged = { [weak rightPaneController] status in
+            rightPaneController?.setSupplementalStatus(status, for: .discovery)
+        }
+        rightPaneController.setSupplementalStatus(
+            sidebarController.workspaceStatus,
+            for: .discovery
+        )
 
         sidebarController.onSelectResource = { [weak self] resource in
             guard let self else { return }
@@ -871,7 +888,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             self?.onContextualShortcutsChanged?()
         }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
-        addSplitViewItem(NSSplitViewItem(viewController: contentController))
+        addSplitViewItem(NSSplitViewItem(viewController: rightPaneController))
         splitViewItems[0].minimumThickness = 180
         splitViewItems[0].maximumThickness = 340
     }
@@ -959,6 +976,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     func engineRecoveryFailed(_ error: Error) {
         let presentation = UserFacingErrorPresentation(error)
         connectionActivityView.setState(.failed, detail: presentation.detailedText)
+        publishWorkspaceOperation(WorkspaceStatus(
+            presentation.inlineText,
+            severity: .error,
+            toolTip: presentation.detailedText
+        ))
         if !isAuthenticated {
             contentController.showDisconnected(
                 "Could not connect to this saved context. \(presentation.inlineText)",
@@ -994,8 +1016,24 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         {
             restoreSubresource(identity, returnState: returnState)
         }
+        let savedTargetStatus = WorkspaceStatus(
+            "Loading the saved resource target…",
+            busy: true
+        )
+        let isLoadingSavedTarget = dataController == nil
+            && detailController == nil
+            && !resumesCurrentResource
+        if isLoadingSavedTarget {
+            publishWorkspaceOperation(savedTargetStatus)
+        }
         sidebarController.recover(session: recoveredSession) { [weak self] result in
             guard let self else { return }
+            if isLoadingSavedTarget {
+                rightPaneController.clearSupplementalStatus(
+                    savedTargetStatus,
+                    for: .workspaceOperation
+                )
+            }
             switch result {
             case .success(let resources):
                 if restoredShellState != nil,
@@ -1012,7 +1050,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                         matching: contentController.currentResourceID
                     )
                 }
-                connectionActivityView.setState(.connected)
             case .failure(let error):
                 // Existing authenticated workspaces keep their warm/current
                 // resource behavior when rediscovery fails. Only an initial
@@ -1020,41 +1057,14 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 guard restoredShellState != nil else { return }
                 sidebarController.discardRestoredResource()
                 contentController.rejectRestoredResourceValidation(error)
-                connectionActivityView.setState(
-                    .failed,
-                    detail: UserFacingErrorPresentation(error).detailedText
-                )
             }
         }
         loadNamespaces()
         startPortForwardObservation()
         if let dataController {
-            connectionActivityView.setState(.connecting, detail: "Reopening Data…")
-            dataController.recover(session: recoveredSession) { [weak self] result in
-                switch result {
-                case .success:
-                    self?.connectionActivityView.setState(.connected)
-                case .failure(let error):
-                    self?.engineRecoveryFailed(error)
-                }
-            }
+            dataController.recover(session: recoveredSession) { _ in }
         } else if let detailController {
-            connectionActivityView.setState(.connecting, detail: "Reopening view…")
-            detailController.recover(session: recoveredSession) { [weak self] result in
-                switch result {
-                case .success:
-                    self?.connectionActivityView.setState(.connected)
-                case .failure(let error):
-                    self?.engineRecoveryFailed(error)
-                }
-            }
-        } else if resumesCurrentResource {
-            connectionActivityView.setState(.connected)
-        } else {
-            connectionActivityView.setState(
-                .connecting,
-                detail: "Loading the saved resource target…"
-            )
+            detailController.recover(session: recoveredSession) { _ in }
         }
     }
 
@@ -1497,7 +1507,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     private func freshOpen(_ identity: ResourceIdentity) {
         let revision = beginObjectOpenTask()
-        connectionActivityView.setState(.connecting, detail: "Refreshing \(identity.name)…")
+        publishWorkspaceOperation(WorkspaceStatus(
+            "Refreshing \(identity.name)…",
+            busy: true
+        ))
         objectOpenTask = Task { [weak self, objectDetailProvider] in
             guard let self else { return }
             defer {
@@ -1506,13 +1519,21 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             do {
                 let detail = try await objectDetailProvider.getObject(identity: identity)
                 guard !Task.isCancelled, objectOpenRevision == revision else { return }
-                connectionActivityView.setState(.connected)
                 objectOpenTask = nil
+                publishWorkspaceOperation(nil)
                 showObject(detail.identity, initialTab: .automatic)
+            } catch is CancellationError {
+                if objectOpenRevision == revision {
+                    publishWorkspaceOperation(nil)
+                }
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
                 let presentation = UserFacingErrorPresentation(error)
-                connectionActivityView.setState(.failed, detail: presentation.detailedText)
+                publishWorkspaceOperation(WorkspaceStatus(
+                    presentation.inlineText,
+                    severity: .error,
+                    toolTip: presentation.detailedText
+                ))
             }
         }
     }
@@ -1532,6 +1553,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         guard ResourceDrillDownPlanner.hasPotentialTarget(identity) else { return }
 
         let revision = beginObjectOpenTask()
+        publishWorkspaceOperation(WorkspaceStatus(
+            "Loading \(identity.name) subresource…",
+            busy: true
+        ))
         objectOpenTask = Task { [weak self, objectDetailProvider] in
             guard let self else { return }
             defer {
@@ -1542,8 +1567,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     identity,
                     provider: objectDetailProvider
                 )
-                guard !Task.isCancelled, objectOpenRevision == revision,
-                    detail.identity == identity,
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
+                publishWorkspaceOperation(nil)
+                guard detail.identity == identity,
                     drillDownSourceIsCurrent(identity, returnState: returnState),
                     let plan = ResourceDrillDownPlanner.plan(for: detail)
                 else { return }
@@ -1559,10 +1585,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     )
                 }
             } catch is CancellationError {
+                if objectOpenRevision == revision {
+                    publishWorkspaceOperation(nil)
+                }
             } catch {
                 guard !Task.isCancelled, objectOpenRevision == revision else { return }
                 let presentation = UserFacingErrorPresentation(error)
-                connectionActivityView.setState(.failed, detail: presentation.detailedText)
+                publishWorkspaceOperation(WorkspaceStatus(
+                    presentation.inlineText,
+                    severity: .error,
+                    toolTip: presentation.detailedText
+                ))
             }
         }
     }
@@ -1598,6 +1631,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func openDrillDownResource(_ query: ResourceDrillDownQuery) {
+        publishWorkspaceOperation(nil)
         guard let target = resources.first(where: {
             $0.group == query.group && $0.version == query.version
                 && $0.resource == query.resource && $0.verbs.contains("list")
@@ -1748,6 +1782,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func showResourceList(resume: Bool = true) {
+        publishWorkspaceOperation(nil)
         guard detailController != nil || dataController != nil || podContainerController != nil else {
             return
         }
@@ -1763,10 +1798,27 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func replaceMainContent(with controller: NSViewController) {
-        if splitViewItems.count > 1 {
-            removeSplitViewItem(splitViewItems[1])
+        guard let publisher = controller as? any WorkspaceStatusPublishing else {
+            assertionFailure("Workspace content must publish semantic status")
+            return
         }
-        insertSplitViewItem(NSSplitViewItem(viewController: controller), at: 1)
+        bindStatusPublisher(publisher, controller: controller)
+        rightPaneController.setContent(controller, initialStatus: publisher.workspaceStatus)
+    }
+
+    private func bindStatusPublisher<T>(_ controller: T)
+    where T: NSViewController, T: WorkspaceStatusPublishing {
+        bindStatusPublisher(controller, controller: controller)
+    }
+
+    private func bindStatusPublisher(
+        _ publisher: any WorkspaceStatusPublishing,
+        controller: NSViewController
+    ) {
+        publisher.onWorkspaceStatusChanged = { [weak self, weak controller] status in
+            guard let self, let controller else { return }
+            rightPaneController.updateContentStatus(status, from: controller)
+        }
     }
 
     @objc private func goBack() {
@@ -1810,6 +1862,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             return
         }
         let revision = beginObjectOpenTask()
+        publishWorkspaceOperation(WorkspaceStatus(
+            "Restoring \(identity.name) subresource…",
+            busy: true
+        ))
         objectOpenTask = Task { [weak self, objectDetailProvider] in
             guard let self else { return }
             defer {
@@ -1820,8 +1876,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     identity,
                     provider: objectDetailProvider
                 )
-                guard !Task.isCancelled, objectOpenRevision == revision,
-                    detail.identity == identity,
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
+                publishWorkspaceOperation(nil)
+                guard detail.identity == identity,
                     subresourceDestinationIsCurrent(identity),
                     let plan = ResourceDrillDownPlanner.plan(for: detail)
                 else { return }
@@ -1836,10 +1893,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     contentController.restoreResource(returnState)
                 }
             } catch is CancellationError {
+                if objectOpenRevision == revision {
+                    publishWorkspaceOperation(nil)
+                }
             } catch {
                 guard !Task.isCancelled, objectOpenRevision == revision else { return }
                 let presentation = UserFacingErrorPresentation(error)
-                connectionActivityView.setState(.failed, detail: presentation.detailedText)
+                publishWorkspaceOperation(WorkspaceStatus(
+                    presentation.inlineText,
+                    severity: .error,
+                    toolTip: presentation.detailedText
+                ))
             }
         }
     }
@@ -1855,6 +1919,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         objectOpenRevision &+= 1
         objectOpenTask?.cancel()
         objectOpenTask = nil
+        publishWorkspaceOperation(nil)
     }
 
     private func beginObjectOpenTask() -> UInt64 {
@@ -1911,14 +1976,23 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 {
                     namespaceControl.selectItem(at: index)
                 }
+                rightPaneController.setSupplementalStatus(nil, for: .namespace)
             } catch {
                 let presentation = UserFacingErrorPresentation(error)
-                connectionActivityView.setState(
-                    .reconnecting,
-                    detail: "Namespace list unavailable\n\(presentation.detailedText)"
+                rightPaneController.setSupplementalStatus(
+                    WorkspaceStatus(
+                        "Namespace list unavailable",
+                        severity: .warning,
+                        toolTip: presentation.detailedText
+                    ),
+                    for: .namespace
                 )
             }
         }
+    }
+
+    private func publishWorkspaceOperation(_ status: WorkspaceStatus?) {
+        rightPaneController.setSupplementalStatus(status, for: .workspaceOperation)
     }
 
     private func updatePortForwardButton(_ snapshot: PortForwardCoordinator.Snapshot) {
@@ -1997,7 +2071,8 @@ private final class SidebarSectionCellView: NSTableCellView {
 
 @MainActor
 private final class ResourceSidebarViewController: NSViewController,
-    NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate
+    NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate,
+    WorkspaceStatusPublishing
 {
     private static let pinnedSectionTitle = "Pinned"
     private static let pinPasteboardType = NSPasteboard.PasteboardType("com.kmgr.sidebar-pin-gvr")
@@ -2013,7 +2088,6 @@ private final class ResourceSidebarViewController: NSViewController,
     private let pinStore: SidebarPinStore
     private let outlineView = NSOutlineView()
     private let searchField = NSSearchField()
-    private let statusLabel = NSTextField(labelWithString: "Loading discovery…")
     private var sections: [Section] = []
     private var allResources: [DiscoveredResource] = []
     private var task: Task<Void, Never>?
@@ -2023,6 +2097,11 @@ private final class ResourceSidebarViewController: NSViewController,
     private var suppressSelectionCallbacks = false
     var onSelectResource: ((DiscoveredResource) -> Void)?
     var onResourcesChanged: (([DiscoveredResource]) -> Void)?
+    private(set) var workspaceStatus = WorkspaceStatus(
+        "Discovering resource kinds…",
+        busy: true
+    )
+    var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
 
     init(
         session: OpenedClusterSession,
@@ -2068,15 +2147,9 @@ private final class ResourceSidebarViewController: NSViewController,
         scroll.documentView = outlineView
         scroll.hasVerticalScroller = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.setAccessibilityLabel("API resource discovery status")
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(searchField)
         root.addSubview(scroll)
-        root.addSubview(statusLabel)
         NSLayoutConstraint.activate([
             searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
             searchField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
@@ -2084,10 +2157,7 @@ private final class ResourceSidebarViewController: NSViewController,
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 6),
-            scroll.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -4),
-            statusLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            statusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            statusLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -6),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
         view = root
     }
@@ -2126,11 +2196,10 @@ private final class ResourceSidebarViewController: NSViewController,
         onComplete: ((Result<[DiscoveredResource], Error>) -> Void)?
     ) {
         guard task == nil else { return }
-        statusLabel.stringValue = refresh
-            ? "Refreshing API resources…"
-            : "Discovering resource kinds…"
-        statusLabel.toolTip = nil
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus(
+            refresh ? "Refreshing API resources…" : "Discovering resource kinds…",
+            busy: true
+        ))
         taskRevision &+= 1
         let revision = taskRevision
         let sessionID = session.sessionID
@@ -2147,18 +2216,24 @@ private final class ResourceSidebarViewController: NSViewController,
                 onResourcesChanged?(allResources)
                 rebuildSections(preservingSelectionID: selectedID)
                 if discovery.potentiallyIncomplete {
-                    statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds • discovery incomplete"
-                    statusLabel.toolTip = discovery.warning?.userFacingPresentation.detailedText
-                        ?? "Some Kubernetes API groups could not be discovered."
-                    statusLabel.textColor = .systemOrange
+                    publishStatus(WorkspaceStatus(
+                        "\(allResources.count.formatted()) resource kinds · discovery incomplete",
+                        severity: .warning,
+                        toolTip: discovery.warning?.userFacingPresentation.detailedText
+                            ?? "Some Kubernetes API groups could not be discovered.",
+                        shortText: "discovery incomplete"
+                    ))
                 } else if let issue = pinStore.loadIssue {
-                    statusLabel.stringValue = "\(allResources.count.formatted()) kinds • built-in pins in use"
-                    statusLabel.toolTip = issue.localizedDescription
-                    statusLabel.textColor = .systemOrange
+                    publishStatus(WorkspaceStatus(
+                        "\(allResources.count.formatted()) kinds · built-in pins in use",
+                        severity: .warning,
+                        toolTip: issue.localizedDescription,
+                        shortText: "built-in pins in use"
+                    ))
                 } else {
-                    statusLabel.stringValue = "\(allResources.count.formatted()) resource kinds"
-                    statusLabel.toolTip = nil
-                    statusLabel.textColor = .secondaryLabelColor
+                    publishStatus(WorkspaceStatus(
+                        "\(allResources.count.formatted()) resource kinds"
+                    ))
                 }
                 onComplete?(.success(allResources))
             } catch {
@@ -2166,12 +2241,19 @@ private final class ResourceSidebarViewController: NSViewController,
                 task = nil
                 let presentation = UserFacingErrorPresentation(error)
                 if refresh, !allResources.isEmpty {
-                    statusLabel.stringValue = "Refresh failed • keeping \(allResources.count.formatted()) resource kinds"
+                    publishStatus(WorkspaceStatus(
+                        "Refresh failed · keeping \(allResources.count.formatted()) resource kinds",
+                        severity: .error,
+                        toolTip: presentation.detailedText,
+                        shortText: "Refresh failed"
+                    ))
                 } else {
-                    statusLabel.stringValue = presentation.inlineText
+                    publishStatus(WorkspaceStatus(
+                        presentation.inlineText,
+                        severity: .error,
+                        toolTip: presentation.detailedText
+                    ))
                 }
-                statusLabel.toolTip = presentation.detailedText
-                statusLabel.textColor = .systemRed
                 onComplete?(.failure(error))
             }
         }
@@ -2197,8 +2279,7 @@ private final class ResourceSidebarViewController: NSViewController,
         task = nil
         self.session = session
         isAuthenticated = true
-        statusLabel.stringValue = "Reloading discovery…"
-        statusLabel.textColor = .secondaryLabelColor
+        publishStatus(WorkspaceStatus("Reloading discovery…", busy: true))
         start(onComplete: onComplete)
     }
 
@@ -2208,8 +2289,11 @@ private final class ResourceSidebarViewController: NSViewController,
         task = nil
         allResources = [resource]
         onResourcesChanged?(allResources)
-        statusLabel.stringValue = "Saved target · waiting for context"
-        statusLabel.textColor = .systemOrange
+        publishStatus(WorkspaceStatus(
+            "Saved target · waiting for context",
+            severity: .warning,
+            busy: true
+        ))
         rebuildSections()
     }
 
@@ -2220,6 +2304,11 @@ private final class ResourceSidebarViewController: NSViewController,
     }
 
     @objc private func searchChanged() { rebuildSections() }
+
+    private func publishStatus(_ status: WorkspaceStatus) {
+        workspaceStatus = status
+        onWorkspaceStatusChanged?(status)
+    }
 
     private func rebuildSections(preservingSelectionID requestedSelectionID: String? = nil) {
         let selectedID = requestedSelectionID ?? selectedResource()?.id
@@ -2514,7 +2603,8 @@ private enum ResourceStreamOpenReason: String {
 
 @MainActor
 private final class ResourceListViewController: NSViewController,
-    NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate
+    NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate,
+    WorkspaceStatusPublishing
 {
     private static let autoWidthPolicy = TableColumnAutoWidthPolicy()
     private static let maxPendingOptionalResourceKeys = 256
@@ -2536,22 +2626,20 @@ private final class ResourceListViewController: NSViewController,
     private let columnsConfigurationPath: String
     private let columnConfigurationCoordinator: ColumnConfigurationCoordinator
     private let columnsConfigurationLoader: ColumnConfigurationDocumentLoader
-    private let connectionActivityView: ClusterConnectionActivityView
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
-    private let freshnessLabel = NSTextField(labelWithString: "Idle")
-    private let freshnessProgressIndicator = NSProgressIndicator()
-    private let countLabel = NSTextField(labelWithString: "0 objects")
     private let sortLabel = NSTextField(labelWithString: "Unsorted")
     private let filterField = NSSearchField()
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
-    private let errorLabel = NSTextField(wrappingLabelWithString: "")
-    private let statusLine = NSTextField(labelWithString: "0 objects · 0 selected · Idle")
-    private var tableTopWithoutErrorConstraint: NSLayoutConstraint?
-    private var tableTopWithErrorConstraint: NSLayoutConstraint?
     private var inlineIssueState = ResourceListInlineIssueState()
     private var inlineIssueToolTip: String?
+    private var inlineIssueSeverity: WorkspaceStatus.Severity = .error
+    private var freshnessText = "Idle"
+    private var freshnessBusy = false
+    private var freshnessSeverity: WorkspaceStatus.Severity = .informational
+    private(set) var workspaceStatus = WorkspaceStatus("0 objects · 0 selected · Idle")
+    var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
     private var model = ResourceTableModel()
     private var rowChangeDetector = ResourceRowChangeDetector(columnDefinitions: [])
     private var cellHighlightStore = ResourceCellHighlightStore()
@@ -2787,8 +2875,7 @@ private final class ResourceListViewController: NSViewController,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         columnsConfigurationPath: String,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator,
-        columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
-        connectionActivityView: ClusterConnectionActivityView
+        columnsConfigurationLoader: ColumnConfigurationDocumentLoader
     ) {
         self.session = session
         self.isAuthenticated = isAuthenticated
@@ -2798,7 +2885,6 @@ private final class ResourceListViewController: NSViewController,
         self.columnsConfigurationPath = columnsConfigurationPath
         self.columnConfigurationCoordinator = columnConfigurationCoordinator
         self.columnsConfigurationLoader = columnsConfigurationLoader
-        self.connectionActivityView = connectionActivityView
         super.init(nibName: nil, bundle: nil)
         columnsConfigurationObserver = columnConfigurationCoordinator.observe {
             [weak self] match, definitions in
@@ -2822,14 +2908,6 @@ private final class ResourceListViewController: NSViewController,
         let root = NSView()
         titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
         scopeLabel.textColor = .secondaryLabelColor
-        freshnessLabel.textColor = .secondaryLabelColor
-        freshnessLabel.setAccessibilityLabel("Resource freshness")
-        freshnessProgressIndicator.style = .spinning
-        freshnessProgressIndicator.controlSize = .small
-        freshnessProgressIndicator.isDisplayedWhenStopped = false
-        freshnessProgressIndicator.isHidden = true
-        freshnessProgressIndicator.setAccessibilityLabel("Resource view update in progress")
-        countLabel.textColor = .secondaryLabelColor
         sortLabel.textColor = .secondaryLabelColor
         filterField.placeholderString = "Filter resources  /"
         filterField.setAccessibilityLabel("Filter Kubernetes resources")
@@ -2847,8 +2925,7 @@ private final class ResourceListViewController: NSViewController,
         let columnsButton = NSButton(title: "Columns…", target: self, action: #selector(showColumns))
         columnsButton.bezelStyle = .texturedRounded
         let header = NSStackView(views: [
-            titleLabel, countLabel, scopeLabel, freshnessProgressIndicator,
-            freshnessLabel, sortLabel, NSView(), filterField, columnsButton,
+            titleLabel, scopeLabel, sortLabel, NSView(), filterField, columnsButton,
         ])
         header.orientation = .horizontal
         header.alignment = .centerY
@@ -2907,53 +2984,16 @@ private final class ResourceListViewController: NSViewController,
             object: scrollView.contentView
         )
 
-        errorLabel.isHidden = true
-        errorLabel.textColor = .systemRed
-        errorLabel.backgroundColor = NSColor.systemRed.withAlphaComponent(0.08)
-        errorLabel.drawsBackground = true
-        errorLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        statusLine.identifier = .init("resource-status-line")
-        statusLine.textColor = .secondaryLabelColor
-        statusLine.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        statusLine.lineBreakMode = .byTruncatingTail
-        statusLine.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        statusLine.translatesAutoresizingMaskIntoConstraints = false
-        let statusBar = NSStackView(views: [statusLine, NSView(), connectionActivityView])
-        statusBar.identifier = .init("resource-status-bar")
-        statusBar.orientation = .horizontal
-        statusBar.alignment = .centerY
-        statusBar.spacing = 8
-        statusBar.translatesAutoresizingMaskIntoConstraints = false
-
-        root.addSubview(errorLabel)
         root.addSubview(scrollView)
-        root.addSubview(statusBar)
-        let tableTopWithoutError = scrollView.topAnchor.constraint(
-            equalTo: header.bottomAnchor,
-            constant: 5
-        )
-        let tableTopWithError = scrollView.topAnchor.constraint(
-            equalTo: errorLabel.bottomAnchor,
-            constant: 5
-        )
-        tableTopWithoutErrorConstraint = tableTopWithoutError
-        tableTopWithErrorConstraint = tableTopWithError
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             header.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
-            errorLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            errorLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            errorLabel.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -2),
-            statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            statusBar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            statusBar.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
+            scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
+            scrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
-        applyInlineIssueState()
         view = root
     }
 
@@ -3055,10 +3095,10 @@ private final class ResourceListViewController: NSViewController,
         cancelOptionalResourceDiscovery(selecting: nil)
         generationGate.reset()
         recoveredResourceTrust.requireValidation()
-        installFreshnessText("Disconnected")
+        installFreshnessText("Disconnected", severity: .warning)
         showInlineIssue(
             "The Kubernetes engine restarted. Rows shown here are from the last connected generation.",
-            color: .systemOrange
+            severity: .warning
         )
         updateStatusLine()
     }
@@ -3076,8 +3116,8 @@ private final class ResourceListViewController: NSViewController,
         cancelOptionalResourceDiscovery(selecting: nil)
         model = ResourceTableModel()
         tableView.reloadData()
-        installFreshnessText("Disconnected")
-        showInlineIssue(message, color: .systemOrange, toolTip: toolTip)
+        installFreshnessText("Disconnected", severity: .warning)
+        showInlineIssue(message, severity: .warning, toolTip: toolTip)
         updateStatusLine()
         publishContextualShortcutsIfChanged()
     }
@@ -3123,8 +3163,6 @@ private final class ResourceListViewController: NSViewController,
         endProjectionRequest(outcome: "cancelled")
         clearTransientCellPresentation()
         stopFreshnessAgeUpdates()
-        freshnessProgressIndicator.stopAnimation(nil)
-        freshnessProgressIndicator.isHidden = true
         filterTask?.cancel()
         filterTask = nil
         cancelCurrentStream(reason: "suspend")
@@ -3394,7 +3432,8 @@ private final class ResourceListViewController: NSViewController,
         hideInlineIssue()
         installFreshnessText(
             model.orderedVisibleUIDs.isEmpty
-                ? "Filtering…" : "Filtering… · last good rows"
+                ? "Filtering…" : "Filtering… · last good rows",
+            busy: true
         )
         rememberCurrentFilter()
         let revision = filterRevision
@@ -3695,10 +3734,8 @@ private final class ResourceListViewController: NSViewController,
                     retainedRowCount: model.orderedVisibleUIDs.count,
                     lastSynchronizedAt: retainedRowsLastSynchronizedAt
                 ))
-                countLabel.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects"
             } else {
                 installResourceViewStatus(status)
-                countLabel.stringValue = "\(status.rowsVisible.formatted()) objects"
             }
         case .snapshot(_, let chunk):
             if var staged = stagedReconciliation {
@@ -4012,7 +4049,6 @@ private final class ResourceListViewController: NSViewController,
         )
         status.rowsVisible = UInt64(model.orderedVisibleUIDs.count)
         installResourceViewStatus(status)
-        countLabel.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects"
         return true
     }
 
@@ -4220,13 +4256,16 @@ private final class ResourceListViewController: NSViewController,
                 // The prior projection was cancelled before this replacement
                 // was rejected. Its rows remain useful, but they are no longer
                 // being watched and must not retain a "Watching" claim.
-                installFreshnessText("\(localState) · last good rows")
+                installFreshnessText(
+                    "\(localState) · last good rows",
+                    severity: .error
+                )
             } else {
-                installFreshnessText(localState)
+                installFreshnessText(localState, severity: .error)
             }
             return
         }
-        installFreshnessText("Disconnected")
+        installFreshnessText("Disconnected", severity: .error)
     }
 
     private func installResourceViewStatus(
@@ -4237,26 +4276,27 @@ private final class ResourceListViewController: NSViewController,
         if status.freshness != .loading {
             hasLastUsableResourceViewStatus = true
         }
-        freshnessLabel.stringValue = status.presentation(now: now)
-        freshnessLabel.setAccessibilityValue(freshnessLabel.stringValue)
-        if status.showsProgress {
-            freshnessProgressIndicator.isHidden = false
-            freshnessProgressIndicator.startAnimation(nil)
-        } else {
-            freshnessProgressIndicator.stopAnimation(nil)
-            freshnessProgressIndicator.isHidden = true
+        freshnessText = status.presentation(now: now)
+        freshnessBusy = status.showsProgress
+        freshnessSeverity = switch status.freshness {
+        case .stale, .resuming, .relisting, .reconnecting: .warning
+        case .failed: .error
+        case .loading, .watching, .complete: .informational
         }
         restartFreshnessAgeUpdatesIfNeeded()
         updateStatusLine()
     }
 
-    private func installFreshnessText(_ text: String) {
+    private func installFreshnessText(
+        _ text: String,
+        severity: WorkspaceStatus.Severity = .informational,
+        busy: Bool = false
+    ) {
         resourceViewStatus = nil
         stopFreshnessAgeUpdates()
-        freshnessProgressIndicator.stopAnimation(nil)
-        freshnessProgressIndicator.isHidden = true
-        freshnessLabel.stringValue = text
-        freshnessLabel.setAccessibilityValue(text)
+        freshnessText = text
+        freshnessSeverity = severity
+        freshnessBusy = busy
         updateStatusLine()
     }
 
@@ -4277,8 +4317,7 @@ private final class ResourceListViewController: NSViewController,
                     let status = self.resourceViewStatus,
                     status.needsAgeRefresh
                 else { return }
-                self.freshnessLabel.stringValue = status.presentation
-                self.freshnessLabel.setAccessibilityValue(self.freshnessLabel.stringValue)
+                self.freshnessText = status.presentation
                 self.updateStatusLine()
             }
         }
@@ -4291,33 +4330,19 @@ private final class ResourceListViewController: NSViewController,
 
     private func showInlineIssue(
         _ message: String,
-        color: NSColor = .systemRed,
+        severity: WorkspaceStatus.Severity = .error,
         toolTip: String? = nil
     ) {
         inlineIssueState.show(message)
         inlineIssueToolTip = toolTip
-        errorLabel.textColor = color
-        applyInlineIssueState()
+        inlineIssueSeverity = severity
+        updateStatusLine()
     }
 
     private func hideInlineIssue() {
         inlineIssueState.hide()
         inlineIssueToolTip = nil
-        applyInlineIssueState()
-    }
-
-    private func applyInlineIssueState() {
-        errorLabel.stringValue = inlineIssueState.message ?? ""
-        errorLabel.toolTip = inlineIssueState.isHidden ? nil : inlineIssueToolTip
-        errorLabel.isHidden = inlineIssueState.isHidden
-        switch inlineIssueState.tableTopAnchor {
-        case .header:
-            tableTopWithErrorConstraint?.isActive = false
-            tableTopWithoutErrorConstraint?.isActive = true
-        case .issueRow:
-            tableTopWithoutErrorConstraint?.isActive = false
-            tableTopWithErrorConstraint?.isActive = true
-        }
+        updateStatusLine()
     }
 
     /// Gives each stream generation distinct completion authority. The
@@ -4538,7 +4563,6 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func updateStatusLine() {
-        countLabel.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects"
         if let descriptor = tableView.sortDescriptors.first, let key = descriptor.key {
             let title = tableView.tableColumns.first(where: { $0.identifier.rawValue == key })?.title
                 ?? key
@@ -4557,16 +4581,30 @@ private final class ResourceListViewController: NSViewController,
         if !labelSelector.isEmpty || !fieldSelector.isEmpty {
             statusParts.append("Kubernetes selector active")
         }
-        statusParts.append(freshnessLabel.stringValue)
-        statusLine.stringValue = statusParts.joined(separator: " · ")
-        var toolTipParts = [statusLine.stringValue]
+        statusParts.append(freshnessText)
+        let text = statusParts.joined(separator: " · ")
+        var toolTipParts = [text]
         if !labelSelector.isEmpty {
             toolTipParts.append("Label selector: \(labelSelector)")
         }
         if !fieldSelector.isEmpty {
             toolTipParts.append("Field selector: \(fieldSelector)")
         }
-        statusLine.toolTip = toolTipParts.joined(separator: "\n")
+        if let issue = inlineIssueState.message {
+            workspaceStatus = WorkspaceStatus(
+                "\(issue) · \(freshnessText)",
+                severity: inlineIssueSeverity,
+                toolTip: inlineIssueToolTip
+            )
+        } else {
+            workspaceStatus = WorkspaceStatus(
+                text,
+                severity: freshnessSeverity,
+                busy: freshnessBusy,
+                toolTip: toolTipParts.joined(separator: "\n")
+            )
+        }
+        onWorkspaceStatusChanged?(workspaceStatus)
     }
 
     private func setFilterShortcutContextActive(_ active: Bool) {
@@ -4930,7 +4968,7 @@ private final class ResourceListViewController: NSViewController,
         ) { [weak self] error in
             self?.showInlineIssue(
                 "Could not save the shared column layout. \(error.localizedDescription)",
-                color: .systemRed
+                severity: .error
             )
         }
     }
@@ -5116,7 +5154,7 @@ private final class ResourceListViewController: NSViewController,
         if restoration.gvr != nil, discoveredResources.isEmpty {
             showInlineIssue(
                 "The saved resource target is not present in authenticated discovery.",
-                color: .systemOrange
+                severity: .warning
             )
         }
         updateStatusLine()

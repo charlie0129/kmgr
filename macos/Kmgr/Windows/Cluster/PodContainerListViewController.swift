@@ -11,7 +11,7 @@ enum PodContainerNetworkAction: Equatable {
 
 @MainActor
 final class PodContainerListViewController: NSViewController,
-    NSTableViewDataSource, NSTableViewDelegate
+    NSTableViewDataSource, NSTableViewDelegate, WorkspaceStatusPublishing
 {
     var onBack: (() -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
@@ -19,6 +19,8 @@ final class PodContainerListViewController: NSViewController,
     var onConfigureExec: ((PodExecTarget) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
+    private(set) var workspaceStatus: WorkspaceStatus
+    var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
 
     var contextualShortcutSnapshot: ContextualShortcutSnapshot {
         let hasSelectedContainer = tableView.selectedRow >= 0
@@ -33,7 +35,6 @@ final class PodContainerListViewController: NSViewController,
     private let containers: [PodContainerDetail]
     private let tableLayoutStore: TableLayoutStore
     private let tableView = PodContainerTableView()
-    private let countLabel = NSTextField(labelWithString: "")
     private let actionButton = NSButton(title: "", target: nil, action: nil)
     private var networkActionsEnabled = true
     private var tableLayoutBinding: TableLayoutBinding?
@@ -46,6 +47,7 @@ final class PodContainerListViewController: NSViewController,
         self.pod = pod
         self.containers = containers
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
+        self.workspaceStatus = WorkspaceStatus(Self.countText(containers.count))
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -72,10 +74,7 @@ final class PodContainerListViewController: NSViewController,
         breadcrumb.font = .systemFont(ofSize: 15, weight: .semibold)
         breadcrumb.lineBreakMode = .byTruncatingMiddle
 
-        countLabel.stringValue = containers.count == 1
-            ? "1 item" : "\(containers.count) items"
-        countLabel.textColor = .secondaryLabelColor
-        let header = NSStackView(views: [backButton, breadcrumb, NSView(), countLabel])
+        let header = NSStackView(views: [backButton, breadcrumb, NSView()])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
@@ -391,6 +390,23 @@ final class PodContainerListViewController: NSViewController,
 
     private func updateSelectionControls() {
         actionButton.isEnabled = networkActionsEnabled && tableView.selectedRow >= 0
+        publishContainerStatus()
+    }
+
+    private func publishContainerStatus() {
+        let count = Self.countText(containers.count)
+        let selection = containers.indices.contains(tableView.selectedRow)
+            ? " · \(containers[tableView.selectedRow].name) selected" : ""
+        let unavailable = networkActionsEnabled ? "" : " · network actions unavailable"
+        workspaceStatus = WorkspaceStatus(
+            count + selection + unavailable,
+            severity: networkActionsEnabled ? .informational : .warning
+        )
+        onWorkspaceStatusChanged?(workspaceStatus)
+    }
+
+    private static func countText(_ count: Int) -> String {
+        count == 1 ? "1 container" : "\(count.formatted()) containers"
     }
 }
 
