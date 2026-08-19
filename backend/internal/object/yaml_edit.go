@@ -122,7 +122,9 @@ func (r *Reader) PrepareYAML(
 
 // ApplyYAML repeats all preparation checks immediately before mutation. The
 // UID and resourceVersion test operations in the JSON patch are API-side
-// preconditions, closing the race between the fresh GET, dry-run, and patch.
+// preconditions, closing the race between the fresh GET and patch. Admission
+// preview remains PrepareYAML's responsibility; repeating its identical
+// dry-run here would add a redundant API request after confirmation.
 func (r *Reader) ApplyYAML(
 	ctx context.Context,
 	identity Identity,
@@ -141,18 +143,6 @@ func (r *Reader) ApplyYAML(
 		return AppliedYAML{
 			Identity: identity, NewResourceVersion: prepared.current.GetResourceVersion(),
 		}, nil
-	}
-	if dryRun, err := prepared.resource.Patch(
-		ctx,
-		identity.Name,
-		types.JSONPatchType,
-		prepared.patch,
-		metav1.PatchOptions{DryRun: []string{metav1.DryRunAll}, FieldManager: YAMLFieldManager},
-	); err != nil {
-		err = r.classifyYAMLPatchError(ctx, identity, expectedResourceVersion, err)
-		return AppliedYAML{}, fmt.Errorf("dry-run JSON patch: %w", err)
-	} else if err := validatePatchedYAMLIdentity(identity, dryRun); err != nil {
-		return AppliedYAML{}, err
 	}
 	updated, err := prepared.resource.Patch(
 		ctx,

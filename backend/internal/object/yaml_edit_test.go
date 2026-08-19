@@ -393,7 +393,7 @@ data:
 	}
 }
 
-func TestApplyYAMLUsesSameMinimalJSONPatchForDryRunAndMutation(t *testing.T) {
+func TestApplyYAMLUsesOneFreshGetAndOneMinimalJSONPatchMutation(t *testing.T) {
 	t.Parallel()
 	current := kubernetesObject("v1", "ConfigMap", "configmaps", "ns", "settings", "uid")
 	reader, client := fakeYAMLReader(t, current)
@@ -403,9 +403,7 @@ func TestApplyYAMLUsesSameMinimalJSONPatchForDryRunAndMutation(t *testing.T) {
 		calls = append(calls, patch)
 		result := current.DeepCopy()
 		result.Object["data"] = map[string]any{"mode": "fast"}
-		if len(calls) == 2 {
-			result.SetResourceVersion("rv-2")
-		}
+		result.SetResourceVersion("rv-2")
 		return true, result, nil
 	})
 	identity := Identity{
@@ -424,14 +422,14 @@ data:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 2 || applied.NewResourceVersion != "rv-2" {
+	if len(calls) != 1 || applied.NewResourceVersion != "rv-2" {
 		t.Fatalf("patches = %d, applied = %#v", len(calls), applied)
 	}
-	assertJSONPatchAction(t, calls[0], true)
-	assertJSONPatchAction(t, calls[1], false)
-	if !reflect.DeepEqual(calls[0].GetPatch(), calls[1].GetPatch()) {
-		t.Fatalf("dry-run patch %s != mutation patch %s", calls[0].GetPatch(), calls[1].GetPatch())
+	actions := client.Actions()
+	if len(actions) != 2 || actions[0].GetVerb() != "get" || actions[1].GetVerb() != "patch" {
+		t.Fatalf("API actions = %#v, want one GET followed by one PATCH", actions)
 	}
+	assertJSONPatchAction(t, calls[0], false)
 	assertJSONEqual(t, calls[0].GetPatch(), `[
   {"op":"test","path":"/metadata/uid","value":"uid"},
   {"op":"test","path":"/metadata/resourceVersion","value":"rv-1"},
@@ -444,7 +442,6 @@ func TestApplyYAMLSendsJSONPatchHTTPProtocol(t *testing.T) {
 	current := kubernetesObject("v1", "ConfigMap", "configmaps", "ns", "settings", "uid")
 	var mu sync.Mutex
 	var requests []recordedHTTPRequest
-	patches := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		recorded, err := recordHTTPRequest(request)
 		if err != nil {
@@ -453,10 +450,6 @@ func TestApplyYAMLSendsJSONPatchHTTPProtocol(t *testing.T) {
 		}
 		mu.Lock()
 		requests = append(requests, recorded)
-		if request.Method == http.MethodPatch {
-			patches++
-		}
-		patchNumber := patches
 		mu.Unlock()
 		switch request.Method {
 		case http.MethodGet:
@@ -464,9 +457,7 @@ func TestApplyYAMLSendsJSONPatchHTTPProtocol(t *testing.T) {
 		case http.MethodPatch:
 			result := current.DeepCopy()
 			result.Object["data"] = map[string]any{"mode": "fast"}
-			if patchNumber == 2 {
-				result.SetResourceVersion("rv-2")
-			}
+			result.SetResourceVersion("rv-2")
 			writeJSONResponse(writer, http.StatusOK, result)
 		default:
 			http.Error(writer, "unexpected method", http.StatusMethodNotAllowed)
@@ -496,8 +487,7 @@ data:
 	mu.Lock()
 	values := append([]recordedHTTPRequest(nil), requests...)
 	mu.Unlock()
-	if len(values) != 3 || values[0].Method != http.MethodGet ||
-		values[1].Method != http.MethodPatch || values[2].Method != http.MethodPatch {
+	if len(values) != 2 || values[0].Method != http.MethodGet || values[1].Method != http.MethodPatch {
 		t.Fatalf("HTTP requests = %#v", values)
 	}
 	for index, request := range values[1:] {
@@ -505,12 +495,8 @@ data:
 			request.ContentType != string(types.JSONPatchType) || request.Query.Get("fieldManager") != YAMLFieldManager {
 			t.Fatalf("patch request %d = %#v", index, request)
 		}
-		wantDryRun := ""
-		if index == 0 {
-			wantDryRun = metav1.DryRunAll
-		}
-		if request.Query.Get("dryRun") != wantDryRun {
-			t.Fatalf("patch request %d dryRun = %q, want %q", index, request.Query.Get("dryRun"), wantDryRun)
+		if request.Query.Get("dryRun") != "" {
+			t.Fatalf("patch request %d unexpectedly used dryRun: %#v", index, request)
 		}
 		assertJSONEqual(t, request.Body, `[
   {"op":"test","path":"/metadata/uid","value":"uid"},
@@ -528,11 +514,6 @@ func TestApplyYAMLMapsAPIRaceToResourceVersionConflict(t *testing.T) {
 	var patches int
 	client.PrependReactor("patch", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
 		patches++
-		if patches == 1 {
-			result := current.DeepCopy()
-			result.Object["data"] = map[string]any{"mode": "fast"}
-			return true, result, nil
-		}
 		changed := current.DeepCopy()
 		changed.SetResourceVersion("rv-2")
 		if err := client.Tracker().Update(gvr, changed, "ns"); err != nil {
@@ -563,9 +544,12 @@ data:
 	if !errors.As(err, &conflict) || conflict.Expected != "rv-1" || conflict.Current != "rv-2" {
 		t.Fatalf("ApplyYAML conflict = %#v", err)
 	}
+	if patches != 1 {
+		t.Fatalf("patches = %d, want 1", patches)
+	}
 }
 
-func TestApplyYAMLClassifiesHTTPDryRunTestFailureAsRecreation(t *testing.T) {
+func TestApplyYAMLClassifiesHTTPPatchTestFailureAsRecreation(t *testing.T) {
 	t.Parallel()
 	current := kubernetesObject("v1", "ConfigMap", "configmaps", "ns", "settings", "uid")
 	recreated := current.DeepCopy()
@@ -625,7 +609,7 @@ data:
 	}
 }
 
-func TestApplyYAMLMapsSameNameRecreationAfterDryRun(t *testing.T) {
+func TestApplyYAMLMapsSameNameRecreationDuringMutation(t *testing.T) {
 	t.Parallel()
 	current := kubernetesObject("v1", "ConfigMap", "configmaps", "ns", "settings", "uid")
 	reader, client := fakeYAMLReader(t, current)
@@ -633,11 +617,6 @@ func TestApplyYAMLMapsSameNameRecreationAfterDryRun(t *testing.T) {
 	var patches int
 	client.PrependReactor("patch", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
 		patches++
-		if patches == 1 {
-			result := current.DeepCopy()
-			result.Object["data"] = map[string]any{"mode": "fast"}
-			return true, result, nil
-		}
 		recreated := current.DeepCopy()
 		recreated.SetUID("new-uid")
 		recreated.SetResourceVersion("rv-2")
@@ -666,6 +645,9 @@ data:
 	var changed *IdentityChangedError
 	if !errors.As(err, &changed) || changed.ExpectedUID != "uid" || changed.ActualUID != "new-uid" {
 		t.Fatalf("ApplyYAML recreation = %#v", err)
+	}
+	if patches != 1 {
+		t.Fatalf("patches = %d, want 1", patches)
 	}
 }
 
