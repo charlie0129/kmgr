@@ -166,6 +166,8 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     var response = Kmgr_V1_GetObjectResponse()
     response.identity = protoIdentity(name: "api", uid: "uid-api")
     response.yamlUtf8 = Data("kind: Deployment\n".utf8)
+    response.podLabelSelector =
+        "app=api,debug,!deprecated,track in (canary,stable),zone notin (east,west)"
     var condition = Kmgr_V1_ObjectSummaryField()
     condition.sectionID = "conditions"
     condition.fieldID = "condition:0"
@@ -190,6 +192,10 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     #expect(detail.metrics.first?.capacity == nil)
     #expect(detail.metrics.first?.sortValue == 0)
     #expect(detail.yamlUTF8 == Data("kind: Deployment\n".utf8))
+    #expect(
+        detail.podLabelSelector
+            == "app=api,debug,!deprecated,track in (canary,stable),zone notin (east,west)"
+    )
     #expect(detail.summaryFields.first?.transitionTime
         == Date(timeIntervalSince1970: 1_755_427_785.123))
     let request = await rpc.capturedObject()

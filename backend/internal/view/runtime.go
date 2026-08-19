@@ -27,6 +27,7 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	"github.com/charlie0129/kmgr/backend/internal/store"
 	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
+	viewfilter "github.com/charlie0129/kmgr/backend/internal/view/filter"
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
 )
 
@@ -545,6 +546,10 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
 	}
+	query, err := planViewQuery(request.GetSpec())
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
+	}
 	var authorityID string
 	var client watcher.ListerWatcher
 	if tableSource, ok := r.source.(TableResourceSource); ok &&
@@ -560,7 +565,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	projector, err := projectorFromProto(sessionID, request.GetSpec(), r.columns)
+	projector, err := projectorFromProto(sessionID, request.GetSpec(), r.columns, query.filter)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
 	}
@@ -573,8 +578,8 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		version:     gvr.Version,
 		resource:    gvr.Resource,
 		namespace:   serverNamespace,
-		labels:      request.GetSpec().GetLabelSelector(),
-		fields:      request.GetSpec().GetFieldSelector(),
+		labels:      query.labelSelector,
+		fields:      query.fieldSelector,
 	}
 	streamKey := viewKey{sessionID: sessionID, viewID: viewID}
 	deliveryIdentity := deliverySignature{
@@ -3493,6 +3498,7 @@ func projectorFromProto(
 	sessionID string,
 	spec *kmgrv1.ViewSpec,
 	resolver ColumnProgramResolver,
+	compiledFilter *viewfilter.Filter,
 ) (*Projector, error) {
 	resource := spec.GetResource()
 	namespaceScope := NamespaceScope{}
@@ -3537,6 +3543,7 @@ func projectorFromProto(
 		ResolvedColumnConfigurationVersion: resolvedVersion,
 		CELPrograms:                        resolved.Programs,
 		ColumnExtractors:                   resolved.Extractors,
+		compiledFilter:                     compiledFilter,
 	})
 }
 

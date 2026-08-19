@@ -49,6 +49,10 @@ type ProjectionSpec struct {
 	ColumnExtractors                   map[string]viewcolumns.Extractor
 	Metrics                            metrics.Snapshot
 	Now                                time.Time
+	// compiledFilter is supplied by the authoritative query planner so an Open
+	// parses the kmgr expression exactly once. Direct projector callers leave it
+	// nil and retain the public constructor's validation behavior.
+	compiledFilter *viewfilter.Filter
 	// WorkerLimit bounds concurrent row projection for large snapshots. Zero
 	// selects a conservative process-wide default capped below GOMAXPROCS.
 	WorkerLimit int
@@ -134,10 +138,15 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 			return nil, fmt.Errorf("column %q has unsupported extractor source %q", id, extractor.Source)
 		}
 	}
-	compiledFilter, err := viewfilter.Compile(spec.FilterExpression)
-	if err != nil {
-		return nil, err
+	compiledFilter := spec.compiledFilter
+	if compiledFilter == nil {
+		var err error
+		compiledFilter, err = viewfilter.Compile(spec.FilterExpression)
+		if err != nil {
+			return nil, err
+		}
 	}
+	spec.compiledFilter = nil
 	// Now is a deterministic clock override used by tests and callers that
 	// need a fixed projection instant. Production projectors leave it unset so
 	// each projection batch captures a fresh timestamp below.

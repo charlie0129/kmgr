@@ -22,7 +22,7 @@ func TestProjectorFromProtoInstallsResolvedNativeExtractorAliases(t *testing.T) 
 	projector, err := projectorFromProto("session-a", &kmgrv1.ViewSpec{
 		Resource:  &kmgrv1.ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
 		ColumnIds: []string{"gpu"},
-	}, resolver)
+	}, resolver, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

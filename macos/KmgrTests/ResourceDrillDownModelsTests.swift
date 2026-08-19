@@ -46,19 +46,21 @@ import Testing
                     sectionID: "selectors", fieldID: "selector:1",
                     label: "tier", displayText: "frontend"
                 ),
-            ]
+            ],
+            podLabelSelector: "app=api,tier=frontend"
         )
         #expect(ResourceDrillDownPlanner.plan(for: detail) == .resource(
             ResourceDrillDownQuery(
                 group: "", version: "v1", resource: "pods",
                 namespaceScope: .namespace("default"),
+                labelSelector: "app=api,tier=frontend",
                 filterExpression: "label:app==api label:tier==frontend"
             )
         ))
     }
 }
 
-@Test func unrepresentableSelectorDoesNothingInsteadOfBroadeningResults() {
+@Test func workloadMatchExpressionsRetainFullNativeSemantics() {
     let deployment = drillDownIdentity(group: "apps", resource: "deployments")
     let detail = ObjectDetail(
         identity: deployment,
@@ -72,9 +74,18 @@ import Testing
                 sectionID: "selectors", fieldID: "selectorExpressions",
                 label: "Match Expressions", displayText: "1 cannot be represented"
             ),
-        ]
+        ],
+        podLabelSelector: "app=api,debug,!retired,track in (canary,stable),zone notin (east,west)"
     )
-    #expect(ResourceDrillDownPlanner.plan(for: detail) == nil)
+    #expect(ResourceDrillDownPlanner.plan(for: detail) == .resource(
+        ResourceDrillDownQuery(
+            group: "", version: "v1", resource: "pods",
+            namespaceScope: .namespace("default"),
+            labelSelector:
+                "app=api,debug,!retired,track in (canary,stable),zone notin (east,west)",
+            filterExpression: "label:app==api"
+        )
+    ))
 }
 
 @Test func nodeAndNamespaceDrillDownUseSafeTypedTargets() {

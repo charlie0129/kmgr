@@ -565,7 +565,8 @@ func detailResponse(requestID string, identity *kmgrv1.ResourceIdentity, detail 
 	response := &kmgrv1.GetObjectResponse{
 		RequestId: requestID, Identity: identity, ResourceVersion: detail.ResourceVersion,
 		YamlUtf8: slices.Clone(detail.YAML), Labels: stringEntries(detail.Labels),
-		Annotations: stringEntries(detail.Annotations),
+		Annotations:      stringEntries(detail.Annotations),
+		PodLabelSelector: detail.PodLabelSelector,
 	}
 	for _, field := range detail.Summary {
 		value := &kmgrv1.ObjectSummaryField{

@@ -636,7 +636,8 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                 uniquingKeysWith: { _, latest in latest }
             ),
             metrics: response.metrics.map(usage),
-            containers: response.containers.compactMap(container)
+            containers: response.containers.compactMap(container),
+            podLabelSelector: response.podLabelSelector
         )
     }
 

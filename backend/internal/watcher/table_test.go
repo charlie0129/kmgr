@@ -138,6 +138,10 @@ func TestTableListFailureFallsBackToRawSameGVR(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+			options := metav1.ListOptions{
+				LabelSelector: "app=kmgr",
+				FieldSelector: "metadata.name=raw",
+			}
 			var requests requestLog
 			handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 				requests.add(request)
@@ -153,7 +157,7 @@ func TestTableListFailureFallsBackToRawSameGVR(t *testing.T) {
 			})
 			gvr := schema.GroupVersionResource{Group: "example.io", Version: "v1", Resource: "widgets"}
 			client := newTableTestClient(t, handler, gvr, "team-a")
-			page, err := client.ListTable(context.Background(), metav1.ListOptions{})
+			page, err := client.ListTable(context.Background(), options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -163,7 +167,9 @@ func TestTableListFailureFallsBackToRawSameGVR(t *testing.T) {
 			if client.TableEnabled() {
 				t.Fatal("Table remained enabled after negotiation failure")
 			}
-			stream, err := client.WatchTable(context.Background(), metav1.ListOptions{ResourceVersion: "51"})
+			watchOptions := options
+			watchOptions.ResourceVersion = "51"
+			stream, err := client.WatchTable(context.Background(), watchOptions)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -187,6 +193,12 @@ func TestTableListFailureFallsBackToRawSameGVR(t *testing.T) {
 			if got[0].query.Get("includeObject") != "Object" ||
 				got[1].query.Get("includeObject") != "" || got[2].query.Get("watch") != "true" {
 				t.Fatalf("fallback request sequence = %v", got)
+			}
+			for _, request := range got {
+				if request.query.Get("labelSelector") != options.LabelSelector ||
+					request.query.Get("fieldSelector") != options.FieldSelector {
+					t.Fatalf("fallback changed selectors: %v", got)
+				}
 			}
 		})
 	}

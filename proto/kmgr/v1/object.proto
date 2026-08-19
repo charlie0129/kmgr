@@ -69,6 +69,11 @@ message GetObjectResponse {
   repeated ResourceUsageValue metrics = 8;
   StructuredError error = 9;
   repeated PodContainerDetail containers = 10;
+  // Canonical Kubernetes label selector for the Pods selected by this
+  // workload, Service, or ReplicationController. Empty means no safe,
+  // restrictive Pod selector is available; clients must not interpret it as
+  // "all Pods".
+  string pod_label_selector = 11;
 }
 
 message WatchObjectRequest {

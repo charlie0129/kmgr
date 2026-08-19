@@ -206,6 +206,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return ctxErr
 				}
+				if isTerminalAPIError(err) {
+					return fmt.Errorf("list resource: %w", err)
+				}
 				p.emitStatus(Status{
 					Phase:            PhaseReconnecting,
 					Stale:            p.store.Len() != 0,
@@ -257,6 +260,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			needsList = true
 			retryAttempt = 0
 			continue
+		}
+		if isTerminalAPIError(result.err) {
+			return fmt.Errorf("watch resource: %w", result.err)
 		}
 		if result.progressed {
 			retryAttempt = 0
@@ -644,6 +650,11 @@ func (p *Pipeline) emitBatch(batch Batch) {
 
 func isExpired(err error) bool {
 	return apierrors.IsGone(err) || apierrors.IsResourceExpired(err)
+}
+
+func isTerminalAPIError(err error) bool {
+	return apierrors.IsBadRequest(err) || apierrors.IsInvalid(err) ||
+		apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err)
 }
 
 func sortedUniqueUIDs(values []types.UID) []types.UID {

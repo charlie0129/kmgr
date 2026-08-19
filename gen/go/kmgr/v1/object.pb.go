@@ -519,8 +519,13 @@ type GetObjectResponse struct {
 	Metrics         []*ResourceUsageValue  `protobuf:"bytes,8,rep,name=metrics,proto3" json:"metrics,omitempty"`
 	Error           *StructuredError       `protobuf:"bytes,9,opt,name=error,proto3" json:"error,omitempty"`
 	Containers      []*PodContainerDetail  `protobuf:"bytes,10,rep,name=containers,proto3" json:"containers,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Canonical Kubernetes label selector for the Pods selected by this
+	// workload, Service, or ReplicationController. Empty means no safe,
+	// restrictive Pod selector is available; clients must not interpret it as
+	// "all Pods".
+	PodLabelSelector string `protobuf:"bytes,11,opt,name=pod_label_selector,json=podLabelSelector,proto3" json:"pod_label_selector,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *GetObjectResponse) Reset() {
@@ -621,6 +626,13 @@ func (x *GetObjectResponse) GetContainers() []*PodContainerDetail {
 		return x.Containers
 	}
 	return nil
+}
+
+func (x *GetObjectResponse) GetPodLabelSelector() string {
+	if x != nil {
+		return x.PodLabelSelector
+	}
+	return ""
 }
 
 type WatchObjectRequest struct {
@@ -1528,7 +1540,7 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\x05ready\x18\x06 \x01(\bR\x05ready\x12#\n" +
 	"\rrestart_count\x18\a \x01(\x05R\frestartCount\x12\x14\n" +
 	"\x05ports\x18\b \x03(\tR\x05ports\x125\n" +
-	"\ametrics\x18\t \x03(\v2\x1b.kmgr.v1.ResourceUsageValueR\ametrics\"\x85\x04\n" +
+	"\ametrics\x18\t \x03(\v2\x1b.kmgr.v1.ResourceUsageValueR\ametrics\"\xb3\x04\n" +
 	"\x11GetObjectResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x125\n" +
@@ -1543,7 +1555,8 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\n" +
 	"containers\x18\n" +
 	" \x03(\v2\x1b.kmgr.v1.PodContainerDetailR\n" +
-	"containers\"\xf3\x01\n" +
+	"containers\x12,\n" +
+	"\x12pod_label_selector\x18\v \x01(\tR\x10podLabelSelector\"\xf3\x01\n" +
 	"\x12WatchObjectRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12(\n" +
 	"\x10object_stream_id\x18\x02 \x01(\tR\x0eobjectStreamId\x12\x1e\n" +

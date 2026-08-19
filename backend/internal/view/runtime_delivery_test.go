@@ -236,7 +236,7 @@ func TestRuntimeColdOpenDefersPersistedTombstoneUntilSnapshotComplete(t *testing
 			defer runtime.Close()
 
 			request := openView("session", "view", 1)
-			projector, err := projectorFromProto("session", request.GetSpec(), runtime.columns)
+			projector, err := projectorFromProto("session", request.GetSpec(), runtime.columns, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

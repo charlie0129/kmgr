@@ -582,6 +582,82 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
+    @Test("native relationship selectors survive filter commits without intermediate streams")
+    func nativeSelectorsSurviveCommittedFilter() async throws {
+        let provider = FilterValidationWorkspaceResourceProvider()
+        let restoration = ClusterWindowRestorationRecord(
+            id: "native-selector-filter",
+            state: ClusterWindowRestorationState(
+                contextName: "test-context",
+                gvr: GVR(group: "", version: "v1", resource: "pods"),
+                namespaceScope: .namespace("default"),
+                labelSelector: "app in (api,worker),!retired",
+                fieldSelector: "metadata.namespace=default"
+            )
+        )
+        let controller = makeWorkspace(provider: provider, restoration: restoration)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let field = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+
+        try await waitUntil { provider.streamRequestCount == 1 }
+        try triggerResourceFilterChange(in: window, value: "status:Running")
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(provider.streamRequestCount == 1)
+
+        let handled = field.delegate?.control?(
+            field,
+            textView: NSTextView(),
+            doCommandBy: #selector(NSResponder.insertNewline(_:))
+        )
+        #expect(handled == true)
+        try await waitUntil(timeout: .milliseconds(120)) {
+            provider.streamRequestCount == 2
+        }
+        let requests = provider.streamRequests
+        #expect(requests.map(\.labelSelector) == [
+            "app in (api,worker),!retired",
+            "app in (api,worker),!retired",
+        ])
+        #expect(requests.map(\.fieldSelector) == [
+            "metadata.namespace=default",
+            "metadata.namespace=default",
+        ])
+        #expect(requests.last?.filterExpression == "status:Running")
+    }
+
+    @Test("stable filter debounce retains native relationship selectors")
+    func nativeSelectorsSurviveStableFilterDebounce() async throws {
+        let provider = FilterValidationWorkspaceResourceProvider()
+        let controller = makeWorkspace(
+            provider: provider,
+            restoration: ClusterWindowRestorationRecord(
+                id: "native-selector-debounce",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "", version: "v1", resource: "pods"),
+                    labelSelector: "app=api"
+                )
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+
+        try await waitUntil { provider.streamRequestCount == 1 }
+        try triggerResourceFilterChange(in: window, value: "label:tier==frontend")
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(provider.streamRequestCount == 1)
+        try await waitUntil(timeout: .seconds(1)) {
+            provider.streamRequestCount == 2
+        }
+        #expect(provider.streamRequests.last?.labelSelector == "app=api")
+        #expect(provider.streamRequests.last?.filterExpression == "label:tier==frontend")
+    }
+
     @Test("contextual help follows explicit filter focus begin and end")
     func contextualHelpTracksFilterFocus() async throws {
         let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
@@ -1323,6 +1399,78 @@ struct ClusterWorkspaceToolbarTests {
             namespaceControl.titleOfSelectedItem == "All namespaces"
                 && table.numberOfRows == 1
         }
+    }
+
+    @Test("workload drill-down preserves canonical match expressions through history")
+    func workloadDrillDownPreservesNativeSelector() async throws {
+        let deployment = ResourceIdentity(
+            clusterSessionID: "test-session", group: "apps", version: "v1",
+            resource: "deployments", namespace: "default", name: "api",
+            uid: "deployment-api"
+        )
+        let provider = RelationshipDrillDownWorkspaceResourceProvider(source: deployment)
+        let selector =
+            "app=api,debug,!retired,track in (canary,stable),zone notin (east,west)"
+        let controller = makeWorkspace(
+            provider: provider,
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: deployment,
+                resourceVersion: "rv-1",
+                summaryFields: [
+                    ObjectSummaryField(
+                        sectionID: "selectors", fieldID: "selector:0",
+                        label: "app", displayText: "api"
+                    ),
+                    ObjectSummaryField(
+                        sectionID: "selectors", fieldID: "selectorExpressions",
+                        label: "Match Expressions", displayText: "4 native requirements"
+                    ),
+                ],
+                podLabelSelector: selector
+            )),
+            restoration: ClusterWindowRestorationRecord(
+                id: "workload-selector-drill-down",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
+                    namespaceScope: .namespace("default")
+                )
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let statusLine = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "resource-status-line" })
+
+        try await waitUntil { provider.streamRequests.count == 1 && table.numberOfRows == 1 }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        #expect(window.makeFirstResponder(table))
+        controller.enterResource(nil)
+
+        try await waitUntil { provider.streamRequests.count == 2 }
+        var requests = provider.streamRequests
+        #expect(requests[1].resource.resource == "pods")
+        #expect(requests[1].labelSelector == selector)
+        #expect(requests[1].filterExpression == "label:app==api")
+        #expect(statusLine.stringValue.contains("Kubernetes selector active"))
+        #expect(statusLine.toolTip?.contains("Label selector: \(selector)") == true)
+
+        controller.navigateBack(nil)
+        try await waitUntil { provider.streamRequests.count == 3 }
+        requests = provider.streamRequests
+        #expect(requests[2].resource.resource == "deployments")
+        #expect(requests[2].labelSelector.isEmpty)
+
+        controller.navigateForward(nil)
+        try await waitUntil { provider.streamRequests.count == 4 }
+        requests = provider.streamRequests
+        #expect(requests[3].resource.resource == "pods")
+        #expect(requests[3].labelSelector == selector)
+        #expect(requests[3].filterExpression == "label:app==api")
     }
 
     @Test("helper recovery refetches a visible subresource with the new session")
@@ -2559,6 +2707,7 @@ private final class FilterValidationWorkspaceResourceProvider: WorkspaceResource
     private let initialRequestIsInvalid: Bool
     private var storedStreamRequestCount = 0
     private var storedCancelRequestCount = 0
+    private var storedStreamRequests: [ResourceViewRequest] = []
 
     init(initialRequestIsInvalid: Bool = false) {
         self.initialRequestIsInvalid = initialRequestIsInvalid
@@ -2566,6 +2715,7 @@ private final class FilterValidationWorkspaceResourceProvider: WorkspaceResource
 
     var streamRequestCount: Int { lock.withLock { storedStreamRequestCount } }
     var cancelRequestCount: Int { lock.withLock { storedCancelRequestCount } }
+    var streamRequests: [ResourceViewRequest] { lock.withLock { storedStreamRequests } }
 
     func discoverResources(sessionID: String, refresh: Bool) async throws
         -> ResourceDiscoveryResult {
@@ -2581,6 +2731,7 @@ private final class FilterValidationWorkspaceResourceProvider: WorkspaceResource
         -> AsyncThrowingStream<ResourceViewMessage, Error> {
         let requestNumber = lock.withLock { () -> Int in
             storedStreamRequestCount += 1
+            storedStreamRequests.append(request)
             return storedStreamRequestCount
         }
         return AsyncThrowingStream { continuation in
@@ -2813,6 +2964,81 @@ private struct NamespaceDrillDownWorkspaceResourceProvider: WorkspaceResourcePro
                         generation: request.generation,
                         sequence: 3
                     ),
+                    reconciliation: ResourceViewReconciliation(
+                        rowsVisible: UInt64(rows.count)
+                    )
+                ))
+            }
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+private final class RelationshipDrillDownWorkspaceResourceProvider:
+    WorkspaceResourceProviding, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let source: ResourceIdentity
+    private var storedStreamRequests: [ResourceViewRequest] = []
+
+    init(source: ResourceIdentity) {
+        self.source = source
+    }
+
+    var streamRequests: [ResourceViewRequest] {
+        lock.withLock { storedStreamRequests }
+    }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        .init(resources: [
+            DiscoveredResource(
+                group: source.group, version: source.version,
+                resource: source.resource, kind: "Deployment",
+                namespaced: true, verbs: ["list", "watch"]
+            ),
+            DiscoveredResource(
+                group: "", version: "v1", resource: "pods", kind: "Pod",
+                namespaced: true, verbs: ["list", "watch"]
+            ),
+        ])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { ["default"] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        lock.withLock { storedStreamRequests.append(request) }
+        var rebound = source
+        rebound.clusterSessionID = request.sessionID
+        let rows = request.resource.resource == source.resource
+            ? [ResourceRow(identity: rebound, cells: [Cell(
+                columnID: "name", displayText: rebound.name,
+                typedValue: .string(rebound.name)
+            )])]
+            : []
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.snapshot(
+                cursor: StreamCursor(generation: request.generation, sequence: 1),
+                chunk: ResourceSnapshotChunk(
+                    rows: rows, first: true, last: true, index: 0,
+                    estimatedTotalRows: UInt64(rows.count)
+                )
+            ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                status: ResourceViewStatus(
+                    freshness: .watching, rowsVisible: UInt64(rows.count)
+                )
+            ))
+            if request.stageUntilReconciled {
+                continuation.yield(.reconciled(
+                    cursor: StreamCursor(generation: request.generation, sequence: 3),
                     reconciliation: ResourceViewReconciliation(
                         rowsVisible: UInt64(rows.count)
                     )

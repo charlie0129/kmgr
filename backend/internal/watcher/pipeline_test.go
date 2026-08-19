@@ -11,9 +11,11 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -139,6 +141,237 @@ func TestPipelineStreamsPaginatedListThenWatchesAndBookmarks(t *testing.T) {
 	}
 	if gotRequests[0].query.Get("continue") != "" || gotRequests[1].query.Get("continue") != "next-page" || gotRequests[2].query.Get("watch") != "true" {
 		t.Fatalf("request sequence = %v", gotRequests)
+	}
+}
+
+func TestPipelineTerminatesPermanentListAPIErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		reason metav1.StatusReason
+		code   int
+		match  func(error) bool
+	}{
+		{name: "bad request", reason: metav1.StatusReasonBadRequest, code: http.StatusBadRequest, match: apierrors.IsBadRequest},
+		{name: "invalid", reason: metav1.StatusReasonInvalid, code: http.StatusUnprocessableEntity, match: apierrors.IsInvalid},
+		{name: "forbidden", reason: metav1.StatusReasonForbidden, code: http.StatusForbidden, match: apierrors.IsForbidden},
+		{name: "unauthorized", reason: metav1.StatusReasonUnauthorized, code: http.StatusUnauthorized, match: apierrors.IsUnauthorized},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var requests atomic.Int32
+			client := newDynamicResource(t, http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				if requests.Add(1) > 1 {
+					cancel()
+				}
+				writeAPIStatus(response, test.reason, test.code)
+			}))
+			var retryCalls atomic.Int32
+			pipeline := mustPipeline(t, PipelineConfig{
+				Client: client,
+				Store:  store.New(),
+				RetryDelay: func(int) time.Duration {
+					retryCalls.Add(1)
+					return 0
+				},
+			})
+
+			err := pipeline.Run(ctx)
+			if !test.match(err) {
+				t.Fatalf("Run error = %v, want %s status", err, test.reason)
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("LIST requests = %d, want 1", got)
+			}
+			if got := retryCalls.Load(); got != 0 {
+				t.Fatalf("retry-delay calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestPipelineTerminatesPermanentWatchAPIErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		write func(http.ResponseWriter)
+		match func(error) bool
+	}{
+		{
+			name: "watch open forbidden",
+			write: func(response http.ResponseWriter) {
+				writeAPIStatus(response, metav1.StatusReasonForbidden, http.StatusForbidden)
+			},
+			match: apierrors.IsForbidden,
+		},
+		{
+			name: "watch error event invalid",
+			write: func(response http.ResponseWriter) {
+				writeWatch(response, watchJSON("ERROR", apiStatusJSON(
+					metav1.StatusReasonInvalid, http.StatusUnprocessableEntity,
+				)))
+			},
+			match: apierrors.IsInvalid,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var requests atomic.Int32
+			client := newDynamicResource(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Query().Get("watch") != "true" {
+					t.Error("warm pipeline issued a LIST")
+				}
+				if request.URL.Query().Get("labelSelector") != "app=kmgr" ||
+					request.URL.Query().Get("fieldSelector") != "metadata.name=api" {
+					t.Errorf("watch selectors = %v", request.URL.Query())
+				}
+				if requests.Add(1) > 1 {
+					cancel()
+				}
+				test.write(response)
+			}))
+			uidStore := store.New()
+			uidStore.Upsert(testObject("uid-warm", "api", "10"))
+			uidStore.SetResourceVersion("10")
+			var retryCalls atomic.Int32
+			pipeline := mustPipeline(t, PipelineConfig{
+				Client: client,
+				Store:  uidStore,
+				ListOptions: metav1.ListOptions{
+					LabelSelector: "app=kmgr",
+					FieldSelector: "metadata.name=api",
+				},
+				RetryDelay: func(int) time.Duration {
+					retryCalls.Add(1)
+					return 0
+				},
+			})
+
+			err := pipeline.Run(ctx)
+			if !test.match(err) {
+				t.Fatalf("Run error = %v, want terminal Kubernetes status", err)
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("WATCH requests = %d, want 1", got)
+			}
+			if got := retryCalls.Load(); got != 0 {
+				t.Fatalf("retry-delay calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestPipelineRetriesTransientListAndWatchAPIErrors(t *testing.T) {
+	t.Parallel()
+	t.Run("list too many requests", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var listRequests atomic.Int32
+		var watchRequests atomic.Int32
+		client := newDynamicResource(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			if request.URL.Query().Get("watch") == "true" {
+				watchRequests.Add(1)
+				writeWatch(response, watchJSON("BOOKMARK", bookmarkJSON("12")))
+				return
+			}
+			switch listRequests.Add(1) {
+			case 1:
+				writeAPIStatus(response, metav1.StatusReasonTooManyRequests, http.StatusTooManyRequests)
+			case 2:
+				writeList(response, "11", "", podJSON("uid", "api", "11"))
+			default:
+				cancel()
+				writeAPIStatus(response, metav1.StatusReasonInternalError, http.StatusInternalServerError)
+			}
+		}))
+		var retryCalls atomic.Int32
+		pipeline := mustPipeline(t, PipelineConfig{
+			Client: client,
+			Store:  store.New(),
+			RetryDelay: func(int) time.Duration {
+				retryCalls.Add(1)
+				return 0
+			},
+			OnBatch: func(batch Batch) {
+				if batch.Bookmark {
+					cancel()
+				}
+			},
+		})
+		assertRunCancelled(t, runPipeline(ctx, pipeline))
+		if listRequests.Load() != 2 || watchRequests.Load() != 1 || retryCalls.Load() != 1 {
+			t.Fatalf("requests/retries = LIST %d, WATCH %d, retry %d; want 2/1/1",
+				listRequests.Load(), watchRequests.Load(), retryCalls.Load())
+		}
+	})
+
+	for _, test := range []struct {
+		name  string
+		write func(http.ResponseWriter)
+	}{
+		{
+			name: "watch open server error",
+			write: func(response http.ResponseWriter) {
+				writeAPIStatus(response, metav1.StatusReasonInternalError, http.StatusInternalServerError)
+			},
+		},
+		{
+			name: "watch timeout event",
+			write: func(response http.ResponseWriter) {
+				writeWatch(response, watchJSON("ERROR", apiStatusJSON(
+					metav1.StatusReasonTimeout, http.StatusGatewayTimeout,
+				)))
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var watchRequests atomic.Int32
+			client := newDynamicResource(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Query().Get("watch") != "true" {
+					t.Error("warm pipeline issued a LIST")
+				}
+				if watchRequests.Add(1) == 1 {
+					test.write(response)
+					return
+				}
+				writeWatch(response, watchJSON("BOOKMARK", bookmarkJSON("12")))
+			}))
+			uidStore := store.New()
+			uidStore.Upsert(testObject("uid-warm", "api", "10"))
+			uidStore.SetResourceVersion("10")
+			var retryCalls atomic.Int32
+			pipeline := mustPipeline(t, PipelineConfig{
+				Client: client,
+				Store:  uidStore,
+				RetryDelay: func(int) time.Duration {
+					retryCalls.Add(1)
+					return 0
+				},
+				OnBatch: func(batch Batch) {
+					if batch.Bookmark {
+						cancel()
+					}
+				},
+			})
+			assertRunCancelled(t, runPipeline(ctx, pipeline))
+			if watchRequests.Load() != 2 || retryCalls.Load() != 1 {
+				t.Fatalf("WATCH requests/retries = %d/%d, want 2/1",
+					watchRequests.Load(), retryCalls.Load())
+			}
+		})
 	}
 }
 
@@ -537,6 +770,23 @@ func writeExpired(response http.ResponseWriter) {
 		"reason":     "Expired",
 		"code":       http.StatusGone,
 	})
+}
+
+func writeAPIStatus(response http.ResponseWriter, reason metav1.StatusReason, code int) {
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(code)
+	writeJSON(response, apiStatusJSON(reason, code))
+}
+
+func apiStatusJSON(reason metav1.StatusReason, code int) map[string]any {
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Status",
+		"status":     "Failure",
+		"message":    "Kubernetes API request failed",
+		"reason":     string(reason),
+		"code":       code,
+	}
 }
 
 func writeJSON(writer io.Writer, value any) {

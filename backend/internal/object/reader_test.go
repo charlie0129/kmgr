@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -222,6 +223,193 @@ func TestReplicationControllerSummaryCarriesFlatPodSelector(t *testing.T) {
 		}
 	}
 	t.Fatalf("flat selector missing from %#v", fields)
+}
+
+func TestDetailCarriesCanonicalWorkloadPodLabelSelector(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, group, version, resource, apiVersion, kind string
+	}{
+		{name: "Deployment", group: "apps", version: "v1", resource: "deployments", apiVersion: "apps/v1", kind: "Deployment"},
+		{name: "StatefulSet", group: "apps", version: "v1", resource: "statefulsets", apiVersion: "apps/v1", kind: "StatefulSet"},
+		{name: "DaemonSet", group: "apps", version: "v1", resource: "daemonsets", apiVersion: "apps/v1", kind: "DaemonSet"},
+		{name: "ReplicaSet", group: "apps", version: "v1", resource: "replicasets", apiVersion: "apps/v1", kind: "ReplicaSet"},
+		{name: "Job", group: "batch", version: "v1", resource: "jobs", apiVersion: "batch/v1", kind: "Job"},
+	}
+	const want = "app=api,debug,!deprecated,tier=frontend,track in (canary,stable),zone notin (east,west)"
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			value := kubernetesObject(test.apiVersion, test.kind, test.resource, "ns", "workload", "uid")
+			value.Object["spec"] = map[string]any{"selector": map[string]any{
+				"matchLabels": map[string]any{"tier": "frontend", "app": "api"},
+				"matchExpressions": []any{
+					map[string]any{"key": "track", "operator": "In", "values": []any{"stable", "canary"}},
+					map[string]any{"key": "zone", "operator": "NotIn", "values": []any{"west", "east"}},
+					map[string]any{"key": "debug", "operator": "Exists"},
+					map[string]any{"key": "deprecated", "operator": "DoesNotExist"},
+				},
+			}}
+			detail, err := detailFromObject(value, Identity{
+				SessionID: "session", Group: test.group, Version: test.version,
+				Resource: test.resource, Namespace: "ns", Name: "workload", UID: "uid",
+			}, false, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if detail.PodLabelSelector != want {
+				t.Fatalf("PodLabelSelector = %q, want %q", detail.PodLabelSelector, want)
+			}
+		})
+	}
+}
+
+func TestDetailCarriesCanonicalFlatPodLabelSelector(t *testing.T) {
+	t.Parallel()
+	for _, resource := range []string{"services", "replicationcontrollers"} {
+		resource := resource
+		t.Run(resource, func(t *testing.T) {
+			t.Parallel()
+			kind := "Service"
+			if resource == "replicationcontrollers" {
+				kind = "ReplicationController"
+			}
+			value := kubernetesObject("v1", kind, resource, "ns", "selected", "uid")
+			value.Object["spec"] = map[string]any{
+				"selector": map[string]any{"tier": "frontend", "app": "api"},
+			}
+			detail, err := detailFromObject(value, Identity{
+				SessionID: "session", Version: "v1", Resource: resource,
+				Namespace: "ns", Name: "selected", UID: "uid",
+			}, false, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := detail.PodLabelSelector, "app=api,tier=frontend"; got != want {
+				t.Fatalf("PodLabelSelector = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestDetailOmitsUnsafePodLabelSelectorsWithoutFailing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		identity Identity
+		spec     map[string]any
+	}{
+		{
+			name: "missing Service selector",
+			identity: Identity{SessionID: "session", Version: "v1", Resource: "services",
+				Namespace: "ns", Name: "selected", UID: "uid"},
+			spec: map[string]any{},
+		},
+		{
+			name: "empty Service selector",
+			identity: Identity{SessionID: "session", Version: "v1", Resource: "services",
+				Namespace: "ns", Name: "selected", UID: "uid"},
+			spec: map[string]any{"selector": map[string]any{}},
+		},
+		{
+			name: "malformed Service selector",
+			identity: Identity{SessionID: "session", Version: "v1", Resource: "services",
+				Namespace: "ns", Name: "selected", UID: "uid"},
+			spec: map[string]any{"selector": map[string]any{"not a label key": "api"}},
+		},
+		{
+			name: "empty workload selector",
+			identity: Identity{SessionID: "session", Group: "apps", Version: "v1", Resource: "deployments",
+				Namespace: "ns", Name: "selected", UID: "uid"},
+			spec: map[string]any{"selector": map[string]any{"matchLabels": map[string]any{}}},
+		},
+		{
+			name: "invalid workload operator",
+			identity: Identity{SessionID: "session", Group: "apps", Version: "v1", Resource: "deployments",
+				Namespace: "ns", Name: "selected", UID: "uid"},
+			spec: map[string]any{"selector": map[string]any{"matchExpressions": []any{
+				map[string]any{"key": "track", "operator": "Around", "values": []any{"stable"}},
+			}}},
+		},
+		{
+			name: "malformed workload value type",
+			identity: Identity{SessionID: "session", Group: "apps", Version: "v1", Resource: "deployments",
+				Namespace: "ns", Name: "selected", UID: "uid"},
+			spec: map[string]any{"selector": map[string]any{"matchLabels": map[string]any{"app": int64(7)}}},
+		},
+		{
+			name: "familiar Kind on unsupported GVR",
+			identity: Identity{SessionID: "session", Group: "example.test", Version: "v1", Resource: "deployments",
+				Namespace: "ns", Name: "selected", UID: "uid"},
+			spec: map[string]any{"selector": map[string]any{"matchLabels": map[string]any{"app": "api"}}},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			value := kubernetesObject("apps/v1", "Deployment", test.identity.Resource, "ns", "selected", "uid")
+			value.Object["spec"] = test.spec
+			detail, err := detailFromObject(value, test.identity, false, true)
+			if err != nil {
+				t.Fatalf("detailFromObject returned an error for an optional selector: %v", err)
+			}
+			if detail.PodLabelSelector != "" {
+				t.Fatalf("PodLabelSelector = %q, want omission", detail.PodLabelSelector)
+			}
+		})
+	}
+}
+
+func TestPodLabelSelectorIsCompleteBeyondSummaryBound(t *testing.T) {
+	t.Parallel()
+	selectorCount := maximumSummarySelectors + 20
+	selectors := make(map[string]any, selectorCount)
+	wantTerms := make([]string, selectorCount)
+	for index := range selectorCount {
+		key := fmt.Sprintf("selector-%03d", index)
+		value := fmt.Sprintf("value-%03d", index)
+		selectors[key] = value
+		wantTerms[index] = key + "=" + value
+	}
+	value := kubernetesObject("v1", "Service", "services", "ns", "selected", "uid")
+	value.Object["spec"] = map[string]any{"selector": selectors}
+	detail, err := detailFromObject(value, Identity{
+		SessionID: "session", Version: "v1", Resource: "services",
+		Namespace: "ns", Name: "selected", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := detail.PodLabelSelector, strings.Join(wantTerms, ","); got != want {
+		t.Fatalf("complete PodLabelSelector = %q, want %q", got, want)
+	}
+	selectorFields := 0
+	omitted := false
+	for _, field := range detail.Summary {
+		if field.Section != "selectors" {
+			continue
+		}
+		if field.ID == "selectorsOmitted" {
+			omitted = true
+		} else {
+			selectorFields++
+		}
+	}
+	if selectorFields != maximumSummarySelectors || !omitted {
+		t.Fatalf("bounded selector summary = %d fields, omitted=%t", selectorFields, omitted)
+	}
+}
+
+func TestDetailResponseCarriesPodLabelSelector(t *testing.T) {
+	t.Parallel()
+	response := detailResponse("request", &kmgrv1.ResourceIdentity{}, Detail{
+		PodLabelSelector: "app=api,track in (canary,stable)",
+	})
+	if got, want := response.GetPodLabelSelector(), "app=api,track in (canary,stable)"; got != want {
+		t.Fatalf("PodLabelSelector = %q, want %q", got, want)
+	}
 }
 
 func TestWorkloadSummaryPreservesMaximumQualifiedSelectorKey(t *testing.T) {

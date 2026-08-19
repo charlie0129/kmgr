@@ -96,7 +96,7 @@ func TestRuntimeWarmMetricCatchupNeverRegressesUsageToMissing(t *testing.T) {
 			warmObject := test.warm()
 			currentObject := test.current()
 			uid := string(warmObject.GetUID())
-			projector, err := projectorFromProto("session", request.GetSpec(), nil)
+			projector, err := projectorFromProto("session", request.GetSpec(), nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

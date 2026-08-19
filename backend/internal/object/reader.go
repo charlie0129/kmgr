@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -261,6 +263,11 @@ type Detail struct {
 	Annotations     map[string]string
 	Summary         []SummaryField
 	Containers      []ContainerDetail
+	// PodLabelSelector is the canonical, restrictive Kubernetes selector
+	// carried by supported built-in Pod controllers and Services. An empty
+	// value is deliberately unusable as a drill-down: the Kubernetes API
+	// interprets an empty labelSelector query as matching every object.
+	PodLabelSelector string
 	// object is the same fresh, UID-validated value used to build the detail.
 	// It stays package-private so optional enrichers can calculate from the
 	// authoritative read without performing a second GET or exposing raw
@@ -293,11 +300,12 @@ func detailFromObject(
 		return Detail{}, err
 	}
 	detail := Detail{
-		Identity:        identity,
-		ResourceVersion: value.GetResourceVersion(),
-		Labels:          cloneStrings(value.GetLabels()),
-		Annotations:     cloneStrings(value.GetAnnotations()),
-		object:          value,
+		Identity:         identity,
+		ResourceVersion:  value.GetResourceVersion(),
+		Labels:           cloneStrings(value.GetLabels()),
+		Annotations:      cloneStrings(value.GetAnnotations()),
+		PodLabelSelector: canonicalPodLabelSelector(value.Object, identity),
+		object:           value,
 	}
 	if includeYAML {
 		jsonBytes, err := value.MarshalJSON()
@@ -316,6 +324,46 @@ func detailFromObject(
 		}
 	}
 	return detail, nil
+}
+
+// canonicalPodLabelSelector converts the authoritative built-in object's Pod
+// selector with Kubernetes' own validation and serialization rules. Missing,
+// malformed, and match-everything selectors are all omitted: returning an
+// empty selector to a Pod LIST/WATCH would otherwise broaden the drill-down to
+// every Pod in its namespace scope.
+func canonicalPodLabelSelector(object map[string]any, identity Identity) string {
+	var (
+		selector labels.Selector
+		err      error
+	)
+	switch identity.GVR() {
+	case schema.GroupVersionResource{Version: "v1", Resource: "services"},
+		schema.GroupVersionResource{Version: "v1", Resource: "replicationcontrollers"}:
+		values, found, nestedErr := unstructured.NestedStringMap(object, "spec", "selector")
+		if nestedErr != nil || !found || len(values) == 0 {
+			return ""
+		}
+		selector, err = labels.ValidatedSelectorFromSet(labels.Set(values))
+	case schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+		schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"},
+		schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"},
+		schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"},
+		schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}:
+		raw, found, nestedErr := unstructured.NestedMap(object, "spec", "selector")
+		if nestedErr != nil || !found || len(raw) == 0 {
+			return ""
+		}
+		var value metav1.LabelSelector
+		if err = k8sruntime.DefaultUnstructuredConverter.FromUnstructured(raw, &value); err == nil {
+			selector, err = metav1.LabelSelectorAsSelector(&value)
+		}
+	default:
+		return ""
+	}
+	if err != nil || selector == nil || selector.Empty() {
+		return ""
+	}
+	return selector.String()
 }
 
 type DataKind uint8

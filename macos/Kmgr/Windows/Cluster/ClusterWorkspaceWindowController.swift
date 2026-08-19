@@ -1559,6 +1559,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             && current.version == returnState.version
             && current.resource == returnState.resource
             && current.namespaceSelection == returnState.namespaceSelection
+            && current.labelSelector == returnState.labelSelector
+            && current.fieldSelector == returnState.fieldSelector
             && current.filter == returnState.filter
             && current.selectedUIDs.contains(identity.uid)
     }
@@ -1587,6 +1589,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             resource: target,
             scope: query.namespaceScope,
             initialFilter: query.filterExpression,
+            labelSelector: query.labelSelector,
+            fieldSelector: query.fieldSelector,
             reason: .resourceDrillDown
         )
         sidebarController.selectResource(matching: target.id)
@@ -2438,6 +2442,10 @@ private final class ResourceListViewController: NSViewController,
 {
     private static let autoWidthPolicy = TableColumnAutoWidthPolicy()
     private static let maxPendingOptionalResourceKeys = 256
+    /// Selector-bearing filters can change the physical LIST/WATCH key. Wait
+    /// for typing to stabilize so intermediate tokens do not create a series
+    /// of short-lived Kubernetes streams; Return still commits immediately.
+    private static let filterStabilityDelay: Duration = .milliseconds(650)
     private static let resourceCacheDiagnosticsEnabled: Bool = {
         guard let raw = ProcessInfo.processInfo.environment[
             "KMGR_RESOURCE_CACHE_DIAGNOSTICS"
@@ -2480,6 +2488,10 @@ private final class ResourceListViewController: NSViewController,
     private var generationGate = GenerationSequenceGate()
     private var resource: DiscoveredResource?
     private var scope = NamespaceSelection()
+    /// Immutable Kubernetes-native relationship constraints for the current
+    /// navigation entry. Editing the kmgr filter must never discard them.
+    private var labelSelector = ""
+    private var fieldSelector = ""
     private var viewID = UUID().uuidString.lowercased()
     private var generation: UInt64 = 0
     private var lastCancelledGeneration: UInt64 = 0
@@ -2873,6 +2885,8 @@ private final class ResourceListViewController: NSViewController,
         resource: DiscoveredResource,
         scope: NamespaceSelection,
         initialFilter: String? = nil,
+        labelSelector: String = "",
+        fieldSelector: String = "",
         reason: ResourceStreamOpenReason
     ) {
         traceResourceCache(
@@ -2899,10 +2913,13 @@ private final class ResourceListViewController: NSViewController,
         installFilterForNavigation(restoredFilter, resourceGVR: nextGVR)
         self.resource = resource
         self.scope = scope
+        self.labelSelector = labelSelector
+        self.fieldSelector = fieldSelector
         pendingScrollAnchor = nil
         let state = ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
             kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope,
+            labelSelector: labelSelector, fieldSelector: fieldSelector,
             filter: restoredFilter
         )
         history.navigate(to: .resource(state))
@@ -3306,7 +3323,7 @@ private final class ResourceListViewController: NSViewController,
         rememberCurrentFilter()
         let revision = filterRevision
         filterTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(180))
+            try? await Task.sleep(for: Self.filterStabilityDelay)
             guard !Task.isCancelled, self?.filterRevision == revision else { return }
             self?.openStream(reason: .debouncedFilter)
             self?.onRestorationChanged?()
@@ -3486,6 +3503,8 @@ private final class ResourceListViewController: NSViewController,
             resource: resource,
             allNamespaces: scope.allNamespaces,
             namespaces: scope.namespaces,
+            labelSelector: labelSelector,
+            fieldSelector: fieldSelector,
             filterExpression: filterField.stringValue,
             filterRevision: filterRevision,
             columnIDs: columnIDs,
@@ -4455,8 +4474,23 @@ private final class ResourceListViewController: NSViewController,
         let selection = counts.hidden > 0
             ? "\(counts.selected) selected (\(counts.hidden) hidden by filter)"
             : "\(counts.selected) selected"
-        statusLine.stringValue = "\(model.orderedVisibleUIDs.count.formatted()) objects · \(selection) · \(freshnessLabel.stringValue)"
-        statusLine.toolTip = statusLine.stringValue
+        var statusParts = [
+            "\(model.orderedVisibleUIDs.count.formatted()) objects",
+            selection,
+        ]
+        if !labelSelector.isEmpty || !fieldSelector.isEmpty {
+            statusParts.append("Kubernetes selector active")
+        }
+        statusParts.append(freshnessLabel.stringValue)
+        statusLine.stringValue = statusParts.joined(separator: " · ")
+        var toolTipParts = [statusLine.stringValue]
+        if !labelSelector.isEmpty {
+            toolTipParts.append("Label selector: \(labelSelector)")
+        }
+        if !fieldSelector.isEmpty {
+            toolTipParts.append("Field selector: \(fieldSelector)")
+        }
+        statusLine.toolTip = toolTipParts.joined(separator: "\n")
     }
 
     private func setFilterShortcutContextActive(_ active: Bool) {
@@ -4896,6 +4930,7 @@ private final class ResourceListViewController: NSViewController,
         return ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
             kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope,
+            labelSelector: labelSelector, fieldSelector: fieldSelector,
             filter: filterField.stringValue,
             sortColumnID: sort.first?.columnID,
             sortDescending: !(sort.first?.ascending ?? true),
@@ -4919,6 +4954,8 @@ private final class ResourceListViewController: NSViewController,
             contextReference: contextReference,
             gvr: state.map { GVR(group: $0.group, version: $0.version, resource: $0.resource) },
             namespaceScope: NamespaceScope(scope),
+            labelSelector: labelSelector,
+            fieldSelector: fieldSelector,
             filter: filterField.stringValue,
             sort: sorts,
             isSidebarVisible: isSidebarVisible,
@@ -4938,6 +4975,8 @@ private final class ResourceListViewController: NSViewController,
         else { return false }
         resource = restored
         scope = restoration.namespaceScope.namespaceSelection
+        labelSelector = restoration.labelSelector
+        fieldSelector = restoration.fieldSelector
         pendingScrollAnchor = restoration.scrollAnchor
         filterCompletionTrigger.reset()
         filterField.stringValue = restoration.filter
@@ -4954,7 +4993,10 @@ private final class ResourceListViewController: NSViewController,
         let nav = ResourceNavigationState(
             group: restored.group, version: restored.version, resource: restored.resource,
             kind: restored.kind, namespaced: restored.namespaced,
-            namespaceSelection: scope, filter: restoration.filter,
+            namespaceSelection: scope,
+            labelSelector: restoration.labelSelector,
+            fieldSelector: restoration.fieldSelector,
+            filter: restoration.filter,
             sortColumnID: restoration.sort.first?.columnID,
             sortDescending: !(restoration.sort.first?.ascending ?? true),
             scrollAnchor: restoration.scrollAnchor
@@ -4980,6 +5022,8 @@ private final class ResourceListViewController: NSViewController,
         }
 
         resource = nil
+        labelSelector = ""
+        fieldSelector = ""
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
@@ -5006,6 +5050,8 @@ private final class ResourceListViewController: NSViewController,
     func rejectRestoredResourceValidation(_ error: Error) {
         resourceCatalogValidated = false
         resource = nil
+        labelSelector = ""
+        fieldSelector = ""
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
@@ -5062,6 +5108,8 @@ private final class ResourceListViewController: NSViewController,
             verbs: ["list", "watch"]
         )
         scope = state.namespaceSelection
+        labelSelector = state.labelSelector
+        fieldSelector = state.fieldSelector
         pendingScrollAnchor = state.scrollAnchor
         pendingSelectionUIDs = state.selectedUIDs
         installFilterForNavigation(

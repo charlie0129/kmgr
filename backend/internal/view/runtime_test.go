@@ -14,6 +14,7 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/store"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -23,6 +24,58 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
 )
+
+func TestRuntimeDeliversPermanentPipelineErrorOnceAsNonRetryable(t *testing.T) {
+	t.Parallel()
+	var runs atomic.Int32
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{
+			authority: "cluster-a",
+			client:    newScriptedResource(),
+		},
+		BatchDelay: time.Millisecond,
+		pipelineRunHook: func(context.Context, func(context.Context) error) error {
+			runs.Add(1)
+			return apierrors.NewBadRequest("unsupported field selector")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	subscription, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var failure *kmgrv1.StructuredError
+	for failure == nil {
+		events, err := subscription.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			if event.GetError() != nil {
+				failure = event.GetError()
+				break
+			}
+		}
+		if err := subscription.AcknowledgeDelivery(events); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if failure.GetRetryable() || failure.GetHttpStatusCode() != 400 ||
+		failure.GetReason() != string(metav1.StatusReasonBadRequest) {
+		t.Fatalf("permanent failure = %#v", failure)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("pipeline runs = %d, want one terminal run", got)
+	}
+}
 
 func TestRuntimeSharesCompatiblePipelineAndDebouncesFinalRelease(t *testing.T) {
 	t.Parallel()
