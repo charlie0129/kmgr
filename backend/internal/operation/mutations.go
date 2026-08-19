@@ -2,6 +2,7 @@ package operation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,7 +10,7 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 )
@@ -20,7 +21,6 @@ const (
 )
 
 type ResourceBackend interface {
-	Get(context.Context, object.Identity) (*unstructured.Unstructured, error)
 	Resource(object.Identity) (dynamic.ResourceInterface, error)
 }
 
@@ -72,37 +72,9 @@ func ScaleResource(
 	if expectedResourceVersion == "" {
 		return "", &ValidationError{Field: "expected_resource_version", Message: "expected resource version is required"}
 	}
-	current, err := backend.Get(ctx, identity)
-	if err != nil {
-		return "", err
-	}
-	if current.GetResourceVersion() != expectedResourceVersion {
-		return "", &object.ResourceVersionConflictError{
-			Expected: expectedResourceVersion, Current: current.GetResourceVersion(),
-		}
-	}
-	resource, err := backend.Resource(identity)
-	if err != nil {
-		return "", err
-	}
-	scale, err := resource.Get(ctx, identity.Name, metav1.GetOptions{}, "scale")
-	if err != nil {
-		return "", err
-	}
-	if scale.GetResourceVersion() != expectedResourceVersion {
-		return "", &object.ResourceVersionConflictError{
-			Expected: expectedResourceVersion, Current: scale.GetResourceVersion(),
-		}
-	}
-	if err := unstructured.SetNestedField(scale.Object, int64(replicas), "spec", "replicas"); err != nil {
-		return "", fmt.Errorf("set scale replicas: %w", err)
-	}
-	scale.SetResourceVersion(expectedResourceVersion)
-	updated, err := resource.Update(ctx, scale, metav1.UpdateOptions{FieldManager: operationFieldManager}, "scale")
-	if err != nil {
-		return "", err
-	}
-	return updated.GetResourceVersion(), nil
+	return patchResource(ctx, backend, identity, expectedResourceVersion, map[string]any{
+		"spec": map[string]any{"replicas": replicas},
+	}, "scale")
 }
 
 func RestartResource(
@@ -125,35 +97,17 @@ func RestartResource(
 	if expectedResourceVersion == "" {
 		return "", &ValidationError{Field: "expected_resource_version", Message: "expected resource version is required"}
 	}
-	current, err := backend.Get(ctx, identity)
-	if err != nil {
-		return "", err
-	}
-	if current.GetResourceVersion() != expectedResourceVersion {
-		return "", &object.ResourceVersionConflictError{
-			Expected: expectedResourceVersion, Current: current.GetResourceVersion(),
-		}
-	}
-	annotations, found, err := unstructured.NestedStringMap(current.Object, "spec", "template", "metadata", "annotations")
-	if err != nil {
-		return "", fmt.Errorf("read pod template annotations: %w", err)
-	}
-	if !found {
-		annotations = make(map[string]string)
-	}
-	annotations[restartedAtAnnotation] = now.UTC().Format(time.RFC3339)
-	if err := unstructured.SetNestedStringMap(current.Object, annotations, "spec", "template", "metadata", "annotations"); err != nil {
-		return "", fmt.Errorf("set rollout restart annotation: %w", err)
-	}
-	resource, err := backend.Resource(identity)
-	if err != nil {
-		return "", err
-	}
-	updated, err := resource.Update(ctx, current, metav1.UpdateOptions{FieldManager: operationFieldManager})
-	if err != nil {
-		return "", err
-	}
-	return updated.GetResourceVersion(), nil
+	return patchResource(ctx, backend, identity, expectedResourceVersion, map[string]any{
+		"spec": map[string]any{
+			"template": map[string]any{
+				"metadata": map[string]any{
+					"annotations": map[string]any{
+						restartedAtAnnotation: now.UTC().Format(time.RFC3339),
+					},
+				},
+			},
+		},
+	})
 }
 
 func UpdateResourceMetadata(
@@ -172,38 +126,73 @@ func UpdateResourceMetadata(
 	if err := ValidateMetadataChanges(changes); err != nil {
 		return "", err
 	}
-	current, err := backend.Get(ctx, identity)
-	if err != nil {
-		return "", err
-	}
-	if current.GetResourceVersion() != expectedResourceVersion {
-		return "", &object.ResourceVersionConflictError{
-			Expected: expectedResourceVersion, Current: current.GetResourceVersion(),
-		}
-	}
-	labels := cloneStringMap(current.GetLabels())
-	annotations := cloneStringMap(current.GetAnnotations())
+	metadata := make(map[string]any, 2)
+	labels := make(map[string]any, len(changes.Labels)+len(changes.RemoveLabelKeys))
+	annotations := make(map[string]any, len(changes.Annotations)+len(changes.RemoveAnnotationKeys))
 	for key, value := range changes.Labels {
 		labels[key] = value
 	}
 	for _, key := range changes.RemoveLabelKeys {
-		delete(labels, key)
+		labels[key] = nil
 	}
 	for key, value := range changes.Annotations {
 		annotations[key] = value
 	}
 	for _, key := range changes.RemoveAnnotationKeys {
-		delete(annotations, key)
+		annotations[key] = nil
 	}
-	current.SetLabels(labels)
-	current.SetAnnotations(annotations)
+	if len(labels) > 0 {
+		metadata["labels"] = labels
+	}
+	if len(annotations) > 0 {
+		metadata["annotations"] = annotations
+	}
+	return patchResource(ctx, backend, identity, expectedResourceVersion, map[string]any{
+		"metadata": metadata,
+	})
+}
+
+// patchResource performs one server-side merge patch. Supplying UID and
+// resourceVersion in the patched metadata makes same-name recreation and
+// concurrent writes fail atomically in the API server. Merge patch is used
+// instead of JSON patch because per-key metadata edits must also work when the
+// labels or annotations parent map does not yet exist.
+func patchResource(
+	ctx context.Context,
+	backend ResourceBackend,
+	identity object.Identity,
+	expectedResourceVersion string,
+	material map[string]any,
+	subresources ...string,
+) (string, error) {
+	metadata, _ := material["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = make(map[string]any, 2)
+		material["metadata"] = metadata
+	}
+	metadata["uid"] = identity.UID
+	metadata["resourceVersion"] = expectedResourceVersion
+	patch, err := json.Marshal(material)
+	if err != nil {
+		return "", fmt.Errorf("encode resource mutation patch: %w", err)
+	}
 	resource, err := backend.Resource(identity)
 	if err != nil {
 		return "", err
 	}
-	updated, err := resource.Update(ctx, current, metav1.UpdateOptions{FieldManager: operationFieldManager})
+	updated, err := resource.Patch(
+		ctx,
+		identity.Name,
+		types.MergePatchType,
+		patch,
+		metav1.PatchOptions{FieldManager: operationFieldManager},
+		subresources...,
+	)
 	if err != nil {
 		return "", err
+	}
+	if updated == nil {
+		return "", errors.New("Kubernetes API returned no object for resource mutation")
 	}
 	return updated.GetResourceVersion(), nil
 }
@@ -250,12 +239,4 @@ func validateRemoveKeys(field string, keys []string, set map[string]string) erro
 		}
 	}
 	return nil
-}
-
-func cloneStringMap(value map[string]string) map[string]string {
-	result := make(map[string]string, len(value))
-	for key, item := range value {
-		result[key] = item
-	}
-	return result
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/object"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -123,9 +124,13 @@ func TestClusterMutationBackendLeaseSurvivesWorkspaceClose(t *testing.T) {
 		SessionID: session.ID(), Version: "v1", Resource: "configmaps", Namespace: "ns",
 		Name: "settings", UID: "uid-settings",
 	}
-	got, err := acquired.Backend.Get(context.Background(), identity)
+	resource, err := acquired.Backend.Resource(identity)
+	if err != nil {
+		t.Fatalf("leased backend Resource = %v", err)
+	}
+	got, err := resource.Get(context.Background(), identity.Name, metav1.GetOptions{})
 	if err != nil || got.GetUID() != types.UID(identity.UID) {
-		t.Fatalf("leased backend Get = %#v, %v", got, err)
+		t.Fatalf("leased resource Get = %#v, %v", got, err)
 	}
 	if factory.closes.Load() != 0 {
 		t.Fatal("workspace close released a backend still owned by a mutation")
