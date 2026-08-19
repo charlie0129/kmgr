@@ -10,14 +10,18 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/metadata"
 )
 
 const (
@@ -26,6 +30,7 @@ const (
 	defaultMaxResolutionObjects = 10_000
 	defaultMaxResolutionCalls   = 512
 	defaultMaxCronJobOwnedJobs  = 128
+	legacyJobControllerUIDLabel = "controller-uid"
 )
 
 var (
@@ -111,6 +116,7 @@ type sourceResolutionClients struct {
 	sessionID       string
 	core            coreclient.CoreV1Interface
 	dynamic         dynamic.Interface
+	metadata        metadata.Interface
 	maxPods         int
 	pods            map[types.UID]PodInventory
 	objectsExamined int
@@ -134,11 +140,11 @@ func (r ClusterWorkloadSourceResolver) Resolve(
 		return SourceResolution{}, ErrSessionNotFound
 	}
 	defer lease.Release()
-	if session.Core() == nil || session.Dynamic() == nil {
+	if session.Core() == nil || session.Dynamic() == nil || session.Metadata() == nil {
 		return SourceResolution{}, ErrWorkloadResolutionUnavailable
 	}
 	clients := sourceResolutionClients{
-		sessionID: sessionID, core: session.Core(), dynamic: session.Dynamic(), maxPods: maxPods,
+		sessionID: sessionID, core: session.Core(), dynamic: session.Dynamic(), metadata: session.Metadata(), maxPods: maxPods,
 		pods: make(map[types.UID]PodInventory),
 	}
 	staticSnapshot := false
@@ -270,24 +276,7 @@ func (c *sourceResolutionClients) resolveOne(ctx context.Context, identity Ident
 		if err != nil {
 			return true, err
 		}
-		jobs, err := c.listControlledObjects(
-			ctx, schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"},
-			identity.Namespace, labels.Everything(), value.GetUID(),
-		)
-		if err != nil {
-			return true, err
-		}
-		if len(jobs) > defaultMaxCronJobOwnedJobs {
-			return true, &ResolutionScanLimitError{Resource: "Jobs owned by the CronJob", Limit: defaultMaxCronJobOwnedJobs}
-		}
-		owners := make(map[types.UID]struct{}, len(jobs))
-		for index := range jobs {
-			owners[jobs[index].GetUID()] = struct{}{}
-		}
-		// One bounded namespace Pod list is preferable to one list per retained
-		// Job, and the controller-owner UID filter still validates the second
-		// CronJob -> Job -> Pod hop exactly.
-		return true, c.listPods(ctx, identity.Namespace, labels.Everything(), owners)
+		return true, c.resolveCronJob(ctx, identity.Namespace, value)
 	default:
 		return false, &UnsupportedLogResourceError{Identity: identity}
 	}
@@ -323,15 +312,188 @@ func (c *sourceResolutionClients) resolveJob(
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(value.Object, &job); err != nil {
 		return fmt.Errorf("decode Job: %w", err)
 	}
-	selector := labels.Everything()
-	if job.Spec.Selector != nil {
-		var err error
-		selector, err = selectorFromLabelSelector(job.Spec.Selector)
+	selector, controllerLabel, err := podSelectorForJob(&job)
+	if err != nil {
+		return err
+	}
+	owners := uidSet(value.GetUID())
+	if controllerLabel != "" {
+		selector, err = controllerUIDSelector(controllerLabel, owners)
 		if err != nil {
-			return fmt.Errorf("Job %s has no resolvable Pod selector: %w", job.Name, err)
+			return fmt.Errorf("build Job %s Pod selector: %w", job.Name, err)
 		}
 	}
-	return c.listPods(ctx, namespace, selector, uidSet(value.GetUID()))
+	return c.listPods(ctx, namespace, selector, owners)
+}
+
+func (c *sourceResolutionClients) resolveCronJob(
+	ctx context.Context,
+	namespace string,
+	value *unstructured.Unstructured,
+) error {
+	jobs, err := c.listControlledObjects(
+		ctx, schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"},
+		namespace, labels.Everything(), value.GetUID(),
+	)
+	if err != nil {
+		return err
+	}
+	if len(jobs) > defaultMaxCronJobOwnedJobs {
+		return &ResolutionScanLimitError{Resource: "Jobs owned by the CronJob", Limit: defaultMaxCronJobOwnedJobs}
+	}
+
+	// Owner references have no portable server-side selector, so the namespace
+	// Job scan above is metadata-only. Fetch full objects only for exact owned
+	// UIDs so manual Job selectors retain their behavior without transferring
+	// every unrelated Job spec in the namespace.
+	controllerOwners := make(map[string]map[types.UID]struct{})
+	selectorGroups := make(map[string]*podSelectorGroup)
+	for index := range jobs {
+		jobMeta := &jobs[index]
+		jobValue, getErr := c.listControllerByName(ctx, Identity{
+			SessionID: c.sessionID, Group: "batch", Version: "v1", Resource: "jobs",
+			Namespace: namespace, Name: jobMeta.GetName(), UID: string(jobMeta.GetUID()),
+		})
+		if getErr != nil {
+			return getErr
+		}
+		var job batchv1.Job
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(jobValue.Object, &job); err != nil {
+			return fmt.Errorf("decode Job %s: %w", jobMeta.GetName(), err)
+		}
+		selector, controllerLabel, err := podSelectorForJob(&job)
+		if err != nil {
+			return err
+		}
+		if controllerLabel != "" {
+			owners := controllerOwners[controllerLabel]
+			if owners == nil {
+				owners = make(map[types.UID]struct{})
+				controllerOwners[controllerLabel] = owners
+			}
+			owners[jobValue.GetUID()] = struct{}{}
+			continue
+		}
+		key := selector.String()
+		group := selectorGroups[key]
+		if group == nil {
+			group = &podSelectorGroup{selector: selector, ownerUIDs: make(map[types.UID]struct{})}
+			selectorGroups[key] = group
+		}
+		group.ownerUIDs[jobValue.GetUID()] = struct{}{}
+	}
+
+	for labelKey, owners := range controllerOwners {
+		selector, err := controllerUIDSelector(labelKey, owners)
+		if err != nil {
+			return fmt.Errorf("build CronJob Pod selector: %w", err)
+		}
+		key := selector.String()
+		group := selectorGroups[key]
+		if group == nil {
+			group = &podSelectorGroup{selector: selector, ownerUIDs: make(map[types.UID]struct{})}
+			selectorGroups[key] = group
+		}
+		for uid := range owners {
+			group.ownerUIDs[uid] = struct{}{}
+		}
+	}
+	groups := make([]*podSelectorGroup, 0, len(selectorGroups))
+	for _, group := range selectorGroups {
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		return groups[i].selector.String() < groups[j].selector.String()
+	})
+	for _, group := range groups {
+		if err := c.listPods(ctx, namespace, group.selector, group.ownerUIDs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// listControllerByName retains the LIST permission required by the existing
+// owner traversal while requesting only the one full object whose selector is
+// needed. Requiring GET on every owned Job would unnecessarily expand RBAC for
+// CronJob log resolution.
+func (c *sourceResolutionClients) listControllerByName(
+	ctx context.Context,
+	identity Identity,
+) (*unstructured.Unstructured, error) {
+	gvr := schema.GroupVersionResource{Group: identity.Group, Version: identity.Version, Resource: identity.Resource}
+	if err := c.beginAPICall(); err != nil {
+		return nil, err
+	}
+	list, err := c.dynamic.Resource(gvr).Namespace(identity.Namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("metadata.name", identity.Name).String(), Limit: 1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := c.observeObjects(identity.Resource, len(list.Items)); err != nil {
+		return nil, err
+	}
+	if len(list.Items) == 0 {
+		return nil, apierrors.NewNotFound(gvr.GroupResource(), identity.Name)
+	}
+	value := &list.Items[0]
+	if err := validateResolutionUID(identity, value.GetUID()); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+type podSelectorGroup struct {
+	selector  labels.Selector
+	ownerUIDs map[types.UID]struct{}
+}
+
+func podSelectorForJob(job *batchv1.Job) (labels.Selector, string, error) {
+	if job == nil {
+		return nil, "", errors.New("Job is absent")
+	}
+	if job.Spec.Selector == nil {
+		// The Kubernetes API normally defaults this selector. Retain a narrow
+		// fallback for synthetic or non-defaulted representations instead of
+		// listing every Pod in the namespace.
+		return nil, batchv1.ControllerUidLabel, nil
+	}
+	selector, err := selectorFromLabelSelector(job.Spec.Selector)
+	if err != nil {
+		return nil, "", fmt.Errorf("Job %s has no resolvable Pod selector: %w", job.Name, err)
+	}
+	if key := exactJobControllerUIDLabel(job.Spec.Selector, job.UID); key != "" {
+		return nil, key, nil
+	}
+	return selector, "", nil
+}
+
+func exactJobControllerUIDLabel(selector *metav1.LabelSelector, uid types.UID) string {
+	if selector == nil || len(selector.MatchExpressions) != 0 || len(selector.MatchLabels) != 1 {
+		return ""
+	}
+	for _, key := range []string{batchv1.ControllerUidLabel, legacyJobControllerUIDLabel} {
+		if selector.MatchLabels[key] == string(uid) {
+			return key
+		}
+	}
+	return ""
+}
+
+func controllerUIDSelector(key string, ownerUIDs map[types.UID]struct{}) (labels.Selector, error) {
+	values := make([]string, 0, len(ownerUIDs))
+	for uid := range ownerUIDs {
+		if uid != "" {
+			values = append(values, string(uid))
+		}
+	}
+	sort.Strings(values)
+	requirement, err := labels.NewRequirement(key, selection.In, values)
+	if err != nil {
+		return nil, err
+	}
+	return labels.NewSelector().Add(*requirement), nil
 }
 
 func (c *sourceResolutionClients) listControlledObjects(
@@ -340,14 +502,14 @@ func (c *sourceResolutionClients) listControlledObjects(
 	namespace string,
 	selector labels.Selector,
 	ownerUID types.UID,
-) ([]unstructured.Unstructured, error) {
-	var result []unstructured.Unstructured
+) ([]metav1.PartialObjectMetadata, error) {
+	var result []metav1.PartialObjectMetadata
 	var continueToken string
 	for {
 		if err := c.beginAPICall(); err != nil {
 			return nil, err
 		}
-		list, err := c.dynamic.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
+		list, err := c.metadata.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: selector.String(), Limit: defaultResolutionPageSize, Continue: continueToken,
 		})
 		if err != nil {

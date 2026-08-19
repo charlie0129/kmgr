@@ -8,11 +8,14 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	metadatafake "k8s.io/client-go/metadata/fake"
 )
 
 func TestDeploymentResolutionRequiresEveryOwnerUIDHop(t *testing.T) {
@@ -82,8 +85,12 @@ func TestCronJobResolutionRequiresCronJobToJobToPodOwnerUIDs(t *testing.T) {
 	unrelatedJob.Name = "other-1"
 	unrelatedJob.UID = "job-other"
 	unrelatedJob.OwnerReferences[0].UID = "other-cron"
-	goodPod := podForController("backup-pod", "pod-good", ownedJob.UID, map[string]string{"job": "backup"}, "backup")
-	wrongPod := podForController("other-pod", "pod-other", unrelatedJob.UID, map[string]string{"job": "backup"}, "backup")
+	goodPod := podForController("backup-pod", "pod-good", ownedJob.UID, map[string]string{
+		"job": "backup", batchv1.ControllerUidLabel: string(ownedJob.UID),
+	}, "backup")
+	wrongPod := podForController("other-pod", "pod-other", unrelatedJob.UID, map[string]string{
+		"job": "backup", batchv1.ControllerUidLabel: string(unrelatedJob.UID),
+	}, "backup")
 
 	clients := resolutionTestClients(t, []runtime.Object{cronJob, ownedJob, unrelatedJob}, goodPod, wrongPod)
 	isWorkload, err := clients.resolveOne(context.Background(), Identity{
@@ -254,13 +261,40 @@ func resolutionTestClients(
 	if err := batchv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	metadataScheme := metadatafake.NewTestScheme()
+	metav1.AddMetaToScheme(metadataScheme)
 	return &sourceResolutionClients{
 		sessionID: "session",
 		core:      kubernetesfake.NewSimpleClientset(podRuntimeObjects(pods)...).CoreV1(),
 		dynamic:   dynamicfake.NewSimpleDynamicClient(scheme, controllers...),
+		metadata:  metadatafake.NewSimpleMetadataClient(metadataScheme, partialMetadataObjects(t, controllers)...),
 		maxPods:   DefaultMaxResolvedPods,
 		pods:      make(map[types.UID]PodInventory),
 	}
+}
+
+func partialMetadataObjects(t *testing.T, values []runtime.Object) []runtime.Object {
+	t.Helper()
+	result := make([]runtime.Object, 0, len(values))
+	for _, value := range values {
+		accessor, err := meta.Accessor(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gvk := value.GetObjectKind().GroupVersionKind()
+		partial := &metav1.PartialObjectMetadata{
+			TypeMeta: metav1.TypeMeta{APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind},
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: accessor.GetNamespace(), Name: accessor.GetName(), UID: accessor.GetUID(),
+				Labels: accessor.GetLabels(), OwnerReferences: accessor.GetOwnerReferences(),
+			},
+		}
+		partial.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind,
+		})
+		result = append(result, partial)
+	}
+	return result
 }
 
 func podRuntimeObjects(values []*corev1.Pod) []runtime.Object {
