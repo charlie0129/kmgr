@@ -386,6 +386,7 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 		config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(config.QPS, config.Burst)
 		activity := &APIActivity{}
 		config = configWithAPIActivity(config, activity)
+		config = configWithSupplementalRateLimit(config)
 		clients, err := r.factory.New(config)
 		if err != nil {
 			return nil, fmt.Errorf("open context %q: %w", contextInfo.Name, err)

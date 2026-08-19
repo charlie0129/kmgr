@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/rest"
 	clientportforward "k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
+	streamhttp "k8s.io/streaming/pkg/httpstream"
 )
 
 type ClientGoForwarder struct {
@@ -41,10 +42,19 @@ func (f ClientGoForwarder) Start(ctx context.Context, request ForwardRequest) (R
 	if err != nil {
 		return nil, fmt.Errorf("construct websocket port-forward transport: %w", err)
 	}
-	dialer := clientportforward.NewFallbackDialer(tunnelDialer, spdyDialer, func(err error) bool {
-		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
-	})
+	dialer := clientportforward.NewFallbackDialer(
+		tunnelDialer, spdyDialer, shouldFallbackPortForward,
+	)
 	return startUIDPinnedClientGoForward(ctx, dialer, f.PodUIDs, request)
+}
+
+// client-go's legacy port-forward Dialer currently returns upgrade errors
+// emitted by both the apimachinery and newer streaming httpstream packages.
+// Recognize both so a rejected WebSocket tunnel still reaches the SPDY
+// fallback while client-go completes that compatibility transition.
+func shouldFallbackPortForward(err error) bool {
+	return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err) ||
+		streamhttp.IsUpgradeFailure(err) || streamhttp.IsHTTPSProxyError(err)
 }
 
 // startUIDPinnedClientGoForward performs the final identity check after the

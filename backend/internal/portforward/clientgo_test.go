@@ -15,7 +15,26 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes/fake"
+	streamhttp "k8s.io/streaming/pkg/httpstream"
 )
+
+func TestPortForwardFallbackRecognizesBothClientGoUpgradeErrorFamilies(t *testing.T) {
+	t.Parallel()
+	for name, err := range map[string]error{
+		"legacy":    &httpstream.UpgradeFailureError{Cause: errors.New("legacy upgrade rejected")},
+		"streaming": &streamhttp.UpgradeFailureError{Cause: errors.New("streaming upgrade rejected")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if !shouldFallbackPortForward(err) {
+				t.Fatalf("upgrade error %T did not enable SPDY fallback", err)
+			}
+		})
+	}
+	if shouldFallbackPortForward(errors.New("unrelated failure")) {
+		t.Fatal("unrelated error enabled SPDY fallback")
+	}
+}
 
 func TestClientGoForwarderAllocatesPortZeroInsideListener(t *testing.T) {
 	t.Parallel()
