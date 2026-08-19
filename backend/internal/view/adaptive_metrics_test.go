@@ -3,6 +3,7 @@ package view
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -241,6 +242,74 @@ func TestCompleteExactMetricsAtomicallyReconcileGlobalSort(t *testing.T) {
 	}
 }
 
+func TestCompleteExactMetricsDiscardInvalidatedScanUntilCadence(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	basePod := metricInterestPod(t, "uid-a", "a")
+	basePod.SetResourceVersion("rv-1")
+	client.listPages = []*unstructured.UnstructuredList{listPage("rv-1", "", basePod)}
+	metricSource := &controlledCompleteMetricSource{
+		started: make(chan []metrics.PodReference, 2),
+		release: make(chan struct{}),
+		samples: map[string]metrics.Sample{
+			"uid-a": metricCPUSample(100_000_000),
+		},
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:  &fakeResourceSource{authority: "cluster-a", client: client},
+		Metrics: metricSource, BatchDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	request := openView("session", "invalidated", 1)
+	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
+	request.Spec.FilterExpression = "field:spec.nodeName==node-a"
+	request.Spec.Sort = []*kmgrv1.SortDescriptor{{
+		ColumnId: PodCPUColumn, Direction: kmgrv1.SortDirection_SORT_DIRECTION_DESCENDING,
+	}}
+	subscription, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if references := receiveExactMetricReferences(t, metricSource.started); len(references) != 1 {
+		t.Fatalf("initial complete references = %#v", references)
+	}
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() != 0 })
+
+	modified := basePod.DeepCopy()
+	modified.SetResourceVersion("rv-2")
+	client.lastWatch().channel <- watch.Event{Type: watch.Modified, Object: modified}
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		return subscription.metricCoverageDirty && subscription.metricsReconciling
+	})
+	close(metricSource.release)
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		return !subscription.metricCoverageRunning && subscription.metricCoverageTimer != nil
+	})
+	select {
+	case references := <-metricSource.started:
+		t.Fatalf("invalidated scan restarted before cadence: %#v", references)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	subscription.requestCompleteMetricCoverage()
+	if references := receiveExactMetricReferences(t, metricSource.started); len(references) != 1 {
+		t.Fatalf("cadence complete references = %#v", references)
+	}
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		return !subscription.metricsReconciling
+	})
+}
+
 func TestCompleteExactMetricsCoverFilterHiddenBaseCandidates(t *testing.T) {
 	t.Parallel()
 	client := newScriptedResource()
@@ -287,7 +356,7 @@ func TestCompleteExactMetricsCoverFilterHiddenBaseCandidates(t *testing.T) {
 	})
 }
 
-func TestCompleteExactMetricsRepeatAfterBaseMembershipChange(t *testing.T) {
+func TestCompleteExactMetricsCoalesceBaseChurnUntilCadence(t *testing.T) {
 	t.Parallel()
 	client := newScriptedResource()
 	client.listPages = []*unstructured.UnstructuredList{listPage(
@@ -296,7 +365,8 @@ func TestCompleteExactMetricsRepeatAfterBaseMembershipChange(t *testing.T) {
 		metricInterestPod(t, "uid-b", "b"),
 	)}
 	metricSource := &recordingExactMetricSource{
-		calls: make(chan []metrics.PodReference, 4),
+		calls:           make(chan []metrics.PodReference, 4),
+		refreshInterval: time.Hour,
 		samples: map[string]metrics.Sample{
 			"uid-a": metricCPUSample(100_000_000),
 			"uid-b": metricCPUSample(200_000_000),
@@ -336,9 +406,33 @@ func TestCompleteExactMetricsRepeatAfterBaseMembershipChange(t *testing.T) {
 	added := metricInterestPod(t, "uid-c", "c")
 	added.SetResourceVersion("rv-2")
 	client.lastWatch().channel <- watch.Event{Type: watch.Added, Object: added}
+	for index := range 12 {
+		modified := added.DeepCopy()
+		modified.SetResourceVersion(fmt.Sprintf("rv-%d", index+3))
+		client.lastWatch().channel <- watch.Event{Type: watch.Modified, Object: modified}
+	}
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		return subscription.metricsReconciling && subscription.metricCoverageTimer != nil
+	})
+	select {
+	case references := <-metricSource.calls:
+		t.Fatalf("WATCH churn started an exact candidate scan before cadence: %#v", references)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Simulate the configured cadence without waiting an hour. All WATCH
+	// batches coalesce into exactly one complete scan of the latest candidates.
+	subscription.requestCompleteMetricCoverage()
 	references := receiveExactMetricReferences(t, metricSource.calls)
 	if len(references) != 3 {
 		t.Fatalf("membership-change references = %#v", references)
+	}
+	select {
+	case references := <-metricSource.calls:
+		t.Fatalf("one cadence produced multiple exact candidate scans: %#v", references)
+	case <-time.After(50 * time.Millisecond):
 	}
 	eventually(t, time.Second, func() bool {
 		subscription.mu.Lock()

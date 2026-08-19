@@ -53,15 +53,17 @@ func (s *Subscription) updateMetricInterest(indexRevision uint64, uids []types.U
 func (s *Subscription) requestCompleteMetricCoverage() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.requireCompleteMetricCoverageLocked()
+	s.requireCompleteMetricCoverageLocked(true)
 }
 
 // requireCompleteMetricCoverageLocked marks the current base-resource state as
 // non-authoritative until a full metrics snapshot has been projected. Exact
 // Pod views run a bounded-concurrency UID-pinned resolve over their already
-// narrowed raw store. Shared LIST providers receive one coalesced immediate
-// refresh request so their snapshot starts after this base barrier.
-func (s *Subscription) requireCompleteMetricCoverageLocked() {
+// narrowed raw store. An immediate request is reserved for the initial LIST,
+// a relist, or the configured metrics cadence. Ordinary WATCH batches only
+// mark the result dirty; they never turn object churn into candidate scans or
+// Metrics LIST pagination.
+func (s *Subscription) requireCompleteMetricCoverageLocked(immediate bool) {
 	if s.closed || !s.snapshotComplete ||
 		!s.metricPlan.dependency.requiresCompleteCoverage() {
 		return
@@ -70,18 +72,20 @@ func (s *Subscription) requireCompleteMetricCoverageLocked() {
 	s.metricCoverageCommit = 0
 	s.setMetricsReconcilingLocked(true)
 	s.metricRefreshAfter = time.Now()
-	if s.metricCoverageTimer != nil {
-		s.metricCoverageTimer.Stop()
-		s.metricCoverageTimer = nil
-	}
 
 	switch s.metricPlan.strategy {
 	case metricFetchSharedList:
-		if s.metrics != nil {
-			s.metrics.RequestRefresh()
-			s.metricRefreshPending = false
-		} else {
-			s.metricRefreshPending = true
+		// Initial snapshots and authoritative relists request one post-barrier
+		// refresh. Ordinary WATCH churn only advances metricRefreshAfter: the
+		// provider's configured cadence will satisfy the newest barrier without a
+		// full PodMetrics/NodeMetrics LIST for every object batch.
+		if immediate {
+			if s.metrics != nil {
+				s.metrics.RequestRefresh()
+				s.metricRefreshPending = false
+			} else {
+				s.metricRefreshPending = true
+			}
 		}
 	case metricFetchPodObjects:
 		if s.podMetricResolver == nil || s.resource == nil {
@@ -94,10 +98,16 @@ func (s *Subscription) requireCompleteMetricCoverageLocked() {
 			return
 		}
 		s.metricCoverageDirty = true
-		if !s.metricCoverageRunning {
-			s.metricCoverageRunning = true
-			go s.resolveCompletePodMetrics()
+		if !immediate {
+			s.scheduleCompletePodMetricCoverageLocked()
+			return
 		}
+		s.stopCompletePodMetricCoverageTimerLocked()
+		if s.metricCoverageRunning {
+			return
+		}
+		s.metricCoverageRunning = true
+		go s.resolveCompletePodMetrics()
 	default:
 		s.metricCoverageCommit = s.metricCoverageID
 		s.projectionRevision++
@@ -107,77 +117,109 @@ func (s *Subscription) requireCompleteMetricCoverageLocked() {
 }
 
 func (s *Subscription) resolveCompletePodMetrics() {
-	for {
-		s.mu.Lock()
-		if s.closed || !s.metricCoverageDirty || s.resource == nil || s.podMetricResolver == nil {
-			s.metricCoverageRunning = false
-			s.mu.Unlock()
-			return
-		}
-		s.metricCoverageDirty = false
-		coverageID := s.metricCoverageID
-		resource := s.resource
-		resolver := s.podMetricResolver
-		sessionID := s.metricSessionID
-		authorityID := s.metricAuthorityID
-		ctx := s.projectionContext
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		s.mu.Unlock()
-
-		objects, err := resource.store.SnapshotContext(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				s.mu.Lock()
-				s.metricCoverageRunning = false
-				s.mu.Unlock()
-				return
-			}
-			objects = nil
-		}
-		references, _ := podMetricReferences(objects)
-		snapshot := metrics.Snapshot{
-			Samples: make(map[string]metrics.Sample), State: metrics.MeasurementCurrent,
-			UpdatedAt: time.Now(),
-		}
-		if len(references) != 0 {
-			snapshot, err = resolver.ResolvePodMetrics(ctx, sessionID, authorityID, references)
-		}
-		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) ||
-				errors.Is(err, context.DeadlineExceeded) {
-				s.mu.Lock()
-				s.metricCoverageRunning = false
-				s.mu.Unlock()
-				return
-			}
-			snapshot = metrics.Snapshot{
-				State: metrics.MeasurementUnavailable, UpdatedAt: time.Now(), Err: err,
-			}
-		}
-
-		s.mu.Lock()
-		if s.closed || s.resource != resource {
-			s.metricCoverageRunning = false
-			s.mu.Unlock()
-			return
-		}
-		if coverageID != s.metricCoverageID {
-			s.metricCoverageDirty = true
-			s.mu.Unlock()
-			continue
-		}
-		s.projector = s.projector.WithMetrics(snapshot)
-		s.projectionRevision++
-		s.projectionResnapshot = true
-		s.metricCoverageCommit = coverageID
-		s.metricRefreshAfter = time.Time{}
+	s.mu.Lock()
+	if s.closed || !s.metricCoverageDirty || s.resource == nil || s.podMetricResolver == nil {
 		s.metricCoverageRunning = false
-		s.scheduleProjectionLocked()
 		s.mu.Unlock()
 		return
 	}
+	s.metricCoverageDirty = false
+	coverageID := s.metricCoverageID
+	resource := s.resource
+	resolver := s.podMetricResolver
+	sessionID := s.metricSessionID
+	authorityID := s.metricAuthorityID
+	ctx := s.projectionContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Unlock()
+
+	objects, err := resource.store.SnapshotContext(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			s.mu.Lock()
+			s.metricCoverageRunning = false
+			s.mu.Unlock()
+			return
+		}
+		objects = nil
+	}
+	references, _ := podMetricReferences(objects)
+	snapshot := metrics.Snapshot{
+		Samples: make(map[string]metrics.Sample), State: metrics.MeasurementCurrent,
+		UpdatedAt: time.Now(),
+	}
+	if len(references) != 0 {
+		snapshot, err = resolver.ResolvePodMetrics(ctx, sessionID, authorityID, references)
+	}
+	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			s.mu.Lock()
+			s.metricCoverageRunning = false
+			s.mu.Unlock()
+			return
+		}
+		snapshot = metrics.Snapshot{
+			State: metrics.MeasurementUnavailable, UpdatedAt: time.Now(), Err: err,
+		}
+	}
+
+	s.mu.Lock()
+	if s.closed || s.resource != resource {
+		s.metricCoverageRunning = false
+		s.mu.Unlock()
+		return
+	}
+	if coverageID != s.metricCoverageID {
+		// The scan is no longer a complete snapshot of the base candidates. Drop
+		// it and wait for the next cadence instead of repeatedly traversing the
+		// store while a busy WATCH stream keeps invalidating the result.
+		s.metricCoverageDirty = true
+		s.metricCoverageRunning = false
+		s.scheduleCompletePodMetricCoverageLocked()
+		s.mu.Unlock()
+		return
+	}
+	s.projector = s.projector.WithMetrics(snapshot)
+	s.projectionRevision++
+	s.projectionResnapshot = true
+	s.metricCoverageCommit = coverageID
+	s.metricRefreshAfter = time.Time{}
+	s.metricCoverageRunning = false
+	s.scheduleProjectionLocked()
+	s.mu.Unlock()
+}
+
+func (s *Subscription) stopCompletePodMetricCoverageTimerLocked() {
+	if s.metricCoverageTimer == nil {
+		return
+	}
+	s.metricCoverageTimer.Stop()
+	s.metricCoverageTimer = nil
+	s.metricCoverageTimerID++
+}
+
+func (s *Subscription) scheduleCompletePodMetricCoverageLocked() {
+	if s.closed || s.metricPlan.strategy != metricFetchPodObjects ||
+		s.metricRefreshInterval <= 0 || s.metricCoverageRunning ||
+		s.metricCoverageTimer != nil {
+		return
+	}
+	s.metricCoverageTimerID++
+	timerID := s.metricCoverageTimerID
+	interval := s.metricRefreshInterval
+	s.metricCoverageTimer = time.AfterFunc(interval, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.closed || s.metricCoverageTimer == nil ||
+			s.metricCoverageTimerID != timerID {
+			return
+		}
+		s.metricCoverageTimer = nil
+		s.requireCompleteMetricCoverageLocked(true)
+	})
 }
 
 func (s *Subscription) completeMetricCoverageLocked() {
@@ -188,14 +230,8 @@ func (s *Subscription) completeMetricCoverageLocked() {
 	s.metricCoverageCommit = 0
 	s.setMetricsReconcilingLocked(false)
 	s.markReconciledLocked()
-	if s.metricPlan.strategy == metricFetchPodObjects && s.metricRefreshInterval > 0 {
-		if s.metricCoverageTimer != nil {
-			s.metricCoverageTimer.Stop()
-		}
-		interval := s.metricRefreshInterval
-		s.metricCoverageTimer = time.AfterFunc(interval, func() {
-			s.requestCompleteMetricCoverage()
-		})
+	if s.metricPlan.strategy == metricFetchPodObjects {
+		s.scheduleCompletePodMetricCoverageLocked()
 	}
 }
 

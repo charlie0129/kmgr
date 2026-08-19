@@ -859,11 +859,12 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	}
 	subscription.optionalResourceHints = newOptionalResourceStreamHints(entry.key, acceleratorConfig)
 	metricPlan := planMetricView(projector, key.fields)
-	if namespacePlan.exactFanIn && metricPlan.strategy == metricFetchSharedList {
+	if namespacePlan.exactFanIn && metricPlan.strategy == metricFetchSharedList &&
+		!metricPlan.dependency.requiresCompleteCoverage() {
 		if kind, supported := metricKindFor(projector.spec.Resource); supported && kind == metrics.PodMetrics {
-			// Metrics Server cannot select several exact namespaces in one LIST.
-			// Reuse the bounded UID-keyed Pod sample path instead of broadening an
-			// otherwise exact base-resource query to all-namespaces PodMetrics.
+			// A display-only exact namespace set needs only the bounded viewport.
+			// Keep UID-pinned GETs here; LIST fan-in is reserved for global metric
+			// sort/filter, where candidate-wide GETs would be the expensive shape.
 			metricPlan.strategy = metricFetchPodObjects
 		}
 	}
@@ -879,15 +880,35 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			}
 		}
 	}
-	var metricProviderLease *metrics.ProviderLease
+	var (
+		metricProviderScopes []string
+		metricProviderLeases []*metrics.ProviderLease
+	)
 	if r.metrics != nil && metricPlan.strategy == metricFetchSharedList {
 		metricKind, _ := metricKindFor(projector.spec.Resource)
-		providerLease, metricErr := r.metrics.OpenMetrics(
-			sessionID, authorityID, metricKind,
+		metricProviderScopes = []string{
 			metricsNamespace(projector.spec.Resource, namespacePlan.metricNamespace),
-			key.labels,
-		)
+		}
+		if metricKind == metrics.PodMetrics && namespacePlan.exactFanIn {
+			// Each child is an ordinary namespace-keyed shared provider. This retains
+			// viewport-independent LIST efficiency for global metric sort/filter while
+			// never broadening an exact 2-8 namespace object stream to all namespaces.
+			metricProviderScopes = append([]string(nil), namespacePlan.apiNamespaces...)
+		}
+		var metricErr error
+		for _, metricNamespace := range metricProviderScopes {
+			var providerLease *metrics.ProviderLease
+			providerLease, metricErr = r.metrics.OpenMetrics(
+				sessionID, authorityID, metricKind, metricNamespace, key.labels,
+			)
+			if metricErr != nil {
+				break
+			}
+			metricProviderLeases = append(metricProviderLeases, providerLease)
+		}
 		if metricErr != nil {
+			closeMetricProviderLeases(metricProviderLeases)
+			metricProviderLeases = nil
 			// Optional metrics setup cannot fail the base resource view. The
 			// projector already renders request/limit or allocatable accounting
 			// with usage unavailable.
@@ -895,10 +916,8 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 				State: metrics.MeasurementUnavailable, Err: metricErr,
 			})
 			subscription.projector = projector
-		} else {
-			metricProviderLease = providerLease
-			defer metricProviderLease.Close()
 		}
+		defer closeMetricProviderLeases(metricProviderLeases)
 	} else if metricPlan.strategy == metricFetchPodObjects {
 		// The exact point cache is driven later by revision-pinned viewport
 		// interests, or by complete candidate coverage when metrics affect order
@@ -910,11 +929,11 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		subscription.projector = projector
 	}
 	if metricPlan.dependency.requiresCompleteCoverage() &&
-		(metricProviderLease != nil ||
+		(len(metricProviderLeases) != 0 ||
 			metricPlan.strategy == metricFetchPodObjects && subscription.podMetricResolver != nil) {
 		subscription.metricsReconciling = true
 	}
-	if metricProviderLease == nil {
+	if len(metricProviderLeases) == 0 {
 		projector = subscription.projector
 	}
 	var warmRows []*kmgrv1.ResourceRow
@@ -923,7 +942,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		// index happens outside Runtime.mu below.
 		warmRows = cachedProjection.rows
 	}
-	if usedWarmProjection && metricProviderLease != nil {
+	if usedWarmProjection && len(metricProviderLeases) != 0 {
 		// Metrics has an independent lifecycle from the raw resource store. The
 		// close-time capture already trimmed this immutable snapshot to visible
 		// UIDs, so seeding the catch-up projector remains O(1) on the warm Open
@@ -1094,7 +1113,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	entry.warmProjection = nil
 	entry.subscribers[subscription] = struct{}{}
 	r.views[streamKey] = subscription
-	var replacedMetrics *metrics.Subscription
+	var replacedMetrics metricSubscription
 	if replaced != nil {
 		replacedMetrics = replaced.retireLocked()
 	}
@@ -1121,8 +1140,8 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	// Enqueue the base projection before metrics can publish. Starting this
 	// goroutine after releasing the runtime lock also keeps a very fast metrics
 	// response from contending with the base LIST/WATCH setup.
-	if metricProviderLease != nil {
-		subscription.attachMetrics(metricProviderLease.Subscribe())
+	if len(metricProviderLeases) != 0 {
+		subscription.attachMetrics(subscribeMetricProviders(metricProviderScopes, metricProviderLeases))
 	}
 	if snapshotComplete && subscription.metricPlan.dependency.requiresCompleteCoverage() {
 		subscription.requestCompleteMetricCoverage()
@@ -2145,7 +2164,7 @@ type Subscription struct {
 	resource     *resourceRuntime
 	key          viewKey
 	metricPlan   metricViewPlan
-	metrics      *metrics.Subscription
+	metrics      metricSubscription
 	metricCancel context.CancelFunc
 
 	podMetricResolver     PodMetricResolver
@@ -2159,6 +2178,7 @@ type Subscription struct {
 	metricCoverageRunning bool
 	metricCoverageDirty   bool
 	metricCoverageTimer   *time.Timer
+	metricCoverageTimerID uint64
 	metricRefreshAfter    time.Time
 	metricRefreshPending  bool
 	metricsReconciling    bool
@@ -2321,7 +2341,7 @@ func (s *Subscription) Close() {
 	}
 }
 
-func (s *Subscription) attachMetrics(subscription *metrics.Subscription) {
+func (s *Subscription) attachMetrics(subscription metricSubscription) {
 	if subscription == nil {
 		return
 	}
@@ -2344,7 +2364,7 @@ func (s *Subscription) attachMetrics(subscription *metrics.Subscription) {
 	go s.receiveMetrics(ctx, subscription)
 }
 
-func (s *Subscription) receiveMetrics(ctx context.Context, subscription *metrics.Subscription) {
+func (s *Subscription) receiveMetrics(ctx context.Context, subscription metricSubscription) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -2644,7 +2664,7 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 			RowsVisible:            uint64(len(s.rows)),
 			LastSynchronizedUnixMs: batch.SynchronizedAt.UnixMilli(),
 		})
-		s.requireCompleteMetricCoverageLocked()
+		s.requireCompleteMetricCoverageLocked(true)
 		s.markReconciledLocked()
 	}
 	s.signalLocked(batch.FromList)
@@ -2705,7 +2725,7 @@ func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
 		s.projectionResnapshot = true
 	}
 	if s.snapshotComplete && (len(batch.Upserts) != 0 || len(batch.RemovedUIDs) != 0) {
-		s.requireCompleteMetricCoverageLocked()
+		s.requireCompleteMetricCoverageLocked(false)
 	}
 	if presentationChanged {
 		s.advancePresentationLocked(true)
@@ -3311,7 +3331,7 @@ func (s *Subscription) close() {
 // Subscription.mu. It returns the metrics subscription so provider teardown,
 // which takes an unrelated mutex, can happen after all lifecycle locks are
 // released.
-func (s *Subscription) retireLocked() *metrics.Subscription {
+func (s *Subscription) retireLocked() metricSubscription {
 	if s.closed {
 		return nil
 	}
@@ -3330,10 +3350,7 @@ func (s *Subscription) retireLocked() *metrics.Subscription {
 		s.metricInterestStop()
 		s.metricInterestStop = nil
 	}
-	if s.metricCoverageTimer != nil {
-		s.metricCoverageTimer.Stop()
-		s.metricCoverageTimer = nil
-	}
+	s.stopCompletePodMetricCoverageTimerLocked()
 	metricSubscription := s.metrics
 	s.metrics = nil
 	if s.timer != nil {
