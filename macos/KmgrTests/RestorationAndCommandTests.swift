@@ -11,7 +11,6 @@ import Testing
         namespaceScope: .namespace("payments"),
         filter: "name:api",
         sort: [SortDescriptorState(columnID: "name", ascending: true)],
-        columns: [ColumnPresentationState(columnID: "name", width: 240)],
         scrollAnchor: ScrollAnchor(uid: "uid-1", pixelOffsetFromTop: 6, priorRowIndex: 12)
     )
 
@@ -24,6 +23,7 @@ import Testing
     #expect(json.contains(secretSentinel) == false)
     #expect(json.contains("rawObject") == false)
     #expect(json.contains("rows") == false)
+    #expect(json.contains("columns") == false)
 }
 
 @Test func sensitiveBytesCanBeReplacedWithoutExposingStorage() {

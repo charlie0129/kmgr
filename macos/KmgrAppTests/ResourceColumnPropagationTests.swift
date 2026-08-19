@@ -113,14 +113,14 @@ struct ResourceColumnPropagationTests {
     @Test("pending column moves remain bounded for valid restoration")
     func pendingColumnMoveHistoryIsBounded() {
         var presentation = DeferredColumnPresentationState(columns: [], sort: [])
-        for index in 0...ClusterWindowRestorationState.maximumColumns {
+        for index in 0...DeferredColumnPresentationState.maximumMoveCount {
             presentation.recordColumnMove(ColumnMoveState(
                 columnID: "name",
                 targetIndex: index % 2
             ))
         }
 
-        #expect(presentation.columnMoves.count == ClusterWindowRestorationState.maximumColumns)
+        #expect(presentation.columnMoves.count == DeferredColumnPresentationState.maximumMoveCount)
         #expect(presentation.columnMoves.first?.targetIndex == 1)
         #expect(presentation.columnMoves.last?.targetIndex == 0)
 
@@ -129,7 +129,7 @@ struct ResourceColumnPropagationTests {
         #expect(
             oversizedTarget.columnMoves == [ColumnMoveState(
                 columnID: "name",
-                targetIndex: ClusterWindowRestorationState.maximumColumns - 1
+                targetIndex: DeferredColumnPresentationState.maximumMoveCount - 1
             )]
         )
     }
@@ -411,11 +411,7 @@ struct ResourceColumnPropagationTests {
         let restoration = ClusterWindowRestorationState(
             contextName: "restored-columns",
             gvr: GVR(group: "", version: "v1", resource: "pods"),
-            sort: [SortDescriptorState(columnID: "restored-custom", ascending: false)],
-            columns: [
-                ColumnPresentationState(columnID: "restored-custom", width: 333),
-                ColumnPresentationState(columnID: "name", width: 777),
-            ]
+            sort: [SortDescriptorState(columnID: "restored-custom", ascending: false)]
         )
         let provider = ColumnPropagationWorkspaceProvider(resource: pods)
         let workspace = makeWorkspace(
@@ -492,11 +488,8 @@ struct ResourceColumnPropagationTests {
         table.dataSource?.tableView?(table, sortDescriptorsDidChange: oldSort)
 
         try await waitUntil {
-            checkpoint?.state.columns.isEmpty == true
-                && checkpoint?.state.columnMoveOverrides == nil
-                && checkpoint?.state.columnMeasurementOverrides == nil
-                && checkpoint?.state.sort.first
-                    == SortDescriptorState(columnID: "name", ascending: false)
+            checkpoint?.state.sort.first
+                == SortDescriptorState(columnID: "name", ascending: false)
         }
         loader.complete(
             attempt: 1,
@@ -577,11 +570,8 @@ struct ResourceColumnPropagationTests {
         table.sortDescriptors = [NSSortDescriptor(key: "name", ascending: false)]
         table.dataSource?.tableView?(table, sortDescriptorsDidChange: oldSort)
         try await waitUntil {
-            checkpoint?.state.columns.isEmpty == true
-                && checkpoint?.state.columnMoveOverrides == nil
-                && checkpoint?.state.columnMeasurementOverrides == nil
-                && checkpoint?.state.sort.first
-                    == SortDescriptorState(columnID: "name", ascending: false)
+            checkpoint?.state.sort.first
+                == SortDescriptorState(columnID: "name", ascending: false)
         }
 
         loader.complete(
@@ -689,9 +679,8 @@ struct ResourceColumnPropagationTests {
                 && provider.streamRequests.last?.resource.resource == "pods"
                 && checkpoint?.state.gvr?.resource == "pods"
         }
-        #expect(checkpoint?.state.columns.isEmpty == true)
-        #expect(checkpoint?.state.columnMoveOverrides == nil)
-        #expect(checkpoint?.state.columnMeasurementOverrides == nil)
+        let encodedCheckpoint = try JSONEncoder().encode(checkpoint?.state)
+        #expect(!String(decoding: encodedCheckpoint, as: UTF8.self).contains("columns"))
 
         let outline = try #require(resourceOutline(in: workspace))
         let nodesRow = try #require((0..<outline.numberOfRows).first(where: {
@@ -1198,11 +1187,7 @@ private func restoredColumnPresentationState() -> ClusterWindowRestorationState 
     ClusterWindowRestorationState(
         contextName: "restored-columns",
         gvr: GVR(group: "", version: "v1", resource: "pods"),
-        sort: [SortDescriptorState(columnID: "restored-custom", ascending: false)],
-        columns: [
-            ColumnPresentationState(columnID: "restored-custom", width: 333),
-            ColumnPresentationState(columnID: "name", width: 777),
-        ]
+        sort: [SortDescriptorState(columnID: "restored-custom", ascending: false)]
     )
 }
 

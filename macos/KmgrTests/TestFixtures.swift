@@ -51,9 +51,6 @@ extension ClusterWindowRestorationState {
         namespaceScope: NamespaceScope = .all,
         filter: String = "",
         sort: [SortDescriptorState] = [],
-        columns: [ColumnPresentationState] = [],
-        columnMoveOverrides: [ColumnMoveState]? = nil,
-        columnMeasurementOverrides: [ColumnPresentationState]? = nil,
         isSidebarVisible: Bool = true,
         scrollAnchor: ScrollAnchor? = nil
     ) {
@@ -64,9 +61,6 @@ extension ClusterWindowRestorationState {
             namespaceScope: namespaceScope,
             filter: filter,
             sort: sort,
-            columns: columns,
-            columnMoveOverrides: columnMoveOverrides,
-            columnMeasurementOverrides: columnMeasurementOverrides,
             isSidebarVisible: isSidebarVisible,
             scrollAnchor: scrollAnchor
         )

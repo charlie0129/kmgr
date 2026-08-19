@@ -127,6 +127,94 @@ struct ApplicationWindowPresentationTests {
         }?.stringValue.contains("unsupported version") == true)
     }
 
+    @Test("a fresh workspace copies the exact-context bookmark frame once")
+    func freshWorkspaceSeedsIndependentFrame() throws {
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-bookmark-frame-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+        let bookmarkFrameName = "ClusterWorkspaceBookmark-test-\(UUID().uuidString)"
+        NSWindow.removeFrame(usingName: bookmarkFrameName)
+        defer { NSWindow.removeFrame(usingName: bookmarkFrameName) }
+        let state = bookmarkState(filter: "name:remembered")
+
+        let source = makeColumnPropagationWorkspace(
+            session: bookmarkSession(),
+            provider: BookmarkWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restorationState: state
+        )
+        let sourceWindow = try #require(source.window)
+        let rememberedFrame = sourceWindow.frame.offsetBy(dx: 43, dy: -31)
+        sourceWindow.setFrame(rememberedFrame, display: false)
+        sourceWindow.saveFrame(usingName: bookmarkFrameName)
+        sourceWindow.setFrameAutosaveName("")
+        source.close()
+
+        let fresh = makeColumnPropagationWorkspace(
+            session: bookmarkSession(sessionID: "bookmark-session-2"),
+            provider: BookmarkWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restorationState: state,
+            seedFrameAutosaveName: bookmarkFrameName
+        )
+        let freshWindow = try #require(fresh.window)
+        defer {
+            freshWindow.setFrameAutosaveName("")
+            fresh.close()
+        }
+
+        #expect(freshWindow.frame == rememberedFrame)
+        #expect(freshWindow.frameAutosaveName != bookmarkFrameName)
+    }
+
+    @Test("activation checkpoints carry exact context and frame changes debounce")
+    func activationAndFrameCheckpointPolicy() async throws {
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-bookmark-callbacks-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+        let controller = makeColumnPropagationWorkspace(
+            session: bookmarkSession(),
+            provider: BookmarkStalledWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restorationState: bookmarkState(filter: "name:active")
+        )
+        let window = try #require(controller.window)
+        var activations: [ClusterWindowRestorationRecord] = []
+        var frameCheckpoints: [ClusterWindowRestorationRecord] = []
+        controller.onActivationCheckpoint = { activations.append($0) }
+        controller.onFrameCheckpoint = { frameCheckpoints.append($0) }
+        controller.showWindow(nil)
+        window.orderOut(nil)
+        activations.removeAll(keepingCapacity: true)
+
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        #expect(activations.count == 1)
+        #expect(activations.first?.state.contextReference == bookmarkSession().contextReference)
+        #expect(activations.first?.state.filter == "name:active")
+
+        controller.windowDidMove(Notification(
+            name: NSWindow.didMoveNotification,
+            object: window
+        ))
+        controller.windowDidMove(Notification(
+            name: NSWindow.didMoveNotification,
+            object: window
+        ))
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(frameCheckpoints.count == 1)
+
+        controller.onActivationCheckpoint = nil
+        controller.onFrameCheckpoint = nil
+        window.setFrameAutosaveName("")
+        controller.close()
+    }
+
     private func policy(
         terminating: Bool = false,
         workspaces: Int = 0,
@@ -143,6 +231,61 @@ struct ApplicationWindowPresentationTests {
         )
     }
 }
+}
+
+private func bookmarkSession(
+    sessionID: String = "bookmark-session"
+) -> OpenedClusterSession {
+    OpenedClusterSession(
+        sessionID: sessionID,
+        contextName: "shared",
+        clusterName: "cluster",
+        serverHostname: "example.invalid",
+        defaultNamespace: "default",
+        contextReference: "/configs/a.yaml#shared"
+    )
+}
+
+private func bookmarkState(filter: String) -> ClusterWindowRestorationState {
+    ClusterWindowRestorationState(
+        contextName: "shared",
+        contextReference: "/configs/a.yaml#shared",
+        gvr: GVR(group: "", version: "v1", resource: "pods"),
+        namespaceScope: .namespace("team-a"),
+        filter: filter
+    )
+}
+
+private struct BookmarkWorkspaceProvider: WorkspaceResourceProviding {
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult { .init(resources: []) }
+    func listNamespaces(sessionID: String) async throws -> [String] { [] }
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+private struct BookmarkStalledWorkspaceProvider: WorkspaceResourceProviding {
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult {
+        try await Task.sleep(for: .seconds(30))
+        return .init(resources: [])
+    }
+    func listNamespaces(sessionID: String) async throws -> [String] { [] }
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+private struct BookmarkOptionalResourceProvider: OptionalResourceCatalogProviding {
+    func discoverOptionalResources(_ request: OptionalResourceCatalogRequest) async throws
+        -> OptionalResourceCatalog { throw CancellationError() }
 }
 
 @MainActor

@@ -14,7 +14,26 @@ struct ResourceColumnsRequest {
     var apply: @MainActor ([ColumnDefinition]) -> Void
 }
 
+struct ColumnPresentationState: Hashable {
+    var columnID: String
+    var width: Double
+    var isVisible: Bool
+
+    init(columnID: String, width: Double, isVisible: Bool = true) {
+        self.columnID = columnID
+        self.width = width
+        self.isVisible = isVisible
+    }
+}
+
+struct ColumnMoveState: Hashable {
+    var columnID: String
+    var targetIndex: Int
+}
+
 struct DeferredColumnPresentationState {
+    static let maximumMoveCount = 256
+
     var columns: [ColumnPresentationState]
     var sort: [SortDescriptorState]
     var columnMoves: [ColumnMoveState] = []
@@ -24,14 +43,14 @@ struct DeferredColumnPresentationState {
         var boundedMove = move
         boundedMove.targetIndex = min(
             max(move.targetIndex, 0),
-            ClusterWindowRestorationState.maximumColumns - 1
+            Self.maximumMoveCount - 1
         )
         columnMoves.append(boundedMove)
-        let overflow = columnMoves.count - ClusterWindowRestorationState.maximumColumns
+        let overflow = columnMoves.count - Self.maximumMoveCount
         if overflow > 0 {
             // A configuration load normally lasts milliseconds. If it remains
             // unavailable across hundreds of gestures, retain the newest
-            // restoration-safe operations instead of invalidating checkpoints.
+            // bounded operations instead of growing pending UI state forever.
             columnMoves.removeFirst(overflow)
         }
     }
@@ -72,6 +91,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onOpenLogWindow: ((LogWindowController) -> Void)?
     var onOpenTerminalWindow: ((TerminalWindowController) -> Void)?
     var onRestorationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
+    var onActivationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
+    var onFrameCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
     var contextualShortcutsDidChange: (() -> Void)?
 
     var contextualShortcutSnapshot: ContextualShortcutSnapshot? {
@@ -105,6 +126,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var resourceMutationController: ResourceMutationWindowController?
     private var yamlSnapshotWindowControllers: [ResourceUID: YAMLSnapshotWindowController] = [:]
     private var didStartWorkspace = false
+    private var frameCheckpointTask: Task<Void, Never>?
 
     init(
         session: OpenedClusterSession,
@@ -131,6 +153,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             $0.isKeyWindow
         },
         restoration: ClusterWindowRestorationRecord,
+        seedFrameAutosaveName: String? = nil,
         startsAuthenticated: Bool = true,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
@@ -162,6 +185,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         window.minSize = NSSize(width: 820, height: 520)
         window.tabbingMode = .disallowed
         window.center()
+        if let seedFrameAutosaveName {
+            window.setFrameUsingName(seedFrameAutosaveName)
+        }
         window.setFrameAutosaveName(restoration.frameAutosaveName)
 
         workspaceController = ClusterWorkspaceViewController(
@@ -298,7 +324,41 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         resourceMutationController = nil
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        restoration.state = workspaceController.restorationState()
+        onActivationCheckpoint?(restoration)
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        scheduleFrameCheckpoint()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        scheduleFrameCheckpoint()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        scheduleFrameCheckpoint()
+    }
+
+    private func scheduleFrameCheckpoint() {
+        frameCheckpointTask?.cancel()
+        frameCheckpointTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            frameCheckpointTask = nil
+            restoration.state = workspaceController.restorationState()
+            onFrameCheckpoint?(restoration)
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
+        frameCheckpointTask?.cancel()
+        frameCheckpointTask = nil
         logOpenRevision &+= 1
         logOpenTask?.cancel()
         logOpenTask = nil
@@ -311,6 +371,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.stop()
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
+        onFrameCheckpoint?(restoration)
         if isAuthenticated {
             Task { [provider, session] in
                 await provider.closeSession(sessionID: session.sessionID)
@@ -847,7 +908,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     func restorationState() -> ClusterWindowRestorationState {
-        contentController.restorationState(
+        // Discovery applies a saved target asynchronously. Until that handoff
+        // completes, checkpoint the known saved state instead of replacing it
+        // with the still-empty resource controller presentation.
+        if var pendingRestorationState {
+            pendingRestorationState.contextName = session.contextName
+            pendingRestorationState.contextReference = session.contextReference
+            return pendingRestorationState
+        }
+        return contentController.restorationState(
             contextName: session.contextName,
             contextReference: session.contextReference,
             isSidebarVisible: !splitViewItems[0].isCollapsed
@@ -4830,9 +4899,6 @@ private final class ResourceListViewController: NSViewController,
             filter: filterField.stringValue,
             sortColumnID: sort.first?.columnID,
             sortDescending: !(sort.first?.ascending ?? true),
-            // Exact-GVR order and widths live only in columns.yaml. History
-            // retains navigation and sort, never a competing window layout.
-            columns: [],
             selectedUIDs: model.selectedUIDs,
             scrollAnchor: captureUpdate().scrollAnchor
         )
@@ -4855,7 +4921,6 @@ private final class ResourceListViewController: NSViewController,
             namespaceScope: NamespaceScope(scope),
             filter: filterField.stringValue,
             sort: sorts,
-            columns: [],
             isSidebarVisible: isSidebarVisible,
             scrollAnchor: captureUpdate().scrollAnchor
         )
@@ -4892,7 +4957,6 @@ private final class ResourceListViewController: NSViewController,
             namespaceSelection: scope, filter: restoration.filter,
             sortColumnID: restoration.sort.first?.columnID,
             sortDescending: !(restoration.sort.first?.ascending ?? true),
-            columns: [],
             scrollAnchor: restoration.scrollAnchor
         )
         history = WorkspaceNavigationHistory(initial: .resource(nav))

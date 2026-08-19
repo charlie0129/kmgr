@@ -31,9 +31,6 @@ public struct ResourceNavigationState: Hashable, Codable, Sendable {
     public var filter: String
     public var sortColumnID: String?
     public var sortDescending: Bool
-    public var columns: [ColumnPresentationState]
-    public var columnMoveOverrides: [ColumnMoveState]?
-    public var columnMeasurementOverrides: [ColumnPresentationState]?
     public var selectedUIDs: Set<ResourceUID>
     public var scrollAnchor: ScrollAnchor?
 
@@ -47,9 +44,6 @@ public struct ResourceNavigationState: Hashable, Codable, Sendable {
         filter: String = "",
         sortColumnID: String? = nil,
         sortDescending: Bool = false,
-        columns: [ColumnPresentationState] = [],
-        columnMoveOverrides: [ColumnMoveState]? = nil,
-        columnMeasurementOverrides: [ColumnPresentationState]? = nil,
         selectedUIDs: Set<ResourceUID> = [],
         scrollAnchor: ScrollAnchor? = nil
     ) {
@@ -62,9 +56,6 @@ public struct ResourceNavigationState: Hashable, Codable, Sendable {
         self.filter = filter
         self.sortColumnID = sortColumnID
         self.sortDescending = sortDescending
-        self.columns = columns
-        self.columnMoveOverrides = columnMoveOverrides
-        self.columnMeasurementOverrides = columnMeasurementOverrides
         self.selectedUIDs = selectedUIDs
         self.scrollAnchor = scrollAnchor
     }

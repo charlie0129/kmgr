@@ -14,18 +14,6 @@ import Testing
             namespaceScope: .namespaces(["api", "workers"]),
             filter: "status == 'Ready'",
             sort: [SortDescriptorState(columnID: "restarts", ascending: false)],
-            columns: [
-                ColumnPresentationState(columnID: "name", width: 280),
-                ColumnPresentationState(columnID: "restarts", width: 90, isVisible: false),
-            ],
-            columnMoveOverrides: [
-                ColumnMoveState(columnID: "restarts", targetIndex: 0),
-                ColumnMoveState(columnID: "name", targetIndex: 1),
-                ColumnMoveState(columnID: "restarts", targetIndex: 1),
-            ],
-            columnMeasurementOverrides: [
-                ColumnPresentationState(columnID: "name", width: 333),
-            ],
             isSidebarVisible: false,
             scrollAnchor: ScrollAnchor(
                 uid: "deployment-uid", pixelOffsetFromTop: 7.5, priorRowIndex: 9_000
@@ -112,6 +100,7 @@ import Testing
     storage.defaults.set(try JSONSerialization.data(withJSONObject: [
         "apiVersion": "kmgr.workspace-restoration/v99",
         "windows": [],
+        "bookmarks": [],
     ]), forKey: WorkspaceRestorationStore.storageKey)
     store = WorkspaceRestorationStore(defaults: storage.defaults)
     #expect(store.windows.isEmpty)
@@ -119,28 +108,95 @@ import Testing
 
     let invalidState = ClusterWindowRestorationState(
         contextName: "local",
-        columns: [ColumnPresentationState(columnID: "name", width: .infinity)]
+        filter: String(repeating: "x", count: ClusterWindowRestorationState.maximumFilterBytes + 1)
     )
     #expect(throws: RestorationValidationError.self) {
         try store.upsert(ClusterWindowRestorationRecord(id: "window", state: invalidState))
     }
 
-    let invalidOverrides = ClusterWindowRestorationState(
+    let invalidSort = ClusterWindowRestorationState(
         contextName: "local",
-        columnMoveOverrides: [
-            ColumnMoveState(columnID: "", targetIndex: 0),
-            ColumnMoveState(columnID: "name", targetIndex: 256),
-        ],
-        columnMeasurementOverrides: [
-            ColumnPresentationState(columnID: "name", width: 10),
-            ColumnPresentationState(columnID: "name", width: 120),
+        sort: [
+            SortDescriptorState(columnID: "name", ascending: true),
+            SortDescriptorState(columnID: "name", ascending: false),
         ]
     )
-    let invalidPaths = Set(invalidOverrides.validationIssues().map(\.path))
-    #expect(invalidPaths.contains("columnMoveOverrides[0].columnID"))
-    #expect(invalidPaths.contains("columnMoveOverrides[1].targetIndex"))
-    #expect(invalidPaths.contains("columnMeasurementOverrides"))
-    #expect(invalidPaths.contains("columnMeasurementOverrides[0].width"))
+    #expect(invalidSort.validationIssues().contains { $0.path == "sort" })
+}
+
+@MainActor
+@Test func contextBookmarksUseExactOpaqueReferenceAndMostRecentActivation() throws {
+    let storage = try restorationDefaults()
+    defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
+    let store = WorkspaceRestorationStore(defaults: storage.defaults)
+    let referenceA = "/configs/a.yaml#shared"
+    let referenceB = "/configs/b.yaml#shared"
+    let firstA = ClusterWindowRestorationRecord(
+        id: "window-a1",
+        state: ClusterWindowRestorationState(
+            contextName: "shared", contextReference: referenceA,
+            filter: "name:first"
+        )
+    )
+    let secondA = ClusterWindowRestorationRecord(
+        id: "window-a2",
+        state: ClusterWindowRestorationState(
+            contextName: "shared", contextReference: referenceA,
+            filter: "name:second"
+        )
+    )
+    let onlyB = ClusterWindowRestorationRecord(
+        id: "window-b",
+        state: ClusterWindowRestorationState(
+            contextName: "shared", contextReference: referenceB,
+            filter: "name:other-file"
+        )
+    )
+
+    let firstBookmark = try store.activate(firstA)
+    try store.upsert(secondA)
+    #expect(store.bookmark(for: referenceA)?.state.filter == "name:first")
+    let secondBookmark = try store.activate(secondA)
+    #expect(secondBookmark.id == firstBookmark.id)
+    #expect(store.bookmark(for: referenceA)?.state.filter == "name:second")
+    var updatedSecond = secondA
+    updatedSecond.state.filter = "name:active-update"
+    try store.upsert(updatedSecond)
+    #expect(store.bookmark(for: referenceA)?.state.filter == "name:active-update")
+    _ = try store.activate(onlyB)
+    #expect(store.bookmark(for: referenceB)?.state.filter == "name:other-file")
+    #expect(store.bookmarks.count == 2)
+    #expect(store.bookmark(for: referenceA)?.frameAutosaveName
+        != store.bookmark(for: referenceB)?.frameAutosaveName)
+
+    var backgroundFirst = firstA
+    backgroundFirst.state.filter = "background-update"
+    try store.upsert(backgroundFirst)
+    #expect(store.bookmark(for: referenceA)?.state.filter == "name:active-update")
+
+    try store.remove(id: secondA.id)
+    #expect(store.record(for: secondA.id) == nil)
+    #expect(store.bookmark(for: referenceA)?.sourceWindowID == secondA.id)
+    #expect(store.bookmark(for: referenceA)?.state.filter == "name:active-update")
+
+    let reloaded = WorkspaceRestorationStore(defaults: storage.defaults)
+    #expect(reloaded.bookmark(for: referenceA) == store.bookmark(for: referenceA))
+    #expect(reloaded.bookmark(for: referenceB) == store.bookmark(for: referenceB))
+}
+
+@MainActor
+@Test func disablingOpenWindowRestorationKeepsContextBookmarks() throws {
+    let storage = try restorationDefaults()
+    defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
+    let store = WorkspaceRestorationStore(defaults: storage.defaults)
+    let record = ClusterWindowRestorationRecord(id: "window", contextName: "local")
+    _ = try store.activate(record)
+
+    try store.removeAllOpenWindows()
+
+    #expect(store.windows.isEmpty)
+    #expect(store.bookmark(for: record.state.contextReference)?.state == record.state)
+    #expect(WorkspaceRestorationStore(defaults: storage.defaults).bookmarks == store.bookmarks)
 }
 
 @MainActor
@@ -154,7 +210,7 @@ import Testing
         "raw-row-json-sentinel",
     ]
     let store = WorkspaceRestorationStore(defaults: storage.defaults)
-    try store.upsert(ClusterWindowRestorationRecord(
+    _ = try store.activate(ClusterWindowRestorationRecord(
         id: "window",
         state: ClusterWindowRestorationState(
             contextName: "production",

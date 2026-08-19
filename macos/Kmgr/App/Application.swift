@@ -308,15 +308,24 @@ final class Application: NSObject, NSApplicationDelegate {
             guard let self else { return }
             let initialNamespace = preferencesStore.current.defaultNamespace
                 .initialSelection(contextDefaultNamespace: session.defaultNamespace)
+            let bookmark = restorationStore.bookmark(
+                for: session.contextReference
+            )
+            var initialState = bookmark?.state ?? ClusterWindowRestorationState(
+                contextName: session.contextName,
+                contextReference: session.contextReference,
+                namespaceScope: NamespaceScope(initialNamespace)
+            )
+            // The opaque reference is the identity. The display name may have
+            // changed in the kubeconfig since this bookmark was recorded.
+            initialState.contextName = session.contextName
+            initialState.contextReference = session.contextReference
             _ = openWorkspace(
                 for: session,
                 restoration: ClusterWindowRestorationRecord(
-                    state: ClusterWindowRestorationState(
-                        contextName: session.contextName,
-                        contextReference: session.contextReference,
-                        namespaceScope: NamespaceScope(initialNamespace)
-                    )
-                )
+                    state: initialState
+                ),
+                seedFrameAutosaveName: bookmark?.frameAutosaveName
             )
         }
         controller.onClose = { [weak self] in
@@ -328,6 +337,8 @@ final class Application: NSObject, NSApplicationDelegate {
     private func openWorkspace(
         for session: OpenedClusterSession,
         restoration: ClusterWindowRestorationRecord,
+        seedFrameAutosaveName: String? = nil,
+        activatesContextBookmarkOnOpen: Bool = true,
         startsAuthenticated: Bool = true
     ) -> ClusterWorkspaceWindowController {
         let controller = ClusterWorkspaceWindowController(
@@ -351,6 +362,7 @@ final class Application: NSObject, NSApplicationDelegate {
                 self?.preferencesStore.current.confirmations ?? ConfirmationPreferences()
             },
             restoration: restoration,
+            seedFrameAutosaveName: seedFrameAutosaveName,
             startsAuthenticated: startsAuthenticated,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
@@ -358,10 +370,12 @@ final class Application: NSObject, NSApplicationDelegate {
         )
         let identifier = ObjectIdentifier(controller)
         workspaceControllers[identifier] = controller
-        controller.onClose = { [weak self] in
+        controller.onClose = { [weak self, weak controller] in
             guard let self else { return }
             if !isTerminating {
+                controller?.window?.setFrameAutosaveName("")
                 try? restorationStore.remove(id: restoration.id)
+                NSWindow.removeFrame(usingName: restoration.frameAutosaveName)
             }
             columnsManagerControllers.removeValue(forKey: identifier)?.close()
             workspaceRecoveryTasks.removeValue(forKey: identifier)?.cancel()
@@ -398,6 +412,29 @@ final class Application: NSObject, NSApplicationDelegate {
         try? restorationStore.upsert(restoration)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+        // Initial AppKit activation can precede asynchronous resource
+        // restoration. Publish the known opening state explicitly, then
+        // observe only later user-driven activations.
+        if activatesContextBookmarkOnOpen,
+            let bookmark = try? restorationStore.activate(restoration)
+        {
+            controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+        }
+        controller.onActivationCheckpoint = { [weak self, weak controller] record in
+            guard let self, !isTerminating, let controller,
+                let bookmark = try? restorationStore.activate(record)
+            else { return }
+            controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+        }
+        controller.onFrameCheckpoint = { [weak self, weak controller] record in
+            guard let self, let controller,
+                let bookmark = restorationStore.bookmark(
+                    for: record.state.contextReference
+                ),
+                bookmark.sourceWindowID == record.id
+            else { return }
+            controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+        }
         return controller
     }
 
@@ -406,7 +443,7 @@ final class Application: NSObject, NSApplicationDelegate {
             // A skipped document describes windows from a process that no
             // longer exists. Consume it now so re-enabling restoration later
             // cannot resurrect an older launch's workspace set.
-            restorationStore.reset()
+            try? restorationStore.removeAllOpenWindows()
             showClusterManager()
             return
         }
@@ -417,6 +454,7 @@ final class Application: NSObject, NSApplicationDelegate {
             let controller = openWorkspace(
                 for: shell.session,
                 restoration: record,
+                activatesContextBookmarkOnOpen: false,
                 startsAuthenticated: false
             )
             let identifier = ObjectIdentifier(controller)

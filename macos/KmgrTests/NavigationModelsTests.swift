@@ -8,10 +8,6 @@ import Testing
         filter: "status:running",
         sortColumnID: "restarts",
         sortDescending: true,
-        columns: [
-            ColumnPresentationState(columnID: "name", width: 310),
-            ColumnPresentationState(columnID: "restarts", width: 88, isVisible: false),
-        ],
         selectedUIDs: ["pod-uid"],
         scrollAnchor: ScrollAnchor(uid: "pod-uid", pixelOffsetFromTop: 7, priorRowIndex: 1_200)
     )
@@ -28,15 +24,11 @@ import Testing
     #expect(history.goForward() == .resource(nodes))
 }
 
-@Test func objectHistoryReturnsToExactTablePresentation() {
+@Test func objectHistoryReturnsToExactResourceNavigation() {
     let table = ResourceNavigationState(
         group: "", version: "v1", resource: "pods", kind: "Pod",
         namespaceSelection: .namespace("team-a"), filter: "name:api",
         sortColumnID: "restarts", sortDescending: true,
-        columns: [
-            ColumnPresentationState(columnID: "name", width: 333),
-            ColumnPresentationState(columnID: "status", width: 120, isVisible: false),
-        ],
         selectedUIDs: ["pod-uid"],
         scrollAnchor: ScrollAnchor(uid: "pod-uid", pixelOffsetFromTop: 4, priorRowIndex: 50)
     )

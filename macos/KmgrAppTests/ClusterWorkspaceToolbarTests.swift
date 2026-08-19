@@ -1993,7 +1993,8 @@ func makeColumnPropagationWorkspace(
     columnsConfigurationPath: String,
     columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
     columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
-    restorationState: ClusterWindowRestorationState? = nil
+    restorationState: ClusterWindowRestorationState? = nil,
+    seedFrameAutosaveName: String? = nil
 ) -> ClusterWorkspaceWindowController {
     let portForwards = PortForwardCoordinator(provider: NoopPortForwardProvider())
     let restoration = restorationState.map {
@@ -2023,6 +2024,7 @@ func makeColumnPropagationWorkspace(
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },
         restoration: restoration,
+        seedFrameAutosaveName: seedFrameAutosaveName,
         onShowPortForwards: {}
     )
 }
