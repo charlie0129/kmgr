@@ -20,6 +20,7 @@ import (
 const DefaultConnectionProbeTimeout = 8 * time.Second
 
 const connectionActivitySampleInterval = 500 * time.Millisecond
+const operationActivitySampleInterval = 500 * time.Millisecond
 
 // SessionProber makes the explicit connection action independently testable.
 // Implementations must honor the supplied context.
@@ -142,6 +143,114 @@ func (s *ClusterService) WatchConnection(
 				return err
 			}
 		}
+	}
+}
+
+func (s *ClusterService) WatchOperations(
+	request *kmgrv1.WatchOperationsRequest,
+	stream grpc.ServerStreamingServer[kmgrv1.ClusterOperationBatch],
+) error {
+	if request == nil {
+		return status.Error(codes.InvalidArgument, "request is required")
+	}
+	requestContext, cancel, err := validateRequestContext(stream.Context(), request.GetContext(), true)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	if request.GetStreamId() == "" {
+		return status.Error(codes.InvalidArgument, "stream ID is required")
+	}
+	session, lease, ok := s.sessions.Acquire(request.GetContext().GetClusterSessionId())
+	if !ok {
+		return status.Error(codes.NotFound, "cluster session was not found")
+	}
+	defer lease.Release()
+	activity := session.APIActivity()
+	generation := s.streamGeneration.Add(1)
+	sequence := uint64(0)
+	completionCursor := uint64(0)
+	send := func(force bool) error {
+		snapshot := activity.OperationActivitySnapshot(completionCursor)
+		if !force && len(snapshot.Active) == 0 && len(snapshot.Completed) == 0 {
+			return nil
+		}
+		active := make([]*kmgrv1.KubernetesAPIOperation, 0, len(snapshot.Active))
+		for _, operation := range snapshot.Active {
+			active = append(active, apiOperationProto(operation))
+		}
+		completed := make([]*kmgrv1.KubernetesAPIOperation, 0, len(snapshot.Completed))
+		for _, operation := range snapshot.Completed {
+			completed = append(completed, apiOperationProto(operation))
+		}
+		sequence++
+		if err := stream.Send(&kmgrv1.ClusterOperationBatch{
+			Cursor: &kmgrv1.StreamCursor{
+				StreamId: request.GetStreamId(), Generation: generation, Sequence: sequence,
+			},
+			Active:           active,
+			Completed:        completed,
+			DroppedCompleted: snapshot.DroppedCompleted,
+		}); err != nil {
+			return err
+		}
+		completionCursor = snapshot.CompletionCursor
+		return nil
+	}
+	if err := send(true); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(operationActivitySampleInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-requestContext.Done():
+			return contextStatus(requestContext.Err())
+		case <-s.stopping:
+			return nil
+		case <-ticker.C:
+			if err := send(false); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func apiOperationProto(operation cluster.APIOperationSnapshot) *kmgrv1.KubernetesAPIOperation {
+	return &kmgrv1.KubernetesAPIOperation{
+		Id:                  operation.ID,
+		State:               apiOperationStateProto(operation.State),
+		Operation:           operation.Operation,
+		Group:               operation.Group,
+		Version:             operation.Version,
+		Resource:            operation.Resource,
+		Namespace:           operation.Namespace,
+		Name:                operation.Name,
+		Subresource:         operation.Subresource,
+		HttpStatusCode:      operation.HTTPStatusCode,
+		BytesReceived:       operation.BytesReceived,
+		BytesSent:           operation.BytesSent,
+		StartedAtUnixNanos:  operation.StartedAtUnixNanos,
+		FinishedAtUnixNanos: operation.FinishedAtUnixNanos,
+	}
+}
+
+func apiOperationStateProto(
+	state cluster.APIOperationState,
+) kmgrv1.KubernetesAPIOperationState {
+	switch state {
+	case cluster.APIOperationStateActive:
+		return kmgrv1.KubernetesAPIOperationState_KUBERNETES_API_OPERATION_STATE_ACTIVE
+	case cluster.APIOperationStateFinished:
+		return kmgrv1.KubernetesAPIOperationState_KUBERNETES_API_OPERATION_STATE_FINISHED
+	case cluster.APIOperationStateFailed:
+		return kmgrv1.KubernetesAPIOperationState_KUBERNETES_API_OPERATION_STATE_FAILED
+	case cluster.APIOperationStateCancelled:
+		return kmgrv1.KubernetesAPIOperationState_KUBERNETES_API_OPERATION_STATE_CANCELLED
+	case cluster.APIOperationStateTimedOut:
+		return kmgrv1.KubernetesAPIOperationState_KUBERNETES_API_OPERATION_STATE_TIMED_OUT
+	default:
+		return kmgrv1.KubernetesAPIOperationState_KUBERNETES_API_OPERATION_STATE_UNSPECIFIED
 	}
 }
 

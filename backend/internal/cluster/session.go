@@ -97,9 +97,12 @@ type activityRoundTripper struct {
 }
 
 func (t *activityRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	operation := t.activity.beginOperation(request)
 	if request != nil && request.Body != nil {
 		request = request.Clone(request.Context())
-		request.Body = &activityReadCloser{ReadCloser: request.Body, activity: t.activity, sent: true}
+		request.Body = &activityReadCloser{
+			ReadCloser: request.Body, activity: t.activity, operation: operation, sent: true,
+		}
 		if request.GetBody != nil {
 			getBody := request.GetBody
 			request.GetBody = func() (io.ReadCloser, error) {
@@ -107,7 +110,9 @@ func (t *activityRoundTripper) RoundTrip(request *http.Request) (*http.Response,
 				if err != nil {
 					return nil, err
 				}
-				return &activityReadCloser{ReadCloser: body, activity: t.activity, sent: true}, nil
+				return &activityReadCloser{
+					ReadCloser: body, activity: t.activity, operation: operation, sent: true,
+				}, nil
 			}
 		}
 	}
@@ -116,17 +121,26 @@ func (t *activityRoundTripper) RoundTrip(request *http.Request) (*http.Response,
 	if response != nil {
 		statusCode = response.StatusCode
 	}
+	operation.setHTTPStatus(statusCode)
 	t.activity.ObserveRoundTrip(statusCode, err)
-	if response != nil && response.Body != nil {
-		response.Body = &activityReadCloser{ReadCloser: response.Body, activity: t.activity}
+	if err != nil {
+		operation.complete(err)
+	} else if response != nil && response.Body != nil {
+		response.Body = &activityReadCloser{
+			ReadCloser: response.Body, activity: t.activity, operation: operation, response: true,
+		}
+	} else {
+		operation.complete(nil)
 	}
 	return response, err
 }
 
 type activityReadCloser struct {
 	io.ReadCloser
-	activity *APIActivity
-	sent     bool
+	activity  *APIActivity
+	operation *trackedAPIOperation
+	sent      bool
+	response  bool
 }
 
 func (r *activityReadCloser) Read(buffer []byte) (int, error) {
@@ -134,11 +148,24 @@ func (r *activityReadCloser) Read(buffer []byte) (int, error) {
 	if count > 0 {
 		if r.sent {
 			r.activity.AddSent(uint64(count))
+			r.operation.addSent(uint64(count))
 		} else {
 			r.activity.AddReceived(uint64(count))
+			r.operation.addReceived(uint64(count))
 		}
 	}
+	if r.response && err != nil {
+		r.operation.complete(err)
+	}
 	return count, err
+}
+
+func (r *activityReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	if r.response {
+		r.operation.complete(err)
+	}
+	return err
 }
 
 func closeHTTPClient(client *http.Client) {

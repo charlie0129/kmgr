@@ -12,6 +12,7 @@ service ClusterService {
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
   rpc CloseSession(CloseSessionRequest) returns (Acknowledgement);
   rpc WatchConnection(WatchConnectionRequest) returns (stream ConnectionEvent);
+  rpc WatchOperations(WatchOperationsRequest) returns (stream ClusterOperationBatch);
   rpc Discover(DiscoverRequest) returns (DiscoverResponse);
   rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
 }
@@ -111,6 +112,50 @@ message WarmCacheUsage {
   uint64 evictable_views = 8;
   uint64 evictable_objects = 9;
   uint64 evictable_bytes = 10;
+}
+
+message WatchOperationsRequest {
+  RequestContext context = 1;
+  string stream_id = 2;
+}
+
+enum KubernetesAPIOperationState {
+  KUBERNETES_API_OPERATION_STATE_UNSPECIFIED = 0;
+  KUBERNETES_API_OPERATION_STATE_ACTIVE = 1;
+  KUBERNETES_API_OPERATION_STATE_FINISHED = 2;
+  KUBERNETES_API_OPERATION_STATE_FAILED = 3;
+  KUBERNETES_API_OPERATION_STATE_CANCELLED = 4;
+  KUBERNETES_API_OPERATION_STATE_TIMED_OUT = 5;
+}
+
+// Redacted metadata for one Kubernetes HTTP operation. Query strings,
+// selectors, headers, bodies, credentials, raw URLs, and raw error strings
+// never enter this message.
+message KubernetesAPIOperation {
+  uint64 id = 1;
+  KubernetesAPIOperationState state = 2;
+  string operation = 3;
+  string group = 4;
+  string version = 5;
+  string resource = 6;
+  string namespace = 7;
+  string name = 8;
+  string subresource = 9;
+  int32 http_status_code = 10;
+  uint64 bytes_received = 11;
+  uint64 bytes_sent = 12;
+  int64 started_at_unix_nanos = 13;
+  int64 finished_at_unix_nanos = 14;
+}
+
+// active is a replacement snapshot; completed contains only records completed
+// since the preceding batch. This keeps IPC bounded by active work and new
+// completions instead of retransmitting the retained GUI history.
+message ClusterOperationBatch {
+  StreamCursor cursor = 1;
+  repeated KubernetesAPIOperation active = 2;
+  repeated KubernetesAPIOperation completed = 3;
+  uint64 dropped_completed = 4;
 }
 
 message DiscoverRequest {

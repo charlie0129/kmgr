@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"net/http"
+	"sync"
 	"sync/atomic"
 )
 
@@ -27,6 +28,12 @@ type APIActivity struct {
 	sent     atomic.Uint64
 	health   atomic.Uint32
 	warm     atomic.Pointer[warmCacheActivitySnapshot]
+
+	operationSequence   atomic.Uint64
+	operationsMu        sync.RWMutex
+	activeOperations    map[uint64]*trackedAPIOperation
+	completedOperations apiOperationCompletionRing
+	completionSequence  uint64
 }
 
 type APIActivitySnapshot struct {

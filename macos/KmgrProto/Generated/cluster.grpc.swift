@@ -72,6 +72,19 @@ public enum Kmgr_V1_ClusterService: Sendable {
                 type: .serverStreaming
             )
         }
+        /// Namespace for "WatchOperations" metadata.
+        public enum WatchOperations: Sendable {
+            /// Request type for "WatchOperations".
+            public typealias Input = Kmgr_V1_WatchOperationsRequest
+            /// Response type for "WatchOperations".
+            public typealias Output = Kmgr_V1_ClusterOperationBatch
+            /// Descriptor for "WatchOperations".
+            public static let descriptor = GRPCCore.MethodDescriptor(
+                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ClusterService"),
+                method: "WatchOperations",
+                type: .serverStreaming
+            )
+        }
         /// Namespace for "Discover" metadata.
         public enum Discover: Sendable {
             /// Request type for "Discover".
@@ -104,6 +117,7 @@ public enum Kmgr_V1_ClusterService: Sendable {
             OpenSession.descriptor,
             CloseSession.descriptor,
             WatchConnection.descriptor,
+            WatchOperations.descriptor,
             Discover.descriptor,
             ListNamespaces.descriptor
         ]
@@ -199,6 +213,25 @@ extension Kmgr_V1_ClusterService {
             deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ConnectionEvent>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_ConnectionEvent>) async throws -> Result
+        ) async throws -> Result where Result: Sendable
+
+        /// Call the "WatchOperations" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_WatchOperationsRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_WatchOperationsRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_ClusterOperationBatch` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        func watchOperations<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_WatchOperationsRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_WatchOperationsRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ClusterOperationBatch>,
+            options: GRPCCore.CallOptions,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_ClusterOperationBatch>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "Discover" method.
@@ -374,6 +407,34 @@ extension Kmgr_V1_ClusterService {
             )
         }
 
+        /// Call the "WatchOperations" method.
+        ///
+        /// - Parameters:
+        ///   - request: A request containing a single `Kmgr_V1_WatchOperationsRequest` message.
+        ///   - serializer: A serializer for `Kmgr_V1_WatchOperationsRequest` messages.
+        ///   - deserializer: A deserializer for `Kmgr_V1_ClusterOperationBatch` messages.
+        ///   - options: Options to apply to this RPC.
+        ///   - handleResponse: A closure which handles the response, the result of which is
+        ///       returned to the caller. Returning from the closure will cancel the RPC if it
+        ///       hasn't already finished.
+        /// - Returns: The result of `handleResponse`.
+        public func watchOperations<Result>(
+            request: GRPCCore.ClientRequest<Kmgr_V1_WatchOperationsRequest>,
+            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_WatchOperationsRequest>,
+            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ClusterOperationBatch>,
+            options: GRPCCore.CallOptions = .defaults,
+            onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_ClusterOperationBatch>) async throws -> Result
+        ) async throws -> Result where Result: Sendable {
+            try await self.client.serverStreaming(
+                request: request,
+                descriptor: Kmgr_V1_ClusterService.Method.WatchOperations.descriptor,
+                serializer: serializer,
+                deserializer: deserializer,
+                options: options,
+                onResponse: handleResponse
+            )
+        }
+
         /// Call the "Discover" method.
         ///
         /// - Parameters:
@@ -532,6 +593,29 @@ extension Kmgr_V1_ClusterService.ClientProtocol {
             request: request,
             serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_WatchConnectionRequest>(),
             deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_ConnectionEvent>(),
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "WatchOperations" method.
+    ///
+    /// - Parameters:
+    ///   - request: A request containing a single `Kmgr_V1_WatchOperationsRequest` message.
+    ///   - options: Options to apply to this RPC.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func watchOperations<Result>(
+        request: GRPCCore.ClientRequest<Kmgr_V1_WatchOperationsRequest>,
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_ClusterOperationBatch>) async throws -> Result
+    ) async throws -> Result where Result: Sendable {
+        try await self.watchOperations(
+            request: request,
+            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_WatchOperationsRequest>(),
+            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_ClusterOperationBatch>(),
             options: options,
             onResponse: handleResponse
         )
@@ -699,6 +783,33 @@ extension Kmgr_V1_ClusterService.ClientProtocol {
             metadata: metadata
         )
         return try await self.watchConnection(
+            request: request,
+            options: options,
+            onResponse: handleResponse
+        )
+    }
+
+    /// Call the "WatchOperations" method.
+    ///
+    /// - Parameters:
+    ///   - message: request message to send.
+    ///   - metadata: Additional metadata to send, defaults to empty.
+    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
+    ///   - handleResponse: A closure which handles the response, the result of which is
+    ///       returned to the caller. Returning from the closure will cancel the RPC if it
+    ///       hasn't already finished.
+    /// - Returns: The result of `handleResponse`.
+    public func watchOperations<Result>(
+        _ message: Kmgr_V1_WatchOperationsRequest,
+        metadata: GRPCCore.Metadata = [:],
+        options: GRPCCore.CallOptions = .defaults,
+        onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_ClusterOperationBatch>) async throws -> Result
+    ) async throws -> Result where Result: Sendable {
+        let request = GRPCCore.ClientRequest<Kmgr_V1_WatchOperationsRequest>(
+            message: message,
+            metadata: metadata
+        )
+        return try await self.watchOperations(
             request: request,
             options: options,
             onResponse: handleResponse

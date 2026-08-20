@@ -604,6 +604,90 @@ func TestWatchConnectionValidatesRequest(t *testing.T) {
 	}
 }
 
+func TestWatchOperationsEmitsIncrementalRedactedCompletions(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"kind":"PodList","items":[]}`))
+	}))
+	defer server.Close()
+	catalog := serviceProbeCatalog(t, server.URL, "private-token")
+	sessions := cluster.NewSessionRegistry(&recordingDefaultServiceFactory{})
+	t.Cleanup(sessions.CloseAll)
+	session, err := sessions.Open(catalog, serviceContextID(t, catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewClusterService(ClusterServiceOptions{Sessions: sessions})
+	streamContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := newOperationTestStream(streamContext)
+	result := make(chan error, 1)
+	go func() {
+		result <- service.WatchOperations(&kmgrv1.WatchOperationsRequest{
+			Context: &kmgrv1.RequestContext{
+				RequestId: "operations", ClusterSessionId: session.ID(),
+			},
+			StreamId: "operation-stream",
+		}, stream)
+	}()
+	stream.waitForCount(t, 1)
+	initial := stream.snapshot()[0]
+	if cursor := initial.GetCursor(); cursor.GetStreamId() != "operation-stream" ||
+		cursor.GetGeneration() == 0 || cursor.GetSequence() != 1 {
+		t.Fatalf("initial cursor = %#v", cursor)
+	}
+
+	if _, err := session.Discovery().RESTClient().Get().
+		AbsPath("/api/v1/namespaces/default/pods").
+		Param("labelSelector", "do-not-retain-this").
+		SetHeader("X-Private", "private-token").
+		DoRaw(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stream.waitForCount(t, 2)
+	batch := stream.snapshot()[1]
+	if batch.GetCursor().GetSequence() != 2 || len(batch.GetCompleted()) != 1 {
+		t.Fatalf("operation batch = %#v", batch)
+	}
+	operation := batch.GetCompleted()[0]
+	if operation.GetState() != kmgrv1.KubernetesAPIOperationState_KUBERNETES_API_OPERATION_STATE_FINISHED ||
+		operation.GetOperation() != "LIST" || operation.GetNamespace() != "default" ||
+		operation.GetResource() != "pods" || operation.GetHttpStatusCode() != http.StatusOK ||
+		operation.GetBytesReceived() == 0 || operation.GetStartedAtUnixNanos() == 0 ||
+		operation.GetFinishedAtUnixNanos() < operation.GetStartedAtUnixNanos() {
+		t.Fatalf("completed operation = %#v", operation)
+	}
+	if strings.Contains(batch.String(), "do-not-retain-this") ||
+		strings.Contains(batch.String(), "private-token") {
+		t.Fatalf("operation batch exposed request secrets: %s", batch.String())
+	}
+	cancel()
+	if err := <-result; status.Code(err) != codes.Canceled {
+		t.Fatalf("WatchOperations cancellation = %v", err)
+	}
+}
+
+func TestWatchOperationsValidatesRequest(t *testing.T) {
+	t.Parallel()
+	service := NewClusterService(ClusterServiceOptions{})
+	stream := newOperationTestStream(context.Background())
+	if err := service.WatchOperations(nil, stream); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("nil request = %v", err)
+	}
+	if err := service.WatchOperations(&kmgrv1.WatchOperationsRequest{
+		Context: requestContext("operations"),
+	}, stream); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("missing stream ID = %v", err)
+	}
+	if err := service.WatchOperations(&kmgrv1.WatchOperationsRequest{
+		Context:  &kmgrv1.RequestContext{RequestId: "request", ClusterSessionId: "missing"},
+		StreamId: "operations",
+	}, stream); status.Code(err) != codes.NotFound {
+		t.Fatalf("missing session = %v", err)
+	}
+}
+
 type connectionTestStream struct {
 	ctx    context.Context
 	mu     sync.Mutex
@@ -647,6 +731,50 @@ func (s *connectionTestStream) waitForCount(t *testing.T, count int) {
 }
 
 var _ grpc.ServerStreamingServer[kmgrv1.ConnectionEvent] = (*connectionTestStream)(nil)
+
+type operationTestStream struct {
+	ctx     context.Context
+	mu      sync.Mutex
+	batches []*kmgrv1.ClusterOperationBatch
+}
+
+func newOperationTestStream(ctx context.Context) *operationTestStream {
+	return &operationTestStream{ctx: ctx}
+}
+
+func (s *operationTestStream) Send(batch *kmgrv1.ClusterOperationBatch) error {
+	s.mu.Lock()
+	s.batches = append(s.batches, batch)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *operationTestStream) SetHeader(metadata.MD) error  { return nil }
+func (s *operationTestStream) SendHeader(metadata.MD) error { return nil }
+func (s *operationTestStream) SetTrailer(metadata.MD)       {}
+func (s *operationTestStream) Context() context.Context     { return s.ctx }
+func (s *operationTestStream) SendMsg(any) error            { return errors.New("unexpected SendMsg") }
+func (s *operationTestStream) RecvMsg(any) error            { return errors.New("unexpected RecvMsg") }
+
+func (s *operationTestStream) snapshot() []*kmgrv1.ClusterOperationBatch {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*kmgrv1.ClusterOperationBatch(nil), s.batches...)
+}
+
+func (s *operationTestStream) waitForCount(t *testing.T, count int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(s.snapshot()) >= count {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("stream received %d batches, want at least %d", len(s.snapshot()), count)
+}
+
+var _ grpc.ServerStreamingServer[kmgrv1.ClusterOperationBatch] = (*operationTestStream)(nil)
 
 func TestConnectionErrorDoesNotExposeUnderlyingMessage(t *testing.T) {
 	t.Parallel()

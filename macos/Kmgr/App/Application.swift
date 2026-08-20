@@ -13,6 +13,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let clusterContextProvider: any ClusterContextProviding
     private let workspaceResourceProvider: any WorkspaceResourceProviding
     private let clusterConnectionActivityProvider: any ClusterConnectionActivityProviding
+    private let clusterOperationHistoryProvider: any ClusterOperationHistoryProviding
     private let optionalResourceCatalogProvider: any OptionalResourceCatalogProviding
     private let columnPreviewProvider: any ColumnPreviewProviding
     private let objectSearchProvider: any ObjectSearchProviding
@@ -84,6 +85,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.clusterConnectionActivityProvider = EngineClusterConnectionActivityProvider(
             connection: supervisor.connection
         )
+        self.clusterOperationHistoryProvider = EngineClusterOperationHistoryProvider(
+            connection: supervisor.connection
+        )
         self.optionalResourceCatalogProvider = EngineOptionalResourceCatalogProvider(
             connection: supervisor.connection
         )
@@ -123,6 +127,13 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 let configuration = LogDisplayConfiguration(preferences: preferences.logs)
                 for controller in logWindowControllers.values {
                     controller.applyDisplayConfiguration(configuration)
+                }
+            }
+            if delta.contains(.operationHistory) {
+                for controller in workspaceControllers.values {
+                    controller.applyOperationHistoryLimit(
+                        preferences.diagnostics.completedOperationHistoryLimit
+                    )
                 }
             }
         }
@@ -366,6 +377,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             session: session,
             provider: workspaceResourceProvider,
             connectionActivityProvider: clusterConnectionActivityProvider,
+            operationHistoryProvider: clusterOperationHistoryProvider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             objectSearchProvider: objectSearchProvider,
             objectDetailProvider: objectDetailProvider,
@@ -384,6 +396,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             logDisplayConfiguration: LogDisplayConfiguration(
                 preferences: preferencesStore.current.logs
             ),
+            operationHistoryCompletedLimit: preferencesStore.current.diagnostics
+                .completedOperationHistoryLimit,
             confirmationPreferences: { [weak self] in
                 self?.preferencesStore.current.confirmations ?? ConfirmationPreferences()
             },

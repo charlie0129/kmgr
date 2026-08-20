@@ -140,6 +140,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         session: OpenedClusterSession,
         provider: any WorkspaceResourceProviding,
         connectionActivityProvider: any ClusterConnectionActivityProviding,
+        operationHistoryProvider: (any ClusterOperationHistoryProviding)? = nil,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
@@ -157,6 +158,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             NSEvent.pressedMouseButtons == 0
         },
         logDisplayConfiguration: LogDisplayConfiguration,
+        operationHistoryCompletedLimit: Int = 2_000,
         confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
         namespacePickerPresenter: @escaping NamespacePickerPresenter = { control, sender in
             control.performClick(sender)
@@ -207,12 +209,14 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             isAuthenticated: startsAuthenticated,
             provider: provider,
             connectionActivityProvider: connectionActivityProvider,
+            operationHistoryProvider: operationHistoryProvider,
             optionalResourceCatalogProvider: optionalResourceCatalogProvider,
             objectSearchProvider: objectSearchProvider,
             objectDetailProvider: objectDetailProvider,
             recentObjectStore: recentObjectStore,
             portForwards: portForwards,
             tableLayoutStore: self.tableLayoutStore,
+            operationHistoryCompletedLimit: operationHistoryCompletedLimit,
             columnsConfigurationPath: columnsConfigurationPath,
             columnConfigurationCoordinator: columnConfigurationCoordinator
                 ?? ColumnConfigurationCoordinator(path: columnsConfigurationPath),
@@ -318,6 +322,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         matching match: ColumnResourceMatch
     ) -> Bool {
         workspaceController.applySavedColumns(definitions, matching: match)
+    }
+
+    func applyOperationHistoryLimit(_ limit: Int) {
+        workspaceController.applyOperationHistoryLimit(limit)
     }
 
     private func dismissTransientOperationsForEngineRecovery() {
@@ -741,6 +749,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var isAuthenticated: Bool
     private let provider: any WorkspaceResourceProviding
     private let connectionActivityProvider: any ClusterConnectionActivityProviding
+    private let operationHistoryProvider: (any ClusterOperationHistoryProviding)?
     private let objectSearchProvider: any ObjectSearchProviding
     private let objectDetailProvider: any ObjectDetailProviding
     private let recentObjectStore: RecentObjectStore
@@ -755,8 +764,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let connectionActivityView: ClusterConnectionActivityView
     private let rightPaneController: WorkspaceRightPaneViewController
     private let connectionActivityStreamID = UUID().uuidString.lowercased()
+    private let operationHistoryStreamID = UUID().uuidString.lowercased()
     private var connectionActivityTask: Task<Void, Never>?
+    private var operationHistoryTask: Task<Void, Never>?
     private var connectionActivityGate = GenerationSequenceGate()
+    private var operationHistoryGate = GenerationSequenceGate()
+    private let operationHistoryStore: ClusterOperationHistoryStore
+    private var operationHistoryWindowController: ClusterOperationHistoryWindowController?
+    private var operationHistoryIsWatching = false
+    private var operationHistoryStreamIssue: UserFacingErrorPresentation?
     private var connectionRateTracker = ClusterConnectionRateTracker()
     private var displayedWarmCacheUsage: DisplayedWarmCacheUsage?
     private let forwardsButton = NSButton(title: "Forwards 0", target: nil, action: nil)
@@ -802,12 +818,14 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         isAuthenticated: Bool,
         provider: any WorkspaceResourceProviding,
         connectionActivityProvider: any ClusterConnectionActivityProviding,
+        operationHistoryProvider: (any ClusterOperationHistoryProviding)?,
         optionalResourceCatalogProvider: any OptionalResourceCatalogProviding,
         objectSearchProvider: any ObjectSearchProviding,
         objectDetailProvider: any ObjectDetailProviding,
         recentObjectStore: RecentObjectStore,
         portForwards: PortForwardCoordinator,
         tableLayoutStore: TableLayoutStore,
+        operationHistoryCompletedLimit: Int,
         columnsConfigurationPath: String,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
@@ -821,11 +839,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.isAuthenticated = isAuthenticated
         self.provider = provider
         self.connectionActivityProvider = connectionActivityProvider
+        self.operationHistoryProvider = operationHistoryProvider
         self.objectSearchProvider = objectSearchProvider
         self.objectDetailProvider = objectDetailProvider
         self.recentObjectStore = recentObjectStore
         self.portForwards = portForwards
         self.tableLayoutStore = tableLayoutStore
+        self.operationHistoryStore = ClusterOperationHistoryStore(
+            completedLimit: operationHistoryCompletedLimit
+        )
         self.namespacePickerPresenter = namespacePickerPresenter
         self.namespacePickerKeyWindowCheck = namespacePickerKeyWindowCheck
         self.onShowPortForwards = onShowPortForwards
@@ -852,6 +874,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             tableColumnMutationAllowed: tableColumnMutationAllowed
         )
         super.init(nibName: nil, bundle: nil)
+        connectionActivityView.onActivate = { [weak self] in
+            self?.showOperationHistory()
+        }
 
         bindStatusPublisher(contentController)
         rightPaneController.setContent(
@@ -954,6 +979,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         pendingRestorationState = state
         connectionActivityView.setState(.connected)
         startConnectionActivityWatch()
+        startOperationHistoryWatch()
         sidebarController.start { [weak self] result in
             guard let self else { return }
             guard case .success(let resources) = result else { return }
@@ -1015,8 +1041,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.engineDidDisconnect()
         connectionActivityTask?.cancel()
         connectionActivityTask = nil
+        operationHistoryTask?.cancel()
+        operationHistoryTask = nil
         resetWarmCacheStatus()
         connectionActivityView.setState(.reconnecting, detail: message)
+        setOperationHistoryStreamState(watching: false, error: ClusterManagerIssue(
+            category: .unavailable,
+            reason: "EngineDisconnected",
+            message: message,
+            retryable: true,
+            operation: "watch Kubernetes API operations"
+        ))
     }
 
     func engineRecoveryFailed(_ error: Error) {
@@ -1047,6 +1082,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         session = recoveredSession
         isAuthenticated = true
         startConnectionActivityWatch()
+        startOperationHistoryWatch(reset: true)
         Task { [recentObjectStore] in
             await recentObjectStore.rebind(
                 from: previousSessionID,
@@ -1194,9 +1230,122 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
     }
 
+    private func startOperationHistoryWatch(reset: Bool = false) {
+        operationHistoryTask?.cancel()
+        operationHistoryGate.reset()
+        guard let operationHistoryProvider else {
+            setOperationHistoryStreamState(watching: false, error: ClusterManagerIssue(
+                category: .unavailable,
+                reason: "OperationHistoryUnavailable",
+                message: "Kubernetes API operation history is unavailable.",
+                operation: "watch Kubernetes API operations"
+            ))
+            return
+        }
+        setOperationHistoryStreamState(watching: true)
+        let sessionID = session.sessionID
+        let streamID = operationHistoryStreamID
+        let store = operationHistoryStore
+        operationHistoryTask = Task { [weak self, operationHistoryProvider] in
+            if reset {
+                await store.reset()
+                guard !Task.isCancelled, let self,
+                    self.session.sessionID == sessionID
+                else { return }
+                operationHistoryWindowController?.clearForNewSession()
+                operationHistoryWindowController?.updateSession(session)
+            }
+            do {
+                for try await batch in operationHistoryProvider.watchOperations(
+                    sessionID: sessionID,
+                    streamID: streamID
+                ) {
+                    guard !Task.isCancelled, let self,
+                        self.session.sessionID == sessionID
+                    else { return }
+                    let disposition = operationHistoryGate.accept(batch.cursor)
+                    guard disposition == .acceptedNewGeneration
+                        || disposition == .acceptedNextSequence
+                    else { continue }
+                    let change = await store.apply(batch)
+                    guard !Task.isCancelled, self.session.sessionID == sessionID else { return }
+                    setOperationHistoryStreamState(watching: true)
+                    operationHistoryWindowController?.apply(change)
+                }
+                guard !Task.isCancelled, let self,
+                    self.session.sessionID == sessionID
+                else { return }
+                setOperationHistoryStreamState(watching: false, error: ClusterManagerIssue(
+                    category: .unavailable,
+                    reason: "OperationHistoryWatchStopped",
+                    message: "The Kubernetes API operation-history watch stopped.",
+                    retryable: true,
+                    operation: "watch Kubernetes API operations"
+                ))
+            } catch {
+                guard !Task.isCancelled, let self,
+                    self.session.sessionID == sessionID
+                else { return }
+                setOperationHistoryStreamState(watching: false, error: error)
+            }
+        }
+    }
+
+    private func showOperationHistory() {
+        let controller: ClusterOperationHistoryWindowController
+        if let existing = operationHistoryWindowController {
+            controller = existing
+            controller.updateSession(session)
+        } else {
+            controller = ClusterOperationHistoryWindowController(
+                session: session,
+                tableLayoutStore: tableLayoutStore
+            )
+            operationHistoryWindowController = controller
+        }
+        controller.showWindow(nil)
+        controller.setStreamState(
+            watching: operationHistoryIsWatching,
+            issue: operationHistoryStreamIssue
+        )
+        let sessionID = session.sessionID
+        Task { [weak self, weak controller, operationHistoryStore] in
+            let snapshot = await operationHistoryStore.snapshot()
+            guard !Task.isCancelled, let self, let controller,
+                self.session.sessionID == sessionID,
+                self.operationHistoryWindowController === controller
+            else { return }
+            controller.install(snapshot)
+        }
+    }
+
+    func applyOperationHistoryLimit(_ limit: Int) {
+        Task { [weak self, operationHistoryStore] in
+            let change = await operationHistoryStore.setCompletedLimit(limit)
+            guard !Task.isCancelled, let self else { return }
+            operationHistoryWindowController?.apply(change)
+        }
+    }
+
+    private func setOperationHistoryStreamState(
+        watching: Bool,
+        error: Error? = nil
+    ) {
+        operationHistoryIsWatching = watching
+        operationHistoryStreamIssue = error.map(UserFacingErrorPresentation.init)
+        operationHistoryWindowController?.setStreamState(
+            watching: watching,
+            issue: operationHistoryStreamIssue
+        )
+    }
+
     func stop() {
         connectionActivityTask?.cancel()
         connectionActivityTask = nil
+        operationHistoryTask?.cancel()
+        operationHistoryTask = nil
+        operationHistoryWindowController?.close()
+        operationHistoryWindowController = nil
         resetWarmCacheStatus()
         namespaceTask?.cancel()
         palettePresentationTask?.cancel()

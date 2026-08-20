@@ -74,6 +74,56 @@ public enum Kmgr_V1_ConnectionState: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
+public enum Kmgr_V1_KubernetesAPIOperationState: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case active // = 1
+  case finished // = 2
+  case failed // = 3
+  case cancelled // = 4
+  case timedOut // = 5
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .active
+    case 2: self = .finished
+    case 3: self = .failed
+    case 4: self = .cancelled
+    case 5: self = .timedOut
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .active: return 1
+    case .finished: return 2
+    case .failed: return 3
+    case .cancelled: return 4
+    case .timedOut: return 5
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Kmgr_V1_KubernetesAPIOperationState] = [
+    .unspecified,
+    .active,
+    .finished,
+    .failed,
+    .cancelled,
+    .timedOut,
+  ]
+
+}
+
 public struct Kmgr_V1_KubeconfigContext: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -377,6 +427,100 @@ public struct Kmgr_V1_WarmCacheUsage: Sendable {
   public init() {}
 }
 
+public struct Kmgr_V1_WatchOperationsRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var context: Kmgr_V1_RequestContext {
+    get {return _context ?? Kmgr_V1_RequestContext()}
+    set {_context = newValue}
+  }
+  /// Returns true if `context` has been explicitly set.
+  public var hasContext: Bool {return self._context != nil}
+  /// Clears the value of `context`. Subsequent reads from it will return its default value.
+  public mutating func clearContext() {self._context = nil}
+
+  public var streamID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _context: Kmgr_V1_RequestContext? = nil
+}
+
+/// Redacted metadata for one Kubernetes HTTP operation. Query strings,
+/// selectors, headers, bodies, credentials, raw URLs, and raw error strings
+/// never enter this message.
+public struct Kmgr_V1_KubernetesAPIOperation: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var id: UInt64 = 0
+
+  public var state: Kmgr_V1_KubernetesAPIOperationState = .unspecified
+
+  public var operation: String = String()
+
+  public var group: String = String()
+
+  public var version: String = String()
+
+  public var resource: String = String()
+
+  public var namespace: String = String()
+
+  public var name: String = String()
+
+  public var subresource: String = String()
+
+  public var httpStatusCode: Int32 = 0
+
+  public var bytesReceived: UInt64 = 0
+
+  public var bytesSent: UInt64 = 0
+
+  public var startedAtUnixNanos: Int64 = 0
+
+  public var finishedAtUnixNanos: Int64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// active is a replacement snapshot; completed contains only records completed
+/// since the preceding batch. This keeps IPC bounded by active work and new
+/// completions instead of retransmitting the retained GUI history.
+public struct Kmgr_V1_ClusterOperationBatch: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var cursor: Kmgr_V1_StreamCursor {
+    get {return _cursor ?? Kmgr_V1_StreamCursor()}
+    set {_cursor = newValue}
+  }
+  /// Returns true if `cursor` has been explicitly set.
+  public var hasCursor: Bool {return self._cursor != nil}
+  /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
+  public mutating func clearCursor() {self._cursor = nil}
+
+  public var active: [Kmgr_V1_KubernetesAPIOperation] = []
+
+  public var completed: [Kmgr_V1_KubernetesAPIOperation] = []
+
+  public var droppedCompleted: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _cursor: Kmgr_V1_StreamCursor? = nil
+}
+
 public struct Kmgr_V1_DiscoverRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -523,6 +667,10 @@ fileprivate let _protobuf_package = "kmgr.v1"
 
 extension Kmgr_V1_ConnectionState: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CONNECTION_STATE_UNSPECIFIED\0\u{1}CONNECTION_STATE_CONNECTING\0\u{1}CONNECTION_STATE_CONNECTED\0\u{1}CONNECTION_STATE_RECONNECTING\0\u{1}CONNECTION_STATE_DISCONNECTED\0\u{1}CONNECTION_STATE_FAILED\0\u{1}CONNECTION_STATE_CLOSED\0")
+}
+
+extension Kmgr_V1_KubernetesAPIOperationState: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0KUBERNETES_API_OPERATION_STATE_UNSPECIFIED\0\u{1}KUBERNETES_API_OPERATION_STATE_ACTIVE\0\u{1}KUBERNETES_API_OPERATION_STATE_FINISHED\0\u{1}KUBERNETES_API_OPERATION_STATE_FAILED\0\u{1}KUBERNETES_API_OPERATION_STATE_CANCELLED\0\u{1}KUBERNETES_API_OPERATION_STATE_TIMED_OUT\0")
 }
 
 extension Kmgr_V1_KubeconfigContext: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -1067,6 +1215,189 @@ extension Kmgr_V1_WarmCacheUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if lhs.evictableViews != rhs.evictableViews {return false}
     if lhs.evictableObjects != rhs.evictableObjects {return false}
     if lhs.evictableBytes != rhs.evictableBytes {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_WatchOperationsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".WatchOperationsRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}stream_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.streamID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._context {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.streamID.isEmpty {
+      try visitor.visitSingularStringField(value: self.streamID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_WatchOperationsRequest, rhs: Kmgr_V1_WatchOperationsRequest) -> Bool {
+    if lhs._context != rhs._context {return false}
+    if lhs.streamID != rhs.streamID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_KubernetesAPIOperation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".KubernetesAPIOperation"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}state\0\u{1}operation\0\u{1}group\0\u{1}version\0\u{1}resource\0\u{1}namespace\0\u{1}name\0\u{1}subresource\0\u{3}http_status_code\0\u{3}bytes_received\0\u{3}bytes_sent\0\u{3}started_at_unix_nanos\0\u{3}finished_at_unix_nanos\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.state) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.operation) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.group) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.version) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.resource) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.namespace) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.subresource) }()
+      case 10: try { try decoder.decodeSingularInt32Field(value: &self.httpStatusCode) }()
+      case 11: try { try decoder.decodeSingularUInt64Field(value: &self.bytesReceived) }()
+      case 12: try { try decoder.decodeSingularUInt64Field(value: &self.bytesSent) }()
+      case 13: try { try decoder.decodeSingularInt64Field(value: &self.startedAtUnixNanos) }()
+      case 14: try { try decoder.decodeSingularInt64Field(value: &self.finishedAtUnixNanos) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.id != 0 {
+      try visitor.visitSingularUInt64Field(value: self.id, fieldNumber: 1)
+    }
+    if self.state != .unspecified {
+      try visitor.visitSingularEnumField(value: self.state, fieldNumber: 2)
+    }
+    if !self.operation.isEmpty {
+      try visitor.visitSingularStringField(value: self.operation, fieldNumber: 3)
+    }
+    if !self.group.isEmpty {
+      try visitor.visitSingularStringField(value: self.group, fieldNumber: 4)
+    }
+    if !self.version.isEmpty {
+      try visitor.visitSingularStringField(value: self.version, fieldNumber: 5)
+    }
+    if !self.resource.isEmpty {
+      try visitor.visitSingularStringField(value: self.resource, fieldNumber: 6)
+    }
+    if !self.namespace.isEmpty {
+      try visitor.visitSingularStringField(value: self.namespace, fieldNumber: 7)
+    }
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 8)
+    }
+    if !self.subresource.isEmpty {
+      try visitor.visitSingularStringField(value: self.subresource, fieldNumber: 9)
+    }
+    if self.httpStatusCode != 0 {
+      try visitor.visitSingularInt32Field(value: self.httpStatusCode, fieldNumber: 10)
+    }
+    if self.bytesReceived != 0 {
+      try visitor.visitSingularUInt64Field(value: self.bytesReceived, fieldNumber: 11)
+    }
+    if self.bytesSent != 0 {
+      try visitor.visitSingularUInt64Field(value: self.bytesSent, fieldNumber: 12)
+    }
+    if self.startedAtUnixNanos != 0 {
+      try visitor.visitSingularInt64Field(value: self.startedAtUnixNanos, fieldNumber: 13)
+    }
+    if self.finishedAtUnixNanos != 0 {
+      try visitor.visitSingularInt64Field(value: self.finishedAtUnixNanos, fieldNumber: 14)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_KubernetesAPIOperation, rhs: Kmgr_V1_KubernetesAPIOperation) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.state != rhs.state {return false}
+    if lhs.operation != rhs.operation {return false}
+    if lhs.group != rhs.group {return false}
+    if lhs.version != rhs.version {return false}
+    if lhs.resource != rhs.resource {return false}
+    if lhs.namespace != rhs.namespace {return false}
+    if lhs.name != rhs.name {return false}
+    if lhs.subresource != rhs.subresource {return false}
+    if lhs.httpStatusCode != rhs.httpStatusCode {return false}
+    if lhs.bytesReceived != rhs.bytesReceived {return false}
+    if lhs.bytesSent != rhs.bytesSent {return false}
+    if lhs.startedAtUnixNanos != rhs.startedAtUnixNanos {return false}
+    if lhs.finishedAtUnixNanos != rhs.finishedAtUnixNanos {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_ClusterOperationBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ClusterOperationBatch"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}active\0\u{1}completed\0\u{3}dropped_completed\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._cursor) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.active) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.completed) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.droppedCompleted) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._cursor {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.active.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.active, fieldNumber: 2)
+    }
+    if !self.completed.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.completed, fieldNumber: 3)
+    }
+    if self.droppedCompleted != 0 {
+      try visitor.visitSingularUInt64Field(value: self.droppedCompleted, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_ClusterOperationBatch, rhs: Kmgr_V1_ClusterOperationBatch) -> Bool {
+    if lhs._cursor != rhs._cursor {return false}
+    if lhs.active != rhs.active {return false}
+    if lhs.completed != rhs.completed {return false}
+    if lhs.droppedCompleted != rhs.droppedCompleted {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

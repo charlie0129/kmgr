@@ -12,6 +12,7 @@ public enum TableSurfaceID: String, CaseIterable, Codable, Hashable, Sendable {
     case columnsManager = "columns-manager"
     case nativeColumnPicker = "native-column-picker"
     case portForwards = "port-forwards"
+    case operationHistory = "operation-history"
     case deleteConfirmation = "delete-confirmation"
     case yamlDiffPaths = "yaml-diff-paths"
 }

@@ -282,6 +282,12 @@ struct ClusterWorkspaceToolbarTests {
         #expect(accessibilityValue?.contains("download active") == true)
         #expect(accessibilityValue?.contains("upload active") == true)
         #expect(rate.accessibilityLabel() == "Kubernetes API transfer rate")
+        #expect(view.accessibilityRole() == .button)
+        #expect(view.accessibilityLabel() == "Show Kubernetes API operation history")
+        var activated = false
+        view.onActivate = { activated = true }
+        #expect(view.accessibilityPerformPress())
+        #expect(activated)
 
         view.update(rate: ClusterConnectionRate(
             bytesReceivedPerSecond: Double(UInt64.max) * 2,
@@ -350,7 +356,7 @@ struct ClusterWorkspaceToolbarTests {
         let status = try #require(descendants(of: statusBar).compactMap { $0 as? NSTextField }
             .first { $0.identifier?.rawValue == "workspace-status-line" })
         let activity = try #require(descendants(of: statusBar).first {
-            $0.accessibilityLabel() == "Kubernetes API connection activity"
+            $0.identifier?.rawValue == "cluster-connection-activity"
         })
         statusBar.layoutSubtreeIfNeeded()
         let statusFrame = statusBar.convert(status.bounds, from: status)
@@ -360,6 +366,46 @@ struct ClusterWorkspaceToolbarTests {
         #expect(abs(statusFrame.midY - activityFrame.midY) < 2)
         #expect(abs(activityFrame.maxX - statusBar.bounds.maxX + 3) < 1)
         #expect(statusBar.fittingSize.height <= 24)
+    }
+
+    @Test("activating connection activity opens the live operation-history panel")
+    func connectionActivityOpensOperationHistory() async throws {
+        let record = ClusterOperationRecord(
+            id: 7,
+            state: .finished,
+            operation: "LIST",
+            resource: "pods",
+            namespace: "default",
+            httpStatusCode: 200,
+            bytesReceived: 1_024,
+            startedAtUnixNanos: 2_000_000_100,
+            finishedAtUnixNanos: 3_000_000_100
+        )
+        let controller = makeWorkspace(
+            operationHistoryProvider: StaticOperationHistoryProvider(completed: [record])
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let activity = try #require(descendants(of: root).first {
+            $0.identifier?.rawValue == "cluster-connection-activity"
+        } as? ClusterConnectionActivityView)
+
+        #expect(activity.accessibilityPerformPress())
+        try await waitUntil {
+            NSApp.windows.contains { window in
+                guard window.accessibilityLabel() == "Kubernetes API operation history",
+                    let root = window.contentView
+                else { return false }
+                return descendants(of: root).compactMap { $0 as? NSTableView }
+                    .first?.numberOfRows == 1
+            }
+        }
+        let panel = try #require(NSApp.windows.first {
+            $0.accessibilityLabel() == "Kubernetes API operation history"
+        } as? NSPanel)
+        #expect(panel.level == NSWindow.Level.floating)
+        #expect(panel.isFloatingPanel)
     }
 
     @Test("warm-cache telemetry appears in the persistent workspace status bar")
@@ -2119,7 +2165,7 @@ struct LazyWorkspaceRestorationTests {
         #expect(window.toolbar?.items.compactMap { $0.view as? NSPopUpButton }
             .first?.titleOfSelectedItem == "payments")
         let connection = descendants(of: root).first {
-            $0.accessibilityLabel() == "Kubernetes API connection activity"
+            $0.identifier?.rawValue == "cluster-connection-activity"
         }
         let connectionValue = connection?.accessibilityValue() as? String
         #expect(connectionValue?.contains("Reconnecting…") == true)
@@ -2326,7 +2372,7 @@ struct LazyWorkspaceRestorationTests {
             .compactMap { ($0 as? NSTextField)?.stringValue }
         #expect(values.contains { $0.contains("Authentication failed (401).") })
         let connection = descendants(of: try #require(originalWindow.contentView)).first {
-            $0.accessibilityLabel() == "Kubernetes API connection activity"
+            $0.identifier?.rawValue == "cluster-connection-activity"
         }
         let connectionValue = connection?.accessibilityValue() as? String
         #expect(connectionValue?.contains("Authentication failed (401).") == true)
@@ -2348,6 +2394,8 @@ private func makeWorkspace(
     provider: any WorkspaceResourceProviding = NoopWorkspaceResourceProvider(),
     connectionActivityProvider: any ClusterConnectionActivityProviding =
         NoopConnectionActivityProvider(),
+    operationHistoryProvider: any ClusterOperationHistoryProviding =
+        NoopOperationHistoryProvider(),
     logProvider: any LogStreamProviding = NoopLogProvider(),
     objectDetailProvider: any ObjectDetailProviding = NoopToolbarObjectDetailProvider(),
     execProvider: any ExecSessionProviding = NoopExecProvider(),
@@ -2368,6 +2416,7 @@ private func makeWorkspace(
         session: session,
         provider: provider,
         connectionActivityProvider: connectionActivityProvider,
+        operationHistoryProvider: operationHistoryProvider,
         optionalResourceCatalogProvider: NoopOptionalResourceCatalogProvider(),
         objectSearchProvider: NoopObjectSearchProvider(),
         objectDetailProvider: objectDetailProvider,
@@ -3653,6 +3702,29 @@ private struct StaticConnectionActivityProvider: ClusterConnectionActivityProvid
         -> AsyncThrowingStream<ClusterConnectionActivitySample, Error> {
         AsyncThrowingStream {
             $0.yield(sample)
+            $0.finish()
+        }
+    }
+}
+
+private struct NoopOperationHistoryProvider: ClusterOperationHistoryProviding {
+    func watchOperations(sessionID: String, streamID: String)
+        -> AsyncThrowingStream<ClusterOperationBatch, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+}
+
+private struct StaticOperationHistoryProvider: ClusterOperationHistoryProviding {
+    let completed: [ClusterOperationRecord]
+
+    func watchOperations(sessionID: String, streamID: String)
+        -> AsyncThrowingStream<ClusterOperationBatch, Error> {
+        AsyncThrowingStream {
+            $0.yield(ClusterOperationBatch(
+                cursor: StreamCursor(generation: 1, sequence: 1),
+                active: [],
+                completed: completed
+            ))
             $0.finish()
         }
     }

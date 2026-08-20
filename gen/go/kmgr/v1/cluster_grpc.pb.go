@@ -23,6 +23,7 @@ const (
 	ClusterService_OpenSession_FullMethodName     = "/kmgr.v1.ClusterService/OpenSession"
 	ClusterService_CloseSession_FullMethodName    = "/kmgr.v1.ClusterService/CloseSession"
 	ClusterService_WatchConnection_FullMethodName = "/kmgr.v1.ClusterService/WatchConnection"
+	ClusterService_WatchOperations_FullMethodName = "/kmgr.v1.ClusterService/WatchOperations"
 	ClusterService_Discover_FullMethodName        = "/kmgr.v1.ClusterService/Discover"
 	ClusterService_ListNamespaces_FullMethodName  = "/kmgr.v1.ClusterService/ListNamespaces"
 )
@@ -35,6 +36,7 @@ type ClusterServiceClient interface {
 	OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*OpenSessionResponse, error)
 	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
 	WatchConnection(ctx context.Context, in *WatchConnectionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConnectionEvent], error)
+	WatchOperations(ctx context.Context, in *WatchOperationsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClusterOperationBatch], error)
 	Discover(ctx context.Context, in *DiscoverRequest, opts ...grpc.CallOption) (*DiscoverResponse, error)
 	ListNamespaces(ctx context.Context, in *ListNamespacesRequest, opts ...grpc.CallOption) (*ListNamespacesResponse, error)
 }
@@ -96,6 +98,25 @@ func (c *clusterServiceClient) WatchConnection(ctx context.Context, in *WatchCon
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ClusterService_WatchConnectionClient = grpc.ServerStreamingClient[ConnectionEvent]
 
+func (c *clusterServiceClient) WatchOperations(ctx context.Context, in *WatchOperationsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClusterOperationBatch], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ClusterService_ServiceDesc.Streams[1], ClusterService_WatchOperations_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchOperationsRequest, ClusterOperationBatch]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ClusterService_WatchOperationsClient = grpc.ServerStreamingClient[ClusterOperationBatch]
+
 func (c *clusterServiceClient) Discover(ctx context.Context, in *DiscoverRequest, opts ...grpc.CallOption) (*DiscoverResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DiscoverResponse)
@@ -124,6 +145,7 @@ type ClusterServiceServer interface {
 	OpenSession(context.Context, *OpenSessionRequest) (*OpenSessionResponse, error)
 	CloseSession(context.Context, *CloseSessionRequest) (*Acknowledgement, error)
 	WatchConnection(*WatchConnectionRequest, grpc.ServerStreamingServer[ConnectionEvent]) error
+	WatchOperations(*WatchOperationsRequest, grpc.ServerStreamingServer[ClusterOperationBatch]) error
 	Discover(context.Context, *DiscoverRequest) (*DiscoverResponse, error)
 	ListNamespaces(context.Context, *ListNamespacesRequest) (*ListNamespacesResponse, error)
 	mustEmbedUnimplementedClusterServiceServer()
@@ -147,6 +169,9 @@ func (UnimplementedClusterServiceServer) CloseSession(context.Context, *CloseSes
 }
 func (UnimplementedClusterServiceServer) WatchConnection(*WatchConnectionRequest, grpc.ServerStreamingServer[ConnectionEvent]) error {
 	return status.Error(codes.Unimplemented, "method WatchConnection not implemented")
+}
+func (UnimplementedClusterServiceServer) WatchOperations(*WatchOperationsRequest, grpc.ServerStreamingServer[ClusterOperationBatch]) error {
+	return status.Error(codes.Unimplemented, "method WatchOperations not implemented")
 }
 func (UnimplementedClusterServiceServer) Discover(context.Context, *DiscoverRequest) (*DiscoverResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Discover not implemented")
@@ -240,6 +265,17 @@ func _ClusterService_WatchConnection_Handler(srv interface{}, stream grpc.Server
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ClusterService_WatchConnectionServer = grpc.ServerStreamingServer[ConnectionEvent]
 
+func _ClusterService_WatchOperations_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchOperationsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ClusterServiceServer).WatchOperations(m, &grpc.GenericServerStream[WatchOperationsRequest, ClusterOperationBatch]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ClusterService_WatchOperationsServer = grpc.ServerStreamingServer[ClusterOperationBatch]
+
 func _ClusterService_Discover_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DiscoverRequest)
 	if err := dec(in); err != nil {
@@ -308,6 +344,11 @@ var ClusterService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "WatchConnection",
 			Handler:       _ClusterService_WatchConnection_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WatchOperations",
+			Handler:       _ClusterService_WatchOperations_Handler,
 			ServerStreams: true,
 		},
 	},
