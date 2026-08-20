@@ -19,6 +19,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let logRecordLimitField = NSTextField()
     private let logByteLimitField = NSTextField()
     private let renderBatchField = NSTextField()
+    private let maximumDisplayedLogLineField = NSTextField()
+    private let completedOperationHistoryLimitField = NSTextField()
     private let metricsRefreshField = NSTextField()
     private let viewportOverscanField = NSTextField()
     private let globalWarmViewLimitField = NSTextField()
@@ -108,6 +110,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
 
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
+            maximumDisplayedLogLineField, completedOperationHistoryLimitField,
             metricsRefreshField,
             viewportOverscanField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
@@ -126,6 +129,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         }
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
+            maximumDisplayedLogLineField, completedOperationHistoryLimitField,
             metricsRefreshField,
             viewportOverscanField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
@@ -188,6 +192,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         logSourceOpenConcurrencyField.setAccessibilityIdentifier(
             "settings.performance.logSourceOpenConcurrency"
         )
+        maximumDisplayedLogLineField.setAccessibilityIdentifier(
+            "settings.logs.maximumDisplayedLineKiB"
+        )
+        completedOperationHistoryLimitField.setAccessibilityIdentifier(
+            "settings.diagnostics.completedOperationHistoryLimit"
+        )
         columnsPathField.lineBreakMode = .byTruncatingMiddle
         columnsPathField.setAccessibilityLabel("External column configuration path")
 
@@ -211,6 +221,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 labeledRow("Retained records", control: logRecordLimitField),
                 labeledRow("Retained data", control: logByteLimitField, suffix: "MiB"),
                 labeledRow("Render batching", control: renderBatchField, suffix: "milliseconds"),
+                labeledRow(
+                    "Logical line preview",
+                    control: maximumDisplayedLogLineField,
+                    suffix: "KiB maximum"
+                ),
+            ]
+        )
+        let diagnosticsHelp = NSTextField(wrappingLabelWithString:
+            "Active operations are always shown. Completed entries are kept only for the current cluster session; zero disables completed history."
+        )
+        diagnosticsHelp.textColor = .secondaryLabelColor
+        diagnosticsHelp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let diagnostics = section(
+            title: "Diagnostics",
+            rows: [
+                labeledRow(
+                    "Completed operations",
+                    control: completedOperationHistoryLimitField,
+                    suffix: "per cluster session"
+                ),
+                diagnosticsHelp,
             ]
         )
 
@@ -341,7 +372,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         let shortcuts = section(title: "Keyboard Shortcuts", rows: [shortcutGrid])
 
         let contentStack = NSStackView(views: [
-            general, logs, advancedPerformance, confirmations, columns, shortcuts,
+            general, logs, diagnostics, advancedPerformance, confirmations, columns,
+            shortcuts,
         ])
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
@@ -349,7 +381,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         contentStack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         for section in [
-            general, logs, advancedPerformance, confirmations, columns, shortcuts,
+            general, logs, diagnostics, advancedPerformance, confirmations, columns,
+            shortcuts,
         ] {
             section.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -32).isActive = true
         }
@@ -476,6 +509,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         logRecordLimitField.integerValue = preferences.logs.recordLimit
         logByteLimitField.integerValue = preferences.logs.byteLimit / (1 << 20)
         renderBatchField.integerValue = preferences.logs.renderBatchMilliseconds
+        maximumDisplayedLogLineField.integerValue =
+            preferences.logs.maximumDisplayedLineUTF8Bytes / (1 << 10)
+        completedOperationHistoryLimitField.integerValue =
+            preferences.diagnostics.completedOperationHistoryLimit
         metricsRefreshField.integerValue = preferences.metricsRefreshSeconds
         viewportOverscanField.integerValue =
             preferences.advancedPerformance.viewportOverscanScreensPerSide
@@ -527,12 +564,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         } else {
             byteLimit = 0
         }
+        let displayedLineKiB = parsedInteger(maximumDisplayedLogLineField)
+        let maximumDisplayedLineUTF8Bytes: Int
+        if displayedLineKiB > 0,
+            !displayedLineKiB.multipliedReportingOverflow(by: 1 << 10).overflow
+        {
+            maximumDisplayedLineUTF8Bytes = displayedLineKiB * (1 << 10)
+        } else {
+            maximumDisplayedLineUTF8Bytes = 0
+        }
         return AppPreferences(
             appearance: AppearancePreference.allCases[safe: appearanceIndex] ?? .system,
             logs: LogDisplayPreferences(
                 recordLimit: parsedInteger(logRecordLimitField),
                 byteLimit: byteLimit,
-                renderBatchMilliseconds: parsedInteger(renderBatchField)
+                renderBatchMilliseconds: parsedInteger(renderBatchField),
+                maximumDisplayedLineUTF8Bytes: maximumDisplayedLineUTF8Bytes
             ),
             metricsRefreshSeconds: parsedInteger(metricsRefreshField),
             defaultNamespace: DefaultNamespacePreference.allCases[safe: namespaceIndex] ?? .contextDefault,
@@ -542,6 +589,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 confirmScaling: confirmScaleButton.state == .on
             ),
             columnsConfigurationPath: columnsPathField.stringValue,
+            diagnostics: DiagnosticsPreferences(
+                completedOperationHistoryLimit: parsedInteger(
+                    completedOperationHistoryLimitField
+                )
+            ),
             advancedPerformance: AdvancedPerformancePreferences(
                 viewportOverscanScreensPerSide: parsedInteger(
                     viewportOverscanField

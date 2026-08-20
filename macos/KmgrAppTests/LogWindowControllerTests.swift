@@ -594,6 +594,11 @@ struct LogWindowControllerTests {
             .first { $0.identifier?.rawValue == "log-status" })
         try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
 
+        controller.applyDisplayConfiguration(LogDisplayConfiguration(
+            renderBatchMilliseconds: 1,
+            maximumDisplayedLineUTF8Bytes: 1 << 10
+        ))
+
         window.orderOut(nil)
         provider.emitStreaming(generation: 1, sequence: 1)
         let original = String(repeating: "x", count: 128 << 10)
@@ -617,8 +622,9 @@ struct LogWindowControllerTests {
             $0.contains(LogTextRenderer.displayTruncationMarker)
         }
 
-        #expect(textView.string.utf8.count < 5 << 10)
+        #expect(textView.string.utf8.count < 2 << 10)
         #expect(status.stringValue.contains("1 long line truncated"))
+        #expect(status.toolTip?.contains("1 KiB") == true)
         controller.saveVisibleBufferSnapshot(
             to: URL(fileURLWithPath: "/tmp/kmgr-long-line-preview-test.txt")
         )

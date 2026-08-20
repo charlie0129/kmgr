@@ -13,7 +13,11 @@ import Testing
     preferences.logs = LogDisplayPreferences(
         recordLimit: 75_000,
         byteLimit: 32 << 20,
-        renderBatchMilliseconds: 50
+        renderBatchMilliseconds: 50,
+        maximumDisplayedLineUTF8Bytes: 8 << 10
+    )
+    preferences.diagnostics = DiagnosticsPreferences(
+        completedOperationHistoryLimit: 4_000
     )
     preferences.metricsRefreshSeconds = 30
     preferences.defaultNamespace = .allNamespaces
@@ -44,6 +48,8 @@ import Testing
     #expect(reloaded.current.appearance == .dark)
     #expect(reloaded.current.logs.recordLimit == 75_000)
     #expect(reloaded.current.logs.byteLimit == 32 << 20)
+    #expect(reloaded.current.logs.maximumDisplayedLineUTF8Bytes == 8 << 10)
+    #expect(reloaded.current.diagnostics.completedOperationHistoryLimit == 4_000)
     #expect(reloaded.current.metricsRefreshSeconds == 30)
     #expect(reloaded.current.defaultNamespace == .allNamespaces)
     #expect(!reloaded.current.restoreOpenClusterWindows)
@@ -93,6 +99,8 @@ import Testing
     preferences.logs.recordLimit = 10
     preferences.logs.byteLimit = 100
     preferences.logs.renderBatchMilliseconds = 1
+    preferences.logs.maximumDisplayedLineUTF8Bytes = 100
+    preferences.diagnostics.completedOperationHistoryLimit = 100_001
     preferences.metricsRefreshSeconds = 1
     preferences.columnsConfigurationPath = "relative/columns.yaml"
     preferences.advancedPerformance = AdvancedPerformancePreferences(
@@ -118,6 +126,8 @@ import Testing
         "logs.recordLimit",
         "logs.byteLimit",
         "logs.renderBatchMilliseconds",
+        "logs.maximumDisplayedLineUTF8Bytes",
+        "diagnostics.completedOperationHistoryLimit",
         "metricsRefreshSeconds",
         "columnsConfigurationPath",
         "advancedPerformance.viewportOverscanScreensPerSide",
@@ -218,6 +228,7 @@ import Testing
     var updated = previous
     updated.appearance = .dark
     updated.logs.recordLimit += 1_000
+    updated.diagnostics.completedOperationHistoryLimit += 1
     updated.confirmations.confirmScaling.toggle()
     updated.defaultNamespace = .allNamespaces
     updated.restoreOpenClusterWindows = false
@@ -229,7 +240,7 @@ import Testing
     let delta = AppPreferencesDelta(previous: previous, updated: updated)
 
     #expect(delta.changes(activated: .immediate) == [
-        .appearance, .logDisplay, .confirmations,
+        .appearance, .logDisplay, .confirmations, .operationHistory,
     ])
     #expect(delta.changes(activated: .newWorkspace) == [
         .defaultNamespace, .viewportOverscan,

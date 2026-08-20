@@ -113,6 +113,36 @@ struct ApplicationWindowPresentationTests {
         #expect(store.current.advancedPerformance.logSourceOpenConcurrency == 9)
     }
 
+    @Test("log and diagnostic display limits persist from Settings")
+    func displayAndDiagnosticSettings() throws {
+        let suite = "kmgr-app-display-settings-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AppPreferencesStore(defaults: defaults)
+        let settings = SettingsWindowController(
+            preferencesStore: store,
+            frameAutosaveName: "Settings-display-\(UUID().uuidString)"
+        )
+        let root = try #require(settings.window?.contentView)
+        let fields = descendants(of: root).compactMap { $0 as? NSTextField }
+        let lineLimit = try #require(fields.first {
+            $0.accessibilityIdentifier() == "settings.logs.maximumDisplayedLineKiB"
+        })
+        let historyLimit = try #require(fields.first {
+            $0.accessibilityIdentifier() ==
+                "settings.diagnostics.completedOperationHistoryLimit"
+        })
+
+        #expect(lineLimit.integerValue == 4)
+        #expect(historyLimit.integerValue == 2_000)
+        lineLimit.stringValue = "12"
+        historyLimit.stringValue = "3500"
+        try #require(button(titled: "Apply", beneath: root)).performClick(nil)
+
+        #expect(store.current.logs.maximumDisplayedLineUTF8Bytes == 12 << 10)
+        #expect(store.current.diagnostics.completedOperationHistoryLimit == 3_500)
+    }
+
     @Test("Settings preserves its frame when reopened and when restored")
     func settingsFrameAutosaveIsNotOverriddenByCentering() throws {
         let preferencesSuite = "kmgr-app-settings-frame-\(UUID().uuidString)"

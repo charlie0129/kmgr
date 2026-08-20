@@ -45,15 +45,26 @@ public struct LogDisplayPreferences: Codable, Hashable, Sendable {
     public var recordLimit: Int
     public var byteLimit: Int
     public var renderBatchMilliseconds: Int
+    public var maximumDisplayedLineUTF8Bytes: Int
 
     public init(
         recordLimit: Int = 20_000,
         byteLimit: Int = 16 << 20,
-        renderBatchMilliseconds: Int = 40
+        renderBatchMilliseconds: Int = 40,
+        maximumDisplayedLineUTF8Bytes: Int = 4 << 10
     ) {
         self.recordLimit = recordLimit
         self.byteLimit = byteLimit
         self.renderBatchMilliseconds = renderBatchMilliseconds
+        self.maximumDisplayedLineUTF8Bytes = maximumDisplayedLineUTF8Bytes
+    }
+}
+
+public struct DiagnosticsPreferences: Codable, Hashable, Sendable {
+    public var completedOperationHistoryLimit: Int
+
+    public init(completedOperationHistoryLimit: Int = 2_000) {
+        self.completedOperationHistoryLimit = completedOperationHistoryLimit
     }
 }
 
@@ -257,7 +268,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v4"
+    public static let apiVersion = "kmgr.preferences/v5"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
@@ -266,6 +277,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
     public var restoreOpenClusterWindows: Bool
     public var confirmations: ConfirmationPreferences
     public var columnsConfigurationPath: String
+    public var diagnostics: DiagnosticsPreferences
     public var advancedPerformance: AdvancedPerformancePreferences
 
     public init(
@@ -276,6 +288,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         restoreOpenClusterWindows: Bool = true,
         confirmations: ConfirmationPreferences = ConfirmationPreferences(),
         columnsConfigurationPath: String = AppPreferences.defaultColumnsConfigurationPath,
+        diagnostics: DiagnosticsPreferences = DiagnosticsPreferences(),
         advancedPerformance: AdvancedPerformancePreferences = AdvancedPerformancePreferences()
     ) {
         self.appearance = appearance
@@ -285,6 +298,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         self.restoreOpenClusterWindows = restoreOpenClusterWindows
         self.confirmations = confirmations
         self.columnsConfigurationPath = columnsConfigurationPath
+        self.diagnostics = diagnostics
         self.advancedPerformance = advancedPerformance
     }
 
@@ -315,6 +329,18 @@ public struct AppPreferences: Codable, Hashable, Sendable {
             issues.append(AppPreferenceIssue(
                 field: "logs.renderBatchMilliseconds",
                 message: "Log render batching must be between 30 and 250 milliseconds."
+            ))
+        }
+        if !((1 << 10)...(1 << 20)).contains(logs.maximumDisplayedLineUTF8Bytes) {
+            issues.append(AppPreferenceIssue(
+                field: "logs.maximumDisplayedLineUTF8Bytes",
+                message: "Displayed log line limit must be between 1 KiB and 1 MiB."
+            ))
+        }
+        if !(0...100_000).contains(diagnostics.completedOperationHistoryLimit) {
+            issues.append(AppPreferenceIssue(
+                field: "diagnostics.completedOperationHistoryLimit",
+                message: "Completed operation history must be between 0 and 100,000 entries."
             ))
         }
         if !(5...300).contains(metricsRefreshSeconds) {
@@ -353,6 +379,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
     case workspaceRestoration
     case metricsRefresh
     case columnsConfigurationPath
+    case operationHistory
     case advancedPerformance
     case viewportOverscan
 
@@ -364,7 +391,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
 
     public var activation: Activation {
         switch self {
-        case .appearance, .logDisplay, .confirmations:
+        case .appearance, .logDisplay, .confirmations, .operationHistory:
             .immediate
         case .defaultNamespace, .viewportOverscan:
             .newWorkspace
@@ -383,6 +410,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         case .workspaceRestoration: "Open cluster window restoration"
         case .metricsRefresh: "Metrics refresh"
         case .columnsConfigurationPath: "Programmable columns path"
+        case .operationHistory: "Completed operation history"
         case .advancedPerformance: "Advanced performance configuration"
         case .viewportOverscan: "List viewport overscan"
         }
@@ -411,6 +439,9 @@ public struct AppPreferencesDelta: Hashable, Sendable {
         }
         if previous.columnsConfigurationPath != updated.columnsConfigurationPath {
             changes.insert(.columnsConfigurationPath)
+        }
+        if previous.diagnostics != updated.diagnostics {
+            changes.insert(.operationHistory)
         }
         if previous.advancedPerformance.viewportOverscanScreensPerSide
             != updated.advancedPerformance.viewportOverscanScreensPerSide

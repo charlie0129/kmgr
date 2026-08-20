@@ -64,6 +64,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var displayConfiguration: LogDisplayConfiguration
     private var renderBatchMilliseconds: Int
     private var maximumRenderedUTF8Bytes: Int
+    private var maximumDisplayedLineUTF8Bytes: Int
     private var configurationRevision: UInt64 = 0
     private var renderScheduleRevision: UInt64 = 0
     private let sourceLabels: [String: String]
@@ -148,6 +149,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         // Preferences may retain far more history than AppKit can safely lay
         // out in one main-thread NSTextView.string replacement.
         self.maximumRenderedUTF8Bytes = min(displayConfiguration.byteLimit, 32 << 20)
+        self.maximumDisplayedLineUTF8Bytes =
+            displayConfiguration.maximumDisplayedLineUTF8Bytes
         self.sourceLabels = LogSourcePresentation.prefixLabels(for: allSources)
         let titleSources = LogSourcePresentation.titleSummary(for: sources)
         let window = LogShortcutWindow(
@@ -305,6 +308,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         displayConfiguration = configuration
         renderBatchMilliseconds = configuration.renderBatchMilliseconds
         maximumRenderedUTF8Bytes = min(configuration.byteLimit, 32 << 20)
+        maximumDisplayedLineUTF8Bytes = configuration.maximumDisplayedLineUTF8Bytes
         configurationRevision &+= 1
         let revision = configurationRevision
         cancelScheduledRender()
@@ -832,12 +836,23 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         statusLabel.stringValue = parts.joined(separator: " · ")
         switch (latestDisplayContinuationBreaks > 0, latestDisplayTruncatedLines > 0) {
         case (_, true):
-            statusLabel.toolTip = "Long lines show at most 4 KiB. Display markers and breaks are not included when saving."
+            statusLabel.toolTip = "Long lines show at most \(formattedDisplayedLineLimit). Display markers and breaks are not included when saving."
         case (true, false):
             statusLabel.toolTip = "Continuation arrows and line breaks are display-only; Save preserves logical lines."
         case (false, false):
             statusLabel.toolTip = nil
         }
+    }
+
+    private var formattedDisplayedLineLimit: String {
+        let bytes = maximumDisplayedLineUTF8Bytes
+        if bytes.isMultiple(of: 1 << 20) {
+            return "\(bytes / (1 << 20)) MiB"
+        }
+        if bytes.isMultiple(of: 1 << 10) {
+            return "\(bytes / (1 << 10)) KiB"
+        }
+        return "\(bytes.formatted()) bytes"
     }
 
     /// Coalesce detached formatting and incremental text installation to at
@@ -885,6 +900,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let records = snapshot.records
         let labels = sourceLabels
         let byteLimit = maximumRenderedUTF8Bytes
+        let displayedLineByteLimit = maximumDisplayedLineUTF8Bytes
         let previousChunks = renderedChunks
         let wrappingColumnCapacity = TextDocumentGeometry
             .streamingLogWrappingColumnCapacity(textView, in: scrollView)
@@ -904,7 +920,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                     sourceLabels: labels,
                     showSourceLabels: showLabels,
                     filter: filter,
-                    maximumOutputUTF8Bytes: byteLimit
+                    maximumOutputUTF8Bytes: byteLimit,
+                    maximumDisplayedLineUTF8Bytes: displayedLineByteLimit
                 )
                 logSignposter.endInterval(
                     PerformanceSignpostCatalog.logTextFormat,

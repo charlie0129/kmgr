@@ -580,23 +580,30 @@ public struct LogDisplayConfiguration: Hashable, Sendable {
     public var recordLimit: Int
     public var byteLimit: Int
     public var renderBatchMilliseconds: Int
+    public var maximumDisplayedLineUTF8Bytes: Int
 
     public init(
         recordLimit: Int = 20_000,
         byteLimit: Int = 16 << 20,
-        renderBatchMilliseconds: Int = 40
+        renderBatchMilliseconds: Int = 40,
+        maximumDisplayedLineUTF8Bytes: Int = LogTextRenderer.defaultMaximumDisplayedLineUTF8Bytes
     ) {
-        precondition(recordLimit > 0 && byteLimit > 0 && renderBatchMilliseconds > 0)
+        precondition(
+            recordLimit > 0 && byteLimit > 0 && renderBatchMilliseconds > 0 &&
+                maximumDisplayedLineUTF8Bytes > 0
+        )
         self.recordLimit = recordLimit
         self.byteLimit = byteLimit
         self.renderBatchMilliseconds = renderBatchMilliseconds
+        self.maximumDisplayedLineUTF8Bytes = maximumDisplayedLineUTF8Bytes
     }
 
     public init(preferences: LogDisplayPreferences) {
         self.init(
             recordLimit: preferences.recordLimit,
             byteLimit: preferences.byteLimit,
-            renderBatchMilliseconds: preferences.renderBatchMilliseconds
+            renderBatchMilliseconds: preferences.renderBatchMilliseconds,
+            maximumDisplayedLineUTF8Bytes: preferences.maximumDisplayedLineUTF8Bytes
         )
     }
 }
