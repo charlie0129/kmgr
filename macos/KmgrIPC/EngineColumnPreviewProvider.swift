@@ -210,6 +210,7 @@ public struct EngineColumnPreviewProvider: ColumnPreviewProviding {
         case .warning: .warning
         case .error: .critical
         case .muted: .muted
+        case .terminating: .terminating
         case .unspecified, .normal, .UNRECOGNIZED: .normal
         }
         return Cell(

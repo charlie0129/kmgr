@@ -15,7 +15,9 @@ struct ResourceListCellEffectsTests {
         defer { controller.close() }
         let table = try resourceTable(in: controller)
 
-        try await waitForCellEffects { provider.requestCount == 1 }
+        try await waitForCellEffects(stage: "initial request") {
+            provider.requestCount == 1
+        }
         #expect(provider.yieldSnapshot(
             rows: [cellEffectsRow(
                 uid: "pod-old",
@@ -26,7 +28,9 @@ struct ResourceListCellEffectsTests {
             first: true,
             last: true
         ))
-        try await waitForCellEffects { table.numberOfRows == 1 }
+        try await waitForCellEffects(stage: "initial row") {
+            table.numberOfRows == 1
+        }
         #expect(try highlightedCell(
             in: table,
             columnID: "status"
@@ -40,7 +44,7 @@ struct ResourceListCellEffectsTests {
                 cpuUsage: 0.3
             )]
         ))
-        try await waitForCellEffects {
+        try await waitForCellEffects(stage: "changed cells") {
             text(in: table, columnID: "status") == "Ready"
                 && (try? highlightedCell(
                     in: table,
@@ -62,18 +66,18 @@ struct ResourceListCellEffectsTests {
         ) as? ResourceTextTableCellView)
         #expect(ordinary.renderedHighlightColor != nil)
         #expect(usage.renderedHighlightColor != nil)
-        let expectedRegression = ResourceTableCellEffectsPolicy.systemDefault
+        let expectedWarning = ResourceTableCellEffectsPolicy.systemDefault
             .backgroundColor(for: ResourceCellHighlightPresentation(
-                emphasis: .regression,
+                emphasis: .warning,
                 strength: 1
             ))
-        #expect(restarts.renderedHighlightColor?.isEqual(expectedRegression) == true)
+        #expect(restarts.renderedHighlightColor?.isEqual(expectedWarning) == true)
         let initialOrdinaryOpacity = try #require(colorAlpha(
             ordinary.renderedHighlightColor
         ))
         #expect(initialOrdinaryOpacity >= 0.27)
 
-        try await waitForCellEffects {
+        try await waitForCellEffects(stage: "fade") {
             guard let current = try? highlightedCell(
                 in: table,
                 columnID: "status"
@@ -83,7 +87,7 @@ struct ResourceListCellEffectsTests {
             return opacity > 0 && opacity < initialOrdinaryOpacity
         }
 
-        try await waitForCellEffects(timeout: .seconds(3)) {
+        try await waitForCellEffects(timeout: .seconds(3), stage: "expiry") {
             (try? highlightedCell(
                 in: table,
                 columnID: "status"
@@ -112,7 +116,7 @@ struct ResourceListCellEffectsTests {
                 cpuUsage: 0.3
             )]
         ))
-        try await waitForCellEffects {
+        try await waitForCellEffects(stage: "terminating change") {
             (try? highlightedCell(
                 in: table,
                 columnID: "status"
@@ -129,7 +133,7 @@ struct ResourceListCellEffectsTests {
             orderedUIDs: ["pod-new"],
             orderIsComplete: true
         ))
-        try await waitForCellEffects {
+        try await waitForCellEffects(stage: "UID replacement") {
             text(in: table, columnID: "status") == "Recreated"
         }
         for columnID in ["status", "restarts", "cpu"] {
@@ -566,6 +570,7 @@ private func cellEffectsDescendants(of root: NSView) -> [NSView] {
 @MainActor
 private func waitForCellEffects(
     timeout: Duration = .seconds(2),
+    stage: String = "condition",
     condition: @escaping @MainActor () throws -> Bool
 ) async throws {
     let clock = ContinuousClock()
@@ -575,7 +580,7 @@ private func waitForCellEffects(
             throw ClusterManagerIssue(
                 category: .internalFailure,
                 reason: "CellEffectsTestTimeout",
-                message: "Timed out waiting for resource-list cell effects.",
+                message: "Timed out waiting for resource-list cell effects: \(stage).",
                 operation: "test resource-list cell effects"
             )
         }

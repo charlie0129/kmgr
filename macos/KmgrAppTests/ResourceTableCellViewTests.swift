@@ -75,7 +75,7 @@ struct ResourceTableCellViewTests {
         #expect(cell.textField?.textColor == .systemRed)
     }
 
-    @Test("neutral and regression highlights use bounded translucent strength")
+    @Test("semantic highlights use bounded translucent strength")
     func semanticHighlightColorsAndStrength() throws {
         let neutralTint = NSColor(
             calibratedRed: 0.1,
@@ -89,12 +89,20 @@ struct ResourceTableCellViewTests {
             blue: 0.2,
             alpha: 1
         )
+        let warningTint = NSColor(
+            calibratedRed: 0.8,
+            green: 0.6,
+            blue: 0.1,
+            alpha: 1
+        )
         let cell = ResourceTextTableCellView()
         cell.effectsPolicy = ResourceTableCellEffectsPolicy(
             reducesMotion: false,
             neutralTint: neutralTint,
+            warningTint: warningTint,
             regressionTint: regressionTint,
             neutralMaximumOpacity: 0.4,
+            warningMaximumOpacity: 0.45,
             regressionMaximumOpacity: 0.5
         )
 
@@ -109,6 +117,19 @@ struct ResourceTableCellViewTests {
         try expectColor(
             cell.renderedHighlightColor,
             equals: neutralTint.withAlphaComponent(0.1)
+        )
+
+        cell.configure(
+            cell: Cell(columnID: "restarts", displayText: "2"),
+            alignment: .right,
+            changeHighlight: ResourceCellHighlightPresentation(
+                emphasis: .warning,
+                strength: 0.5
+            )
+        )
+        try expectColor(
+            cell.renderedHighlightColor,
+            equals: warningTint.withAlphaComponent(0.225)
         )
 
         cell.configure(
@@ -137,6 +158,16 @@ struct ResourceTableCellViewTests {
             defaultNeutral,
             equals: NSColor.controlAccentColor.withAlphaComponent(0.28)
         )
+        let defaultWarning = defaultPolicy.backgroundColor(
+            for: ResourceCellHighlightPresentation(
+                emphasis: .warning,
+                strength: 1
+            )
+        )
+        try expectColor(
+            defaultWarning,
+            equals: NSColor.systemYellow.withAlphaComponent(0.30)
+        )
         let defaultRegression = defaultPolicy.backgroundColor(
             for: ResourceCellHighlightPresentation(
                 emphasis: .regression,
@@ -147,6 +178,21 @@ struct ResourceTableCellViewTests {
             defaultRegression,
             equals: NSColor.systemRed.withAlphaComponent(0.32)
         )
+    }
+
+    @Test("terminating resources use a distinct purple lifecycle color")
+    func terminatingSeverityIsPurple() {
+        let cell = ResourceTextTableCellView()
+        cell.configure(
+            cell: Cell(
+                columnID: "status",
+                displayText: "Terminating",
+                severity: .terminating
+            ),
+            alignment: .center
+        )
+
+        #expect(cell.textField?.textColor == .systemPurple)
     }
 
     @Test("reduced motion is injectable and renders a steady highlight")

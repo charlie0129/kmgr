@@ -13,11 +13,12 @@ public struct ResourceCellAddress: Hashable, Sendable {
     }
 }
 
-/// Semantic weight for a transient changed-cell highlight. `regression` is
-/// intentionally narrow; arbitrary CEL or status changes are not classified
-/// as failures by the GUI.
+/// Semantic weight for a transient changed-cell highlight. Warning is used
+/// for restart increases and warning Pod states; regression is intentionally
+/// narrow and reserved for critical Pod state transitions.
 public enum ResourceCellChangeEmphasis: String, Hashable, Sendable {
     case neutral
+    case warning
     case regression
 }
 
@@ -45,29 +46,41 @@ public struct ResourceRowChangeDetector: Hashable, Sendable {
     public static let maximumFallbackColumnCount = 64
 
     private var restartColumnIDs: Set<String>
+    private var podStateColumnIDs: Set<String>
 
     public init(columnDefinitions: [ColumnDefinition]) {
         var seenColumnIDs: Set<String> = []
         var ambiguousColumnIDs: Set<String> = []
         var restartColumnIDs: Set<String> = []
+        var podStateColumnIDs: Set<String> = []
 
         for definition in columnDefinitions {
             guard seenColumnIDs.insert(definition.id).inserted else {
                 ambiguousColumnIDs.insert(definition.id)
                 restartColumnIDs.remove(definition.id)
+                podStateColumnIDs.remove(definition.id)
                 continue
             }
             if definition.source == .builtin, definition.value == "restarts" {
                 restartColumnIDs.insert(definition.id)
             }
+            if definition.source == .builtin,
+                definition.value == "ready" || definition.value == "status"
+            {
+                podStateColumnIDs.insert(definition.id)
+            }
         }
         restartColumnIDs.subtract(ambiguousColumnIDs)
+        podStateColumnIDs.subtract(ambiguousColumnIDs)
         self.restartColumnIDs = restartColumnIDs
+        self.podStateColumnIDs = podStateColumnIDs
     }
 
     /// Returns changes in incoming-column order. A missing prior row or a UID
     /// mismatch establishes a new identity baseline and never flashes cells.
-    /// Only rendered `displayText` participates in change detection.
+    /// Rendered `displayText` drives ordinary changes. Projected severity also
+    /// participates for the two native Pod-state columns so an unchanged
+    /// "Running" status can still expose a readiness regression.
     public func changes(
         from previous: ResourceRow?,
         to incoming: ResourceRow
@@ -75,6 +88,7 @@ public struct ResourceRowChangeDetector: Hashable, Sendable {
         guard let previous,
             previous.identity.uid == incoming.identity.uid
         else { return [] }
+        let isPod = Self.isPod(incoming.identity)
 
         if previous.cells.count == incoming.cells.count {
             var result: [ResourceCellChange] = []
@@ -83,24 +97,30 @@ public struct ResourceRowChangeDetector: Hashable, Sendable {
                 let oldCell = previous.cells[index]
                 let newCell = incoming.cells[index]
                 guard oldCell.columnID == newCell.columnID else {
-                    return fallbackChanges(from: previous, to: incoming)
+                    return fallbackChanges(
+                        from: previous,
+                        to: incoming,
+                        isPod: isPod
+                    )
                 }
                 appendChange(
                     from: oldCell,
                     to: newCell,
                     uid: incoming.identity.uid,
+                    isPod: isPod,
                     into: &result
                 )
             }
             return result
         }
 
-        return fallbackChanges(from: previous, to: incoming)
+        return fallbackChanges(from: previous, to: incoming, isPod: isPod)
     }
 
     private func fallbackChanges(
         from previous: ResourceRow,
-        to incoming: ResourceRow
+        to incoming: ResourceRow,
+        isPod: Bool
     ) -> [ResourceCellChange] {
         guard previous.cells.count <= Self.maximumFallbackColumnCount,
             incoming.cells.count <= Self.maximumFallbackColumnCount
@@ -132,6 +152,7 @@ public struct ResourceRowChangeDetector: Hashable, Sendable {
                 from: oldCell,
                 to: newCell,
                 uid: incoming.identity.uid,
+                isPod: isPod,
                 into: &result
             )
         }
@@ -142,17 +163,33 @@ public struct ResourceRowChangeDetector: Hashable, Sendable {
         from previous: Cell,
         to incoming: Cell,
         uid: ResourceUID,
+        isPod: Bool,
         into changes: inout [ResourceCellChange]
     ) {
-        guard previous.displayText != incoming.displayText else { return }
-        let emphasis: ResourceCellChangeEmphasis = isRestartIncrease(
-            from: previous,
-            to: incoming
-        ) ? .regression : .neutral
+        let isPodState = isPod && podStateColumnIDs.contains(incoming.columnID)
+        guard previous.displayText != incoming.displayText
+                || (isPodState && previous.severity != incoming.severity)
+        else { return }
+        let emphasis: ResourceCellChangeEmphasis
+        if isRestartIncrease(from: previous, to: incoming) {
+            emphasis = .warning
+        } else if isPodState {
+            emphasis = switch incoming.severity {
+            case .critical: .regression
+            case .warning: .warning
+            default: .neutral
+            }
+        } else {
+            emphasis = .neutral
+        }
         changes.append(ResourceCellChange(
             address: ResourceCellAddress(uid: uid, columnID: incoming.columnID),
             emphasis: emphasis
         ))
+    }
+
+    private static func isPod(_ identity: ResourceIdentity) -> Bool {
+        identity.group.isEmpty && identity.resource == "pods"
     }
 
     private func isRestartIncrease(from previous: Cell, to incoming: Cell) -> Bool {

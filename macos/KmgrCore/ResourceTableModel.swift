@@ -749,7 +749,7 @@ private enum ResourceTableCellRenderedPresentation: Hashable {
             return
         }
         let baseSeverity: CellSeverity = switch cell.severity {
-        case .informational, .muted: cell.severity
+        case .informational, .muted, .terminating: cell.severity
         default: .normal
         }
         let accentSeverity: CellSeverity

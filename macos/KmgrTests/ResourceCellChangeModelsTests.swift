@@ -123,7 +123,7 @@ import Testing
     ).isEmpty)
 }
 
-@Test func resourceCellDetectorMarksOnlyExactBuiltinRestartIncreasesAsRegression() {
+@Test func resourceCellDetectorMarksOnlyExactBuiltinRestartIncreasesAsWarning() {
     let restartDefinition = changeDefinition(
         id: "restart-total",
         source: .builtin,
@@ -141,7 +141,7 @@ import Testing
     )
     #expect(numberIncrease == [ResourceCellChange(
         address: ResourceCellAddress(uid: "pod", columnID: "restart-total"),
-        emphasis: .regression
+        emphasis: .warning
     )])
 
     let mixedTypedIncrease = detector.changes(
@@ -152,7 +152,7 @@ import Testing
             changeCell("restart-total", "3", typedValue: .number(3)),
         ])
     )
-    #expect(mixedTypedIncrease.first?.emphasis == .regression)
+    #expect(mixedTypedIncrease.first?.emphasis == .warning)
 
     let unchangedDisplay = detector.changes(
         from: changeRow(uid: "pod", cells: [
@@ -163,6 +163,60 @@ import Testing
         ])
     )
     #expect(unchangedDisplay.isEmpty)
+}
+
+@Test func podStateTransitionsUseProjectedSemanticSeverity() {
+    let detector = ResourceRowChangeDetector(columnDefinitions: [
+        changeDefinition(id: "ready", source: .builtin, value: "ready"),
+        changeDefinition(id: "status", source: .builtin, value: "status"),
+    ])
+    let previous = changeRow(uid: "pod", cells: [
+        changeCell("ready", "1 / 1", severity: .normal),
+        changeCell("status", "Running", severity: .normal),
+    ])
+
+    let runningNotReady = detector.changes(
+        from: previous,
+        to: changeRow(uid: "pod", cells: [
+            changeCell("ready", "0 / 1", severity: .critical),
+            // A severity-only transition must still flash Status so its
+            // unchanged "Running" text cannot hide a readiness regression.
+            changeCell("status", "Running", severity: .critical),
+        ])
+    )
+    #expect(runningNotReady == [
+        ResourceCellChange(
+            address: ResourceCellAddress(uid: "pod", columnID: "ready"),
+            emphasis: .regression
+        ),
+        ResourceCellChange(
+            address: ResourceCellAddress(uid: "pod", columnID: "status"),
+            emphasis: .regression
+        ),
+    ])
+
+    let pending = detector.changes(
+        from: previous,
+        to: changeRow(uid: "pod", cells: [
+            changeCell("ready", "0 / 1", severity: .warning),
+            changeCell("status", "Pending", severity: .warning),
+        ])
+    )
+    #expect(pending.allSatisfy { $0.emphasis == .warning })
+}
+
+@Test func nonPodSeverityOnlyChangesDoNotCreatePodSemanticHighlights() {
+    let detector = ResourceRowChangeDetector(columnDefinitions: [
+        changeDefinition(id: "status", source: .builtin, value: "status"),
+    ])
+    var previous = changeRow(uid: "node", cells: [
+        changeCell("status", "Ready", severity: .normal),
+    ])
+    previous.identity.resource = "nodes"
+    var incoming = previous
+    incoming.cells[0].severity = .critical
+
+    #expect(detector.changes(from: previous, to: incoming).isEmpty)
 }
 
 @Test(arguments: [
@@ -498,12 +552,14 @@ private func changeRow(
 private func changeCell(
     _ columnID: String,
     _ displayText: String,
-    typedValue: CellTypedValue? = nil
+    typedValue: CellTypedValue? = nil,
+    severity: CellSeverity = .normal
 ) -> Cell {
     Cell(
         columnID: columnID,
         displayText: displayText,
-        typedValue: typedValue
+        typedValue: typedValue,
+        severity: severity
     )
 }
 

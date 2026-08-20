@@ -1472,6 +1472,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         case .warning: .systemOrange
         case .critical: .systemRed
         case .muted: .secondaryLabelColor
+        case .terminating: .systemPurple
         case .normal, .informational: .labelColor
         }
     }

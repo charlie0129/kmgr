@@ -107,6 +107,10 @@ public enum Kmgr_V1_CellSeverity: SwiftProtobuf.Enum, Swift.CaseIterable {
   case warning // = 3
   case error // = 4
   case muted // = 5
+
+  /// A resource is being deleted. Kept distinct from informational state so
+  /// the GUI can render lifecycle teardown in purple rather than blue.
+  case terminating // = 6
   case UNRECOGNIZED(Int)
 
   public init() {
@@ -121,6 +125,7 @@ public enum Kmgr_V1_CellSeverity: SwiftProtobuf.Enum, Swift.CaseIterable {
     case 3: self = .warning
     case 4: self = .error
     case 5: self = .muted
+    case 6: self = .terminating
     default: self = .UNRECOGNIZED(rawValue)
     }
   }
@@ -133,6 +138,7 @@ public enum Kmgr_V1_CellSeverity: SwiftProtobuf.Enum, Swift.CaseIterable {
     case .warning: return 3
     case .error: return 4
     case .muted: return 5
+    case .terminating: return 6
     case .UNRECOGNIZED(let i): return i
     }
   }
@@ -145,6 +151,7 @@ public enum Kmgr_V1_CellSeverity: SwiftProtobuf.Enum, Swift.CaseIterable {
     .warning,
     .error,
     .muted,
+    .terminating,
   ]
 
 }
@@ -668,7 +675,7 @@ extension Kmgr_V1_ErrorCategory: SwiftProtobuf._ProtoNameProviding {
 }
 
 extension Kmgr_V1_CellSeverity: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CELL_SEVERITY_UNSPECIFIED\0\u{1}CELL_SEVERITY_NORMAL\0\u{1}CELL_SEVERITY_INFO\0\u{1}CELL_SEVERITY_WARNING\0\u{1}CELL_SEVERITY_ERROR\0\u{1}CELL_SEVERITY_MUTED\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CELL_SEVERITY_UNSPECIFIED\0\u{1}CELL_SEVERITY_NORMAL\0\u{1}CELL_SEVERITY_INFO\0\u{1}CELL_SEVERITY_WARNING\0\u{1}CELL_SEVERITY_ERROR\0\u{1}CELL_SEVERITY_MUTED\0\u{1}CELL_SEVERITY_TERMINATING\0")
 }
 
 extension Kmgr_V1_PropagationPolicy: SwiftProtobuf._ProtoNameProviding {

@@ -60,6 +60,7 @@ public enum CellSeverity: String, Codable, Sendable, CaseIterable {
     case warning
     case critical
     case muted
+    case terminating
 }
 
 /// Compact, already-computed resource usage sent to the GUI. Quantities used

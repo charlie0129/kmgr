@@ -1085,29 +1085,48 @@ func statusSeverity(status string) kmgrv1.CellSeverity {
 	}
 }
 
-// statusSeverityForObject preserves the generic status mapping for arbitrary
+// presentationForObject preserves the generic status mapping for arbitrary
 // resources while applying the richer Pod state palette used by the native
-// table. In particular, completed Pods are intentionally muted and a
-// terminating Pod is informational rather than another warning shade.
-func statusSeverityForObject(object *unstructured.Unstructured, status string) kmgrv1.CellSeverity {
+// table.
+func presentationForObject(object *unstructured.Unstructured) (string, kmgrv1.CellSeverity) {
+	status := statusText(object)
 	if object != nil && strings.EqualFold(object.GetKind(), "pod") {
-		folded := strings.ToLower(status)
-		switch {
-		case podCompleted(object) || folded == "succeeded" || folded == "completed":
-			return kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		case strings.Contains(folded, "terminating"):
-			return kmgrv1.CellSeverity_CELL_SEVERITY_INFO
-		case podStatusIsError(folded):
-			return kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
-		case podStatusIsInitializing(folded):
-			return kmgrv1.CellSeverity_CELL_SEVERITY_INFO
-		case podStatusIsPending(folded) || strings.Contains(folded, "unknown"):
-			return kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
-		default:
-			return kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL
-		}
+		return podPresentationWithStatus(object, status)
 	}
-	return statusSeverity(status)
+	return status, statusSeverity(status)
+}
+
+// podPresentation is the single authority for both Status and Ready styling.
+// Keeping these columns on one state classification prevents combinations
+// such as a blue Terminating status with a yellow Ready count, or a red
+// liveness failure beside a merely yellow Ready count.
+func podPresentation(object *unstructured.Unstructured) (string, kmgrv1.CellSeverity) {
+	return podPresentationWithStatus(object, podStatusText(object))
+}
+
+func podPresentationWithStatus(
+	object *unstructured.Unstructured,
+	status string,
+) (string, kmgrv1.CellSeverity) {
+	folded := strings.ToLower(status)
+	ready, total := readyContainers(object)
+	phase := strings.ToLower(nestedString(object.Object, "status", "phase"))
+	switch {
+	case object.GetDeletionTimestamp() != nil || strings.Contains(folded, "terminating"):
+		return status, kmgrv1.CellSeverity_CELL_SEVERITY_TERMINATING
+	case podCompleted(object) || folded == "succeeded" || folded == "completed":
+		return status, kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+	case podStatusIsError(folded) || phase == "failed":
+		return status, kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
+	case podStatusIsInitializing(folded):
+		return status, kmgrv1.CellSeverity_CELL_SEVERITY_INFO
+	case podStatusIsPending(folded) || phase == "pending" || strings.Contains(folded, "unknown"):
+		return status, kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
+	case phase == "running" && total > 0 && ready != total:
+		return status, kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
+	default:
+		return status, kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL
+	}
 }
 
 func podStatusText(object *unstructured.Unstructured) string {

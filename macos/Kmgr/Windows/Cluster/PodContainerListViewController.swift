@@ -337,6 +337,7 @@ final class PodContainerListViewController: NSViewController,
         case .warning: .systemOrange
         case .critical: .systemRed
         case .muted: .secondaryLabelColor
+        case .terminating: .systemPurple
         default: .labelColor
         }
     }

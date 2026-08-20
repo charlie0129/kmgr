@@ -816,6 +816,7 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
         case .warning: .warning
         case .error: .critical
         case .muted: .muted
+        case .terminating: .terminating
         case .normal, .unspecified, .UNRECOGNIZED: .normal
         }
     }

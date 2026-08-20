@@ -1302,6 +1302,7 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         case .warning: .warning
         case .error: .critical
         case .muted: .muted
+        case .terminating: .terminating
         case .unspecified, .normal, .UNRECOGNIZED: .normal
         }
         return Cell(

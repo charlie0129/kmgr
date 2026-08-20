@@ -16,21 +16,27 @@ struct ResourceTableTextAccent {
 struct ResourceTableCellEffectsPolicy {
     var reducesMotion: Bool
     var neutralTint: NSColor
+    var warningTint: NSColor
     var regressionTint: NSColor
     var neutralMaximumOpacity: CGFloat
+    var warningMaximumOpacity: CGFloat
     var regressionMaximumOpacity: CGFloat
 
     init(
         reducesMotion: Bool,
         neutralTint: NSColor = .controlAccentColor,
+        warningTint: NSColor = .systemYellow,
         regressionTint: NSColor = .systemRed,
         neutralMaximumOpacity: CGFloat = 0.28,
+        warningMaximumOpacity: CGFloat = 0.30,
         regressionMaximumOpacity: CGFloat = 0.32
     ) {
         self.reducesMotion = reducesMotion
         self.neutralTint = neutralTint
+        self.warningTint = warningTint
         self.regressionTint = regressionTint
         self.neutralMaximumOpacity = min(max(neutralMaximumOpacity, 0), 1)
+        self.warningMaximumOpacity = min(max(warningMaximumOpacity, 0), 1)
         self.regressionMaximumOpacity = min(max(regressionMaximumOpacity, 0), 1)
     }
 
@@ -55,6 +61,9 @@ struct ResourceTableCellEffectsPolicy {
         case .neutral:
             tint = neutralTint
             maximumOpacity = neutralMaximumOpacity
+        case .warning:
+            tint = warningTint
+            maximumOpacity = warningMaximumOpacity
         case .regression:
             tint = regressionTint
             maximumOpacity = regressionMaximumOpacity
@@ -274,6 +283,7 @@ final class ResourceTextTableCellView: HighlightableResourceTableCellView {
         case .critical: .systemRed
         case .informational: .systemBlue
         case .muted: .secondaryLabelColor
+        case .terminating: .systemPurple
         default: .labelColor
         }
         return (font, color)

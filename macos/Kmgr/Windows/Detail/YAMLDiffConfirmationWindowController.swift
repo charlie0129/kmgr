@@ -339,6 +339,7 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
         case .critical: .systemRed
         case .informational: .systemBlue
         case .muted: .secondaryLabelColor
+        case .terminating: .systemPurple
         case .normal: .labelColor
         }
     }

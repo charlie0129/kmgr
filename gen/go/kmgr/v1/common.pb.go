@@ -109,6 +109,9 @@ const (
 	CellSeverity_CELL_SEVERITY_WARNING     CellSeverity = 3
 	CellSeverity_CELL_SEVERITY_ERROR       CellSeverity = 4
 	CellSeverity_CELL_SEVERITY_MUTED       CellSeverity = 5
+	// A resource is being deleted. Kept distinct from informational state so
+	// the GUI can render lifecycle teardown in purple rather than blue.
+	CellSeverity_CELL_SEVERITY_TERMINATING CellSeverity = 6
 )
 
 // Enum value maps for CellSeverity.
@@ -120,6 +123,7 @@ var (
 		3: "CELL_SEVERITY_WARNING",
 		4: "CELL_SEVERITY_ERROR",
 		5: "CELL_SEVERITY_MUTED",
+		6: "CELL_SEVERITY_TERMINATING",
 	}
 	CellSeverity_value = map[string]int32{
 		"CELL_SEVERITY_UNSPECIFIED": 0,
@@ -128,6 +132,7 @@ var (
 		"CELL_SEVERITY_WARNING":     3,
 		"CELL_SEVERITY_ERROR":       4,
 		"CELL_SEVERITY_MUTED":       5,
+		"CELL_SEVERITY_TERMINATING": 6,
 	}
 )
 
@@ -1579,14 +1584,15 @@ const file_kmgr_v1_common_proto_rawDesc = "" +
 	"\x1aERROR_CATEGORY_UNSUPPORTED\x10\n" +
 	"\x12\x1b\n" +
 	"\x17ERROR_CATEGORY_INTERNAL\x10\v\x12%\n" +
-	"!ERROR_CATEGORY_RESOURCE_EXHAUSTED\x10\f*\xac\x01\n" +
+	"!ERROR_CATEGORY_RESOURCE_EXHAUSTED\x10\f*\xcb\x01\n" +
 	"\fCellSeverity\x12\x1d\n" +
 	"\x19CELL_SEVERITY_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14CELL_SEVERITY_NORMAL\x10\x01\x12\x16\n" +
 	"\x12CELL_SEVERITY_INFO\x10\x02\x12\x19\n" +
 	"\x15CELL_SEVERITY_WARNING\x10\x03\x12\x17\n" +
 	"\x13CELL_SEVERITY_ERROR\x10\x04\x12\x17\n" +
-	"\x13CELL_SEVERITY_MUTED\x10\x05*\x9c\x01\n" +
+	"\x13CELL_SEVERITY_MUTED\x10\x05\x12\x1d\n" +
+	"\x19CELL_SEVERITY_TERMINATING\x10\x06*\x9c\x01\n" +
 	"\x11PropagationPolicy\x12\"\n" +
 	"\x1ePROPAGATION_POLICY_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dPROPAGATION_POLICY_BACKGROUND\x10\x01\x12!\n" +

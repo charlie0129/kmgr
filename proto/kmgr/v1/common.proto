@@ -118,6 +118,9 @@ enum CellSeverity {
   CELL_SEVERITY_WARNING = 3;
   CELL_SEVERITY_ERROR = 4;
   CELL_SEVERITY_MUTED = 5;
+  // A resource is being deleted. Kept distinct from informational state so
+  // the GUI can render lifecycle teardown in purple rather than blue.
+  CELL_SEVERITY_TERMINATING = 6;
 }
 
 message ResourceUsageValue {

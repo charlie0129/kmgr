@@ -422,18 +422,18 @@ func TestPodStatusPaletteSeparatesCompletedTerminatingAndFailureStates(t *testin
 		},
 		{
 			name: "terminating", phase: "Running", terminating: true,
-			wantStatus: "Terminating", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_INFO,
-			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			wantStatus: "Terminating", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_TERMINATING,
+			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_TERMINATING,
 		},
 		{
 			name: "liveness failure", phase: "Running", waitingReason: "LivenessProbeFailed",
 			wantStatus: "LivenessProbeFailed", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_ERROR,
-			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_ERROR,
 		},
 		{
 			name: "crash loop", phase: "Running", waitingReason: "CrashLoopBackOff",
 			wantStatus: "CrashLoopBackOff", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_ERROR,
-			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_ERROR,
 		},
 		{
 			name: "image pull backoff", phase: "Pending", waitingReason: "ImagePullBackOff",
@@ -443,7 +443,12 @@ func TestPodStatusPaletteSeparatesCompletedTerminatingAndFailureStates(t *testin
 		{
 			name: "container creating", phase: "Pending", waitingReason: "ContainerCreating",
 			wantStatus: "ContainerCreating", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_INFO,
-			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_INFO,
+		},
+		{
+			name: "running not ready", phase: "Running", wantStatus: "Running",
+			wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_ERROR,
+			wantReady:    kmgrv1.CellSeverity_CELL_SEVERITY_ERROR,
 		},
 	}
 	for _, test := range tests {
@@ -456,6 +461,10 @@ func TestPodStatusPaletteSeparatesCompletedTerminatingAndFailureStates(t *testin
 				status["state"] = map[string]any{
 					"waiting": map[string]any{"reason": test.waitingReason},
 				}
+			}
+			if test.name == "running not ready" {
+				status["ready"] = false
+				status["state"] = map[string]any{"running": map[string]any{}}
 			}
 			if test.terminating {
 				deletedAt := metav1.NewTime(time.Now())

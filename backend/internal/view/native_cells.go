@@ -60,9 +60,9 @@ func (p *Projector) nativeObjectCell(
 	case "resourceVersion":
 		return stringValue(object.GetResourceVersion())
 	case "status":
-		status := statusText(object)
+		status, severity := presentationForObject(object)
 		setNativeString(cell, status)
-		cell.Severity = statusSeverityForObject(object, status)
+		cell.Severity = severity
 		return cell, true
 	case "ready":
 		return p.readyCell(object, cell), true
@@ -450,11 +450,7 @@ func (p *Projector) readyCell(object *unstructured.Unstructured, cell *kmgrv1.Ce
 			return cell
 		}
 		setNativeString(cell, fmt.Sprintf("%d / %d", ready, total))
-		if podCompleted(object) {
-			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
-		} else if ready != total {
-			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
-		}
+		_, cell.Severity = podPresentation(object)
 		return cell
 	}
 	ready, _, _ := unstructured.NestedInt64(object.Object, "status", "readyReplicas")

@@ -6797,6 +6797,7 @@ private final class ResourceListViewController: NSViewController,
         switch severity {
         case .informational: .systemBlue
         case .muted: .secondaryLabelColor
+        case .terminating: .systemPurple
         default: .labelColor
         }
     }
