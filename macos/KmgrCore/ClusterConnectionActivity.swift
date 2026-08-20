@@ -13,6 +13,9 @@ public struct WarmCacheUsage: Hashable, Sendable {
     public var retainedViews: UInt64
     public var retainedObjects: UInt64
     public var retainedBytes: UInt64
+    public var evictableViews: UInt64
+    public var evictableObjects: UInt64
+    public var evictableBytes: UInt64
     public var viewLimit: UInt64
     public var objectLimit: UInt64
     public var byteLimit: UInt64
@@ -22,6 +25,9 @@ public struct WarmCacheUsage: Hashable, Sendable {
         retainedViews: UInt64 = 0,
         retainedObjects: UInt64 = 0,
         retainedBytes: UInt64 = 0,
+        evictableViews: UInt64 = 0,
+        evictableObjects: UInt64 = 0,
+        evictableBytes: UInt64 = 0,
         viewLimit: UInt64 = 0,
         objectLimit: UInt64 = 0,
         byteLimit: UInt64 = 0,
@@ -30,6 +36,9 @@ public struct WarmCacheUsage: Hashable, Sendable {
         self.retainedViews = retainedViews
         self.retainedObjects = retainedObjects
         self.retainedBytes = retainedBytes
+        self.evictableViews = evictableViews
+        self.evictableObjects = evictableObjects
+        self.evictableBytes = evictableBytes
         self.viewLimit = viewLimit
         self.objectLimit = objectLimit
         self.byteLimit = byteLimit
@@ -117,14 +126,6 @@ public struct ClusterConnectionRateTracker: Hashable, Sendable {
         else {
             lastSample = sample
             return ClusterConnectionRate()
-        }
-        guard sample.bytesReceived != previous.bytesReceived
-            || sample.bytesSent != previous.bytesSent
-        else {
-            // Health and warm-cache telemetry share the connection stream but
-            // are not transfer samples. Do not blank the current rate or move
-            // its baseline when only those aggregates changed.
-            return nil
         }
         let duration = sample.observedAt.timeIntervalSince(previous.observedAt)
         guard duration > 0 else {

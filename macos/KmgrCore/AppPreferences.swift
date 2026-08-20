@@ -93,6 +93,7 @@ public enum PreferenceControlledMutation: Hashable, Sendable {
 }
 
 public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
+    public var viewportOverscanScreensPerSide: Int
     public var globalWarmCacheViewLimit: Int
     public var globalWarmCacheObjectLimit: Int
     public var globalWarmCacheMemoryPercent: Int
@@ -110,6 +111,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     public var logSourceOpenConcurrency: Int
 
     public init(
+        viewportOverscanScreensPerSide: Int = 10,
         globalWarmCacheViewLimit: Int = 24,
         globalWarmCacheObjectLimit: Int = 250_000,
         globalWarmCacheMemoryPercent: Int = 20,
@@ -126,6 +128,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         exactPodMetricsGETConcurrency: Int = 16,
         logSourceOpenConcurrency: Int = 16
     ) {
+        self.viewportOverscanScreensPerSide = viewportOverscanScreensPerSide
         self.globalWarmCacheViewLimit = globalWarmCacheViewLimit
         self.globalWarmCacheObjectLimit = globalWarmCacheObjectLimit
         self.globalWarmCacheMemoryPercent = globalWarmCacheMemoryPercent
@@ -161,6 +164,13 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
                     message: "\(title) must be between 1% and 100%."
                 ))
             }
+        }
+
+        if !(0...100).contains(viewportOverscanScreensPerSide) {
+            issues.append(AppPreferenceIssue(
+                field: "advancedPerformance.viewportOverscanScreensPerSide",
+                message: "List overscan must be between 0 and 100 screens per side."
+            ))
         }
 
         validateCount(
@@ -247,7 +257,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v3"
+    public static let apiVersion = "kmgr.preferences/v4"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
@@ -344,6 +354,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
     case metricsRefresh
     case columnsConfigurationPath
     case advancedPerformance
+    case viewportOverscan
 
     public enum Activation: Hashable, Sendable {
         case immediate
@@ -355,7 +366,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         switch self {
         case .appearance, .logDisplay, .confirmations:
             .immediate
-        case .defaultNamespace:
+        case .defaultNamespace, .viewportOverscan:
             .newWorkspace
         case .workspaceRestoration, .metricsRefresh, .columnsConfigurationPath,
             .advancedPerformance:
@@ -373,6 +384,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         case .metricsRefresh: "Metrics refresh"
         case .columnsConfigurationPath: "Programmable columns path"
         case .advancedPerformance: "Advanced performance configuration"
+        case .viewportOverscan: "List viewport overscan"
         }
     }
 }
@@ -400,7 +412,15 @@ public struct AppPreferencesDelta: Hashable, Sendable {
         if previous.columnsConfigurationPath != updated.columnsConfigurationPath {
             changes.insert(.columnsConfigurationPath)
         }
-        if previous.advancedPerformance != updated.advancedPerformance {
+        if previous.advancedPerformance.viewportOverscanScreensPerSide
+            != updated.advancedPerformance.viewportOverscanScreensPerSide
+        {
+            changes.insert(.viewportOverscan)
+        }
+        var previousEnginePerformance = previous.advancedPerformance
+        previousEnginePerformance.viewportOverscanScreensPerSide =
+            updated.advancedPerformance.viewportOverscanScreensPerSide
+        if previousEnginePerformance != updated.advancedPerformance {
             changes.insert(.advancedPerformance)
         }
         self.changes = changes

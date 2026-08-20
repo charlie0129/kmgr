@@ -120,6 +120,10 @@ public struct ResourceViewRequest: Hashable, Sendable {
     public var filterExpression: String
     public var filterRevision: UInt64
     public var columnIDs: [String]
+    /// Stable content identity for the persisted column document used by the
+    /// engine. It prevents an Open racing an atomic save from silently
+    /// resolving the previous CEL program under a newly visible column ID.
+    public var columnConfigurationVersion: String
     public var sort: [ResourceSortDescriptor]
     /// Keep a compatible rendered table visible while this generation builds
     /// its replacement. The stream will emit `.reconciled` after all payloads
@@ -138,6 +142,7 @@ public struct ResourceViewRequest: Hashable, Sendable {
         filterExpression: String = "",
         filterRevision: UInt64 = 0,
         columnIDs: [String] = [],
+        columnConfigurationVersion: String = "",
         sort: [ResourceSortDescriptor] = [],
         stageUntilReconciled: Bool = false
     ) {
@@ -152,6 +157,7 @@ public struct ResourceViewRequest: Hashable, Sendable {
         self.filterExpression = filterExpression
         self.filterRevision = filterRevision
         self.columnIDs = columnIDs
+        self.columnConfigurationVersion = columnConfigurationVersion
         self.sort = sort
         self.stageUntilReconciled = stageUntilReconciled
     }

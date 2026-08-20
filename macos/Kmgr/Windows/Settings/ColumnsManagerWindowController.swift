@@ -1464,16 +1464,75 @@ final class CELColumnEditorWindowController: NSWindowController,
                 + " object. Select one row before opening Columns to use its live fields."
         }
         return source + "\n\n" + """
-        Try these (maps/lists stay visible while you explore):
-          object.apiVersion              → string
-          object.kind                    → string
-          object.metadata.name           → string (for example, "sample")
-          object.metadata.namespace      → string (for example, "default")
-          object.metadata.labels["app"]  → string (when present)
-          object.metadata                → map (inspect its YAML, then index a key)
-          context.kind                   → string
-          now                            → timestamp
-        Map/list values remain visible in the preview when temporarily invalid; transform them to a scalar before saving.
+        kmgr.cel/v1 examples (pick a matching result type):
+
+        Safe access and error handling
+          object.?metadata.?labels[?"app"].orValue("—")                string
+          object.?status.?phase.orValue("Unknown")                     string
+          object.?spec.?replicas.orValue(0)                             integer
+          object.?status.?conditions.orValue([]).size()                 integer
+
+        Pods
+          object.?spec.?nodeName.orValue("Unscheduled")                string
+          object.?spec.?tolerations.orValue([])
+            .map(t, t.?key.orValue("*") + ":"
+              + t.?operator.orValue("Equal") + ":"
+              + t.?effect.orValue("*"))                                string list
+          object.?spec.?containers.orValue([])
+            .filter(c, c.?env.orValue([]).exists(e, e.name == "DEBUG"))
+            .map(c, c.name)                                            string list
+          object.?spec.?containers.orValue([])
+            .filter(c, c.?env.orValue([])
+              .exists(e, e.name == "JAVA_OPTS"))
+            .map(c, c.name + "=" + kmgr.join(c.?env.orValue([])
+              .filter(e, e.name == "JAVA_OPTS")
+              .map(e, e.?value.orValue(e.?valueFrom.hasValue()
+                ? "<valueFrom>" : "<unset>")), "|"))                   string list
+          object.?metadata.?ownerReferences.orValue([])
+            .map(o, o.kind + "/" + o.name)                             string list
+          kmgr.sum(object.?status.?containerStatuses.orValue([])
+            .map(c, c.?restartCount.orValue(0)))                        integer
+          object.?status.?containerStatuses.orValue([])
+            .filter(c, c.?ready.orValue(false)).size()                  integer
+          object.?spec.?containers.orValue([])
+            .map(c, c.name + "="
+              + c.?resources.?requests[?"cpu"].orValue("0"))           string list
+          object.?spec.?volumes.orValue([])
+            .filter(v, v.?persistentVolumeClaim.hasValue())
+            .map(v, v.persistentVolumeClaim.claimName)                 string list
+          object.?spec.?containers.orValue([]).map(c, c.image)         string list
+
+        Nodes
+          object.?spec.?taints.orValue([])
+            .map(t, t.key + "=" + t.?value.orValue("")
+              + ":" + t.effect)                                       string list
+          object.?status.?allocatable[?"nvidia.com/gpu"].orValue("0")   quantity
+          object.?status.?addresses.orValue([])
+            .filter(a, a.type == "InternalIP").map(a, a.address)       string list
+          object.?status.?conditions.orValue([])
+            .filter(c, c.status == "True").map(c, c.type)             string list
+          object.?spec.?unschedulable.orValue(false)                   boolean
+
+        Workloads
+          object.?spec.?replicas.orValue(0)
+            - object.?status.?availableReplicas.orValue(0)             integer
+          object.?metadata.?generation.orValue(0) ==
+            object.?status.?observedGeneration.orValue(-1)             boolean
+
+        Common helpers
+          kmgr.join(object.?metadata.?finalizers.orValue([]), " · ")   string
+          object.?metadata.?creationTimestamp.hasValue()
+            ? now - timestamp(object.metadata.creationTimestamp)
+            : duration("0s")                                           duration
+          object.?metadata.?deletionTimestamp.hasValue()               boolean
+          context.?kind.orValue("Unknown")                             string
+
+        Optional selection (`.?field`, `[?key]`, and `.orValue`) is the
+        preferred way to make missing Kubernetes fields render predictably.
+        `kmgr.sum` accepts numeric lists only; Kubernetes quantities such as
+        `250m` are strings, so display them per container instead of summing.
+        Maps/lists stay visible in Preview while exploring; save a scalar or
+        scalar list that matches the selected result type.
         """
     }
 

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
@@ -1113,6 +1114,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	entry.warmProjection = nil
 	entry.subscribers[subscription] = struct{}{}
 	r.views[streamKey] = subscription
+	r.signalWarmCacheTelemetryLocked()
 	var replacedMetrics metricSubscription
 	if replaced != nil {
 		replacedMetrics = replaced.retireLocked()
@@ -1343,6 +1345,10 @@ func (r *Runtime) prepareEntryBatchLocked(
 ) []*Subscription {
 	entry.revision++
 	applyResourceTableBatch(entry, batch)
+	// UIDStore retained weights change before this lifecycle callback. Publish
+	// a coalesced hint even when no view is attached so progressive LIST pages
+	// and background WATCH updates are reflected in cache telemetry.
+	r.signalWarmCacheTelemetryLocked()
 	if batch.SynchronizedAt.After(entry.lastStatus.LastSynchronized) {
 		entry.lastStatus.LastSynchronized = batch.SynchronizedAt
 	}
@@ -1495,6 +1501,7 @@ func (r *Runtime) detachLocked(subscription *Subscription) {
 	}
 	r.cleanupUnusedEntryLocked(entry)
 	r.scheduleReleaseLocked(entry)
+	r.signalWarmCacheTelemetryLocked()
 }
 
 // willDetachLastSubscriptionLocked reports whether removing subscription
@@ -1963,6 +1970,7 @@ func (r *Runtime) removeSearchSnapshotLocked(key searchSnapshotKey, expected *co
 		// Defensive only: every mutation is serialized under Runtime.mu.
 		r.searchSnapshotObjects = 0
 	}
+	r.signalWarmCacheTelemetryLocked()
 }
 
 func (r *Runtime) oldestSearchSnapshotLocked() (searchSnapshotKey, *completedSearchSnapshot) {
@@ -2184,41 +2192,46 @@ type Subscription struct {
 	metricsReconciling    bool
 	lastStatus            *kmgrv1.ViewStatus
 
-	mu                         sync.Mutex
-	generation                 uint64
-	sequence                   uint64
-	projector                  *Projector
-	projectionCacheKey         projectionCacheKey
-	rows                       map[string]*kmgrv1.ResourceRow
-	order                      []string
-	presentationRevision       uint64
-	indexRevision              uint64
-	pendingInvalidation        bool
-	pendingStatuses            []*kmgrv1.ViewStatus
-	pendingError               *kmgrv1.StructuredError
-	pendingSchema              *kmgrv1.ViewSchema
-	sealedInitial              []*kmgrv1.ViewEvent
-	stageUntilReconciled       bool
-	pendingReconciliation      bool
-	reconciliationDelivered    bool
-	serverSchema               *kmgrv1.ViewSchema
-	serverColumns              []projectedTableColumn
-	serverCells                map[string][]*kmgrv1.Cell
-	selectionSnapshot          *SelectionSnapshot
-	selectionSnapshotBuildHook func()
-	optionalResourceHints      optionalResourceStreamHints
-	inFlightDelivery           *subscriptionDelivery
-	pendingObjects             map[string]*unstructured.Unstructured
-	projectionTimer            *time.Timer
-	projectionScheduled        bool
-	projectionRunning          bool
-	projectionResnapshot       bool
-	projectionRevision         uint64
-	projectionScheduleID       uint64
-	projectionPasses           uint64
-	projectedObjects           uint64
-	projectionContext          context.Context
-	cancelProjection           context.CancelFunc
+	mu                          sync.Mutex
+	generation                  uint64
+	sequence                    uint64
+	projector                   *Projector
+	projectionCacheKey          projectionCacheKey
+	rows                        map[string]*kmgrv1.ResourceRow
+	order                       []string
+	presentationRowBytes        map[string]int64
+	presentationRowBytesTotal   int64
+	presentationUIDBytesTotal   int64
+	presentationRetainedObjects atomic.Uint64
+	presentationRetainedBytes   atomic.Uint64
+	presentationRevision        uint64
+	indexRevision               uint64
+	pendingInvalidation         bool
+	pendingStatuses             []*kmgrv1.ViewStatus
+	pendingError                *kmgrv1.StructuredError
+	pendingSchema               *kmgrv1.ViewSchema
+	sealedInitial               []*kmgrv1.ViewEvent
+	stageUntilReconciled        bool
+	pendingReconciliation       bool
+	reconciliationDelivered     bool
+	serverSchema                *kmgrv1.ViewSchema
+	serverColumns               []projectedTableColumn
+	serverCells                 map[string][]*kmgrv1.Cell
+	selectionSnapshot           *SelectionSnapshot
+	selectionSnapshotBuildHook  func()
+	optionalResourceHints       optionalResourceStreamHints
+	inFlightDelivery            *subscriptionDelivery
+	pendingObjects              map[string]*unstructured.Unstructured
+	projectionTimer             *time.Timer
+	projectionScheduled         bool
+	projectionRunning           bool
+	projectionResnapshot        bool
+	projectionRevision          uint64
+	projectionScheduleID        uint64
+	projectionPasses            uint64
+	projectedObjects            uint64
+	projectionContext           context.Context
+	cancelProjection            context.CancelFunc
 	// snapshotComplete records whether this generation crossed an authoritative
 	// initial LIST/WatchList barrier. It gates staged reconciliation and warm
 	// catch-up status; it is not client row-delivery state.
@@ -2260,6 +2273,7 @@ func newSubscription(
 		projector:            projector,
 		projectionCacheKey:   projector.cacheKey,
 		rows:                 make(map[string]*kmgrv1.ResourceRow),
+		presentationRowBytes: make(map[string]int64),
 		presentationRevision: 1,
 		indexRevision:        1,
 		pendingObjects:       make(map[string]*unstructured.Unstructured),
@@ -2408,6 +2422,9 @@ func (s *Subscription) applyMetrics(snapshot metrics.Snapshot) {
 // catch-up is delivered only when authoritative state actually raced Open.
 func (s *Subscription) initializeSealedRows(rows []*kmgrv1.ResourceRow) {
 	clear(s.rows)
+	clear(s.presentationRowBytes)
+	s.presentationRowBytesTotal = 0
+	s.presentationUIDBytesTotal = 0
 	s.order = s.order[:0]
 	s.pendingStatuses = nil
 	s.pendingError = nil
@@ -2426,8 +2443,18 @@ func (s *Subscription) initializeSealedRows(rows []*kmgrv1.ResourceRow) {
 			continue
 		}
 		s.rows[uid] = row
+		s.presentationRowBytes[uid] = projectedRowRetainedBytes(row)
+		s.presentationRowBytesTotal = saturatingProjectionBytes(
+			s.presentationRowBytesTotal,
+			s.presentationRowBytes[uid],
+		)
+		s.presentationUIDBytesTotal = saturatingProjectionBytes(
+			s.presentationUIDBytesTotal,
+			int64(len(uid)),
+		)
 		s.order = append(s.order, uid)
 	}
+	s.publishPresentationRetentionLocked()
 }
 
 // initializeServerTable is called while a new subscription is still private.
@@ -2623,6 +2650,7 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 		}
 		markOrderCandidate()
 		delete(s.rows, key)
+		s.updatePresentationRowRetentionLocked(key, nil)
 		presentationChanged = true
 	}
 	for _, object := range batch.Upserts {
@@ -2636,6 +2664,7 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 			if previous != nil {
 				markOrderCandidate()
 				delete(s.rows, uid)
+				s.updatePresentationRowRetentionLocked(uid, nil)
 				presentationChanged = true
 			}
 			continue
@@ -2644,9 +2673,13 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 			markOrderCandidate()
 		}
 		s.rows[uid] = row
+		s.updatePresentationRowRetentionLocked(uid, row)
 		if previous == nil || !proto.Equal(previous, row) {
 			presentationChanged = true
 		}
+	}
+	if len(batch.RemovedUIDs) != 0 || len(batch.Upserts) != 0 {
+		s.publishPresentationRetentionLocked()
 	}
 	indexChanged := false
 	if orderCandidate {
@@ -2710,8 +2743,12 @@ func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
 				s.order, s.rows, key, previous, s.projector.compareRows,
 			)
 			delete(s.rows, key)
+			s.updatePresentationRowRetentionLocked(key, nil)
 			presentationChanged = true
 		}
+	}
+	if presentationChanged {
+		s.publishPresentationRetentionLocked()
 	}
 	for _, object := range batch.Upserts {
 		if object == nil || object.GetUID() == "" {
@@ -2973,6 +3010,7 @@ func (s *Subscription) runProjection() {
 			indexChanged := !slices.Equal(previousOrder, nextOrder)
 			s.rows = baseRows
 			s.order = nextOrder
+			s.replacePresentationRetentionLocked(baseRows)
 			if presentationChanged || indexChanged {
 				s.advancePresentationLocked(indexChanged)
 			}
@@ -3011,6 +3049,7 @@ func (s *Subscription) runProjection() {
 							s.order, s.rows, uid, previous, projector.compareRows,
 						)
 						delete(s.rows, uid)
+						s.updatePresentationRowRetentionLocked(uid, nil)
 						presentationChanged = true
 					}
 					continue
@@ -3022,6 +3061,7 @@ func (s *Subscription) runProjection() {
 					)
 				}
 				s.rows[uid] = row
+				s.updatePresentationRowRetentionLocked(uid, row)
 				if rowMoved {
 					s.order = insertOrderedRow(s.order, s.rows, uid, row, projector.compareRows)
 				}
@@ -3029,6 +3069,7 @@ func (s *Subscription) runProjection() {
 					presentationChanged = true
 				}
 			}
+			s.publishPresentationRetentionLocked()
 			indexChanged := orderCandidate && !slices.Equal(previousOrder, s.order)
 			if presentationChanged || indexChanged {
 				s.advancePresentationLocked(indexChanged)
@@ -3133,6 +3174,86 @@ func resourceRowsEqual(left, right map[string]*kmgrv1.ResourceRow) bool {
 		}
 	}
 	return true
+}
+
+func (s *Subscription) replacePresentationRetentionLocked(
+	rows map[string]*kmgrv1.ResourceRow,
+) {
+	weights := make(map[string]int64, len(rows))
+	var total int64
+	var uidBytes int64
+	for uid, row := range rows {
+		weight := projectedRowRetainedBytes(row)
+		weights[uid] = weight
+		total = saturatingProjectionBytes(total, weight)
+		uidBytes = saturatingProjectionBytes(uidBytes, int64(len(uid)))
+	}
+	s.presentationRowBytes = weights
+	s.presentationRowBytesTotal = total
+	s.presentationUIDBytesTotal = uidBytes
+	s.publishPresentationRetentionLocked()
+}
+
+func (s *Subscription) updatePresentationRowRetentionLocked(
+	uid string,
+	row *kmgrv1.ResourceRow,
+) {
+	if uid == "" {
+		return
+	}
+	previous, existed := s.presentationRowBytes[uid]
+	if previous <= s.presentationRowBytesTotal {
+		s.presentationRowBytesTotal -= previous
+	} else {
+		s.presentationRowBytesTotal = 0
+	}
+	if row == nil {
+		delete(s.presentationRowBytes, uid)
+		if existed {
+			s.presentationUIDBytesTotal = max(
+				0,
+				s.presentationUIDBytesTotal-int64(len(uid)),
+			)
+		}
+	} else {
+		weight := projectedRowRetainedBytes(row)
+		s.presentationRowBytes[uid] = weight
+		s.presentationRowBytesTotal = saturatingProjectionBytes(
+			s.presentationRowBytesTotal,
+			weight,
+		)
+		if !existed {
+			s.presentationUIDBytesTotal = saturatingProjectionBytes(
+				s.presentationUIDBytesTotal,
+				int64(len(uid)),
+			)
+		}
+	}
+}
+
+func (s *Subscription) publishPresentationRetentionLocked() {
+	objects := uint64(len(s.rows))
+	bytes := retainedUint64(s.presentationRowBytesTotal)
+	// Account for the map/slice containers and UID strings even when the
+	// projected rows themselves are tiny. Capacity is intentionally included:
+	// deleting rows does not necessarily return these allocations to the heap.
+	containerBytes := saturatingProjectionBytes(
+		int64(256),
+		saturatingProjectionProduct(int64(cap(s.order)), 24),
+	)
+	containerBytes = saturatingProjectionBytes(
+		containerBytes,
+		saturatingProjectionProduct(int64(len(s.rows)), 48),
+	)
+	containerBytes = saturatingProjectionBytes(containerBytes, s.presentationUIDBytesTotal)
+	bytes = uint64(saturatingProjectionBytes(int64(bytes), containerBytes))
+	s.presentationRetainedObjects.Store(objects)
+	s.presentationRetainedBytes.Store(bytes)
+	if s.runtime != nil {
+		// This is a coalescing hint only. Avoid the Runtime mutex from the
+		// Subscription lock; telemetry reads the atomic totals later.
+		s.runtime.signalWarmCacheTelemetry()
+	}
 }
 
 func (s *Subscription) advancePresentationLocked(indexChanged bool) {

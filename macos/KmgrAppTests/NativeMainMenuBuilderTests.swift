@@ -100,6 +100,9 @@ struct NativeMainMenuBuilderTests {
         #expect(submenu("Resource", in: built.main) != nil)
         #expect(window.item(withTitle: "Command Palette…") != nil)
         #expect(window.item(withTitle: "Port Forwards") != nil)
+        let shortcuts = try #require(window.item(withTitle: "Show Shortcuts"))
+        #expect(shortcuts.target === target)
+        #expect(shortcuts.action == #selector(MenuTarget.shortcuts(_:)))
     }
 
     @Test("resource table navigation is discoverable through responder-chain commands")
@@ -212,6 +215,7 @@ struct NativeMainMenuBuilderTests {
             newClusterWindow: #selector(MenuTarget.newWindow(_:)),
             showCommandPalette: #selector(MenuTarget.palette(_:)),
             showPortForwards: #selector(MenuTarget.forwards(_:)),
+            toggleShortcuts: #selector(MenuTarget.shortcuts(_:)),
             cycleWindowsForward: #selector(MenuTarget.cycleForward(_:)),
             cycleWindowsBackward: #selector(MenuTarget.cycleBackward(_:))
         ))
@@ -241,6 +245,7 @@ private final class MenuTarget: NSObject {
     @objc func newWindow(_ sender: Any?) {}
     @objc func palette(_ sender: Any?) {}
     @objc func forwards(_ sender: Any?) {}
+    @objc func shortcuts(_ sender: Any?) {}
     @objc func cycleForward(_ sender: Any?) {}
     @objc func cycleBackward(_ sender: Any?) {}
 }

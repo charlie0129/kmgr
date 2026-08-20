@@ -474,6 +474,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         super.viewDidAppear()
         view.layoutSubtreeIfNeeded()
         loadObject()
+        if segmented.selectedSegment == ObjectDetailInitialTab.yaml.segment {
+            view.window?.makeFirstResponder(yamlTextView)
+        }
     }
 
     override func viewDidLayout() {
@@ -898,6 +901,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         switch segmented.selectedSegment {
         case 1:
             show(yamlContainerView)
+            // Cmd-F is provided by NSTextView's find bar. When Y opens this
+            // controller, focus the YAML document itself instead of leaving
+            // the controller root as first responder.
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                    self.segmented.selectedSegment == ObjectDetailInitialTab.yaml.segment,
+                    self.view.window != nil
+                else { return }
+                self.view.window?.makeFirstResponder(self.yamlTextView)
+            }
         case 2:
             show(relationshipsContainerView)
             loadRelationshipsIfNeeded()

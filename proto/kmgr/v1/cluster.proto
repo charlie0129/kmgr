@@ -87,22 +87,30 @@ message ConnectionEvent {
   // expose counts only; the GUI derives short-window rates from deltas.
   uint64 api_bytes_received = 5;
   uint64 api_bytes_sent = 6;
-  // Process-memory warm-cache accounting only. Neither record includes cache
-  // keys, Kubernetes identities, selectors, or authority identifiers.
+  // Process-memory view-cache accounting. Retained totals include active and
+  // idle raw stores plus their projected presentations. Evictable totals are
+  // the idle warm subset governed by the reported limits. Neither record
+  // includes cache keys, Kubernetes identities, selectors, or authority IDs.
   WarmCacheUsage authority_warm_cache = 7;
   WarmCacheUsage global_warm_cache = 8;
 }
 
 message WarmCacheUsage {
+  // Total retained view-cache graph, including active views. These values are
+  // informational and are not capped by the idle warm-cache limits below.
   uint64 retained_views = 1;
   uint64 retained_objects = 2;
   uint64 retained_bytes = 3;
+  // Limits apply only to the evictable idle warm subset.
   uint64 view_limit = 4;
   uint64 object_limit = 5;
   uint64 byte_limit = 6;
   // Cumulative entries removed specifically to satisfy a warm-cache budget.
   // Normal consumption, explicit removal, and shutdown do not increment it.
   uint64 budget_evictions = 7;
+  uint64 evictable_views = 8;
+  uint64 evictable_objects = 9;
+  uint64 evictable_bytes = 10;
 }
 
 message DiscoverRequest {

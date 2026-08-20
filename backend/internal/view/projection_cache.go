@@ -160,19 +160,26 @@ func newProjectionCacheKey(spec ProjectionSpec) projectionCacheKey {
 func projectedRowsRetainedBytes(rows []*kmgrv1.ResourceRow) int64 {
 	result := saturatingProjectionBytes(24, saturatingProjectionProduct(int64(cap(rows)), 8))
 	for _, row := range rows {
-		if row == nil {
-			continue
-		}
-		encoded := int64(proto.Size(row))
-		// proto.Size accounts for encoded payload bytes, but rows also retain a
-		// ResourceRow, ResourceIdentity, the Cells backing array, and one Cell
-		// object per entry. Tiny cells otherwise look nearly free despite having
-		// most of their cost in Go/protobuf object overhead.
-		result = saturatingProjectionBytes(result, 512)
-		result = saturatingProjectionBytes(result, saturatingProjectionProduct(int64(cap(row.Cells)), 256))
-		result = saturatingProjectionBytes(result, saturatingProjectionBytes(encoded, encoded))
+		result = saturatingProjectionBytes(result, projectedRowRetainedBytes(row))
 	}
 	return result
+}
+
+func projectedRowRetainedBytes(row *kmgrv1.ResourceRow) int64 {
+	if row == nil {
+		return 0
+	}
+	encoded := int64(proto.Size(row))
+	// proto.Size accounts for encoded payload bytes, but rows also retain a
+	// ResourceRow, ResourceIdentity, the Cells backing array, and one Cell
+	// object per entry. Tiny cells otherwise look nearly free despite having
+	// most of their cost in Go/protobuf object overhead.
+	result := int64(512)
+	result = saturatingProjectionBytes(
+		result,
+		saturatingProjectionProduct(int64(cap(row.Cells)), 256),
+	)
+	return saturatingProjectionBytes(result, saturatingProjectionBytes(encoded, encoded))
 }
 
 func saturatingProjectionBytes(left, right int64) int64 {

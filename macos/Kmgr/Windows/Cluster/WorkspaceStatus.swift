@@ -148,10 +148,10 @@ enum WarmCacheWorkspaceStatus {
     ) -> WorkspaceStatus? {
         guard isAvailable(authority) || isAvailable(global) else { return nil }
 
-        let authorityMemory = memoryUsage(authority)
-        let globalMemory = memoryUsage(global)
+        let authorityMemory = bytes(authority.retainedBytes)
+        let globalMemory = bytes(global.retainedBytes)
         let aggregatesDiffer = authority != global
-        var components = ["Warm cache \(authorityMemory)"]
+        var components = ["Cache \(authorityMemory)"]
         if aggregatesDiffer {
             components.append("global \(globalMemory)")
         }
@@ -164,27 +164,27 @@ enum WarmCacheWorkspaceStatus {
             text,
             toolTip: [
                 detail(title: "This cluster", usage: authority),
-                detail(title: "Global warm cache", usage: global),
-                "Retained memory is a conservative warm-cache estimate, not total engine memory.",
+                detail(title: "Global view cache", usage: global),
+                "Retained memory is a conservative view-cache estimate, not process RSS.",
             ].joined(separator: "\n\n"),
             shortText: text
         )
     }
 
     private static func isAvailable(_ usage: WarmCacheUsage) -> Bool {
-        usage.viewLimit > 0 || usage.objectLimit > 0 || usage.byteLimit > 0
-    }
-
-    private static func memoryUsage(_ usage: WarmCacheUsage) -> String {
-        "\(bytes(usage.retainedBytes)) / \(bytes(usage.byteLimit))"
+        usage.retainedBytes > 0 || usage.viewLimit > 0
+            || usage.objectLimit > 0 || usage.byteLimit > 0
     }
 
     private static func detail(title: String, usage: WarmCacheUsage) -> String {
         """
         \(title)
-        \(usage.retainedViews.formatted()) / \(usage.viewLimit.formatted()) queries
-        \(usage.retainedObjects.formatted()) / \(usage.objectLimit.formatted()) objects
-        \(memoryUsage(usage)) estimated retained memory
+        \(usage.retainedViews.formatted()) retained queries
+        \(usage.retainedObjects.formatted()) retained raw objects and projected rows
+        \(bytes(usage.retainedBytes)) estimated retained memory
+        \(usage.evictableViews.formatted()) / \(usage.viewLimit.formatted()) idle warm queries
+        \(usage.evictableObjects.formatted()) / \(usage.objectLimit.formatted()) idle warm objects
+        \(bytes(usage.evictableBytes)) / \(bytes(usage.byteLimit)) idle warm memory
         \(usage.budgetEvictions.formatted()) budget evictions
         """
     }

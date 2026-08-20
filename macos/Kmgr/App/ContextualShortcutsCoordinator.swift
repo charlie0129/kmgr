@@ -23,6 +23,7 @@ final class ContextualShortcutsCoordinator: NSObject {
     private weak var application: NSApplication?
     private weak var observedProviderObject: AnyObject?
     private var isStarted = false
+    private(set) var isEnabled = true
     private var refreshTask: Task<Void, Never>?
 
     init(
@@ -72,6 +73,10 @@ final class ContextualShortcutsCoordinator: NSObject {
     /// AppKit tests. The production path supplies `NSApplication.isActive` and
     /// its current key window.
     func synchronize(isApplicationActive: Bool, keyWindow: NSWindow?) {
+        guard isEnabled else {
+            hideAndUnbind()
+            return
+        }
         guard isApplicationActive,
             let keyWindow,
             keyWindow !== shortcutsWindowController.window
@@ -87,6 +92,21 @@ final class ContextualShortcutsCoordinator: NSObject {
             return
         }
         shortcutsWindowController.present(snapshot, relativeTo: keyWindow)
+    }
+
+    func toggle() {
+        isEnabled.toggle()
+        if !isEnabled {
+            hideAndUnbind()
+        } else {
+            scheduleRefresh()
+        }
+    }
+
+    func closeFromUser() {
+        guard isEnabled else { return }
+        isEnabled = false
+        hideAndUnbind()
     }
 
     private func refresh() {
@@ -123,7 +143,7 @@ final class ContextualShortcutsCoordinator: NSObject {
             // Remove the passive panel before AppKit evaluates whether the last
             // user window closed. It must never keep the process alive itself.
             hideAndUnbind()
-            scheduleRefresh()
+            if isEnabled { scheduleRefresh() }
         } else {
             scheduleRefresh()
         }
@@ -181,11 +201,12 @@ final class ContextualShortcutsWindowController: NSWindowController {
     private let contentController = ContextualShortcutsContentViewController()
     private(set) var currentSnapshot: ContextualShortcutSnapshot?
     private var positionedHostWindowNumber: Int?
+    var onUserClose: (() -> Void)?
 
     init() {
         let panel = PassiveContextualShortcutsPanel(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 180),
-            styleMask: [.titled, .utilityWindow, .nonactivatingPanel],
+            styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -200,12 +221,13 @@ final class ContextualShortcutsWindowController: NSWindowController {
         panel.isExcludedFromWindowsMenu = true
         panel.collectionBehavior = [.ignoresCycle, .fullScreenAuxiliary, .moveToActiveSpace]
         panel.animationBehavior = .utilityWindow
-        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.closeButton)?.isHidden = false
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.setAccessibilityLabel("Contextual keyboard shortcuts")
         panel.contentViewController = contentController
         super.init(window: panel)
+        panel.delegate = self
     }
 
     @available(*, unavailable)
@@ -241,6 +263,13 @@ final class ContextualShortcutsWindowController: NSWindowController {
             x: visibleFrame.maxX - frame.width - 16,
             y: visibleFrame.maxY - frame.height - 16
         ))
+    }
+}
+
+extension ContextualShortcutsWindowController: NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        onUserClose?()
+        return true
     }
 }
 

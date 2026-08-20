@@ -62,7 +62,7 @@ func (p *Projector) nativeObjectCell(
 	case "status":
 		status := statusText(object)
 		setNativeString(cell, status)
-		cell.Severity = statusSeverity(status)
+		cell.Severity = statusSeverityForObject(object, status)
 		return cell, true
 	case "ready":
 		return p.readyCell(object, cell), true
@@ -449,8 +449,10 @@ func (p *Projector) readyCell(object *unstructured.Unstructured, cell *kmgrv1.Ce
 			setMissingCell(cell, "Pod has no containers")
 			return cell
 		}
-		setNativeString(cell, fmt.Sprintf("%d/%d", ready, total))
-		if ready != total {
+		setNativeString(cell, fmt.Sprintf("%d / %d", ready, total))
+		if podCompleted(object) {
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		} else if ready != total {
 			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
 		}
 		return cell
@@ -460,7 +462,7 @@ func (p *Projector) readyCell(object *unstructured.Unstructured, cell *kmgrv1.Ce
 	if !found {
 		desired = 1
 	}
-	setNativeString(cell, fmt.Sprintf("%d/%d", ready, desired))
+	setNativeString(cell, fmt.Sprintf("%d / %d", ready, desired))
 	if ready != desired {
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
 	}

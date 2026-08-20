@@ -68,7 +68,10 @@ type Activation struct {
 }
 
 type Value struct {
-	Display  string
+	Display string
+	// Missing distinguishes a null or empty optional CEL result from a real
+	// scalar whose rendered text happens to equal the configured placeholder.
+	Missing  bool
 	String   *string
 	Quantity *resource.Quantity
 	Integer  *int64
@@ -437,11 +440,11 @@ func previewNativeValue(value ref.Val) (any, error) {
 
 func (p *Program) coerce(result ref.Val) (Value, error) {
 	if result == nil || result == types.NullValue || types.IsUnknownOrError(result) {
-		return Value{Display: p.definition.Missing}, nil
+		return Value{Display: p.definition.Missing, Missing: true}, nil
 	}
 	if optional, ok := result.(*types.Optional); ok {
 		if !optional.HasValue() {
-			return Value{Display: p.definition.Missing}, nil
+			return Value{Display: p.definition.Missing, Missing: true}, nil
 		}
 		result = optional.GetValue()
 	}

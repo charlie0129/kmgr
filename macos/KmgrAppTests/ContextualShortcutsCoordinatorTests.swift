@@ -21,6 +21,7 @@ struct ContextualShortcutsCoordinatorTests {
         #expect(panel.collectionBehavior.contains(.ignoresCycle))
         #expect(panel.isExcludedFromWindowsMenu)
         #expect(panel.accessibilityLabel() == "Contextual keyboard shortcuts")
+        #expect(panel.standardWindowButton(.closeButton)?.isHidden == false)
     }
 
     @Test("active leaf provider wins and deactivation hides the panel")
@@ -107,6 +108,39 @@ struct ContextualShortcutsCoordinatorTests {
 
         coordinator.synchronize(isApplicationActive: true, keyWindow: child.window)
         #expect(coordinator.shortcutsWindowController.currentSnapshot == parentSnapshot)
+    }
+
+    @Test("closing and the Window menu toggle keep shortcuts disabled until reopened")
+    func closeAndToggle() throws {
+        let host = ShortcutProviderWindowController(snapshot: ContextualShortcutCatalog.resourceFilter)
+        let coordinator = ContextualShortcutsCoordinator(application: .shared)
+        coordinator.shortcutsWindowController.onUserClose = { [weak coordinator] in
+            coordinator?.closeFromUser()
+        }
+        defer {
+            coordinator.stop()
+            host.close()
+        }
+
+        coordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
+        let panel = try #require(coordinator.shortcutsWindowController.window)
+        #expect(panel.isVisible)
+        #expect(coordinator.isEnabled)
+
+        panel.performClose(nil)
+        #expect(!panel.isVisible)
+        #expect(!coordinator.isEnabled)
+        coordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
+        #expect(!panel.isVisible)
+
+        coordinator.toggle()
+        coordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
+        #expect(coordinator.isEnabled)
+        #expect(panel.isVisible)
+
+        coordinator.toggle()
+        #expect(!coordinator.isEnabled)
+        #expect(!panel.isVisible)
     }
 }
 }

@@ -572,6 +572,7 @@ func (r *Runtime) installCompletedSearchSnapshotLocked(
 		}
 		r.removeSearchSnapshotLocked(evictionKey, eviction)
 	}
+	r.signalWarmCacheTelemetryLocked()
 	return r.searchSnapshots[key] == snapshot
 }
 

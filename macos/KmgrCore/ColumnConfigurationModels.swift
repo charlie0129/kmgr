@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum ColumnConfigurationSchema {
@@ -137,6 +138,16 @@ public struct ColumnsConfigurationDocument: Codable, Hashable, Sendable {
         self.celEnvironment = celEnvironment
         self.views = views
         self.accelerators = accelerators
+    }
+
+    /// Exact content identity shared with the Go column manager. The file
+    /// store emits sorted-key JSON, and the engine hashes those exact bytes.
+    public func persistedVersion() -> String? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(self) else { return nil }
+        let digest = SHA256.hash(data: data)
+        return "sha256:" + digest.map { String(format: "%02x", $0) }.joined()
     }
 
     public func validationIssues() -> [ColumnConfigurationIssue] {

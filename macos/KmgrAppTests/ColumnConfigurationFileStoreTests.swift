@@ -263,6 +263,20 @@ import Testing
     #expect(cache.document?.views.first { $0.match == nodes }?.columns == laterNodes)
 }
 
+@Test func columnConfigurationCacheDoesNotInventAFileDigestForExternalYAML() throws {
+    let pods = ColumnResourceMatch(group: "", version: "v1", resource: "pods")
+    var cache = ColumnConfigurationCacheState()
+    let loaded = ColumnsConfigurationDocument(views: [
+        ResourceColumnConfiguration(match: pods, columns: [testColumn(id: "loaded")]),
+    ])
+
+    _ = cache.installLoaded(loaded)
+    #expect(cache.persistedVersion == nil)
+
+    cache.recordSaved([testColumn(id: "saved")], matching: pods)
+    #expect(cache.persistedVersion == cache.document?.persistedVersion())
+}
+
 private func testColumn(id: String) -> ColumnDefinition {
     ColumnDefinition(
         id: id,

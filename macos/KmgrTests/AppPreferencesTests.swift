@@ -21,6 +21,7 @@ import Testing
     preferences.confirmations.confirmWorkloadRestart = false
     preferences.columnsConfigurationPath = "~/Library/Application Support/kmgr/custom-columns.yaml"
     preferences.advancedPerformance = AdvancedPerformancePreferences(
+        viewportOverscanScreensPerSide: 17,
         globalWarmCacheViewLimit: 48,
         globalWarmCacheObjectLimit: 500_000,
         globalWarmCacheMemoryPercent: 30,
@@ -95,6 +96,7 @@ import Testing
     preferences.metricsRefreshSeconds = 1
     preferences.columnsConfigurationPath = "relative/columns.yaml"
     preferences.advancedPerformance = AdvancedPerformancePreferences(
+        viewportOverscanScreensPerSide: 101,
         globalWarmCacheViewLimit: 0,
         globalWarmCacheObjectLimit: 0,
         globalWarmCacheMemoryPercent: 0,
@@ -118,6 +120,7 @@ import Testing
         "logs.renderBatchMilliseconds",
         "metricsRefreshSeconds",
         "columnsConfigurationPath",
+        "advancedPerformance.viewportOverscanScreensPerSide",
         "advancedPerformance.globalWarmCacheViewLimit",
         "advancedPerformance.globalWarmCacheObjectLimit",
         "advancedPerformance.globalWarmCacheMemoryPercent",
@@ -220,6 +223,7 @@ import Testing
     updated.restoreOpenClusterWindows = false
     updated.metricsRefreshSeconds += 5
     updated.columnsConfigurationPath = "/tmp/kmgr-columns.yaml"
+    updated.advancedPerformance.viewportOverscanScreensPerSide = 17
     updated.advancedPerformance.globalWarmCacheMemoryPercent = 30
 
     let delta = AppPreferencesDelta(previous: previous, updated: updated)
@@ -227,7 +231,9 @@ import Testing
     #expect(delta.changes(activated: .immediate) == [
         .appearance, .logDisplay, .confirmations,
     ])
-    #expect(delta.changes(activated: .newWorkspace) == [.defaultNamespace])
+    #expect(delta.changes(activated: .newWorkspace) == [
+        .defaultNamespace, .viewportOverscan,
+    ])
     #expect(delta.changes(activated: .applicationRelaunch) == [
         .workspaceRestoration, .metricsRefresh, .columnsConfigurationPath,
         .advancedPerformance,

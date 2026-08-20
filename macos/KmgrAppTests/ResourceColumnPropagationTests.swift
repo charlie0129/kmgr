@@ -134,6 +134,61 @@ struct ResourceColumnPropagationTests {
         )
     }
 
+    @Test("a deferred column replacement reopens the stream only after installation")
+    func deferredColumnReplacementReopensAfterInstallation() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let provider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let columnMutationGate = TableColumnMutationGate()
+        let workspace = makeColumnPropagationWorkspace(
+            session: OpenedClusterSession(
+                sessionID: "deferred-column-stream",
+                contextName: "deferred-column-stream",
+                clusterName: "deferred-column-stream",
+                serverHostname: "deferred-column-stream.example.invalid",
+                defaultNamespace: "default"
+            ),
+            provider: provider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            columnsConfigurationPath: fixture.path,
+            tableColumnMutationAllowed: { columnMutationGate.isOpen }
+        )
+        workspace.showWindow(nil)
+        defer { workspace.close() }
+        try await waitUntil {
+            provider.streamRequests.count == 1
+                && resourceTable(in: workspace)?.numberOfRows == 1
+        }
+        columnMutationGate.isOpen = false
+        let match = ColumnResourceMatch(group: "", version: "v1", resource: "pods")
+        let definitions = [
+            ColumnDefinition(
+                id: "name", title: "Name", source: .builtin,
+                value: "name", type: .string
+            ),
+            ColumnDefinition(
+                id: "cel-value", title: "CEL", source: .cel,
+                expression: "object.metadata.name", type: .string
+            ),
+        ]
+        #expect(workspace.applySavedColumns(definitions, matching: match))
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(provider.streamRequests.count == 1)
+        #expect(resourceTable(in: workspace)?.tableColumns.map { $0.identifier.rawValue } != definitions.map(\.id))
+
+        columnMutationGate.isOpen = true
+        try await waitUntil {
+            provider.streamRequests.count == 2
+                && provider.streamRequests.last?.columnIDs == definitions.map(\.id)
+                && resourceTable(in: workspace)?.tableColumns.map { $0.identifier.rawValue }
+                    == definitions.map(\.id)
+        }
+    }
+
     @Test("a saved edit reaches every exact-GVR window without changing other window state")
     func savedEditPropagatesByExactGVR() async throws {
         let fixture = try ColumnPropagationFixture()
@@ -1153,6 +1208,11 @@ private struct ColumnPropagationFixture {
     func remove() {
         try? FileManager.default.removeItem(at: directory)
     }
+}
+
+@MainActor
+private final class TableColumnMutationGate {
+    var isOpen = true
 }
 
 private func sharedSavedColumnDefinitions() -> [ColumnDefinition] {

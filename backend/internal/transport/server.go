@@ -289,13 +289,16 @@ func publishWarmCacheTelemetry(
 
 func clusterWarmCacheUsage(usage view.WarmCacheUsage) cluster.WarmCacheUsage {
 	return cluster.WarmCacheUsage{
-		RetainedViews:   usage.RetainedViews,
-		RetainedObjects: usage.RetainedObjects,
-		RetainedBytes:   usage.RetainedBytes,
-		ViewLimit:       usage.ViewLimit,
-		ObjectLimit:     usage.ObjectLimit,
-		ByteLimit:       usage.ByteLimit,
-		BudgetEvictions: usage.BudgetEvictions,
+		RetainedViews:    usage.RetainedViews,
+		RetainedObjects:  usage.RetainedObjects,
+		RetainedBytes:    usage.RetainedBytes,
+		EvictableViews:   usage.EvictableViews,
+		EvictableObjects: usage.EvictableObjects,
+		EvictableBytes:   usage.EvictableBytes,
+		ViewLimit:        usage.ViewLimit,
+		ObjectLimit:      usage.ObjectLimit,
+		ByteLimit:        usage.ByteLimit,
+		BudgetEvictions:  usage.BudgetEvictions,
 	}
 }
 

@@ -153,6 +153,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
         resourceViewportTiming: ResourceViewportTiming = .production,
+        tableColumnMutationAllowed: @escaping @MainActor () -> Bool = {
+            NSEvent.pressedMouseButtons == 0
+        },
         logDisplayConfiguration: LogDisplayConfiguration,
         confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
         namespacePickerPresenter: @escaping NamespacePickerPresenter = { control, sender in
@@ -215,6 +218,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                 ?? ColumnConfigurationCoordinator(path: columnsConfigurationPath),
             columnsConfigurationLoader: columnsConfigurationLoader,
             resourceViewportTiming: resourceViewportTiming,
+            tableColumnMutationAllowed: tableColumnMutationAllowed,
             namespacePickerPresenter: namespacePickerPresenter,
             namespacePickerKeyWindowCheck: namespacePickerKeyWindowCheck,
             onShowPortForwards: onShowPortForwards
@@ -808,6 +812,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
         resourceViewportTiming: ResourceViewportTiming,
+        tableColumnMutationAllowed: @escaping @MainActor () -> Bool,
         namespacePickerPresenter: @escaping NamespacePickerPresenter,
         namespacePickerKeyWindowCheck: @escaping NamespacePickerKeyWindowCheck,
         onShowPortForwards: @escaping @MainActor () -> Void
@@ -843,7 +848,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             columnsConfigurationPath: columnsConfigurationPath,
             columnConfigurationCoordinator: columnConfigurationCoordinator,
             columnsConfigurationLoader: columnsConfigurationLoader,
-            viewportTiming: resourceViewportTiming
+            viewportTiming: resourceViewportTiming,
+            tableColumnMutationAllowed: tableColumnMutationAllowed
         )
         super.init(nibName: nil, bundle: nil)
 
@@ -920,6 +926,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onContextualShortcutsChanged = { [weak self] in
             self?.onContextualShortcutsChanged?()
+        }
+        contentController.onDrillDownFilterCleared = { [weak self] in
+            guard let self, let resource = contentController.currentResource else { return }
+            sidebarController.selectResource(matchingCurrent: resource.id)
+            checkpointRestoration()
         }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
         addSplitViewItem(NSSplitViewItem(viewController: rightPaneController))
@@ -1722,7 +1733,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             fieldSelector: query.fieldSelector,
             reason: .resourceDrillDown
         )
-        sidebarController.selectResource(matching: target.id)
+        sidebarController.selectResource(matchingCurrent: target.id)
         checkpointRestoration()
         view.window?.makeFirstResponder(contentController.tableResponder)
     }
@@ -1746,7 +1757,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             initialFilter: "field:involvedObject.uid==\(identity.uid.rawValue)",
             reason: .resourceDrillDown
         )
-        sidebarController.selectResource(matching: target.id)
+        sidebarController.selectResource(matchingCurrent: target.id)
         checkpointRestoration()
         view.window?.makeFirstResponder(contentController.tableResponder)
     }
@@ -2677,28 +2688,42 @@ private enum ResourceStreamOpenReason: String {
     case sortChange = "sort-change"
 }
 
-struct ResourceViewportTiming: Sendable {
-    static let production = production(metricsRefreshSeconds: 15)
+private struct PendingResourceStreamOpen {
+    var reason: ResourceStreamOpenReason
+    var preservingOptionalResourceDiscoveryState: Bool
+}
 
-    static func production(metricsRefreshSeconds: Int) -> ResourceViewportTiming {
+struct ResourceViewportTiming: Sendable {
+    static let production = production(metricsRefreshSeconds: 15, overscanScreensPerSide: 10)
+
+    static func production(
+        metricsRefreshSeconds: Int,
+        overscanScreensPerSide: Int = ResourceViewViewportPlanner.defaultOverscanScreensPerSide
+    ) -> ResourceViewportTiming {
         precondition(metricsRefreshSeconds > 0)
+        precondition(overscanScreensPerSide >= 0)
         return ResourceViewportTiming(
             scrollDebounce: .milliseconds(80),
-            metricInterestRefresh: .seconds(metricsRefreshSeconds)
+            metricInterestRefresh: .seconds(metricsRefreshSeconds),
+            overscanScreensPerSide: overscanScreensPerSide
         )
     }
 
     var scrollDebounce: Duration
     var metricInterestRefresh: Duration
+    var overscanScreensPerSide: Int
 
     init(
         scrollDebounce: Duration,
-        metricInterestRefresh: Duration
+        metricInterestRefresh: Duration,
+        overscanScreensPerSide: Int = ResourceViewViewportPlanner.defaultOverscanScreensPerSide
     ) {
         precondition(scrollDebounce > .zero)
         precondition(metricInterestRefresh > .zero)
+        precondition(overscanScreensPerSide >= 0)
         self.scrollDebounce = scrollDebounce
         self.metricInterestRefresh = metricInterestRefresh
+        self.overscanScreensPerSide = overscanScreensPerSide
     }
 }
 
@@ -2791,6 +2816,7 @@ private final class ResourceListViewController: NSViewController,
     private let columnConfigurationCoordinator: ColumnConfigurationCoordinator
     private let columnsConfigurationLoader: ColumnConfigurationDocumentLoader
     private let viewportTiming: ResourceViewportTiming
+    private let tableColumnMutationAllowed: @MainActor () -> Bool
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let sortLabel = NSTextField(labelWithString: "Unsorted")
@@ -2805,6 +2831,7 @@ private final class ResourceListViewController: NSViewController,
     private var freshnessSeverity: WorkspaceStatus.Severity = .informational
     private(set) var workspaceStatus = WorkspaceStatus("0 objects · 0 selected · Idle")
     var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
+    var onDrillDownFilterCleared: (() -> Void)?
     private var model = ResourceTableModel()
     private var rowChangeDetector = ResourceRowChangeDetector(columnDefinitions: [])
     private var cellHighlightStore = ResourceCellHighlightStore()
@@ -2816,11 +2843,13 @@ private final class ResourceListViewController: NSViewController,
     private var activeFilterHighlight: ResourceFilterHighlight?
     private var generationGate = GenerationSequenceGate()
     private var resource: DiscoveredResource?
+    var currentResource: DiscoveredResource? { resource }
     private var scope = NamespaceSelection()
     /// Immutable Kubernetes-native relationship constraints for the current
     /// navigation entry. Editing the kmgr filter must never discard them.
     private var labelSelector = ""
     private var fieldSelector = ""
+    private var relationshipFilterActive = false
     private var viewID = UUID().uuidString.lowercased()
     private var generation: UInt64 = 0
     private var lastCancelledGeneration: UInt64 = 0
@@ -2845,6 +2874,12 @@ private final class ResourceListViewController: NSViewController,
     private var columnIDs: [String] = []
     private var columnDefinitionsByID: [String: ColumnDefinition] = [:]
     private var columnDefinitionsByResourceID: [String: [ColumnDefinition]] = [:]
+    private var pendingColumnInstallation: (
+        definitions: [ColumnDefinition], preservingCurrentPresentation: Bool
+    )?
+    private var columnInstallRetryTask: Task<Void, Never>?
+    private var pendingStreamOpenAfterColumnInstallation: PendingResourceStreamOpen?
+    private var pendingColumnStreamOpenTask: Task<Void, Never>?
     private var serverSchemaByResourceID: [String: ResourceViewSchema] = [:]
     private var provisionalDefaultColumnResourceIDs: Set<String> = []
     private var columnsConfigurationCache = ColumnConfigurationCacheState()
@@ -3103,7 +3138,8 @@ private final class ResourceListViewController: NSViewController,
         columnsConfigurationPath: String,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
-        viewportTiming: ResourceViewportTiming
+        viewportTiming: ResourceViewportTiming,
+        tableColumnMutationAllowed: @escaping @MainActor () -> Bool
     ) {
         self.session = session
         self.isAuthenticated = isAuthenticated
@@ -3114,6 +3150,7 @@ private final class ResourceListViewController: NSViewController,
         self.columnConfigurationCoordinator = columnConfigurationCoordinator
         self.columnsConfigurationLoader = columnsConfigurationLoader
         self.viewportTiming = viewportTiming
+        self.tableColumnMutationAllowed = tableColumnMutationAllowed
         super.init(nibName: nil, bundle: nil)
         columnsConfigurationObserver = columnConfigurationCoordinator.observe {
             [weak self] match, definitions in
@@ -3125,6 +3162,8 @@ private final class ResourceListViewController: NSViewController,
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
     deinit {
+        columnInstallRetryTask?.cancel()
+        pendingColumnStreamOpenTask?.cancel()
         let coordinator = columnConfigurationCoordinator
         if let columnsConfigurationObserver {
             Task { @MainActor in
@@ -3262,6 +3301,7 @@ private final class ResourceListViewController: NSViewController,
         self.scope = scope
         self.labelSelector = labelSelector
         self.fieldSelector = fieldSelector
+        relationshipFilterActive = !labelSelector.isEmpty || !fieldSelector.isEmpty
         pendingScrollAnchor = nil
         let state = ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
@@ -3324,6 +3364,7 @@ private final class ResourceListViewController: NSViewController,
         clearTransientCellPresentation()
         filterTask?.cancel()
         filterTask = nil
+        discardPendingColumnStreamOpen()
         streamTask?.cancel()
         streamTask = nil
         stopViewportWork()
@@ -3352,6 +3393,7 @@ private final class ResourceListViewController: NSViewController,
         )
         endProjectionRequest(outcome: "disconnected")
         clearTransientCellPresentation()
+        discardPendingColumnStreamOpen()
         streamTask?.cancel()
         streamTask = nil
         stopViewportWork()
@@ -3416,6 +3458,7 @@ private final class ResourceListViewController: NSViewController,
         stopFreshnessAgeUpdates()
         filterTask?.cancel()
         filterTask = nil
+        discardPendingColumnStreamOpen()
         cancelCurrentStream(reason: "suspend")
         stopViewportWork()
         rangeCache = nil
@@ -3642,11 +3685,22 @@ private final class ResourceListViewController: NSViewController,
         filterRevision &+= 1
         filterTask?.cancel()
         filterField.stringValue = value
+        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            clearRelationshipFilterIfNeeded()
+        }
         rememberCurrentFilter()
         openStream(reason: .programmaticFilter)
         onRestorationChanged?()
         setFilterShortcutContextActive(true)
         view.window?.makeFirstResponder(filterField)
+    }
+
+    private func clearRelationshipFilterIfNeeded() {
+        guard relationshipFilterActive else { return }
+        relationshipFilterActive = false
+        labelSelector = ""
+        fieldSelector = ""
+        onDrillDownFilterCleared?()
     }
 
     func captureNavigationState() -> ResourceNavigationState? {
@@ -3884,6 +3938,9 @@ private final class ResourceListViewController: NSViewController,
 
     func controlTextDidChange(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
+        if filterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            clearRelationshipFilterIfNeeded()
+        }
         clearTransientCellPresentation()
         filterRevision &+= 1
         filterTask?.cancel()
@@ -4064,6 +4121,51 @@ private final class ResourceListViewController: NSViewController,
         selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
     }
 
+    private func deferStreamOpenUntilColumnsAreInstalled(
+        reason: ResourceStreamOpenReason,
+        preservingOptionalResourceDiscoveryState: Bool
+    ) -> Bool {
+        guard pendingColumnInstallation != nil else { return false }
+        pendingColumnStreamOpenTask?.cancel()
+        pendingColumnStreamOpenTask = nil
+        pendingStreamOpenAfterColumnInstallation = PendingResourceStreamOpen(
+            reason: reason,
+            preservingOptionalResourceDiscoveryState:
+                preservingOptionalResourceDiscoveryState
+        )
+        traceResourceCache(
+            "event=open_stream_deferred reason=\(reason.rawValue)"
+                + " cause=table-column-mutation"
+        )
+        return true
+    }
+
+    private func discardPendingColumnStreamOpen() {
+        pendingColumnStreamOpenTask?.cancel()
+        pendingColumnStreamOpenTask = nil
+        pendingStreamOpenAfterColumnInstallation = nil
+    }
+
+    private func schedulePendingColumnStreamOpen() {
+        guard pendingStreamOpenAfterColumnInstallation != nil,
+            pendingColumnStreamOpenTask == nil
+        else { return }
+        pendingColumnStreamOpenTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            pendingColumnStreamOpenTask = nil
+            guard pendingColumnInstallation == nil,
+                let pending = pendingStreamOpenAfterColumnInstallation
+            else { return }
+            pendingStreamOpenAfterColumnInstallation = nil
+            openStream(
+                reason: pending.reason,
+                preservingOptionalResourceDiscoveryState:
+                    pending.preservingOptionalResourceDiscoveryState
+            )
+        }
+    }
+
     private func openStream(
         reason: ResourceStreamOpenReason,
         preservingOptionalResourceDiscoveryState: Bool = false
@@ -4084,6 +4186,16 @@ private final class ResourceListViewController: NSViewController,
             )
             return
         }
+        if deferStreamOpenUntilColumnsAreInstalled(
+            reason: reason,
+            preservingOptionalResourceDiscoveryState:
+                preservingOptionalResourceDiscoveryState
+        ) {
+            return
+        }
+        // A direct open after an immediate replacement supersedes any open
+        // queued by an earlier deferred replacement in the same run-loop turn.
+        discardPendingColumnStreamOpen()
         endProjectionRequest(outcome: "superseded")
         cancelCurrentStream(reason: "open-stream:\(reason.rawValue)")
         clearTransientCellPresentation()
@@ -4114,6 +4226,13 @@ private final class ResourceListViewController: NSViewController,
             preservingOptionalResourceDiscoveryState:
                 preservingOptionalResourceDiscoveryState
         )
+        if deferStreamOpenUntilColumnsAreInstalled(
+            reason: reason,
+            preservingOptionalResourceDiscoveryState:
+                preservingOptionalResourceDiscoveryState
+        ) {
+            return
+        }
         beginProjectionRequest()
         generationGate.reset()
         let rowsBeforeOpen = model.orderedVisibleUIDs.count
@@ -4197,6 +4316,7 @@ private final class ResourceListViewController: NSViewController,
             filterExpression: filterField.stringValue,
             filterRevision: filterRevision,
             columnIDs: columnIDs,
+            columnConfigurationVersion: columnsConfigurationCache.persistedVersion ?? "",
             sort: tableView.sortDescriptors.compactMap { descriptor in
                 guard let columnID = descriptor.key else { return nil }
                 return ResourceSortDescriptor(
@@ -4204,7 +4324,7 @@ private final class ResourceListViewController: NSViewController,
                     direction: descriptor.ascending ? .ascending : .descending
                 )
             },
-            stageUntilReconciled: canKeepWarmRows
+            stageUntilReconciled: canKeepWarmRows && reason != .resumeAfterDetail
         )
         streamTask = Task { [weak self, provider] in
             do {
@@ -4771,7 +4891,8 @@ private final class ResourceListViewController: NSViewController,
         let target = ResourceViewViewportPlanner.retainedRange(
             visibleRows: visibleAbsoluteTableRange(),
             rowsVisible: cache.rowsVisible,
-            maximumRows: cache.maximumCachedRows
+            maximumRows: cache.maximumCachedRows,
+            overscanScreensPerSide: viewportTiming.overscanScreensPerSide
         )
         guard !target.isEmpty else { return }
 
@@ -5770,10 +5891,17 @@ private final class ResourceListViewController: NSViewController,
             let previousProjection = projectionIdentity(
                 for: installedColumnDefinitions
             )
+            let nextEffective = effectiveColumnDefinitions(
+                persistedDefinitions: definitions,
+                resource: resource
+            )
+            let nextProjection = projectionIdentity(
+                for: enabledColumnDefinitions(in: nextEffective)
+            )
             let previousSort = currentSortPresentation
             provisionalDefaultColumnResourceIDs.remove(resource.id)
             columnDefinitionsByResourceID[resource.id] = definitions
-            installEffectiveColumns(for: resource)
+            installColumns(nextEffective)
             if let deferredPresentation {
                 applyDeferredColumnPresentation(deferredPresentation)
                 if !deferredPresentation.columnMoves.isEmpty
@@ -5782,7 +5910,7 @@ private final class ResourceListViewController: NSViewController,
                     scheduleCurrentColumnLayoutPersistence()
                 }
             }
-            if projectionIdentity(for: installedColumnDefinitions) != previousProjection
+            if nextProjection != previousProjection
                 || currentSortPresentation != previousSort
             {
                 openStream(reason: .loadedColumnConfiguration)
@@ -5802,6 +5930,9 @@ private final class ResourceListViewController: NSViewController,
         columnDefinitionsByResourceID[resourceID] = definitions
         let previousEffective = installedColumnDefinitions
         let previousProjection = projectionIdentity(for: previousEffective)
+        let nextProjection = projectionIdentity(
+            for: enabledColumnDefinitions(in: nextEffective)
+        )
         let previousSort = currentSortPresentation
         let deferredPresentation = deferredColumnPresentationByResourceID
             .removeValue(forKey: resourceID)
@@ -5816,7 +5947,7 @@ private final class ResourceListViewController: NSViewController,
         if let deferredPresentation {
             applyDeferredColumnPresentation(deferredPresentation)
         }
-        if projectionIdentity(for: installedColumnDefinitions) != previousProjection
+        if nextProjection != previousProjection
             || currentSortPresentation != previousSort
         {
             openStream(reason: .appliedColumns)
@@ -5852,6 +5983,57 @@ private final class ResourceListViewController: NSViewController,
     private func installColumns(
         _ definitions: [ColumnDefinition],
         preservingCurrentPresentation: Bool = false
+    ) {
+        // AppKit's header view keeps an internal pointer to the column being
+        // resized. Removing/recreating NSTableColumn objects during that
+        // mouse event can leave the header with a dangling pointer (the crash
+        // report shows _resizeCursorForTableColumn: sending `minWidth` to the
+        // freed column). Keep logical definitions current, but defer the
+        // structural mutation until the event has fully unwound.
+        if !tableColumnMutationAllowed() {
+            pendingColumnInstallation = (
+                definitions: definitions,
+                preservingCurrentPresentation: preservingCurrentPresentation
+            )
+            scheduleDeferredColumnInstallation()
+            return
+        }
+        pendingColumnInstallation = nil
+        columnInstallRetryTask?.cancel()
+        columnInstallRetryTask = nil
+        installColumnsImmediately(
+            definitions,
+            preservingCurrentPresentation: preservingCurrentPresentation
+        )
+        schedulePendingColumnStreamOpen()
+    }
+
+    private func scheduleDeferredColumnInstallation() {
+        guard columnInstallRetryTask == nil else { return }
+        columnInstallRetryTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(40))
+                guard let self else { return }
+                guard self.tableColumnMutationAllowed() else { continue }
+                let pending = self.pendingColumnInstallation
+                self.pendingColumnInstallation = nil
+                self.columnInstallRetryTask = nil
+                if let pending {
+                    self.installColumnsImmediately(
+                        pending.definitions,
+                        preservingCurrentPresentation:
+                            pending.preservingCurrentPresentation
+                    )
+                    self.schedulePendingColumnStreamOpen()
+                }
+                return
+            }
+        }
+    }
+
+    private func installColumnsImmediately(
+        _ definitions: [ColumnDefinition],
+        preservingCurrentPresentation: Bool
     ) {
         let enabled = definitions.filter(\.isEnabled)
         // Removing an NSTableColumn makes AppKit immediately remove every
@@ -6150,6 +6332,7 @@ private final class ResourceListViewController: NSViewController,
         scope = restoration.namespaceScope.namespaceSelection
         labelSelector = restoration.labelSelector
         fieldSelector = restoration.fieldSelector
+        relationshipFilterActive = !labelSelector.isEmpty || !fieldSelector.isEmpty
         pendingScrollAnchor = restoration.scrollAnchor
         filterCompletionTrigger.reset()
         filterField.stringValue = restoration.filter
@@ -6197,6 +6380,7 @@ private final class ResourceListViewController: NSViewController,
         resource = nil
         labelSelector = ""
         fieldSelector = ""
+        relationshipFilterActive = false
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
@@ -6232,6 +6416,7 @@ private final class ResourceListViewController: NSViewController,
         resource = nil
         labelSelector = ""
         fieldSelector = ""
+        relationshipFilterActive = false
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
@@ -6290,6 +6475,7 @@ private final class ResourceListViewController: NSViewController,
         scope = state.namespaceSelection
         labelSelector = state.labelSelector
         fieldSelector = state.fieldSelector
+        relationshipFilterActive = !labelSelector.isEmpty || !fieldSelector.isEmpty
         pendingScrollAnchor = state.scrollAnchor
         pendingSelectionUIDs = state.selectedUIDs
         installFilterForNavigation(

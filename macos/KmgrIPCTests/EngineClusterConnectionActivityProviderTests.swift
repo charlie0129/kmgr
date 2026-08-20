@@ -90,6 +90,9 @@ private actor BlockingClusterConnectionActivityRPC: ClusterConnectionActivityRPC
     event.authorityWarmCache.retainedViews = 2
     event.authorityWarmCache.retainedObjects = 300
     event.authorityWarmCache.retainedBytes = 4_096
+    event.authorityWarmCache.evictableViews = 1
+    event.authorityWarmCache.evictableObjects = 120
+    event.authorityWarmCache.evictableBytes = 2_048
     event.authorityWarmCache.viewLimit = 8
     event.authorityWarmCache.objectLimit = 100_000
     event.authorityWarmCache.byteLimit = 1 << 30
@@ -97,6 +100,9 @@ private actor BlockingClusterConnectionActivityRPC: ClusterConnectionActivityRPC
     event.globalWarmCache.retainedViews = 4
     event.globalWarmCache.retainedObjects = 900
     event.globalWarmCache.retainedBytes = 16_384
+    event.globalWarmCache.evictableViews = 2
+    event.globalWarmCache.evictableObjects = 320
+    event.globalWarmCache.evictableBytes = 8_192
     event.globalWarmCache.viewLimit = 24
     event.globalWarmCache.objectLimit = 250_000
     event.globalWarmCache.byteLimit = 2 << 30
@@ -133,6 +139,9 @@ private actor BlockingClusterConnectionActivityRPC: ClusterConnectionActivityRPC
         retainedViews: 2,
         retainedObjects: 300,
         retainedBytes: 4_096,
+        evictableViews: 1,
+        evictableObjects: 120,
+        evictableBytes: 2_048,
         viewLimit: 8,
         objectLimit: 100_000,
         byteLimit: 1 << 30,
@@ -142,6 +151,9 @@ private actor BlockingClusterConnectionActivityRPC: ClusterConnectionActivityRPC
         retainedViews: 4,
         retainedObjects: 900,
         retainedBytes: 16_384,
+        evictableViews: 2,
+        evictableObjects: 320,
+        evictableBytes: 8_192,
         viewLimit: 24,
         objectLimit: 250_000,
         byteLimit: 2 << 30,

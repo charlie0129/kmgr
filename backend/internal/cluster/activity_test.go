@@ -8,38 +8,21 @@ import (
 	"net/http"
 	"sync"
 	"testing"
-	"time"
 
 	"k8s.io/client-go/rest"
 )
 
-func TestAPIActivityTracksMonotonicTotalsAndCoalescesHints(t *testing.T) {
+func TestAPIActivityTracksMonotonicTotals(t *testing.T) {
 	t.Parallel()
 	activity := &APIActivity{}
-	updates, unsubscribe := activity.Subscribe()
-	unsubscribe()
-	unsubscribe()
 	activity.AddReceived(3)
 	activity.AddSent(5)
 	if snapshot := activity.Snapshot(); snapshot.BytesReceived != 3 || snapshot.BytesSent != 5 {
 		t.Fatalf("Snapshot = %#v", snapshot)
 	}
-
-	updates, unsubscribe = activity.Subscribe()
-	defer unsubscribe()
 	activity.AddReceived(7)
 	activity.AddReceived(11)
 	activity.AddSent(13)
-	select {
-	case <-updates:
-	case <-time.After(time.Second):
-		t.Fatal("activity subscriber was not notified")
-	}
-	select {
-	case <-updates:
-		t.Fatal("activity hints were not coalesced")
-	default:
-	}
 	if snapshot := activity.Snapshot(); snapshot.BytesReceived != 21 || snapshot.BytesSent != 18 {
 		t.Fatalf("Snapshot after burst = %#v", snapshot)
 	}
@@ -48,17 +31,10 @@ func TestAPIActivityTracksMonotonicTotalsAndCoalescesHints(t *testing.T) {
 func TestAPIActivityTracksConnectionHealthWithoutRetainingErrors(t *testing.T) {
 	t.Parallel()
 	activity := &APIActivity{}
-	updates, unsubscribe := activity.Subscribe()
-	defer unsubscribe()
 
 	assertHealth := func(statusCode int, roundTripErr error, want APIConnectionHealth) {
 		t.Helper()
 		activity.ObserveRoundTrip(statusCode, roundTripErr)
-		select {
-		case <-updates:
-		case <-time.After(time.Second):
-			t.Fatalf("no connection-health update for %d / %v", statusCode, roundTripErr)
-		}
 		if got := activity.Snapshot().ConnectionHealth; got != want {
 			t.Fatalf("connection health = %v, want %v", got, want)
 		}
@@ -66,12 +42,7 @@ func TestAPIActivityTracksConnectionHealthWithoutRetainingErrors(t *testing.T) {
 
 	assertHealth(http.StatusOK, nil, APIConnectionConnected)
 	// Forbidden is resource authorization, not a broken cluster connection.
-	activity.ObserveRoundTrip(http.StatusForbidden, nil)
-	select {
-	case <-updates:
-		t.Fatal("unchanged connected state emitted a redundant hint")
-	default:
-	}
+	assertHealth(http.StatusForbidden, nil, APIConnectionConnected)
 	assertHealth(0, errors.New("sensitive transport detail"), APIConnectionReconnecting)
 	assertHealth(http.StatusUnauthorized, nil, APIConnectionAuthenticationFailed)
 	assertHealth(http.StatusNoContent, nil, APIConnectionConnected)
@@ -80,8 +51,6 @@ func TestAPIActivityTracksConnectionHealthWithoutRetainingErrors(t *testing.T) {
 func TestAPIActivityPublishesWarmCacheChangesWithoutPayloadActivity(t *testing.T) {
 	t.Parallel()
 	activity := &APIActivity{}
-	updates, unsubscribe := activity.Subscribe()
-	defer unsubscribe()
 	authority := WarmCacheUsage{
 		RetainedViews: 2, RetainedObjects: 300, RetainedBytes: 4096,
 		ViewLimit: 8, ObjectLimit: 100_000, ByteLimit: 1 << 30,
@@ -93,11 +62,6 @@ func TestAPIActivityPublishesWarmCacheChangesWithoutPayloadActivity(t *testing.T
 		BudgetEvictions: 7,
 	}
 	activity.setWarmCacheUsage(1, authority, global)
-	select {
-	case <-updates:
-	case <-time.After(time.Second):
-		t.Fatal("warm-cache-only change did not notify activity subscriber")
-	}
 	snapshot := activity.Snapshot()
 	if snapshot.AuthorityWarmCache != authority || snapshot.GlobalWarmCache != global ||
 		snapshot.BytesReceived != 0 || snapshot.BytesSent != 0 {
@@ -105,37 +69,23 @@ func TestAPIActivityPublishesWarmCacheChangesWithoutPayloadActivity(t *testing.T
 	}
 
 	activity.setWarmCacheUsage(2, authority, global)
-	select {
-	case <-updates:
-		t.Fatal("identical warm-cache snapshot emitted a redundant hint")
-	default:
+	if installed := activity.warm.Load(); installed == nil || installed.generation != 2 {
+		t.Fatalf("identical newer warm-cache generation was not installed: %#v", installed)
 	}
 }
 
 func TestAPIActivityRejectsOutOfOrderWarmCachePublication(t *testing.T) {
 	t.Parallel()
 	activity := &APIActivity{}
-	updates, unsubscribe := activity.Subscribe()
-	defer unsubscribe()
 	newerAuthority := WarmCacheUsage{RetainedViews: 2, BudgetEvictions: 3}
 	newerGlobal := WarmCacheUsage{RetainedViews: 4, BudgetEvictions: 5}
 	activity.setWarmCacheUsage(2, newerAuthority, newerGlobal)
-	select {
-	case <-updates:
-	case <-time.After(time.Second):
-		t.Fatal("new warm-cache generation did not notify subscriber")
-	}
 
 	activity.setWarmCacheUsage(
 		1,
 		WarmCacheUsage{RetainedViews: 1, BudgetEvictions: 1},
 		WarmCacheUsage{RetainedViews: 1, BudgetEvictions: 1},
 	)
-	select {
-	case <-updates:
-		t.Fatal("stale warm-cache generation notified subscriber")
-	default:
-	}
 	if snapshot := activity.Snapshot(); snapshot.AuthorityWarmCache != newerAuthority || snapshot.GlobalWarmCache != newerGlobal {
 		t.Fatalf("stale generation replaced warm-cache telemetry = %#v", snapshot)
 	}

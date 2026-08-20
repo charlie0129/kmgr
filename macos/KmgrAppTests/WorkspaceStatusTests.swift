@@ -49,6 +49,9 @@ struct WorkspaceStatusTests {
                 retainedViews: 2,
                 retainedObjects: 300,
                 retainedBytes: 180 << 20,
+                evictableViews: 1,
+                evictableObjects: 120,
+                evictableBytes: 64 << 20,
                 viewLimit: 8,
                 objectLimit: 100_000,
                 byteLimit: 4 << 30,
@@ -58,6 +61,9 @@ struct WorkspaceStatusTests {
                 retainedViews: 4,
                 retainedObjects: 900,
                 retainedBytes: 512 << 20,
+                evictableViews: 2,
+                evictableObjects: 320,
+                evictableBytes: 128 << 20,
                 viewLimit: 24,
                 objectLimit: 250_000,
                 byteLimit: 4 << 30,
@@ -66,11 +72,11 @@ struct WorkspaceStatusTests {
         ))
 
         #expect(status.text == (
-            "Warm cache 180 MiB / 4 GiB · global 512 MiB / 4 GiB · evictions 3/5"
+            "Cache 180 MiB · global 512 MiB · evictions 3/5"
         ))
-        #expect(status.toolTip?.contains("2 / 8 queries") == true)
-        #expect(status.toolTip?.contains("300 / 100,000 objects") == true)
-        #expect(status.toolTip?.contains("not total engine memory") == true)
+        #expect(status.toolTip?.contains("1 / 8 idle warm queries") == true)
+        #expect(status.toolTip?.contains("120 / 100,000 idle warm objects") == true)
+        #expect(status.toolTip?.contains("not process RSS") == true)
         #expect(WarmCacheWorkspaceStatus.make(
             authority: WarmCacheUsage(),
             global: WarmCacheUsage()

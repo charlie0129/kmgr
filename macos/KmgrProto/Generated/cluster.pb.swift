@@ -313,8 +313,10 @@ public struct Kmgr_V1_ConnectionEvent: @unchecked Sendable {
     set {_uniqueStorage()._apiBytesSent = newValue}
   }
 
-  /// Process-memory warm-cache accounting only. Neither record includes cache
-  /// keys, Kubernetes identities, selectors, or authority identifiers.
+  /// Process-memory view-cache accounting. Retained totals include active and
+  /// idle raw stores plus their projected presentations. Evictable totals are
+  /// the idle warm subset governed by the reported limits. Neither record
+  /// includes cache keys, Kubernetes identities, selectors, or authority IDs.
   public var authorityWarmCache: Kmgr_V1_WarmCacheUsage {
     get {return _storage._authorityWarmCache ?? Kmgr_V1_WarmCacheUsage()}
     set {_uniqueStorage()._authorityWarmCache = newValue}
@@ -345,12 +347,15 @@ public struct Kmgr_V1_WarmCacheUsage: Sendable {
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Total retained view-cache graph, including active views. These values are
+  /// informational and are not capped by the idle warm-cache limits below.
   public var retainedViews: UInt64 = 0
 
   public var retainedObjects: UInt64 = 0
 
   public var retainedBytes: UInt64 = 0
 
+  /// Limits apply only to the evictable idle warm subset.
   public var viewLimit: UInt64 = 0
 
   public var objectLimit: UInt64 = 0
@@ -360,6 +365,12 @@ public struct Kmgr_V1_WarmCacheUsage: Sendable {
   /// Cumulative entries removed specifically to satisfy a warm-cache budget.
   /// Normal consumption, explicit removal, and shutdown do not increment it.
   public var budgetEvictions: UInt64 = 0
+
+  public var evictableViews: UInt64 = 0
+
+  public var evictableObjects: UInt64 = 0
+
+  public var evictableBytes: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -988,7 +999,7 @@ extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Kmgr_V1_WarmCacheUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WarmCacheUsage"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}retained_views\0\u{3}retained_objects\0\u{3}retained_bytes\0\u{3}view_limit\0\u{3}object_limit\0\u{3}byte_limit\0\u{3}budget_evictions\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}retained_views\0\u{3}retained_objects\0\u{3}retained_bytes\0\u{3}view_limit\0\u{3}object_limit\0\u{3}byte_limit\0\u{3}budget_evictions\0\u{3}evictable_views\0\u{3}evictable_objects\0\u{3}evictable_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1003,6 +1014,9 @@ extension Kmgr_V1_WarmCacheUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageI
       case 5: try { try decoder.decodeSingularUInt64Field(value: &self.objectLimit) }()
       case 6: try { try decoder.decodeSingularUInt64Field(value: &self.byteLimit) }()
       case 7: try { try decoder.decodeSingularUInt64Field(value: &self.budgetEvictions) }()
+      case 8: try { try decoder.decodeSingularUInt64Field(value: &self.evictableViews) }()
+      case 9: try { try decoder.decodeSingularUInt64Field(value: &self.evictableObjects) }()
+      case 10: try { try decoder.decodeSingularUInt64Field(value: &self.evictableBytes) }()
       default: break
       }
     }
@@ -1030,6 +1044,15 @@ extension Kmgr_V1_WarmCacheUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if self.budgetEvictions != 0 {
       try visitor.visitSingularUInt64Field(value: self.budgetEvictions, fieldNumber: 7)
     }
+    if self.evictableViews != 0 {
+      try visitor.visitSingularUInt64Field(value: self.evictableViews, fieldNumber: 8)
+    }
+    if self.evictableObjects != 0 {
+      try visitor.visitSingularUInt64Field(value: self.evictableObjects, fieldNumber: 9)
+    }
+    if self.evictableBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.evictableBytes, fieldNumber: 10)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1041,6 +1064,9 @@ extension Kmgr_V1_WarmCacheUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if lhs.objectLimit != rhs.objectLimit {return false}
     if lhs.byteLimit != rhs.byteLimit {return false}
     if lhs.budgetEvictions != rhs.budgetEvictions {return false}
+    if lhs.evictableViews != rhs.evictableViews {return false}
+    if lhs.evictableObjects != rhs.evictableObjects {return false}
+    if lhs.evictableBytes != rhs.evictableBytes {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

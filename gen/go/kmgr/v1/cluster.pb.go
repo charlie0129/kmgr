@@ -585,8 +585,10 @@ type ConnectionEvent struct {
 	// expose counts only; the GUI derives short-window rates from deltas.
 	ApiBytesReceived uint64 `protobuf:"varint,5,opt,name=api_bytes_received,json=apiBytesReceived,proto3" json:"api_bytes_received,omitempty"`
 	ApiBytesSent     uint64 `protobuf:"varint,6,opt,name=api_bytes_sent,json=apiBytesSent,proto3" json:"api_bytes_sent,omitempty"`
-	// Process-memory warm-cache accounting only. Neither record includes cache
-	// keys, Kubernetes identities, selectors, or authority identifiers.
+	// Process-memory view-cache accounting. Retained totals include active and
+	// idle raw stores plus their projected presentations. Evictable totals are
+	// the idle warm subset governed by the reported limits. Neither record
+	// includes cache keys, Kubernetes identities, selectors, or authority IDs.
 	AuthorityWarmCache *WarmCacheUsage `protobuf:"bytes,7,opt,name=authority_warm_cache,json=authorityWarmCache,proto3" json:"authority_warm_cache,omitempty"`
 	GlobalWarmCache    *WarmCacheUsage `protobuf:"bytes,8,opt,name=global_warm_cache,json=globalWarmCache,proto3" json:"global_warm_cache,omitempty"`
 	unknownFields      protoimpl.UnknownFields
@@ -680,18 +682,24 @@ func (x *ConnectionEvent) GetGlobalWarmCache() *WarmCacheUsage {
 }
 
 type WarmCacheUsage struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	RetainedViews   uint64                 `protobuf:"varint,1,opt,name=retained_views,json=retainedViews,proto3" json:"retained_views,omitempty"`
-	RetainedObjects uint64                 `protobuf:"varint,2,opt,name=retained_objects,json=retainedObjects,proto3" json:"retained_objects,omitempty"`
-	RetainedBytes   uint64                 `protobuf:"varint,3,opt,name=retained_bytes,json=retainedBytes,proto3" json:"retained_bytes,omitempty"`
-	ViewLimit       uint64                 `protobuf:"varint,4,opt,name=view_limit,json=viewLimit,proto3" json:"view_limit,omitempty"`
-	ObjectLimit     uint64                 `protobuf:"varint,5,opt,name=object_limit,json=objectLimit,proto3" json:"object_limit,omitempty"`
-	ByteLimit       uint64                 `protobuf:"varint,6,opt,name=byte_limit,json=byteLimit,proto3" json:"byte_limit,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Total retained view-cache graph, including active views. These values are
+	// informational and are not capped by the idle warm-cache limits below.
+	RetainedViews   uint64 `protobuf:"varint,1,opt,name=retained_views,json=retainedViews,proto3" json:"retained_views,omitempty"`
+	RetainedObjects uint64 `protobuf:"varint,2,opt,name=retained_objects,json=retainedObjects,proto3" json:"retained_objects,omitempty"`
+	RetainedBytes   uint64 `protobuf:"varint,3,opt,name=retained_bytes,json=retainedBytes,proto3" json:"retained_bytes,omitempty"`
+	// Limits apply only to the evictable idle warm subset.
+	ViewLimit   uint64 `protobuf:"varint,4,opt,name=view_limit,json=viewLimit,proto3" json:"view_limit,omitempty"`
+	ObjectLimit uint64 `protobuf:"varint,5,opt,name=object_limit,json=objectLimit,proto3" json:"object_limit,omitempty"`
+	ByteLimit   uint64 `protobuf:"varint,6,opt,name=byte_limit,json=byteLimit,proto3" json:"byte_limit,omitempty"`
 	// Cumulative entries removed specifically to satisfy a warm-cache budget.
 	// Normal consumption, explicit removal, and shutdown do not increment it.
-	BudgetEvictions uint64 `protobuf:"varint,7,opt,name=budget_evictions,json=budgetEvictions,proto3" json:"budget_evictions,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	BudgetEvictions  uint64 `protobuf:"varint,7,opt,name=budget_evictions,json=budgetEvictions,proto3" json:"budget_evictions,omitempty"`
+	EvictableViews   uint64 `protobuf:"varint,8,opt,name=evictable_views,json=evictableViews,proto3" json:"evictable_views,omitempty"`
+	EvictableObjects uint64 `protobuf:"varint,9,opt,name=evictable_objects,json=evictableObjects,proto3" json:"evictable_objects,omitempty"`
+	EvictableBytes   uint64 `protobuf:"varint,10,opt,name=evictable_bytes,json=evictableBytes,proto3" json:"evictable_bytes,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *WarmCacheUsage) Reset() {
@@ -769,6 +777,27 @@ func (x *WarmCacheUsage) GetByteLimit() uint64 {
 func (x *WarmCacheUsage) GetBudgetEvictions() uint64 {
 	if x != nil {
 		return x.BudgetEvictions
+	}
+	return 0
+}
+
+func (x *WarmCacheUsage) GetEvictableViews() uint64 {
+	if x != nil {
+		return x.EvictableViews
+	}
+	return 0
+}
+
+func (x *WarmCacheUsage) GetEvictableObjects() uint64 {
+	if x != nil {
+		return x.EvictableObjects
+	}
+	return 0
+}
+
+func (x *WarmCacheUsage) GetEvictableBytes() uint64 {
+	if x != nil {
+		return x.EvictableBytes
 	}
 	return 0
 }
@@ -1146,7 +1175,7 @@ const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	"\x12api_bytes_received\x18\x05 \x01(\x04R\x10apiBytesReceived\x12$\n" +
 	"\x0eapi_bytes_sent\x18\x06 \x01(\x04R\fapiBytesSent\x12I\n" +
 	"\x14authority_warm_cache\x18\a \x01(\v2\x17.kmgr.v1.WarmCacheUsageR\x12authorityWarmCache\x12C\n" +
-	"\x11global_warm_cache\x18\b \x01(\v2\x17.kmgr.v1.WarmCacheUsageR\x0fglobalWarmCache\"\x95\x02\n" +
+	"\x11global_warm_cache\x18\b \x01(\v2\x17.kmgr.v1.WarmCacheUsageR\x0fglobalWarmCache\"\x94\x03\n" +
 	"\x0eWarmCacheUsage\x12%\n" +
 	"\x0eretained_views\x18\x01 \x01(\x04R\rretainedViews\x12)\n" +
 	"\x10retained_objects\x18\x02 \x01(\x04R\x0fretainedObjects\x12%\n" +
@@ -1156,7 +1185,11 @@ const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	"\fobject_limit\x18\x05 \x01(\x04R\vobjectLimit\x12\x1d\n" +
 	"\n" +
 	"byte_limit\x18\x06 \x01(\x04R\tbyteLimit\x12)\n" +
-	"\x10budget_evictions\x18\a \x01(\x04R\x0fbudgetEvictions\"^\n" +
+	"\x10budget_evictions\x18\a \x01(\x04R\x0fbudgetEvictions\x12'\n" +
+	"\x0fevictable_views\x18\b \x01(\x04R\x0eevictableViews\x12+\n" +
+	"\x11evictable_objects\x18\t \x01(\x04R\x10evictableObjects\x12'\n" +
+	"\x0fevictable_bytes\x18\n" +
+	" \x01(\x04R\x0eevictableBytes\"^\n" +
 	"\x0fDiscoverRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x18\n" +
 	"\arefresh\x18\x02 \x01(\bR\arefresh\"\xbc\x01\n" +

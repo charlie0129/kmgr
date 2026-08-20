@@ -14,14 +14,14 @@ import Testing
     #expect(rate?.sentActive == true)
 }
 
-@Test func connectionRateTrackerIgnoresCacheOnlySamplesWithoutMovingItsBaseline() {
+@Test func connectionRateTrackerEmitsZeroForIdleCounterIntervals() {
     var tracker = ClusterConnectionRateTracker()
     #expect(tracker.receive(connectionSample(at: 10, received: 100, sent: 40)) == nil)
-    #expect(tracker.receive(connectionSample(at: 11, received: 100, sent: 40)) == nil)
+    #expect(tracker.receive(connectionSample(at: 11, received: 100, sent: 40)) == ClusterConnectionRate())
 
     let rate = tracker.receive(connectionSample(at: 12, received: 2_148, sent: 1_064))
-    #expect(rate?.bytesReceivedPerSecond == 1_024)
-    #expect(rate?.bytesSentPerSecond == 512)
+    #expect(rate?.bytesReceivedPerSecond == 2_048)
+    #expect(rate?.bytesSentPerSecond == 1_024)
     #expect(rate?.receivedActive == true)
     #expect(rate?.sentActive == true)
 }
@@ -50,6 +50,9 @@ import Testing
         retainedViews: 2,
         retainedObjects: 300,
         retainedBytes: 4_096,
+        evictableViews: 1,
+        evictableObjects: 120,
+        evictableBytes: 2_048,
         viewLimit: 8,
         objectLimit: 100_000,
         byteLimit: 1 << 30,
@@ -59,6 +62,9 @@ import Testing
         retainedViews: 4,
         retainedObjects: 900,
         retainedBytes: 16_384,
+        evictableViews: 2,
+        evictableObjects: 320,
+        evictableBytes: 8_192,
         viewLimit: 24,
         objectLimit: 250_000,
         byteLimit: 2 << 30,

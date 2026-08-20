@@ -19,7 +19,7 @@ import (
 
 const DefaultConnectionProbeTimeout = 8 * time.Second
 
-const connectionActivityCoalesceDelay = 100 * time.Millisecond
+const connectionActivitySampleInterval = 500 * time.Millisecond
 
 // SessionProber makes the explicit connection action independently testable.
 // Implementations must honor the supplied context.
@@ -102,16 +102,10 @@ func (s *ClusterService) WatchConnection(
 	}
 	defer lease.Release()
 	activity := session.APIActivity()
-	updates, unsubscribe := activity.Subscribe()
-	defer unsubscribe()
 	generation := s.streamGeneration.Add(1)
 	sequence := uint64(0)
-	lastSent := cluster.APIActivitySnapshot{}
-	send := func(force bool) error {
+	send := func() error {
 		totals := activity.Snapshot()
-		if !force && totals == lastSent {
-			return nil
-		}
 		sequence++
 		connectionState, connectionError := connectionEventState(
 			totals.ConnectionHealth, session.Context().Name,
@@ -130,35 +124,21 @@ func (s *ClusterService) WatchConnection(
 		}); err != nil {
 			return err
 		}
-		lastSent = totals
 		return nil
 	}
-	if err := send(true); err != nil {
+	if err := send(); err != nil {
 		return err
 	}
-	var timer *time.Timer
-	var timerChannel <-chan time.Time
+	ticker := time.NewTicker(connectionActivitySampleInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-requestContext.Done():
-			if timer != nil {
-				timer.Stop()
-			}
 			return contextStatus(requestContext.Err())
 		case <-s.stopping:
-			if timer != nil {
-				timer.Stop()
-			}
 			return nil
-		case <-updates:
-			if timerChannel == nil {
-				timer = time.NewTimer(connectionActivityCoalesceDelay)
-				timerChannel = timer.C
-			}
-		case <-timerChannel:
-			timerChannel = nil
-			timer = nil
-			if err := send(false); err != nil {
+		case <-ticker.C:
+			if err := send(); err != nil {
 				return err
 			}
 		}
@@ -167,13 +147,16 @@ func (s *ClusterService) WatchConnection(
 
 func warmCacheUsageProto(usage cluster.WarmCacheUsage) *kmgrv1.WarmCacheUsage {
 	return &kmgrv1.WarmCacheUsage{
-		RetainedViews:   usage.RetainedViews,
-		RetainedObjects: usage.RetainedObjects,
-		RetainedBytes:   usage.RetainedBytes,
-		ViewLimit:       usage.ViewLimit,
-		ObjectLimit:     usage.ObjectLimit,
-		ByteLimit:       usage.ByteLimit,
-		BudgetEvictions: usage.BudgetEvictions,
+		RetainedViews:    usage.RetainedViews,
+		RetainedObjects:  usage.RetainedObjects,
+		RetainedBytes:    usage.RetainedBytes,
+		EvictableViews:   usage.EvictableViews,
+		EvictableObjects: usage.EvictableObjects,
+		EvictableBytes:   usage.EvictableBytes,
+		ViewLimit:        usage.ViewLimit,
+		ObjectLimit:      usage.ObjectLimit,
+		ByteLimit:        usage.ByteLimit,
+		BudgetEvictions:  usage.BudgetEvictions,
 	}
 }
 

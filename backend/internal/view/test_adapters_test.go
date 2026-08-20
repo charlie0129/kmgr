@@ -57,6 +57,9 @@ func (r *Runtime) installSearchSnapshot(
 
 func (s *Subscription) initializeRows(rows []*kmgrv1.ResourceRow) {
 	clear(s.rows)
+	clear(s.presentationRowBytes)
+	s.presentationRowBytesTotal = 0
+	s.presentationUIDBytesTotal = 0
 	s.order = s.order[:0]
 	for _, row := range rows {
 		uid := row.GetIdentity().GetUid()
@@ -64,8 +67,18 @@ func (s *Subscription) initializeRows(rows []*kmgrv1.ResourceRow) {
 			continue
 		}
 		s.rows[uid] = row
+		s.presentationRowBytes[uid] = projectedRowRetainedBytes(row)
+		s.presentationRowBytesTotal = saturatingProjectionBytes(
+			s.presentationRowBytesTotal,
+			s.presentationRowBytes[uid],
+		)
+		s.presentationUIDBytesTotal = saturatingProjectionBytes(
+			s.presentationUIDBytesTotal,
+			int64(len(uid)),
+		)
 		s.order = append(s.order, uid)
 	}
+	s.publishPresentationRetentionLocked()
 	if s.presentationRevision == 0 {
 		s.presentationRevision = 1
 	}

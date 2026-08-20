@@ -11,6 +11,7 @@ struct NativeMainMenuActions {
     let newClusterWindow: Selector
     let showCommandPalette: Selector
     let showPortForwards: Selector
+    let toggleShortcuts: Selector
     let cycleWindowsForward: Selector
     let cycleWindowsBackward: Selector
 }
@@ -349,6 +350,13 @@ enum NativeMainMenuBuilder {
             to: menu,
             title: "Port Forwards",
             action: actions.showPortForwards,
+            keyEquivalent: "",
+            actions: actions
+        )
+        addApplicationItem(
+            to: menu,
+            title: "Show Shortcuts",
+            action: actions.toggleShortcuts,
             keyEquivalent: "",
             actions: actions
         )

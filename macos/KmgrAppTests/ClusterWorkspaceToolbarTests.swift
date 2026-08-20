@@ -245,7 +245,7 @@ struct ClusterWorkspaceToolbarTests {
 
         let labels = descendants(of: view).compactMap { $0 as? NSTextField }
         let state = try #require(labels.first { $0.stringValue == "Reconnecting…" })
-        let rate = try #require(labels.first { $0.stringValue.hasPrefix("↓") })
+        let rate = try #require(labels.first { $0.stringValue.hasPrefix("↑↓") })
         let stateFrame = view.convert(state.bounds, from: state)
         let rateFrame = view.convert(rate.bounds, from: rate)
 
@@ -278,12 +278,13 @@ struct ClusterWorkspaceToolbarTests {
         let accessibilityValue = view.accessibilityValue() as? String
         #expect(accessibilityValue?.contains("Reconnecting…") == true)
         #expect(accessibilityValue?.contains("Retrying the Kubernetes API") == true)
-        #expect(accessibilityValue?.contains("Download 12 MiB/s") == true)
-        #expect(accessibilityValue?.contains("upload 3.0 MiB/s") == true)
+        #expect(accessibilityValue?.contains("Aggregate 15 MiB/s") == true)
+        #expect(accessibilityValue?.contains("download active") == true)
+        #expect(accessibilityValue?.contains("upload active") == true)
         #expect(rate.accessibilityLabel() == "Kubernetes API transfer rate")
     }
 
-    @Test("connection arrows activate independently and return to their idle presentation")
+    @Test("connection arrows reflect each counter interval independently")
     func connectionArrowPresentationResets() async throws {
         let downloadView = ClusterConnectionActivityView()
         downloadView.update(rate: ClusterConnectionRate(
@@ -294,7 +295,7 @@ struct ClusterWorkspaceToolbarTests {
         ))
         let downloadRate = try #require(descendants(of: downloadView)
             .compactMap { $0 as? NSTextField }
-            .first { $0.stringValue.hasPrefix("↓") })
+            .first { $0.stringValue.hasPrefix("↑↓") })
         var colors = try transferArrowColors(in: downloadRate)
         #expect(colors.download.isEqual(NSColor.systemGreen))
         #expect(colors.upload.isEqual(NSColor.secondaryLabelColor))
@@ -308,18 +309,19 @@ struct ClusterWorkspaceToolbarTests {
         ))
         let uploadRate = try #require(descendants(of: uploadView)
             .compactMap { $0 as? NSTextField }
-            .first { $0.stringValue.hasPrefix("↓") })
+            .first { $0.stringValue.hasPrefix("↑↓") })
         colors = try transferArrowColors(in: uploadRate)
         #expect(colors.download.isEqual(NSColor.secondaryLabelColor))
         #expect(colors.upload.isEqual(NSColor.systemRed))
 
-        try await Task.sleep(for: .milliseconds(500))
+        downloadView.update(rate: ClusterConnectionRate())
         colors = try transferArrowColors(in: downloadRate)
         #expect(colors.download.isEqual(NSColor.secondaryLabelColor))
         #expect(colors.upload.isEqual(NSColor.secondaryLabelColor))
-        #expect(downloadRate.stringValue == "↓ 0 B/s  ↑ 0 B/s")
+        #expect(downloadRate.stringValue == "↑↓ 0 B/s")
         let accessibilityValue = downloadView.accessibilityValue() as? String
-        #expect(accessibilityValue?.contains("Download 0 B/s, upload 0 B/s") == true)
+        #expect(accessibilityValue?.contains("Aggregate 0 B/s") == true)
+        #expect(accessibilityValue?.contains("download idle") == true)
     }
 
     @Test("connection activity sits at the far right of the persistent workspace status bar")
@@ -361,6 +363,9 @@ struct ClusterWorkspaceToolbarTests {
                 retainedViews: 2,
                 retainedObjects: 300,
                 retainedBytes: 180 << 20,
+                evictableViews: 1,
+                evictableObjects: 120,
+                evictableBytes: 64 << 20,
                 viewLimit: 8,
                 objectLimit: 100_000,
                 byteLimit: 4 << 30,
@@ -370,6 +375,9 @@ struct ClusterWorkspaceToolbarTests {
                 retainedViews: 4,
                 retainedObjects: 900,
                 retainedBytes: 512 << 20,
+                evictableViews: 2,
+                evictableObjects: 320,
+                evictableBytes: 128 << 20,
                 viewLimit: 24,
                 objectLimit: 250_000,
                 byteLimit: 4 << 30,
@@ -386,11 +394,11 @@ struct ClusterWorkspaceToolbarTests {
             .first { $0.identifier?.rawValue == "workspace-status-line" })
 
         try await waitUntil {
-            status.stringValue.contains("Warm cache 180 MiB / 4 GiB")
+            status.stringValue.contains("Cache 180 MiB")
         }
-        #expect(status.stringValue.contains("global 512 MiB / 4 GiB"))
+        #expect(status.stringValue.contains("global 512 MiB"))
         #expect(status.stringValue.contains("evictions 3/5"))
-        #expect(status.toolTip?.contains("not total engine memory") == true)
+        #expect(status.toolTip?.contains("not process RSS") == true)
     }
 
     @Test("sidebar section material spans the full outline row")
@@ -1647,6 +1655,64 @@ struct ClusterWorkspaceToolbarTests {
         #expect(requests[3].filterExpression == "label:app==api")
     }
 
+    @Test("clearing a workload drill-down filter restores all Pods and selects Pods")
+    func clearingWorkloadDrillDownRestoresPods() async throws {
+        let daemonSet = ResourceIdentity(
+            clusterSessionID: "test-session", group: "apps", version: "v1",
+            resource: "daemonsets", namespace: "default", name: "agent",
+            uid: "daemonset-agent"
+        )
+        let selector = "app=agent,!retired"
+        let provider = RelationshipDrillDownWorkspaceResourceProvider(source: daemonSet)
+        let controller = makeWorkspace(
+            provider: provider,
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: daemonSet,
+                resourceVersion: "rv-1",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "selectors", fieldID: "selector:0",
+                    label: "app", displayText: "agent"
+                )],
+                podLabelSelector: selector
+            )),
+            restoration: ClusterWindowRestorationRecord(
+                id: "clear-workload-selector",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "apps", version: "v1", resource: "daemonsets"),
+                    namespaceScope: .namespace("default")
+                )
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let outline = try #require(apiResourceOutline(in: window))
+
+        try await waitUntil { provider.streamRequests.count == 1 && table.numberOfRows == 1 }
+        try await selectResourceRow(0, in: table)
+        #expect(window.makeFirstResponder(table))
+        controller.enterResource(nil)
+        try await waitUntil { provider.streamRequests.count == 2 }
+        #expect(provider.streamRequests[1].resource.resource == "pods")
+        #expect(provider.streamRequests[1].labelSelector == selector)
+
+        try triggerResourceFilterChange(in: window, value: "")
+        try await waitUntil(timeout: .seconds(1)) { provider.streamRequests.count == 3 }
+        let restored = provider.streamRequests[2]
+        #expect(restored.resource.resource == "pods")
+        #expect(restored.labelSelector.isEmpty)
+        #expect(restored.fieldSelector.isEmpty)
+        #expect(restored.filterExpression.isEmpty)
+        let selected = outline.selectedRow >= 0
+            ? outline.item(atRow: outline.selectedRow) as? DiscoveredResource
+            : nil
+        #expect(selected?.resource == "pods")
+    }
+
     @Test("helper recovery refetches a visible subresource with the new session")
     func helperRecoveryRebindsVisibleSubresource() async throws {
         let pod = toolbarPodIdentity()
@@ -2047,7 +2113,7 @@ struct LazyWorkspaceRestorationTests {
         let connectionValue = connection?.accessibilityValue() as? String
         #expect(connectionValue?.contains("Reconnecting…") == true)
         #expect(connectionValue?.contains("Opening saved Kubernetes context…") == true)
-        #expect(connectionValue?.contains("Download 0 B/s, upload 0 B/s") == true)
+        #expect(connectionValue?.contains("Aggregate 0 B/s") == true)
 
         try await Task.sleep(for: .milliseconds(40))
         #expect(provider.events.isEmpty)
@@ -2323,6 +2389,9 @@ func makeColumnPropagationWorkspace(
     columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
     columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
     resourceViewportTiming: ResourceViewportTiming = .production,
+    tableColumnMutationAllowed: @escaping @MainActor () -> Bool = {
+        NSEvent.pressedMouseButtons == 0
+    },
     restorationState: ClusterWindowRestorationState? = nil,
     seedFrameAutosaveName: String? = nil
 ) -> ClusterWorkspaceWindowController {
@@ -2353,6 +2422,7 @@ func makeColumnPropagationWorkspace(
         columnConfigurationCoordinator: columnConfigurationCoordinator,
         columnsConfigurationLoader: columnsConfigurationLoader,
         resourceViewportTiming: resourceViewportTiming,
+        tableColumnMutationAllowed: tableColumnMutationAllowed,
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },
         restoration: restoration,

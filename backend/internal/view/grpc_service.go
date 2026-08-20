@@ -285,6 +285,11 @@ func cellForCELValue(columnID string, value viewcolumns.Value) *kmgrv1.Cell {
 		ColumnId: columnID, DisplayText: value.Display,
 		Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 	}
+	if value.Missing {
+		cell.Tooltip = "Value is not present on this object"
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		return cell
+	}
 	switch {
 	case value.String != nil:
 		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: *value.String}

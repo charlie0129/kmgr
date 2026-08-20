@@ -5,7 +5,7 @@ import OSLog
 
 @main
 @MainActor
-final class Application: NSObject, NSApplicationDelegate {
+final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "application")
     private var chooserControllers: [ObjectIdentifier: ClusterManagerWindowController] = [:]
     private var workspaceControllers: [ObjectIdentifier: ClusterWorkspaceWindowController] = [:]
@@ -111,6 +111,9 @@ final class Application: NSObject, NSApplicationDelegate {
             application: .shared
         )
         super.init()
+        self.contextualShortcutsCoordinator.shortcutsWindowController.onUserClose = {
+            self.contextualShortcutsCoordinator.closeFromUser()
+        }
         settings.onPreferencesChanged = { [weak self] preferences, delta in
             guard let self else { return }
             if delta.contains(.appearance) {
@@ -374,7 +377,9 @@ final class Application: NSObject, NSApplicationDelegate {
             columnsConfigurationPath: engineColumnsConfigurationPath,
             columnConfigurationCoordinator: columnConfigurationCoordinator,
             resourceViewportTiming: .production(
-                metricsRefreshSeconds: engineMetricsRefreshSeconds
+                metricsRefreshSeconds: engineMetricsRefreshSeconds,
+                overscanScreensPerSide: preferencesStore.current
+                    .advancedPerformance.viewportOverscanScreensPerSide
             ),
             logDisplayConfiguration: LogDisplayConfiguration(
                 preferences: preferencesStore.current.logs
@@ -651,11 +656,26 @@ final class Application: NSObject, NSApplicationDelegate {
             newClusterWindow: #selector(showClusterManager),
             showCommandPalette: #selector(showCommandPalette(_:)),
             showPortForwards: #selector(showPortForwards(_:)),
+            toggleShortcuts: #selector(toggleShortcuts(_:)),
             cycleWindowsForward: #selector(cycleWindowsForward(_:)),
             cycleWindowsBackward: #selector(cycleWindowsBackward(_:))
         )
         let menu = NativeMainMenuBuilder.make(actions: actions)
         NSApp.windowsMenu = menu.window
         NSApp.mainMenu = menu.main
+    }
+
+    @objc private func toggleShortcuts(_ sender: Any?) {
+        contextualShortcutsCoordinator.toggle()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleShortcuts(_:)) {
+            menuItem.title = contextualShortcutsCoordinator.isEnabled
+                ? "Hide Shortcuts" : "Show Shortcuts"
+            menuItem.state = contextualShortcutsCoordinator.isEnabled ? .on : .off
+            return true
+        }
+        return true
     }
 }

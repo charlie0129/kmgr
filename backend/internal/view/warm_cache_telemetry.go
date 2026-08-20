@@ -1,15 +1,20 @@
 package view
 
+import "github.com/charlie0129/kmgr/backend/internal/store"
+
 // WarmCacheUsage is aggregate process-memory warm-cache accounting. It never
 // contains an authority identity or an individual cache/query key.
 type WarmCacheUsage struct {
-	RetainedViews   uint64
-	RetainedObjects uint64
-	RetainedBytes   uint64
-	ViewLimit       uint64
-	ObjectLimit     uint64
-	ByteLimit       uint64
-	BudgetEvictions uint64
+	RetainedViews    uint64
+	RetainedObjects  uint64
+	RetainedBytes    uint64
+	EvictableViews   uint64
+	EvictableObjects uint64
+	EvictableBytes   uint64
+	ViewLimit        uint64
+	ObjectLimit      uint64
+	ByteLimit        uint64
+	BudgetEvictions  uint64
 }
 
 // WarmCacheTelemetry is one coherent process-wide snapshot. Authorities are
@@ -79,9 +84,9 @@ func (r *Runtime) warmCacheTelemetrySnapshotLocked() WarmCacheTelemetry {
 		BudgetEvictions: r.warmBudgetEvictions,
 	}
 	if r.warm != nil {
-		global.RetainedViews = uint64(r.warm.Len())
-		global.RetainedObjects = uint64(r.warm.ObjectCount())
-		global.RetainedBytes = uint64(r.warm.ByteCount())
+		global.EvictableViews = uint64(r.warm.Len())
+		global.EvictableObjects = uint64(r.warm.ObjectCount())
+		global.EvictableBytes = uint64(r.warm.ByteCount())
 	}
 	authorityBudget := WarmCacheUsage{
 		ViewLimit:   uint64(r.warmViewLimitPerAuthority),
@@ -97,9 +102,9 @@ func (r *Runtime) warmCacheTelemetrySnapshotLocked() WarmCacheTelemetry {
 			continue
 		}
 		usage := authorityBudget
-		usage.RetainedViews = uint64(cache.Len())
-		usage.RetainedObjects = uint64(cache.ObjectCount())
-		usage.RetainedBytes = uint64(cache.ByteCount())
+		usage.EvictableViews = uint64(cache.Len())
+		usage.EvictableObjects = uint64(cache.ObjectCount())
+		usage.EvictableBytes = uint64(cache.ByteCount())
 		usage.BudgetEvictions = r.warmBudgetEvictionsByAuthority[authorityID]
 		authorities[authorityID] = usage
 	}
@@ -114,11 +119,135 @@ func (r *Runtime) warmCacheTelemetrySnapshotLocked() WarmCacheTelemetry {
 		usage.BudgetEvictions = evictions
 		authorities[authorityID] = usage
 	}
+	r.addRetainedCacheTelemetryLocked(&global, authorities, authorityBudget)
 	return WarmCacheTelemetry{
 		Global:          global,
 		AuthorityBudget: authorityBudget,
 		Authorities:     authorities,
 	}
+}
+
+// addRetainedCacheTelemetryLocked accounts for the complete retained view
+// graph without traversing Kubernetes objects. UIDStore and Subscription keep
+// their weights incrementally, so this work is O(open/cache entries), not
+// O(cluster objects). Runtime.mu is held and Subscription.mu is never taken.
+func (r *Runtime) addRetainedCacheTelemetryLocked(
+	global *WarmCacheUsage,
+	authorities map[string]WarmCacheUsage,
+	authorityBudget WarmCacheUsage,
+) {
+	seenStores := make(map[*store.UIDStore]struct{}, len(r.resources)+len(r.searchSnapshots))
+	addStore := func(authorityID string, value *store.UIDStore) {
+		if value == nil {
+			return
+		}
+		if _, exists := seenStores[value]; exists {
+			return
+		}
+		seenStores[value] = struct{}{}
+		usage := authorities[authorityID]
+		if usage.ViewLimit == 0 {
+			usage = authorityBudget
+		}
+		objects := uint64(max(0, value.Len()))
+		bytes := retainedUint64(value.RetainedBytes())
+		addRetainedUsage(global, 0, objects, bytes)
+		addRetainedUsage(&usage, 0, objects, bytes)
+		authorities[authorityID] = usage
+	}
+	addPresentation := func(authorityID string, objects, bytes uint64) {
+		usage := authorities[authorityID]
+		if usage.ViewLimit == 0 {
+			usage = authorityBudget
+		}
+		addRetainedUsage(global, 0, objects, bytes)
+		addRetainedUsage(&usage, 0, objects, bytes)
+		authorities[authorityID] = usage
+	}
+
+	for _, entry := range r.resources {
+		if entry == nil {
+			continue
+		}
+		// resources is the canonical owner of both active and idle warm resource
+		// graphs. The LRUs above contribute only the independently useful
+		// evictable subset; deriving retained totals here avoids double counting
+		// stores shared with search handoffs.
+		authorityID := entry.key.authorityID
+		addRetainedUsage(global, 1, 0, 0)
+		usage := authorities[authorityID]
+		if usage.ViewLimit == 0 {
+			usage = authorityBudget
+		}
+		addRetainedUsage(&usage, 1, 0, 0)
+		authorities[authorityID] = usage
+		addStore(authorityID, entry.store)
+		if projection := entry.warmProjection; projection != nil {
+			addPresentation(
+				authorityID,
+				uint64(len(projection.rows)),
+				retainedUint64(projection.retainedBytes),
+			)
+		}
+		for subscription := range entry.subscribers {
+			if subscription == nil {
+				continue
+			}
+			addPresentation(
+				authorityID,
+				subscription.presentationRetainedObjects.Load(),
+				subscription.presentationRetainedBytes.Load(),
+			)
+		}
+	}
+	for key, snapshot := range r.searchSnapshots {
+		if snapshot != nil {
+			addRetainedUsage(global, 1, 0, 0)
+			usage := authorities[key.resource.authorityID]
+			if usage.ViewLimit == 0 {
+				usage = authorityBudget
+			}
+			addRetainedUsage(&usage, 1, 0, 0)
+			authorities[key.resource.authorityID] = usage
+			addStore(key.resource.authorityID, snapshot.store)
+		}
+	}
+	for key, transient := range r.transientSearchLists {
+		if transient != nil {
+			addRetainedUsage(global, 1, 0, 0)
+			usage := authorities[key.resource.authorityID]
+			if usage.ViewLimit == 0 {
+				usage = authorityBudget
+			}
+			addRetainedUsage(&usage, 1, 0, 0)
+			authorities[key.resource.authorityID] = usage
+			addStore(key.resource.authorityID, transient.store)
+		}
+	}
+}
+
+func retainedUint64(value int64) uint64 {
+	if value <= 0 {
+		return 0
+	}
+	return uint64(value)
+}
+
+func addRetainedUsage(usage *WarmCacheUsage, views, objects, bytes uint64) {
+	if usage == nil {
+		return
+	}
+	usage.RetainedViews = saturatingTelemetryAdd(usage.RetainedViews, views)
+	usage.RetainedObjects = saturatingTelemetryAdd(usage.RetainedObjects, objects)
+	usage.RetainedBytes = saturatingTelemetryAdd(usage.RetainedBytes, bytes)
+}
+
+func saturatingTelemetryAdd(left, right uint64) uint64 {
+	const maximum = ^uint64(0)
+	if left > maximum-right {
+		return maximum
+	}
+	return left + right
 }
 
 func (r *Runtime) startWarmCacheTelemetry() {
@@ -153,6 +282,19 @@ func (r *Runtime) runWarmCacheTelemetry() {
 // signalWarmCacheTelemetryLocked is a non-blocking hint only. The publisher
 // takes its coherent snapshot later and invokes the observer without r.mu.
 func (r *Runtime) signalWarmCacheTelemetryLocked() {
+	if r == nil || r.warmCacheTelemetryWake == nil {
+		return
+	}
+	select {
+	case r.warmCacheTelemetryWake <- struct{}{}:
+	default:
+	}
+}
+
+// signalWarmCacheTelemetry is safe from Subscription-owned critical sections.
+// The channel is initialized before a Runtime can publish a subscription and
+// remains valid until shutdown has retired every subscription.
+func (r *Runtime) signalWarmCacheTelemetry() {
 	if r == nil || r.warmCacheTelemetryWake == nil {
 		return
 	}

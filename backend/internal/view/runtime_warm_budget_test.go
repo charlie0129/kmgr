@@ -9,6 +9,7 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/store"
 	"github.com/charlie0129/kmgr/backend/internal/systemmemory"
 	"github.com/charlie0129/kmgr/backend/internal/watcher"
+	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -264,11 +265,14 @@ func TestWarmCacheTelemetryDistinguishesEvictionFromConsumptionAndClose(t *testi
 	snapshot := runtime.WarmCacheTelemetrySnapshot()
 	if snapshot.Global.RetainedViews != 2 ||
 		snapshot.Global.RetainedObjects != 7 ||
+		snapshot.Global.EvictableViews != 2 ||
+		snapshot.Global.EvictableObjects != 7 ||
 		snapshot.Global.BudgetEvictions != 1 {
 		t.Fatalf("global telemetry after authority eviction = %#v", snapshot.Global)
 	}
 	if got := snapshot.Authorities["cluster-a"]; got.RetainedViews != 1 ||
-		got.RetainedObjects != 4 || got.BudgetEvictions != 1 {
+		got.RetainedObjects != 4 || got.EvictableViews != 1 ||
+		got.EvictableObjects != 4 || got.BudgetEvictions != 1 {
 		t.Fatalf("cluster-a telemetry = %#v", got)
 	}
 	if got := snapshot.Authorities["cluster-b"]; got.RetainedViews != 1 ||
@@ -293,9 +297,11 @@ func TestWarmCacheTelemetryDistinguishesEvictionFromConsumptionAndClose(t *testi
 	}
 	runtime.mu.Unlock()
 	consumed := runtime.WarmCacheTelemetrySnapshot()
-	if consumed.Global.RetainedViews != 1 ||
+	if consumed.Global.RetainedViews != 2 ||
+		consumed.Global.EvictableViews != 1 ||
 		consumed.Global.BudgetEvictions != 1 ||
-		consumed.Authorities["cluster-a"].RetainedViews != 0 ||
+		consumed.Authorities["cluster-a"].RetainedViews != 1 ||
+		consumed.Authorities["cluster-a"].EvictableViews != 0 ||
 		consumed.Authorities["cluster-a"].BudgetEvictions != 1 {
 		t.Fatalf("normal consumption changed eviction accounting = %#v", consumed)
 	}
@@ -337,6 +343,177 @@ func TestWarmCacheTelemetryAttributesGlobalEvictionToRemovedAuthority(t *testing
 	if snapshot.Authorities["cluster-b"].RetainedViews != 1 ||
 		snapshot.Authorities["cluster-c"].RetainedViews != 1 {
 		t.Fatalf("retained authority telemetry = %#v", snapshot.Authorities)
+	}
+}
+
+func TestWarmCacheTelemetryCountsActiveRawStoresAndProjectedRows(t *testing.T) {
+	t.Parallel()
+	runtime := newWarmBudgetRuntime(t, 8, 100, 4, 100)
+	defer runtime.Close()
+
+	entry := newWarmBudgetEntry("cluster-a", "pods", string(make([]byte, 32<<10)))
+	entry.state = resourceRunning
+	presentation := &Subscription{}
+	presentation.presentationRetainedObjects.Store(2)
+	presentation.presentationRetainedBytes.Store(4_096)
+	entry.subscribers[presentation] = struct{}{}
+	runtime.mu.Lock()
+	runtime.resources[entry.key] = entry
+	runtime.mu.Unlock()
+
+	snapshot := runtime.WarmCacheTelemetrySnapshot()
+	wantBytes := uint64(entry.store.RetainedBytes()) + 4_096
+	if snapshot.Global.RetainedViews != 1 ||
+		snapshot.Global.RetainedObjects != uint64(entry.store.Len()+2) ||
+		snapshot.Global.RetainedBytes != wantBytes ||
+		snapshot.Global.EvictableViews != 0 ||
+		snapshot.Global.EvictableObjects != 0 ||
+		snapshot.Global.EvictableBytes != 0 {
+		t.Fatalf("active global telemetry = %#v, want %d retained bytes", snapshot.Global, wantBytes)
+	}
+	if got := snapshot.Authorities["cluster-a"]; got.RetainedViews != 1 ||
+		got.RetainedObjects != uint64(entry.store.Len()+2) ||
+		got.RetainedBytes != wantBytes || got.EvictableViews != 0 {
+		t.Fatalf("active authority telemetry = %#v, want %d retained bytes", got, wantBytes)
+	}
+}
+
+func TestWarmCacheTelemetryDoesNotDoubleCountStoreSharedWithSearchSnapshot(t *testing.T) {
+	t.Parallel()
+	runtime := newWarmBudgetRuntime(t, 8, 100, 4, 100)
+	defer runtime.Close()
+
+	entry := newWarmBudgetEntry("cluster-a", "pods", "")
+	entry.warmProjection = &warmProjection{
+		rows: []*kmgrv1.ResourceRow{
+			{Identity: &kmgrv1.ResourceIdentity{Uid: "projected-a"}},
+			{Identity: &kmgrv1.ResourceIdentity{Uid: "projected-b"}},
+		},
+		retainedBytes: 4_096,
+	}
+	admitWarmBudgetEntry(runtime, entry)
+	searchKey := searchSnapshotKey{
+		resource: entry.key, namespaceScope: "all", metadataOnly: true,
+	}
+	if _, retained := runtime.installSearchSnapshot(searchKey, entry.store); !retained {
+		t.Fatal("shared search snapshot was not retained")
+	}
+
+	snapshot := runtime.WarmCacheTelemetrySnapshot()
+	wantBytes := uint64(entry.store.RetainedBytes()) + 4_096
+	if snapshot.Global.RetainedViews != 2 ||
+		snapshot.Global.RetainedObjects != uint64(entry.store.Len()+2) ||
+		snapshot.Global.RetainedBytes != wantBytes ||
+		snapshot.Global.EvictableViews != 1 ||
+		snapshot.Global.EvictableObjects != uint64(entry.store.Len()) ||
+		snapshot.Global.EvictableBytes != wantBytes {
+		t.Fatalf("shared-store global telemetry = %#v, want %d retained bytes", snapshot.Global, wantBytes)
+	}
+}
+
+func TestWarmCacheObserverPublishesSearchSnapshotInstallationAndRemoval(t *testing.T) {
+	t.Parallel()
+	updates := make(chan WarmCacheTelemetry, 8)
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{},
+		WarmCacheObserver: func(snapshot WarmCacheTelemetry) {
+			updates <- snapshot
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("initial cache telemetry was not published")
+	}
+
+	snapshotStore := store.New()
+	object := &unstructured.Unstructured{}
+	object.SetUID("search-object")
+	object.SetName("search-object")
+	snapshotStore.Upsert(object)
+	snapshotStore.SetResourceVersion("search-rv")
+	key := searchSnapshotKey{resource: resourceKey{
+		authorityID: "cluster-a", version: "v1", resource: "pods",
+	}, namespaceScope: "all", metadataOnly: true}
+	if _, retained := runtime.installSearchSnapshot(key, snapshotStore); !retained {
+		t.Fatal("search snapshot was not retained")
+	}
+	select {
+	case snapshot := <-updates:
+		if snapshot.Global.RetainedViews != 1 ||
+			snapshot.Global.RetainedBytes != uint64(snapshotStore.RetainedBytes()) {
+			t.Fatalf("installed search telemetry = %#v", snapshot.Global)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("search snapshot installation did not wake telemetry observer")
+	}
+
+	runtime.mu.Lock()
+	consumed := runtime.consumeSearchSnapshotLocked(key)
+	runtime.mu.Unlock()
+	if consumed == nil {
+		t.Fatal("search snapshot was not consumed")
+	}
+	select {
+	case snapshot := <-updates:
+		if snapshot.Global.RetainedViews != 0 || snapshot.Global.RetainedBytes != 0 {
+			t.Fatalf("removed search telemetry = %#v", snapshot.Global)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("search snapshot removal did not wake telemetry observer")
+	}
+}
+
+func TestWarmCacheObserverPublishesUnsubscribedRawStoreGrowth(t *testing.T) {
+	t.Parallel()
+	updates := make(chan WarmCacheTelemetry, 8)
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{},
+		WarmCacheObserver: func(snapshot WarmCacheTelemetry) {
+			updates <- snapshot
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("initial cache telemetry was not published")
+	}
+
+	entry := &resourceRuntime{
+		key: resourceKey{
+			authorityID: "cluster-a", version: "v1", resource: "pods",
+		},
+		store:       store.New(),
+		state:       resourceRunning,
+		subscribers: make(map[*Subscription]struct{}),
+	}
+	runtime.mu.Lock()
+	runtime.resources[entry.key] = entry
+	runtime.mu.Unlock()
+	object := &unstructured.Unstructured{}
+	object.SetUID("active-object")
+	object.SetName("active-object")
+	entry.store.Upsert(object)
+	runtime.mu.Lock()
+	runtime.prepareEntryBatchLocked(entry, watcher.Batch{})
+	runtime.mu.Unlock()
+
+	select {
+	case snapshot := <-updates:
+		if snapshot.Global.RetainedObjects != 1 ||
+			snapshot.Global.RetainedBytes != uint64(entry.store.RetainedBytes()) {
+			t.Fatalf("active store telemetry = %#v", snapshot.Global)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("raw-store growth did not wake telemetry observer")
 	}
 }
 

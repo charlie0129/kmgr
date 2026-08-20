@@ -54,6 +54,24 @@ func TestPreviewColumnPreservesExactIntegerAndQuantityTypes(t *testing.T) {
 	}
 }
 
+func TestPreviewColumnMutesMissingOptionalValue(t *testing.T) {
+	t.Parallel()
+	service := newPreviewService(t, &fakeResourceSource{authority: "authority", client: newSearchClient()})
+	request := previewRequest(`object.?spec.?nodeName`, "string", nil)
+	request.Column.Missing = "-"
+
+	response, err := service.PreviewColumn(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := response.GetPreview()
+	if response.GetError() != nil || preview.GetDisplayText() != "-" ||
+		preview.GetSeverity() != kmgrv1.CellSeverity_CELL_SEVERITY_MUTED ||
+		preview.GetTypedValue() != nil {
+		t.Fatalf("missing optional preview = %#v", response)
+	}
+}
+
 func TestPreviewColumnReturnsCompileAndEvaluationErrorsInline(t *testing.T) {
 	t.Parallel()
 	service := newPreviewService(t, &fakeResourceSource{authority: "authority", client: newSearchClient()})

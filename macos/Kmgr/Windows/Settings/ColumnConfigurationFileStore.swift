@@ -15,6 +15,12 @@ struct ColumnConfigurationDocumentLoader: Sendable {
 /// successful save recorded after it began must win for its exact GVR.
 struct ColumnConfigurationCacheState {
     private(set) var document: ColumnsConfigurationDocument?
+    /// A strict engine version is available only for bytes written by this
+    /// process. An externally-authored YAML document is still valid input, but
+    /// its raw-byte digest cannot be reconstructed from the normalized model;
+    /// leaving this empty lets the engine accept that document and return its
+    /// authoritative version during resolution.
+    private(set) var persistedVersion: String?
     private var pendingSavedDefinitions: [ColumnResourceMatch: [ColumnDefinition]] = [:]
 
     mutating func recordSaved(
@@ -27,6 +33,7 @@ struct ColumnConfigurationCacheState {
             // divider drag does not trigger one file reload per open window.
             Self.upsert(definitions, matching: match, in: &document)
             self.document = document
+            persistedVersion = document.persistedVersion()
         } else {
             // A load already in flight may return an older snapshot. Reapply
             // the durable exact-GVR save when that snapshot arrives.
@@ -39,12 +46,14 @@ struct ColumnConfigurationCacheState {
         _ loaded: ColumnsConfigurationDocument
     ) -> ColumnsConfigurationDocument {
         var reconciled = loaded
+        let hadPendingSave = !pendingSavedDefinitions.isEmpty
         for match in pendingSavedDefinitions.keys.sorted(by: { $0.key < $1.key }) {
             guard let definitions = pendingSavedDefinitions[match] else { continue }
             Self.upsert(definitions, matching: match, in: &reconciled)
         }
         pendingSavedDefinitions.removeAll(keepingCapacity: true)
         document = reconciled
+        persistedVersion = hadPendingSave ? reconciled.persistedVersion() : nil
         return reconciled
     }
 

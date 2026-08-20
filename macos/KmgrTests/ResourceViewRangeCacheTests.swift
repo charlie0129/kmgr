@@ -8,15 +8,15 @@ struct ResourceViewRangeCacheTests {
         #expect(ResourceViewViewportPlanner.retainedRange(
             visibleRows: 0..<20,
             rowsVisible: 1_000
-        ) == 0..<60)
+        ) == 0..<420)
         #expect(ResourceViewViewportPlanner.retainedRange(
             visibleRows: 490..<510,
             rowsVisible: 1_000
-        ) == 470..<530)
+        ) == 290..<710)
         #expect(ResourceViewViewportPlanner.retainedRange(
             visibleRows: 980..<1_000,
             rowsVisible: 1_000
-        ) == 940..<1_000)
+        ) == 580..<1_000)
         #expect(ResourceViewViewportPlanner.retainedRange(
             visibleRows: 1_000..<1_800,
             rowsVisible: 10_000

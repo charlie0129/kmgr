@@ -28,12 +28,36 @@ func TestCompileOptionalAndTypedEvaluation(t *testing.T) {
 	value, err := program.Evaluate(Activation{Object: map[string]any{
 		"spec": map[string]any{"nodeName": "worker-1"},
 	}})
-	if err != nil || value.Display != "worker-1" || value.String == nil || *value.String != "worker-1" {
+	if err != nil || value.Missing || value.Display != "worker-1" || value.String == nil || *value.String != "worker-1" {
 		t.Fatalf("Evaluate present = %#v, %v", value, err)
 	}
 	value, err = program.Evaluate(Activation{Object: map[string]any{}})
-	if err != nil || value.Display != DefaultMissing {
+	if err != nil || value.Missing || value.Display != DefaultMissing {
+		t.Fatalf("Evaluate explicit fallback = %#v, %v", value, err)
+	}
+
+	optionalProgram, err := compiler.Compile(Definition{
+		ID: "optional-node", Expression: `object.?spec.?nodeName`, ResultType: ResultString,
+		Missing: "-",
+	})
+	if err != nil {
+		t.Fatalf("Compile optional: %v", err)
+	}
+	value, err = optionalProgram.Evaluate(Activation{Object: map[string]any{}})
+	if err != nil || !value.Missing || value.Display != "-" || value.String != nil {
 		t.Fatalf("Evaluate missing = %#v, %v", value, err)
+	}
+
+	nullProgram, err := compiler.Compile(Definition{
+		ID: "null-node", Expression: `null`, ResultType: ResultString,
+		Missing: "not reported",
+	})
+	if err != nil {
+		t.Fatalf("Compile null: %v", err)
+	}
+	value, err = nullProgram.Evaluate(Activation{})
+	if err != nil || !value.Missing || value.Display != "not reported" {
+		t.Fatalf("Evaluate null = %#v, %v", value, err)
 	}
 }
 

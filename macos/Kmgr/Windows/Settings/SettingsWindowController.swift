@@ -1,6 +1,10 @@
 import AppKit
 import KmgrCore
 
+private final class FlippedSettingsDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     NSTextFieldDelegate
@@ -16,6 +20,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let logByteLimitField = NSTextField()
     private let renderBatchField = NSTextField()
     private let metricsRefreshField = NSTextField()
+    private let viewportOverscanField = NSTextField()
     private let globalWarmViewLimitField = NSTextField()
     private let globalWarmObjectLimitField = NSTextField()
     private let globalWarmMemoryPercentField = NSTextField()
@@ -104,6 +109,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
             metricsRefreshField,
+            viewportOverscanField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
@@ -121,6 +127,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
             metricsRefreshField,
+            viewportOverscanField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
@@ -135,6 +142,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         }
         globalWarmViewLimitField.setAccessibilityIdentifier(
             "settings.performance.globalWarmViews"
+        )
+        viewportOverscanField.setAccessibilityIdentifier(
+            "settings.performance.viewportOverscanScreensPerSide"
         )
         globalWarmObjectLimitField.setAccessibilityIdentifier(
             "settings.performance.globalWarmObjects"
@@ -223,6 +233,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         let advancedPerformance = section(
             title: "Advanced Performance",
             rows: [
+                groupHeading("Virtual list"),
+                labeledRow(
+                    "Overscan",
+                    control: viewportOverscanField,
+                    suffix: "screens per side"
+                ),
                 warmCacheHelp,
                 groupHeading("Warm cache — global aggregate"),
                 labeledRow("Retained queries", control: globalWarmViewLimitField),
@@ -338,7 +354,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             section.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -32).isActive = true
         }
 
-        let documentView = NSView()
+        let documentView = FlippedSettingsDocumentView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
         documentView.addSubview(contentStack)
         NSLayoutConstraint.activate([
             contentStack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
@@ -354,6 +371,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            documentView.leadingAnchor.constraint(
+                equalTo: scrollView.contentView.leadingAnchor
+            ),
+            documentView.topAnchor.constraint(
+                equalTo: scrollView.contentView.topAnchor
+            ),
+            documentView.widthAnchor.constraint(
+                equalTo: scrollView.contentView.widthAnchor
+            ),
+        ])
 
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -449,6 +477,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         logByteLimitField.integerValue = preferences.logs.byteLimit / (1 << 20)
         renderBatchField.integerValue = preferences.logs.renderBatchMilliseconds
         metricsRefreshField.integerValue = preferences.metricsRefreshSeconds
+        viewportOverscanField.integerValue =
+            preferences.advancedPerformance.viewportOverscanScreensPerSide
         globalWarmViewLimitField.integerValue =
             preferences.advancedPerformance.globalWarmCacheViewLimit
         globalWarmObjectLimitField.integerValue =
@@ -513,6 +543,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             ),
             columnsConfigurationPath: columnsPathField.stringValue,
             advancedPerformance: AdvancedPerformancePreferences(
+                viewportOverscanScreensPerSide: parsedInteger(
+                    viewportOverscanField
+                ),
                 globalWarmCacheViewLimit: parsedInteger(globalWarmViewLimitField),
                 globalWarmCacheObjectLimit: parsedInteger(globalWarmObjectLimitField),
                 globalWarmCacheMemoryPercent: parsedInteger(

@@ -241,7 +241,7 @@ func TestProjectionSliceReadersDoNotMutateOrAliasRawObjects(t *testing.T) {
 	status["ready"] = false
 	status["restartCount"] = int64(99)
 	podObject.Object["status"].(map[string]any)["phase"] = "Failed"
-	if ready := cellByID(podRow, "ready"); ready.GetDisplayText() != "1/1" {
+	if ready := cellByID(podRow, "ready"); ready.GetDisplayText() != "1 / 1" {
 		t.Fatalf("projected ready cell aliased raw status: %#v", ready)
 	}
 	if restarts := cellByID(podRow, "restarts"); restarts.GetIntegerValue() != 7 {
@@ -388,6 +388,95 @@ func TestProjectionSliceReadersPreserveMalformedFieldFallbacks(t *testing.T) {
 	}
 }
 
+func TestPodStatusPaletteSeparatesCompletedTerminatingAndFailureStates(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true},
+		ColumnIDs:      []string{"status", "ready"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name          string
+		phase         string
+		waitingReason string
+		terminating   bool
+		wantStatus    string
+		wantSeverity  kmgrv1.CellSeverity
+		wantReady     kmgrv1.CellSeverity
+	}{
+		{
+			name: "running", phase: "Running", wantStatus: "Running",
+			wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			wantReady:    kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+		},
+		{
+			name: "succeeded", phase: "Succeeded", wantStatus: "Succeeded",
+			wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_MUTED,
+			wantReady:    kmgrv1.CellSeverity_CELL_SEVERITY_MUTED,
+		},
+		{
+			name: "terminating", phase: "Running", terminating: true,
+			wantStatus: "Terminating", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_INFO,
+			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+		},
+		{
+			name: "liveness failure", phase: "Running", waitingReason: "LivenessProbeFailed",
+			wantStatus: "LivenessProbeFailed", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_ERROR,
+			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+		},
+		{
+			name: "crash loop", phase: "Running", waitingReason: "CrashLoopBackOff",
+			wantStatus: "CrashLoopBackOff", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_ERROR,
+			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+		},
+		{
+			name: "image pull backoff", phase: "Pending", waitingReason: "ImagePullBackOff",
+			wantStatus: "ImagePullBackOff", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+		},
+		{
+			name: "container creating", phase: "Pending", waitingReason: "ContainerCreating",
+			wantStatus: "ContainerCreating", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_INFO,
+			wantReady: kmgrv1.CellSeverity_CELL_SEVERITY_WARNING,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := pod("uid-"+test.name, "ns", test.name, test.phase, 0, nil, time.Time{})
+			statuses := nestedSliceNoCopy(value.Object, "status", "containerStatuses")
+			status := statuses[0].(map[string]any)
+			if test.waitingReason != "" {
+				status["ready"] = false
+				status["state"] = map[string]any{
+					"waiting": map[string]any{"reason": test.waitingReason},
+				}
+			}
+			if test.terminating {
+				deletedAt := metav1.NewTime(time.Now())
+				value.SetDeletionTimestamp(&deletedAt)
+			}
+			row, visible := projector.ProjectOne(value)
+			if !visible {
+				t.Fatal("Pod row was unexpectedly hidden")
+			}
+			statusCell := cellByID(row, "status")
+			if statusCell.GetDisplayText() != test.wantStatus ||
+				statusCell.GetSeverity() != test.wantSeverity {
+				t.Fatalf("status cell = %#v, want %q/%v", statusCell, test.wantStatus, test.wantSeverity)
+			}
+			if ready := cellByID(row, "ready"); ready.GetSeverity() != test.wantReady {
+				t.Fatalf("ready cell = %#v, want severity %v", ready, test.wantReady)
+			}
+		})
+	}
+}
+
 func TestProjectorProjectsCuratedWorkloadCounts(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -410,7 +499,7 @@ func TestProjectorProjectsCuratedWorkloadCounts(t *testing.T) {
 				"availableReplicas": int64(2), "readyReplicas": int64(3),
 				"replicas": int64(4),
 			},
-			columnID: "ready", want: "3/3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			columnID: "ready", want: "3 / 3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		},
 		{
 			name: "StatefulSet ready",
@@ -423,7 +512,7 @@ func TestProjectorProjectsCuratedWorkloadCounts(t *testing.T) {
 				"availableReplicas": int64(3), "readyReplicas": int64(3),
 				"replicas": int64(3),
 			},
-			columnID: "ready", want: "3/3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			columnID: "ready", want: "3 / 3", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		},
 		{
 			name: "DaemonSet progressing",
@@ -532,6 +621,57 @@ func TestProjectorEvaluatesCompiledCELAndSortsByTypedResult(t *testing.T) {
 	}
 	if rows[0].GetCells()[1].GetIntegerValue() != 10 {
 		t.Fatalf("typed CEL cell = %#v", rows[0].GetCells()[1])
+	}
+}
+
+func TestProjectorMutesOnlyActualMissingCELValues(t *testing.T) {
+	t.Parallel()
+	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := compiler.Compile(viewcolumns.Definition{
+		ID: "missing", Expression: `object.?spec.?nodeName`,
+		ResultType: viewcolumns.ResultString, Missing: "-",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal, err := compiler.Compile(viewcolumns.Definition{
+		ID: "literal", Expression: `"-"`, ResultType: viewcolumns.ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true},
+		ColumnIDs:      []string{"missing", "literal"},
+		CELPrograms: map[string]*viewcolumns.Program{
+			"missing": missing, "literal": literal,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, visible := projector.ProjectOne(pod("uid", "ns", "pod", "Running", 0, nil, time.Time{}))
+	if !visible {
+		t.Fatal("row hidden")
+	}
+	missingCell := cellByID(row, "missing")
+	if missingCell.GetDisplayText() != "-" ||
+		missingCell.GetSeverity() != kmgrv1.CellSeverity_CELL_SEVERITY_MUTED ||
+		missingCell.GetTypedValue() != nil {
+		t.Fatalf("missing CEL cell = %#v", missingCell)
+	}
+	literalCell := cellByID(row, "literal")
+	if literalCell.GetDisplayText() != "-" ||
+		literalCell.GetSeverity() != kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL ||
+		literalCell.GetStringValue() != "-" {
+		t.Fatalf("literal CEL cell = %#v", literalCell)
 	}
 }
 

@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"net/http"
-	"sync"
 	"sync/atomic"
 )
 
@@ -20,16 +19,14 @@ const (
 
 // APIActivity is a process-local byte counter for one shared Kubernetes
 // authority. It records lengths only and never retains or inspects payloads.
-// Notify channels are edge-triggered hints; readers always load totals and
-// therefore cannot lose accounting when events are coalesced.
+// The response-body hot path only performs atomic additions. Connection
+// streams sample these totals on a fixed interval, so payload reads never
+// contend on a listener lock or perform per-read IPC coordination.
 type APIActivity struct {
 	received atomic.Uint64
 	sent     atomic.Uint64
 	health   atomic.Uint32
 	warm     atomic.Pointer[warmCacheActivitySnapshot]
-
-	mu        sync.Mutex
-	listeners map[chan struct{}]struct{}
 }
 
 type APIActivitySnapshot struct {
@@ -43,13 +40,16 @@ type APIActivitySnapshot struct {
 // WarmCacheUsage contains aggregate process-memory accounting only. It never
 // carries an authority ID, Kubernetes identity, query key, or selector.
 type WarmCacheUsage struct {
-	RetainedViews   uint64
-	RetainedObjects uint64
-	RetainedBytes   uint64
-	ViewLimit       uint64
-	ObjectLimit     uint64
-	ByteLimit       uint64
-	BudgetEvictions uint64
+	RetainedViews    uint64
+	RetainedObjects  uint64
+	RetainedBytes    uint64
+	EvictableViews   uint64
+	EvictableObjects uint64
+	EvictableBytes   uint64
+	ViewLimit        uint64
+	ObjectLimit      uint64
+	ByteLimit        uint64
+	BudgetEvictions  uint64
 }
 
 type warmCacheActivitySnapshot struct {
@@ -98,9 +98,6 @@ func (a *APIActivity) setWarmCacheUsage(
 		if !a.warm.CompareAndSwap(previous, next) {
 			continue
 		}
-		if previous == nil || previous.authority != authority || previous.global != global {
-			a.notify()
-		}
 		return
 	}
 }
@@ -119,10 +116,7 @@ func (a *APIActivity) ObserveRoundTrip(statusCode int, roundTripErr error) {
 	case statusCode == http.StatusUnauthorized:
 		next = APIConnectionAuthenticationFailed
 	}
-	previous := APIConnectionHealth(a.health.Swap(uint32(next)))
-	if previous != next {
-		a.notify()
-	}
+	a.health.Store(uint32(next))
 }
 
 func (a *APIActivity) AddReceived(bytes uint64) {
@@ -130,7 +124,6 @@ func (a *APIActivity) AddReceived(bytes uint64) {
 		return
 	}
 	a.received.Add(bytes)
-	a.notify()
 }
 
 func (a *APIActivity) AddSent(bytes uint64) {
@@ -138,41 +131,4 @@ func (a *APIActivity) AddSent(bytes uint64) {
 		return
 	}
 	a.sent.Add(bytes)
-	a.notify()
-}
-
-// Subscribe returns a coalescing activity hint and an idempotent cancellation
-// closure. Consumers must read Snapshot after every hint.
-func (a *APIActivity) Subscribe() (<-chan struct{}, func()) {
-	if a == nil {
-		closed := make(chan struct{})
-		close(closed)
-		return closed, func() {}
-	}
-	updates := make(chan struct{}, 1)
-	a.mu.Lock()
-	if a.listeners == nil {
-		a.listeners = make(map[chan struct{}]struct{})
-	}
-	a.listeners[updates] = struct{}{}
-	a.mu.Unlock()
-	var once sync.Once
-	return updates, func() {
-		once.Do(func() {
-			a.mu.Lock()
-			delete(a.listeners, updates)
-			a.mu.Unlock()
-		})
-	}
-}
-
-func (a *APIActivity) notify() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for listener := range a.listeners {
-		select {
-		case listener <- struct{}{}:
-		default:
-		}
-	}
 }

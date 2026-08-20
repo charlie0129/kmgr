@@ -502,11 +502,22 @@ func (p *Projector) celCellContext(ctx context.Context, program *viewcolumns.Pro
 		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
 			return nil, ctxErr
 		}
-		cell.Tooltip = err.Error()
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
+		if isMissingCELDataError(err) {
+			cell.DisplayText = missing
+			cell.Tooltip = "Value is not present on this object"
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		} else {
+			cell.Tooltip = err.Error()
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
+		}
 		return cell, nil
 	}
 	cell.DisplayText = value.Display
+	if value.Missing {
+		cell.Tooltip = "Value is not present on this object"
+		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		return cell, nil
+	}
 	switch {
 	case value.String != nil:
 		cell.TypedValue = &kmgrv1.Cell_StringValue{StringValue: *value.String}
@@ -524,6 +535,22 @@ func (p *Projector) celCellContext(ctx context.Context, program *viewcolumns.Pro
 		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: value.Duration.Seconds()}
 	}
 	return cell, nil
+}
+
+func isMissingCELDataError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"no such key", "key not found", "field not found", "no such field",
+		"does not contain field", "missing field", "unknown field",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func quantityCellValue(value resource.Quantity, display string) *kmgrv1.Cell_QuantityValue {
@@ -672,20 +699,42 @@ func (p *Projector) resourceUsageCell(
 			return cell
 		}
 		setUsageQuantities(usage, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable))
-		cell.DisplayText = formatUsageDisplay(
-			resourceName, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
-		)
+		allocatableValue := optionalQuantity(allocatable, hasAllocatable)
+		// Node views intentionally do not open Pod metrics just to infer
+		// accelerator allocation. When usage is unavailable, the only truthful
+		// value is the node's allocatable count; avoid the misleading "— / 8"
+		// form and keep it a normal (black) cell.
+		if !measurement.HasValue() && allocatableValue != nil &&
+			isOptionalNodeResource(resourceName) {
+			cell.DisplayText = formatResourceQuantity(resourceName, allocatableValue)
+		} else {
+			cell.DisplayText = formatUsageDisplay(
+				resourceName, measurement, nil, nil, allocatableValue,
+			)
+		}
 		cell.Tooltip = formatUsageTooltip(
 			resourceName, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
 			optionalQuantity(capacity, hasCapacity), p.spec.Now,
 		)
 	}
-	if measurement.State == metrics.MeasurementStale {
+	if measurement.State == metrics.MeasurementStale && measurement.HasValue() {
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
 	} else if !measurement.HasValue() {
-		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		if kind == metrics.NodeMetrics && cell.GetUsage().Capacity != nil &&
+			isOptionalNodeResource(resourceName) {
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL
+		} else {
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		}
 	}
 	return cell
+}
+
+func isOptionalNodeResource(name corev1.ResourceName) bool {
+	value := string(name)
+	return strings.Contains(value, "/") ||
+		(strings.HasPrefix(value, string(corev1.ResourceHugePagesPrefix)) &&
+			value != string(corev1.ResourceHugePagesPrefix))
 }
 
 func setUsageQuantities(
@@ -901,7 +950,13 @@ func defaultColumns(resource ResourceType) []string {
 }
 
 func statusText(object *unstructured.Unstructured) string {
+	if object == nil {
+		return "Active"
+	}
 	kind := strings.ToLower(object.GetKind())
+	if kind == "pod" {
+		return podStatusText(object)
+	}
 	if object.GetDeletionTimestamp() != nil {
 		return nodeSchedulingStatus(object, "Terminating", kind == "node")
 	}
@@ -1009,6 +1064,189 @@ func statusSeverity(status string) kmgrv1.CellSeverity {
 	default:
 		return kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL
 	}
+}
+
+// statusSeverityForObject preserves the generic status mapping for arbitrary
+// resources while applying the richer Pod state palette used by the native
+// table. In particular, completed Pods are intentionally muted and a
+// terminating Pod is informational rather than another warning shade.
+func statusSeverityForObject(object *unstructured.Unstructured, status string) kmgrv1.CellSeverity {
+	if object != nil && strings.EqualFold(object.GetKind(), "pod") {
+		folded := strings.ToLower(status)
+		switch {
+		case podCompleted(object) || folded == "succeeded" || folded == "completed":
+			return kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
+		case strings.Contains(folded, "terminating"):
+			return kmgrv1.CellSeverity_CELL_SEVERITY_INFO
+		case podStatusIsError(folded):
+			return kmgrv1.CellSeverity_CELL_SEVERITY_ERROR
+		case podStatusIsInitializing(folded):
+			return kmgrv1.CellSeverity_CELL_SEVERITY_INFO
+		case podStatusIsPending(folded) || strings.Contains(folded, "unknown"):
+			return kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
+		default:
+			return kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL
+		}
+	}
+	return statusSeverity(status)
+}
+
+func podStatusText(object *unstructured.Unstructured) string {
+	if object.GetDeletionTimestamp() != nil {
+		return "Terminating"
+	}
+	statusReason := nestedString(object.Object, "status", "reason")
+	if statusReason == "NodeLost" {
+		return "Unknown"
+	}
+
+	// Init containers take precedence over the ordinary phase, matching the
+	// useful diagnostic state shown by k9s without converting the whole object.
+	initStatuses := nestedSliceNoCopy(object.Object, "status", "initContainerStatuses")
+	initCount := len(nestedSliceNoCopy(object.Object, "spec", "initContainers"))
+	for index, raw := range initStatuses {
+		status, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		state, _ := nestedAnyMap(status, "state")
+		if waiting, ok := nestedAnyMap(state, "waiting"); ok {
+			if reason, _ := waiting["reason"].(string); reason != "" && reason != "PodInitializing" {
+				return "Init:" + reason
+			}
+		}
+		if terminated, ok := nestedAnyMap(state, "terminated"); ok {
+			exitCode := nestedInt64Value(terminated["exitCode"])
+			if exitCode != 0 {
+				if reason, _ := terminated["reason"].(string); reason != "" {
+					return "Init:" + reason
+				}
+				return fmt.Sprintf("Init:ExitCode:%d", exitCode)
+			}
+			continue
+		}
+		if initCount > 0 {
+			return fmt.Sprintf("Init:%d/%d", index, initCount)
+		}
+	}
+
+	containerStatuses := nestedSliceNoCopy(object.Object, "status", "containerStatuses")
+	hasRunning := false
+	allReady := len(containerStatuses) > 0
+	for _, raw := range containerStatuses {
+		status, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		state, _ := nestedAnyMapValue(status["state"])
+		if waiting, ok := nestedAnyMap(state, "waiting"); ok {
+			if reason, _ := waiting["reason"].(string); reason != "" {
+				return reason
+			}
+		}
+		if terminated, ok := nestedAnyMap(state, "terminated"); ok {
+			if reason, _ := terminated["reason"].(string); reason != "" {
+				return reason
+			}
+			if exitCode := nestedInt64Value(terminated["exitCode"]); exitCode != 0 {
+				return fmt.Sprintf("ExitCode:%d", exitCode)
+			}
+		}
+		if running := state["running"]; running != nil {
+			hasRunning = true
+		}
+		ready, _ := status["ready"].(bool)
+		allReady = allReady && ready
+	}
+
+	phase := nestedString(object.Object, "status", "phase")
+	if statusReason != "" && (phase == "Failed" || phase == "Unknown") {
+		return statusReason
+	}
+	if phase == "Succeeded" {
+		if hasRunning {
+			if allReady {
+				return "Running"
+			}
+			return "NotReady"
+		}
+		return "Succeeded"
+	}
+	if phase == "Running" && len(containerStatuses) > 0 && !allReady && !hasRunning {
+		return "NotReady"
+	}
+	if phase != "" {
+		return phase
+	}
+	if statusReason != "" {
+		return statusReason
+	}
+	return "Pending"
+}
+
+func nestedAnyMap(value map[string]any, key string) (map[string]any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	return nestedAnyMapValue(value[key])
+}
+
+func nestedAnyMapValue(value any) (map[string]any, bool) {
+	result, ok := value.(map[string]any)
+	return result, ok
+}
+
+func nestedInt64Value(value any) int64 {
+	switch value := value.(type) {
+	case int:
+		return int64(value)
+	case int32:
+		return int64(value)
+	case int64:
+		return value
+	case uint:
+		return int64(value)
+	case uint32:
+		return int64(value)
+	case uint64:
+		if value > uint64(math.MaxInt64) {
+			return math.MaxInt64
+		}
+		return int64(value)
+	case float64:
+		return int64(value)
+	default:
+		return 0
+	}
+}
+
+func podCompleted(object *unstructured.Unstructured) bool {
+	if object == nil {
+		return false
+	}
+	return strings.EqualFold(nestedString(object.Object, "status", "phase"), "Succeeded")
+}
+
+func podStatusIsError(status string) bool {
+	for _, token := range []string{
+		"fail", "error", "oomkilled", "evicted", "crashloop", "notready",
+		"createcontainererror", "runcontainererror", "exitcode:", "liveness",
+	} {
+		if strings.Contains(status, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func podStatusIsInitializing(status string) bool {
+	return strings.Contains(status, "init:") || strings.Contains(status, "initializ") ||
+		strings.Contains(status, "containercreating")
+}
+
+func podStatusIsPending(status string) bool {
+	return strings.Contains(status, "pending") || strings.Contains(status, "scheduling") ||
+		strings.Contains(status, "imagepull")
 }
 
 func nodeRoles(object *unstructured.Unstructured) []string {

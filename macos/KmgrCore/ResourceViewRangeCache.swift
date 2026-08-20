@@ -15,17 +15,17 @@ public enum ResourceViewRangeReception: Hashable, Sendable {
 }
 
 /// Plans one bounded table window from AppKit's absolute visible row indexes.
-/// The retained range includes approximately one viewport before and after the
-/// visible rows (two screens total overscan), while always respecting the
+/// The retained range includes a configurable number of viewports before and
+/// after the visible rows, while always respecting the
 /// protocol's hard cache bound.
 public enum ResourceViewViewportPlanner {
-    public static let defaultOverscanScreens = 2
+    public static let defaultOverscanScreensPerSide = 10
 
     public static func retainedRange(
         visibleRows: Range<UInt64>,
         rowsVisible: UInt64,
         maximumRows: Int = ResourceViewInvalidation.protocolMaximumRangeLength,
-        overscanScreens: Int = defaultOverscanScreens
+        overscanScreensPerSide: Int = defaultOverscanScreensPerSide
     ) -> Range<UInt64> {
         guard rowsVisible > 0, maximumRows > 0 else { return 0..<0 }
 
@@ -37,13 +37,17 @@ public enum ResourceViewViewportPlanner {
         )
         let visibleCount = min(maximum, visibleUpper - visibleLower)
         let overscanCount = visibleCount.multipliedReportingOverflow(
-            by: UInt64(max(0, overscanScreens))
+            by: UInt64(max(0, overscanScreensPerSide))
         )
+        let totalOverscan: UInt64
+        if overscanCount.overflow || overscanCount.partialValue > maximum / 2 {
+            totalOverscan = maximum
+        } else {
+            totalOverscan = min(maximum, overscanCount.partialValue * 2)
+        }
         let desiredCount = min(
             maximum,
-            overscanCount.overflow
-                ? maximum
-                : visibleCount + min(maximum, overscanCount.partialValue)
+            visibleCount + min(maximum - visibleCount, totalOverscan)
         )
         let extra = desiredCount - visibleCount
         let preferredBefore = extra / 2

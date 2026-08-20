@@ -766,6 +766,7 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         rpcRequest.spec.filterExpression = request.filterExpression
         rpcRequest.spec.filterRevision = request.filterRevision
         rpcRequest.spec.columnIds = request.columnIDs
+        rpcRequest.spec.columnConfigurationVersion = request.columnConfigurationVersion
         rpcRequest.spec.sort = request.sort.map { descriptor in
             var result = Kmgr_V1_SortDescriptor()
             result.columnID = descriptor.columnID

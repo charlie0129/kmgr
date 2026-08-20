@@ -209,10 +209,6 @@ func TestSessionRegistryRoutesWarmCacheTelemetryAcrossAuthorities(t *testing.T) 
 		}
 	}
 
-	firstUpdates, stopFirst := first.APIActivity().Subscribe()
-	defer stopFirst()
-	secondUpdates, stopSecond := second.APIActivity().Subscribe()
-	defer stopSecond()
 	firstUsage := authorityBudget
 	firstUsage.RetainedViews = 2
 	firstUsage.RetainedObjects = 30
@@ -234,15 +230,6 @@ func TestSessionRegistryRoutesWarmCacheTelemetryAcrossAuthorities(t *testing.T) 
 			first.AuthorityID(): firstUsage, second.AuthorityID(): secondUsage,
 		},
 	})
-	for name, updates := range map[string]<-chan struct{}{
-		"first": firstUpdates, "second": secondUpdates,
-	} {
-		select {
-		case <-updates:
-		case <-time.After(time.Second):
-			t.Fatalf("%s authority was not notified", name)
-		}
-	}
 	if snapshot := first.APIActivity().Snapshot(); snapshot.AuthorityWarmCache != firstUsage ||
 		snapshot.GlobalWarmCache != global {
 		t.Fatalf("first routed telemetry = %#v", snapshot)
