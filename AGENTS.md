@@ -1,5 +1,6 @@
 - No need to keep config backwards compatibility. Reset to default if invalid config is detected. Prefer clean config.
 - This is a prototype, not production app. So you can do radical changes to the codebase. There is no need to be compatible with previous versions. Prefer clean code over compatibility mess. If you find some code is not clean, please refactor it.
 - Optimize everything for performance. Efficiency on huge clusters is important (like 2k+ Nodes, 50k+ Pods.). If you find some feature cannot be implemented efficiently, please discuss it with me before implementing it.
+- If security is making implementation too complex and inefficient, please discuss it with me before implementing it. Security is important, but we can make trade-offs if needed.
 - Commit your code when a feature is done. Commit message format: "<type>(<scope>): <description>"
 - If you face some decision making, please discuss it with me before implementing it.
