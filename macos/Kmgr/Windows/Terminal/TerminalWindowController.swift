@@ -69,8 +69,12 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
-    func windowWillClose(_ notification: Notification) {
+    func prepareForTermination() {
         terminalController.stop()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        prepareForTermination()
         onClose?()
     }
 

@@ -47,6 +47,7 @@ type ClusterService struct {
 	sessions         *cluster.SessionRegistry
 	prober           SessionProber
 	probeTimeout     time.Duration
+	stopping         <-chan struct{}
 	streamGeneration atomic.Uint64
 }
 
@@ -55,6 +56,7 @@ type ClusterServiceOptions struct {
 	Sessions     *cluster.SessionRegistry
 	Prober       SessionProber
 	ProbeTimeout time.Duration
+	Stopping     <-chan struct{}
 }
 
 func NewClusterService(options ClusterServiceOptions) *ClusterService {
@@ -75,6 +77,7 @@ func NewClusterService(options ClusterServiceOptions) *ClusterService {
 		sessions:     options.Sessions,
 		prober:       options.Prober,
 		probeTimeout: options.ProbeTimeout,
+		stopping:     options.Stopping,
 	}
 }
 
@@ -142,6 +145,11 @@ func (s *ClusterService) WatchConnection(
 				timer.Stop()
 			}
 			return contextStatus(requestContext.Err())
+		case <-s.stopping:
+			if timer != nil {
+				timer.Stop()
+			}
+			return nil
 		case <-updates:
 			if timerChannel == nil {
 				timer = time.NewTimer(connectionActivityCoalesceDelay)

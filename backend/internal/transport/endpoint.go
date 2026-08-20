@@ -83,6 +83,9 @@ func (e *PrivateEndpoint) Close() error {
 	var closeErr error
 	if e.listener != nil {
 		closeErr = e.listener.Close()
+		if errors.Is(closeErr, net.ErrClosed) {
+			closeErr = nil
+		}
 		e.listener = nil
 	}
 	var removeErr error

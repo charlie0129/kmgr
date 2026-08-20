@@ -264,6 +264,76 @@ func TestServerAuthenticatesEveryRPC(t *testing.T) {
 	}
 }
 
+func TestServerShutdownDrainsActiveConnectionWatch(t *testing.T) {
+	t.Parallel()
+	token := strings.Repeat("a", 64)
+	server, err := NewServer(token, ServerOptions{
+		Version: "test", ColumnsPath: t.TempDir() + "/columns.yaml",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { server.Shutdown(time.Second) })
+	catalog := serviceCatalog(t)
+	session, err := server.sessions.Open(catalog, serviceContextID(t, catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listener := bufconn.Listen(1024 * 1024)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- server.Serve(listener) }()
+	t.Cleanup(func() { _ = listener.Close() })
+	connection, err := grpc.NewClient(
+		"passthrough:///bufconn",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return listener.Dial()
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+
+	streamContext, cancelStream := context.WithCancel(context.Background())
+	defer cancelStream()
+	streamContext = metadata.AppendToOutgoingContext(
+		streamContext, AuthorizationMetadataKey, "Bearer "+token,
+	)
+	watch, err := kmgrv1.NewClusterServiceClient(connection).WatchConnection(
+		streamContext,
+		&kmgrv1.WatchConnectionRequest{
+			Context: &kmgrv1.RequestContext{
+				RequestId: "shutdown-watch", ClusterSessionId: session.ID(),
+			},
+			StreamId: "shutdown-watch",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := watch.Recv(); err != nil {
+		t.Fatal(err)
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		server.Shutdown(time.Second)
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+	case <-time.After(500 * time.Millisecond):
+		cancelStream()
+		<-shutdownDone
+		t.Fatal("Shutdown waited for its timeout with an active connection watch")
+	}
+	if err := <-serveResult; err != nil {
+		t.Fatalf("Serve returned %v", err)
+	}
+}
+
 func TestServerShutdownDeadlineIncludesStubbornManagerDrains(t *testing.T) {
 	server, err := NewServer(strings.Repeat("a", 64), ServerOptions{Version: "test"})
 	if err != nil {

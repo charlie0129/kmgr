@@ -263,6 +263,18 @@ final class Application: NSObject, NSApplicationDelegate {
         workspaceRecoveryTasks.removeAll()
         for attempt in restoredWorkspaceAttempts.values { attempt.cancel() }
         restoredWorkspaceAttempts.removeAll()
+        for controller in chooserControllers.values {
+            controller.prepareForTermination()
+        }
+        for controller in workspaceControllers.values {
+            controller.prepareForTermination()
+        }
+        for controller in logWindowControllers.values {
+            controller.prepareForTermination()
+        }
+        for controller in terminalWindowControllers.values {
+            controller.prepareForTermination()
+        }
         terminationTask = Task {
             [engineSupervisor, portForwardCoordinator, columnConfigurationCoordinator] in
             await columnConfigurationCoordinator.flushPendingLayoutSaves()

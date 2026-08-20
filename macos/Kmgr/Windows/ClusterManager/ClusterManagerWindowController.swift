@@ -65,8 +65,15 @@ final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate
         fatalError("ClusterManagerWindowController is programmatic")
     }
 
-    func windowWillClose(_ notification: Notification) {
+    /// Cancel local context loading or an in-flight OpenSession RPC before the
+    /// engine begins draining. The chooser itself remains owned by AppKit
+    /// until asynchronous application termination is approved.
+    func prepareForTermination() {
         managerViewController.cancelWork()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        prepareForTermination()
         onClose?()
     }
 }

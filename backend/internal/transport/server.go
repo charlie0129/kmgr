@@ -90,6 +90,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		Sessions:     sessions,
 		Prober:       options.SessionProber,
 		ProbeTimeout: options.ProbeTimeout,
+		Stopping:     engine.Done(),
 	})
 	columnsCompiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
 	if err != nil {

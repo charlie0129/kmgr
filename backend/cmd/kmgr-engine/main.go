@@ -223,7 +223,11 @@ func run(arguments []string) int {
 	}
 	defer func() {
 		if err := endpoint.Close(); err != nil {
-			logger.Warn("failed to fully clean private engine endpoint", "error_kind", "cleanup")
+			logger.Warn(
+				"failed to fully clean private engine endpoint",
+				"error_kind", "cleanup",
+				"error", err,
+			)
 		}
 	}()
 

@@ -395,6 +395,42 @@ func TestWatchConnectionEmitsInitialAndCoalescedMonotonicTotals(t *testing.T) {
 	<-secondResult
 }
 
+func TestWatchConnectionStopsWithEngineLifecycle(t *testing.T) {
+	t.Parallel()
+	catalog := serviceCatalog(t)
+	sessions := cluster.NewSessionRegistry(&serviceFactory{})
+	t.Cleanup(sessions.CloseAll)
+	session, err := sessions.Open(catalog, serviceContextID(t, catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopping := make(chan struct{})
+	service := NewClusterService(ClusterServiceOptions{
+		Sessions: sessions,
+		Stopping: stopping,
+	})
+	stream := newConnectionTestStream(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- service.WatchConnection(&kmgrv1.WatchConnectionRequest{
+			Context: &kmgrv1.RequestContext{
+				RequestId: "engine-stopping", ClusterSessionId: session.ID(),
+			},
+			StreamId: "connection-stopping",
+		}, stream)
+	}()
+	stream.waitForCount(t, 1)
+	close(stopping)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("WatchConnection stopping error = %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("WatchConnection did not stop with the engine lifecycle")
+	}
+}
+
 func TestWatchConnectionEmitsObservedTransportAndAuthenticationStates(t *testing.T) {
 	t.Parallel()
 	catalog := serviceCatalog(t)

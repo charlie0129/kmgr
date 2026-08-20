@@ -249,6 +249,7 @@ public final class EngineSupervisor {
     private var shutdownRequested = false
     private var currentProcess: Process?
     private var currentClient: EngineConnection.Client?
+    private var currentConnectionTask: Task<Void, Never>?
     private var stateObservers: [UUID: @MainActor (EngineConnectionState) -> Void] = [:]
 
     public init(configuration: Configuration = .bundled()) {
@@ -258,6 +259,7 @@ public final class EngineSupervisor {
     deinit {
         supervisionTask?.cancel()
         if let currentClient { currentClient.beginGracefulShutdown() }
+        currentConnectionTask?.cancel()
         if let currentProcess, currentProcess.isRunning { currentProcess.terminate() }
     }
 
@@ -316,9 +318,11 @@ public final class EngineSupervisor {
 
         shutdownRequested = true
         state = .stopping
-        if let currentClient {
+        let shutdownClient = currentClient
+        connection.stop()
+        if let shutdownClient {
             do {
-                let client = Kmgr_V1_EngineService.Client(wrapping: currentClient)
+                let client = Kmgr_V1_EngineService.Client(wrapping: shutdownClient)
                 var request = Kmgr_V1_ShutdownRequest()
                 request.context = requestContext(timeout: configuration.handshakeTimeout)
                 request.stopActivePortForwards = stopActivePortForwards
@@ -335,6 +339,9 @@ public final class EngineSupervisor {
                 logger.warning("Graceful engine shutdown RPC failed")
             }
         }
+        shutdownClient?.beginGracefulShutdown()
+        currentConnectionTask?.cancel()
+        currentConnectionTask = nil
 
         let shutdownDeadline = ContinuousClock.now + configuration.shutdownTimeout
         while currentProcess?.isRunning == true, ContinuousClock.now < shutdownDeadline {
@@ -472,6 +479,7 @@ public final class EngineSupervisor {
                     // transport reconnects internally while the helper lives.
                 }
             }
+            currentConnectionTask = connectionTask
         } catch {
             await stopProcess(process, waiter: exitWaiter)
             diagnosticsTask?.cancel()
@@ -495,6 +503,7 @@ public final class EngineSupervisor {
             currentProcess = nil
             client.beginGracefulShutdown()
             connectionTask.cancel()
+            currentConnectionTask = nil
             diagnosticsTask?.cancel()
             try? endpoint.cleanup()
             return EngineGenerationExit(status: status, readyDuration: readyDuration)
@@ -505,6 +514,7 @@ public final class EngineSupervisor {
             currentProcess = nil
             client.beginGracefulShutdown()
             connectionTask.cancel()
+            currentConnectionTask = nil
             diagnosticsTask?.cancel()
             try? endpoint.cleanup()
             throw error

@@ -186,8 +186,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         startStream()
     }
 
-    func windowWillClose(_ notification: Notification) {
+    func prepareForTermination() {
         isClosing = true
+        stopStream()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        prepareForTermination()
         NotificationCenter.default.removeObserver(
             self,
             name: NSView.boundsDidChangeNotification,
@@ -198,7 +203,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             name: NSView.frameDidChangeNotification,
             object: textView
         )
-        stopStream()
         onClose?()
     }
 

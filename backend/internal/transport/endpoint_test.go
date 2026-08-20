@@ -39,6 +39,32 @@ func TestListenPrivateUnixPathUsesCallerDirectoryAndRemovesOnlySocket(t *testing
 	}
 }
 
+func TestPrivateEndpointCloseToleratesListenerAlreadyClosed(t *testing.T) {
+	t.Parallel()
+	directory, err := os.MkdirTemp("/tmp", "kmgr-ep.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(directory, "engine.sock")
+	endpoint, err := ListenPrivateUnixPath(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := endpoint.Listener().Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := endpoint.Close(); err != nil {
+		t.Fatalf("Close after listener ownership transfer = %v", err)
+	}
+	if _, err := os.Stat(socket); !os.IsNotExist(err) {
+		t.Fatalf("socket remains after repeated close: %v", err)
+	}
+}
+
 func TestListenPrivateUnixPathRejectsWeakDirectoryAndExistingPath(t *testing.T) {
 	t.Parallel()
 	directory, err := os.MkdirTemp("/tmp", "kmgr-ep.")

@@ -366,7 +366,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
     }
 
-    func windowWillClose(_ notification: Notification) {
+    /// Cancel helper-backed work without closing windows, changing restoration
+    /// state, or issuing one CloseSession RPC per workspace. AppKit keeps the
+    /// windows alive until asynchronous application termination is approved.
+    func prepareForTermination() {
         frameCheckpointTask?.cancel()
         frameCheckpointTask = nil
         logOpenRevision &+= 1
@@ -375,10 +378,17 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         automaticExecOpenRevision &+= 1
         automaticExecOpenTask?.cancel()
         automaticExecOpenTask = nil
+        for controller in yamlSnapshotWindowControllers.values {
+            controller.stop()
+        }
+        workspaceController.stop()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        prepareForTermination()
         let yamlWindows = Array(yamlSnapshotWindowControllers.values)
         yamlSnapshotWindowControllers.removeAll()
         yamlWindows.forEach { $0.close() }
-        workspaceController.stop()
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
         onFrameCheckpoint?(restoration)

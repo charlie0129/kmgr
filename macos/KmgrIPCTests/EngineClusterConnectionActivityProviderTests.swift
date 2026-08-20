@@ -57,6 +57,28 @@ private actor ClusterConnectionActivityRPCCapture: ClusterConnectionActivityRPC 
     }
 }
 
+private actor BlockingClusterConnectionActivityRPC: ClusterConnectionActivityRPC {
+    private var started = false
+    private var cancelled = false
+
+    func watchConnection(
+        request: Kmgr_V1_WatchConnectionRequest,
+        timeout: Duration,
+        receive: @escaping @Sendable (Kmgr_V1_ConnectionEvent) throws -> Void
+    ) async throws {
+        started = true
+        do {
+            try await Task.sleep(for: .seconds(30))
+        } catch is CancellationError {
+            cancelled = true
+            throw CancellationError()
+        }
+    }
+
+    func hasStarted() -> Bool { started }
+    func wasCancelled() -> Bool { cancelled }
+}
+
 @Test func connectionActivityProviderBuildsEnvelopeAndMapsTotals() async throws {
     var event = ClusterConnectionActivityRPCCapture.event(
         streamID: "activity-1",
@@ -163,4 +185,32 @@ private actor ClusterConnectionActivityRPCCapture: ClusterConnectionActivityRPC 
     } catch {
         Issue.record("unexpected error: \(error)")
     }
+}
+
+@Test func connectionActivityProviderCancelsRPCWhenConsumerStops() async {
+    let rpc = BlockingClusterConnectionActivityRPC()
+    let provider = EngineClusterConnectionActivityProvider(rpc: rpc)
+    let stream = provider.watchConnectionActivity(
+        sessionID: "session",
+        streamID: "activity"
+    )
+    let consumer = Task {
+        do {
+            for try await _ in stream {}
+        } catch {
+            // Cancellation is the expected terminal state for this fixture.
+        }
+    }
+
+    for _ in 0..<200 {
+        if await rpc.hasStarted() { break }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(await rpc.hasStarted())
+    consumer.cancel()
+    for _ in 0..<200 {
+        if await rpc.wasCancelled() { break }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(await rpc.wasCancelled())
 }
