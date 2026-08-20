@@ -220,7 +220,12 @@ struct ResourceListCellEffectsTests {
             first: true,
             last: true
         ))
-        try await waitForCellEffects { table.numberOfRows == 1 }
+        // The table row count is published before the asynchronous range
+        // fetch materializes its cells. Wait for rendered content so the
+        // replacement stream can retain a real warm row.
+        try await waitForCellEffects {
+            text(in: table, columnID: "status") == "Running"
+        }
 
         filter.stringValue = "name:api"
         filter.delegate?.controlTextDidChange?(Notification(
