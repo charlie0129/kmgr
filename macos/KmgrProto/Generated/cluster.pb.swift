@@ -341,14 +341,10 @@ public struct Kmgr_V1_ConnectionEvent: @unchecked Sendable {
     set {_uniqueStorage()._observedAtUnixMs = newValue}
   }
 
-  public var error: Kmgr_V1_StructuredError {
-    get {return _storage._error ?? Kmgr_V1_StructuredError()}
-    set {_uniqueStorage()._error = newValue}
+  public var errorMessage: String {
+    get {return _storage._errorMessage}
+    set {_uniqueStorage()._errorMessage = newValue}
   }
-  /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return _storage._error != nil}
-  /// Clears the value of `error`. Subsequent reads from it will return its default value.
-  public mutating func clearError() {_uniqueStorage()._error = nil}
 
   /// Monotonic, process-local Kubernetes API payload totals for this shared
   /// cluster authority. They intentionally exclude kubeconfig contents and
@@ -450,9 +446,10 @@ public struct Kmgr_V1_WatchOperationsRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-/// Redacted metadata for one Kubernetes HTTP operation. Query strings,
-/// selectors, headers, bodies, credentials, raw URLs, and raw error strings
-/// never enter this message.
+/// Metadata for one Kubernetes HTTP operation. Query strings, selectors,
+/// headers, bodies, credentials, and raw URLs never enter this message. Failed
+/// operations include exact decoded Kubernetes watch Status details and the
+/// original Go stream/transport error text in error_message when available.
 public struct Kmgr_V1_KubernetesAPIOperation: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -486,14 +483,18 @@ public struct Kmgr_V1_KubernetesAPIOperation: Sendable {
 
   public var finishedAtUnixNanos: Int64 = 0
 
+  public var errorMessage: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 }
 
 /// active is a replacement snapshot; completed contains only records completed
-/// since the preceding batch. This keeps IPC bounded by active work and new
-/// completions instead of retransmitting the retained GUI history.
+/// or corrected since the preceding batch. A corrected record reuses its
+/// operation ID and replaces the retained completion in the GUI. This keeps IPC
+/// bounded by active work and changed completions instead of retransmitting the
+/// retained GUI history.
 public struct Kmgr_V1_ClusterOperationBatch: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1028,13 +1029,13 @@ extension Kmgr_V1_WatchConnectionRequest: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ConnectionEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}state\0\u{3}observed_at_unix_ms\0\u{1}error\0\u{3}api_bytes_received\0\u{3}api_bytes_sent\0\u{3}authority_warm_cache\0\u{3}global_warm_cache\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}state\0\u{3}observed_at_unix_ms\0\u{3}error_message\0\u{3}api_bytes_received\0\u{3}api_bytes_sent\0\u{3}authority_warm_cache\0\u{3}global_warm_cache\0")
 
   fileprivate class _StorageClass {
     var _cursor: Kmgr_V1_StreamCursor? = nil
     var _state: Kmgr_V1_ConnectionState = .unspecified
     var _observedAtUnixMs: Int64 = 0
-    var _error: Kmgr_V1_StructuredError? = nil
+    var _errorMessage: String = String()
     var _apiBytesReceived: UInt64 = 0
     var _apiBytesSent: UInt64 = 0
     var _authorityWarmCache: Kmgr_V1_WarmCacheUsage? = nil
@@ -1052,7 +1053,7 @@ extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
       _cursor = source._cursor
       _state = source._state
       _observedAtUnixMs = source._observedAtUnixMs
-      _error = source._error
+      _errorMessage = source._errorMessage
       _apiBytesReceived = source._apiBytesReceived
       _apiBytesSent = source._apiBytesSent
       _authorityWarmCache = source._authorityWarmCache
@@ -1078,7 +1079,7 @@ extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
         case 1: try { try decoder.decodeSingularMessageField(value: &_storage._cursor) }()
         case 2: try { try decoder.decodeSingularEnumField(value: &_storage._state) }()
         case 3: try { try decoder.decodeSingularInt64Field(value: &_storage._observedAtUnixMs) }()
-        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._error) }()
+        case 4: try { try decoder.decodeSingularStringField(value: &_storage._errorMessage) }()
         case 5: try { try decoder.decodeSingularUInt64Field(value: &_storage._apiBytesReceived) }()
         case 6: try { try decoder.decodeSingularUInt64Field(value: &_storage._apiBytesSent) }()
         case 7: try { try decoder.decodeSingularMessageField(value: &_storage._authorityWarmCache) }()
@@ -1104,9 +1105,9 @@ extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
       if _storage._observedAtUnixMs != 0 {
         try visitor.visitSingularInt64Field(value: _storage._observedAtUnixMs, fieldNumber: 3)
       }
-      try { if let v = _storage._error {
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
-      } }()
+      if !_storage._errorMessage.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._errorMessage, fieldNumber: 4)
+      }
       if _storage._apiBytesReceived != 0 {
         try visitor.visitSingularUInt64Field(value: _storage._apiBytesReceived, fieldNumber: 5)
       }
@@ -1131,7 +1132,7 @@ extension Kmgr_V1_ConnectionEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
         if _storage._cursor != rhs_storage._cursor {return false}
         if _storage._state != rhs_storage._state {return false}
         if _storage._observedAtUnixMs != rhs_storage._observedAtUnixMs {return false}
-        if _storage._error != rhs_storage._error {return false}
+        if _storage._errorMessage != rhs_storage._errorMessage {return false}
         if _storage._apiBytesReceived != rhs_storage._apiBytesReceived {return false}
         if _storage._apiBytesSent != rhs_storage._apiBytesSent {return false}
         if _storage._authorityWarmCache != rhs_storage._authorityWarmCache {return false}
@@ -1261,7 +1262,7 @@ extension Kmgr_V1_WatchOperationsRequest: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Kmgr_V1_KubernetesAPIOperation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".KubernetesAPIOperation"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}state\0\u{1}operation\0\u{1}group\0\u{1}version\0\u{1}resource\0\u{1}namespace\0\u{1}name\0\u{1}subresource\0\u{3}http_status_code\0\u{3}bytes_received\0\u{3}bytes_sent\0\u{3}started_at_unix_nanos\0\u{3}finished_at_unix_nanos\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}state\0\u{1}operation\0\u{1}group\0\u{1}version\0\u{1}resource\0\u{1}namespace\0\u{1}name\0\u{1}subresource\0\u{3}http_status_code\0\u{3}bytes_received\0\u{3}bytes_sent\0\u{3}started_at_unix_nanos\0\u{3}finished_at_unix_nanos\0\u{3}error_message\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1283,6 +1284,7 @@ extension Kmgr_V1_KubernetesAPIOperation: SwiftProtobuf.Message, SwiftProtobuf._
       case 12: try { try decoder.decodeSingularUInt64Field(value: &self.bytesSent) }()
       case 13: try { try decoder.decodeSingularInt64Field(value: &self.startedAtUnixNanos) }()
       case 14: try { try decoder.decodeSingularInt64Field(value: &self.finishedAtUnixNanos) }()
+      case 15: try { try decoder.decodeSingularStringField(value: &self.errorMessage) }()
       default: break
       }
     }
@@ -1331,6 +1333,9 @@ extension Kmgr_V1_KubernetesAPIOperation: SwiftProtobuf.Message, SwiftProtobuf._
     if self.finishedAtUnixNanos != 0 {
       try visitor.visitSingularInt64Field(value: self.finishedAtUnixNanos, fieldNumber: 14)
     }
+    if !self.errorMessage.isEmpty {
+      try visitor.visitSingularStringField(value: self.errorMessage, fieldNumber: 15)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1349,6 +1354,7 @@ extension Kmgr_V1_KubernetesAPIOperation: SwiftProtobuf.Message, SwiftProtobuf._
     if lhs.bytesSent != rhs.bytesSent {return false}
     if lhs.startedAtUnixNanos != rhs.startedAtUnixNanos {return false}
     if lhs.finishedAtUnixNanos != rhs.finishedAtUnixNanos {return false}
+    if lhs.errorMessage != rhs.errorMessage {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

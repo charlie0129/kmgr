@@ -44,12 +44,14 @@ type TableListerWatcher interface {
 }
 
 type TableResourceClient struct {
-	rest      rest.Interface
-	fallback  ListerWatcher
-	resource  string
-	namespace string
-	include   metav1.IncludeObjectPolicy
-	disabled  atomic.Bool
+	rest                rest.Interface
+	fallback            ListerWatcher
+	watchListCapability WatchListSemantics
+	watchListDisabler   WatchListSemanticsDisabler
+	resource            string
+	namespace           string
+	include             metav1.IncludeObjectPolicy
+	disabled            atomic.Bool
 }
 
 func NewTableResourceClient(
@@ -66,6 +68,8 @@ func NewTableResourceClient(
 	if fallback == nil {
 		return nil, errors.New("table resource client requires a fallback client")
 	}
+	watchListCapability, _ := fallback.(WatchListSemantics)
+	watchListDisabler, _ := fallback.(WatchListSemanticsDisabler)
 	if include != metav1.IncludeObject && include != metav1.IncludeMetadata {
 		return nil, fmt.Errorf("unsupported Table includeObject policy %q", include)
 	}
@@ -97,7 +101,8 @@ func NewTableResourceClient(
 		return nil, fmt.Errorf("construct Table REST client: %w", err)
 	}
 	return &TableResourceClient{
-		rest: client, fallback: fallback, resource: gvr.Resource, namespace: namespace,
+		rest: client, fallback: fallback, watchListCapability: watchListCapability,
+		watchListDisabler: watchListDisabler, resource: gvr.Resource, namespace: namespace,
 		include: include,
 	}, nil
 }
@@ -127,11 +132,25 @@ func (c *TableResourceClient) SupportsWatchListSemantics() bool {
 		return false
 	}
 	capability, ok := c.fallback.(WatchListSemantics)
-	return ok && capability.SupportsWatchListSemantics()
+	if !ok || !capability.SupportsWatchListSemantics() {
+		return false
+	}
+	return c.watchListCapability == nil || c.watchListCapability.SupportsWatchListSemantics()
 }
 
 func (c *TableResourceClient) IsWatchListSemanticsUnSupported() bool {
 	return !c.SupportsWatchListSemantics()
+}
+
+// DisableWatchListSemantics forwards a persistent storage-capability failure
+// to the dynamic or metadata fallback that owns the shared negative cache.
+func (c *TableResourceClient) DisableWatchListSemantics() {
+	if c == nil {
+		return
+	}
+	if c.watchListDisabler != nil {
+		c.watchListDisabler.DisableWatchListSemantics()
+	}
 }
 
 func (c *TableResourceClient) ListTable(ctx context.Context, options metav1.ListOptions) (*TableList, error) {

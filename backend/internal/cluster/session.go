@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sync"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -17,6 +18,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/flowcontrol"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
+
+	"github.com/charlie0129/kmgr/backend/internal/apioperation"
 )
 
 const (
@@ -98,6 +101,11 @@ type activityRoundTripper struct {
 
 func (t *activityRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	operation := t.activity.beginOperation(request)
+	if request != nil {
+		if observer := apioperation.WatchErrorObserverFromContext(request.Context()); observer != nil {
+			observer.Bind(operation.recordWatchError)
+		}
+	}
 	if request != nil && request.Body != nil {
 		request = request.Clone(request.Context())
 		request.Body = &activityReadCloser{
@@ -122,7 +130,7 @@ func (t *activityRoundTripper) RoundTrip(request *http.Request) (*http.Response,
 		statusCode = response.StatusCode
 	}
 	operation.setHTTPStatus(statusCode)
-	t.activity.ObserveRoundTrip(statusCode, err)
+	t.activity.ObserveRoundTrip(request, statusCode, err)
 	if err != nil {
 		operation.complete(err)
 	} else if response != nil && response.Body != nil {
@@ -216,6 +224,11 @@ type sharedBackend struct {
 	// namespaceNames stores only a sorted string snapshot and belongs to this
 	// shared Kubernetes authority rather than any workspace session.
 	namespaceNames namespaceNameCache
+	// watchListUnavailable is a negative capability cache scoped to the exact
+	// shared Kubernetes authority and GVR. Namespace does not affect the
+	// backing storage feature that implements WatchList.
+	watchListMu          sync.RWMutex
+	watchListUnavailable map[schema.GroupVersionResource]struct{}
 }
 
 // WarmCacheTelemetry is one redacted process-memory cache snapshot from the
@@ -611,6 +624,33 @@ func (s *Session) RESTConfig() *rest.Config {
 		return nil
 	}
 	return rest.CopyConfig(s.backend.config)
+}
+
+// WatchListUnavailable reports whether this shared cluster backend has
+// already returned a persistent storage-capability failure for the GVR.
+func (s *Session) WatchListUnavailable(resource schema.GroupVersionResource) bool {
+	if s == nil || s.backend == nil || resource.Empty() {
+		return false
+	}
+	s.backend.watchListMu.RLock()
+	_, unavailable := s.backend.watchListUnavailable[resource]
+	s.backend.watchListMu.RUnlock()
+	return unavailable
+}
+
+// DisableWatchList records a persistent negative capability for one GVR. The
+// cache lives only as long as the shared backend clients, so reopening a
+// retired authority probes its current server/storage capabilities again.
+func (s *Session) DisableWatchList(resource schema.GroupVersionResource) {
+	if s == nil || s.backend == nil || resource.Empty() {
+		return
+	}
+	s.backend.watchListMu.Lock()
+	if s.backend.watchListUnavailable == nil {
+		s.backend.watchListUnavailable = make(map[schema.GroupVersionResource]struct{})
+	}
+	s.backend.watchListUnavailable[resource] = struct{}{}
+	s.backend.watchListMu.Unlock()
 }
 
 func newSessionID() (string, error) {

@@ -9,6 +9,8 @@ extension AppKitTestHarness {
 struct ClusterOperationHistoryWindowControllerTests {
     @Test("floating table defaults to exact newest-first ordering and supports sorting")
     func tablePresentationAndSorting() throws {
+        let rawOperationError =
+            "dial tcp 10.0.0.8:6443:  connect: connection refused\nTLS handshake timeout"
         let suite = "kmgr-operation-window-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -40,7 +42,8 @@ struct ClusterOperationHistoryWindowControllerTests {
                 name: "newer",
                 received: 10,
                 started: 2_000_000_900,
-                finished: 3_000_000_900
+                finished: 3_000_000_900,
+                errorMessage: rawOperationError
             ),
         ]))
 
@@ -50,7 +53,7 @@ struct ClusterOperationHistoryWindowControllerTests {
         #expect(panel.level == NSWindow.Level.floating)
         #expect(panel.isFloatingPanel)
         #expect(table.numberOfRows == 2)
-        #expect(table.tableColumns.count == 9)
+        #expect(table.tableColumns.count == 10)
         #expect(table.allowsColumnReordering)
         #expect(table.tableColumns.allSatisfy {
             $0.resizingMask.contains(NSTableColumn.ResizingOptions.userResizingMask)
@@ -70,6 +73,22 @@ struct ClusterOperationHistoryWindowControllerTests {
             .contains("older"))
         #expect(cellText(table, column: "operation-history.status-code", row: 1)
             == "403 Forbidden")
+        #expect(cellText(table, column: "operation-history.error", row: 1)
+            == rawOperationError)
+
+        let rawConnectionError = "proxyconnect tcp:  EOF\nread: connection reset by peer"
+        controller.setConnectionState(
+            .reconnecting,
+            errorMessage: rawConnectionError
+        )
+        let connectionError = try #require(
+            descendants(of: root).compactMap { $0 as? NSTextField }.first {
+                $0.accessibilityIdentifier() == "operation-history.connection-error"
+            }
+        )
+        #expect(connectionError.stringValue == "Connection: \(rawConnectionError)")
+        #expect(connectionError.toolTip == rawConnectionError)
+        #expect(!connectionError.isHidden)
     }
 
     @Test("Active Only filters retained completions without discarding them")
@@ -154,7 +173,8 @@ struct ClusterOperationHistoryWindowControllerTests {
         name: String,
         received: UInt64,
         started: Int64,
-        finished: Int64? = nil
+        finished: Int64? = nil,
+        errorMessage: String? = nil
     ) -> ClusterOperationRecord {
         ClusterOperationRecord(
             id: id,
@@ -167,7 +187,8 @@ struct ClusterOperationHistoryWindowControllerTests {
             bytesReceived: received,
             bytesSent: 1,
             startedAtUnixNanos: started,
-            finishedAtUnixNanos: finished
+            finishedAtUnixNanos: finished,
+            errorMessage: errorMessage
         )
     }
 }

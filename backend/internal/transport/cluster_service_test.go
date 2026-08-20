@@ -456,29 +456,27 @@ func TestWatchConnectionEmitsObservedTransportAndAuthenticationStates(t *testing
 	stream.waitForCount(t, 1)
 
 	activity := session.APIActivity()
-	activity.ObserveRoundTrip(0, errors.New("do not expose this transport detail"))
+	activity.ObserveRoundTrip(nil, 0, errors.New("do not expose this transport detail"))
 	stream.waitForCount(t, 2)
 	reconnecting := stream.snapshot()[1]
 	if reconnecting.GetState() != kmgrv1.ConnectionState_CONNECTION_STATE_RECONNECTING ||
-		reconnecting.GetError().GetReason() != "APITransportInterrupted" ||
-		!reconnecting.GetError().GetRetryable() ||
-		strings.Contains(reconnecting.GetError().GetMessage(), "do not expose") {
+		reconnecting.GetErrorMessage() != "do not expose this transport detail" {
 		t.Fatalf("reconnecting event = %#v", reconnecting)
 	}
 
-	activity.ObserveRoundTrip(http.StatusUnauthorized, nil)
+	activity.ObserveRoundTrip(nil, http.StatusUnauthorized, nil)
 	stream.waitForCount(t, 3)
 	authentication := stream.snapshot()[2]
 	if authentication.GetState() != kmgrv1.ConnectionState_CONNECTION_STATE_FAILED ||
-		authentication.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION ||
-		authentication.GetError().GetReason() != "AuthenticationRejected" {
+		authentication.GetErrorMessage() != "HTTP 401 Unauthorized" {
 		t.Fatalf("authentication event = %#v", authentication)
 	}
 
-	activity.ObserveRoundTrip(http.StatusOK, nil)
+	activity.ObserveRoundTrip(nil, http.StatusOK, nil)
 	stream.waitForCount(t, 4)
 	recovered := stream.snapshot()[3]
-	if recovered.GetState() != kmgrv1.ConnectionState_CONNECTION_STATE_CONNECTED || recovered.GetError() != nil {
+	if recovered.GetState() != kmgrv1.ConnectionState_CONNECTION_STATE_CONNECTED ||
+		recovered.GetErrorMessage() != "" {
 		t.Fatalf("recovered event = %#v", recovered)
 	}
 	cancel()
@@ -685,6 +683,19 @@ func TestWatchOperationsValidatesRequest(t *testing.T) {
 		StreamId: "operations",
 	}, stream); status.Code(err) != codes.NotFound {
 		t.Fatalf("missing session = %v", err)
+	}
+}
+
+func TestAPIOperationProtoPreservesRawGoErrorMessage(t *testing.T) {
+	t.Parallel()
+	const raw = "proxyconnect tcp:  EOF\nread: connection reset by peer"
+	operation := apiOperationProto(cluster.APIOperationSnapshot{
+		ID:           1,
+		State:        cluster.APIOperationStateFailed,
+		ErrorMessage: raw,
+	})
+	if operation.GetErrorMessage() != raw {
+		t.Fatalf("error message = %q, want exact raw message %q", operation.GetErrorMessage(), raw)
 	}
 }
 

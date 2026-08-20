@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -255,6 +256,85 @@ func TestPipelineUnsupportedWatchListFallsBackOnceAndStaysDisabled(t *testing.T)
 	}
 	if _, ok := snapshotObject(uidStore, "uid-b"); !ok {
 		t.Fatal("second fallback LIST object was not retained")
+	}
+}
+
+func TestPipelineRequestWatchProgressFailureFallsBackAndDisablesSharedSemantics(t *testing.T) {
+	t.Parallel()
+
+	const serverMessage = "a watch stream was requested by the client but the required storage feature RequestWatchProgress is disabled"
+	var watchLists atomic.Int32
+	var lists atomic.Int32
+	var watches atomic.Int32
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query()
+		switch {
+		case query.Get("sendInitialEvents") == "true":
+			watchLists.Add(1)
+			status := apiStatusJSON(metav1.StatusReasonInternalError, http.StatusInternalServerError)
+			status["message"] = serverMessage
+			writeWatch(response, watchJSON("ERROR", status))
+		case query.Get("watch") == "true":
+			watchNumber := watches.Add(1)
+			writeWatch(response, watchJSON("BOOKMARK", bookmarkJSON(fmt.Sprintf("%d", 10+watchNumber))))
+		default:
+			listNumber := lists.Add(1)
+			switch listNumber {
+			case 1:
+				writeList(response, "11", "next-1")
+			case 2:
+				if query.Get("continue") != "next-1" {
+					t.Errorf("first fallback continuation = %q", query.Get("continue"))
+				}
+				writeList(response, "11", "")
+			case 3:
+				writeList(response, "12", "next-2")
+			case 4:
+				if query.Get("continue") != "next-2" {
+					t.Errorf("second fallback continuation = %q", query.Get("continue"))
+				}
+				writeList(response, "12", "")
+			default:
+				t.Errorf("unexpected LIST request %d", listNumber)
+				response.WriteHeader(http.StatusInternalServerError)
+			}
+		}
+	})
+	base := newDynamicResource(t, handler)
+	sharedDisabled := &atomic.Bool{}
+
+	run := func(wantBookmark string) *Pipeline {
+		ctx, cancel := context.WithCancel(context.Background())
+		pipeline := mustPipeline(t, PipelineConfig{
+			Client: watchListSharedCapabilityClient{
+				ListerWatcher: base,
+				disabled:      sharedDisabled,
+			},
+			Store:      store.New(),
+			RetryDelay: noDelay,
+			OnBatch: func(batch Batch) {
+				if batch.Bookmark && batch.ResourceVersion == wantBookmark {
+					cancel()
+				}
+			},
+		})
+		assertRunCancelled(t, runPipeline(ctx, pipeline))
+		return pipeline
+	}
+
+	first := run("11")
+	if !first.watchListDisabled || !sharedDisabled.Load() {
+		t.Fatal("RequestWatchProgress capability failure did not disable WatchList")
+	}
+	second := run("12")
+	if !second.watchListDisabled && second.watchListEligible() {
+		t.Fatal("second pipeline remained eligible for the shared disabled capability")
+	}
+	if watchLists.Load() != 1 || lists.Load() != 4 || watches.Load() != 2 {
+		t.Fatalf(
+			"request counts = WatchList %d, LIST %d, WATCH %d; want 1/4/2",
+			watchLists.Load(), lists.Load(), watches.Load(),
+		)
 	}
 }
 
@@ -1205,6 +1285,21 @@ func (l *requestLog) snapshot() []loggedRequest {
 type watchListSupportedClient struct{ ListerWatcher }
 
 func (watchListSupportedClient) SupportsWatchListSemantics() bool { return true }
+
+type watchListSharedCapabilityClient struct {
+	ListerWatcher
+	disabled *atomic.Bool
+}
+
+func (c watchListSharedCapabilityClient) SupportsWatchListSemantics() bool {
+	return c.disabled != nil && !c.disabled.Load()
+}
+
+func (c watchListSharedCapabilityClient) DisableWatchListSemantics() {
+	if c.disabled != nil {
+		c.disabled.Store(true)
+	}
+}
 
 func newDynamicResource(t *testing.T, handler http.Handler) ListerWatcher {
 	t.Helper()

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 )
 
@@ -90,6 +91,43 @@ func TestSessionRegistryOpensIndependentSessionsWithSharedClients(t *testing.T) 
 	}
 	if registry.Close(second.ID()) {
 		t.Fatal("closing an absent session succeeded")
+	}
+}
+
+func TestSessionWatchListCapabilityCacheIsSharedPerBackendAndGVR(t *testing.T) {
+	t.Parallel()
+	catalog := testCatalog(t, "https://cluster.example.test")
+	contextID := requireContextNamed(t, catalog, "local").ID
+	registry := NewSessionRegistry(&recordingFactory{})
+	t.Cleanup(registry.CloseAll)
+
+	first, err := registry.Open(catalog, contextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := registry.Open(catalog, contextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+	pods := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	first.DisableWatchList(nodes)
+	if !first.WatchListUnavailable(nodes) || !second.WatchListUnavailable(nodes) {
+		t.Fatal("shared sessions did not share the Nodes capability failure")
+	}
+	if first.WatchListUnavailable(pods) || second.WatchListUnavailable(pods) {
+		t.Fatal("Nodes capability failure disabled WatchList for Pods")
+	}
+
+	if !registry.Close(first.ID()) || !registry.Close(second.ID()) {
+		t.Fatal("failed to retire shared backend")
+	}
+	reopened, err := registry.Open(catalog, contextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.WatchListUnavailable(nodes) {
+		t.Fatal("retired backend capability cache leaked into a new authority")
 	}
 }
 

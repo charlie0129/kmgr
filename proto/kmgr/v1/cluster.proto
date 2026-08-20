@@ -82,7 +82,7 @@ message ConnectionEvent {
   StreamCursor cursor = 1;
   ConnectionState state = 2;
   int64 observed_at_unix_ms = 3;
-  StructuredError error = 4;
+  string error_message = 4;
   // Monotonic, process-local Kubernetes API payload totals for this shared
   // cluster authority. They intentionally exclude kubeconfig contents and
   // expose counts only; the GUI derives short-window rates from deltas.
@@ -128,9 +128,10 @@ enum KubernetesAPIOperationState {
   KUBERNETES_API_OPERATION_STATE_TIMED_OUT = 5;
 }
 
-// Redacted metadata for one Kubernetes HTTP operation. Query strings,
-// selectors, headers, bodies, credentials, raw URLs, and raw error strings
-// never enter this message.
+// Metadata for one Kubernetes HTTP operation. Query strings, selectors,
+// headers, bodies, credentials, and raw URLs never enter this message. Failed
+// operations include exact decoded Kubernetes watch Status details and the
+// original Go stream/transport error text in error_message when available.
 message KubernetesAPIOperation {
   uint64 id = 1;
   KubernetesAPIOperationState state = 2;
@@ -146,11 +147,14 @@ message KubernetesAPIOperation {
   uint64 bytes_sent = 12;
   int64 started_at_unix_nanos = 13;
   int64 finished_at_unix_nanos = 14;
+  string error_message = 15;
 }
 
 // active is a replacement snapshot; completed contains only records completed
-// since the preceding batch. This keeps IPC bounded by active work and new
-// completions instead of retransmitting the retained GUI history.
+// or corrected since the preceding batch. A corrected record reuses its
+// operation ID and replaces the retained completion in the GUI. This keeps IPC
+// bounded by active work and changed completions instead of retransmitting the
+// retained GUI history.
 message ClusterOperationBatch {
   StreamCursor cursor = 1;
   repeated KubernetesAPIOperation active = 2;

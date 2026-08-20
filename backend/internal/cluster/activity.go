@@ -7,8 +7,7 @@ import (
 )
 
 // APIConnectionHealth is a payload-free observation of the shared HTTP
-// transport. It deliberately does not retain response bodies, URLs, headers,
-// or raw error strings.
+// transport. It does not retain response bodies or headers.
 type APIConnectionHealth uint32
 
 const (
@@ -19,15 +18,16 @@ const (
 )
 
 // APIActivity is a process-local byte counter for one shared Kubernetes
-// authority. It records lengths only and never retains or inspects payloads.
+// authority. It records lengths and the latest raw Go transport error, but
+// never retains or inspects payloads.
 // The response-body hot path only performs atomic additions. Connection
 // streams sample these totals on a fixed interval, so payload reads never
 // contend on a listener lock or perform per-read IPC coordination.
 type APIActivity struct {
-	received atomic.Uint64
-	sent     atomic.Uint64
-	health   atomic.Uint32
-	warm     atomic.Pointer[warmCacheActivitySnapshot]
+	received   atomic.Uint64
+	sent       atomic.Uint64
+	connection atomic.Pointer[apiConnectionActivitySnapshot]
+	warm       atomic.Pointer[warmCacheActivitySnapshot]
 
 	operationSequence   atomic.Uint64
 	operationsMu        sync.RWMutex
@@ -40,6 +40,7 @@ type APIActivitySnapshot struct {
 	BytesReceived      uint64
 	BytesSent          uint64
 	ConnectionHealth   APIConnectionHealth
+	ConnectionError    string
 	AuthorityWarmCache WarmCacheUsage
 	GlobalWarmCache    WarmCacheUsage
 }
@@ -65,14 +66,22 @@ type warmCacheActivitySnapshot struct {
 	global     WarmCacheUsage
 }
 
+type apiConnectionActivitySnapshot struct {
+	health       APIConnectionHealth
+	errorMessage string
+}
+
 func (a *APIActivity) Snapshot() APIActivitySnapshot {
 	if a == nil {
 		return APIActivitySnapshot{}
 	}
 	snapshot := APIActivitySnapshot{
-		BytesReceived:    a.received.Load(),
-		BytesSent:        a.sent.Load(),
-		ConnectionHealth: APIConnectionHealth(a.health.Load()),
+		BytesReceived: a.received.Load(),
+		BytesSent:     a.sent.Load(),
+	}
+	if connection := a.connection.Load(); connection != nil {
+		snapshot.ConnectionHealth = connection.health
+		snapshot.ConnectionError = connection.errorMessage
 	}
 	if warm := a.warm.Load(); warm != nil {
 		snapshot.AuthorityWarmCache = warm.authority
@@ -112,8 +121,17 @@ func (a *APIActivity) setWarmCacheUsage(
 // ObserveRoundTrip records only a coarse connection outcome. Authorization
 // failures other than 401 are resource-specific and still prove the API server
 // is reachable; 5xx responses and transport failures indicate reconnecting.
-func (a *APIActivity) ObserveRoundTrip(statusCode int, roundTripErr error) {
+func (a *APIActivity) ObserveRoundTrip(
+	request *http.Request,
+	statusCode int,
+	roundTripErr error,
+) {
 	if a == nil {
+		return
+	}
+	// Cancelling a LIST/WATCH because its consumer changed panels is not a
+	// connection failure and must not make the shared authority reconnecting.
+	if requestWasCancelled(request, roundTripErr) {
 		return
 	}
 	next := APIConnectionConnected
@@ -123,7 +141,17 @@ func (a *APIActivity) ObserveRoundTrip(statusCode int, roundTripErr error) {
 	case statusCode == http.StatusUnauthorized:
 		next = APIConnectionAuthenticationFailed
 	}
-	a.health.Store(uint32(next))
+	message := ""
+	if next != APIConnectionConnected {
+		message = apiOperationErrorMessage(
+			requestContextError(request),
+			roundTripErr,
+			statusCode,
+		)
+	}
+	a.connection.Store(&apiConnectionActivitySnapshot{
+		health: next, errorMessage: message,
+	})
 }
 
 func (a *APIActivity) AddReceived(bytes uint64) {

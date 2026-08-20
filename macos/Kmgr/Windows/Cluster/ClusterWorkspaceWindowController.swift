@@ -773,6 +773,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var operationHistoryWindowController: ClusterOperationHistoryWindowController?
     private var operationHistoryIsWatching = false
     private var operationHistoryStreamIssue: UserFacingErrorPresentation?
+    private var operationHistoryConnectionState: ClusterConnectionState = .connecting
+    private var operationHistoryConnectionErrorMessage: String?
     private var connectionRateTracker = ClusterConnectionRateTracker()
     private var displayedWarmCacheUsage: DisplayedWarmCacheUsage?
     private let forwardsButton = NSButton(title: "Forwards 0", target: nil, action: nil)
@@ -1045,6 +1047,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         operationHistoryTask = nil
         resetWarmCacheStatus()
         connectionActivityView.setState(.reconnecting, detail: message)
+        setOperationHistoryConnectionState(
+            .reconnecting,
+            errorMessage: message
+        )
         setOperationHistoryStreamState(watching: false, error: ClusterManagerIssue(
             category: .unavailable,
             reason: "EngineDisconnected",
@@ -1193,6 +1199,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         connectionRateTracker = ClusterConnectionRateTracker()
         resetWarmCacheStatus()
         connectionActivityView.update(rate: ClusterConnectionRate())
+        setOperationHistoryConnectionState(.connecting)
         let provider = connectionActivityProvider
         let sessionID = session.sessionID
         let streamID = connectionActivityStreamID
@@ -1211,7 +1218,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     else { continue }
                     connectionActivityView.setState(
                         sample.state,
-                        detail: sample.issue?.userFacingPresentation.detailedText
+                        detail: sample.errorMessage
+                    )
+                    setOperationHistoryConnectionState(
+                        sample.state,
+                        errorMessage: sample.errorMessage
                     )
                     if let rate = connectionRateTracker.receive(sample) {
                         connectionActivityView.update(rate: rate)
@@ -1220,11 +1231,16 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 }
             } catch {
                 guard !Task.isCancelled, self?.session.sessionID == sessionID else { return }
-                let presentation = UserFacingErrorPresentation(error)
+                let errorMessage = (error as? ClusterManagerIssue)?.message
+                    ?? error.localizedDescription
                 self?.resetWarmCacheStatus()
                 self?.connectionActivityView.setState(
                     .reconnecting,
-                    detail: presentation.detailedText
+                    detail: errorMessage
+                )
+                self?.setOperationHistoryConnectionState(
+                    .reconnecting,
+                    errorMessage: errorMessage
                 )
             }
         }
@@ -1308,6 +1324,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             watching: operationHistoryIsWatching,
             issue: operationHistoryStreamIssue
         )
+        controller.setConnectionState(
+            operationHistoryConnectionState,
+            errorMessage: operationHistoryConnectionErrorMessage
+        )
         let sessionID = session.sessionID
         Task { [weak self, weak controller, operationHistoryStore] in
             let snapshot = await operationHistoryStore.snapshot()
@@ -1336,6 +1356,18 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         operationHistoryWindowController?.setStreamState(
             watching: watching,
             issue: operationHistoryStreamIssue
+        )
+    }
+
+    private func setOperationHistoryConnectionState(
+        _ state: ClusterConnectionState,
+        errorMessage: String? = nil
+    ) {
+        operationHistoryConnectionState = state
+        operationHistoryConnectionErrorMessage = errorMessage
+        operationHistoryWindowController?.setConnectionState(
+            state,
+            errorMessage: errorMessage
         )
     }
 

@@ -100,6 +100,8 @@ private actor BlockingClusterOperationHistoryRPC: ClusterOperationHistoryRPC {
     completed.name = "api"
     completed.httpStatusCode = 403
     completed.finishedAtUnixNanos = 1_234_567_890_223_456_789
+    completed.errorMessage =
+        "dial tcp 10.0.0.8:6443:  connect: connection refused\nTLS handshake timeout"
     event.completed = [completed]
     event.droppedCompleted = 3
     let rpc = ClusterOperationHistoryRPCCapture(mode: .batches([event]))
@@ -143,6 +145,8 @@ private actor BlockingClusterOperationHistoryRPC: ClusterOperationHistoryRPC {
     #expect(batches[0].completed[0].id == 11)
     #expect(batches[0].completed[0].state == .failed)
     #expect(batches[0].completed[0].finishedAtUnixNanos == 1_234_567_890_223_456_789)
+    #expect(batches[0].completed[0].errorMessage
+        == "dial tcp 10.0.0.8:6443:  connect: connection refused\nTLS handshake timeout")
 }
 
 @Test func operationHistoryProviderRejectsCrossStreamBatch() async {

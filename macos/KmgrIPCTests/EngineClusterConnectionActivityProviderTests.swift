@@ -107,6 +107,7 @@ private actor BlockingClusterConnectionActivityRPC: ClusterConnectionActivityRPC
     event.globalWarmCache.objectLimit = 250_000
     event.globalWarmCache.byteLimit = 2 << 30
     event.globalWarmCache.budgetEvictions = 5
+    event.errorMessage = "proxyconnect tcp:  EOF\nread: connection reset by peer"
     let rpc = ClusterConnectionActivityRPCCapture(mode: .events([event]))
     let provider = EngineClusterConnectionActivityProvider(
         rpc: rpc,
@@ -135,6 +136,8 @@ private actor BlockingClusterConnectionActivityRPC: ClusterConnectionActivityRPC
     #expect(samples.first?.observedAt == Date(timeIntervalSince1970: 12.345))
     #expect(samples.first?.bytesReceived == 2_048)
     #expect(samples.first?.bytesSent == 512)
+    #expect(samples.first?.errorMessage
+        == "proxyconnect tcp:  EOF\nread: connection reset by peer")
     #expect(samples.first?.authorityWarmCache == WarmCacheUsage(
         retainedViews: 2,
         retainedObjects: 300,

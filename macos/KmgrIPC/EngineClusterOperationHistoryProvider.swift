@@ -182,7 +182,10 @@ public struct EngineClusterOperationHistoryProvider: ClusterOperationHistoryProv
             startedAtUnixNanos: operation.startedAtUnixNanos,
             finishedAtUnixNanos: operation.finishedAtUnixNanos == 0
                 ? nil
-                : operation.finishedAtUnixNanos
+                : operation.finishedAtUnixNanos,
+            errorMessage: operation.errorMessage.isEmpty
+                ? nil
+                : operation.errorMessage
         )
     }
 

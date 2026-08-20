@@ -9,6 +9,11 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/charlie0129/kmgr/backend/internal/apioperation"
 )
 
 func TestDescribeAPIOperationClassifiesKubernetesPaths(t *testing.T) {
@@ -149,7 +154,7 @@ func TestActivityRoundTripperTracksOperationLifetimeAndRedactsPayloads(t *testin
 	}
 }
 
-func TestActivityRoundTripperMarksCancelledWatchWithoutRawError(t *testing.T) {
+func TestActivityRoundTripperMarksCancelledWatchWithRawContextError(t *testing.T) {
 	t.Parallel()
 	activity := &APIActivity{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -179,12 +184,13 @@ func TestActivityRoundTripperMarksCancelledWatchWithoutRawError(t *testing.T) {
 		t.Fatal(err)
 	}
 	completed := activity.OperationActivitySnapshot(0).Completed
-	if len(completed) != 1 || completed[0].State != APIOperationStateCancelled {
+	if len(completed) != 1 || completed[0].State != APIOperationStateCancelled ||
+		completed[0].ErrorMessage != context.Canceled.Error() {
 		t.Fatalf("cancelled watch = %#v", completed)
 	}
 }
 
-func TestActivityRoundTripperClassifiesTransportFailureWithoutRetainingError(t *testing.T) {
+func TestActivityRoundTripperRetainsRawTransportFailure(t *testing.T) {
 	t.Parallel()
 	activity := &APIActivity{}
 	request, err := http.NewRequest(http.MethodGet, "https://cluster.test/api/v1/nodes", nil)
@@ -199,11 +205,79 @@ func TestActivityRoundTripperClassifiesTransportFailureWithoutRetainingError(t *
 	}
 	completed := activity.OperationActivitySnapshot(0).Completed
 	if len(completed) != 1 || completed[0].State != APIOperationStateFailed ||
-		completed[0].HTTPStatusCode != 0 {
+		completed[0].HTTPStatusCode != 0 ||
+		completed[0].ErrorMessage != "sensitive transport failure" {
 		t.Fatalf("transport failure = %#v", completed)
 	}
-	if strings.Contains(fmt.Sprintf("%+v", completed), "sensitive transport failure") {
-		t.Fatal("operation snapshot retained raw transport error")
+}
+
+func TestActivityRoundTripperCombinesKubernetesWatchAndGoStreamErrors(t *testing.T) {
+	t.Parallel()
+	const (
+		serverMessage = "a watch stream was requested by the client but the required storage feature RequestWatchProgress is disabled"
+		goMessage     = "http2: response body closed"
+	)
+	want := "Kubernetes server (InternalError, HTTP 500): " + serverMessage + "\nGo: " + goMessage
+	serverError := &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status: metav1.StatusFailure, Message: serverMessage,
+		Reason: metav1.StatusReasonInternalError, Code: http.StatusInternalServerError,
+	}}
+
+	for _, observeBeforeGoError := range []bool{true, false} {
+		name := "server error before Go error"
+		if !observeBeforeGoError {
+			name = "server error after Go error"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			activity := &APIActivity{}
+			ctx, observer := apioperation.WithWatchErrorObserver(context.Background())
+			request, err := http.NewRequestWithContext(
+				ctx, http.MethodGet,
+				"https://cluster.test/api/v1/nodes?watch=true&sendInitialEvents=true",
+				nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       &operationErrorReadCloser{err: errors.New(goMessage)},
+					Request:    request,
+				}, nil
+			})
+			response, err := (&activityRoundTripper{base: base, activity: activity}).RoundTrip(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observeBeforeGoError {
+				observer.Observe(serverError)
+			}
+			if _, err := response.Body.Read(make([]byte, 1)); err == nil || err.Error() != goMessage {
+				t.Fatalf("body error = %v, want %q", err, goMessage)
+			}
+
+			first := activity.OperationActivitySnapshot(0)
+			if len(first.Completed) != 1 {
+				t.Fatalf("initial completion = %#v", first.Completed)
+			}
+			if !observeBeforeGoError {
+				if first.Completed[0].ErrorMessage != goMessage {
+					t.Fatalf("initial Go error = %q", first.Completed[0].ErrorMessage)
+				}
+				observer.Observe(serverError)
+				first = activity.OperationActivitySnapshot(first.CompletionCursor)
+				if len(first.Completed) != 1 {
+					t.Fatalf("corrected completion = %#v", first.Completed)
+				}
+			}
+			record := first.Completed[0]
+			if record.State != APIOperationStateFailed || record.HTTPStatusCode != http.StatusOK ||
+				record.ErrorMessage != want {
+				t.Fatalf("combined completion = %#v, want error %q", record, want)
+			}
+		})
 	}
 }
 
@@ -234,3 +308,8 @@ type operationTestReadCloser struct{}
 
 func (*operationTestReadCloser) Read([]byte) (int, error) { return 0, nil }
 func (*operationTestReadCloser) Close() error             { return nil }
+
+type operationErrorReadCloser struct{ err error }
+
+func (r *operationErrorReadCloser) Read([]byte) (int, error) { return 0, r.err }
+func (*operationErrorReadCloser) Close() error               { return nil }

@@ -26,9 +26,10 @@ const (
 	APIOperationStateTimedOut
 )
 
-// APIOperationSnapshot contains only bounded, display-safe request metadata.
-// It never contains query values, selectors, headers, bodies, credentials,
-// raw URLs, or raw error strings.
+// APIOperationSnapshot contains request metadata plus exact decoded Kubernetes
+// watch Status details and original Go error text for failed operations. It
+// never contains query values, selectors, headers, bodies, credentials, or
+// raw URLs.
 type APIOperationSnapshot struct {
 	ID                  uint64
 	State               APIOperationState
@@ -44,6 +45,7 @@ type APIOperationSnapshot struct {
 	BytesSent           uint64
 	StartedAtUnixNanos  int64
 	FinishedAtUnixNanos int64
+	ErrorMessage        string
 }
 
 type APIOperationActivitySnapshot struct {
@@ -64,15 +66,20 @@ type apiOperationDescriptor struct {
 }
 
 type trackedAPIOperation struct {
-	activity *APIActivity
-	id       uint64
-	detail   apiOperationDescriptor
-	ctx      context.Context
-	started  int64
-	received atomic.Uint64
-	sent     atomic.Uint64
-	status   atomic.Int32
-	finish   sync.Once
+	activity           *APIActivity
+	id                 uint64
+	detail             apiOperationDescriptor
+	ctx                context.Context
+	started            int64
+	received           atomic.Uint64
+	sent               atomic.Uint64
+	status             atomic.Int32
+	finish             sync.Once
+	terminalMu         sync.Mutex
+	serverErrorMessage string
+	goErrorMessage     string
+	completedSnapshot  APIOperationSnapshot
+	completed          bool
 }
 
 type completedAPIOperation struct {
@@ -106,9 +113,10 @@ func (a *APIActivity) beginOperation(request *http.Request) *trackedAPIOperation
 }
 
 // OperationActivitySnapshot returns a replacement active snapshot and only
-// completions newer than afterCompletion. The fixed backend ring bridges the
-// 500 ms IPC sampling interval; long-lived GUI retention is maintained by the
-// client and is not retransmitted on every sample.
+// completions or corrected completions newer than afterCompletion. The fixed
+// backend ring bridges the 500 ms IPC sampling interval; long-lived GUI
+// retention is maintained by the client and is not retransmitted on every
+// sample.
 func (a *APIActivity) OperationActivitySnapshot(
 	afterCompletion uint64,
 ) APIOperationActivitySnapshot {
@@ -162,10 +170,26 @@ func (o *trackedAPIOperation) complete(terminalError error) {
 	}
 	o.finish.Do(func() {
 		finished := time.Now().UnixNano()
+		contextError := o.ctx.Err()
+		statusCode := int(o.status.Load())
 		state := completedAPIOperationState(
-			o.ctx.Err(), terminalError, int(o.status.Load()),
+			contextError, terminalError, statusCode,
 		)
 		snapshot := o.snapshot(state, finished)
+		goErrorMessage := apiOperationErrorMessage(
+			contextError, terminalError, statusCode,
+		)
+		o.terminalMu.Lock()
+		o.goErrorMessage = goErrorMessage
+		if o.serverErrorMessage != "" {
+			snapshot.State = APIOperationStateFailed
+		}
+		snapshot.ErrorMessage = combinedAPIOperationErrorMessage(
+			o.serverErrorMessage,
+			o.goErrorMessage,
+		)
+		o.completedSnapshot = snapshot
+		o.completed = true
 		a := o.activity
 		a.operationsMu.Lock()
 		if a.activeOperations[o.id] == o {
@@ -177,7 +201,50 @@ func (o *trackedAPIOperation) complete(terminalError error) {
 			snapshot: snapshot,
 		})
 		a.operationsMu.Unlock()
+		o.terminalMu.Unlock()
 	})
+}
+
+// recordWatchError attaches an embedded Kubernetes watch.Error to the same
+// HTTP operation as the response stream. If the Go body error completed first,
+// append a corrected completion with the same operation ID and a newer cursor
+// so already-running history consumers receive the full two-layer failure.
+func (o *trackedAPIOperation) recordWatchError(err error) {
+	if o == nil || o.activity == nil || err == nil {
+		return
+	}
+	message := kubernetesWatchErrorMessage(err)
+	if message == "" {
+		return
+	}
+
+	o.terminalMu.Lock()
+	if o.serverErrorMessage == message {
+		o.terminalMu.Unlock()
+		return
+	}
+	o.serverErrorMessage = message
+	if !o.completed {
+		o.terminalMu.Unlock()
+		return
+	}
+
+	snapshot := o.completedSnapshot
+	snapshot.State = APIOperationStateFailed
+	snapshot.ErrorMessage = combinedAPIOperationErrorMessage(
+		o.serverErrorMessage,
+		o.goErrorMessage,
+	)
+	o.completedSnapshot = snapshot
+	a := o.activity
+	a.operationsMu.Lock()
+	a.completionSequence++
+	a.completedOperations.append(completedAPIOperation{
+		sequence: a.completionSequence,
+		snapshot: snapshot,
+	})
+	a.operationsMu.Unlock()
+	o.terminalMu.Unlock()
 }
 
 func (o *trackedAPIOperation) snapshot(

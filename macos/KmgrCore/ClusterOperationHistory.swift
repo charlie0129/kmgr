@@ -8,7 +8,8 @@ public enum ClusterOperationState: Hashable, Sendable {
     case timedOut
 }
 
-/// Display-safe metadata for one Kubernetes HTTP operation. Exact Unix
+/// Metadata for one Kubernetes HTTP operation, including exact decoded server
+/// Status details and the original Go error text when available. Exact Unix
 /// nanoseconds are retained separately from Date so equal-looking second-level
 /// timestamps still sort in their original high-precision order.
 public struct ClusterOperationRecord: Identifiable, Hashable, Sendable {
@@ -26,6 +27,7 @@ public struct ClusterOperationRecord: Identifiable, Hashable, Sendable {
     public var bytesSent: UInt64
     public var startedAtUnixNanos: Int64
     public var finishedAtUnixNanos: Int64?
+    public var errorMessage: String?
 
     public init(
         id: UInt64,
@@ -41,7 +43,8 @@ public struct ClusterOperationRecord: Identifiable, Hashable, Sendable {
         bytesReceived: UInt64 = 0,
         bytesSent: UInt64 = 0,
         startedAtUnixNanos: Int64,
-        finishedAtUnixNanos: Int64? = nil
+        finishedAtUnixNanos: Int64? = nil,
+        errorMessage: String? = nil
     ) {
         self.id = id
         self.state = state
@@ -57,6 +60,7 @@ public struct ClusterOperationRecord: Identifiable, Hashable, Sendable {
         self.bytesSent = bytesSent
         self.startedAtUnixNanos = startedAtUnixNanos
         self.finishedAtUnixNanos = finishedAtUnixNanos
+        self.errorMessage = errorMessage
     }
 }
 
@@ -64,7 +68,7 @@ public struct ClusterOperationBatch: Hashable, Sendable {
     public var cursor: StreamCursor
     /// Replacement snapshot of every currently active operation.
     public var active: [ClusterOperationRecord]
-    /// Only operations completed since the preceding batch.
+    /// Only operations completed or corrected since the preceding batch.
     public var completed: [ClusterOperationRecord]
     public var droppedCompleted: UInt64
 
@@ -133,7 +137,7 @@ public actor ClusterOperationHistoryStore {
     private var activeByID: [UInt64: ClusterOperationRecord] = [:]
     private var completedStorage: [ClusterOperationRecord] = []
     private var completedHead = 0
-    private var completedIDs: Set<UInt64> = []
+    private var completedIndexByID: [UInt64: Int] = [:]
     private var droppedCompleted: UInt64 = 0
 
     public init(completedLimit: Int = 2_000) {
@@ -147,13 +151,24 @@ public actor ClusterOperationHistoryStore {
             uniquingKeysWith: { _, latest in latest }
         )
         var added: [ClusterOperationRecord] = []
+        var addedIndexByID: [UInt64: Int] = [:]
         var evicted: [UInt64] = []
         if completedLimit > 0 {
             added.reserveCapacity(min(completedLimit, batch.completed.count))
-            for record in batch.completed where !completedIDs.contains(record.id) {
-                completedStorage.append(record)
-                completedIDs.insert(record.id)
-                added.append(record)
+            for record in batch.completed {
+                if let index = completedIndexByID[record.id], index >= completedHead {
+                    guard completedStorage[index] != record else { continue }
+                    completedStorage[index] = record
+                } else {
+                    completedIndexByID[record.id] = completedStorage.count
+                    completedStorage.append(record)
+                }
+                if let changeIndex = addedIndexByID[record.id] {
+                    added[changeIndex] = record
+                } else {
+                    addedIndexByID[record.id] = added.count
+                    added.append(record)
+                }
             }
             evictCompletedIfNeeded(into: &evicted)
         }
@@ -182,7 +197,7 @@ public actor ClusterOperationHistoryStore {
         activeByID.removeAll(keepingCapacity: true)
         completedStorage.removeAll(keepingCapacity: false)
         completedHead = 0
-        completedIDs.removeAll(keepingCapacity: false)
+        completedIndexByID.removeAll(keepingCapacity: false)
         droppedCompleted = 0
     }
 
@@ -200,7 +215,7 @@ public actor ClusterOperationHistoryStore {
         evicted.reserveCapacity(evicted.count + excess)
         for _ in 0..<excess {
             let id = completedStorage[completedHead].id
-            completedIDs.remove(id)
+            completedIndexByID.removeValue(forKey: id)
             evicted.append(id)
             completedHead += 1
         }
@@ -213,6 +228,11 @@ public actor ClusterOperationHistoryStore {
         else { return }
         completedStorage.removeFirst(completedHead)
         completedHead = 0
+        completedIndexByID = Dictionary(
+            uniqueKeysWithValues: completedStorage.indices.map {
+                (completedStorage[$0].id, $0)
+            }
+        )
     }
 
     private func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {

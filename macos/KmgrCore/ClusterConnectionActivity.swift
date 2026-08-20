@@ -57,7 +57,7 @@ public struct ClusterConnectionActivitySample: Hashable, Sendable {
     public var bytesSent: UInt64
     public var authorityWarmCache: WarmCacheUsage
     public var globalWarmCache: WarmCacheUsage
-    public var issue: ClusterManagerIssue?
+    public var errorMessage: String?
 
     public init(
         cursor: StreamCursor,
@@ -67,7 +67,7 @@ public struct ClusterConnectionActivitySample: Hashable, Sendable {
         bytesSent: UInt64,
         authorityWarmCache: WarmCacheUsage = WarmCacheUsage(),
         globalWarmCache: WarmCacheUsage = WarmCacheUsage(),
-        issue: ClusterManagerIssue? = nil
+        errorMessage: String? = nil
     ) {
         self.cursor = cursor
         self.state = state
@@ -76,7 +76,7 @@ public struct ClusterConnectionActivitySample: Hashable, Sendable {
         self.bytesSent = bytesSent
         self.authorityWarmCache = authorityWarmCache
         self.globalWarmCache = globalWarmCache
-        self.issue = issue
+        self.errorMessage = errorMessage
     }
 }
 

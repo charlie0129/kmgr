@@ -637,7 +637,7 @@ type ConnectionEvent struct {
 	Cursor           *StreamCursor          `protobuf:"bytes,1,opt,name=cursor,proto3" json:"cursor,omitempty"`
 	State            ConnectionState        `protobuf:"varint,2,opt,name=state,proto3,enum=kmgr.v1.ConnectionState" json:"state,omitempty"`
 	ObservedAtUnixMs int64                  `protobuf:"varint,3,opt,name=observed_at_unix_ms,json=observedAtUnixMs,proto3" json:"observed_at_unix_ms,omitempty"`
-	Error            *StructuredError       `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	ErrorMessage     string                 `protobuf:"bytes,4,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
 	// Monotonic, process-local Kubernetes API payload totals for this shared
 	// cluster authority. They intentionally exclude kubeconfig contents and
 	// expose counts only; the GUI derives short-window rates from deltas.
@@ -704,11 +704,11 @@ func (x *ConnectionEvent) GetObservedAtUnixMs() int64 {
 	return 0
 }
 
-func (x *ConnectionEvent) GetError() *StructuredError {
+func (x *ConnectionEvent) GetErrorMessage() string {
 	if x != nil {
-		return x.Error
+		return x.ErrorMessage
 	}
-	return nil
+	return ""
 }
 
 func (x *ConnectionEvent) GetApiBytesReceived() uint64 {
@@ -912,9 +912,10 @@ func (x *WatchOperationsRequest) GetStreamId() string {
 	return ""
 }
 
-// Redacted metadata for one Kubernetes HTTP operation. Query strings,
-// selectors, headers, bodies, credentials, raw URLs, and raw error strings
-// never enter this message.
+// Metadata for one Kubernetes HTTP operation. Query strings, selectors,
+// headers, bodies, credentials, and raw URLs never enter this message. Failed
+// operations include exact decoded Kubernetes watch Status details and the
+// original Go stream/transport error text in error_message when available.
 type KubernetesAPIOperation struct {
 	state               protoimpl.MessageState      `protogen:"open.v1"`
 	Id                  uint64                      `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -931,6 +932,7 @@ type KubernetesAPIOperation struct {
 	BytesSent           uint64                      `protobuf:"varint,12,opt,name=bytes_sent,json=bytesSent,proto3" json:"bytes_sent,omitempty"`
 	StartedAtUnixNanos  int64                       `protobuf:"varint,13,opt,name=started_at_unix_nanos,json=startedAtUnixNanos,proto3" json:"started_at_unix_nanos,omitempty"`
 	FinishedAtUnixNanos int64                       `protobuf:"varint,14,opt,name=finished_at_unix_nanos,json=finishedAtUnixNanos,proto3" json:"finished_at_unix_nanos,omitempty"`
+	ErrorMessage        string                      `protobuf:"bytes,15,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -1063,9 +1065,18 @@ func (x *KubernetesAPIOperation) GetFinishedAtUnixNanos() int64 {
 	return 0
 }
 
+func (x *KubernetesAPIOperation) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
 // active is a replacement snapshot; completed contains only records completed
-// since the preceding batch. This keeps IPC bounded by active work and new
-// completions instead of retransmitting the retained GUI history.
+// or corrected since the preceding batch. A corrected record reuses its
+// operation ID and replaces the retained completion in the GUI. This keeps IPC
+// bounded by active work and changed completions instead of retransmitting the
+// retained GUI history.
 type ClusterOperationBatch struct {
 	state            protoimpl.MessageState    `protogen:"open.v1"`
 	Cursor           *StreamCursor             `protobuf:"bytes,1,opt,name=cursor,proto3" json:"cursor,omitempty"`
@@ -1498,12 +1509,12 @@ const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	"\x18keep_independent_streams\x18\x02 \x01(\bR\x16keepIndependentStreams\"h\n" +
 	"\x16WatchConnectionRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x1b\n" +
-	"\tstream_id\x18\x02 \x01(\tR\bstreamId\"\xb3\x03\n" +
+	"\tstream_id\x18\x02 \x01(\tR\bstreamId\"\xa8\x03\n" +
 	"\x0fConnectionEvent\x12-\n" +
 	"\x06cursor\x18\x01 \x01(\v2\x15.kmgr.v1.StreamCursorR\x06cursor\x12.\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x18.kmgr.v1.ConnectionStateR\x05state\x12-\n" +
-	"\x13observed_at_unix_ms\x18\x03 \x01(\x03R\x10observedAtUnixMs\x12.\n" +
-	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\x12,\n" +
+	"\x13observed_at_unix_ms\x18\x03 \x01(\x03R\x10observedAtUnixMs\x12#\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\x12,\n" +
 	"\x12api_bytes_received\x18\x05 \x01(\x04R\x10apiBytesReceived\x12$\n" +
 	"\x0eapi_bytes_sent\x18\x06 \x01(\x04R\fapiBytesSent\x12I\n" +
 	"\x14authority_warm_cache\x18\a \x01(\v2\x17.kmgr.v1.WarmCacheUsageR\x12authorityWarmCache\x12C\n" +
@@ -1524,7 +1535,7 @@ const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	" \x01(\x04R\x0eevictableBytes\"h\n" +
 	"\x16WatchOperationsRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x1b\n" +
-	"\tstream_id\x18\x02 \x01(\tR\bstreamId\"\xfa\x03\n" +
+	"\tstream_id\x18\x02 \x01(\tR\bstreamId\"\x9f\x04\n" +
 	"\x16KubernetesAPIOperation\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12:\n" +
 	"\x05state\x18\x02 \x01(\x0e2$.kmgr.v1.KubernetesAPIOperationStateR\x05state\x12\x1c\n" +
@@ -1541,7 +1552,8 @@ const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	"\n" +
 	"bytes_sent\x18\f \x01(\x04R\tbytesSent\x121\n" +
 	"\x15started_at_unix_nanos\x18\r \x01(\x03R\x12startedAtUnixNanos\x123\n" +
-	"\x16finished_at_unix_nanos\x18\x0e \x01(\x03R\x13finishedAtUnixNanos\"\xeb\x01\n" +
+	"\x16finished_at_unix_nanos\x18\x0e \x01(\x03R\x13finishedAtUnixNanos\x12#\n" +
+	"\rerror_message\x18\x0f \x01(\tR\ferrorMessage\"\xeb\x01\n" +
 	"\x15ClusterOperationBatch\x12-\n" +
 	"\x06cursor\x18\x01 \x01(\v2\x15.kmgr.v1.StreamCursorR\x06cursor\x127\n" +
 	"\x06active\x18\x02 \x03(\v2\x1f.kmgr.v1.KubernetesAPIOperationR\x06active\x12=\n" +
@@ -1651,40 +1663,39 @@ var file_kmgr_v1_cluster_proto_depIdxs = []int32{
 	20, // 7: kmgr.v1.WatchConnectionRequest.context:type_name -> kmgr.v1.RequestContext
 	21, // 8: kmgr.v1.ConnectionEvent.cursor:type_name -> kmgr.v1.StreamCursor
 	0,  // 9: kmgr.v1.ConnectionEvent.state:type_name -> kmgr.v1.ConnectionState
-	19, // 10: kmgr.v1.ConnectionEvent.error:type_name -> kmgr.v1.StructuredError
-	10, // 11: kmgr.v1.ConnectionEvent.authority_warm_cache:type_name -> kmgr.v1.WarmCacheUsage
-	10, // 12: kmgr.v1.ConnectionEvent.global_warm_cache:type_name -> kmgr.v1.WarmCacheUsage
-	20, // 13: kmgr.v1.WatchOperationsRequest.context:type_name -> kmgr.v1.RequestContext
-	1,  // 14: kmgr.v1.KubernetesAPIOperation.state:type_name -> kmgr.v1.KubernetesAPIOperationState
-	21, // 15: kmgr.v1.ClusterOperationBatch.cursor:type_name -> kmgr.v1.StreamCursor
-	12, // 16: kmgr.v1.ClusterOperationBatch.active:type_name -> kmgr.v1.KubernetesAPIOperation
-	12, // 17: kmgr.v1.ClusterOperationBatch.completed:type_name -> kmgr.v1.KubernetesAPIOperation
-	20, // 18: kmgr.v1.DiscoverRequest.context:type_name -> kmgr.v1.RequestContext
-	22, // 19: kmgr.v1.ApiResource.type:type_name -> kmgr.v1.ResourceType
-	15, // 20: kmgr.v1.DiscoverResponse.resources:type_name -> kmgr.v1.ApiResource
-	19, // 21: kmgr.v1.DiscoverResponse.error:type_name -> kmgr.v1.StructuredError
-	19, // 22: kmgr.v1.DiscoverResponse.warning:type_name -> kmgr.v1.StructuredError
-	20, // 23: kmgr.v1.ListNamespacesRequest.context:type_name -> kmgr.v1.RequestContext
-	19, // 24: kmgr.v1.ListNamespacesResponse.error:type_name -> kmgr.v1.StructuredError
-	3,  // 25: kmgr.v1.ClusterService.ListContexts:input_type -> kmgr.v1.ListContextsRequest
-	5,  // 26: kmgr.v1.ClusterService.OpenSession:input_type -> kmgr.v1.OpenSessionRequest
-	7,  // 27: kmgr.v1.ClusterService.CloseSession:input_type -> kmgr.v1.CloseSessionRequest
-	8,  // 28: kmgr.v1.ClusterService.WatchConnection:input_type -> kmgr.v1.WatchConnectionRequest
-	11, // 29: kmgr.v1.ClusterService.WatchOperations:input_type -> kmgr.v1.WatchOperationsRequest
-	14, // 30: kmgr.v1.ClusterService.Discover:input_type -> kmgr.v1.DiscoverRequest
-	17, // 31: kmgr.v1.ClusterService.ListNamespaces:input_type -> kmgr.v1.ListNamespacesRequest
-	4,  // 32: kmgr.v1.ClusterService.ListContexts:output_type -> kmgr.v1.ListContextsResponse
-	6,  // 33: kmgr.v1.ClusterService.OpenSession:output_type -> kmgr.v1.OpenSessionResponse
-	23, // 34: kmgr.v1.ClusterService.CloseSession:output_type -> kmgr.v1.Acknowledgement
-	9,  // 35: kmgr.v1.ClusterService.WatchConnection:output_type -> kmgr.v1.ConnectionEvent
-	13, // 36: kmgr.v1.ClusterService.WatchOperations:output_type -> kmgr.v1.ClusterOperationBatch
-	16, // 37: kmgr.v1.ClusterService.Discover:output_type -> kmgr.v1.DiscoverResponse
-	18, // 38: kmgr.v1.ClusterService.ListNamespaces:output_type -> kmgr.v1.ListNamespacesResponse
-	32, // [32:39] is the sub-list for method output_type
-	25, // [25:32] is the sub-list for method input_type
-	25, // [25:25] is the sub-list for extension type_name
-	25, // [25:25] is the sub-list for extension extendee
-	0,  // [0:25] is the sub-list for field type_name
+	10, // 10: kmgr.v1.ConnectionEvent.authority_warm_cache:type_name -> kmgr.v1.WarmCacheUsage
+	10, // 11: kmgr.v1.ConnectionEvent.global_warm_cache:type_name -> kmgr.v1.WarmCacheUsage
+	20, // 12: kmgr.v1.WatchOperationsRequest.context:type_name -> kmgr.v1.RequestContext
+	1,  // 13: kmgr.v1.KubernetesAPIOperation.state:type_name -> kmgr.v1.KubernetesAPIOperationState
+	21, // 14: kmgr.v1.ClusterOperationBatch.cursor:type_name -> kmgr.v1.StreamCursor
+	12, // 15: kmgr.v1.ClusterOperationBatch.active:type_name -> kmgr.v1.KubernetesAPIOperation
+	12, // 16: kmgr.v1.ClusterOperationBatch.completed:type_name -> kmgr.v1.KubernetesAPIOperation
+	20, // 17: kmgr.v1.DiscoverRequest.context:type_name -> kmgr.v1.RequestContext
+	22, // 18: kmgr.v1.ApiResource.type:type_name -> kmgr.v1.ResourceType
+	15, // 19: kmgr.v1.DiscoverResponse.resources:type_name -> kmgr.v1.ApiResource
+	19, // 20: kmgr.v1.DiscoverResponse.error:type_name -> kmgr.v1.StructuredError
+	19, // 21: kmgr.v1.DiscoverResponse.warning:type_name -> kmgr.v1.StructuredError
+	20, // 22: kmgr.v1.ListNamespacesRequest.context:type_name -> kmgr.v1.RequestContext
+	19, // 23: kmgr.v1.ListNamespacesResponse.error:type_name -> kmgr.v1.StructuredError
+	3,  // 24: kmgr.v1.ClusterService.ListContexts:input_type -> kmgr.v1.ListContextsRequest
+	5,  // 25: kmgr.v1.ClusterService.OpenSession:input_type -> kmgr.v1.OpenSessionRequest
+	7,  // 26: kmgr.v1.ClusterService.CloseSession:input_type -> kmgr.v1.CloseSessionRequest
+	8,  // 27: kmgr.v1.ClusterService.WatchConnection:input_type -> kmgr.v1.WatchConnectionRequest
+	11, // 28: kmgr.v1.ClusterService.WatchOperations:input_type -> kmgr.v1.WatchOperationsRequest
+	14, // 29: kmgr.v1.ClusterService.Discover:input_type -> kmgr.v1.DiscoverRequest
+	17, // 30: kmgr.v1.ClusterService.ListNamespaces:input_type -> kmgr.v1.ListNamespacesRequest
+	4,  // 31: kmgr.v1.ClusterService.ListContexts:output_type -> kmgr.v1.ListContextsResponse
+	6,  // 32: kmgr.v1.ClusterService.OpenSession:output_type -> kmgr.v1.OpenSessionResponse
+	23, // 33: kmgr.v1.ClusterService.CloseSession:output_type -> kmgr.v1.Acknowledgement
+	9,  // 34: kmgr.v1.ClusterService.WatchConnection:output_type -> kmgr.v1.ConnectionEvent
+	13, // 35: kmgr.v1.ClusterService.WatchOperations:output_type -> kmgr.v1.ClusterOperationBatch
+	16, // 36: kmgr.v1.ClusterService.Discover:output_type -> kmgr.v1.DiscoverResponse
+	18, // 37: kmgr.v1.ClusterService.ListNamespaces:output_type -> kmgr.v1.ListNamespacesResponse
+	31, // [31:38] is the sub-list for method output_type
+	24, // [24:31] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_cluster_proto_init() }

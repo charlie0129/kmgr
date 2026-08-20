@@ -110,10 +110,20 @@ type ClusterResourceSource struct {
 // latter matters to adapters that use richer dynamic-client type assertions.
 type watchListDynamicResource struct {
 	dynamic.ResourceInterface
+	session  *cluster.Session
+	resource schema.GroupVersionResource
 }
 
 func (client watchListDynamicResource) SupportsWatchListSemantics() bool {
-	return !clientwatchlist.DoesClientNotSupportWatchListSemantics(client.ResourceInterface)
+	return client.ResourceInterface != nil &&
+		(client.session == nil || !client.session.WatchListUnavailable(client.resource)) &&
+		!clientwatchlist.DoesClientNotSupportWatchListSemantics(client.ResourceInterface)
+}
+
+func (client watchListDynamicResource) DisableWatchListSemantics() {
+	if client.session != nil {
+		client.session.DisableWatchList(client.resource)
+	}
 }
 
 func (s ClusterResourceSource) OpenResource(
@@ -135,7 +145,11 @@ func (s ClusterResourceSource) OpenResource(
 	} else {
 		resourceClient = client.Namespace(namespace)
 	}
-	resourceClient = watchListDynamicResource{ResourceInterface: resourceClient}
+	resourceClient = watchListDynamicResource{
+		ResourceInterface: resourceClient,
+		session:           session,
+		resource:          resource,
+	}
 	// SessionRegistry shares one dynamic client between workspace sessions for
 	// the same catalog/context. Include its pointer so a kubeconfig reload that
 	// happens to retain the same stable context ID cannot cross-wire clients.
@@ -3599,6 +3613,7 @@ func structuredViewError(operation string, err error, retryable bool) *kmgrv1.St
 var _ watcher.ListerWatcher = dynamic.ResourceInterface(nil)
 var _ watcher.ListerWatcher = watchListDynamicResource{}
 var _ watcher.WatchListSemantics = watchListDynamicResource{}
+var _ watcher.WatchListSemanticsDisabler = watchListDynamicResource{}
 var _ dynamic.ResourceInterface = watchListDynamicResource{}
 var _ MetadataSearchResourceSource = ClusterResourceSource{}
 var _ = types.UID("")

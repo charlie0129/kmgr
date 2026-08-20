@@ -108,8 +108,8 @@ func (s *ClusterService) WatchConnection(
 	send := func() error {
 		totals := activity.Snapshot()
 		sequence++
-		connectionState, connectionError := connectionEventState(
-			totals.ConnectionHealth, session.Context().Name,
+		connectionState, connectionErrorMessage := connectionEventState(
+			totals.ConnectionHealth, totals.ConnectionError,
 		)
 		if err := stream.Send(&kmgrv1.ConnectionEvent{
 			Cursor: &kmgrv1.StreamCursor{
@@ -121,7 +121,7 @@ func (s *ClusterService) WatchConnection(
 			ApiBytesSent:       totals.BytesSent,
 			AuthorityWarmCache: warmCacheUsageProto(totals.AuthorityWarmCache),
 			GlobalWarmCache:    warmCacheUsageProto(totals.GlobalWarmCache),
-			Error:              connectionError,
+			ErrorMessage:       connectionErrorMessage,
 		}); err != nil {
 			return err
 		}
@@ -217,7 +217,7 @@ func (s *ClusterService) WatchOperations(
 }
 
 func apiOperationProto(operation cluster.APIOperationSnapshot) *kmgrv1.KubernetesAPIOperation {
-	return &kmgrv1.KubernetesAPIOperation{
+	result := &kmgrv1.KubernetesAPIOperation{
 		Id:                  operation.ID,
 		State:               apiOperationStateProto(operation.State),
 		Operation:           operation.Operation,
@@ -233,6 +233,8 @@ func apiOperationProto(operation cluster.APIOperationSnapshot) *kmgrv1.Kubernete
 		StartedAtUnixNanos:  operation.StartedAtUnixNanos,
 		FinishedAtUnixNanos: operation.FinishedAtUnixNanos,
 	}
+	result.ErrorMessage = operation.ErrorMessage
+	return result
 }
 
 func apiOperationStateProto(
@@ -271,32 +273,28 @@ func warmCacheUsageProto(usage cluster.WarmCacheUsage) *kmgrv1.WarmCacheUsage {
 
 func connectionEventState(
 	health cluster.APIConnectionHealth,
-	contextName string,
-) (kmgrv1.ConnectionState, *kmgrv1.StructuredError) {
+	errorMessage string,
+) (kmgrv1.ConnectionState, string) {
 	switch health {
 	case cluster.APIConnectionReconnecting:
-		return kmgrv1.ConnectionState_CONNECTION_STATE_RECONNECTING, &kmgrv1.StructuredError{
-			Category:    kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE,
-			Reason:      "APITransportInterrupted",
-			Message:     "The Kubernetes API transport was interrupted and may reconnect.",
-			Retryable:   true,
-			ContextName: contextName,
-			Operation:   "watch-connection",
-		}
+		return kmgrv1.ConnectionState_CONNECTION_STATE_RECONNECTING,
+			fallbackAPIErrorMessage(errorMessage)
 	case cluster.APIConnectionAuthenticationFailed:
-		return kmgrv1.ConnectionState_CONNECTION_STATE_FAILED, &kmgrv1.StructuredError{
-			Category:    kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION,
-			Reason:      "AuthenticationRejected",
-			Message:     "The Kubernetes API server rejected the configured credentials.",
-			ContextName: contextName,
-			Operation:   "watch-connection",
-		}
+		return kmgrv1.ConnectionState_CONNECTION_STATE_FAILED,
+			fallbackAPIErrorMessage(errorMessage)
 	default:
 		// OpenSession performs an authenticated probe before this stream can
 		// start. A zero health value therefore means no post-probe request has
 		// completed yet, not that the session is unauthenticated.
-		return kmgrv1.ConnectionState_CONNECTION_STATE_CONNECTED, nil
+		return kmgrv1.ConnectionState_CONNECTION_STATE_CONNECTED, ""
 	}
+}
+
+func fallbackAPIErrorMessage(message string) string {
+	if message != "" {
+		return message
+	}
+	return "Kubernetes API request failed"
 }
 
 func (s *ClusterService) ListContexts(

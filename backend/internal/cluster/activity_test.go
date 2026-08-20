@@ -28,13 +28,13 @@ func TestAPIActivityTracksMonotonicTotals(t *testing.T) {
 	}
 }
 
-func TestAPIActivityTracksConnectionHealthWithoutRetainingErrors(t *testing.T) {
+func TestAPIActivityTracksConnectionHealthAndRawError(t *testing.T) {
 	t.Parallel()
 	activity := &APIActivity{}
 
 	assertHealth := func(statusCode int, roundTripErr error, want APIConnectionHealth) {
 		t.Helper()
-		activity.ObserveRoundTrip(statusCode, roundTripErr)
+		activity.ObserveRoundTrip(nil, statusCode, roundTripErr)
 		if got := activity.Snapshot().ConnectionHealth; got != want {
 			t.Fatalf("connection health = %v, want %v", got, want)
 		}
@@ -44,8 +44,33 @@ func TestAPIActivityTracksConnectionHealthWithoutRetainingErrors(t *testing.T) {
 	// Forbidden is resource authorization, not a broken cluster connection.
 	assertHealth(http.StatusForbidden, nil, APIConnectionConnected)
 	assertHealth(0, errors.New("sensitive transport detail"), APIConnectionReconnecting)
+	if got := activity.Snapshot().ConnectionError; got != "sensitive transport detail" {
+		t.Fatalf("connection error = %q", got)
+	}
 	assertHealth(http.StatusUnauthorized, nil, APIConnectionAuthenticationFailed)
 	assertHealth(http.StatusNoContent, nil, APIConnectionConnected)
+}
+
+func TestAPIActivityIgnoresConsumerCancellationForConnectionHealth(t *testing.T) {
+	t.Parallel()
+	activity := &APIActivity{}
+	activity.ObserveRoundTrip(nil, 0, errors.New("proxyconnect tcp: EOF"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, "https://cluster.test/api/v1/pods?watch=true", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	activity.ObserveRoundTrip(request, 0, context.Canceled)
+
+	snapshot := activity.Snapshot()
+	if snapshot.ConnectionHealth != APIConnectionReconnecting ||
+		snapshot.ConnectionError != "proxyconnect tcp: EOF" {
+		t.Fatalf("consumer cancellation changed connection health = %#v", snapshot)
+	}
 }
 
 func TestAPIActivityPublishesWarmCacheChangesWithoutPayloadActivity(t *testing.T) {

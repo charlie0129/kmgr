@@ -12,12 +12,15 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
         action: nil
     )
     private let statusLabel = NSTextField(labelWithString: "No operations")
+    private let connectionIssueLabel = NSTextField(wrappingLabelWithString: "")
     private var tableLayoutBinding: TableLayoutBinding?
     private var recordsByID: [UInt64: ClusterOperationRecord] = [:]
     private var activeIDs: Set<UInt64> = []
     private var displayedRecords: [ClusterOperationRecord] = []
     private var droppedCompleted: UInt64 = 0
     private var streamIssue: UserFacingErrorPresentation?
+    private var connectionState: ClusterConnectionState = .connecting
+    private var connectionErrorMessage: String?
     private var isWatching = false
     private var isPresenting = false
     private var sortReferenceUnixNanos: Int64 = 0
@@ -122,6 +125,17 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
         updateStatus()
     }
 
+    func setConnectionState(
+        _ state: ClusterConnectionState,
+        errorMessage: String? = nil
+    ) {
+        connectionState = state
+        connectionErrorMessage = errorMessage
+        guard isPresenting else { return }
+        updateConnectionIssue()
+        updateStatus()
+    }
+
     func clearForNewSession() {
         guard isPresenting else { return }
         recordsByID.removeAll(keepingCapacity: true)
@@ -167,6 +181,20 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
             if record.state == .failed || record.state == .timedOut {
                 label.textColor = .systemRed
             }
+        case .operationError:
+            if let errorMessage = record.errorMessage {
+                label.stringValue = errorMessage
+                label.toolTip = errorMessage
+                label.textColor = switch record.state {
+                case .cancelled: .secondaryLabelColor
+                case .timedOut: .systemOrange
+                case .failed: .systemRed
+                case .active, .finished: .labelColor
+                }
+            } else {
+                label.stringValue = "—"
+                label.textColor = .tertiaryLabelColor
+            }
         case .operationReceived:
             label.stringValue = Self.byteText(record.bytesReceived)
             label.alignment = .right
@@ -201,6 +229,7 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
             (.operationNamespace, "Namespace", 125, .left),
             (.operationTarget, "Resource / Target", 220, .left),
             (.operationStatus, "Status", 135, .left),
+            (.operationError, "Error", 310, .left),
             (.operationReceived, "Received", 90, .right),
             (.operationSent, "Sent", 90, .right),
             (.operationStarted, "Started", 155, .left),
@@ -255,21 +284,38 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 10
-        footer.translatesAutoresizingMaskIntoConstraints = false
+
+        connectionIssueLabel.isSelectable = true
+        connectionIssueLabel.maximumNumberOfLines = 3
+        connectionIssueLabel.lineBreakMode = .byWordWrapping
+        connectionIssueLabel.textColor = .systemRed
+        connectionIssueLabel.setAccessibilityIdentifier(
+            "operation-history.connection-error"
+        )
+        connectionIssueLabel.isHidden = true
+
+        let diagnostics = NSStackView(views: [connectionIssueLabel, footer])
+        diagnostics.orientation = .vertical
+        diagnostics.alignment = .leading
+        diagnostics.spacing = 5
+        diagnostics.translatesAutoresizingMaskIntoConstraints = false
 
         let root = NSView()
         root.addSubview(scrollView)
-        root.addSubview(footer)
+        root.addSubview(diagnostics)
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: root.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -6),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
-            footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
+            scrollView.bottomAnchor.constraint(equalTo: diagnostics.topAnchor, constant: -6),
+            diagnostics.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
+            diagnostics.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
+            diagnostics.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
+            footer.widthAnchor.constraint(equalTo: diagnostics.widthAnchor),
+            connectionIssueLabel.widthAnchor.constraint(equalTo: diagnostics.widthAnchor),
         ])
         panel.contentView = root
+        updateConnectionIssue()
         updateStatus()
     }
 
@@ -360,6 +406,10 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
             return targetText(lhs).localizedStandardCompare(targetText(rhs))
         case .operationStatus:
             return compareValues(lhs.httpStatusCode, rhs.httpStatusCode)
+        case .operationError:
+            return (lhs.errorMessage ?? "").localizedStandardCompare(
+                rhs.errorMessage ?? ""
+            )
         case .operationReceived:
             return compareValues(lhs.bytesReceived, rhs.bytesReceived)
         case .operationSent:
@@ -442,6 +492,7 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
             parts.append("\(droppedCompleted.formatted()) missed before delivery")
         }
         parts.append(isWatching ? "watching" : "watch stopped")
+        parts.append("connection: \(connectionStateText)")
         if let streamIssue {
             parts.append(streamIssue.inlineText)
             statusLabel.toolTip = streamIssue.detailedText
@@ -451,6 +502,31 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
             statusLabel.textColor = .secondaryLabelColor
         }
         statusLabel.stringValue = parts.joined(separator: " · ")
+    }
+
+    private func updateConnectionIssue() {
+        guard let connectionErrorMessage else {
+            connectionIssueLabel.stringValue = ""
+            connectionIssueLabel.toolTip = nil
+            connectionIssueLabel.isHidden = true
+            return
+        }
+        connectionIssueLabel.stringValue = "Connection: \(connectionErrorMessage)"
+        connectionIssueLabel.toolTip = connectionErrorMessage
+        connectionIssueLabel.textColor = connectionState == .failed
+            ? .systemRed : .systemOrange
+        connectionIssueLabel.isHidden = false
+    }
+
+    private var connectionStateText: String {
+        switch connectionState {
+        case .connecting: "connecting"
+        case .connected: "connected"
+        case .reconnecting: "reconnecting"
+        case .disconnected: "disconnected"
+        case .failed: "failed"
+        case .closed: "closed"
+        }
     }
 
     private func makeCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
@@ -544,6 +620,7 @@ private extension NSUserInterfaceItemIdentifier {
     static let operationNamespace = Self("operation-history.namespace")
     static let operationTarget = Self("operation-history.target")
     static let operationStatus = Self("operation-history.status-code")
+    static let operationError = Self("operation-history.error")
     static let operationReceived = Self("operation-history.received")
     static let operationSent = Self("operation-history.sent")
     static let operationStarted = Self("operation-history.started")

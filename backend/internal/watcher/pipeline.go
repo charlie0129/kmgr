@@ -7,8 +7,10 @@ import (
 	"io"
 	"math"
 	rand "math/rand/v2"
+	"net/http"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	clientwatchlist "k8s.io/client-go/util/watchlist"
 	"k8s.io/utils/ptr"
 
+	"github.com/charlie0129/kmgr/backend/internal/apioperation"
 	"github.com/charlie0129/kmgr/backend/internal/store"
 )
 
@@ -42,6 +45,13 @@ type ListerWatcher interface {
 // streaming initial events preserve Kubernetes WatchList semantics.
 type WatchListSemantics interface {
 	SupportsWatchListSemantics() bool
+}
+
+// WatchListSemanticsDisabler persists a server capability failure beyond one
+// Pipeline. Production clients use it to share a negative capability cache
+// between views of the same cluster resource.
+type WatchListSemanticsDisabler interface {
+	DisableWatchListSemantics()
 }
 
 // Phase describes whether the local store is being synchronized or is backed
@@ -228,6 +238,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 					// snapshot is kept on the proven paginated LIST path for this
 					// Pipeline's remaining lifetime, including later 410 recovery.
 					p.watchListDisabled = true
+					if watchList.disableSemantics {
+						if capability, ok := p.client.(WatchListSemanticsDisabler); ok {
+							capability.DisableWatchListSemantics()
+						}
+					}
 				} else if watchList.synchronized {
 					resourceVersion = watchList.list.resourceVersion
 					listedPages = watchList.list.pages
@@ -355,10 +370,11 @@ type listResult struct {
 }
 
 type watchListResult struct {
-	synchronized bool
-	fallback     bool
-	list         listResult
-	watch        watchResult
+	synchronized     bool
+	fallback         bool
+	disableSemantics bool
+	list             listResult
+	watch            watchResult
 }
 
 func (p *Pipeline) watchListEligible() bool {
@@ -396,10 +412,13 @@ func (p *Pipeline) watchList(ctx context.Context) watchListResult {
 	}
 	options.TimeoutSeconds = &timeoutSeconds
 
-	stream, err := p.client.Watch(ctx, options)
+	watchContext, watchErrors := apioperation.WithWatchErrorObserver(ctx)
+	stream, err := p.client.Watch(watchContext, options)
 	if err != nil {
+		capabilityFailure := isWatchListCapabilityError(err)
 		return watchListResult{
-			fallback: isWatchListFallbackError(err),
+			fallback:         isWatchListFallbackError(err) || capabilityFailure,
+			disableSemantics: capabilityFailure,
 			watch: watchResult{
 				err:     err,
 				expired: isExpired(err),
@@ -437,12 +456,14 @@ func (p *Pipeline) watchList(ctx context.Context) watchListResult {
 			}
 			if event.Type == watch.Error {
 				eventErr := apierrors.FromObject(event.Object)
+				watchErrors.Observe(eventErr)
 				result.watch.err = eventErr
 				result.watch.expired = isExpired(eventErr)
 				if !result.synchronized {
+					result.disableSemantics = isWatchListCapabilityError(eventErr)
 					var status apierrors.APIStatus
 					result.fallback = !errors.As(eventErr, &status) ||
-						isWatchListFallbackError(eventErr)
+						isWatchListFallbackError(eventErr) || result.disableSemantics
 				}
 				return result
 			}
@@ -612,6 +633,25 @@ func isWatchListFallbackError(err error) bool {
 		apierrors.IsMethodNotSupported(err) || isExpired(err)
 }
 
+// isWatchListCapabilityError recognizes the narrow server-side failure seen
+// when WatchList is implemented by the apiserver but its backing storage
+// cannot provide progress notifications. Other InternalError responses remain
+// retryable and do not poison the shared per-resource capability cache.
+func isWatchListCapabilityError(err error) bool {
+	var apiStatus apierrors.APIStatus
+	if !errors.As(err, &apiStatus) {
+		return false
+	}
+	status := apiStatus.Status()
+	if status.Code != http.StatusInternalServerError ||
+		status.Reason != metav1.StatusReasonInternalError {
+		return false
+	}
+	message := strings.ToLower(status.Message)
+	return strings.Contains(message, "requestwatchprogress") &&
+		(strings.Contains(message, "disabled") || strings.Contains(message, "unavailable"))
+}
+
 func (p *Pipeline) list(ctx context.Context) (listResult, error) {
 	options := p.listOptions
 	options.Watch = false
@@ -761,12 +801,13 @@ func (p *Pipeline) watch(ctx context.Context, resourceVersion string, watching S
 	}
 	options.TimeoutSeconds = &timeoutSeconds
 
+	watchContext, watchErrors := apioperation.WithWatchErrorObserver(ctx)
 	var stream watch.Interface
 	var err error
 	if tableClient, ok := p.client.(TableListerWatcher); ok {
-		stream, err = tableClient.WatchTable(ctx, options)
+		stream, err = tableClient.WatchTable(watchContext, options)
 	} else {
-		stream, err = p.client.Watch(ctx, options)
+		stream, err = p.client.Watch(watchContext, options)
 	}
 	if err != nil {
 		return watchResult{err: err, expired: isExpired(err)}
@@ -789,6 +830,7 @@ func (p *Pipeline) watch(ctx context.Context, resourceVersion string, watching S
 			}
 			if event.Type == watch.Error {
 				err := apierrors.FromObject(event.Object)
+				watchErrors.Observe(err)
 				result.err = err
 				result.expired = isExpired(err)
 				return result

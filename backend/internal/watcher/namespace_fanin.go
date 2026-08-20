@@ -19,6 +19,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+
+	"github.com/charlie0129/kmgr/backend/internal/apioperation"
 )
 
 const (
@@ -568,7 +570,9 @@ func openNamespaceWatch(
 			childOptions := options
 			childOptions.ResourceVersion = revisions[index]
 			childOptions.Continue = ""
-			results[index].stream, results[index].err = open(streamCtx, stream, childOptions)
+			childContext, observer := apioperation.WithWatchErrorObserver(streamCtx)
+			results[index].observer = observer
+			results[index].stream, results[index].err = open(childContext, stream, childOptions)
 		}(index, stream)
 	}
 	wait.Wait()
@@ -590,14 +594,17 @@ func openNamespaceWatch(
 		}
 	}
 	children := make([]watch.Interface, len(results))
+	observers := make([]*apioperation.WatchErrorObserver, len(results))
 	for index, result := range results {
 		children[index] = result.stream
+		observers[index] = result.observer
 	}
 	merged := &namespaceWatch{
 		ctx:       streamCtx,
 		cancel:    cancel,
 		streams:   streams,
 		children:  children,
+		observers: observers,
 		revisions: append([]string(nil), revisions...),
 		result:    make(chan watch.Event),
 	}
@@ -614,8 +621,9 @@ func stopNamespaceWatches(results []namespaceWatchOpenResult) {
 }
 
 type namespaceWatchOpenResult struct {
-	stream watch.Interface
-	err    error
+	stream   watch.Interface
+	observer *apioperation.WatchErrorObserver
+	err      error
 }
 
 type namespaceWatch struct {
@@ -623,6 +631,7 @@ type namespaceWatch struct {
 	cancel    context.CancelFunc
 	streams   []NamespaceStream
 	children  []watch.Interface
+	observers []*apioperation.WatchErrorObserver
 	revisions []string
 	result    chan watch.Event
 	stopOnce  sync.Once
@@ -685,6 +694,10 @@ func (w *namespaceWatch) run() {
 				return
 			}
 			event := incomingEvent.event
+			if event.Type == watch.Error && incomingEvent.index >= 0 &&
+				incomingEvent.index < len(w.observers) {
+				w.observers[incomingEvent.index].Observe(apierrors.FromObject(event.Object))
+			}
 			if event.Type != watch.Error {
 				checkpointed, err := checkpointNamespaceEvent(
 					w.streams,

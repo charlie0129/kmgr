@@ -150,7 +150,7 @@ public struct EngineClusterConnectionActivityProvider: ClusterConnectionActivity
             bytesSent: event.apiBytesSent,
             authorityWarmCache: warmCacheUsage(from: event.authorityWarmCache),
             globalWarmCache: warmCacheUsage(from: event.globalWarmCache),
-            issue: event.hasError ? EngineClusterContextProvider.issue(from: event.error) : nil
+            errorMessage: event.errorMessage.isEmpty ? nil : event.errorMessage
         )
     }
 
