@@ -69,7 +69,7 @@ public struct DiagnosticsPreferences: Codable, Hashable, Sendable {
 }
 
 public struct NodeShellPreferences: Codable, Hashable, Sendable {
-    public static let defaultImage = "zcr.zhipuai-infra.cn/infra/alpine:3.22"
+    public static let defaultImage = "alpine:latest"
 
     public var globalImage: String
     public var clusterImagesByContextReference: [String: String]
