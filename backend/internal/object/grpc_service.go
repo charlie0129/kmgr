@@ -204,21 +204,14 @@ func (s *GRPCService) WatchObject(
 						if value.GetResourceVersion() != "" {
 							resourceVersion = value.GetResourceVersion()
 						}
-						sequence++
 						if event.Type == watch.Bookmark {
-							if err := stream.Send(&kmgrv1.ObjectEvent{
-								Cursor: objectCursor(request, sequence),
-								Type:   kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_STATUS,
-								Object: &kmgrv1.GetObjectResponse{
-									RequestId: requestID, Identity: request.GetIdentity(),
-									ResourceVersion: resourceVersion,
-								},
-							}); err != nil {
-								return &objectWatchStreamSendError{err: err}
-							}
+							// A server may still send an unsolicited bookmark. Use it
+							// only as the reconnect cursor; collection progress is not
+							// a selected-object UI event.
 							retryAttempt = 0
 							continue
 						}
+						sequence++
 						if event.Type != watch.Added && event.Type != watch.Modified && event.Type != watch.Deleted {
 							return fmt.Errorf("%w: unsupported event type %q", ErrInvalidObjectWatchEvent, event.Type)
 						}

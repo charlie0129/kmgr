@@ -88,8 +88,8 @@ struct TableLayoutBindingTests {
         #expect(fixture.store.successfulPersistenceCount == 1)
     }
 
-    @Test("adaptive final-column sizing stays local to each window")
-    func adaptiveSizingDoesNotOverwriteSharedPreference() throws {
+    @Test("adaptive sizing stays local until an explicit resize takes ownership")
+    func adaptiveSizingYieldsToUserResize() throws {
         let fixture = try tableLayoutBindingFixture()
         defer { fixture.defaults.removePersistentDomain(forName: fixture.suite) }
         let first = fixedTable([("field", 180), ("value", 360)])
@@ -109,6 +109,7 @@ struct TableLayoutBindingTests {
         secondBinding.fitLastColumn(to: 500)
         #expect(first.tableColumns[1].width > second.tableColumns[1].width)
         #expect(fixture.store.layout(for: .objectSummary) == nil)
+        let visibleAdaptiveWidth = first.tableColumns[1].width
 
         first.tableColumns[0].width = 260
         NotificationCenter.default.post(
@@ -118,11 +119,15 @@ struct TableLayoutBindingTests {
 
         #expect(fixture.store.layout(for: .objectSummary) == TableLayout(columns: [
             .init(id: "field", width: 260),
-            .init(id: "value", width: 360),
+            .init(id: "value", width: Double(visibleAdaptiveWidth)),
         ]))
         #expect(first.tableColumns[0].width == 260)
         #expect(second.tableColumns[0].width == 260)
         #expect(first.tableColumns[1].width > second.tableColumns[1].width)
+
+        let userLayout = first.tableColumns.map(\.width)
+        firstBinding.fitLastColumn(to: 420)
+        #expect(first.tableColumns.map(\.width) == userLayout)
     }
 
     @Test("fixed table schema mismatch resets only that saved surface")

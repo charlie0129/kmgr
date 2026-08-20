@@ -487,8 +487,15 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private func updateSummaryTableGeometry() {
         let width = max(1, summaryScrollView.contentSize.width)
         summaryTableLayoutBinding?.fitLastColumn(to: width)
-        if abs(summaryTable.frame.width - width) > 0.5 {
-            summaryTable.setFrameSize(NSSize(width: width, height: summaryTable.frame.height))
+        let columnWidth = summaryTable.tableColumns.reduce(0) { $0 + $1.width }
+            + summaryTable.intercellSpacing.width
+                * CGFloat(max(0, summaryTable.tableColumns.count - 1))
+        let documentWidth = max(width, columnWidth)
+        if abs(summaryTable.frame.width - documentWidth) > 0.5 {
+            summaryTable.setFrameSize(NSSize(
+                width: documentWidth,
+                height: summaryTable.frame.height
+            ))
         }
     }
 
@@ -616,7 +623,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         summaryTable.menu = summaryMenu
         summaryScrollView.documentView = summaryTable
         summaryScrollView.hasVerticalScroller = true
-        summaryScrollView.hasHorizontalScroller = false
+        summaryScrollView.hasHorizontalScroller = true
         summaryScrollView.autohidesScrollers = true
         summaryScrollView.identifier = .init("object-detail-summary-scroll")
         summaryTableLayoutBinding = TableLayoutBinding(
@@ -984,6 +991,14 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     severity: .warning
                 ))
             }
+            return
+        }
+        // Kubernetes resourceVersion identifies the complete serialized
+        // object. Re-presenting the same version only reloads both tables and
+        // restarts YAML preparation without adding any information.
+        if !updated.resourceVersion.isEmpty,
+            updated.resourceVersion == detail?.resourceVersion
+        {
             return
         }
         let presented = ObjectDetailWatchPresentation.merging(updated, previous: detail)

@@ -244,6 +244,74 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(!editor.string.contains("latest-manager"))
     }
 
+    @Test("a duplicate object resource version does not rebuild Details")
+    func duplicateResourceVersionIsIgnored() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: "pods",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let initialYAML = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: api\n"
+        let duplicateYAML = initialYAML + "status:\n  phase: Duplicate\n"
+        let watch = AsyncThrowingStream<ObjectWatchEvent, Error>.makeStream()
+        let probe = YAMLPresentationBuilderProbe()
+        probe.releaseBlockedBuild()
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: LoadedObjectDetailProvider(
+                detail: ObjectDetail(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    yamlUTF8: Data(initialYAML.utf8)
+                ),
+                data: ObjectData(
+                    identity: identity,
+                    resourceVersion: "rv-1",
+                    entries: [],
+                    secret: false
+                ),
+                objectWatch: watch.stream
+            ),
+            initialTab: .yaml,
+            yamlPresentationBuilder: { probe.build($0) }
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer {
+            watch.continuation.finish()
+            controller.stop()
+        }
+        let editor = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Kubernetes object YAML" })
+        try await waitUntil {
+            probe.completedBuildCount == 1 && editor.string == initialYAML
+        }
+
+        watch.continuation.yield(.updated(
+            cursor: StreamCursor(generation: 1, sequence: 1),
+            detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-1",
+                yamlUTF8: Data(duplicateYAML.utf8)
+            )
+        ))
+        watch.continuation.yield(.status(
+            cursor: StreamCursor(generation: 1, sequence: 2),
+            resourceVersion: "rv-1"
+        ))
+        try await waitUntil {
+            controller.workspaceStatus.text == "Watching · resource version rv-1"
+        }
+
+        #expect(probe.buildCount == 1)
+        #expect(editor.string == initialYAML)
+    }
+
     @Test("rapid YAML updates stay coherent and coalesce to the latest presentation")
     func rapidManagedFieldsUpdatesStayCoherentAndBounded() async throws {
         let identity = ResourceIdentity(

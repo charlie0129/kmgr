@@ -27,7 +27,10 @@ func (r *Reader) Watch(
 		return nil, err
 	}
 	return resource.Watch(ctx, metav1.ListOptions{
-		AllowWatchBookmarks: true,
+		// A name-scoped Details watch already has an authoritative object
+		// resourceVersion. Collection bookmarks add idle traffic but contain no
+		// new object state, so keep them disabled here.
+		AllowWatchBookmarks: false,
 		FieldSelector:       fields.OneTermEqualSelector("metadata.name", identity.Name).String(),
 		ResourceVersion:     resourceVersion,
 	})

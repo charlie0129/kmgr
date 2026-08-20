@@ -24,7 +24,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestWatchObjectPinsUIDMapsUpdatesAndBookmarks(t *testing.T) {
+func TestWatchObjectPinsUIDMapsUpdatesAndKeepsBookmarksInternal(t *testing.T) {
 	t.Parallel()
 	pod := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "uid")
 	scheme := runtime.NewScheme()
@@ -63,6 +63,10 @@ func TestWatchObjectPinsUIDMapsUpdatesAndBookmarks(t *testing.T) {
 	bookmark := &unstructured.Unstructured{}
 	bookmark.SetResourceVersion("rv-3")
 	fakeWatch.Action(watch.Bookmark, bookmark)
+	updatedAgain := updated.DeepCopy()
+	updatedAgain.SetResourceVersion("rv-4")
+	updatedAgain.Object["status"] = map[string]any{"phase": "Succeeded"}
+	fakeWatch.Modify(updatedAgain)
 	stream.waitForCount(t, 3)
 	cancel()
 	if err := <-done; status.Code(err) != codes.Canceled {
@@ -82,9 +86,9 @@ func TestWatchObjectPinsUIDMapsUpdatesAndBookmarks(t *testing.T) {
 		len(events[1].GetObject().GetYamlUtf8()) == 0 {
 		t.Fatalf("update = %#v", events[1])
 	}
-	if events[2].GetType() != kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_STATUS ||
-		events[2].GetObject().GetResourceVersion() != "rv-3" {
-		t.Fatalf("bookmark = %#v", events[2])
+	if events[2].GetType() != kmgrv1.ObjectEventType_OBJECT_EVENT_TYPE_UPDATED ||
+		events[2].GetObject().GetResourceVersion() != "rv-4" {
+		t.Fatalf("post-bookmark update = %#v", events[2])
 	}
 	for index, event := range events {
 		if event.GetCursor().GetStreamId() != "object-stream" ||

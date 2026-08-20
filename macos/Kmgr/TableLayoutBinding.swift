@@ -13,6 +13,7 @@ final class TableLayoutBinding: NSObject {
     private var preferredLayout: TableLayout
     private var renderedWidths: [String: Double] = [:]
     private var adaptiveLastColumnAvailableWidth: Double?
+    private var adaptiveLastColumnWasReplacedByUser = false
     private var isApplyingStoreLayout = false
     private var isInvalidated = false
 
@@ -88,7 +89,9 @@ final class TableLayoutBinding: NSObject {
     /// to share one stable user layout without synchronization feedback.
     func fitLastColumn(to availableWidth: CGFloat) {
         let width = Double(availableWidth)
-        guard width.isFinite, width > 0 else { return }
+        guard width.isFinite, width > 0,
+            !adaptiveLastColumnWasReplacedByUser
+        else { return }
         adaptiveLastColumnAvailableWidth = width
         renderPreferredLayout()
     }
@@ -98,6 +101,16 @@ final class TableLayoutBinding: NSObject {
             let tableView, notification.object as? NSTableView === tableView
         else { return }
         let actual = Self.capture(tableView)
+        let endedAdaptiveFit = notification.name == NSTableView.columnDidResizeNotification
+            && adaptiveLastColumnAvailableWidth != nil
+        if endedAdaptiveFit {
+            // Once the user resizes any column, the complete visible layout is
+            // their preference. Persist it exactly and stop treating the last
+            // column as viewport-owned; otherwise every resize notification or
+            // data reload snaps that divider back under the pointer.
+            adaptiveLastColumnAvailableWidth = nil
+            adaptiveLastColumnWasReplacedByUser = true
+        }
         let preferredWidths = Dictionary(uniqueKeysWithValues:
             preferredLayout.columns.map { ($0.id, $0.width) }
         )
@@ -113,6 +126,7 @@ final class TableLayoutBinding: NSObject {
             // last render are explicit external/user changes. Preserve any
             // adaptive columns that were not part of this resize gesture.
             columns = actual.columns.map { column in
+                if endedAdaptiveFit { return column }
                 let rendered = renderedWidths[column.id]
                 let changed = rendered.map { abs($0 - column.width) > 0.5 } ?? true
                 return .init(
@@ -129,6 +143,8 @@ final class TableLayoutBinding: NSObject {
     private func install(_ saved: TableLayout?) {
         guard !isInvalidated, let tableView else { return }
         guard let saved else {
+            adaptiveLastColumnAvailableWidth = nil
+            adaptiveLastColumnWasReplacedByUser = false
             preferredLayout = defaultLayout
             renderPreferredLayout()
             return
