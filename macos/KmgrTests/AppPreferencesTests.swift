@@ -19,6 +19,12 @@ import Testing
     preferences.diagnostics = DiagnosticsPreferences(
         completedOperationHistoryLimit: 4_000
     )
+    preferences.nodeShell = NodeShellPreferences(
+        globalImage: "registry.example/global-node-shell:1",
+        clusterImagesByContextReference: [
+            "context-ref-a": "registry.example/cluster-node-shell:2",
+        ]
+    )
     preferences.metricsRefreshSeconds = 30
     preferences.defaultNamespace = .allNamespaces
     preferences.restoreOpenClusterWindows = false
@@ -50,6 +56,7 @@ import Testing
     #expect(reloaded.current.logs.byteLimit == 32 << 20)
     #expect(reloaded.current.logs.maximumDisplayedLineUTF8Bytes == 8 << 10)
     #expect(reloaded.current.diagnostics.completedOperationHistoryLimit == 4_000)
+    #expect(reloaded.current.nodeShell == preferences.nodeShell)
     #expect(reloaded.current.metricsRefreshSeconds == 30)
     #expect(reloaded.current.defaultNamespace == .allNamespaces)
     #expect(!reloaded.current.restoreOpenClusterWindows)
@@ -152,10 +159,33 @@ import Testing
     #expect(ConfirmationPreferences.alwaysConfirmNonLoopbackPortForward)
     #expect(ConfirmationPreferences.alwaysShowClusterAndNamespaceIdentity)
     #expect(KeyboardShortcutReference.defaults.contains { $0.keys == "S" })
+    #expect(KeyboardShortcutReference.defaults.contains { $0.keys == "⇧S" })
     #expect(KeyboardShortcutReference.defaults.contains {
         $0.keys == "⇧⌘N" && $0.action.contains("namespace")
     })
     #expect(AppPreferences().restoreOpenClusterWindows)
+}
+
+@Test func nodeShellPreferencesChooseClusterOverrideAndRejectUnsafeValues() {
+    var preferences = NodeShellPreferences(globalImage: "registry.example/global:1")
+    #expect(preferences.effectiveImage(contextReference: "cluster-a")
+        == "registry.example/global:1")
+    preferences.setClusterImage(
+        "registry.example/cluster:2",
+        contextReference: "cluster-a"
+    )
+    #expect(preferences.effectiveImage(contextReference: "cluster-a")
+        == "registry.example/cluster:2")
+    preferences.setClusterImage(nil, contextReference: "cluster-a")
+    #expect(preferences.effectiveImage(contextReference: "cluster-a")
+        == "registry.example/global:1")
+    #expect(NodeShellPreferences.isValidImage("registry.example/ns/image:tag"))
+    #expect(!NodeShellPreferences.isValidImage(" registry.example/image:tag"))
+    #expect(!NodeShellPreferences.isValidImage("registry.example/image\nsecret"))
+
+    var app = AppPreferences()
+    app.nodeShell.globalImage = "bad image"
+    #expect(app.validationIssues().contains { $0.field == "nodeShell.globalImage" })
 }
 
 @MainActor
@@ -229,6 +259,7 @@ import Testing
     updated.appearance = .dark
     updated.logs.recordLimit += 1_000
     updated.diagnostics.completedOperationHistoryLimit += 1
+    updated.nodeShell.globalImage = "registry.example/node-shell:2"
     updated.confirmations.confirmScaling.toggle()
     updated.defaultNamespace = .allNamespaces
     updated.restoreOpenClusterWindows = false
@@ -240,7 +271,7 @@ import Testing
     let delta = AppPreferencesDelta(previous: previous, updated: updated)
 
     #expect(delta.changes(activated: .immediate) == [
-        .appearance, .logDisplay, .confirmations, .operationHistory,
+        .appearance, .logDisplay, .confirmations, .operationHistory, .nodeShell,
     ])
     #expect(delta.changes(activated: .newWorkspace) == [
         .defaultNamespace, .viewportOverscan,

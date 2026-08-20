@@ -140,7 +140,7 @@ func (s *GRPCService) Exec(stream grpc.BidiStreamingServer[kmgrv1.ExecClientMess
 			serverSequence++
 			message := deliveryToProto(
 				result.delivery, request.ExecSessionID, request.Generation, serverSequence,
-				session.ContextName(), session.Pod(),
+				session.ContextName(), session.Target(),
 			)
 			if err := stream.Send(message); err != nil {
 				return err
@@ -248,26 +248,45 @@ func startFromProto(message *kmgrv1.ExecClientMessage) (StartRequest, error) {
 		return StartRequest{}, fmt.Errorf("%w: stream ID, generation, and sequence are required", ErrInvalidRequest)
 	}
 	start := message.GetStart()
-	if start == nil || start.GetContext() == nil || start.GetPod() == nil {
+	if start == nil || start.GetContext() == nil {
 		return StartRequest{}, fmt.Errorf("%w: the first payload must be a complete start request", ErrInvalidRequest)
 	}
 	if start.GetExecSessionId() != message.GetExecSessionId() || start.GetGeneration() != message.GetGeneration() {
 		return StartRequest{}, fmt.Errorf("%w: start and stream envelopes do not match", ErrInvalidRequest)
 	}
-	identity := start.GetPod()
 	request := StartRequest{
 		SessionID: start.GetContext().GetClusterSessionId(), ExecSessionID: start.GetExecSessionId(),
-		Generation: start.GetGeneration(), Container: start.GetContainer(),
-		Command: slices.Clone(start.GetCommand()), TTY: start.GetTty(), Stdin: start.GetStdin(),
-		Pod: Identity{
-			SessionID: identity.GetClusterSessionId(), Group: identity.GetGroup(), Version: identity.GetVersion(),
-			Resource: identity.GetResource(), Namespace: identity.GetNamespace(), Name: identity.GetName(), UID: identity.GetUid(),
-		},
+		Generation: start.GetGeneration(),
+		Command:    slices.Clone(start.GetCommand()), TTY: start.GetTty(), Stdin: start.GetStdin(),
+	}
+	if identity := start.GetPod(); identity != nil {
+		request.Pod = &PodTarget{
+			Pod:       identityFromProto(identity),
+			Container: start.GetContainer(),
+		}
+	}
+	if nodeShell := start.GetNodeShell(); nodeShell != nil && nodeShell.GetNode() != nil {
+		request.NodeShell = &NodeShellTarget{
+			Node:      identityFromProto(nodeShell.GetNode()),
+			Namespace: nodeShell.GetNamespace(),
+			Image:     nodeShell.GetImage(),
+		}
 	}
 	if start.GetInitialColumns() != 0 || start.GetInitialRows() != 0 {
 		request.InitialSize = &TerminalSize{Columns: start.GetInitialColumns(), Rows: start.GetInitialRows()}
 	}
 	return request, nil
+}
+
+func identityFromProto(identity *kmgrv1.ResourceIdentity) Identity {
+	if identity == nil {
+		return Identity{}
+	}
+	return Identity{
+		SessionID: identity.GetClusterSessionId(), Group: identity.GetGroup(),
+		Version: identity.GetVersion(), Resource: identity.GetResource(),
+		Namespace: identity.GetNamespace(), Name: identity.GetName(), UID: identity.GetUid(),
+	}
 }
 
 func validateClientEnvelope(message *kmgrv1.ExecClientMessage, request StartRequest, lastSequence *uint64) error {
@@ -302,7 +321,7 @@ func deliveryToProto(
 	execSessionID string,
 	generation, sequence uint64,
 	contextName string,
-	pod Identity,
+	target Identity,
 ) *kmgrv1.ExecServerMessage {
 	message := &kmgrv1.ExecServerMessage{Cursor: &kmgrv1.StreamCursor{
 		StreamId: execSessionID, Generation: generation, Sequence: sequence,
@@ -322,7 +341,7 @@ func deliveryToProto(
 			State: stateToProto(value.State), ExitCode: value.ExitCode, StatusReason: value.StatusReason,
 		}
 		if value.Err != nil {
-			converted.Error = structuredExecError(value.Err, contextName, pod)
+			converted.Error = structuredExecError(value.Err, contextName, target)
 		}
 		message.Payload = &kmgrv1.ExecServerMessage_Status{Status: converted}
 	}
@@ -377,18 +396,28 @@ func execStatusError(err error) error {
 	}
 }
 
-func structuredExecError(err error, contextName string, pod Identity) *kmgrv1.StructuredError {
+func structuredExecError(err error, contextName string, target Identity) *kmgrv1.StructuredError {
+	isNodeShell := target.Resource == "nodes"
+	operation := "exec-pod"
+	message := "The Kubernetes Pod exec session failed."
+	if isNodeShell {
+		operation = "open-node-shell"
+		message = "The Kubernetes Node shell failed."
+	}
 	result := &kmgrv1.StructuredError{
 		Category: kmgrv1.ErrorCategory_ERROR_CATEGORY_INTERNAL,
-		Reason:   "ExecFailed", Message: "The Kubernetes Pod exec session failed.",
-		ContextName: contextName, Operation: "exec-pod",
+		Reason:   "ExecFailed", Message: message,
+		ContextName: contextName, Operation: operation,
 		Resource: &kmgrv1.ResourceIdentity{
-			ClusterSessionId: pod.SessionID, Group: pod.Group, Version: pod.Version,
-			Resource: pod.Resource, Namespace: pod.Namespace, Name: pod.Name, Uid: pod.UID,
+			ClusterSessionId: target.SessionID, Group: target.Group, Version: target.Version,
+			Resource: target.Resource, Namespace: target.Namespace, Name: target.Name, Uid: target.UID,
 		},
 	}
 	kubeerrors.Enrich(result, err)
 	var mismatch *UIDMismatchError
+	var nodeMismatch *NodeUIDMismatchError
+	var helperStart *NodeShellPodStartError
+	var helperReplaced *NodeShellPodReplacedError
 	var apiStatus apierrors.APIStatus
 	switch {
 	case errors.As(err, &mismatch):
@@ -396,14 +425,39 @@ func structuredExecError(err error, contextName string, pod Identity) *kmgrv1.St
 		result.Reason = "PodRecreated"
 		result.Message = "The selected Pod was replaced before exec connected."
 		result.SafeDetails = map[string]string{"expected_uid": mismatch.Expected, "current_uid": mismatch.Actual}
+	case errors.As(err, &nodeMismatch):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		result.Reason = "NodeRecreated"
+		result.Message = "The selected Node was replaced before its shell helper started."
+		result.SafeDetails = map[string]string{
+			"expected_uid": nodeMismatch.Expected, "current_uid": nodeMismatch.Actual,
+		}
+	case errors.As(err, &helperStart):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
+		result.Reason = "NodeShellHelper" + helperStart.Reason
+		result.Message = "The temporary node-shell helper Pod could not start (" + helperStart.Reason + ")."
+		result.Retryable = true
+	case errors.As(err, &helperReplaced):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		result.Reason = "NodeShellHelperReplaced"
+		result.Message = "The temporary node-shell helper Pod was replaced before the terminal attached."
+	case errors.Is(err, ErrWindowsNodeShellUnsupported):
+		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED
+		result.Reason = "WindowsNodeShellUnsupported"
+		result.Message = "This node-shell implementation currently supports Linux Nodes only."
 	case errors.Is(err, ErrOutputBackpressure):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
 		result.Reason = "OutputBackpressure"
 		result.Message = "The terminal receiver could not keep up; the exec session was stopped to keep memory bounded."
 	case apierrors.IsNotFound(err):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
-		result.Reason = "PodOrContainerNotFound"
-		result.Message = "The selected Pod or container was not found."
+		if isNodeShell {
+			result.Reason = "NodeOrHelperNamespaceNotFound"
+			result.Message = "The selected Node or node-shell helper namespace was not found."
+		} else {
+			result.Reason = "PodOrContainerNotFound"
+			result.Message = "The selected Pod or container was not found."
+		}
 	case apierrors.IsUnauthorized(err):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION
 		result.Reason = "AuthenticationRejected"
@@ -411,11 +465,19 @@ func structuredExecError(err error, contextName string, pod Identity) *kmgrv1.St
 	case apierrors.IsForbidden(err):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHORIZATION
 		result.Reason = "Forbidden"
-		result.Message = "The configured identity is not authorized to exec into this Pod."
+		if isNodeShell {
+			result.Message = "The configured identity is not authorized to create or attach to the privileged node-shell helper Pod."
+		} else {
+			result.Message = "The configured identity is not authorized to exec into this Pod."
+		}
 	case errors.Is(err, context.DeadlineExceeded):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TIMEOUT
 		result.Reason = "ExecTimedOut"
-		result.Message = "The Pod exec session timed out."
+		if isNodeShell {
+			result.Message = "The node-shell helper did not become ready before the timeout."
+		} else {
+			result.Message = "The Pod exec session timed out."
+		}
 	case errors.As(err, &apiStatus):
 		value := apiStatus.Status()
 		result.HttpStatusCode = value.Code

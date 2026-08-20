@@ -22,11 +22,14 @@ func (f runnerFunc) Run(ctx context.Context, request StartRequest, options RunOp
 func testStart(generation uint64) StartRequest {
 	return StartRequest{
 		SessionID: "cluster-session", ExecSessionID: "terminal", Generation: generation,
-		Pod: Identity{
-			SessionID: "cluster-session", Version: "v1", Resource: "pods",
-			Namespace: "default", Name: "api-0", UID: "pod-uid",
+		Pod: &PodTarget{
+			Pod: Identity{
+				SessionID: "cluster-session", Version: "v1", Resource: "pods",
+				Namespace: "default", Name: "api-0", UID: "pod-uid",
+			},
+			Container: "main",
 		},
-		Container: "main", Command: []string{"/bin/sh"}, TTY: true, Stdin: true,
+		Command: []string{"/bin/sh"}, TTY: true, Stdin: true,
 		InitialSize: &TerminalSize{Columns: 80, Rows: 24},
 	}
 }
@@ -110,7 +113,8 @@ func TestManagerCarriesStdinAndDistinctOutputs(t *testing.T) {
 	if !containsState(states, StateConnecting) || !containsState(states, StateRunning) || !containsState(states, StateExited) {
 		t.Fatalf("states = %v", states)
 	}
-	if capturedRequest.Container != "main" || capturedRequest.Command[0] != "/bin/sh" {
+	if capturedRequest.Pod == nil || capturedRequest.Pod.Container != "main" ||
+		capturedRequest.Command[0] != "/bin/sh" {
 		t.Fatalf("request = %#v", capturedRequest)
 	}
 }

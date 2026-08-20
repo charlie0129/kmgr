@@ -16,6 +16,55 @@ public struct PodExecTarget: Hashable, Sendable {
     }
 }
 
+public struct NodeShellTarget: Hashable, Sendable {
+    public var node: ResourceIdentity
+
+    public init(node: ResourceIdentity) {
+        self.node = node
+    }
+}
+
+public struct PodExecDestination: Hashable, Sendable {
+    public var pod: ResourceIdentity
+    public var container: String
+
+    public init(pod: ResourceIdentity, container: String) {
+        self.pod = pod
+        self.container = container
+    }
+}
+
+public struct NodeShellDestination: Hashable, Sendable {
+    public var node: ResourceIdentity
+    public var namespace: String
+    public var image: String
+
+    public init(node: ResourceIdentity, namespace: String, image: String) {
+        self.node = node
+        self.namespace = namespace
+        self.image = image
+    }
+}
+
+public enum ExecSessionTarget: Hashable, Sendable {
+    case pod(PodExecDestination)
+    case nodeShell(NodeShellDestination)
+
+    public var identity: ResourceIdentity {
+        switch self {
+        case .pod(let destination): destination.pod
+        case .nodeShell(let destination): destination.node
+        }
+    }
+
+    public var operationDescription: String {
+        switch self {
+        case .pod: "exec Pod"
+        case .nodeShell: "open Node shell"
+        }
+    }
+}
+
 public struct TerminalSize: Hashable, Sendable {
     public var columns: UInt32
     public var rows: UInt32
@@ -31,10 +80,9 @@ public struct ExecSessionRequest: Hashable, Sendable {
     public var sessionID: String
     public var execSessionID: String
     public var generation: UInt64
-    public var pod: ResourceIdentity
+    public var target: ExecSessionTarget
     public var contextName: String
     public var clusterName: String
-    public var container: String
     public var command: [String]
     public var tty: Bool
     public var stdin: Bool
@@ -44,10 +92,9 @@ public struct ExecSessionRequest: Hashable, Sendable {
         sessionID: String,
         execSessionID: String,
         generation: UInt64,
-        pod: ResourceIdentity,
+        target: ExecSessionTarget,
         contextName: String,
         clusterName: String = "",
-        container: String,
         command: [String],
         tty: Bool = true,
         stdin: Bool = true,
@@ -56,10 +103,9 @@ public struct ExecSessionRequest: Hashable, Sendable {
         self.sessionID = sessionID
         self.execSessionID = execSessionID
         self.generation = generation
-        self.pod = pod
+        self.target = target
         self.contextName = contextName
         self.clusterName = clusterName
-        self.container = container
         self.command = command
         self.tty = tty
         self.stdin = stdin

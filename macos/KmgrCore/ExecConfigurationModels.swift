@@ -200,16 +200,120 @@ public enum AutomaticExecLaunchPlanner {
             sessionID: session.sessionID,
             execSessionID: execSessionID,
             generation: 1,
-            pod: pod,
+            target: .pod(PodExecDestination(pod: pod, container: candidate.name)),
             contextName: session.contextName,
             clusterName: session.clusterName,
-            container: candidate.name,
             command: ["/bin/bash"]
         )
         return AutomaticExecLaunchPlan(
             request: request,
             fallbackShellCommand: ["/bin/sh"]
         )
+    }
+}
+
+public struct NodeShellLaunchPlan: Hashable, Sendable {
+    public var request: ExecSessionRequest
+    public var fallbackShellCommand: [String]?
+
+    public init(request: ExecSessionRequest, fallbackShellCommand: [String]?) {
+        self.request = request
+        self.fallbackShellCommand = fallbackShellCommand
+    }
+}
+
+public enum NodeShellLaunchPlanner {
+    public static func plan(
+        session: OpenedClusterSession,
+        target: NodeShellTarget,
+        image: String,
+        namespace: String,
+        command: [String] = ["bash", "-l"],
+        fallbackShellCommand: [String]? = ["sh", "-l"],
+        execSessionID: String
+    ) throws -> NodeShellLaunchPlan {
+        let node = target.node
+        guard node.clusterSessionID == session.sessionID,
+            node.group.isEmpty,
+            node.version == "v1",
+            node.resource == "nodes",
+            node.namespace.isEmpty,
+            !node.name.isEmpty,
+            !node.uid.rawValue.isEmpty
+        else { throw NodeShellLaunchError.invalidNodeIdentity }
+        guard NodeShellPreferences.isValidImage(image) else {
+            throw NodeShellLaunchError.invalidImage
+        }
+        guard isValidNamespace(namespace) else {
+            throw NodeShellLaunchError.invalidNamespace
+        }
+        guard !execSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NodeShellLaunchError.invalidExecSessionID
+        }
+        let validatedCommand = try ExecCommandChoice.executable(
+            path: command.first ?? "",
+            arguments: Array(command.dropFirst())
+        ).validatedCommand()
+        let request = ExecSessionRequest(
+            sessionID: session.sessionID,
+            execSessionID: execSessionID,
+            generation: 1,
+            target: .nodeShell(NodeShellDestination(
+                node: node,
+                namespace: namespace,
+                image: image
+            )),
+            contextName: session.contextName,
+            clusterName: session.clusterName,
+            command: validatedCommand
+        )
+        return NodeShellLaunchPlan(
+            request: request,
+            fallbackShellCommand: fallbackShellCommand
+        )
+    }
+
+    public static func defaultNamespace(for session: OpenedClusterSession) -> String {
+        let value = session.defaultNamespace.trimmingCharacters(in: .whitespacesAndNewlines)
+        return isValidNamespace(value) ? value : "default"
+    }
+
+    public static func isValidNamespace(_ value: String) -> Bool {
+        let bytes = value.utf8
+        guard !bytes.isEmpty, bytes.count <= 63,
+            let first = bytes.first, let last = bytes.last,
+            isLowercaseLetterOrDigit(first),
+            isLowercaseLetterOrDigit(last)
+        else { return false }
+        return bytes.allSatisfy { byte in
+            isLowercaseLetterOrDigit(byte) || byte == 0x2d
+        }
+    }
+
+    private static func isLowercaseLetterOrDigit(_ byte: UInt8) -> Bool {
+        (byte >= 0x61 && byte <= 0x7a) || (byte >= 0x30 && byte <= 0x39)
+    }
+}
+
+public enum NodeShellLaunchError: Error, Hashable, Sendable {
+    case invalidNodeIdentity
+    case invalidImage
+    case invalidNamespace
+    case invalidExecSessionID
+}
+
+extension NodeShellLaunchError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .invalidNodeIdentity:
+            "Node shell requires one complete, UID-pinned core/v1 Node from this cluster session."
+        case .invalidImage:
+            "Enter a nonempty helper image reference without whitespace or control characters."
+        case .invalidNamespace:
+            "The helper namespace must be a lowercase Kubernetes namespace name of at most 63 characters."
+        case .invalidExecSessionID:
+            "The terminal session identifier is invalid."
+        }
     }
 }
 

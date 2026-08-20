@@ -2,6 +2,52 @@ import AppKit
 import KmgrCore
 import SwiftTerm
 
+private struct TerminalTargetPresentation {
+    var titleName: String
+    var subtitle: String
+    var displayName: String
+    var accessibilityLabel: String
+    var toolbarText: String
+    var toolbarToolTip: String
+    var closeDetails: String
+
+    init(request: ExecSessionRequest) {
+        let cluster = ClusterIdentityPresentation(
+            clusterName: request.clusterName,
+            contextName: request.contextName
+        )
+        switch request.target {
+        case .pod(let destination):
+            let pod = destination.pod
+            let qualifiedName = pod.namespace.isEmpty
+                ? pod.name : "\(pod.namespace)/\(pod.name)"
+            titleName = pod.name
+            subtitle = "\(qualifiedName) · \(destination.container)"
+            displayName = qualifiedName
+            accessibilityLabel = "Terminal for Pod \(qualifiedName), container \(destination.container)"
+            toolbarText = "\(cluster.titlePrefix) · \(qualifiedName) · \(destination.container)"
+            toolbarToolTip = "\(cluster.labeledInline), Pod \(qualifiedName), container \(destination.container)"
+            closeDetails = """
+            \(cluster.targetDetails(pod))
+            Container: \(destination.container)
+            """
+        case .nodeShell(let destination):
+            let node = destination.node
+            titleName = node.name
+            subtitle = "Node \(node.name) · helper namespace \(destination.namespace)"
+            displayName = "node/\(node.name)"
+            accessibilityLabel = "Terminal for Node \(node.name)"
+            toolbarText = "\(cluster.titlePrefix) · node/\(node.name) · host shell"
+            toolbarToolTip = "\(cluster.labeledInline), Node \(node.name), helper namespace \(destination.namespace), image \(destination.image)"
+            closeDetails = """
+            \(cluster.targetDetails(node))
+            Helper namespace: \(destination.namespace)
+            Helper image: \(destination.image)
+            """
+        }
+    }
+}
+
 /// One remote process in one independent window. Reconnect always asks the
 /// provider to create a new generation; this controller never reuses a dead
 /// stream or persists terminal contents.
@@ -32,8 +78,9 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             clusterName: request.clusterName,
             contextName: request.contextName
         )
-        window.title = "\(clusterPresentation.titlePrefix) — Terminal — \(request.pod.name)"
-        window.subtitle = Self.subtitle(for: request)
+        let targetPresentation = TerminalTargetPresentation(request: request)
+        window.title = "\(clusterPresentation.titlePrefix) — Terminal — \(targetPresentation.titleName)"
+        window.subtitle = targetPresentation.subtitle
         window.minSize = NSSize(width: 560, height: 360)
         window.tabbingMode = .disallowed
         window.isRestorable = false
@@ -78,19 +125,10 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         onClose?()
     }
 
-    private static func subtitle(for request: ExecSessionRequest) -> String {
-        let namespace = request.pod.namespace.isEmpty ? "default" : request.pod.namespace
-        return "\(namespace)/\(request.pod.name) · \(request.container)"
-    }
-
     static func closeConfirmationInformativeText(for request: ExecSessionRequest) -> String {
-        let clusterPresentation = ClusterIdentityPresentation(
-            clusterName: request.clusterName,
-            contextName: request.contextName
-        )
+        let target = TerminalTargetPresentation(request: request)
         return """
-        \(clusterPresentation.targetDetails(request.pod))
-        Container: \(request.container)
+        \(target.closeDetails)
 
         Closing this window will terminate the remote process.
         """
@@ -102,10 +140,11 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     NSToolbarDelegate
 {
     let terminalView: TerminalView
-    let podDisplayName: String
+    let targetDisplayName: String
     var onConfirmedEOFExit: (() -> Void)?
 
     private let baseRequest: ExecSessionRequest
+    private let targetPresentation: TerminalTargetPresentation
     private let provider: any ExecSessionProviding
     private let fallbackShellCommand: [String]?
     private let statusLabel = NSTextField(labelWithString: "Not connected")
@@ -144,12 +183,13 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         fallbackShellCommand: [String]? = nil
     ) {
         baseRequest = request
+        let targetPresentation = TerminalTargetPresentation(request: request)
+        self.targetPresentation = targetPresentation
         self.provider = provider
         self.fallbackShellCommand = fallbackShellCommand
         generation = request.generation
         activeCommand = request.command
-        podDisplayName = request.pod.namespace.isEmpty
-            ? request.pod.name : "\(request.pod.namespace)/\(request.pod.name)"
+        targetDisplayName = targetPresentation.displayName
         var options = TerminalOptions.default
         options.cols = Int(request.initialSize?.columns ?? 80)
         options.rows = Int(request.initialSize?.rows ?? 24)
@@ -163,7 +203,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         super.init(nibName: nil, bundle: nil)
         terminalView.terminalDelegate = self
         terminalView.configureNativeColors()
-        terminalView.setAccessibilityLabel("Terminal for \(podDisplayName), container \(request.container)")
+        terminalView.setAccessibilityLabel(targetPresentation.accessibilityLabel)
     }
 
     @available(*, unavailable)
@@ -272,7 +312,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
                         message: "The engine cancelled the terminal connection attempt.",
                         retryable: true,
                         contextName: baseRequest.contextName,
-                        operation: "exec Pod"
+                        operation: baseRequest.target.operationDescription
                     )
                 )
             } catch {
@@ -368,7 +408,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
                 message: "The terminal disconnected from the engine.",
                 retryable: true,
                 contextName: baseRequest.contextName,
-                operation: "exec Pod"
+                operation: baseRequest.target.operationDescription
             ))
             if startFallbackShellIfNeeded(from: attemptGeneration) { return }
         }
@@ -447,7 +487,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             message: "The terminal disconnected from the engine.",
             retryable: true,
             contextName: baseRequest.contextName,
-            operation: "exec Pod"
+            operation: baseRequest.target.operationDescription
         )
         state = .failed
         lastIssue = issue
@@ -601,15 +641,11 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     ) -> NSToolbarItem? {
         switch itemIdentifier {
         case .identity:
-            let clusterPresentation = ClusterIdentityPresentation(
-                clusterName: baseRequest.clusterName,
-                contextName: baseRequest.contextName
-            )
             let label = NSTextField(
-                labelWithString: "\(clusterPresentation.titlePrefix) · \(podDisplayName) · \(baseRequest.container)"
+                labelWithString: targetPresentation.toolbarText
             )
             label.lineBreakMode = .byTruncatingMiddle
-            label.toolTip = "\(clusterPresentation.labeledInline), Pod \(podDisplayName), container \(baseRequest.container)"
+            label.toolTip = targetPresentation.toolbarToolTip
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Target"
             item.view = label

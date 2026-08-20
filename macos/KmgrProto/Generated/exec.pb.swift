@@ -134,11 +134,45 @@ public struct Kmgr_V1_ExecStart: @unchecked Sendable {
     set {_uniqueStorage()._initialRows = newValue}
   }
 
+  public var nodeShell: Kmgr_V1_NodeShellStart {
+    get {return _storage._nodeShell ?? Kmgr_V1_NodeShellStart()}
+    set {_uniqueStorage()._nodeShell = newValue}
+  }
+  /// Returns true if `nodeShell` has been explicitly set.
+  public var hasNodeShell: Bool {return _storage._nodeShell != nil}
+  /// Clears the value of `nodeShell`. Subsequent reads from it will return its default value.
+  public mutating func clearNodeShell() {_uniqueStorage()._nodeShell = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public struct Kmgr_V1_NodeShellStart: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var node: Kmgr_V1_ResourceIdentity {
+    get {return _node ?? Kmgr_V1_ResourceIdentity()}
+    set {_node = newValue}
+  }
+  /// Returns true if `node` has been explicitly set.
+  public var hasNode: Bool {return self._node != nil}
+  /// Clears the value of `node`. Subsequent reads from it will return its default value.
+  public mutating func clearNode() {self._node = nil}
+
+  public var namespace: String = String()
+
+  public var image: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _node: Kmgr_V1_ResourceIdentity? = nil
 }
 
 public struct Kmgr_V1_TerminalResize: Sendable {
@@ -330,7 +364,7 @@ extension Kmgr_V1_ExecConnectionState: SwiftProtobuf._ProtoNameProviding {
 
 extension Kmgr_V1_ExecStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecStart"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}exec_session_id\0\u{1}generation\0\u{1}pod\0\u{1}container\0\u{1}command\0\u{1}tty\0\u{1}stdin\0\u{3}initial_columns\0\u{3}initial_rows\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}exec_session_id\0\u{1}generation\0\u{1}pod\0\u{1}container\0\u{1}command\0\u{1}tty\0\u{1}stdin\0\u{3}initial_columns\0\u{3}initial_rows\0\u{3}node_shell\0")
 
   fileprivate class _StorageClass {
     var _context: Kmgr_V1_RequestContext? = nil
@@ -343,6 +377,7 @@ extension Kmgr_V1_ExecStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
     var _stdin: Bool = false
     var _initialColumns: UInt32 = 0
     var _initialRows: UInt32 = 0
+    var _nodeShell: Kmgr_V1_NodeShellStart? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -363,6 +398,7 @@ extension Kmgr_V1_ExecStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
       _stdin = source._stdin
       _initialColumns = source._initialColumns
       _initialRows = source._initialRows
+      _nodeShell = source._nodeShell
     }
   }
 
@@ -391,6 +427,7 @@ extension Kmgr_V1_ExecStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
         case 8: try { try decoder.decodeSingularBoolField(value: &_storage._stdin) }()
         case 9: try { try decoder.decodeSingularUInt32Field(value: &_storage._initialColumns) }()
         case 10: try { try decoder.decodeSingularUInt32Field(value: &_storage._initialRows) }()
+        case 11: try { try decoder.decodeSingularMessageField(value: &_storage._nodeShell) }()
         default: break
         }
       }
@@ -433,6 +470,9 @@ extension Kmgr_V1_ExecStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
       if _storage._initialRows != 0 {
         try visitor.visitSingularUInt32Field(value: _storage._initialRows, fieldNumber: 10)
       }
+      try { if let v = _storage._nodeShell {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -452,10 +492,55 @@ extension Kmgr_V1_ExecStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
         if _storage._stdin != rhs_storage._stdin {return false}
         if _storage._initialColumns != rhs_storage._initialColumns {return false}
         if _storage._initialRows != rhs_storage._initialRows {return false}
+        if _storage._nodeShell != rhs_storage._nodeShell {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_NodeShellStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".NodeShellStart"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}node\0\u{1}namespace\0\u{1}image\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._node) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.namespace) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.image) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._node {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.namespace.isEmpty {
+      try visitor.visitSingularStringField(value: self.namespace, fieldNumber: 2)
+    }
+    if !self.image.isEmpty {
+      try visitor.visitSingularStringField(value: self.image, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_NodeShellStart, rhs: Kmgr_V1_NodeShellStart) -> Bool {
+    if lhs._node != rhs._node {return false}
+    if lhs.namespace != rhs.namespace {return false}
+    if lhs.image != rhs.image {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

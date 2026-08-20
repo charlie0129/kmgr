@@ -21,6 +21,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let renderBatchField = NSTextField()
     private let maximumDisplayedLogLineField = NSTextField()
     private let completedOperationHistoryLimitField = NSTextField()
+    private let nodeShellImageField = NSTextField()
     private let metricsRefreshField = NSTextField()
     private let viewportOverscanField = NSTextField()
     private let globalWarmViewLimitField = NSTextField()
@@ -111,6 +112,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
             maximumDisplayedLogLineField, completedOperationHistoryLimitField,
+            nodeShellImageField,
             metricsRefreshField,
             viewportOverscanField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
@@ -198,6 +200,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         completedOperationHistoryLimitField.setAccessibilityIdentifier(
             "settings.diagnostics.completedOperationHistoryLimit"
         )
+        nodeShellImageField.setAccessibilityIdentifier(
+            "settings.nodeShell.globalImage"
+        )
+        nodeShellImageField.lineBreakMode = .byTruncatingMiddle
+        nodeShellImageField.widthAnchor.constraint(
+            greaterThanOrEqualToConstant: 360
+        ).isActive = true
         columnsPathField.lineBreakMode = .byTruncatingMiddle
         columnsPathField.setAccessibilityLabel("External column configuration path")
 
@@ -242,6 +251,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                     suffix: "per cluster session"
                 ),
                 diagnosticsHelp,
+            ]
+        )
+
+        let nodeShellHelp = NSTextField(wrappingLabelWithString:
+            "S on a Node creates a temporary privileged helper Pod, enters the host namespaces, and removes the Pod when the terminal ends. Shift-S can override this image for one cluster."
+        )
+        nodeShellHelp.textColor = .secondaryLabelColor
+        nodeShellHelp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let nodeShell = section(
+            title: "Node Shell",
+            rows: [
+                labeledRow("Default image", control: nodeShellImageField),
+                nodeShellHelp,
             ]
         )
 
@@ -372,7 +394,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         let shortcuts = section(title: "Keyboard Shortcuts", rows: [shortcutGrid])
 
         let contentStack = NSStackView(views: [
-            general, logs, diagnostics, advancedPerformance, confirmations, columns,
+            general, logs, diagnostics, nodeShell, advancedPerformance, confirmations, columns,
             shortcuts,
         ])
         contentStack.orientation = .vertical
@@ -381,7 +403,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         contentStack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         for section in [
-            general, logs, diagnostics, advancedPerformance, confirmations, columns,
+            general, logs, diagnostics, nodeShell, advancedPerformance, confirmations, columns,
             shortcuts,
         ] {
             section.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -32).isActive = true
@@ -513,6 +535,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             preferences.logs.maximumDisplayedLineUTF8Bytes / (1 << 10)
         completedOperationHistoryLimitField.integerValue =
             preferences.diagnostics.completedOperationHistoryLimit
+        nodeShellImageField.stringValue = preferences.nodeShell.globalImage
         metricsRefreshField.integerValue = preferences.metricsRefreshSeconds
         viewportOverscanField.integerValue =
             preferences.advancedPerformance.viewportOverscanScreensPerSide
@@ -593,6 +616,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 completedOperationHistoryLimit: parsedInteger(
                     completedOperationHistoryLimitField
                 )
+            ),
+            nodeShell: NodeShellPreferences(
+                globalImage: nodeShellImageField.stringValue,
+                clusterImagesByContextReference: preferencesStore.current.nodeShell
+                    .clusterImagesByContextReference
             ),
             advancedPerformance: AdvancedPerformancePreferences(
                 viewportOverscanScreensPerSide: parsedInteger(

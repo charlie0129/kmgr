@@ -72,7 +72,7 @@ type operation struct {
 	key                sessionKey
 	generation         uint64
 	context            context.Context
-	pod                Identity
+	target             Identity
 	tty                bool
 	cancel             context.CancelFunc
 	input              *inputPipe
@@ -233,7 +233,8 @@ func (m *Manager) newOperation(
 		input.Close()
 	}
 	return &operation{
-		key: key, generation: generation, context: execContext, pod: request.Pod, tty: request.TTY,
+		key: key, generation: generation, context: execContext,
+		target: request.targetIdentity(), tty: request.TTY,
 		cancel: cancel, input: input, session: session,
 		resizes: newResizeQueue(request.InitialSize),
 		output:  newOutputQueue(m.config.OutputItems, m.config.OutputBytes, m.config.OutputChunkBytes),
@@ -492,11 +493,11 @@ func (s *Session) ContextName() string {
 	return s.operation.session.contextName
 }
 
-func (s *Session) Pod() Identity {
+func (s *Session) Target() Identity {
 	if s == nil || s.operation == nil {
 		return Identity{}
 	}
-	return s.operation.pod
+	return s.operation.target
 }
 
 func (s *Session) Close() {

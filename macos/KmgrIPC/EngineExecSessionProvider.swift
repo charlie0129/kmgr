@@ -116,7 +116,10 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
                 if Task.isCancelled || error is CancellationError {
                     eventPair.continuation.finish()
                 } else {
-                    eventPair.continuation.finish(throwing: Self.issue(from: error))
+                    eventPair.continuation.finish(throwing: Self.issue(
+                        from: error,
+                        operation: request.target.operationDescription
+                    ))
                 }
             }
         }
@@ -146,24 +149,57 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
         guard !request.sessionID.isEmpty,
             !request.execSessionID.isEmpty,
             request.generation > 0,
-            request.pod.clusterSessionID == request.sessionID,
-            request.pod.group.isEmpty,
-            request.pod.version == "v1",
-            request.pod.resource == "pods",
-            !request.pod.namespace.isEmpty,
-            !request.pod.name.isEmpty,
-            !request.pod.uid.rawValue.isEmpty,
-            !request.container.isEmpty,
             !request.command.isEmpty,
             !request.command.contains(where: \.isEmpty)
         else {
             throw ClusterManagerIssue(
                 category: .validation,
                 reason: "InvalidExecRequest",
-                message: "A complete Pod, container, command, and exec session identity are required.",
+                message: "A complete target, command, and exec session identity are required.",
                 contextName: request.contextName,
-                operation: "exec Pod"
+                operation: request.target.operationDescription
             )
+        }
+        switch request.target {
+        case .pod(let destination):
+            let pod = destination.pod
+            guard pod.clusterSessionID == request.sessionID,
+                pod.group.isEmpty,
+                pod.version == "v1",
+                pod.resource == "pods",
+                !pod.namespace.isEmpty,
+                !pod.name.isEmpty,
+                !pod.uid.rawValue.isEmpty,
+                !destination.container.isEmpty
+            else {
+                throw ClusterManagerIssue(
+                    category: .validation,
+                    reason: "InvalidExecRequest",
+                    message: "A complete Pod and container from this cluster session are required.",
+                    contextName: request.contextName,
+                    operation: request.target.operationDescription
+                )
+            }
+        case .nodeShell(let destination):
+            let node = destination.node
+            guard node.clusterSessionID == request.sessionID,
+                node.group.isEmpty,
+                node.version == "v1",
+                node.resource == "nodes",
+                node.namespace.isEmpty,
+                !node.name.isEmpty,
+                !node.uid.rawValue.isEmpty,
+                NodeShellPreferences.isValidImage(destination.image),
+                NodeShellLaunchPlanner.isValidNamespace(destination.namespace)
+            else {
+                throw ClusterManagerIssue(
+                    category: .validation,
+                    reason: "InvalidNodeShellRequest",
+                    message: "A complete Node, helper namespace, and image from this cluster session are required.",
+                    contextName: request.contextName,
+                    operation: request.target.operationDescription
+                )
+            }
         }
         if request.initialSize != nil && !request.tty {
             throw ClusterManagerIssue(
@@ -171,7 +207,7 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
                 reason: "InvalidTerminalSize",
                 message: "An initial terminal size requires TTY mode.",
                 contextName: request.contextName,
-                operation: "exec Pod"
+                operation: request.target.operationDescription
             )
         }
     }
@@ -214,7 +250,10 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
         }
     }
 
-    private static func issue(from error: Error) -> ClusterManagerIssue {
+    private static func issue(
+        from error: Error,
+        operation: String
+    ) -> ClusterManagerIssue {
         switch error {
         case ExecStreamBridgeError.outboundBufferExceeded(let limit):
             return ClusterManagerIssue(
@@ -222,7 +261,7 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
                 reason: "ExecInputBufferExceeded",
                 message: "Terminal input arrived faster than it could be sent. The exec session was stopped safely.",
                 retryable: true,
-                operation: "exec Pod",
+                operation: operation,
                 safeDetails: ["buffered_message_limit": String(limit)]
             )
         case ExecStreamBridgeError.eventBufferExceeded(let limit):
@@ -231,7 +270,7 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
                 reason: "ExecOutputBufferExceeded",
                 message: "Terminal output arrived faster than the window could render it. Reconnect to start a new process.",
                 retryable: true,
-                operation: "exec Pod",
+                operation: operation,
                 safeDetails: ["buffered_message_limit": String(limit)]
             )
         case ExecStreamBridgeError.cursorMismatch:
@@ -239,20 +278,20 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
                 category: .internalFailure,
                 reason: "ExecCursorMismatch",
                 message: "The engine returned output for a different exec generation.",
-                operation: "exec Pod"
+                operation: operation
             )
         case ExecStreamBridgeError.missingPayload:
             return ClusterManagerIssue(
                 category: .internalFailure,
                 reason: "MissingExecPayload",
                 message: "The engine returned an exec event without a payload.",
-                operation: "exec Pod"
+                operation: operation
             )
         default:
             return EngineClusterContextProvider.issue(
                 from: error,
                 contextName: "",
-                operation: "exec Pod"
+                operation: operation
             )
         }
     }
@@ -417,8 +456,17 @@ private final class ExecOutboundChannel: @unchecked Sendable {
         start.context = context
         start.execSessionID = request.execSessionID
         start.generation = request.generation
-        start.pod = identity(from: request.pod)
-        start.container = request.container
+        switch request.target {
+        case .pod(let destination):
+            start.pod = identity(from: destination.pod)
+            start.container = destination.container
+        case .nodeShell(let destination):
+            var nodeShell = Kmgr_V1_NodeShellStart()
+            nodeShell.node = identity(from: destination.node)
+            nodeShell.namespace = destination.namespace
+            nodeShell.image = destination.image
+            start.nodeShell = nodeShell
+        }
         start.command = request.command
         start.tty = request.tty
         start.stdin = request.stdin

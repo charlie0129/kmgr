@@ -122,6 +122,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let tableLayoutStore: TableLayoutStore
     private let logDisplayConfiguration: LogDisplayConfiguration
     private let confirmationPreferences: @MainActor () -> ConfirmationPreferences
+    private let nodeShellPreferences: @MainActor () -> NodeShellPreferences
+    private let saveNodeShellPreferences: @MainActor (NodeShellPreferences) throws -> Void
     private let workspaceController: ClusterWorkspaceViewController
     private var restoration: ClusterWindowRestorationRecord
     private var portForwardConfigurationController: PortForwardConfigurationWindowController?
@@ -130,6 +132,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var automaticExecOpenTask: Task<Void, Never>?
     private var automaticExecOpenRevision: UInt64 = 0
     private var execConfigurationController: ExecConfigurationWindowController?
+    private var nodeShellConfigurationController: NodeShellConfigurationWindowController?
     private var deleteResourcesController: DeleteResourcesWindowController?
     private var resourceMutationController: ResourceMutationWindowController?
     private var yamlSnapshotWindowControllers: [ResourceUID: YAMLSnapshotWindowController] = [:]
@@ -160,6 +163,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         logDisplayConfiguration: LogDisplayConfiguration,
         operationHistoryCompletedLimit: Int = 2_000,
         confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
+        nodeShellPreferences: @escaping @MainActor () -> NodeShellPreferences = {
+            NodeShellPreferences()
+        },
+        saveNodeShellPreferences: @escaping @MainActor (NodeShellPreferences) throws -> Void = {
+            _ in
+        },
         namespacePickerPresenter: @escaping NamespacePickerPresenter = { control, sender in
             control.performClick(sender)
         },
@@ -185,6 +194,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.logDisplayConfiguration = logDisplayConfiguration
         self.confirmationPreferences = confirmationPreferences
+        self.nodeShellPreferences = nodeShellPreferences
+        self.saveNodeShellPreferences = saveNodeShellPreferences
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
@@ -252,6 +263,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
         workspaceController.onConfigureExec = { [weak self] target in
             self?.showExecConfiguration(target)
+        }
+        workspaceController.onOpenNodeShell = { [weak self] target in
+            self?.openNodeShell(target)
+        }
+        workspaceController.onConfigureNodeShell = { [weak self] target in
+            self?.showNodeShellConfiguration(target)
         }
         workspaceController.onDelete = { [weak self] request in
             self?.showDeleteResources(request)
@@ -338,10 +355,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         automaticExecOpenTask?.cancel()
         automaticExecOpenTask = nil
         execConfigurationController?.close()
+        nodeShellConfigurationController?.close()
         deleteResourcesController?.close()
         resourceMutationController?.close()
         portForwardConfigurationController = nil
         execConfigurationController = nil
+        nodeShellConfigurationController = nil
         deleteResourcesController = nil
         resourceMutationController = nil
     }
@@ -534,7 +553,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     private func openAutomaticExec(_ target: PodExecTarget) {
         guard automaticExecOpenTask == nil,
-            execConfigurationController == nil
+            execConfigurationController == nil,
+            nodeShellConfigurationController == nil
         else { NSSound.beep(); return }
         automaticExecOpenRevision &+= 1
         let revision = automaticExecOpenRevision
@@ -585,7 +605,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private func showExecConfiguration(_ target: PodExecTarget) {
         guard let window,
             automaticExecOpenTask == nil,
-            execConfigurationController == nil
+            execConfigurationController == nil,
+            nodeShellConfigurationController == nil
         else { NSSound.beep(); return }
         let controller = ExecConfigurationWindowController(
             session: session,
@@ -600,6 +621,65 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             self?.execConfigurationController = nil
         }
         execConfigurationController = controller
+        controller.beginSheet(for: window)
+    }
+
+    private func openNodeShell(_ target: NodeShellTarget) {
+        guard automaticExecOpenTask == nil,
+            execConfigurationController == nil,
+            nodeShellConfigurationController == nil
+        else { NSSound.beep(); return }
+        do {
+            let preferences = nodeShellPreferences()
+            let plan = try NodeShellLaunchPlanner.plan(
+                session: session,
+                target: target,
+                image: preferences.effectiveImage(
+                    contextReference: session.contextReference
+                ),
+                namespace: NodeShellLaunchPlanner.defaultNamespace(for: session),
+                execSessionID: UUID().uuidString.lowercased()
+            )
+            onOpenTerminalWindow?(TerminalWindowController(
+                request: plan.request,
+                provider: execProvider,
+                fallbackShellCommand: plan.fallbackShellCommand
+            ))
+        } catch {
+            presentExecOpenFailure(error)
+        }
+    }
+
+    private func showNodeShellConfiguration(_ target: NodeShellTarget) {
+        guard let window,
+            automaticExecOpenTask == nil,
+            execConfigurationController == nil,
+            nodeShellConfigurationController == nil
+        else { NSSound.beep(); return }
+        let preferences = nodeShellPreferences()
+        let contextReference = session.contextReference
+        let controller = NodeShellConfigurationWindowController(
+            session: session,
+            target: target,
+            image: preferences.effectiveImage(contextReference: contextReference),
+            namespace: NodeShellLaunchPlanner.defaultNamespace(for: session),
+            usesClusterImageOverride: preferences.clusterImagesByContextReference[
+                contextReference
+            ] != nil,
+            execProvider: execProvider,
+            saveClusterImage: { [weak self] image in
+                guard let self else { return }
+                var updated = nodeShellPreferences()
+                updated.setClusterImage(image, contextReference: contextReference)
+                try saveNodeShellPreferences(updated)
+            }
+        )
+        controller.onOpenWindow = { [weak self] in self?.onOpenTerminalWindow?($0) }
+        controller.onDismiss = { [weak self, weak controller] in
+            guard self?.nodeShellConfigurationController === controller else { return }
+            self?.nodeShellConfigurationController = nil
+        }
+        nodeShellConfigurationController = controller
         controller.beginSheet(for: window)
     }
 
@@ -797,6 +877,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((PodExecTarget) -> Void)?
     var onConfigureExec: ((PodExecTarget) -> Void)?
+    var onOpenNodeShell: ((NodeShellTarget) -> Void)?
+    var onConfigureNodeShell: ((NodeShellTarget) -> Void)?
     var onDelete: ((DeleteResourcesRequest) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: ((ClusterWindowRestorationState) -> Void)?
@@ -941,6 +1023,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onConfigureExec = { [weak self] target in
             self?.onConfigureExec?(target)
+        }
+        contentController.onOpenNodeShell = { [weak self] target in
+            self?.onOpenNodeShell?(target)
+        }
+        contentController.onConfigureNodeShell = { [weak self] target in
+            self?.onConfigureNodeShell?(target)
         }
         contentController.onDelete = { [weak self] request in
             self?.onDelete?(request)
@@ -3182,6 +3270,8 @@ private final class ResourceListViewController: NSViewController,
     var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((PodExecTarget) -> Void)?
     var onConfigureExec: ((PodExecTarget) -> Void)?
+    var onOpenNodeShell: ((NodeShellTarget) -> Void)?
+    var onConfigureNodeShell: ((NodeShellTarget) -> Void)?
     var onDelete: ((DeleteResourcesRequest) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
     var onRestorationChanged: (() -> Void)?
@@ -7711,14 +7801,22 @@ private final class ResourceListViewController: NSViewController,
             ))
         case .openExec:
             guard let identity = selected.only,
-                identity.group.isEmpty, identity.version == "v1", identity.resource == "pods"
+                identity.group.isEmpty, identity.version == "v1"
             else { NSSound.beep(); return }
-            onOpenExec?(PodExecTarget(pod: identity))
+            switch identity.resource {
+            case "pods": onOpenExec?(PodExecTarget(pod: identity))
+            case "nodes": onOpenNodeShell?(NodeShellTarget(node: identity))
+            default: NSSound.beep()
+            }
         case .configureExec:
             guard let identity = selected.only,
-                identity.group.isEmpty, identity.version == "v1", identity.resource == "pods"
+                identity.group.isEmpty, identity.version == "v1"
             else { NSSound.beep(); return }
-            onConfigureExec?(PodExecTarget(pod: identity))
+            switch identity.resource {
+            case "pods": onConfigureExec?(PodExecTarget(pod: identity))
+            case "nodes": onConfigureNodeShell?(NodeShellTarget(node: identity))
+            default: NSSound.beep()
+            }
         case .selectAll:
             guard let revision = interactiveSelectionRevision else { return }
             enqueueSelectionGesture(
@@ -8230,7 +8328,8 @@ private final class ResourceListViewController: NSViewController,
             return group == "batch" && version == "v1"
                 && ["jobs", "cronjobs"].contains(name)
         case .openExec, .configureExec:
-            return exactlyOne && group.isEmpty && version == "v1" && name == "pods"
+            return exactlyOne && group.isEmpty && version == "v1"
+                && (name == "pods" || name == "nodes")
         case .startPortForward:
             return exactlyOne && group.isEmpty && version == "v1"
                 && (name == "pods" || name == "services")
@@ -8266,7 +8365,8 @@ private final class ResourceListViewController: NSViewController,
             return LogResourceCompatibility.supportsSelection(selected)
         case .openExec, .configureExec:
             return selected.count == 1 && selected[0].group.isEmpty
-                && selected[0].version == "v1" && selected[0].resource == "pods"
+                && selected[0].version == "v1"
+                && (selected[0].resource == "pods" || selected[0].resource == "nodes")
         case .startPortForward:
             return selected.count == 1 && selected[0].group.isEmpty
                 && selected[0].version == "v1"

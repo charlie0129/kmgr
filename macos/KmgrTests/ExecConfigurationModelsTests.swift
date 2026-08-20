@@ -88,10 +88,14 @@ import Testing
         execSessionID: "exec-1"
     )
 
-    #expect(plan.request.container == "api")
+    guard case .pod(let destination) = plan.request.target else {
+        Issue.record("expected Pod exec destination")
+        return
+    }
+    #expect(destination.container == "api")
     #expect(plan.request.command == ["/bin/bash"])
     #expect(plan.fallbackShellCommand == ["/bin/sh"])
-    #expect(plan.request.pod.uid == ResourceUID("pod-uid"))
+    #expect(destination.pod.uid == ResourceUID("pod-uid"))
     #expect(plan.request.execSessionID == "exec-1")
 }
 
@@ -129,8 +133,14 @@ import Testing
         execSessionID: "exec-selected"
     )
 
-    #expect(automatic.request.container == "sidecar")
-    #expect(selected.request.container == "debug")
+    guard case .pod(let automaticDestination) = automatic.request.target,
+        case .pod(let selectedDestination) = selected.request.target
+    else {
+        Issue.record("expected Pod exec destinations")
+        return
+    }
+    #expect(automaticDestination.container == "sidecar")
+    #expect(selectedDestination.container == "debug")
 }
 
 @Test func automaticExecRejectsReplacementPodsAndVanishedSelectedContainers() {
@@ -172,6 +182,76 @@ import Testing
                 ]
             ),
             execSessionID: "exec-vanished"
+        )
+    }
+}
+
+@Test func nodeShellPlannerPinsNodeAndBuildsHostNamespaceShell() throws {
+    let session = execPlannerSession()
+    let node = ResourceIdentity(
+        clusterSessionID: session.sessionID,
+        group: "",
+        version: "v1",
+        resource: "nodes",
+        namespace: "",
+        name: "worker-a",
+        uid: "node-uid"
+    )
+    let plan = try NodeShellLaunchPlanner.plan(
+        session: session,
+        target: NodeShellTarget(node: node),
+        image: "registry.example/node-shell:1",
+        namespace: "ops-tools",
+        execSessionID: "node-exec-1"
+    )
+    guard case .nodeShell(let destination) = plan.request.target else {
+        Issue.record("expected Node-shell destination")
+        return
+    }
+    #expect(destination.node == node)
+    #expect(destination.namespace == "ops-tools")
+    #expect(destination.image == "registry.example/node-shell:1")
+    #expect(plan.request.command == ["bash", "-l"])
+    #expect(plan.fallbackShellCommand == ["sh", "-l"])
+    #expect(plan.request.target.operationDescription == "open Node shell")
+    #expect(NodeShellLaunchPlanner.defaultNamespace(for: session) == "default")
+    #expect(NodeShellLaunchPlanner.isValidNamespace("kube-system"))
+    #expect(!NodeShellLaunchPlanner.isValidNamespace("Kube-System"))
+    #expect(!NodeShellLaunchPlanner.isValidNamespace("-invalid"))
+}
+
+@Test func nodeShellPlannerRejectsPodIdentityAndInvalidConfiguration() {
+    let session = execPlannerSession()
+    #expect(throws: NodeShellLaunchError.invalidNodeIdentity) {
+        try NodeShellLaunchPlanner.plan(
+            session: session,
+            target: NodeShellTarget(node: execPlannerPod()),
+            image: "registry.example/node-shell:1",
+            namespace: "default",
+            execSessionID: "node-exec"
+        )
+    }
+    let node = ResourceIdentity(
+        clusterSessionID: session.sessionID,
+        group: "", version: "v1", resource: "nodes", namespace: "",
+        name: "worker-a", uid: "node-uid"
+    )
+    #expect(throws: NodeShellLaunchError.invalidImage) {
+        try NodeShellLaunchPlanner.plan(
+            session: session,
+            target: NodeShellTarget(node: node),
+            image: "bad image",
+            namespace: "default",
+            execSessionID: "node-exec"
+        )
+    }
+    #expect(throws: NodeShellLaunchError.invalidNamespace) {
+        try NodeShellLaunchPlanner.plan(
+            session: session,
+            target: NodeShellTarget(node: node),
+            image: "registry.example/node-shell:1",
+            namespace: "Bad_Namespace",
+            execSessionID: "node-exec"
         )
     }
 }

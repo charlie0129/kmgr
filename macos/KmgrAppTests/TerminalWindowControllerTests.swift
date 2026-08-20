@@ -204,18 +204,20 @@ private func execRequest(command: [String]) -> ExecSessionRequest {
         sessionID: "cluster-session",
         execSessionID: "exec-session",
         generation: 1,
-        pod: ResourceIdentity(
-            clusterSessionID: "cluster-session",
-            group: "",
-            version: "v1",
-            resource: "pods",
-            namespace: "team-a",
-            name: "api",
-            uid: ResourceUID("pod-uid")
-        ),
+        target: .pod(PodExecDestination(
+            pod: ResourceIdentity(
+                clusterSessionID: "cluster-session",
+                group: "",
+                version: "v1",
+                resource: "pods",
+                namespace: "team-a",
+                name: "api",
+                uid: ResourceUID("pod-uid")
+            ),
+            container: "app"
+        )),
         contextName: "production",
         clusterName: "cluster-a",
-        container: "app",
         command: command
     )
 }

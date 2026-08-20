@@ -91,6 +91,7 @@ type ExecStart struct {
 	Stdin          bool                   `protobuf:"varint,8,opt,name=stdin,proto3" json:"stdin,omitempty"`
 	InitialColumns uint32                 `protobuf:"varint,9,opt,name=initial_columns,json=initialColumns,proto3" json:"initial_columns,omitempty"`
 	InitialRows    uint32                 `protobuf:"varint,10,opt,name=initial_rows,json=initialRows,proto3" json:"initial_rows,omitempty"`
+	NodeShell      *NodeShellStart        `protobuf:"bytes,11,opt,name=node_shell,json=nodeShell,proto3" json:"node_shell,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -195,6 +196,73 @@ func (x *ExecStart) GetInitialRows() uint32 {
 	return 0
 }
 
+func (x *ExecStart) GetNodeShell() *NodeShellStart {
+	if x != nil {
+		return x.NodeShell
+	}
+	return nil
+}
+
+type NodeShellStart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Node          *ResourceIdentity      `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
+	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Image         string                 `protobuf:"bytes,3,opt,name=image,proto3" json:"image,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeShellStart) Reset() {
+	*x = NodeShellStart{}
+	mi := &file_kmgr_v1_exec_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeShellStart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeShellStart) ProtoMessage() {}
+
+func (x *NodeShellStart) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_exec_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeShellStart.ProtoReflect.Descriptor instead.
+func (*NodeShellStart) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_exec_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *NodeShellStart) GetNode() *ResourceIdentity {
+	if x != nil {
+		return x.Node
+	}
+	return nil
+}
+
+func (x *NodeShellStart) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *NodeShellStart) GetImage() string {
+	if x != nil {
+		return x.Image
+	}
+	return ""
+}
+
 type TerminalResize struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Columns       uint32                 `protobuf:"varint,1,opt,name=columns,proto3" json:"columns,omitempty"`
@@ -205,7 +273,7 @@ type TerminalResize struct {
 
 func (x *TerminalResize) Reset() {
 	*x = TerminalResize{}
-	mi := &file_kmgr_v1_exec_proto_msgTypes[1]
+	mi := &file_kmgr_v1_exec_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -217,7 +285,7 @@ func (x *TerminalResize) String() string {
 func (*TerminalResize) ProtoMessage() {}
 
 func (x *TerminalResize) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_exec_proto_msgTypes[1]
+	mi := &file_kmgr_v1_exec_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -230,7 +298,7 @@ func (x *TerminalResize) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalResize.ProtoReflect.Descriptor instead.
 func (*TerminalResize) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_exec_proto_rawDescGZIP(), []int{1}
+	return file_kmgr_v1_exec_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *TerminalResize) GetColumns() uint32 {
@@ -266,7 +334,7 @@ type ExecClientMessage struct {
 
 func (x *ExecClientMessage) Reset() {
 	*x = ExecClientMessage{}
-	mi := &file_kmgr_v1_exec_proto_msgTypes[2]
+	mi := &file_kmgr_v1_exec_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -278,7 +346,7 @@ func (x *ExecClientMessage) String() string {
 func (*ExecClientMessage) ProtoMessage() {}
 
 func (x *ExecClientMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_exec_proto_msgTypes[2]
+	mi := &file_kmgr_v1_exec_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -291,7 +359,7 @@ func (x *ExecClientMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecClientMessage.ProtoReflect.Descriptor instead.
 func (*ExecClientMessage) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_exec_proto_rawDescGZIP(), []int{2}
+	return file_kmgr_v1_exec_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ExecClientMessage) GetExecSessionId() string {
@@ -413,7 +481,7 @@ type ExecStatus struct {
 
 func (x *ExecStatus) Reset() {
 	*x = ExecStatus{}
-	mi := &file_kmgr_v1_exec_proto_msgTypes[3]
+	mi := &file_kmgr_v1_exec_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -425,7 +493,7 @@ func (x *ExecStatus) String() string {
 func (*ExecStatus) ProtoMessage() {}
 
 func (x *ExecStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_exec_proto_msgTypes[3]
+	mi := &file_kmgr_v1_exec_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -438,7 +506,7 @@ func (x *ExecStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecStatus.ProtoReflect.Descriptor instead.
 func (*ExecStatus) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_exec_proto_rawDescGZIP(), []int{3}
+	return file_kmgr_v1_exec_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ExecStatus) GetState() ExecConnectionState {
@@ -485,7 +553,7 @@ type ExecServerMessage struct {
 
 func (x *ExecServerMessage) Reset() {
 	*x = ExecServerMessage{}
-	mi := &file_kmgr_v1_exec_proto_msgTypes[4]
+	mi := &file_kmgr_v1_exec_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -497,7 +565,7 @@ func (x *ExecServerMessage) String() string {
 func (*ExecServerMessage) ProtoMessage() {}
 
 func (x *ExecServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_exec_proto_msgTypes[4]
+	mi := &file_kmgr_v1_exec_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -510,7 +578,7 @@ func (x *ExecServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecServerMessage.ProtoReflect.Descriptor instead.
 func (*ExecServerMessage) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_exec_proto_rawDescGZIP(), []int{4}
+	return file_kmgr_v1_exec_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ExecServerMessage) GetCursor() *StreamCursor {
@@ -595,7 +663,7 @@ var File_kmgr_v1_exec_proto protoreflect.FileDescriptor
 
 const file_kmgr_v1_exec_proto_rawDesc = "" +
 	"\n" +
-	"\x12kmgr/v1/exec.proto\x12\akmgr.v1\x1a\x14kmgr/v1/common.proto\"\xdf\x02\n" +
+	"\x12kmgr/v1/exec.proto\x12\akmgr.v1\x1a\x14kmgr/v1/common.proto\"\x97\x03\n" +
 	"\tExecStart\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12&\n" +
 	"\x0fexec_session_id\x18\x02 \x01(\tR\rexecSessionId\x12\x1e\n" +
@@ -609,7 +677,13 @@ const file_kmgr_v1_exec_proto_rawDesc = "" +
 	"\x05stdin\x18\b \x01(\bR\x05stdin\x12'\n" +
 	"\x0finitial_columns\x18\t \x01(\rR\x0einitialColumns\x12!\n" +
 	"\finitial_rows\x18\n" +
-	" \x01(\rR\vinitialRows\">\n" +
+	" \x01(\rR\vinitialRows\x126\n" +
+	"\n" +
+	"node_shell\x18\v \x01(\v2\x17.kmgr.v1.NodeShellStartR\tnodeShell\"s\n" +
+	"\x0eNodeShellStart\x12-\n" +
+	"\x04node\x18\x01 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\x04node\x12\x1c\n" +
+	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x14\n" +
+	"\x05image\x18\x03 \x01(\tR\x05image\">\n" +
 	"\x0eTerminalResize\x12\x18\n" +
 	"\acolumns\x18\x01 \x01(\rR\acolumns\x12\x12\n" +
 	"\x04rows\x18\x02 \x01(\rR\x04rows\"\xb6\x02\n" +
@@ -664,36 +738,39 @@ func file_kmgr_v1_exec_proto_rawDescGZIP() []byte {
 }
 
 var file_kmgr_v1_exec_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_kmgr_v1_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_kmgr_v1_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_kmgr_v1_exec_proto_goTypes = []any{
 	(ExecConnectionState)(0),  // 0: kmgr.v1.ExecConnectionState
 	(*ExecStart)(nil),         // 1: kmgr.v1.ExecStart
-	(*TerminalResize)(nil),    // 2: kmgr.v1.TerminalResize
-	(*ExecClientMessage)(nil), // 3: kmgr.v1.ExecClientMessage
-	(*ExecStatus)(nil),        // 4: kmgr.v1.ExecStatus
-	(*ExecServerMessage)(nil), // 5: kmgr.v1.ExecServerMessage
-	(*RequestContext)(nil),    // 6: kmgr.v1.RequestContext
-	(*ResourceIdentity)(nil),  // 7: kmgr.v1.ResourceIdentity
-	(*StructuredError)(nil),   // 8: kmgr.v1.StructuredError
-	(*StreamCursor)(nil),      // 9: kmgr.v1.StreamCursor
+	(*NodeShellStart)(nil),    // 2: kmgr.v1.NodeShellStart
+	(*TerminalResize)(nil),    // 3: kmgr.v1.TerminalResize
+	(*ExecClientMessage)(nil), // 4: kmgr.v1.ExecClientMessage
+	(*ExecStatus)(nil),        // 5: kmgr.v1.ExecStatus
+	(*ExecServerMessage)(nil), // 6: kmgr.v1.ExecServerMessage
+	(*RequestContext)(nil),    // 7: kmgr.v1.RequestContext
+	(*ResourceIdentity)(nil),  // 8: kmgr.v1.ResourceIdentity
+	(*StructuredError)(nil),   // 9: kmgr.v1.StructuredError
+	(*StreamCursor)(nil),      // 10: kmgr.v1.StreamCursor
 }
 var file_kmgr_v1_exec_proto_depIdxs = []int32{
-	6,  // 0: kmgr.v1.ExecStart.context:type_name -> kmgr.v1.RequestContext
-	7,  // 1: kmgr.v1.ExecStart.pod:type_name -> kmgr.v1.ResourceIdentity
-	1,  // 2: kmgr.v1.ExecClientMessage.start:type_name -> kmgr.v1.ExecStart
-	2,  // 3: kmgr.v1.ExecClientMessage.resize:type_name -> kmgr.v1.TerminalResize
-	0,  // 4: kmgr.v1.ExecStatus.state:type_name -> kmgr.v1.ExecConnectionState
-	8,  // 5: kmgr.v1.ExecStatus.error:type_name -> kmgr.v1.StructuredError
-	9,  // 6: kmgr.v1.ExecServerMessage.cursor:type_name -> kmgr.v1.StreamCursor
-	4,  // 7: kmgr.v1.ExecServerMessage.status:type_name -> kmgr.v1.ExecStatus
-	8,  // 8: kmgr.v1.ExecServerMessage.error:type_name -> kmgr.v1.StructuredError
-	3,  // 9: kmgr.v1.ExecService.Exec:input_type -> kmgr.v1.ExecClientMessage
-	5,  // 10: kmgr.v1.ExecService.Exec:output_type -> kmgr.v1.ExecServerMessage
-	10, // [10:11] is the sub-list for method output_type
-	9,  // [9:10] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	7,  // 0: kmgr.v1.ExecStart.context:type_name -> kmgr.v1.RequestContext
+	8,  // 1: kmgr.v1.ExecStart.pod:type_name -> kmgr.v1.ResourceIdentity
+	2,  // 2: kmgr.v1.ExecStart.node_shell:type_name -> kmgr.v1.NodeShellStart
+	8,  // 3: kmgr.v1.NodeShellStart.node:type_name -> kmgr.v1.ResourceIdentity
+	1,  // 4: kmgr.v1.ExecClientMessage.start:type_name -> kmgr.v1.ExecStart
+	3,  // 5: kmgr.v1.ExecClientMessage.resize:type_name -> kmgr.v1.TerminalResize
+	0,  // 6: kmgr.v1.ExecStatus.state:type_name -> kmgr.v1.ExecConnectionState
+	9,  // 7: kmgr.v1.ExecStatus.error:type_name -> kmgr.v1.StructuredError
+	10, // 8: kmgr.v1.ExecServerMessage.cursor:type_name -> kmgr.v1.StreamCursor
+	5,  // 9: kmgr.v1.ExecServerMessage.status:type_name -> kmgr.v1.ExecStatus
+	9,  // 10: kmgr.v1.ExecServerMessage.error:type_name -> kmgr.v1.StructuredError
+	4,  // 11: kmgr.v1.ExecService.Exec:input_type -> kmgr.v1.ExecClientMessage
+	6,  // 12: kmgr.v1.ExecService.Exec:output_type -> kmgr.v1.ExecServerMessage
+	12, // [12:13] is the sub-list for method output_type
+	11, // [11:12] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_exec_proto_init() }
@@ -702,15 +779,15 @@ func file_kmgr_v1_exec_proto_init() {
 		return
 	}
 	file_kmgr_v1_common_proto_init()
-	file_kmgr_v1_exec_proto_msgTypes[2].OneofWrappers = []any{
+	file_kmgr_v1_exec_proto_msgTypes[3].OneofWrappers = []any{
 		(*ExecClientMessage_Start)(nil),
 		(*ExecClientMessage_Stdin)(nil),
 		(*ExecClientMessage_Resize)(nil),
 		(*ExecClientMessage_CloseStdin)(nil),
 		(*ExecClientMessage_Cancel)(nil),
 	}
-	file_kmgr_v1_exec_proto_msgTypes[3].OneofWrappers = []any{}
-	file_kmgr_v1_exec_proto_msgTypes[4].OneofWrappers = []any{
+	file_kmgr_v1_exec_proto_msgTypes[4].OneofWrappers = []any{}
+	file_kmgr_v1_exec_proto_msgTypes[5].OneofWrappers = []any{
 		(*ExecServerMessage_Stdout)(nil),
 		(*ExecServerMessage_Stderr)(nil),
 		(*ExecServerMessage_Status)(nil),
@@ -722,7 +799,7 @@ func file_kmgr_v1_exec_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_exec_proto_rawDesc), len(file_kmgr_v1_exec_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

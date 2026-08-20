@@ -26,7 +26,8 @@ func TestExecProtoStartAndMonotonicEnvelope(t *testing.T) {
 		t.Fatalf("startFromProto: %v", err)
 	}
 	if request.SessionID != "cluster-session" || request.ExecSessionID != "terminal" ||
-		request.Generation != 7 || request.Pod.UID != "pod-uid" || request.Container != "main" ||
+		request.Generation != 7 || request.Pod == nil || request.Pod.Pod.UID != "pod-uid" ||
+		request.Pod.Container != "main" ||
 		len(request.Command) != 1 || request.Command[0] != "/bin/sh" || !request.TTY || !request.Stdin ||
 		request.InitialSize == nil || request.InitialSize.Columns != 80 || request.InitialSize.Rows != 24 {
 		t.Fatalf("converted request = %#v", request)
@@ -55,7 +56,7 @@ func TestDeliveryToProtoUsesCursorAndCopiesOutput(t *testing.T) {
 	data := []byte("terminal bytes")
 	message := deliveryToProto(
 		Delivery{Output: &Output{Kind: StreamStderr, Data: data}},
-		"terminal", 9, 42, "local", testStart(9).Pod,
+		"terminal", 9, 42, "local", testStart(9).targetIdentity(),
 	)
 	data[0] = 'X'
 	if cursor := message.GetCursor(); cursor.GetStreamId() != "terminal" || cursor.GetGeneration() != 9 || cursor.GetSequence() != 42 {
@@ -68,7 +69,7 @@ func TestDeliveryToProtoUsesCursorAndCopiesOutput(t *testing.T) {
 	exitCode := int32(23)
 	statusMessage := deliveryToProto(
 		Delivery{Status: &Status{State: StateExited, ExitCode: &exitCode, StatusReason: "NonZeroExit"}},
-		"terminal", 9, 43, "local", testStart(9).Pod,
+		"terminal", 9, 43, "local", testStart(9).targetIdentity(),
 	)
 	converted := statusMessage.GetStatus()
 	if converted.GetState() != kmgrv1.ExecConnectionState_EXEC_CONNECTION_STATE_EXITED ||
@@ -80,7 +81,7 @@ func TestDeliveryToProtoUsesCursorAndCopiesOutput(t *testing.T) {
 func TestExecErrorsNeverExposeUnderlyingTransportText(t *testing.T) {
 	t.Parallel()
 	const secret = "do-not-expose-terminal-or-token-data"
-	pod := testStart(1).Pod
+	pod := testStart(1).targetIdentity()
 	for _, underlying := range []error{
 		errors.New(secret),
 		apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "api-0", errors.New(secret)),

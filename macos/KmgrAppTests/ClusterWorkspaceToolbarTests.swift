@@ -1429,6 +1429,76 @@ struct ClusterWorkspaceToolbarTests {
         #expect(window.attachedSheet?.title == "test-cluster — test-context — Configure Terminal")
     }
 
+    @Test("S opens a Node shell with the cluster image and Shift-S configures it")
+    func nodeShellShortcutsUsePerClusterImage() async throws {
+        let node = ResourceIdentity(
+            clusterSessionID: "test-session",
+            group: "", version: "v1", resource: "nodes", namespace: "",
+            name: "worker-a", uid: "node-uid"
+        )
+        let preferences = NodeShellPreferences(
+            globalImage: "registry.example/global:1",
+            clusterImagesByContextReference: [
+                "test-context:test-context": "registry.example/cluster:2",
+            ]
+        )
+        var savedPreferences: NodeShellPreferences?
+        let controller = makeWorkspace(
+            provider: SingleObjectWorkspaceResourceProvider(identity: node, kind: "Node"),
+            nodeShellPreferences: { preferences },
+            saveNodeShellPreferences: { savedPreferences = $0 },
+            restoration: ClusterWindowRestorationRecord(
+                id: "node-shell-shortcut",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "", version: "v1", resource: "nodes")
+                )
+            )
+        )
+        var opened: TerminalWindowController?
+        controller.onOpenTerminalWindow = { opened = $0 }
+        controller.showWindow(nil)
+        defer {
+            if let window = controller.window, let sheet = window.attachedSheet {
+                window.endSheet(sheet)
+            }
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { table.numberOfRows == 1 }
+        try await selectResourceRow(0, in: table)
+        #expect(window.makeFirstResponder(table))
+        table.keyDown(with: try workspaceLetterKey("s"))
+        try await waitUntil { opened != nil }
+        #expect(opened?.window?.title.contains("worker-a") == true)
+        #expect(opened?.window?.subtitle == "Node worker-a · helper namespace default")
+        let targetItem = try #require(opened?.window?.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "terminal.identity"
+        })
+        #expect((targetItem.view as? NSTextField)?.toolTip?
+            .contains("registry.example/cluster:2") == true)
+
+        table.keyDown(with: try workspaceLetterKey("s", modifiers: [.shift]))
+        try await waitUntil { window.attachedSheet != nil }
+        #expect(window.attachedSheet?.title
+            == "test-cluster — test-context — Configure Node Shell")
+        let sheetRoot = try #require(window.attachedSheet?.contentView)
+        let image = try #require(descendants(of: sheetRoot).compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityIdentifier() == "node-shell.image" })
+        let saveOverride = try #require(
+            descendants(of: sheetRoot).compactMap { $0 as? NSButton }.first {
+                $0.accessibilityIdentifier() == "node-shell.save-cluster-image"
+            }
+        )
+        #expect(image.stringValue == "registry.example/cluster:2")
+        #expect(saveOverride.state == .on)
+        #expect(savedPreferences == nil)
+    }
+
     @Test("Y opens the Details YAML tab and Shift-Y opens a dedicated window")
     func yamlShortcutsHaveDistinctDestinations() async throws {
         let pod = toolbarPodIdentity()
@@ -2399,6 +2469,12 @@ private func makeWorkspace(
     logProvider: any LogStreamProviding = NoopLogProvider(),
     objectDetailProvider: any ObjectDetailProviding = NoopToolbarObjectDetailProvider(),
     execProvider: any ExecSessionProviding = NoopExecProvider(),
+    nodeShellPreferences: @escaping @MainActor () -> NodeShellPreferences = {
+        NodeShellPreferences()
+    },
+    saveNodeShellPreferences: @escaping @MainActor (NodeShellPreferences) throws -> Void = {
+        _ in
+    },
     namespacePickerPresenter: @escaping NamespacePickerPresenter = { control, sender in
         control.performClick(sender)
     },
@@ -2427,6 +2503,8 @@ private func makeWorkspace(
         columnsConfigurationPath: "/tmp/kmgr-toolbar-test-columns.yaml",
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },
+        nodeShellPreferences: nodeShellPreferences,
+        saveNodeShellPreferences: saveNodeShellPreferences,
         namespacePickerPresenter: namespacePickerPresenter,
         namespacePickerKeyWindowCheck: namespacePickerKeyWindowCheck,
         restoration: restoration,

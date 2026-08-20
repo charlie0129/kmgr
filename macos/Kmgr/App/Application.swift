@@ -401,6 +401,15 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             confirmationPreferences: { [weak self] in
                 self?.preferencesStore.current.confirmations ?? ConfirmationPreferences()
             },
+            nodeShellPreferences: { [weak self] in
+                self?.preferencesStore.current.nodeShell ?? NodeShellPreferences()
+            },
+            saveNodeShellPreferences: { [weak self] nodeShell in
+                guard let self else { return }
+                var preferences = preferencesStore.current
+                preferences.nodeShell = nodeShell
+                try preferencesStore.save(preferences)
+            },
             restoration: restoration,
             seedFrameAutosaveName: seedFrameAutosaveName,
             startsAuthenticated: startsAuthenticated,

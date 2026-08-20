@@ -239,10 +239,9 @@ private func identityExecRequest() -> ExecSessionRequest {
         sessionID: "session",
         execSessionID: "exec",
         generation: 1,
-        pod: podIdentity(),
+        target: .pod(PodExecDestination(pod: podIdentity(), container: "app")),
         contextName: "production/admin@corp",
         clusterName: "cluster-a",
-        container: "app",
         command: ["/bin/sh"]
     )
 }

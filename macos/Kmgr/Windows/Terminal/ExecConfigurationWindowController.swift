@@ -376,10 +376,12 @@ final class ExecConfigurationWindowController: NSWindowController,
             sessionID: session.sessionID,
             execSessionID: UUID().uuidString.lowercased(),
             generation: 1,
-            pod: podIdentity,
+            target: .pod(PodExecDestination(
+                pod: podIdentity,
+                container: container.name
+            )),
             contextName: session.contextName,
             clusterName: session.clusterName,
-            container: container.name,
             command: command
         )
         let controller = TerminalWindowController(

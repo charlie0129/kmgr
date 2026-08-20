@@ -117,6 +117,41 @@ private actor ExecRPCCapture: ExecRPC {
     }
 }
 
+@Test func execProviderEncodesNodeShellTargetWithoutPodFields() async throws {
+    let rpc = ExecRPCCapture()
+    let provider = EngineExecSessionProvider(rpc: rpc)
+    let request = ExecSessionRequest(
+        sessionID: "cluster-session",
+        execSessionID: "node-terminal-1",
+        generation: 2,
+        target: .nodeShell(NodeShellDestination(
+            node: ResourceIdentity(
+                clusterSessionID: "cluster-session",
+                group: "", version: "v1", resource: "nodes",
+                namespace: "", name: "worker-a", uid: "node-uid"
+            ),
+            namespace: "ops-tools",
+            image: "registry.example/node-shell:1"
+        )),
+        contextName: "production",
+        command: ["bash", "-l"]
+    )
+    let session = try await provider.startExec(request: request)
+    for try await _ in session.events {}
+
+    let sent = await rpc.messages()
+    let start = try #require(sent.first?.start)
+    #expect(!start.hasPod)
+    #expect(start.container.isEmpty)
+    #expect(start.hasNodeShell)
+    #expect(start.nodeShell.node.resource == "nodes")
+    #expect(start.nodeShell.node.name == "worker-a")
+    #expect(start.nodeShell.node.uid == "node-uid")
+    #expect(start.nodeShell.namespace == "ops-tools")
+    #expect(start.nodeShell.image == "registry.example/node-shell:1")
+    #expect(start.command == ["bash", "-l"])
+}
+
 @Test func execSessionRejectsResizeWithoutTTYLocally() async throws {
     let rpc = ExecRPCCapture()
     var request = makeRequest()
@@ -138,17 +173,19 @@ private func makeRequest() -> ExecSessionRequest {
         sessionID: "cluster-session",
         execSessionID: "terminal-1",
         generation: 4,
-        pod: ResourceIdentity(
-            clusterSessionID: "cluster-session",
-            group: "",
-            version: "v1",
-            resource: "pods",
-            namespace: "default",
-            name: "api-0",
-            uid: "pod-uid"
-        ),
+        target: .pod(PodExecDestination(
+            pod: ResourceIdentity(
+                clusterSessionID: "cluster-session",
+                group: "",
+                version: "v1",
+                resource: "pods",
+                namespace: "default",
+                name: "api-0",
+                uid: "pod-uid"
+            ),
+            container: "main"
+        )),
         contextName: "local",
-        container: "main",
         command: ["/bin/sh"]
     )
 }

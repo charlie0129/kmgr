@@ -68,6 +68,77 @@ public struct DiagnosticsPreferences: Codable, Hashable, Sendable {
     }
 }
 
+public struct NodeShellPreferences: Codable, Hashable, Sendable {
+    public static let defaultImage = "zcr.zhipuai-infra.cn/infra/alpine:3.22"
+
+    public var globalImage: String
+    public var clusterImagesByContextReference: [String: String]
+
+    public init(
+        globalImage: String = Self.defaultImage,
+        clusterImagesByContextReference: [String: String] = [:]
+    ) {
+        self.globalImage = globalImage
+        self.clusterImagesByContextReference = clusterImagesByContextReference
+    }
+
+    public func effectiveImage(contextReference: String) -> String {
+        clusterImagesByContextReference[contextReference] ?? globalImage
+    }
+
+    public mutating func setClusterImage(_ image: String?, contextReference: String) {
+        if let image {
+            clusterImagesByContextReference[contextReference] = image
+        } else {
+            clusterImagesByContextReference.removeValue(forKey: contextReference)
+        }
+    }
+
+    fileprivate func validationIssues() -> [AppPreferenceIssue] {
+        var issues: [AppPreferenceIssue] = []
+        if !Self.isValidImage(globalImage) {
+            issues.append(AppPreferenceIssue(
+                field: "nodeShell.globalImage",
+                message: "The default node-shell image must be a nonempty image reference of at most 1,024 UTF-8 bytes without whitespace or control characters."
+            ))
+        }
+        if clusterImagesByContextReference.count > 1_000 {
+            issues.append(AppPreferenceIssue(
+                field: "nodeShell.clusterImagesByContextReference",
+                message: "At most 1,000 per-cluster node-shell image overrides may be retained."
+            ))
+        }
+        for (reference, image) in clusterImagesByContextReference {
+            if reference.isEmpty || reference.utf8.count > 512 ||
+                reference.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+            {
+                issues.append(AppPreferenceIssue(
+                    field: "nodeShell.clusterImagesByContextReference",
+                    message: "A per-cluster node-shell image override has an invalid context reference."
+                ))
+                break
+            }
+            if !Self.isValidImage(image) {
+                issues.append(AppPreferenceIssue(
+                    field: "nodeShell.clusterImagesByContextReference",
+                    message: "A per-cluster node-shell image override has an invalid image reference."
+                ))
+                break
+            }
+        }
+        return issues
+    }
+
+    public static func isValidImage(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed == value && value.utf8.count <= 1_024 &&
+            !value.unicodeScalars.contains {
+                CharacterSet.whitespacesAndNewlines.contains($0) ||
+                    CharacterSet.controlCharacters.contains($0)
+            }
+    }
+}
+
 public struct ConfirmationPreferences: Codable, Hashable, Sendable {
     public var confirmWorkloadRestart: Bool
     public var confirmScaling: Bool
@@ -268,7 +339,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v5"
+    public static let apiVersion = "kmgr.preferences/v6"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
@@ -278,6 +349,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
     public var confirmations: ConfirmationPreferences
     public var columnsConfigurationPath: String
     public var diagnostics: DiagnosticsPreferences
+    public var nodeShell: NodeShellPreferences
     public var advancedPerformance: AdvancedPerformancePreferences
 
     public init(
@@ -289,6 +361,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         confirmations: ConfirmationPreferences = ConfirmationPreferences(),
         columnsConfigurationPath: String = AppPreferences.defaultColumnsConfigurationPath,
         diagnostics: DiagnosticsPreferences = DiagnosticsPreferences(),
+        nodeShell: NodeShellPreferences = NodeShellPreferences(),
         advancedPerformance: AdvancedPerformancePreferences = AdvancedPerformancePreferences()
     ) {
         self.appearance = appearance
@@ -299,6 +372,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         self.confirmations = confirmations
         self.columnsConfigurationPath = columnsConfigurationPath
         self.diagnostics = diagnostics
+        self.nodeShell = nodeShell
         self.advancedPerformance = advancedPerformance
     }
 
@@ -343,6 +417,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
                 message: "Completed operation history must be between 0 and 100,000 entries."
             ))
         }
+        issues.append(contentsOf: nodeShell.validationIssues())
         if !(5...300).contains(metricsRefreshSeconds) {
             issues.append(AppPreferenceIssue(
                 field: "metricsRefreshSeconds",
@@ -380,6 +455,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
     case metricsRefresh
     case columnsConfigurationPath
     case operationHistory
+    case nodeShell
     case advancedPerformance
     case viewportOverscan
 
@@ -391,7 +467,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
 
     public var activation: Activation {
         switch self {
-        case .appearance, .logDisplay, .confirmations, .operationHistory:
+        case .appearance, .logDisplay, .confirmations, .operationHistory, .nodeShell:
             .immediate
         case .defaultNamespace, .viewportOverscan:
             .newWorkspace
@@ -411,6 +487,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         case .metricsRefresh: "Metrics refresh"
         case .columnsConfigurationPath: "Programmable columns path"
         case .operationHistory: "Completed operation history"
+        case .nodeShell: "Node shell defaults"
         case .advancedPerformance: "Advanced performance configuration"
         case .viewportOverscan: "List viewport overscan"
         }
@@ -442,6 +519,9 @@ public struct AppPreferencesDelta: Hashable, Sendable {
         }
         if previous.diagnostics != updated.diagnostics {
             changes.insert(.operationHistory)
+        }
+        if previous.nodeShell != updated.nodeShell {
+            changes.insert(.nodeShell)
         }
         if previous.advancedPerformance.viewportOverscanScreensPerSide
             != updated.advancedPerformance.viewportOverscanScreensPerSide
@@ -627,7 +707,8 @@ public struct KeyboardShortcutReference: Hashable, Sendable {
         Self(keys: "E", action: "Open Events for one object"),
         Self(keys: "L", action: "Open logs"),
         Self(keys: "\u{21E7}L", action: "Open previous container logs"),
-        Self(keys: "S", action: "Open Pod shell"),
+        Self(keys: "S", action: "Open Pod or Node shell"),
+        Self(keys: "⇧S", action: "Configure Pod or Node shell"),
         Self(keys: "P", action: "Start a Pod or Service port-forward"),
         Self(keys: "⌘⌫", action: "Delete selection"),
         Self(keys: "⌘S", action: "Save the active object edit"),
