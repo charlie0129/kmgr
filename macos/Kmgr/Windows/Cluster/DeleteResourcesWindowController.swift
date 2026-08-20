@@ -24,9 +24,7 @@ final class DeleteResourcesWindowController: NSWindowController,
     private let warningLabel = NSTextField(wrappingLabelWithString: "")
     private let highImpactWarning = NSTextField(wrappingLabelWithString: "")
     private let selectionSummaryLabel = NSTextField(wrappingLabelWithString: "")
-    private let advancedButton = NSButton(
-        title: "Advanced", target: nil, action: nil
-    )
+    private let advancedButton = NSButton(title: "", target: nil, action: nil)
     private let advancedOptions = NSStackView()
     private let propagationButton = NSPopUpButton()
     private let graceField = NSTextField()
@@ -212,10 +210,18 @@ final class DeleteResourcesWindowController: NSWindowController,
         advancedOptions.spacing = 8
         advancedOptions.isHidden = true
         advancedButton.bezelStyle = .disclosure
+        advancedButton.controlSize = .small
         advancedButton.target = self
         advancedButton.action = #selector(toggleAdvanced)
         advancedButton.setAccessibilityLabel("Show advanced deletion options")
-        let advancedContainer = NSStackView(views: [advancedButton, advancedOptions])
+        advancedButton.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        advancedButton.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        let advancedLabel = NSTextField(labelWithString: "Advanced")
+        let advancedHeader = NSStackView(views: [advancedButton, advancedLabel])
+        advancedHeader.orientation = .horizontal
+        advancedHeader.alignment = .centerY
+        advancedHeader.spacing = 4
+        let advancedContainer = NSStackView(views: [advancedHeader, advancedOptions])
         advancedContainer.orientation = .vertical
         advancedContainer.alignment = .leading
         advancedContainer.spacing = 6

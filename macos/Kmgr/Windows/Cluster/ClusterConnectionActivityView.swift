@@ -15,16 +15,23 @@ final class ClusterConnectionActivityView: NSView {
         super.init(frame: frameRect)
         stateLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         stateLabel.maximumNumberOfLines = 1
-        stateLabel.lineBreakMode = .byClipping
-        rateLabel.font = .monospacedDigitSystemFont(
+        stateLabel.lineBreakMode = .byTruncatingTail
+        let rateFont = NSFont.monospacedDigitSystemFont(
             ofSize: NSFont.smallSystemFontSize - 1,
             weight: .regular
         )
+        rateLabel.font = rateFont
         rateLabel.textColor = .secondaryLabelColor
         rateLabel.maximumNumberOfLines = 1
         rateLabel.lineBreakMode = .byClipping
-        stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        rateLabel.alignment = .right
+        stateLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        stateLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        rateLabel.setContentHuggingPriority(.required, for: .horizontal)
         rateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        rateLabel.widthAnchor.constraint(
+            equalToConstant: Self.maximumRateLabelWidth(font: rateFont)
+        ).isActive = true
         let stack = NSStackView(views: [stateLabel, rateLabel])
         stack.orientation = .horizontal
         stack.alignment = .centerY
@@ -130,8 +137,14 @@ final class ClusterConnectionActivityView: NSView {
     }
 
     private static func rate(_ bytesPerSecond: Double) -> String {
-        let value = max(0, bytesPerSecond)
-        let units = ["B/s", "KiB/s", "MiB/s", "GiB/s"]
+        let maximumCounterRate = Double(UInt64.max) * 2
+        let value: Double
+        if bytesPerSecond.isNaN || bytesPerSecond <= 0 {
+            value = 0
+        } else {
+            value = min(bytesPerSecond, maximumCounterRate)
+        }
+        let units = ["B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s", "PiB/s", "EiB/s"]
         var scaled = value
         var index = 0
         while scaled >= 1024, index < units.count - 1 {
@@ -140,5 +153,14 @@ final class ClusterConnectionActivityView: NSView {
         }
         if index == 0 { return "\(Int(scaled.rounded())) \(units[index])" }
         return String(format: scaled < 10 ? "%.1f %@" : "%.0f %@", scaled, units[index])
+    }
+
+    private static func maximumRateLabelWidth(font: NSFont) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        return ["B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s", "PiB/s", "EiB/s"]
+            .map { unit in
+                ("↑↓ 1024 \(unit)" as NSString).size(withAttributes: attributes).width
+            }
+            .max().map { ceil($0) + 2 } ?? 92
     }
 }

@@ -282,6 +282,17 @@ struct ClusterWorkspaceToolbarTests {
         #expect(accessibilityValue?.contains("download active") == true)
         #expect(accessibilityValue?.contains("upload active") == true)
         #expect(rate.accessibilityLabel() == "Kubernetes API transfer rate")
+
+        view.update(rate: ClusterConnectionRate(
+            bytesReceivedPerSecond: Double(UInt64.max) * 2,
+            receivedActive: true
+        ))
+        view.frame.size = NSSize(width: 176, height: view.intrinsicContentSize.height)
+        view.layoutSubtreeIfNeeded()
+        let boundedRateFrame = view.convert(rate.bounds, from: rate)
+        #expect(rate.stringValue.hasSuffix("EiB/s"))
+        #expect(boundedRateFrame.minX >= view.bounds.minX)
+        #expect(boundedRateFrame.maxX <= view.bounds.maxX + 0.5)
     }
 
     @Test("connection arrows reflect each counter interval independently")
@@ -347,7 +358,7 @@ struct ClusterWorkspaceToolbarTests {
 
         #expect(statusFrame.maxX <= activityFrame.minX)
         #expect(abs(statusFrame.midY - activityFrame.midY) < 2)
-        #expect(abs(activityFrame.maxX - statusBar.bounds.maxX + 8) < 1)
+        #expect(abs(activityFrame.maxX - statusBar.bounds.maxX + 3) < 1)
         #expect(statusBar.fittingSize.height <= 24)
     }
 

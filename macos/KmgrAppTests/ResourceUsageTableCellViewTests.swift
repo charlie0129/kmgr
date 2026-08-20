@@ -35,10 +35,7 @@ struct ResourceUsageTableCellViewTests {
         ) as? NSColor == .systemOrange)
         #expect(attributed?.attribute(
             .font, at: 0, effectiveRange: nil
-        ) as? NSFont == .systemFont(
-            ofSize: NSFont.systemFontSize,
-            weight: .semibold
-        ))
+        ) as? NSFont == .systemFont(ofSize: NSFont.systemFontSize))
         let requestIndex = (attributed?.string as? NSString)?.range(of: "500m").location ?? 0
         #expect(attributed?.attribute(
             .foregroundColor, at: requestIndex, effectiveRange: nil
@@ -80,10 +77,7 @@ struct ResourceUsageTableCellViewTests {
         ) as? NSColor == .systemRed)
         #expect(attributed?.attribute(
             .font, at: 0, effectiveRange: nil
-        ) as? NSFont == .systemFont(
-            ofSize: NSFont.systemFontSize,
-            weight: .semibold
-        ))
+        ) as? NSFont == .systemFont(ofSize: NSFont.systemFontSize))
         let capacityIndex = (attributed?.string as? NSString)?.range(of: "100").location ?? 0
         #expect(attributed?.attribute(
             .foregroundColor, at: capacityIndex, effectiveRange: nil
@@ -159,10 +153,7 @@ struct ResourceUsageTableCellViewTests {
             attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
         )
         #expect(NSFontManager.shared.traits(of: matchedFont).contains(.boldFontMask))
-        #expect(baseFont == .systemFont(
-            ofSize: NSFont.systemFontSize,
-            weight: .semibold
-        ))
+        #expect(baseFont == .systemFont(ofSize: NSFont.systemFontSize))
         #expect(attributed.attribute(
             .foregroundColor, at: 0, effectiveRange: nil
         ) as? NSColor == .systemOrange)

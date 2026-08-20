@@ -7,6 +7,31 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Delete resources window", .serialized)
 struct DeleteResourcesWindowControllerTests {
+    @Test("advanced deletion disclosure keeps its title outside the triangle")
+    func advancedDisclosureLayout() throws {
+        let controller = DeleteResourcesWindowController(
+            session: deleteSession(),
+            targets: [ResourceDeleteTarget(identity: deleteIdentity(
+                name: "api", uid: "api-uid"
+            ))],
+            provider: NoopDeleteResourcesProvider()
+        )
+        let root = try #require(controller.window?.contentView)
+        root.layoutSubtreeIfNeeded()
+        let disclosure = try #require(deleteButtons(in: controller).first {
+            $0.bezelStyle == .disclosure
+        })
+        let title = try #require(deleteDescendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.stringValue == "Advanced" })
+        let disclosureFrame = root.convert(disclosure.bounds, from: disclosure)
+        let titleFrame = root.convert(title.bounds, from: title)
+
+        #expect(disclosure.title.isEmpty)
+        #expect(titleFrame.minX >= disclosureFrame.maxX)
+        #expect(disclosure.accessibilityLabel() == "Show advanced deletion options")
+    }
+
     @Test("confirmation rows identify each exact target hidden by the current filter")
     func hiddenTargetsAreMarkedInTheirRows() throws {
         let visible = deleteIdentity(name: "api", uid: "api-uid")

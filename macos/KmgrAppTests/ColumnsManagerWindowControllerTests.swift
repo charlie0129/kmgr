@@ -125,6 +125,20 @@ struct ColumnsManagerWindowControllerTests {
             previewContext: testPreviewContext()
         )
         let panel = try #require(editor.window)
+        let initialRoot = try #require(panel.contentView)
+        initialRoot.needsLayout = true
+        initialRoot.layoutSubtreeIfNeeded()
+        let initialExpression = try #require(
+            view(accessibilityLabel: "CEL expression", beneath: initialRoot) as? NSTextView
+        )
+        let initialResultLabel = try #require(descendants(of: initialRoot)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.stringValue == "Result type" })
+        let initialExpressionScroll = try #require(initialExpression.enclosingScrollView)
+        let expressionToResultGap = frame(
+            of: initialExpressionScroll, in: initialRoot
+        ).minY - frame(of: initialResultLabel, in: initialRoot).maxY
+        #expect(expressionToResultGap >= 0 && expressionToResultGap <= 12)
         panel.setFrame(
             NSRect(origin: panel.frame.origin, size: panel.minSize),
             display: false

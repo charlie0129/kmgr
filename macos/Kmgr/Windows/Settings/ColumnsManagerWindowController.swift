@@ -1307,6 +1307,13 @@ final class CELColumnEditorWindowController: NSWindowController,
         form.alignment = .leading
         form.spacing = 8
         form.translatesAutoresizingMaskIntoConstraints = false
+        // Keep extra panel height out of the form rows. The preview is the
+        // useful elastic region; otherwise NSStackView assigns the surplus to
+        // the Expression row and creates a large blank gap before Result type.
+        form.setContentHuggingPriority(.required, for: .vertical)
+        for section in formSections {
+            section.setContentHuggingPriority(.required, for: .vertical)
+        }
         NSLayoutConstraint.activate(formSections.map {
             $0.widthAnchor.constraint(equalTo: form.widthAnchor)
         })
@@ -1358,7 +1365,8 @@ final class CELColumnEditorWindowController: NSWindowController,
         previewValueScroll.hasHorizontalScroller = true
         previewValueScroll.autohidesScrollers = true
         previewValueScroll.borderType = .bezelBorder
-        previewValueScroll.heightAnchor.constraint(equalToConstant: 140).isActive = true
+        previewValueScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
+        previewValueScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         previewSourceLabel.textColor = .secondaryLabelColor
         previewSourceLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         previewEnvironmentLabel.textColor = .tertiaryLabelColor
@@ -1372,6 +1380,7 @@ final class CELColumnEditorWindowController: NSWindowController,
         previewStack.orientation = .vertical
         previewStack.alignment = .leading
         previewStack.spacing = 4
+        previewStack.setContentHuggingPriority(.defaultLow, for: .vertical)
         previewStack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         previewStack.wantsLayer = true
         previewStack.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor

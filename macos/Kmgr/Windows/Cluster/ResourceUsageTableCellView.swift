@@ -24,10 +24,7 @@ final class ResourceUsageTableCellView: HighlightableResourceTableCellView {
             presentation.currentUsageTextRange.map { range in
                 ResourceTableTextAccent(
                     utf16Range: range,
-                    font: .systemFont(
-                        ofSize: NSFont.systemFontSize,
-                        weight: .semibold
-                    ),
+                    font: baseFont,
                     color: color
                 )
             }
