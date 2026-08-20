@@ -5,7 +5,7 @@ repo_root=${0:A:h:h}
 app_dir=${1:-"$repo_root/build/Kmgr.app"}
 contents_dir="$app_dir/Contents"
 info_plist="$contents_dir/Info.plist"
-expected_identifier=com.pktium.kmgr
+expected_identifier=cc.chlc.kmgr
 expected_minimum_system=15.0
 
 fail() {

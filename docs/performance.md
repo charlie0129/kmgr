@@ -207,7 +207,7 @@ replace a manual VoiceOver navigation/read-order pass in the packaged app.
 ## Instruments signposts
 
 Release builds contain local `OSSignposter` intervals under subsystem
-`com.pktium.kmgr`. The vocabulary is stable and records only byte/row/column
+`cc.chlc.kmgr`. The vocabulary is stable and records only byte/row/column
 counts, booleans, stream generations/sequences, filter revisions, and outcome
 labels. It never records Kubernetes names, namespaces, UIDs, selectors, filter
 text, cell values, log content, credentials, or IPC metadata.
@@ -228,7 +228,7 @@ To record interactively:
    `build/Kmgr.app`.
 2. Open Instruments, choose the **Logging** template (or add **Points of
    Interest** to **Time Profiler**), and attach to **Kmgr**.
-3. Filter signposts to subsystem `com.pktium.kmgr`, then exercise initial list,
+3. Filter signposts to subsystem `cc.chlc.kmgr`, then exercise initial list,
    filter/sort changes, bursty watches, and visible/hidden log windows.
 4. Correlate `ResourceModelApply`, `ResourceTableReload`, and
    `LogTextInstall` intervals with Main Thread and animation-hitch tracks.

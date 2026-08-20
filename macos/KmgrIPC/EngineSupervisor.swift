@@ -244,7 +244,7 @@ public final class EngineSupervisor {
     public nonisolated let connection = EngineConnection()
 
     private let configuration: Configuration
-    private let logger = Logger(subsystem: "com.pktium.kmgr", category: "engine-supervisor")
+    private let logger = Logger(subsystem: "cc.chlc.kmgr", category: "engine-supervisor")
     private var supervisionTask: Task<Void, Never>?
     private var shutdownRequested = false
     private var currentProcess: Process?

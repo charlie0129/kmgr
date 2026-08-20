@@ -330,7 +330,7 @@ After reproducing, export only the dedicated unified-log category:
   --last 15m \
   --style compact \
   --info --debug \
-  --predicate 'process == "Kmgr" AND subsystem == "com.pktium.kmgr" AND category == "resource-cache"' \
+  --predicate 'process == "Kmgr" AND subsystem == "cc.chlc.kmgr" AND category == "resource-cache"' \
   > "$HOME/Desktop/kmgr-resource-cache.log"
 ```
 

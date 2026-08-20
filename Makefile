@@ -22,6 +22,9 @@ test-swift:
 app:
 	./scripts/build-app.sh
 
+app-release:
+	CONFIGURATION=release ./scripts/build-app.sh
+
 install: app
 	rm -rf /Applications/Kmgr.app
 	cp -R build/Kmgr.app /Applications/Kmgr.app

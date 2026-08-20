@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>Kmgr</string>
     <key>CFBundleIdentifier</key>
-    <string>com.pktium.kmgr</string>
+    <string>cc.chlc.kmgr</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
