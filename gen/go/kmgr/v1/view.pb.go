@@ -2474,7 +2474,13 @@ type SelectionGesture struct {
 	// only by command-all and clear gestures.
 	Index uint64 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
 	// Command-Shift range extension. Invalid for every other gesture kind.
-	Additive      bool `protobuf:"varint,3,opt,name=additive,proto3" json:"additive,omitempty"`
+	Additive bool `protobuf:"varint,3,opt,name=additive,proto3" json:"additive,omitempty"`
+	// Stable target used when a gesture was made against warm rows while a new
+	// ordering was loading. The engine resolves it in the requested current
+	// revision; it never trusts the stale numeric index.
+	TargetUid string `protobuf:"bytes,4,opt,name=target_uid,json=targetUid,proto3" json:"target_uid,omitempty"`
+	// Stable Shift anchor. Valid only with target_uid and SHIFT_EXTEND.
+	AnchorUid     string `protobuf:"bytes,5,opt,name=anchor_uid,json=anchorUid,proto3" json:"anchor_uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2528,6 +2534,20 @@ func (x *SelectionGesture) GetAdditive() bool {
 		return x.Additive
 	}
 	return false
+}
+
+func (x *SelectionGesture) GetTargetUid() string {
+	if x != nil {
+		return x.TargetUid
+	}
+	return ""
+}
+
+func (x *SelectionGesture) GetAnchorUid() string {
+	if x != nil {
+		return x.AnchorUid
+	}
+	return ""
 }
 
 type SelectionAnchor struct {
@@ -3436,11 +3456,15 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"\x17nodes_snapshot_complete\x18\x05 \x01(\bR\x15nodesSnapshotComplete\x124\n" +
 	"\x16pods_snapshot_complete\x18\x06 \x01(\bR\x14podsSnapshotComplete\x125\n" +
 	"\x16potentially_incomplete\x18\a \x01(\bR\x15potentiallyIncomplete\x12.\n" +
-	"\x05error\x18\b \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"w\n" +
+	"\x05error\x18\b \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\xb5\x01\n" +
 	"\x10SelectionGesture\x121\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x1d.kmgr.v1.SelectionGestureKindR\x04kind\x12\x14\n" +
 	"\x05index\x18\x02 \x01(\x04R\x05index\x12\x1a\n" +
-	"\badditive\x18\x03 \x01(\bR\badditive\"9\n" +
+	"\badditive\x18\x03 \x01(\bR\badditive\x12\x1d\n" +
+	"\n" +
+	"target_uid\x18\x04 \x01(\tR\ttargetUid\x12\x1d\n" +
+	"\n" +
+	"anchor_uid\x18\x05 \x01(\tR\tanchorUid\"9\n" +
 	"\x0fSelectionAnchor\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\tR\x03uid\"\xf3\x01\n" +

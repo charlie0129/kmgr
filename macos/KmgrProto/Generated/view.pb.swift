@@ -1151,6 +1151,14 @@ public struct Kmgr_V1_SelectionGesture: Sendable {
   /// Command-Shift range extension. Invalid for every other gesture kind.
   public var additive: Bool = false
 
+  /// Stable target used when a gesture was made against warm rows while a new
+  /// ordering was loading. The engine resolves it in the requested current
+  /// revision; it never trusts the stale numeric index.
+  public var targetUid: String = String()
+
+  /// Stable Shift anchor. Valid only with target_uid and SHIFT_EXTEND.
+  public var anchorUid: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -3108,7 +3116,7 @@ extension Kmgr_V1_DiscoverOptionalResourcesResponse: SwiftProtobuf.Message, Swif
 
 extension Kmgr_V1_SelectionGesture: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SelectionGesture"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}index\0\u{1}additive\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}index\0\u{1}additive\0\u{3}target_uid\0\u{3}anchor_uid\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3119,6 +3127,8 @@ extension Kmgr_V1_SelectionGesture: SwiftProtobuf.Message, SwiftProtobuf._Messag
       case 1: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.index) }()
       case 3: try { try decoder.decodeSingularBoolField(value: &self.additive) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.targetUid) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.anchorUid) }()
       default: break
       }
     }
@@ -3134,6 +3144,12 @@ extension Kmgr_V1_SelectionGesture: SwiftProtobuf.Message, SwiftProtobuf._Messag
     if self.additive != false {
       try visitor.visitSingularBoolField(value: self.additive, fieldNumber: 3)
     }
+    if !self.targetUid.isEmpty {
+      try visitor.visitSingularStringField(value: self.targetUid, fieldNumber: 4)
+    }
+    if !self.anchorUid.isEmpty {
+      try visitor.visitSingularStringField(value: self.anchorUid, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3141,6 +3157,8 @@ extension Kmgr_V1_SelectionGesture: SwiftProtobuf.Message, SwiftProtobuf._Messag
     if lhs.kind != rhs.kind {return false}
     if lhs.index != rhs.index {return false}
     if lhs.additive != rhs.additive {return false}
+    if lhs.targetUid != rhs.targetUid {return false}
+    if lhs.anchorUid != rhs.anchorUid {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

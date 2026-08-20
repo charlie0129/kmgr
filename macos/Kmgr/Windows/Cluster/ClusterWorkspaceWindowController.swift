@@ -2734,6 +2734,13 @@ private struct PendingResourceSelectionGesture: Sendable {
     /// The last absolute row targeted by a numeric gesture. This is separate
     /// from the backend anchor: it identifies the moving edge for Shift-arrow.
     var activeEndpoint: UInt64?
+    /// True when this gesture was captured by UID from warm rows and should
+    /// keep its local placeholder until the fresh token projection arrives.
+    var preservesUIDPlaceholder: Bool
+}
+
+private struct DeferredUIDSelectionGesture: Sendable {
+    var gesture: ResourceSelectionGesture
 }
 
 @MainActor
@@ -2905,6 +2912,9 @@ private final class ResourceListViewController: NSViewController,
     private var tableRowsVisible: UInt64 = 0
     private var presentedTableRange: Range<UInt64>?
     private var pendingSelectionTableIndexes: IndexSet?
+    /// Authoritative local presentation while UID gestures wait for the first
+    /// fresh range and for their resulting token projection.
+    private var pendingUIDSelectionTableIndexes: IndexSet?
     private var pendingCommandForLoadingSelection: ResourceTableCommand?
     /// The immutable backend token is the authority for cardinality and
     /// command targets. `model.selectedUIDs` is only its loaded-range
@@ -2923,6 +2933,8 @@ private final class ResourceListViewController: NSViewController,
     private var nextSelectionGestureSequence: UInt64 = 0
     private var lastEnqueuedSelectionGestureSequence: UInt64?
     private var selectionGestureFences: [UInt64: [ResourceSelectionGestureFence]] = [:]
+    private var deferredUIDSelectionGestures: [DeferredUIDSelectionGesture] = []
+    private var pendingUIDSelectionGestureSequences: Set<UInt64> = []
     /// Last selection explicitly installed by this controller. AppKit changes
     /// its indexes before the delegate fallback observes accessibility-driven
     /// selection, so a rejected overflow gesture needs this bounded snapshot
@@ -4536,6 +4548,12 @@ private final class ResourceListViewController: NSViewController,
             self.pendingSelectionTableIndexes = valid.isEmpty
                 ? nil : IndexSet(valid)
         }
+        if let pendingUIDSelectionTableIndexes {
+            let valid = pendingUIDSelectionTableIndexes.filter {
+                $0 >= 0 && $0 < tableRowCount
+            }
+            self.pendingUIDSelectionTableIndexes = IndexSet(valid)
+        }
         let wasSuppressingSelectionCallbacks = suppressSelectionCallbacks
         suppressSelectionCallbacks = true
         tableView.noteNumberOfRowsChanged()
@@ -4627,6 +4645,7 @@ private final class ResourceListViewController: NSViewController,
         activeSelectionEndpointRevision = nil
         clearPendingSelectionGestures()
         pendingSelectionTableIndexes = nil
+        clearDeferredUIDSelection()
         pendingCommandForLoadingSelection = nil
         selectionProjectionTask?.cancel()
         selectionProjectionTask = nil
@@ -4656,6 +4675,7 @@ private final class ResourceListViewController: NSViewController,
         clearPendingSelectionGestures()
         selectionProjectionTicket = nil
         pendingSelectionTableIndexes = nil
+        clearDeferredUIDSelection()
         pendingCommandForLoadingSelection = nil
         pendingSelectionUIDs = nil
         model.clearSelection()
@@ -4692,6 +4712,7 @@ private final class ResourceListViewController: NSViewController,
         activeSelectionEndpoint = nil
         activeSelectionEndpointRevision = nil
         pendingSelectionTableIndexes = nil
+        clearDeferredUIDSelection()
         model.clearSelection()
         selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
         let wasSuppressing = suppressSelectionCallbacks
@@ -4701,6 +4722,12 @@ private final class ResourceListViewController: NSViewController,
         suppressSelectionCallbacks = wasSuppressing
         updateStatusLine()
         publishContextualShortcutsIfChanged()
+    }
+
+    private func clearDeferredUIDSelection() {
+        deferredUIDSelectionGestures.removeAll(keepingCapacity: true)
+        pendingUIDSelectionGestureSequences.removeAll(keepingCapacity: true)
+        pendingUIDSelectionTableIndexes = nil
     }
 
     private func scheduleSelectionExpiry(for state: ResourceSelectionState) {
@@ -4844,6 +4871,12 @@ private final class ResourceListViewController: NSViewController,
         model.restoreSelection(uids: selectedUIDs, anchorUID: anchorUID)
         selectedUIDsKnownInPresentedIndex = selectedUIDs
 
+        if pendingUIDSelectionGestureSequences.isEmpty,
+            deferredUIDSelectionGestures.isEmpty
+        {
+            pendingUIDSelectionTableIndexes = nil
+        }
+
         if let pending = pendingSelectionTableIndexes {
             let unresolved = pending.filter {
                 guard $0 >= 0 else { return false }
@@ -4852,8 +4885,11 @@ private final class ResourceListViewController: NSViewController,
             pendingSelectionTableIndexes = unresolved.isEmpty
                 ? nil : IndexSet(unresolved)
         }
-        var tableSelection = selectedTableRowIndexes()
-        if let pendingSelectionTableIndexes {
+        var tableSelection = pendingUIDSelectionTableIndexes
+            ?? selectedTableRowIndexes()
+        if pendingUIDSelectionTableIndexes == nil,
+            let pendingSelectionTableIndexes
+        {
             tableSelection.formUnion(pendingSelectionTableIndexes)
         }
         let wasSuppressing = suppressSelectionCallbacks
@@ -5116,6 +5152,7 @@ private final class ResourceListViewController: NSViewController,
             range.startIndex + UInt64(range.rows.count)
         )
         setTableRowsVisible(range.rowsVisible)
+        presentedRangeRevision = range.revision
         let restoredPlan = restoringPendingSelection(
             in: plan,
             chunkIsComplete: true
@@ -5130,6 +5167,7 @@ private final class ResourceListViewController: NSViewController,
         selectedUIDsKnownInPresentedIndex.formUnion(
             order.lazy.filter { self.model.selectedUIDs.contains($0) }
         )
+        replayDeferredUIDSelectionGestures(in: range)
         applyTablePlan(restoredPlan)
         pendingScrollAnchor = nil
         if !detectedChanges.isEmpty {
@@ -5147,7 +5185,6 @@ private final class ResourceListViewController: NSViewController,
             // projection do not need to be materialized to trust these UIDs.
             last: true
         )
-        presentedRangeRevision = range.revision
         isChangeDetectionArmed = true
         activateRequestedFilterHighlight()
         reloadVisibleCellPresentation(at: affectedCellAddresses)
@@ -5166,6 +5203,49 @@ private final class ResourceListViewController: NSViewController,
         scheduleSelectionProjection()
         if request != nil { updateStatusLine() }
         runPendingSelectionCommandIfReady()
+    }
+
+    private func replayDeferredUIDSelectionGestures(
+        in range: ResourceViewRange
+    ) {
+        guard !deferredUIDSelectionGestures.isEmpty,
+            let revision = interactiveSelectionRevision
+        else { return }
+
+        var tableRowByUID: [ResourceUID: Int] = [:]
+        tableRowByUID.reserveCapacity(range.rows.count)
+        for (offset, row) in range.rows.enumerated() {
+            let absolute = range.startIndex + UInt64(offset)
+            guard absolute <= UInt64(Int.max) else { continue }
+            tableRowByUID[row.identity.uid] = Int(absolute)
+        }
+
+        // Rebuild the optimistic presentation from UID truth in the fresh
+        // bounded range. A moved offscreen target remains selected by the
+        // backend but cannot be painted at a guessed numeric position.
+        pendingUIDSelectionTableIndexes = selectedTableRowIndexes()
+        let deferred = deferredUIDSelectionGestures
+        deferredUIDSelectionGestures.removeAll(keepingCapacity: true)
+        for item in deferred {
+            let targetTableRow = item.gesture.targetUID.flatMap {
+                tableRowByUID[$0]
+            }
+            installDeferredUIDSelectionPlaceholder(
+                gesture: item.gesture,
+                targetTableRow: targetTableRow
+            )
+            let accepted = enqueueSelectionGesture(
+                item.gesture,
+                revision: revision,
+                activeEndpoint: targetTableRow.map(UInt64.init),
+                preservesUIDPlaceholder: true
+            )
+            if !accepted {
+                clearDeferredUIDSelection()
+                restoreAppKitSelectionFromLoadedModel()
+                break
+            }
+        }
     }
 
     private func runPendingSelectionCommandIfReady() {
@@ -5252,7 +5332,12 @@ private final class ResourceListViewController: NSViewController,
                 ) === view
             }
         )
-        if let pendingSelectionTableIndexes,
+        if let pendingUIDSelectionTableIndexes {
+            tableView.selectRowIndexes(
+                pendingUIDSelectionTableIndexes,
+                byExtendingSelection: false
+            )
+        } else if let pendingSelectionTableIndexes,
             !pendingSelectionTableIndexes.isEmpty
         {
             tableView.selectRowIndexes(
@@ -6818,23 +6903,13 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func performSelectionGesture(_ gesture: ResourceTableSelectionGesture) -> Bool {
-        guard let revision = interactiveSelectionRevision else {
-            // Warm rows can remain visible between an invalidation and its
-            // replacement range. Never let AppKit mutate local indexes while
-            // those rows do not match the backend's interactive ordering.
-            if presentedTableRange != nil || tableRowsVisible > 0 {
-                NSSound.beep()
-                restoreAppKitSelectionFromLoadedModel()
-                return true
-            }
-            return false
-        }
-
         let targetIndex: UInt64?
         if let direction = gesture.keyboardDirection {
-            let endpoint = activeSelectionEndpointRevision == revision
+            let endpoint = interactiveSelectionRevision.flatMap { revision in
+                activeSelectionEndpointRevision == revision
                 ? activeSelectionEndpoint
                 : nil
+            }
             let fallback = tableView.selectedRow >= 0
                 ? UInt64(tableView.selectedRow) : nil
             guard let current = endpoint ?? fallback, tableRowsVisible > 0 else {
@@ -6850,6 +6925,19 @@ private final class ResourceListViewController: NSViewController,
                 guard row >= 0, UInt64(row) < tableRowsVisible else { return nil }
                 return UInt64(row)
             }
+        }
+
+        guard let revision = interactiveSelectionRevision else {
+            // The visible row belongs to the old ordering, but its UID remains
+            // trustworthy. Capture that identity and replay it only after the
+            // first fresh range makes numeric interaction safe again.
+            guard presentedTableRange != nil || tableRowsVisible > 0 else {
+                return false
+            }
+            return deferUIDSelectionGesture(
+                gesture,
+                targetIndex: targetIndex
+            )
         }
 
         let backendGesture: ResourceSelectionGesture
@@ -6882,11 +6970,117 @@ private final class ResourceListViewController: NSViewController,
         return true
     }
 
+    private func deferUIDSelectionGesture(
+        _ gesture: ResourceTableSelectionGesture,
+        targetIndex: UInt64?
+    ) -> Bool {
+        guard deferredUIDSelectionGestures.count < Self.maxPendingSelectionGestures else {
+            NSSound.beep()
+            restoreAppKitSelectionFromLoadedModel()
+            return true
+        }
+
+        let backendGesture: ResourceSelectionGesture
+        if let targetIndex {
+            guard targetIndex <= UInt64(Int.max),
+                let row = resourceRow(atTableRow: Int(targetIndex))
+            else {
+                // An unloaded virtual row has no locally authenticated UID, so
+                // retaining its stale number would be unsafe.
+                NSSound.beep()
+                restoreAppKitSelectionFromLoadedModel()
+                return true
+            }
+            let kind: ResourceSelectionGesture.Kind
+            if gesture.modifiers.contains(.shift) {
+                kind = .shiftExtend
+            } else if gesture.modifiers.contains(.command) {
+                kind = .commandToggle
+            } else {
+                kind = .replace
+            }
+            let anchorUID = kind == .shiftExtend
+                ? (displayedSelectionState?.anchor?.uid ?? model.selectionAnchorUID)
+                : nil
+            backendGesture = ResourceSelectionGesture(
+                kind: kind,
+                additive: gesture.modifiers.contains([.shift, .command]),
+                targetUID: row.identity.uid,
+                anchorUID: anchorUID
+            )
+        } else {
+            backendGesture = ResourceSelectionGesture(kind: .clear)
+        }
+
+        deferredUIDSelectionGestures.append(DeferredUIDSelectionGesture(
+            gesture: backendGesture
+        ))
+        installDeferredUIDSelectionPlaceholder(
+            gesture: backendGesture,
+            targetTableRow: targetIndex.flatMap {
+                $0 <= UInt64(Int.max) ? Int($0) : nil
+            }
+        )
+        pendingCommandForLoadingSelection = nil
+        updateStatusLine()
+        return true
+    }
+
+    private func installDeferredUIDSelectionPlaceholder(
+        gesture: ResourceSelectionGesture,
+        targetTableRow: Int?
+    ) {
+        var indexes = pendingUIDSelectionTableIndexes
+            ?? tableView.selectedRowIndexes
+        switch gesture.kind {
+        case .clear:
+            indexes = []
+        case .commandAll:
+            break
+        case .replace:
+            indexes = targetTableRow.map(IndexSet.init(integer:)) ?? []
+        case .commandToggle:
+            if let targetTableRow {
+                if indexes.contains(targetTableRow) {
+                    indexes.remove(targetTableRow)
+                } else {
+                    indexes.insert(targetTableRow)
+                }
+            }
+        case .shiftExtend:
+            guard let targetTableRow else { break }
+            let anchorTableRow = gesture.anchorUID.flatMap { anchorUID in
+                model.visibleIndex(for: anchorUID).flatMap(tableRow(forModelIndex:))
+            }
+            let extensionIndexes: IndexSet
+            if let anchorTableRow {
+                extensionIndexes = IndexSet(integersIn:
+                    min(anchorTableRow, targetTableRow)...max(anchorTableRow, targetTableRow)
+                )
+            } else {
+                extensionIndexes = IndexSet(integer: targetTableRow)
+            }
+            if gesture.additive {
+                indexes.formUnion(extensionIndexes)
+            } else {
+                indexes = extensionIndexes
+            }
+        }
+        pendingUIDSelectionTableIndexes = indexes
+        let wasSuppressing = suppressSelectionCallbacks
+        suppressSelectionCallbacks = true
+        tableView.selectRowIndexes(indexes, byExtendingSelection: false)
+        lastAcceptedAppKitSelection = indexes
+        suppressSelectionCallbacks = wasSuppressing
+        if let targetTableRow { tableView.scrollRowToVisible(targetTableRow) }
+    }
+
     @discardableResult
     private func enqueueSelectionGesture(
         _ gesture: ResourceSelectionGesture,
         revision: ResourceSelectionRevision,
-        activeEndpoint: UInt64?
+        activeEndpoint: UInt64?,
+        preservesUIDPlaceholder: Bool = false
     ) -> Bool {
         guard pendingSelectionGestureCount < Self.maxPendingSelectionGestures else {
             // Consume overflow without allowing AppKit's delegate-first
@@ -6911,8 +7105,12 @@ private final class ResourceListViewController: NSViewController,
             sequence: sequence,
             revision: revision,
             gesture: gesture,
-            activeEndpoint: activeEndpoint
+            activeEndpoint: activeEndpoint,
+            preservesUIDPlaceholder: preservesUIDPlaceholder
         ))
+        if preservesUIDPlaceholder {
+            pendingUIDSelectionGestureSequences.insert(sequence)
+        }
         if let activeEndpoint {
             activeSelectionEndpoint = activeEndpoint
             activeSelectionEndpointRevision = revision
@@ -6920,10 +7118,12 @@ private final class ResourceListViewController: NSViewController,
             activeSelectionEndpoint = nil
             activeSelectionEndpointRevision = nil
         }
-        installPendingSelectionPlaceholder(
-            gesture: gesture,
-            targetIndex: activeEndpoint
-        )
+        if !preservesUIDPlaceholder {
+            installPendingSelectionPlaceholder(
+                gesture: gesture,
+                targetIndex: activeEndpoint
+            )
+        }
         startSelectionGestureQueueIfNeeded()
         updateStatusLine()
         return true
@@ -6988,15 +7188,27 @@ private final class ResourceListViewController: NSViewController,
             {
                 guard currentSelectionRevision == pending.revision else {
                     discardSelectionPlaceholder(for: pending)
+                    pendingUIDSelectionGestureSequences.remove(pending.sequence)
                     resolveSelectionGestureFences(
                         sequence: pending.sequence,
                         result: .failure(selectionScopeChangedIssue())
                     )
                     continue
                 }
-                let previousToken = usableSelectionContinuationToken(
+                var previousToken = usableSelectionContinuationToken(
                     for: pending.revision
                 )
+                if previousToken.isEmpty,
+                    pending.preservesUIDPlaceholder,
+                    pending.gesture.targetUID != nil,
+                    let displayed = displayedSelectionState,
+                    displayed.expiresAt.map({ $0 > Date() }) ?? true
+                {
+                    // The engine accepts this predecessor only because the
+                    // queued gesture carries stable UIDs; it rebases selected
+                    // membership and the anchor without reusing old numbers.
+                    previousToken = displayed.token
+                }
                 do {
                     let state = try await provider.applySelectionGesture(
                         sessionID: session.sessionID,
@@ -7033,8 +7245,10 @@ private final class ResourceListViewController: NSViewController,
     ) {
         guard !state.token.isEmpty, state.revision == pending.revision else {
             discardSelectionPlaceholder(for: pending)
+            pendingUIDSelectionGestureSequences.remove(pending.sequence)
             return
         }
+        pendingUIDSelectionGestureSequences.remove(pending.sequence)
         displayedSelectionState = state
         scheduleSelectionExpiry(for: state)
         if currentSelectionRevision == pending.revision {
@@ -7059,6 +7273,7 @@ private final class ResourceListViewController: NSViewController,
         discardSelectionPlaceholder(for: pending)
         clearPendingSelectionGestures()
         pendingSelectionTableIndexes = nil
+        clearDeferredUIDSelection()
         pendingCommandForLoadingSelection = nil
         if committedSelectionEndpointRevision == pending.revision {
             activeSelectionEndpoint = committedSelectionEndpoint
@@ -7070,12 +7285,22 @@ private final class ResourceListViewController: NSViewController,
         restoreAppKitSelectionFromLoadedModel()
         scheduleSelectionProjection()
         guard currentSelectionRevision == pending.revision else { return }
+        if pending.preservesUIDPlaceholder,
+            let issue = error as? ClusterManagerIssue,
+            issue.category == .notFound
+        {
+            // The UID (or Shift anchor) disappeared in the fresh ordering.
+            // Clearing the optimistic selection is the requested outcome, not
+            // an actionable backend error.
+            return
+        }
         show(error: error)
     }
 
     private func discardSelectionPlaceholder(
         for pending: PendingResourceSelectionGesture
     ) {
+        if pending.preservesUIDPlaceholder { return }
         guard let target = pending.activeEndpoint,
             target <= UInt64(Int.max),
             var placeholders = pendingSelectionTableIndexes
@@ -7162,8 +7387,11 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func restoreAppKitSelectionFromLoadedModel() {
-        var indexes = selectedTableRowIndexes()
-        if let pendingSelectionTableIndexes {
+        var indexes = pendingUIDSelectionTableIndexes
+            ?? selectedTableRowIndexes()
+        if pendingUIDSelectionTableIndexes == nil,
+            let pendingSelectionTableIndexes
+        {
             indexes.formUnion(pendingSelectionTableIndexes)
         }
         let wasSuppressing = suppressSelectionCallbacks

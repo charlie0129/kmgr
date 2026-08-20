@@ -1052,12 +1052,25 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         case .replace, .commandToggle, .shiftExtend: true
         case .commandAll, .clear: false
         }
-        guard targetsRow == (gesture.index != nil),
-            gesture.kind == .shiftExtend || !gesture.additive
+        let hasNumericTarget = gesture.index != nil
+        let hasStableTarget = gesture.targetUID != nil
+        let stableUIDsAreValid = [gesture.targetUID, gesture.anchorUID]
+            .compactMap { $0?.rawValue }
+            .allSatisfy {
+                !$0.isEmpty
+                    && $0.trimmingCharacters(in: .whitespacesAndNewlines) == $0
+            }
+        guard targetsRow == (hasNumericTarget || hasStableTarget),
+            !(hasNumericTarget && hasStableTarget),
+            gesture.kind == .shiftExtend || !gesture.additive,
+            gesture.anchorUID == nil || (
+                gesture.kind == .shiftExtend && hasStableTarget
+            ),
+            stableUIDsAreValid
         else {
             throw validationIssue(
                 reason: "InvalidSelectionGesture",
-                message: "Only row gestures accept an index, and only Shift extension may be additive.",
+                message: "Row gestures require exactly one numeric or stable target, and only Shift extension accepts an anchor or additive mode.",
                 operation: "apply resource selection gesture"
             )
         }
@@ -1066,20 +1079,25 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         result.kind = kind
         result.index = index
         result.additive = gesture.additive
+        result.targetUid = gesture.targetUID?.rawValue ?? ""
+        result.anchorUid = gesture.anchorUID?.rawValue ?? ""
         return result
     }
 
     private static func selectionGestureIndex(
         _ gesture: ResourceSelectionGesture
     ) throws -> UInt64 {
-        guard let index = gesture.index else {
+        if let index = gesture.index { return index }
+        guard gesture.targetUID != nil else {
             throw validationIssue(
                 reason: "InvalidSelectionGesture",
                 message: "This selection gesture requires an absolute row index.",
                 operation: "apply resource selection gesture"
             )
         }
-        return index
+        // Stable targets are resolved by the engine against the requested
+        // revision, so the protobuf's numeric field is deliberately ignored.
+        return 0
     }
 
     private static func selectionState(

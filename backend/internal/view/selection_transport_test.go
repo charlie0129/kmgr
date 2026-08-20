@@ -323,8 +323,8 @@ func TestGRPCSelectionTransportAndStatusMapping(t *testing.T) {
 	apply, err := service.ApplySelectionGesture(context.Background(), &kmgrv1.ApplySelectionGestureRequest{
 		Context: requestContext, ViewId: "view", Generation: 7, IndexRevision: 2,
 		Gesture: &kmgrv1.SelectionGesture{
-			Kind:  kmgrv1.SelectionGestureKind_SELECTION_GESTURE_KIND_REPLACE,
-			Index: 1,
+			Kind:      kmgrv1.SelectionGestureKind_SELECTION_GESTURE_KIND_REPLACE,
+			TargetUid: "b",
 		},
 	})
 	if err != nil {
@@ -355,6 +355,16 @@ func TestGRPCSelectionTransportAndStatusMapping(t *testing.T) {
 		page.GetItems()[0].GetIdentity().GetClusterSessionId() != "session" ||
 		page.GetItems()[0].GetIdentity().GetUid() != "b" {
 		t.Fatalf("page response = %#v", page)
+	}
+	_, err = service.ApplySelectionGesture(context.Background(), &kmgrv1.ApplySelectionGestureRequest{
+		Context: requestContext, ViewId: "view", Generation: 7, IndexRevision: 2,
+		Gesture: &kmgrv1.SelectionGesture{
+			Kind:      kmgrv1.SelectionGestureKind_SELECTION_GESTURE_KIND_REPLACE,
+			TargetUid: "gone",
+		},
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("missing stable target code = %v (%v)", status.Code(err), err)
 	}
 
 	// The first immutable token remains live, so the configured process-wide

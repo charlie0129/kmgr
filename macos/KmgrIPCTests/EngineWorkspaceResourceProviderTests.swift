@@ -374,6 +374,24 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(gesture?.gesture.index == 6)
         #expect(gesture?.gesture.additive == true)
 
+        _ = try await provider.applySelectionGesture(
+            sessionID: "session-one",
+            viewID: "view-pods",
+            generation: 9,
+            indexRevision: 11,
+            previousToken: state.token,
+            gesture: ResourceSelectionGesture(
+                kind: .shiftExtend,
+                additive: true,
+                targetUID: "uid-target",
+                anchorUID: "uid-anchor"
+            )
+        )
+        let stableGesture = await rpc.capturedSelectionGestureRequest()
+        #expect(stableGesture?.gesture.index == 0)
+        #expect(stableGesture?.gesture.targetUid == "uid-target")
+        #expect(stableGesture?.gesture.anchorUid == "uid-anchor")
+
         let range = await rpc.capturedSelectionRangeRequest()
         #expect(range?.generation == 9)
         #expect(range?.indexRevision == 11)

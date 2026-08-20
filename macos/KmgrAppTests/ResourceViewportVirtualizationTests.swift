@@ -486,8 +486,8 @@ struct ResourceViewportVirtualizationTests {
         #expect(extensionGesture.previousToken == committed.state.token)
     }
 
-    @Test("clicks against a stale rendered index are consumed and restored")
-    func staleIndexClickIsConsumed() async throws {
+    @Test("clicks against warm rows replay by UID on the fresh ordering")
+    func staleIndexClickReplaysByUID() async throws {
         let provider = ControlledViewportWorkspaceProvider(rowCount: 10_000)
         let controller = makeViewportWorkspace(
             provider: provider,
@@ -511,6 +511,9 @@ struct ResourceViewportVirtualizationTests {
                 && table.selectedRowIndexes == IndexSet(integer: 4)
         }
         let attemptsBeforeClick = provider.selectionApplicationAttempts
+        let previousToken = try #require(
+            provider.selectionApplications.last?.state.token
+        )
 
         provider.delayNextRange()
         provider.emitInvalidation(presentationRevision: 2, indexRevision: 2)
@@ -522,7 +525,103 @@ struct ResourceViewportVirtualizationTests {
         ))
 
         #expect(provider.selectionApplicationAttempts == attemptsBeforeClick)
-        #expect(table.selectedRowIndexes == IndexSet(integer: 4))
+        #expect(table.selectedRowIndexes == IndexSet(integer: 8))
+
+        provider.releaseDelayedRange()
+        try await waitForViewport {
+            provider.selectionApplications.count == 2
+                && table.selectedRowIndexes == IndexSet(integer: 8)
+        }
+        let replay = try #require(provider.selectionApplications.last)
+        #expect(replay.previousToken == previousToken)
+        #expect(replay.gesture.kind == .replace)
+        #expect(replay.gesture.index == nil)
+        #expect(replay.gesture.targetUID == "viewport-pod-8")
+    }
+
+    @Test("Shift-click against warm rows carries stable anchor and target UIDs")
+    func staleShiftClickReplaysStableRange() async throws {
+        let provider = ControlledViewportWorkspaceProvider(rowCount: 10_000)
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "selection-stale-shift"
+        )
+        controller.showWindow(nil)
+        defer {
+            provider.releaseDelayedRange()
+            controller.close()
+        }
+        let table = try resourceTable(in: controller)
+        try await waitForViewport {
+            table.numberOfRows == 10_000
+                && self.cellText(in: table, row: 0) == "pod-0"
+        }
+
+        controller.window?.makeFirstResponder(table)
+        table.selectRowIndexes(IndexSet(integer: 4), byExtendingSelection: false)
+        try await waitForViewport { provider.selectionApplications.count == 1 }
+
+        provider.delayNextRange()
+        provider.emitInvalidation(presentationRevision: 2, indexRevision: 2)
+        try await waitForViewport { provider.delayedRequest?.revision.index == 2 }
+        table.mouseDown(with: try rowClick(
+            table: table,
+            row: 8,
+            modifiers: [.shift],
+            windowNumber: controller.window?.windowNumber ?? 0
+        ))
+        #expect(table.selectedRowIndexes == IndexSet(integersIn: 4...8))
+        #expect(provider.selectionApplicationAttempts == 1)
+
+        provider.releaseDelayedRange()
+        try await waitForViewport {
+            provider.selectionApplications.count == 2
+                && table.selectedRowIndexes == IndexSet(integersIn: 4...8)
+        }
+        let replay = try #require(provider.selectionApplications.last)
+        #expect(replay.gesture.kind == .shiftExtend)
+        #expect(replay.gesture.targetUID == "viewport-pod-8")
+        #expect(replay.gesture.anchorUID == "viewport-pod-4")
+    }
+
+    @Test("a warm-row selection clears quietly when its UID disappears")
+    func staleSelectionTargetCanDisappear() async throws {
+        let provider = ControlledViewportWorkspaceProvider(rowCount: 10_000)
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "selection-stale-disappeared"
+        )
+        controller.showWindow(nil)
+        defer {
+            provider.releaseDelayedRange()
+            controller.close()
+        }
+        let table = try resourceTable(in: controller)
+        try await waitForViewport {
+            table.numberOfRows == 10_000
+                && self.cellText(in: table, row: 0) == "pod-0"
+        }
+
+        controller.window?.makeFirstResponder(table)
+        table.selectRowIndexes(IndexSet(integer: 4), byExtendingSelection: false)
+        try await waitForViewport { provider.selectionApplications.count == 1 }
+        provider.delayNextRange()
+        provider.emitInvalidation(presentationRevision: 2, indexRevision: 2)
+        try await waitForViewport { provider.delayedRequest?.revision.index == 2 }
+        table.mouseDown(with: try rowClick(
+            table: table,
+            row: 8,
+            windowNumber: controller.window?.windowNumber ?? 0
+        ))
+        #expect(table.selectedRowIndexes == IndexSet(integer: 8))
+
+        provider.makeStableSelectionUIDDisappear("viewport-pod-8")
+        provider.releaseDelayedRange()
+        try await waitForViewport {
+            provider.selectionApplicationAttempts == 2
+                && table.selectedRowIndexes == IndexSet(integer: 4)
+        }
+        #expect(provider.selectionApplications.count == 1)
     }
 
     @Test("closing during a delayed gesture prevents later selection publication")
@@ -1024,6 +1123,7 @@ struct ResourceViewportVirtualizationTests {
     private func rowClick(
         table: NSTableView,
         row: Int,
+        modifiers: NSEvent.ModifierFlags = [],
         windowNumber: Int
     ) throws -> NSEvent {
         let location = table.convert(
@@ -1033,7 +1133,7 @@ struct ResourceViewportVirtualizationTests {
         return try #require(NSEvent.mouseEvent(
             with: .leftMouseDown,
             location: location,
-            modifierFlags: [],
+            modifierFlags: modifiers,
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: windowNumber,
             context: nil,
@@ -1148,6 +1248,7 @@ private final class ControlledViewportWorkspaceProvider:
     private var failNextSelection = false
     private var delayNextSelection = false
     private var delayedSelectionContinuation: CheckedContinuation<Void, Never>?
+    private var missingStableSelectionUIDs: Set<ResourceUID> = []
 
     init(
         rowCount: Int,
@@ -1413,20 +1514,55 @@ private final class ControlledViewportWorkspaceProvider:
                 operation: "apply test selection gesture"
             )
         }
-        return lock.withLock {
+        return try lock.withLock {
             var indexes = selectionsByToken[previousToken]?.indexes ?? []
             var anchor = selectionsByToken[previousToken]?.anchor
+            let targetIndex: Int?
+            if let targetUID = gesture.targetUID {
+                guard !missingStableSelectionUIDs.contains(targetUID) else {
+                    throw ClusterManagerIssue(
+                        category: .notFound,
+                        reason: "MissingTestSelectionTarget",
+                        message: "The stable selection target disappeared.",
+                        operation: "apply test selection gesture"
+                    )
+                }
+                targetIndex = Self.viewportIndex(for: targetUID)
+                guard targetIndex.map({ (0..<rowCount).contains($0) }) == true else {
+                    throw ClusterManagerIssue(
+                        category: .notFound,
+                        reason: "MissingTestSelectionTarget",
+                        message: "The stable selection target disappeared.",
+                        operation: "apply test selection gesture"
+                    )
+                }
+            } else {
+                targetIndex = gesture.index.map(Int.init)
+            }
+            if let anchorUID = gesture.anchorUID {
+                guard let stableAnchor = Self.viewportIndex(for: anchorUID),
+                    (0..<rowCount).contains(stableAnchor)
+                else {
+                    throw ClusterManagerIssue(
+                        category: .notFound,
+                        reason: "MissingTestSelectionAnchor",
+                        message: "The stable selection anchor disappeared.",
+                        operation: "apply test selection gesture"
+                    )
+                }
+                anchor = stableAnchor
+            }
             switch gesture.kind {
             case .replace:
-                let index = Int(gesture.index!)
+                let index = targetIndex!
                 indexes = [index]
                 anchor = index
             case .commandToggle:
-                let index = Int(gesture.index!)
+                let index = targetIndex!
                 if indexes.remove(index) == nil { indexes.insert(index) }
                 anchor = index
             case .shiftExtend:
-                let index = Int(gesture.index!)
+                let index = targetIndex!
                 let fixed = anchor ?? index
                 let range = Set(min(fixed, index)...max(fixed, index))
                 indexes = gesture.additive ? indexes.union(range) : range
@@ -1466,6 +1602,16 @@ private final class ControlledViewportWorkspaceProvider:
             ))
             return state
         }
+    }
+
+    private static func viewportIndex(for uid: ResourceUID) -> Int? {
+        let prefix = "viewport-pod-"
+        guard uid.rawValue.hasPrefix(prefix) else { return nil }
+        return Int(uid.rawValue.dropFirst(prefix.count))
+    }
+
+    func makeStableSelectionUIDDisappear(_ uid: ResourceUID) {
+        _ = lock.withLock { missingStableSelectionUIDs.insert(uid) }
     }
 
     func projectSelectionRange(

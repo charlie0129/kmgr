@@ -151,6 +151,7 @@ func selectionGestureFromMessage(message *kmgrv1.SelectionGesture) (SelectionGes
 	}
 	return SelectionGesture{
 		Kind: kind, Index: message.GetIndex(), Additive: message.GetAdditive(),
+		TargetUID: message.GetTargetUid(), AnchorUID: message.GetAnchorUid(),
 	}, nil
 }
 
@@ -193,7 +194,8 @@ func selectionStatusError(err error) error {
 		return status.Error(codes.Canceled, "request cancelled")
 	case errors.Is(err, ErrViewNotFound),
 		errors.Is(err, ErrSelectionTokenNotFound),
-		errors.Is(err, ErrSelectionScopeMismatch):
+		errors.Is(err, ErrSelectionScopeMismatch),
+		errors.Is(err, ErrSelectionTargetNotFound):
 		return status.Error(codes.NotFound, "selection or resource view was not found")
 	case errors.Is(err, ErrStaleViewGeneration),
 		errors.Is(err, ErrStaleViewRevision),

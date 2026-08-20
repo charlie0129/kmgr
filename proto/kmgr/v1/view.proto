@@ -344,6 +344,12 @@ message SelectionGesture {
   uint64 index = 2;
   // Command-Shift range extension. Invalid for every other gesture kind.
   bool additive = 3;
+  // Stable target used when a gesture was made against warm rows while a new
+  // ordering was loading. The engine resolves it in the requested current
+  // revision; it never trusts the stale numeric index.
+  string target_uid = 4;
+  // Stable Shift anchor. Valid only with target_uid and SHIFT_EXTEND.
+  string anchor_uid = 5;
 }
 
 message SelectionAnchor {

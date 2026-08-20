@@ -36,6 +36,7 @@ var (
 	ErrInvalidSelectionSnapshot   = errors.New("invalid selection snapshot")
 	ErrSelectionSnapshotConflict  = errors.New("selection snapshot conflicts with its revision")
 	ErrInvalidSelectionGesture    = errors.New("invalid selection gesture")
+	ErrSelectionTargetNotFound    = errors.New("selection target was not found")
 	ErrSelectionTokenNotFound     = errors.New("selection token was not found")
 	ErrSelectionTokenExpired      = errors.New("selection token expired")
 	ErrSelectionScopeMismatch     = errors.New("selection token belongs to another scope")
@@ -201,9 +202,11 @@ const (
 // for ShiftExtend (Command-Shift); a plain ShiftExtend replaces the previous
 // intervals with the anchor-to-target interval.
 type SelectionGesture struct {
-	Kind     SelectionGestureKind
-	Index    uint64
-	Additive bool
+	Kind      SelectionGestureKind
+	Index     uint64
+	Additive  bool
+	TargetUID string
+	AnchorUID string
 }
 
 type SelectionInterval struct {
@@ -341,7 +344,8 @@ func (s *SelectionStore) Apply(
 	if snapshot == nil {
 		return SelectionState{}, fmt.Errorf("%w: snapshot is required", ErrInvalidSelectionSnapshot)
 	}
-	if err := validateSelectionGesture(gesture, snapshot.Len()); err != nil {
+	resolvedGesture, err := resolveSelectionGesture(snapshot, gesture)
+	if err != nil {
 		return SelectionState{}, err
 	}
 
@@ -387,9 +391,23 @@ func (s *SelectionStore) Apply(
 		entry = previous.snapshot
 		base = previous.intervals
 		anchor = copySelectionIndex(previous.anchor)
+	} else if previous != nil && gesture.TargetUID != "" {
+		// A warm-row gesture explicitly opts into UID rebasing. Numeric gestures
+		// keep the strict fresh-start behavior above so an old index can never
+		// silently retarget after a reorder.
+		base, anchor = rebaseSelectionByUID(previous, snapshot)
+	}
+	if gesture.AnchorUID != "" {
+		anchorIndex := snapshot.uidToIndex[gesture.AnchorUID]
+		anchor = selectionIndex(anchorIndex)
 	}
 
-	intervals, nextAnchor := applySelectionGesture(base, anchor, snapshot.Len(), gesture)
+	intervals, nextAnchor := applySelectionGesture(
+		base,
+		anchor,
+		snapshot.Len(),
+		resolvedGesture,
+	)
 	prefix, selectedCount := selectionIntervalPrefix(intervals)
 	if len(s.tokens) >= s.config.MaxTokens {
 		return SelectionState{}, fmt.Errorf(
@@ -711,6 +729,104 @@ func validateSelectionIdentity(identity SelectionIdentity) error {
 		}
 	}
 	return nil
+}
+
+func resolveSelectionGesture(
+	snapshot *SelectionSnapshot,
+	gesture SelectionGesture,
+) (SelectionGesture, error) {
+	if snapshot == nil {
+		return SelectionGesture{}, fmt.Errorf(
+			"%w: snapshot is required",
+			ErrInvalidSelectionSnapshot,
+		)
+	}
+	targetsRow := gesture.Kind == SelectionGestureReplace ||
+		gesture.Kind == SelectionGestureCommandToggle ||
+		gesture.Kind == SelectionGestureShiftExtend
+	if gesture.TargetUID != "" {
+		if !targetsRow || strings.TrimSpace(gesture.TargetUID) != gesture.TargetUID {
+			return SelectionGesture{}, fmt.Errorf(
+				"%w: target UID applies only to row gestures and must be trimmed",
+				ErrInvalidSelectionGesture,
+			)
+		}
+		index, found := snapshot.uidToIndex[gesture.TargetUID]
+		if !found {
+			return SelectionGesture{}, fmt.Errorf(
+				"%w: target UID is absent from the current ordering",
+				ErrSelectionTargetNotFound,
+			)
+		}
+		gesture.Index = index
+	}
+	if gesture.AnchorUID != "" {
+		if gesture.TargetUID == "" || gesture.Kind != SelectionGestureShiftExtend ||
+			strings.TrimSpace(gesture.AnchorUID) != gesture.AnchorUID {
+			return SelectionGesture{}, fmt.Errorf(
+				"%w: anchor UID requires a UID-targeted Shift extension",
+				ErrInvalidSelectionGesture,
+			)
+		}
+		if _, found := snapshot.uidToIndex[gesture.AnchorUID]; !found {
+			return SelectionGesture{}, fmt.Errorf(
+				"%w: anchor UID is absent from the current ordering",
+				ErrSelectionTargetNotFound,
+			)
+		}
+	}
+	if gesture.TargetUID == "" && gesture.AnchorUID != "" {
+		return SelectionGesture{}, fmt.Errorf(
+			"%w: anchor UID requires a target UID",
+			ErrInvalidSelectionGesture,
+		)
+	}
+	if err := validateSelectionGesture(gesture, snapshot.Len()); err != nil {
+		return SelectionGesture{}, err
+	}
+	return gesture, nil
+}
+
+// rebaseSelectionByUID maps one immutable predecessor token onto a newer
+// ordering. Work is proportional to selected membership, not total rows; the
+// current snapshot's prebuilt UID index keeps every lookup O(1).
+func rebaseSelectionByUID(
+	previous *selectionTokenRecord,
+	current *SelectionSnapshot,
+) ([]SelectionInterval, *uint64) {
+	if previous == nil || current == nil {
+		return nil, nil
+	}
+	indexes := make([]uint64, 0, min(previous.count, uint64(len(current.identities))))
+	oldSnapshot := previous.snapshot.snapshot
+	for _, interval := range previous.intervals {
+		for index := interval.Start; index < interval.End; index++ {
+			if index >= uint64(len(oldSnapshot.identities)) {
+				break
+			}
+			uid := oldSnapshot.identities[index].UID
+			if currentIndex, found := current.uidToIndex[uid]; found {
+				indexes = append(indexes, currentIndex)
+			}
+		}
+	}
+	sort.Slice(indexes, func(left, right int) bool { return indexes[left] < indexes[right] })
+	intervals := make([]SelectionInterval, 0, len(indexes))
+	for _, index := range indexes {
+		if len(intervals) > 0 && intervals[len(intervals)-1].End == index {
+			intervals[len(intervals)-1].End++
+			continue
+		}
+		intervals = append(intervals, SelectionInterval{Start: index, End: index + 1})
+	}
+	var anchor *uint64
+	if previous.anchor != nil && *previous.anchor < uint64(len(oldSnapshot.identities)) {
+		uid := oldSnapshot.identities[*previous.anchor].UID
+		if index, found := current.uidToIndex[uid]; found {
+			anchor = selectionIndex(index)
+		}
+	}
+	return intervals, anchor
 }
 
 func validateSelectionGesture(gesture SelectionGesture, rowCount uint64) error {

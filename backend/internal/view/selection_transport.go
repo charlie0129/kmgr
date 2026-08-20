@@ -63,9 +63,16 @@ func (r *Runtime) ApplySelectionGesture(
 			subscription.indexRevision,
 		)
 	}
-	if err := validateSelectionGesture(gesture, uint64(len(subscription.order))); err != nil {
+	if gesture.TargetUID == "" {
+		if err := validateSelectionGesture(gesture, uint64(len(subscription.order))); err != nil {
+			subscription.mu.Unlock()
+			return SelectionState{}, err
+		}
+	} else if gesture.Kind != SelectionGestureReplace &&
+		gesture.Kind != SelectionGestureCommandToggle &&
+		gesture.Kind != SelectionGestureShiftExtend {
 		subscription.mu.Unlock()
-		return SelectionState{}, err
+		return SelectionState{}, ErrInvalidSelectionGesture
 	}
 	snapshot := subscription.selectionSnapshot
 	if snapshot != nil && (snapshot.Generation() != generation || snapshot.IndexRevision() != indexRevision) {

@@ -381,6 +381,10 @@ public struct ResourceTableModel: Hashable, Sendable {
         selectionAnchorUID = uid
     }
 
+    public func visibleIndex(for uid: ResourceUID) -> Int? {
+        visibleIndexByUID[uid]
+    }
+
     /// Implements a Command-click toggle. The clicked identity becomes the
     /// Shift anchor even when the click toggles it off, matching native range
     /// selection behavior while keeping the anchor independent of row indexes.

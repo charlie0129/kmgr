@@ -352,11 +352,23 @@ public struct ResourceSelectionGesture: Hashable, Sendable {
     public var index: UInt64?
     /// Command-Shift extension. Meaningful only for `shiftExtend`.
     public var additive: Bool
+    /// UID-authoritative target for a gesture captured from stale warm rows.
+    public var targetUID: ResourceUID?
+    /// UID-authoritative Shift anchor paired with `targetUID`.
+    public var anchorUID: ResourceUID?
 
-    public init(kind: Kind, index: UInt64? = nil, additive: Bool = false) {
+    public init(
+        kind: Kind,
+        index: UInt64? = nil,
+        additive: Bool = false,
+        targetUID: ResourceUID? = nil,
+        anchorUID: ResourceUID? = nil
+    ) {
         self.kind = kind
         self.index = index
         self.additive = additive
+        self.targetUID = targetUID
+        self.anchorUID = anchorUID
     }
 }
 

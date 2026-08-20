@@ -214,6 +214,52 @@ func TestSelectionStoreNewIndexAndGenerationStartFreshWithoutRetargeting(t *test
 	}
 }
 
+func TestSelectionStoreUIDGestureSafelyRebasesAcrossIndexRevision(t *testing.T) {
+	store := newTestSelectionStore(t, SelectionStoreConfig{}, nil)
+	scope := selectionTestScope()
+	oldSnapshot := selectionTestSnapshot(t, 1, 1, []SelectionIdentity{
+		selectionTestIdentity("a"), selectionTestIdentity("b"),
+		selectionTestIdentity("c"), selectionTestIdentity("d"),
+	})
+	first := applySelectionForTest(t, store, scope, oldSnapshot, "", SelectionGesture{
+		Kind: SelectionGestureReplace, Index: 1,
+	})
+	old := applySelectionForTest(t, store, scope, oldSnapshot, first.Token, SelectionGesture{
+		Kind: SelectionGestureCommandToggle, Index: 3,
+	})
+	newSnapshot := selectionTestSnapshot(t, 1, 2, []SelectionIdentity{
+		selectionTestIdentity("d"), selectionTestIdentity("c"),
+		selectionTestIdentity("b"), selectionTestIdentity("e"),
+	})
+
+	rebased := applySelectionForTest(t, store, scope, newSnapshot, old.Token, SelectionGesture{
+		Kind: SelectionGestureCommandToggle, TargetUID: "c",
+	})
+	if got := selectionPageUIDs(selectionPageForTest(t, store, scope, rebased.Token, 0, 10)); !slices.Equal(got, []string{"d", "c", "b"}) {
+		t.Fatalf("UID-rebased selection = %v, want [d c b]", got)
+	}
+	if rebased.Anchor == nil || rebased.Anchor.UID != "c" || rebased.Anchor.Index != 1 {
+		t.Fatalf("UID-rebased anchor = %#v, want c at index 1", rebased.Anchor)
+	}
+
+	extended := applySelectionForTest(t, store, scope, newSnapshot, old.Token, SelectionGesture{
+		Kind: SelectionGestureShiftExtend, TargetUID: "e", AnchorUID: "b",
+	})
+	if got := selectionPageUIDs(selectionPageForTest(t, store, scope, extended.Token, 0, 10)); !slices.Equal(got, []string{"b", "e"}) {
+		t.Fatalf("UID-anchored Shift selection = %v, want [b e]", got)
+	}
+	if extended.Anchor == nil || extended.Anchor.UID != "b" || extended.Anchor.Index != 2 {
+		t.Fatalf("UID-anchored Shift anchor = %#v, want b at index 2", extended.Anchor)
+	}
+
+	_, err := store.Apply(scope, newSnapshot, old.Token, SelectionGesture{
+		Kind: SelectionGestureReplace, TargetUID: "gone",
+	})
+	if !errors.Is(err, ErrSelectionTargetNotFound) {
+		t.Fatalf("missing UID error = %v, want %v", err, ErrSelectionTargetNotFound)
+	}
+}
+
 func TestSelectionStoreCellOnlyRevisionContinuesAndSharesSnapshot(t *testing.T) {
 	store := newTestSelectionStore(t, SelectionStoreConfig{}, nil)
 	scope := selectionTestScope()
