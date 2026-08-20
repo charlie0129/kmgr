@@ -141,6 +141,11 @@ func TestAcceleratorSuffixDiscoveryIsExactCaseSensitiveAndDisableable(t *testing
 	if got := DiscoverResources(nodes, nil, AcceleratorConfig{AutoDetectSuffixes: []string{"/GPU"}}).Accelerators; !slices.Equal(got, []corev1.ResourceName{"vendor.example/GPU"}) {
 		t.Fatalf("custom suffix discovery = %q; want exact uppercase /GPU", got)
 	}
+	if !IsAcceleratorResource("vendor.example/gpu", AcceleratorConfig{}) ||
+		IsAcceleratorResource("hugepages-2Mi", AcceleratorConfig{}) ||
+		!IsOptionalSchedulerResource("hugepages-2Mi", AcceleratorConfig{}) {
+		t.Fatal("accelerator classification conflated accelerators and huge pages")
+	}
 }
 
 func TestEphemeralStorageDiscoveryAndAccounting(t *testing.T) {

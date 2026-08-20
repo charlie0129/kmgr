@@ -88,6 +88,9 @@ func TestProjectionCacheKeyMissesOnPresentationSemantics(t *testing.T) {
 		{name: "sort order", mutate: func(spec *ProjectionSpec) { spec.Sort[0], spec.Sort[1] = spec.Sort[1], spec.Sort[0] }},
 		{name: "requested configuration version", mutate: func(spec *ProjectionSpec) { spec.ColumnConfigurationVersion = "requested-v2" }},
 		{name: "resolved configuration version", mutate: func(spec *ProjectionSpec) { spec.ResolvedColumnConfigurationVersion = "resolved-v2" }},
+		{name: "accelerator configuration", mutate: func(spec *ProjectionSpec) {
+			spec.Accelerators.AutoDetectSuffixes[0] = "/ppu"
+		}},
 		{name: "CEL definition ID", mutate: func(spec *ProjectionSpec) { spec.CELPrograms["custom-a"] = changedDefinitions["id"] }},
 		{name: "CEL definition title", mutate: func(spec *ProjectionSpec) { spec.CELPrograms["custom-a"] = changedDefinitions["title"] }},
 		{name: "CEL definition expression", mutate: func(spec *ProjectionSpec) { spec.CELPrograms["custom-a"] = changedDefinitions["expression"] }},
@@ -285,6 +288,12 @@ func projectionCacheTestSpec(t *testing.T) ProjectionSpec {
 			"native-a": {Source: "builtin", Value: "age"},
 			"native-b": {Source: "metric", Value: "memory"},
 		},
+		Accelerators: metrics.AcceleratorConfig{
+			AutoDetectSuffixes: []string{"/gpu"},
+			Resources: map[string]metrics.AcceleratorResourceConfig{
+				"example.com/fpga-card": {DisplayName: "FPGA"},
+			},
+		},
 	}
 }
 
@@ -320,6 +329,7 @@ func cloneProjectionCacheTestSpec(spec ProjectionSpec) ProjectionSpec {
 	clone.NamespaceScope.Namespaces = append([]string(nil), spec.NamespaceScope.Namespaces...)
 	clone.ColumnIDs = append([]string(nil), spec.ColumnIDs...)
 	clone.Sort = append([]SortDescriptor(nil), spec.Sort...)
+	clone.Accelerators = cloneAcceleratorConfig(spec.Accelerators)
 	clone.CELPrograms = make(map[string]*viewcolumns.Program, len(spec.CELPrograms))
 	for id, program := range spec.CELPrograms {
 		clone.CELPrograms[id] = program

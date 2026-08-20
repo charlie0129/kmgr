@@ -47,8 +47,12 @@ type ProjectionSpec struct {
 	ResolvedColumnConfigurationVersion string
 	CELPrograms                        map[string]*viewcolumns.Program
 	ColumnExtractors                   map[string]viewcolumns.Extractor
-	Metrics                            metrics.Snapshot
-	Now                                time.Time
+	// Accelerators applies the same exact-key/suffix classification used by
+	// optional resource discovery, so allocation-only columns never pretend a
+	// Metrics API usage sample exists.
+	Accelerators metrics.AcceleratorConfig
+	Metrics      metrics.Snapshot
+	Now          time.Time
 	// compiledFilter is supplied by the authoritative query planner so an Open
 	// parses the kmgr expression exactly once. Direct projector callers leave it
 	// nil and retain the public constructor's validation behavior.
@@ -156,6 +160,7 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 		now = func() time.Time { return fixed }
 	}
 	spec.Now = time.Time{}
+	spec.Accelerators = cloneAcceleratorConfig(spec.Accelerators)
 	namespaces := make(map[string]struct{}, len(spec.NamespaceScope.Namespaces))
 	for _, namespace := range spec.NamespaceScope.Namespaces {
 		if namespace != "" {
@@ -652,6 +657,7 @@ func (p *Projector) resourceUsageCell(
 		}
 	}
 
+	schedulerAllocationOnly := false
 	switch kind {
 	case metrics.PodMetrics:
 		var pod corev1.Pod
@@ -664,6 +670,8 @@ func (p *Projector) resourceUsageCell(
 		requests, limits := metrics.EffectivePodResources(&pod)
 		request, hasRequest := requests[resourceName]
 		limit, hasLimit := limits[resourceName]
+		requestValue := optionalQuantity(request, hasRequest)
+		limitValue := optionalQuantity(limit, hasLimit)
 		if _, exact := exactResourceColumn(p.extractorID(columnID)); exact &&
 			!hasRequest && !hasLimit && !measurement.HasValue() {
 			cell.DisplayText = DefaultMissingCell
@@ -672,12 +680,19 @@ func (p *Projector) resourceUsageCell(
 			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
 			return cell
 		}
-		setUsageQuantities(usage, measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil)
-		cell.DisplayText = formatUsageDisplay(
-			resourceName, measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil,
-		)
+		setUsageQuantities(usage, measurement, requestValue, limitValue, nil)
+		schedulerAllocationOnly = !measurement.HasValue() &&
+			(requestValue != nil || limitValue != nil) &&
+			metrics.IsAcceleratorResource(resourceName, p.spec.Accelerators)
+		if schedulerAllocationOnly {
+			cell.DisplayText = formatRequestLimitDisplay(resourceName, requestValue, limitValue)
+		} else {
+			cell.DisplayText = formatUsageDisplay(
+				resourceName, measurement, requestValue, limitValue, nil,
+			)
+		}
 		cell.Tooltip = formatUsageTooltip(
-			resourceName, measurement, optionalQuantity(request, hasRequest), optionalQuantity(limit, hasLimit), nil, nil,
+			resourceName, measurement, requestValue, limitValue, nil, nil,
 			p.spec.Now,
 		)
 	case metrics.NodeMetrics:
@@ -690,6 +705,8 @@ func (p *Projector) resourceUsageCell(
 		}
 		allocatable, hasAllocatable := node.Status.Allocatable[resourceName]
 		capacity, hasCapacity := node.Status.Capacity[resourceName]
+		allocatableValue := optionalQuantity(allocatable, hasAllocatable)
+		capacityValue := optionalQuantity(capacity, hasCapacity)
 		if _, exact := exactResourceColumn(p.extractorID(columnID)); exact &&
 			!hasAllocatable && !hasCapacity && !measurement.HasValue() {
 			cell.DisplayText = DefaultMissingCell
@@ -698,14 +715,14 @@ func (p *Projector) resourceUsageCell(
 			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
 			return cell
 		}
-		setUsageQuantities(usage, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable))
-		allocatableValue := optionalQuantity(allocatable, hasAllocatable)
+		setUsageQuantities(usage, measurement, nil, nil, allocatableValue)
 		// Node views intentionally do not open Pod metrics just to infer
 		// accelerator allocation. When usage is unavailable, the only truthful
 		// value is the node's allocatable count; avoid the misleading "— / 8"
 		// form and keep it a normal (black) cell.
-		if !measurement.HasValue() && allocatableValue != nil &&
-			isOptionalNodeResource(resourceName) {
+		schedulerAllocationOnly = !measurement.HasValue() && allocatableValue != nil &&
+			metrics.IsOptionalSchedulerResource(resourceName, p.spec.Accelerators)
+		if schedulerAllocationOnly {
 			cell.DisplayText = formatResourceQuantity(resourceName, allocatableValue)
 		} else {
 			cell.DisplayText = formatUsageDisplay(
@@ -713,28 +730,20 @@ func (p *Projector) resourceUsageCell(
 			)
 		}
 		cell.Tooltip = formatUsageTooltip(
-			resourceName, measurement, nil, nil, optionalQuantity(allocatable, hasAllocatable),
-			optionalQuantity(capacity, hasCapacity), p.spec.Now,
+			resourceName, measurement, nil, nil, allocatableValue,
+			capacityValue, p.spec.Now,
 		)
 	}
 	if measurement.State == metrics.MeasurementStale && measurement.HasValue() {
 		cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
 	} else if !measurement.HasValue() {
-		if kind == metrics.NodeMetrics && cell.GetUsage().Capacity != nil &&
-			isOptionalNodeResource(resourceName) {
+		if schedulerAllocationOnly {
 			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL
 		} else {
 			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_MUTED
 		}
 	}
 	return cell
-}
-
-func isOptionalNodeResource(name corev1.ResourceName) bool {
-	value := string(name)
-	return strings.Contains(value, "/") ||
-		(strings.HasPrefix(value, string(corev1.ResourceHugePagesPrefix)) &&
-			value != string(corev1.ResourceHugePagesPrefix))
 }
 
 func setUsageQuantities(
@@ -833,6 +842,16 @@ func formatUsageDisplay(
 	}
 	parts = append(parts, formatResourceQuantity(resourceName, request), formatResourceQuantity(resourceName, limit))
 	return strings.Join(parts, " / ")
+}
+
+func formatRequestLimitDisplay(
+	resourceName corev1.ResourceName,
+	request, limit *resource.Quantity,
+) string {
+	return strings.Join([]string{
+		formatResourceQuantity(resourceName, request),
+		formatResourceQuantity(resourceName, limit),
+	}, " / ")
 }
 
 func formatUsageTooltip(

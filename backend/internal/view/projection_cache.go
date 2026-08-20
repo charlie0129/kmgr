@@ -16,7 +16,7 @@ type projectionCacheKey [sha256.Size]byte
 const (
 	// Bump either value when the retained protobuf shape or native projection
 	// semantics change in a way that can make an in-process candidate invalid.
-	warmProjectionSchemaVersion = "kmgr.warm-projection/v2"
+	warmProjectionSchemaVersion = "kmgr.warm-projection/v3"
 	projectionRuntimePolicy     = "kmgr.view-projection/v1"
 )
 
@@ -44,6 +44,7 @@ type projectionCacheSignature struct {
 	ResolvedColumnConfiguration  string
 	CELDefinitions               map[string]viewcolumns.Definition
 	ColumnExtractors             map[string]viewcolumns.Extractor
+	Accelerators                 metrics.AcceleratorConfig
 }
 
 // captureWarmProjectionUnlocked is called while Subscription.mu is held and
@@ -147,6 +148,7 @@ func newProjectionCacheKey(spec ProjectionSpec) projectionCacheKey {
 		ResolvedColumnConfiguration:  spec.ResolvedColumnConfigurationVersion,
 		CELDefinitions:               definitions,
 		ColumnExtractors:             spec.ColumnExtractors,
+		Accelerators:                 spec.Accelerators,
 	})
 	if err != nil {
 		// Every signature field above is JSON-safe by construction. Panicking here

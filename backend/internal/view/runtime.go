@@ -854,11 +854,9 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	subscription.runtime = r
 	subscription.resource = entry
 	subscription.stageUntilReconciled = request.GetStageUntilReconciled()
-	acceleratorConfig := metrics.AcceleratorConfig{}
-	if provider, ok := r.columns.(AcceleratorConfigProvider); ok {
-		acceleratorConfig = provider.AcceleratorConfig()
-	}
-	subscription.optionalResourceHints = newOptionalResourceStreamHints(entry.key, acceleratorConfig)
+	subscription.optionalResourceHints = newOptionalResourceStreamHints(
+		entry.key, projector.spec.Accelerators,
+	)
 	metricPlan := planMetricView(projector, key.fields)
 	if namespacePlan.exactFanIn && metricPlan.strategy == metricFetchSharedList &&
 		!metricPlan.dependency.requiresCompleteCoverage() {
@@ -3519,6 +3517,10 @@ func projectorFromProto(
 			return nil, err
 		}
 	}
+	accelerators := metrics.AcceleratorConfig{}
+	if provider, ok := resolver.(AcceleratorConfigProvider); ok {
+		accelerators = provider.AcceleratorConfig()
+	}
 	return NewProjector(ProjectionSpec{
 		ClusterSessionID: sessionID,
 		Resource: ResourceType{
@@ -3533,6 +3535,7 @@ func projectorFromProto(
 		ResolvedColumnConfigurationVersion: resolvedVersion,
 		CELPrograms:                        resolved.Programs,
 		ColumnExtractors:                   resolved.Extractors,
+		Accelerators:                       accelerators,
 		compiledFilter:                     compiledFilter,
 	})
 }

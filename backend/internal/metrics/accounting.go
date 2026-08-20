@@ -170,6 +170,16 @@ func IsOptionalSchedulerResource(name corev1.ResourceName, acceleratorConfig Acc
 	if isHugePageResource(name) {
 		return true
 	}
+	return IsAcceleratorResource(name, acceleratorConfig)
+}
+
+// IsAcceleratorResource applies the configured exact-key and suffix rules
+// without including huge-page resources, whose request/limit presentation is
+// different from allocation-only accelerator columns.
+func IsAcceleratorResource(name corev1.ResourceName, acceleratorConfig AcceleratorConfig) bool {
+	if name == "" {
+		return false
+	}
 	if _, configured := acceleratorConfig.Resources[string(name)]; configured {
 		return true
 	}

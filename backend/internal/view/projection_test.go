@@ -1226,7 +1226,12 @@ func TestProjectorEmitsPodResourceUsageWithEffectiveAccounting(t *testing.T) {
 		memory.GetSortValue() != 64*1024*1024 {
 		t.Fatalf("memory usage = %#v", memory)
 	}
-	accelerator := cellByID(row, metricColumnID("nvidia.com/gpu")).GetUsage()
+	acceleratorCell := cellByID(row, metricColumnID("nvidia.com/gpu"))
+	if acceleratorCell.GetDisplayText() != "1 / 2" ||
+		acceleratorCell.GetSeverity() != kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL {
+		t.Fatalf("accelerator allocation presentation = %#v", acceleratorCell)
+	}
+	accelerator := acceleratorCell.GetUsage()
 	if accelerator.GetUsageAvailable() || accelerator.GetRequested() != 1 || accelerator.GetLimit() != 2 ||
 		accelerator.GetResourceName() != "nvidia.com/gpu" || accelerator.GetSortValue() != 1 {
 		t.Fatalf("accelerator accounting invented usage or lost identity: %#v", accelerator)

@@ -31,6 +31,13 @@ func newOptionalResourceStreamHints(key resourceKey, config metrics.AcceleratorC
 	if key.group != "" || key.version != "v1" || (key.resource != "pods" && key.resource != "nodes") {
 		return optionalResourceStreamHints{}
 	}
+	return optionalResourceStreamHints{
+		resource: key.resource, accelerators: cloneAcceleratorConfig(config),
+		pending: make(map[string]struct{}),
+	}
+}
+
+func cloneAcceleratorConfig(config metrics.AcceleratorConfig) metrics.AcceleratorConfig {
 	cloned := metrics.AcceleratorConfig{AutoDetectSuffixes: slices.Clone(config.AutoDetectSuffixes)}
 	if config.Resources != nil {
 		cloned.Resources = make(map[string]metrics.AcceleratorResourceConfig, len(config.Resources))
@@ -38,10 +45,7 @@ func newOptionalResourceStreamHints(key resourceKey, config metrics.AcceleratorC
 			cloned.Resources[name] = value
 		}
 	}
-	return optionalResourceStreamHints{
-		resource: key.resource, accelerators: cloned,
-		pending: make(map[string]struct{}),
-	}
+	return cloned
 }
 
 func (h *optionalResourceStreamHints) enabled() bool {
