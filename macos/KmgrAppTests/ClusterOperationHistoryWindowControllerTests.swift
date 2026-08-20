@@ -54,6 +54,10 @@ struct ClusterOperationHistoryWindowControllerTests {
         #expect(panel.isFloatingPanel)
         #expect(table.numberOfRows == 2)
         #expect(table.tableColumns.count == 10)
+        #expect(table.tableColumns.map(\.title) == [
+            "Started", "State", "Operation", "Namespace", "Resource / Target",
+            "Status", "Sent", "Received", "Duration", "Error",
+        ])
         #expect(table.allowsColumnReordering)
         #expect(table.tableColumns.allSatisfy {
             $0.resizingMask.contains(NSTableColumn.ResizingOptions.userResizingMask)

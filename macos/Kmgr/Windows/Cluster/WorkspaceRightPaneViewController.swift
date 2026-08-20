@@ -45,7 +45,7 @@ final class WorkspaceRightPaneViewController: NSViewController {
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
-        footer.edgeInsets = NSEdgeInsets(top: 2, left: 8, bottom: 3, right: 3)
+        footer.edgeInsets = NSEdgeInsets(top: 2, left: 8, bottom: 3, right: 0)
         footer.translatesAutoresizingMaskIntoConstraints = false
 
         let separator = NSBox()

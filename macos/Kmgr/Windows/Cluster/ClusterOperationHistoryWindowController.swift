@@ -224,16 +224,16 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
         tableLayoutStore: TableLayoutStore
     ) {
         let columns: [(NSUserInterfaceItemIdentifier, String, CGFloat, NSTextAlignment)] = [
+            (.operationStarted, "Started", 155, .left),
             (.operationState, "State", 90, .left),
             (.operationVerb, "Operation", 90, .left),
             (.operationNamespace, "Namespace", 125, .left),
             (.operationTarget, "Resource / Target", 220, .left),
             (.operationStatus, "Status", 135, .left),
-            (.operationError, "Error", 310, .left),
-            (.operationReceived, "Received", 90, .right),
             (.operationSent, "Sent", 90, .right),
-            (.operationStarted, "Started", 155, .left),
+            (.operationReceived, "Received", 90, .right),
             (.operationDuration, "Duration", 90, .right),
+            (.operationError, "Error", 310, .left),
         ]
         for (identifier, title, width, alignment) in columns {
             let column = NSTableColumn(identifier: identifier)

@@ -958,9 +958,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             tableColumnMutationAllowed: tableColumnMutationAllowed
         )
         super.init(nibName: nil, bundle: nil)
-        connectionActivityView.onActivate = { [weak self] in
-            self?.showOperationHistory()
-        }
 
         bindStatusPublisher(contentController)
         rightPaneController.setContent(
@@ -1395,7 +1392,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
     }
 
-    private func showOperationHistory() {
+    @objc private func showOperationHistory(_ sender: Any?) {
         let controller: ClusterOperationHistoryWindowController
         if let existing = operationHistoryWindowController {
             controller = existing
@@ -1515,11 +1512,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebar, .back, .forward, .namespace, .flexibleSpace, .palette, .forwards, .actions]
+        [
+            .sidebar, .back, .forward, .namespace, .flexibleSpace,
+            .palette, .operations, .forwards, .actions,
+        ]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebar, .back, .forward, .namespace, .flexibleSpace, .palette, .forwards, .actions]
+        [
+            .sidebar, .back, .forward, .namespace, .flexibleSpace,
+            .palette, .operations, .forwards, .actions,
+        ]
     }
 
     func toolbar(
@@ -1564,6 +1567,18 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             item.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Command Palette")
             item.target = self
             item.action = #selector(showCommandPalette)
+            return item
+        case .operations:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Operations"
+            item.paletteLabel = "Kubernetes API Operations"
+            item.toolTip = "Show Kubernetes API Operations"
+            item.image = NSImage(
+                systemSymbolName: "list.bullet.rectangle",
+                accessibilityDescription: "Kubernetes API Operations"
+            )
+            item.target = self
+            item.action = #selector(showOperationHistory(_:))
             return item
         case .forwards:
             forwardsButton.bezelStyle = .texturedRounded
@@ -2375,6 +2390,7 @@ private extension NSToolbarItem.Identifier {
     static let forward = Self("workspace.forward")
     static let namespace = Self("workspace.namespace")
     static let palette = Self("workspace.palette")
+    static let operations = Self("workspace.operations")
     static let forwards = Self("workspace.forwards")
     static let actions = Self("workspace.actions")
 }

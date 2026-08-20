@@ -29,6 +29,10 @@ struct ClusterWorkspaceToolbarTests {
             == items.firstIndex {
                 $0.itemIdentifier.rawValue == "workspace.namespace"
             }.map { $0 + 1 })
+        #expect(items.suffix(4).map(\.itemIdentifier.rawValue) == [
+            "workspace.palette", "workspace.operations", "workspace.forwards",
+            "workspace.actions",
+        ])
     }
 
     @Test("namespace picker returns keyboard focus to the resource list")
@@ -282,12 +286,9 @@ struct ClusterWorkspaceToolbarTests {
         #expect(accessibilityValue?.contains("download active") == true)
         #expect(accessibilityValue?.contains("upload active") == true)
         #expect(rate.accessibilityLabel() == "Kubernetes API transfer rate")
-        #expect(view.accessibilityRole() == .button)
-        #expect(view.accessibilityLabel() == "Show Kubernetes API operation history")
-        var activated = false
-        view.onActivate = { activated = true }
-        #expect(view.accessibilityPerformPress())
-        #expect(activated)
+        #expect(view.accessibilityRole() == .group)
+        #expect(view.accessibilityLabel() == "Kubernetes API connection status")
+        #expect(view.gestureRecognizers.isEmpty)
 
         view.update(rate: ClusterConnectionRate(
             bytesReceivedPerSecond: Double(UInt64.max) * 2,
@@ -364,12 +365,12 @@ struct ClusterWorkspaceToolbarTests {
 
         #expect(statusFrame.maxX <= activityFrame.minX)
         #expect(abs(statusFrame.midY - activityFrame.midY) < 2)
-        #expect(abs(activityFrame.maxX - statusBar.bounds.maxX + 3) < 1)
+        #expect(abs(activityFrame.maxX - statusBar.bounds.maxX) < 1)
         #expect(statusBar.fittingSize.height <= 24)
     }
 
-    @Test("activating connection activity opens the live operation-history panel")
-    func connectionActivityOpensOperationHistory() async throws {
+    @Test("Operations toolbar button opens the live operation-history panel")
+    func operationsToolbarButtonOpensOperationHistory() async throws {
         let record = ClusterOperationRecord(
             id: 7,
             state: .finished,
@@ -386,12 +387,14 @@ struct ClusterWorkspaceToolbarTests {
         )
         controller.showWindow(nil)
         defer { controller.close() }
-        let root = try #require(controller.window?.contentView)
-        let activity = try #require(descendants(of: root).first {
-            $0.identifier?.rawValue == "cluster-connection-activity"
-        } as? ClusterConnectionActivityView)
+        let item = try #require(controller.window?.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.operations"
+        })
+        let action = try #require(item.action)
 
-        #expect(activity.accessibilityPerformPress())
+        #expect(item.label == "Operations")
+        #expect(item.image != nil)
+        #expect(NSApp.sendAction(action, to: item.target, from: item))
         try await waitUntil {
             NSApp.windows.contains { window in
                 guard window.accessibilityLabel() == "Kubernetes API operation history",

@@ -10,7 +10,6 @@ final class ClusterConnectionActivityView: NSView {
     private var sendArrowIsActive = false
     private var stateAccessibilityValue = "Connected"
     private var rateAccessibilityValue = "Download 0 B/s, upload 0 B/s"
-    var onActivate: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -49,30 +48,14 @@ final class ClusterConnectionActivityView: NSView {
         setContentCompressionResistancePriority(.required, for: .horizontal)
         identifier = .init("cluster-connection-activity")
         setAccessibilityElement(true)
-        setAccessibilityRole(.button)
-        setAccessibilityLabel("Show Kubernetes API operation history")
-        let click = NSClickGestureRecognizer(target: self, action: #selector(activate))
-        addGestureRecognizer(click)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Kubernetes API connection status")
         setState(.connected)
         update(rate: ClusterConnectionRate())
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: .pointingHand)
-    }
-
-    override func accessibilityPerformPress() -> Bool {
-        activate()
-        return true
-    }
-
-    @objc private func activate() {
-        onActivate?()
-    }
 
     override var intrinsicContentSize: NSSize {
         let content = subviews.first?.fittingSize ?? NSSize(width: 176, height: 16)
