@@ -759,32 +759,6 @@ private final class PalettePanel: NSPanel {
 
 @MainActor
 private final class PaletteSearchField: NSSearchField {
-    override class var cellClass: AnyClass? {
-        get { PaletteSearchFieldCell.self }
-        set {}
-    }
-}
-
-@MainActor
-private final class PaletteSearchFieldCell: NSSearchFieldCell {
-    override func searchTextRect(forBounds rect: NSRect) -> NSRect {
-        let nativeRect = super.searchTextRect(forBounds: rect)
-        guard let font else { return nativeRect }
-
-        // NSSearchField keeps the regular control's 22-point editor even
-        // when its font is enlarged. Give the palette font enough room for
-        // its full glyph bounds plus one point of padding on each edge.
-        let requiredHeight = ceil(font.boundingRectForFont.height) + 2
-        let height = min(rect.height, max(nativeRect.height, requiredHeight))
-        guard height > nativeRect.height else { return nativeRect }
-
-        return NSRect(
-            x: nativeRect.minX,
-            y: floor(rect.midY - height / 2),
-            width: nativeRect.width,
-            height: height
-        )
-    }
 }
 
 @MainActor
