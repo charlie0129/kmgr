@@ -263,9 +263,10 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     #expect(ring.droppedBytes == 6)
 }
 
-@Test func multiMegabyteLogicalLineRemainsCompleteForTheVirtualViewport() throws {
+@Test func multiMegabyteLogicalLineUsesBoundedDisplayAndLosslessExport() throws {
     let fragmentBytes = 64 << 10
     let payloadBytes = 8 << 20
+    let displayedLineBytes = 16 << 10
     var ring = LogRecordRing(
         recordLimit: 1_024,
         byteLimit: payloadBytes + fragmentBytes,
@@ -289,16 +290,93 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
         sourceLabels: [:],
         showSourceLabels: false,
         filter: "",
-        maximumOutputUTF8Bytes: payloadBytes + fragmentBytes
+        maximumOutputUTF8Bytes: payloadBytes + fragmentBytes,
+        maximumDisplayedLineUTF8Bytes: displayedLineBytes
     )
 
     #expect(rendered.text.utf8.count == payloadBytes + 1)
     #expect(rendered.text.hasPrefix(String(repeating: "x", count: fragmentBytes)))
-    let physicalLines = rendered.text.split(
+    #expect(rendered.displayTruncatedLines == 1)
+    #expect(rendered.displayText.hasPrefix(String(
+        repeating: "x",
+        count: displayedLineBytes
+    )))
+    #expect(rendered.displayText.contains(LogTextRenderer.displayTruncationMarker))
+    #expect(rendered.displayOutputUTF8Bytes
+        <= displayedLineBytes + LogTextRenderer.displayTruncationMarker.utf8.count + 2)
+    let physicalLines = rendered.displayText.split(
         separator: "\n",
         omittingEmptySubsequences: false
     )
     #expect(physicalLines.count == 2)
+}
+
+@Test func displayedLineLimitSpansChunksAndKeepsUnicodeWhole() throws {
+    let rendered = try LogTextRenderer.render(
+        records: [
+            LogRecord(
+                sourceID: "pod", data: Data("12".utf8),
+                startsLine: true, endsWithNewline: false
+            ),
+            LogRecord(
+                sourceID: "pod", data: Data("🐈tail".utf8),
+                startsLine: false, endsWithNewline: true
+            ),
+            LogRecord(
+                sourceID: "pod", data: Data("next".utf8),
+                startsLine: true, endsWithNewline: true
+            ),
+        ],
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10,
+        maximumDisplayedLineUTF8Bytes: 6
+    )
+
+    #expect(rendered.text == "12🐈tail\nnext\n")
+    #expect(rendered.displayText == "12🐈 \(LogTextRenderer.displayTruncationMarker)\nnext\n")
+    #expect(rendered.displayTruncatedLines == 1)
+}
+
+@Test func hiddenLongLineSuffixDoesNotReinstallItsBoundedDisplay() throws {
+    func record(_ value: String, startsLine: Bool) -> LogRecord {
+        LogRecord(
+            sourceID: "pod",
+            data: Data(value.utf8),
+            startsLine: startsLine,
+            endsWithNewline: false
+        )
+    }
+    let previous = try LogTextRenderer.render(
+        records: [record("0123456789", startsLine: true)],
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10,
+        maximumDisplayedLineUTF8Bytes: 4
+    )
+    let current = try LogTextRenderer.render(
+        records: [
+            record("0123456789", startsLine: true),
+            record("hidden suffix", startsLine: false),
+        ],
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10,
+        maximumDisplayedLineUTF8Bytes: 4
+    )
+
+    let plan = LogTextInstallPlanner.plan(
+        previousChunks: previous.displayChunks,
+        currentChunks: current.displayChunks
+    )
+    #expect(previous.displayText == current.displayText)
+    #expect(plan.removePrefixUTF16Length == 0)
+    #expect(plan.retainedChunkCount == previous.displayChunks.count)
+    #expect(plan.appendedChunkCount == 0)
+    #expect(current.text == "0123456789hidden suffix")
 }
 
 @Test func interleavedLineFragmentsRemainCompleteAndUnicodeSafe() throws {
@@ -693,10 +771,12 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
         recordLimit: 75_000,
         byteLimit: 32 << 20,
         renderBatchMilliseconds: 65,
-        maximumRenderedUTF8Bytes: 20 << 20
+        maximumRenderedUTF8Bytes: 20 << 20,
+        maximumDisplayedLineUTF8Bytes: 12 << 10
     ))
     #expect(configuration.recordLimit == 75_000)
     #expect(configuration.byteLimit == 32 << 20)
     #expect(configuration.renderBatchMilliseconds == 65)
     #expect(configuration.maximumRenderedUTF8Bytes == 20 << 20)
+    #expect(configuration.maximumDisplayedLineUTF8Bytes == 12 << 10)
 }

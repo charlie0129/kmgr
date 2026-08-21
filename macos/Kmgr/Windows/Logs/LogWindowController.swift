@@ -78,6 +78,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var displayConfiguration: LogDisplayConfiguration
     private var renderBatchMilliseconds: Int
     private var maximumRenderedUTF8Bytes: Int
+    private var maximumDisplayedLineUTF8Bytes: Int
     private var configurationRevision: UInt64 = 0
     private var renderScheduleRevision: UInt64 = 0
     private let sourceLabels: [String: String]
@@ -90,8 +91,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var latestStoreDrops: UInt64 = 0
     private var latestStreamDrops: UInt64 = 0
     private var latestRenderOmissions = 0
+    private var latestDisplayTruncatedLines = 0
     private var latestStreamState: LogStreamState = .connecting
-    private var renderedChunks: [String] = []
+    private var renderedDisplayChunks: [String] = []
+    private var renderedExportChunks: [String] = []
     private var followsVisibleTail = true
     private var lastObservedViewportOrigin = NSPoint.zero
     private var pendingFollowTailRestore: Bool?
@@ -159,6 +162,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             displayConfiguration.byteLimit,
             displayConfiguration.maximumRenderedUTF8Bytes
         )
+        self.maximumDisplayedLineUTF8Bytes =
+            displayConfiguration.maximumDisplayedLineUTF8Bytes
         self.sourceLabels = LogSourcePresentation.prefixLabels(for: allSources)
         let titleSources = LogSourcePresentation.titleSummary(for: sources)
         let window = LogShortcutWindow(
@@ -301,6 +306,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             configuration.byteLimit,
             configuration.maximumRenderedUTF8Bytes
         )
+        maximumDisplayedLineUTF8Bytes = configuration.maximumDisplayedLineUTF8Bytes
         configurationRevision &+= 1
         let revision = configurationRevision
         cancelScheduledRender()
@@ -966,8 +972,23 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         if latestRenderOmissions > 0 {
             parts.append("\(latestRenderOmissions.formatted()) omitted from display")
         }
+        if latestDisplayTruncatedLines > 0 {
+            parts.append(latestDisplayTruncatedLines == 1
+                ? "1 long line truncated"
+                : "\(latestDisplayTruncatedLines.formatted()) long lines truncated")
+        }
         statusLabel.stringValue = parts.joined(separator: " · ")
-        statusLabel.toolTip = nil
+        statusLabel.toolTip = latestDisplayTruncatedLines > 0
+            ? "Displayed lines are limited to \(formattedDisplayedLineLimit). Save preserves complete logical lines."
+            : nil
+    }
+
+    private var formattedDisplayedLineLimit: String {
+        let bytes = maximumDisplayedLineUTF8Bytes
+        if bytes.isMultiple(of: 1 << 10) {
+            return "\(bytes / (1 << 10)) KiB"
+        }
+        return "\(bytes.formatted()) bytes"
     }
 
     /// Coalesce detached formatting and incremental text installation to at
@@ -1015,7 +1036,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let records = snapshot.records
         let labels = sourceLabels
         let byteLimit = maximumRenderedUTF8Bytes
-        let previousChunks = renderedChunks
+        let displayedLineByteLimit = maximumDisplayedLineUTF8Bytes
+        let previousChunks = renderedDisplayChunks
         let previousProjection = logView.projection
         let style = previousProjection.style
         let result: (
@@ -1034,14 +1056,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                     sourceLabels: labels,
                     showSourceLabels: showLabels,
                     filter: filter,
-                    maximumOutputUTF8Bytes: byteLimit
+                    maximumOutputUTF8Bytes: byteLimit,
+                    maximumDisplayedLineUTF8Bytes: displayedLineByteLimit
                 )
                 let install = LogTextInstallPlanner.plan(
                     previousChunks: previousChunks,
-                    currentChunks: rendered.chunks
+                    currentChunks: rendered.displayChunks
                 )
                 let projection = try LogViewportProjection.make(
-                    chunks: rendered.chunks,
+                    chunks: rendered.displayChunks,
                     previous: previousProjection,
                     retainedChunkCount: install.retainedChunkCount,
                     style: style
@@ -1049,7 +1072,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 logSignposter.endInterval(
                     PerformanceSignpostCatalog.logTextFormat,
                     interval,
-                    "rendered_records=\(rendered.renderedRecords) omitted_records=\(rendered.omittedRecords) output_bytes=\(rendered.outputUTF8Bytes)"
+                    "rendered_records=\(rendered.renderedRecords) omitted_records=\(rendered.omittedRecords) logical_output_bytes=\(rendered.outputUTF8Bytes) display_output_bytes=\(rendered.displayOutputUTF8Bytes) truncated_lines=\(rendered.displayTruncatedLines)"
                 )
                 return (
                     rendered: rendered,
@@ -1081,7 +1104,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let shouldFollowTail = followsVisibleTail
         let installInterval = logSignposter.beginInterval(
             PerformanceSignpostCatalog.logTextInstall,
-            "output_bytes=\(result.rendered.outputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendedUTF8Length)"
+            "logical_output_bytes=\(result.rendered.outputUTF8Bytes) display_output_bytes=\(result.rendered.displayOutputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) truncated_lines=\(result.rendered.displayTruncatedLines) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendedUTF8Length)"
         )
         withViewportTrackingSuppressed {
             logView.install(
@@ -1089,8 +1112,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 viewportSize: scrollView.contentSize
             )
         }
-        renderedChunks = result.rendered.chunks
+        renderedDisplayChunks = result.rendered.displayChunks
+        renderedExportChunks = result.rendered.chunks
         latestRenderOmissions = result.rendered.omittedRecords
+        latestDisplayTruncatedLines = result.rendered.displayTruncatedLines
         updateStatusLabel()
         logView.setSelectedRange(result.install.remapSelection(selectedRange))
         if shouldFollowTail { scrollToTail() }
@@ -1153,6 +1178,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             guard let self else { return }
             latestStoreDrops = 0
             latestRenderOmissions = 0
+            latestDisplayTruncatedLines = 0
             updateStatusLabel()
         }
         withViewportTrackingSuppressed {
@@ -1161,7 +1187,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 viewportSize: scrollView.contentSize
             )
         }
-        renderedChunks.removeAll(keepingCapacity: true)
+        renderedDisplayChunks.removeAll(keepingCapacity: true)
+        renderedExportChunks.removeAll(keepingCapacity: true)
         followsVisibleTail = true
         updateFollowButtonPresentation()
         updateLogViewportFrame()
@@ -1208,12 +1235,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     /// UTF-8 encoding, and file I/O all stay off MainActor even for a
     /// multi-megabyte logical line.
     func saveVisibleBufferSnapshot(to url: URL) {
-        let renderedUTF16Length = renderedChunks.reduce(into: 0) {
+        let renderedUTF16Length = renderedDisplayChunks.reduce(into: 0) {
             $0 += $1.utf16.count
         }
         let hasCurrentProjection = renderedUTF16Length
             == logView.projection.textUTF16Length
-        let exportChunks = hasCurrentProjection ? renderedChunks : nil
+        let exportChunks = hasCurrentProjection ? renderedExportChunks : nil
         let fallbackValue = hasCurrentProjection ? nil : logView.string
         let writer = fileWriter
         statusLabel.stringValue = "Saving \(url.lastPathComponent)…"

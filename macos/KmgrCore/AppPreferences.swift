@@ -42,21 +42,28 @@ public enum DefaultNamespacePreference: String, Codable, CaseIterable, Hashable,
 }
 
 public struct LogDisplayPreferences: Codable, Hashable, Sendable {
+    public static let defaultMaximumRenderedUTF8Bytes = 16 << 20
+    public static let defaultMaximumDisplayedLineUTF8Bytes = 16 << 10
+    public static let maximumDisplayedLineUTF8BytesRange = 256...(16 << 20)
+
     public var recordLimit: Int
     public var byteLimit: Int
     public var renderBatchMilliseconds: Int
     public var maximumRenderedUTF8Bytes: Int
+    public var maximumDisplayedLineUTF8Bytes: Int
 
     public init(
         recordLimit: Int = 20_000,
         byteLimit: Int = 16 << 20,
         renderBatchMilliseconds: Int = 40,
-        maximumRenderedUTF8Bytes: Int = 32 << 20
+        maximumRenderedUTF8Bytes: Int = Self.defaultMaximumRenderedUTF8Bytes,
+        maximumDisplayedLineUTF8Bytes: Int = Self.defaultMaximumDisplayedLineUTF8Bytes
     ) {
         self.recordLimit = recordLimit
         self.byteLimit = byteLimit
         self.renderBatchMilliseconds = renderBatchMilliseconds
         self.maximumRenderedUTF8Bytes = maximumRenderedUTF8Bytes
+        self.maximumDisplayedLineUTF8Bytes = maximumDisplayedLineUTF8Bytes
     }
 }
 
@@ -529,7 +536,22 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         if !((1 << 20)...(512 << 20)).contains(logs.maximumRenderedUTF8Bytes) {
             issues.append(AppPreferenceIssue(
                 field: "logs.maximumRenderedUTF8Bytes",
-                message: "Rendered log text limit must be between 1 MiB and 512 MiB."
+                message: "Viewer text budget must be between 1 MiB and 512 MiB."
+            ))
+        } else if ((1 << 20)...(512 << 20)).contains(logs.byteLimit),
+            logs.maximumRenderedUTF8Bytes > logs.byteLimit
+        {
+            issues.append(AppPreferenceIssue(
+                field: "logs.maximumRenderedUTF8Bytes",
+                message: "Viewer text budget cannot exceed the raw log buffer."
+            ))
+        }
+        if !LogDisplayPreferences.maximumDisplayedLineUTF8BytesRange.contains(
+            logs.maximumDisplayedLineUTF8Bytes
+        ) {
+            issues.append(AppPreferenceIssue(
+                field: "logs.maximumDisplayedLineUTF8Bytes",
+                message: "Visible log line limit must be between 256 B and 16 MiB."
             ))
         }
         if !(0...100_000).contains(diagnostics.completedOperationHistoryLimit) {

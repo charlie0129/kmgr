@@ -14,7 +14,8 @@ import Testing
         recordLimit: 75_000,
         byteLimit: 32 << 20,
         renderBatchMilliseconds: 50,
-        maximumRenderedUTF8Bytes: 24 << 20
+        maximumRenderedUTF8Bytes: 24 << 20,
+        maximumDisplayedLineUTF8Bytes: 12 << 10
     )
     preferences.diagnostics = DiagnosticsPreferences(
         completedOperationHistoryLimit: 4_000
@@ -64,6 +65,7 @@ import Testing
     #expect(reloaded.current.logs.recordLimit == 75_000)
     #expect(reloaded.current.logs.byteLimit == 32 << 20)
     #expect(reloaded.current.logs.maximumRenderedUTF8Bytes == 24 << 20)
+    #expect(reloaded.current.logs.maximumDisplayedLineUTF8Bytes == 12 << 10)
     #expect(reloaded.current.diagnostics.completedOperationHistoryLimit == 4_000)
     #expect(reloaded.current.nodeShell == preferences.nodeShell)
     #expect(reloaded.current.metricsRefreshSeconds == 30)
@@ -118,6 +120,7 @@ import Testing
     preferences.logs.byteLimit = 100
     preferences.logs.renderBatchMilliseconds = 1
     preferences.logs.maximumRenderedUTF8Bytes = 100
+    preferences.logs.maximumDisplayedLineUTF8Bytes = 100
     preferences.diagnostics.completedOperationHistoryLimit = 100_001
     preferences.metricsRefreshSeconds = 1
     preferences.columnsConfigurationPath = "relative/columns.yaml"
@@ -154,6 +157,7 @@ import Testing
         "logs.byteLimit",
         "logs.renderBatchMilliseconds",
         "logs.maximumRenderedUTF8Bytes",
+        "logs.maximumDisplayedLineUTF8Bytes",
         "diagnostics.completedOperationHistoryLimit",
         "metricsRefreshSeconds",
         "columnsConfigurationPath",
@@ -193,6 +197,43 @@ import Testing
         $0.keys == "⇧⌘N" && $0.action.contains("namespace")
     })
     #expect(AppPreferences().restoreOpenClusterWindows)
+}
+
+@Test func visibleLogLineLimitUsesTheFullByteRange() {
+    var preferences = AppPreferences()
+    preferences.logs.maximumDisplayedLineUTF8Bytes = 256
+    #expect(!preferences.validationIssues().contains {
+        $0.field == "logs.maximumDisplayedLineUTF8Bytes"
+    })
+
+    preferences.logs.maximumDisplayedLineUTF8Bytes = 16 << 20
+    #expect(!preferences.validationIssues().contains {
+        $0.field == "logs.maximumDisplayedLineUTF8Bytes"
+    })
+
+    preferences.logs.maximumDisplayedLineUTF8Bytes = 255
+    #expect(preferences.validationIssues().contains {
+        $0.field == "logs.maximumDisplayedLineUTF8Bytes"
+    })
+
+    preferences.logs.maximumDisplayedLineUTF8Bytes = (16 << 20) + 1
+    #expect(preferences.validationIssues().contains {
+        $0.field == "logs.maximumDisplayedLineUTF8Bytes"
+    })
+}
+
+@Test func viewerTextBudgetCannotExceedRawLogBuffer() {
+    var preferences = AppPreferences()
+    preferences.logs.byteLimit = 16 << 20
+    preferences.logs.maximumRenderedUTF8Bytes = 16 << 20
+    #expect(!preferences.validationIssues().contains {
+        $0.field == "logs.maximumRenderedUTF8Bytes"
+    })
+
+    preferences.logs.maximumRenderedUTF8Bytes = 17 << 20
+    #expect(preferences.validationIssues().contains {
+        $0.field == "logs.maximumRenderedUTF8Bytes"
+    })
 }
 
 @Test func nodeShellPreferencesChooseClusterOverrideAndRejectUnsafeValues() {

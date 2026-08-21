@@ -594,8 +594,8 @@ struct LogWindowControllerTests {
         #expect(laidOutText.intersects(logView.visibleRect))
     }
 
-    @Test("long lines remain complete in the viewport and when saved")
-    func longLineDisplayAndSaveAreLossless() async throws {
+    @Test("long lines use the configured display limit and save losslessly")
+    func longLineDisplayIsBoundedAndSaveIsLossless() async throws {
         let provider = OrderedLogWindowProvider()
         let writer = LogFileWriterProbe()
         let source = logSource(pod: "api", uid: "api-uid", container: "app")
@@ -606,12 +606,16 @@ struct LogWindowControllerTests {
             ),
             sources: [source],
             provider: provider,
-            displayConfiguration: LogDisplayConfiguration(renderBatchMilliseconds: 1),
+            displayConfiguration: LogDisplayConfiguration(
+                renderBatchMilliseconds: 1,
+                maximumDisplayedLineUTF8Bytes: 16 << 10
+            ),
             fileWriter: { value, url in
                 try writer.write(value, to: url, failure: nil)
             }
         )
         controller.showWindow(nil)
+        defer { controller.close() }
         let window = try #require(controller.window)
         let root = try #require(window.contentView)
         let logView = try #require(descendants(of: root)
@@ -641,12 +645,15 @@ struct LogWindowControllerTests {
             object: window
         ))
         try await waitForLogText(logView) {
-            $0.utf8.count == original.utf8.count + 1
+            $0.contains(LogTextRenderer.displayTruncationMarker)
         }
 
-        #expect(logView.string == original + "\n")
-        #expect(!status.stringValue.contains("truncated"))
-        #expect(status.toolTip == nil)
+        #expect(logView.string.hasPrefix(String(repeating: "x", count: 16 << 10)))
+        #expect(logView.string.hasSuffix("\(LogTextRenderer.displayTruncationMarker)\n"))
+        #expect(logView.string.utf8.count < (17 << 10))
+        #expect(status.stringValue.contains("1 long line truncated"))
+        #expect(status.toolTip?.contains("16 KiB") == true)
+        #expect(status.toolTip?.contains("Save preserves") == true)
         controller.saveVisibleBufferSnapshot(
             to: URL(fileURLWithPath: "/tmp/kmgr-long-line-preview-test.txt")
         )

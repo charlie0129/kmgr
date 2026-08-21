@@ -155,6 +155,9 @@ struct ApplicationWindowPresentationTests {
         )
         let root = try #require(settings.window?.contentView)
         let fields = descendants(of: root).compactMap { $0 as? NSTextField }
+        let lineLimit = try #require(fields.first {
+            $0.accessibilityIdentifier() == "settings.logs.maximumDisplayedLineSize"
+        })
         let renderedLimit = try #require(fields.first {
             $0.accessibilityIdentifier() == "settings.logs.maximumRenderedTextMiB"
         })
@@ -166,15 +169,25 @@ struct ApplicationWindowPresentationTests {
             $0.accessibilityIdentifier() == "settings.operations.defaultDeleteConcurrency"
         })
 
-        #expect(renderedLimit.integerValue == 32)
+        #expect(fields.contains { $0.stringValue == "Raw log buffer" })
+        #expect(fields.contains { $0.stringValue == "Viewer text budget" })
+        #expect(fields.contains { $0.stringValue == "Visible line limit" })
+        #expect(fields.contains {
+            $0.stringValue.contains("decoded, filtered text")
+                && $0.stringValue.contains("cannot exceed that buffer")
+        })
+        #expect(lineLimit.stringValue == "16 KiB")
+        #expect(renderedLimit.integerValue == 16)
         #expect(historyLimit.integerValue == 2_000)
         #expect(deleteConcurrency.integerValue == 4)
-        renderedLimit.stringValue = "24"
+        lineLimit.stringValue = "256 B"
+        renderedLimit.stringValue = "12"
         historyLimit.stringValue = "3500"
         deleteConcurrency.stringValue = "12"
         try #require(button(titled: "Apply", beneath: root)).performClick(nil)
 
-        #expect(store.current.logs.maximumRenderedUTF8Bytes == 24 << 20)
+        #expect(store.current.logs.maximumDisplayedLineUTF8Bytes == 256)
+        #expect(store.current.logs.maximumRenderedUTF8Bytes == 12 << 20)
         #expect(store.current.diagnostics.completedOperationHistoryLimit == 3_500)
         #expect(store.current.resourceOperations.defaultDeleteConcurrency == 12)
     }

@@ -20,6 +20,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let logByteLimitField = NSTextField()
     private let renderBatchField = NSTextField()
     private let maximumRenderedLogTextField = NSTextField()
+    private let maximumDisplayedLogLineField = NSTextField()
     private let completedOperationHistoryLimitField = NSTextField()
     private let defaultDeleteConcurrencyField = NSTextField()
     private let nodeShellImageField = NSTextField()
@@ -120,7 +121,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
 
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
-            maximumRenderedLogTextField,
+            maximumRenderedLogTextField, maximumDisplayedLogLineField,
             completedOperationHistoryLimitField, defaultDeleteConcurrencyField,
             nodeShellImageField, nodeShellStartupTimeoutField,
             metricsRefreshField,
@@ -144,7 +145,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         }
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
-            maximumRenderedLogTextField,
+            maximumRenderedLogTextField, maximumDisplayedLogLineField,
             completedOperationHistoryLimitField, defaultDeleteConcurrencyField,
             nodeShellStartupTimeoutField, metricsRefreshField,
             viewportOverscanField,
@@ -235,6 +236,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         maximumRenderedLogTextField.setAccessibilityIdentifier(
             "settings.logs.maximumRenderedTextMiB"
         )
+        maximumDisplayedLogLineField.setAccessibilityIdentifier(
+            "settings.logs.maximumDisplayedLineSize"
+        )
+        maximumDisplayedLogLineField.placeholderString = "e.g. 16 KiB"
         completedOperationHistoryLimitField.setAccessibilityIdentifier(
             "settings.diagnostics.completedOperationHistoryLimit"
         )
@@ -268,17 +273,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 restoreWindowsButton,
             ]
         )
+        let logsHelp = NSTextField(wrappingLabelWithString:
+            "Raw log buffer caps stream bytes kept in memory. Viewer text budget caps the decoded, filtered text prepared for this window and cannot exceed that buffer. Visible line limit accepts B, KiB, or MiB and affects only screen rendering; Save preserves those lines in full."
+        )
+        logsHelp.textColor = .secondaryLabelColor
+        logsHelp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         let logs = section(
             title: "Logs",
             rows: [
                 labeledRow("Retained records", control: logRecordLimitField),
-                labeledRow("Retained data", control: logByteLimitField, suffix: "MiB"),
+                labeledRow("Raw log buffer", control: logByteLimitField, suffix: "MiB"),
                 labeledRow("Render batching", control: renderBatchField, suffix: "milliseconds"),
                 labeledRow(
-                    "Rendered text",
+                    "Viewer text budget",
                     control: maximumRenderedLogTextField,
                     suffix: "MiB maximum"
                 ),
+                labeledRow(
+                    "Visible line limit",
+                    control: maximumDisplayedLogLineField
+                ),
+                logsHelp,
             ]
         )
         let diagnosticsHelp = NSTextField(wrappingLabelWithString:
@@ -635,6 +650,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         renderBatchField.integerValue = preferences.logs.renderBatchMilliseconds
         maximumRenderedLogTextField.integerValue =
             preferences.logs.maximumRenderedUTF8Bytes / (1 << 20)
+        maximumDisplayedLogLineField.stringValue = formattedByteSize(
+            preferences.logs.maximumDisplayedLineUTF8Bytes
+        )
         completedOperationHistoryLimitField.integerValue =
             preferences.diagnostics.completedOperationHistoryLimit
         defaultDeleteConcurrencyField.integerValue =
@@ -705,13 +723,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             maximumRenderedLogTextField,
             multiplier: 1 << 20
         )
+        let maximumDisplayedLineUTF8Bytes = parsedByteSize(maximumDisplayedLogLineField)
         return AppPreferences(
             appearance: AppearancePreference.allCases[safe: appearanceIndex] ?? .system,
             logs: LogDisplayPreferences(
                 recordLimit: parsedInteger(logRecordLimitField),
                 byteLimit: byteLimit,
                 renderBatchMilliseconds: parsedInteger(renderBatchField),
-                maximumRenderedUTF8Bytes: maximumRenderedUTF8Bytes
+                maximumRenderedUTF8Bytes: maximumRenderedUTF8Bytes,
+                maximumDisplayedLineUTF8Bytes: maximumDisplayedLineUTF8Bytes
             ),
             metricsRefreshSeconds: parsedInteger(metricsRefreshField),
             defaultNamespace: DefaultNamespacePreference.allCases[safe: namespaceIndex] ?? .contextDefault,
@@ -811,6 +831,47 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         guard value > 0 else { return 0 }
         let result = value.multipliedReportingOverflow(by: multiplier)
         return result.overflow ? 0 : result.partialValue
+    }
+
+    private func parsedByteSize(_ field: NSTextField) -> Int {
+        var value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let multiplier: Double
+        if value.hasSuffix("mib") {
+            multiplier = Double(1 << 20)
+            value.removeLast(3)
+        } else if value.hasSuffix("kib") {
+            multiplier = Double(1 << 10)
+            value.removeLast(3)
+        } else if value.hasSuffix("b") {
+            multiplier = 1
+            value.removeLast()
+        } else {
+            multiplier = 1
+        }
+        let numberText = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.allowsFloats = true
+        formatter.isLenient = false
+        let amount = Double(numberText) ?? formatter.number(from: numberText)?.doubleValue
+        guard let amount, amount.isFinite, amount > 0 else { return 0 }
+        let bytes = amount * multiplier
+        let rounded = bytes.rounded()
+        guard rounded <= Double(Int.max), abs(bytes - rounded) < 0.000_001 else {
+            return 0
+        }
+        return Int(rounded)
+    }
+
+    private func formattedByteSize(_ bytes: Int) -> String {
+        if bytes.isMultiple(of: 1 << 20) {
+            return "\(bytes / (1 << 20)) MiB"
+        }
+        if bytes.isMultiple(of: 1 << 10) {
+            return "\(bytes / (1 << 10)) KiB"
+        }
+        return "\(bytes) B"
     }
 
     private func parsedDouble(_ field: NSTextField) -> Double {
