@@ -194,6 +194,17 @@ struct NativeMainMenuBuilderTests {
         }
     }
 
+    @Test("Copy Cell is discoverable in the Resource menu with Command-C")
+    func copyCellCommand() throws {
+        let resource = try #require(submenu("Resource", in: makeMenu().main))
+        let copyCell = try #require(resource.item(withTitle: "Copy Cell"))
+        expectResponderItem(
+            copyCell,
+            action: #selector(ClusterWorkspaceWindowController.copyResourceCell(_:)),
+            keyEquivalent: "c"
+        )
+    }
+
     @Test("terminal defaults and configuration have distinct responder shortcuts")
     func terminalCommands() throws {
         let resource = try #require(submenu("Resource", in: makeMenu().main))

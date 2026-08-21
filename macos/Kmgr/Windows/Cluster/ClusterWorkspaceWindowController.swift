@@ -161,6 +161,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
         resourceViewportTiming: ResourceViewportTiming = .production,
+        resourceCellHighlightTiming: ResourceCellHighlightTiming = .production,
         tableColumnMutationAllowed: @escaping @MainActor () -> Bool = {
             NSEvent.pressedMouseButtons == 0
         },
@@ -236,6 +237,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                 ?? ColumnConfigurationCoordinator(path: columnsConfigurationPath),
             columnsConfigurationLoader: columnsConfigurationLoader,
             resourceViewportTiming: resourceViewportTiming,
+            resourceCellHighlightTiming: resourceCellHighlightTiming,
             tableColumnMutationAllowed: tableColumnMutationAllowed,
             namespacePickerPresenter: namespacePickerPresenter,
             namespacePickerKeyWindowCheck: namespacePickerKeyWindowCheck,
@@ -828,6 +830,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func scaleResourceSelection(_ sender: Any?) { workspaceController.scaleResourceSelection(sender) }
     @objc func restartResourceSelection(_ sender: Any?) { workspaceController.restartResourceSelection(sender) }
     @objc func editResourceMetadata(_ sender: Any?) { workspaceController.editResourceMetadata(sender) }
+    @objc func copyResourceCell(_ sender: Any?) { workspaceController.copyResourceCell(sender) }
     @objc func copyResourceName(_ sender: Any?) { workspaceController.copyResourceName(sender) }
     @objc func copyResourceNamespacedName(_ sender: Any?) {
         workspaceController.copyResourceNamespacedName(sender)
@@ -840,6 +843,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
         if menuItem.action == #selector(refreshAPIResources(_:)) {
             return workspaceController.canRefreshAPIResources
+        }
+        if menuItem.action == #selector(copyResourceCell(_:)) {
+            return workspaceController.canCopyResourceCell
         }
         let command: ResourceTableCommand?
         switch menuItem.action {
@@ -975,6 +981,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
         resourceViewportTiming: ResourceViewportTiming,
+        resourceCellHighlightTiming: ResourceCellHighlightTiming,
         tableColumnMutationAllowed: @escaping @MainActor () -> Bool,
         namespacePickerPresenter: @escaping NamespacePickerPresenter,
         namespacePickerKeyWindowCheck: @escaping NamespacePickerKeyWindowCheck,
@@ -1016,6 +1023,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             columnConfigurationCoordinator: columnConfigurationCoordinator,
             columnsConfigurationLoader: columnsConfigurationLoader,
             viewportTiming: resourceViewportTiming,
+            cellHighlightTiming: resourceCellHighlightTiming,
             tableColumnMutationAllowed: tableColumnMutationAllowed
         )
         super.init(nibName: nil, bundle: nil)
@@ -1786,11 +1794,25 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func scaleResourceSelection(_ sender: Any?) { contentController.performCommand(.scale) }
     @objc func restartResourceSelection(_ sender: Any?) { contentController.performCommand(.restart) }
     @objc func editResourceMetadata(_ sender: Any?) { contentController.performCommand(.editMetadata) }
+    @objc func copyResourceCell(_ sender: Any?) {
+        guard canCopyResourceCell else {
+            NSSound.beep()
+            return
+        }
+        contentController.copyCapturedCell(sender)
+    }
     @objc func copyResourceName(_ sender: Any?) { contentController.performCommand(.copyName) }
     @objc func copyResourceNamespacedName(_ sender: Any?) {
         contentController.performCommand(.copyNamespacedName)
     }
     @objc func copyResourceReference(_ sender: Any?) { contentController.performCommand(.copyReference) }
+
+    var canCopyResourceCell: Bool {
+        detailController == nil
+            && dataController == nil
+            && podContainerController == nil
+            && contentController.canCopyCapturedCell
+    }
 
     func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
         if let action = command.subresourceNetworkAction,
@@ -3085,6 +3107,18 @@ struct ResourceViewportTiming: Sendable {
     }
 }
 
+struct ResourceCellHighlightTiming: Sendable {
+    static let production = ResourceCellHighlightTiming(
+        now: { ContinuousClock.now },
+        sleep: { delay in
+            try await Task.sleep(for: delay)
+        }
+    )
+
+    var now: @Sendable () -> ContinuousClock.Instant
+    var sleep: @Sendable (Duration) async throws -> Void
+}
+
 private struct PendingResourceSelectionGesture: Sendable {
     var sequence: UInt64
     var revision: ResourceSelectionRevision
@@ -3181,6 +3215,7 @@ private final class ResourceListViewController: NSViewController,
     private let columnConfigurationCoordinator: ColumnConfigurationCoordinator
     private let columnsConfigurationLoader: ColumnConfigurationDocumentLoader
     private let viewportTiming: ResourceViewportTiming
+    private let cellHighlightTiming: ResourceCellHighlightTiming
     private let tableColumnMutationAllowed: @MainActor () -> Bool
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
@@ -3520,6 +3555,7 @@ private final class ResourceListViewController: NSViewController,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader,
         viewportTiming: ResourceViewportTiming,
+        cellHighlightTiming: ResourceCellHighlightTiming,
         tableColumnMutationAllowed: @escaping @MainActor () -> Bool
     ) {
         self.session = session
@@ -3531,6 +3567,7 @@ private final class ResourceListViewController: NSViewController,
         self.columnConfigurationCoordinator = columnConfigurationCoordinator
         self.columnsConfigurationLoader = columnsConfigurationLoader
         self.viewportTiming = viewportTiming
+        self.cellHighlightTiming = cellHighlightTiming
         self.tableColumnMutationAllowed = tableColumnMutationAllowed
         super.init(nibName: nil, bundle: nil)
         columnsConfigurationObserver = columnConfigurationCoordinator.observe {
@@ -4023,6 +4060,12 @@ private final class ResourceListViewController: NSViewController,
         addResourceMenuItems(to: menu)
     }
 
+    var canCopyCapturedCell: Bool { tableView.canCopyCapturedCell }
+
+    @objc func copyCapturedCell(_ sender: Any?) {
+        tableView.copy(sender)
+    }
+
     private func addResourceMenuItems(to menu: NSMenu) {
         func add(_ title: String, _ command: ResourceTableCommand) {
             let item = NSMenuItem(title: title, action: #selector(performContextMenuCommand(_:)), keyEquivalent: "")
@@ -4055,11 +4098,22 @@ private final class ResourceListViewController: NSViewController,
             ("Rollout Restart…", .restart),
             ("Edit Labels / Annotations…", .editMetadata),
         ])
-        addGroup([
-            ("Copy Name", .copyName),
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+        let copyCellItem = NSMenuItem(
+            title: "Copy Cell",
+            action: #selector(copyCapturedCell(_:)),
+            keyEquivalent: ""
+        )
+        copyCellItem.target = self
+        copyCellItem.isEnabled = canCopyCapturedCell
+        menu.addItem(copyCellItem)
+        for (title, command) in [
+            ("Copy Name", ResourceTableCommand.copyName),
             ("Copy Namespace/Name", .copyNamespacedName),
             ("Copy kubectl Reference", .copyReference),
-        ])
+        ].filter({ isCommandCompatible($0.1) }) {
+            add(title, command)
+        }
         addGroup([("Delete…", .delete)])
     }
 
@@ -5565,7 +5619,7 @@ private final class ResourceListViewController: NSViewController,
         if !detectedChanges.isEmpty {
             affectedCellAddresses.formUnion(cellHighlightStore.record(
                 detectedChanges,
-                at: ContinuousClock.now,
+                at: cellHighlightTiming.now(),
                 visibleUIDs: visibleResourceUIDsInViewport()
             ))
         }
@@ -5782,7 +5836,7 @@ private final class ResourceListViewController: NSViewController,
         let visibleRows = visibleTableRowIndexes()
         guard !visibleRows.isEmpty else { return }
         guard reloadAllVisibleCells || !addresses.isEmpty else { return }
-        let now = ContinuousClock.now
+        let now = cellHighlightTiming.now()
         for columnIndex in tableView.tableColumns.indices {
             let column = tableView.tableColumns[columnIndex]
             let columnID = tableView.tableColumns[columnIndex].identifier.rawValue
@@ -5842,16 +5896,17 @@ private final class ResourceListViewController: NSViewController,
 
     private func scheduleCellHighlightRefresh() {
         cancelCellHighlightRefresh()
-        let now = ContinuousClock.now
+        let now = cellHighlightTiming.now()
         let delay = cellEffectsPolicy.usesContinuousFade
             ? cellHighlightStore.nextRefreshDelay(at: now)
             : cellHighlightStore.nextExpiryDelay(at: now)
         guard let delay else { return }
 
         let revision = cellHighlightRefreshRevision
+        let sleep = cellHighlightTiming.sleep
         cellHighlightRefreshTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: delay)
+                try await sleep(delay)
             } catch {
                 return
             }
@@ -5860,7 +5915,7 @@ private final class ResourceListViewController: NSViewController,
                 !Task.isCancelled
             else { return }
             cellHighlightRefreshTask = nil
-            let now = ContinuousClock.now
+            let now = cellHighlightTiming.now()
             let affectedAddresses = cellHighlightStore.addresses
             cellHighlightStore.expire(at: now)
             reloadVisibleCellPresentation(at: affectedAddresses)
@@ -7225,7 +7280,7 @@ private final class ResourceListViewController: NSViewController,
         }
         let changeHighlight = cellHighlightStore.presentation(
             for: ResourceCellAddress(uid: uid, columnID: columnID),
-            at: ContinuousClock.now
+            at: cellHighlightTiming.now()
         )
         if let value, let presentation = ResourceUsageCellPresentation(cell: value) {
             let identifier = NSUserInterfaceItemIdentifier("usage-cell.\(columnID)")
@@ -8581,10 +8636,12 @@ private final class ResourceTableCommandBox {
 }
 
 @MainActor
-private final class ResourceTableView: NSTableView {
+private final class ResourceTableView: NSTableView, NSMenuItemValidation {
     var onCommand: ((ResourceTableCommand) -> Void)?
     var onSelectionGesture: ((ResourceTableSelectionGesture) -> Bool)?
-    private var routesTextMouseDownToTable = false
+    private var capturedCellValue: String?
+
+    var canCopyCapturedCell: Bool { capturedCellValue != nil }
 
     /// A nil-targeted Edit > Select All command resolves to NSTableView before
     /// `keyDown(with:)` gets a chance to translate Command-A. Route that
@@ -8599,28 +8656,18 @@ private final class ResourceTableView: NSTableView {
         onCommand(.selectAll)
     }
 
-    /// View-based tables claim cell hits so row selection remains native. For
-    /// the read-only resource value field, route only left-button tracking to
-    /// AppKit's field editor. Context menus and every non-text hit continue to
-    /// belong to the table.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !routesTextMouseDownToTable,
-            Self.isTextSelectionEvent(NSApp.currentEvent),
-            let textField = selectableTextField(at: point)
-        else { return super.hitTest(point) }
-
-        textField.onSelectionMouseDown = { [weak self] event in
-            self?.beginTextSelection(with: event) ?? false
-        }
-        textField.onSelectionEnded = { [weak self] hasSelection in
-            guard !hasSelection, let self else { return }
-            self.window?.makeFirstResponder(self)
-        }
-        return textField
+    /// Context-menu hits update the copy target without making the clicked row
+    /// authoritative. The existing UID-backed row selection is left intact for
+    /// every resource action in the same menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        captureCellValue(at: convert(event.locationInWindow, from: nil))
+        return super.menu(for: event)
     }
 
     override func mouseDown(with event: NSEvent) {
-        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        captureCellValue(at: point)
+        let row = self.row(at: point)
         let gesture = ResourceTableSelectionGesture(
             row: row >= 0 ? row : nil,
             modifiers: Self.selectionModifiers(from: event.modifierFlags),
@@ -8634,6 +8681,26 @@ private final class ResourceTableView: NSTableView {
             return
         }
         super.mouseDown(with: event)
+    }
+
+    /// Edit > Copy and Command-C reach this responder action when the resource
+    /// table owns focus. Capturing the immutable string on the click keeps the
+    /// operation independent of cell reuse, scrolling, and total row count.
+    @objc func copy(_ sender: Any?) {
+        guard let capturedCellValue else {
+            NSSound.beep()
+            return
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(capturedCellValue, forType: .string)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(copy(_:)) {
+            return canCopyCapturedCell
+        }
+        return true
     }
 
     override func keyDown(with event: NSEvent) {
@@ -8701,59 +8768,21 @@ private final class ResourceTableView: NSTableView {
         }
     }
 
-    private func selectableTextField(
-        at point: NSPoint
-    ) -> ResourceTableValueTextField? {
+    private func captureCellValue(at point: NSPoint) {
         let row = row(at: point)
         let column = column(at: point)
         guard row >= 0, column >= 0,
             let cell = view(
                 atColumn: column,
                 row: row,
-                makeIfNecessary: false
+                makeIfNecessary: true
             ) as? NSTableCellView,
-            let textField = cell.textField as? ResourceTableValueTextField,
-            textField.bounds.contains(textField.convert(point, from: self))
-        else { return nil }
-        return textField
-    }
-
-    private func beginTextSelection(with event: NSEvent) -> Bool {
-        let modifiers = Self.selectionModifiers(from: event.modifierFlags)
-        guard modifiers.isEmpty else {
-            routeTextMouseDownToTable(event)
-            return false
+            let value = cell.textField?.stringValue
+        else {
+            capturedCellValue = nil
+            return
         }
-        let row = row(at: convert(event.locationInWindow, from: nil))
-        let gesture = ResourceTableSelectionGesture(
-            row: row >= 0 ? row : nil,
-            modifiers: [],
-            keyboardDirection: nil
-        )
-        guard onSelectionGesture?(gesture) == true else {
-            routeTextMouseDownToTable(event)
-            return false
-        }
-        return true
-    }
-
-    private func routeTextMouseDownToTable(_ event: NSEvent) {
-        routesTextMouseDownToTable = true
-        defer { routesTextMouseDownToTable = false }
-        mouseDown(with: event)
-    }
-
-    private static func isTextSelectionEvent(_ event: NSEvent?) -> Bool {
-        guard let event else { return false }
-        switch event.type {
-        case .leftMouseDown:
-            // Preserve the table's existing double-click primary action.
-            return event.clickCount == 1
-        case .leftMouseDragged, .leftMouseUp:
-            return true
-        default:
-            return false
-        }
+        capturedCellValue = value
     }
 
     private static func selectionModifiers(

@@ -2660,6 +2660,7 @@ func makeColumnPropagationWorkspace(
     columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
     columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
     resourceViewportTiming: ResourceViewportTiming = .production,
+    resourceCellHighlightTiming: ResourceCellHighlightTiming = .production,
     tableColumnMutationAllowed: @escaping @MainActor () -> Bool = {
         NSEvent.pressedMouseButtons == 0
     },
@@ -2693,6 +2694,7 @@ func makeColumnPropagationWorkspace(
         columnConfigurationCoordinator: columnConfigurationCoordinator,
         columnsConfigurationLoader: columnsConfigurationLoader,
         resourceViewportTiming: resourceViewportTiming,
+        resourceCellHighlightTiming: resourceCellHighlightTiming,
         tableColumnMutationAllowed: tableColumnMutationAllowed,
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },

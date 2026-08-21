@@ -10,7 +10,11 @@ struct ResourceListCellEffectsTests {
     @Test("initial range is baseline and later UID-pinned revisions highlight")
     func snapshotDeltaExpiryAndReplacement() async throws {
         let provider = ControlledCellEffectsWorkspaceProvider()
-        let controller = makeCellEffectsWorkspace(provider: provider)
+        let timing = ControlledCellHighlightTiming()
+        let controller = makeCellEffectsWorkspace(
+            provider: provider,
+            cellHighlightTiming: timing.value
+        )
         controller.showWindow(nil)
         defer { controller.close() }
         let table = try resourceTable(in: controller)
@@ -29,7 +33,7 @@ struct ResourceListCellEffectsTests {
             last: true
         ))
         try await waitForCellEffects(stage: "initial row") {
-            table.numberOfRows == 1
+            text(in: table, columnID: "status") == "Running"
         }
         #expect(try highlightedCell(
             in: table,
@@ -77,6 +81,10 @@ struct ResourceListCellEffectsTests {
         ))
         #expect(initialOrdinaryOpacity >= 0.27)
 
+        try await waitForCellEffects(stage: "hold refresh scheduled") {
+            timing.pendingSleepCount == 1
+        }
+        timing.advance(by: .milliseconds(825))
         try await waitForCellEffects(stage: "fade") {
             guard let current = try? highlightedCell(
                 in: table,
@@ -87,7 +95,11 @@ struct ResourceListCellEffectsTests {
             return opacity > 0 && opacity < initialOrdinaryOpacity
         }
 
-        try await waitForCellEffects(timeout: .seconds(3), stage: "expiry") {
+        try await waitForCellEffects(stage: "fade refresh scheduled") {
+            timing.pendingSleepCount == 1
+        }
+        timing.advance(by: .milliseconds(675))
+        try await waitForCellEffects(stage: "expiry") {
             (try? highlightedCell(
                 in: table,
                 columnID: "status"
@@ -422,6 +434,80 @@ private final class ControlledCellEffectsWorkspaceProvider:
     }
 }
 
+private final class ControlledCellHighlightTiming: @unchecked Sendable {
+    private struct Waiter {
+        var deadline: ContinuousClock.Instant
+        var continuation: CheckedContinuation<Void, any Error>
+    }
+
+    private let lock = NSLock()
+    private var instant = ContinuousClock.now
+    private var waiters: [UUID: Waiter] = [:]
+    private var cancelledWaiterIDs: Set<UUID> = []
+
+    var value: ResourceCellHighlightTiming {
+        ResourceCellHighlightTiming(
+            now: { [self] in now },
+            sleep: { [self] delay in
+                try await sleep(for: delay)
+            }
+        )
+    }
+
+    var pendingSleepCount: Int {
+        lock.withLock { waiters.count }
+    }
+
+    func advance(by duration: Duration) {
+        let continuations = lock.withLock {
+            instant = instant.advanced(by: duration)
+            let readyIDs = waiters.compactMap { id, waiter in
+                waiter.deadline <= instant ? id : nil
+            }
+            return readyIDs.compactMap {
+                waiters.removeValue(forKey: $0)?.continuation
+            }
+        }
+        continuations.forEach { $0.resume() }
+    }
+
+    private var now: ContinuousClock.Instant {
+        lock.withLock { instant }
+    }
+
+    private func sleep(for duration: Duration) async throws {
+        let id = UUID()
+        try Task.checkCancellation()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let shouldCancel = lock.withLock {
+                    if cancelledWaiterIDs.remove(id) != nil || Task.isCancelled {
+                        return true
+                    }
+                    waiters[id] = Waiter(
+                        deadline: instant.advanced(by: duration),
+                        continuation: continuation
+                    )
+                    return false
+                }
+                if shouldCancel {
+                    continuation.resume(throwing: CancellationError())
+                }
+            }
+        } onCancel: {
+            let continuation: CheckedContinuation<Void, any Error>? =
+                self.lock.withLock {
+                    guard let waiter = self.waiters.removeValue(forKey: id) else {
+                        self.cancelledWaiterIDs.insert(id)
+                        return nil
+                    }
+                    return waiter.continuation
+                }
+            continuation?.resume(throwing: CancellationError())
+        }
+    }
+}
+
 private struct NoopCellEffectsOptionalResourceCatalogProvider:
     OptionalResourceCatalogProviding
 {
@@ -434,7 +520,8 @@ private struct NoopCellEffectsOptionalResourceCatalogProvider:
 
 @MainActor
 private func makeCellEffectsWorkspace(
-    provider: ControlledCellEffectsWorkspaceProvider
+    provider: ControlledCellEffectsWorkspaceProvider,
+    cellHighlightTiming: ResourceCellHighlightTiming = .production
 ) -> ClusterWorkspaceWindowController {
     makeColumnPropagationWorkspace(
         session: OpenedClusterSession(
@@ -447,7 +534,8 @@ private func makeCellEffectsWorkspace(
         provider: provider,
         optionalResourceCatalogProvider: NoopCellEffectsOptionalResourceCatalogProvider(),
         columnsConfigurationPath:
-            "/tmp/kmgr-cell-effects-\(UUID().uuidString).yaml"
+            "/tmp/kmgr-cell-effects-\(UUID().uuidString).yaml",
+        resourceCellHighlightTiming: cellHighlightTiming
     )
 }
 

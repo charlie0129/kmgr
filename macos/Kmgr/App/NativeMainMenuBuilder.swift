@@ -295,6 +295,12 @@ enum NativeMainMenuBuilder {
         menu.addItem(.separator())
         addResponderItem(
             to: menu,
+            title: "Copy Cell",
+            action: #selector(ClusterWorkspaceWindowController.copyResourceCell(_:)),
+            keyEquivalent: "c"
+        )
+        addResponderItem(
+            to: menu,
             title: "Copy Name",
             action: #selector(ClusterWorkspaceWindowController.copyResourceName(_:))
         )

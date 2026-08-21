@@ -84,9 +84,9 @@ app-wide Port Forwards window.
 ## Main workflows
 
 - Resource tables use UID-stable native multi-selection. Sorting, filtering,
-  and watch updates do not retarget a selection by row index. Cell text supports
-  native click-drag selection and Command-C; a click without a text selection
-  returns keyboard focus to the table.
+  and watch updates do not retarget a selection by row index. Clicking a cell
+  captures its full value for Command-C or Copy Cell without adding a second
+  visible selection or changing the selected rows.
 - Details provide a structured, copyable Summary table, plus YAML, Events,
   Relationships, Metrics where meaningful, and a Data editor for ConfigMaps
   and Secrets. Oversized Summary values stay available through row copy while

@@ -7,26 +7,18 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Resource table text effects")
 struct ResourceTableCellViewTests {
-    @Test("resource values expose selectable read-only native text")
-    func valuesAreSelectableAndReadOnly() throws {
+    @Test("resource values remain passive labels owned by row selection")
+    func valuesArePassiveLabels() throws {
         let cell = ResourceTextTableCellView()
         cell.configure(
             cell: Cell(columnID: "name", displayText: "api-server"),
             alignment: .left
         )
 
-        let textField = try #require(
-            cell.textField as? ResourceTableValueTextField
-        )
-        #expect(textField.isSelectable)
+        let textField = try #require(cell.textField)
+        #expect(!textField.isSelectable)
         #expect(!textField.isEditable)
-        #expect(textField.focusRingType == .none)
-
-        textField.onSelectionMouseDown = { _ in true }
-        textField.onSelectionEnded = { _ in }
-        cell.prepareForReuse()
-        #expect(textField.onSelectionMouseDown == nil)
-        #expect(textField.onSelectionEnded == nil)
+        #expect(textField.stringValue == "api-server")
     }
 
     @Test("long resource values are constrained to one truncated line")

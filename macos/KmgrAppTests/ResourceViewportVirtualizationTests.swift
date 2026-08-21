@@ -112,6 +112,83 @@ struct ResourceViewportVirtualizationTests {
         #expect(provider.metricInterests.count == sendsAfterTeardown)
     }
 
+    @Test("cell copy stays full, selection-neutral, and reuse-safe at 50k rows")
+    func capturedCellCopy() async throws {
+        let longValue = "controller-with-a-very-long-generated-pod-name-"
+            + String(repeating: "7b9d6f8c7d-", count: 12)
+            + "x4k2p"
+        let provider = ControlledViewportWorkspaceProvider(
+            rowCount: 50_000,
+            rowNames: [5: longValue]
+        )
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "cell-copy"
+        )
+        controller.showWindow(nil)
+        defer {
+            NSPasteboard.general.clearContents()
+            controller.close()
+        }
+        let table = try resourceTable(in: controller)
+        try await waitForViewport {
+            table.numberOfRows == 50_000
+                && self.cellText(in: table, row: 5) == longValue
+                && self.cellText(in: table, row: 7) == "pod-7"
+        }
+
+        let barItem = NSMenuItem(
+            title: "Copy Cell",
+            action: #selector(ClusterWorkspaceWindowController.copyResourceCell(_:)),
+            keyEquivalent: "c"
+        )
+        #expect(!controller.validateMenuItem(barItem))
+        table.mouseDown(with: try cellClick(
+            table: table,
+            row: 5,
+            windowNumber: controller.window?.windowNumber ?? 0
+        ))
+        try await waitForViewport {
+            provider.selectionApplications.count == 1
+                && table.selectedRowIndexes == IndexSet(integer: 5)
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("sentinel", forType: .string)
+        #expect(table.tryToPerform(#selector(NSText.copy(_:)), with: nil))
+        #expect(NSPasteboard.general.string(forType: .string) == longValue)
+
+        #expect(controller.validateMenuItem(barItem))
+        NSPasteboard.general.setString("sentinel", forType: .string)
+        controller.copyResourceCell(nil)
+        #expect(NSPasteboard.general.string(forType: .string) == longValue)
+
+        let selectedBeforeContextMenu = table.selectedRowIndexes
+        let contextMenu = try #require(table.menu(for: try rightClick(
+            table: table,
+            row: 7,
+            windowNumber: controller.window?.windowNumber ?? 0
+        )))
+        contextMenu.delegate?.menuNeedsUpdate?(contextMenu)
+        let copyCell = try #require(contextMenu.item(withTitle: "Copy Cell"))
+        #expect(copyCell.isEnabled)
+        #expect(table.selectedRowIndexes == selectedBeforeContextMenu)
+        let copyAction = try #require(copyCell.action)
+        #expect(NSApp.sendAction(copyAction, to: copyCell.target, from: copyCell))
+        #expect(NSPasteboard.general.string(forType: .string) == "pod-7")
+        #expect(table.selectedRowIndexes == selectedBeforeContextMenu)
+
+        scroll(table, to: 25_000)
+        try await waitForViewport {
+            self.cellText(in: table, row: 25_000) == "pod-25000"
+        }
+        NSPasteboard.general.setString("sentinel", forType: .string)
+        #expect(table.tryToPerform(#selector(NSText.copy(_:)), with: nil))
+        #expect(NSPasteboard.general.string(forType: .string) == "pod-7")
+        #expect(provider.fetchRequests.allSatisfy { $0.length <= 512 })
+        #expect(provider.selectionPageRequests.isEmpty)
+    }
+
     @Test("selection gestures serialize tokens and Command-A stays range projected")
     func tokenBackedSelection() async throws {
         let provider = ControlledViewportWorkspaceProvider(rowCount: 10_000)
@@ -1143,6 +1220,54 @@ struct ResourceViewportVirtualizationTests {
         ))
     }
 
+    private func rightClick(
+        table: NSTableView,
+        row: Int,
+        windowNumber: Int
+    ) throws -> NSEvent {
+        try cellClick(
+            table: table,
+            row: row,
+            type: .rightMouseDown,
+            windowNumber: windowNumber
+        )
+    }
+
+    private func cellClick(
+        table: NSTableView,
+        row: Int,
+        type: NSEvent.EventType = .leftMouseDown,
+        windowNumber: Int
+    ) throws -> NSEvent {
+        let column = table.column(withIdentifier: .init("name"))
+        guard table.tableColumns.indices.contains(column) else {
+            throw ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "MissingNameColumn",
+                message: "The resource table has no Name column.",
+                operation: "test resource cell copy"
+            )
+        }
+        let location = table.convert(
+            NSPoint(
+                x: table.rect(ofColumn: column).midX,
+                y: table.rect(ofRow: row).midY
+            ),
+            to: nil
+        )
+        return try #require(NSEvent.mouseEvent(
+            with: type,
+            location: location,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+    }
+
     private func contains(
         tableRow: UInt64,
         request: ResourceViewRangeRequest
@@ -1214,6 +1339,7 @@ private final class ControlledViewportWorkspaceProvider:
     private let selectionLifetime: TimeInterval
     private let discoveredResources: [DiscoveredResource]
     private let namespaceNames: [String]
+    private let rowNames: [Int: String]
     private var storedStreamRequests: [ResourceViewRequest] = []
     private var storedFetchRequests: [ResourceViewRangeRequest] = []
     private var storedMetricInterests: [ResourceMetricInterestRequest] = []
@@ -1263,7 +1389,8 @@ private final class ControlledViewportWorkspaceProvider:
                 verbs: ["list", "watch"]
             ),
         ],
-        namespaceNames: [String] = ["default"]
+        namespaceNames: [String] = ["default"],
+        rowNames: [Int: String] = [:]
     ) {
         precondition(rowCount > 0)
         precondition(!discoveredResources.isEmpty)
@@ -1271,6 +1398,7 @@ private final class ControlledViewportWorkspaceProvider:
         self.selectionLifetime = selectionLifetime
         self.discoveredResources = discoveredResources
         self.namespaceNames = namespaceNames
+        self.rowNames = rowNames
     }
 
     var streamRequests: [ResourceViewRequest] {
@@ -1707,7 +1835,7 @@ private final class ControlledViewportWorkspaceProvider:
     func closeSession(sessionID: String) async {}
 
     private func resourceRow(_ index: Int) -> ResourceRow {
-        let name = "pod-\(index)"
+        let name = rowNames[index] ?? "pod-\(index)"
         return ResourceRow(
             identity: ResourceIdentity(
                 clusterSessionID: "viewport-session",
