@@ -28,6 +28,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let metricsRefreshField = NSTextField()
     private let viewportOverscanField = NSTextField()
     private let viewReleaseGraceField = NSTextField()
+    private let projectionWorkerLimitField = NSTextField()
     private let globalWarmViewLimitField = NSTextField()
     private let globalWarmObjectLimitField = NSTextField()
     private let globalWarmMemoryPercentField = NSTextField()
@@ -125,7 +126,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             nodeShellImageField, nodeShellStartupTimeoutField,
             metricsRefreshField,
             viewportOverscanField,
-            viewReleaseGraceField,
+            viewReleaseGraceField, projectionWorkerLimitField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
@@ -148,7 +149,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             completedOperationHistoryLimitField, defaultDeleteConcurrencyField,
             nodeShellStartupTimeoutField, metricsRefreshField,
             viewportOverscanField,
-            viewReleaseGraceField,
+            viewReleaseGraceField, projectionWorkerLimitField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
@@ -171,6 +172,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         )
         viewReleaseGraceField.setAccessibilityIdentifier(
             "settings.performance.viewReleaseGraceSeconds"
+        )
+        projectionWorkerLimitField.setAccessibilityIdentifier(
+            "settings.performance.projectionWorkerLimit"
         )
         globalWarmObjectLimitField.setAccessibilityIdentifier(
             "settings.performance.globalWarmObjects"
@@ -367,6 +371,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                     "View release grace",
                     control: viewReleaseGraceField,
                     suffix: "seconds"
+                ),
+                labeledRow(
+                    "Projection workers",
+                    control: projectionWorkerLimitField,
+                    suffix: "process-wide (1–32)"
                 ),
                 viewReleaseHelp,
                 warmCacheHelp,
@@ -649,6 +658,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             preferences.advancedPerformance.viewportOverscanScreensPerSide
         viewReleaseGraceField.integerValue =
             preferences.advancedPerformance.viewReleaseGraceSeconds
+        projectionWorkerLimitField.integerValue =
+            preferences.advancedPerformance.projectionWorkerLimit
         globalWarmViewLimitField.integerValue =
             preferences.advancedPerformance.globalWarmCacheViewLimit
         globalWarmObjectLimitField.integerValue =
@@ -745,6 +756,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                     viewportOverscanField
                 ),
                 viewReleaseGraceSeconds: parsedInteger(viewReleaseGraceField),
+                projectionWorkerLimit: parsedInteger(projectionWorkerLimitField),
                 globalWarmCacheViewLimit: parsedInteger(globalWarmViewLimitField),
                 globalWarmCacheObjectLimit: parsedInteger(globalWarmObjectLimitField),
                 globalWarmCacheMemoryPercent: parsedInteger(

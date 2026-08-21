@@ -34,6 +34,7 @@ type ServerOptions struct {
 	ColumnsPath                 string
 	MetricsRefreshInterval      time.Duration
 	ViewReleaseDelay            time.Duration
+	ProjectionWorkerLimit       int
 	IdleMetricProviderLimit     int
 	IdleMetricSampleLimit       int
 	PodMetricsEntryLimit        int
@@ -142,6 +143,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		Columns:                     columnManager,
 		PipelinePageSize:            options.KubernetesListPageSize,
 		ReleaseDelay:                options.ViewReleaseDelay,
+		ProjectionWorkerLimit:       options.ProjectionWorkerLimit,
 		WarmViewLimit:               options.WarmViewLimit,
 		WarmObjectLimit:             options.WarmObjectLimit,
 		WarmByteLimit:               options.WarmByteLimit,

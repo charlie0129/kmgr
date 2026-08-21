@@ -74,7 +74,9 @@ func TestProjectBoundedNeverExceedsWorkerLimitAndVisitsEveryIndex(t *testing.T) 
 }
 
 func TestProjectionWorkerGateBoundsAggregateConcurrentBatches(t *testing.T) {
-	gateLimit := cap(projectionWorkerGate)
+	t.Parallel()
+	pool := newProjectionWorkerPool(3)
+	gateLimit := pool.limit()
 	batchCount := gateLimit * 3
 	started := make(chan struct{}, batchCount)
 	release := make(chan struct{})
@@ -85,7 +87,7 @@ func TestProjectionWorkerGateBoundsAggregateConcurrentBatches(t *testing.T) {
 	for range batchCount {
 		go func() {
 			defer batches.Done()
-			err := projectBoundedContext(context.Background(), 1, 1, func(int) error {
+			err := projectBoundedContextWithPool(context.Background(), 1, 1, pool, func(int) error {
 				current := active.Add(1)
 				for {
 					previous := peak.Load()
@@ -117,21 +119,21 @@ func TestProjectionWorkerGateBoundsAggregateConcurrentBatches(t *testing.T) {
 }
 
 func TestProjectBoundedContextCancellationReleasesWorkersWaitingForGlobalGate(t *testing.T) {
-	// This top-level test intentionally does not call t.Parallel. Parallel tests
-	// remain paused while it temporarily occupies the package-global gate.
-	for range cap(projectionWorkerGate) {
-		projectionWorkerGate <- struct{}{}
+	t.Parallel()
+	pool := newProjectionWorkerPool(2)
+	for range pool.limit() {
+		pool.slots <- struct{}{}
 	}
 	defer func() {
-		for range cap(projectionWorkerGate) {
-			<-projectionWorkerGate
+		for range pool.limit() {
+			<-pool.slots
 		}
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- projectBoundedContext(ctx, 100, MaxProjectionWorkerLimit, func(int) error {
+		done <- projectBoundedContextWithPool(ctx, 100, MaxProjectionWorkerLimit, pool, func(int) error {
 			t.Error("projection ran without global worker capacity")
 			return nil
 		})

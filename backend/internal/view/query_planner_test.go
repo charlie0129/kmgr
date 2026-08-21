@@ -219,7 +219,7 @@ func TestProjectorReusesQueryPlanCompiledFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projector, err := projectorFromProto("session", spec, nil, plan.filter)
+	projector, err := projectorFromProto("session", spec, nil, plan.filter, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

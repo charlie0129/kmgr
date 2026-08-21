@@ -15,10 +15,28 @@ import (
 )
 
 func TestNewFilterRevisionCancelsStaleProjectionAndPublishesOnlyNewestFilter(t *testing.T) {
-	// This test intentionally remains sequential because it occupies the
-	// process-wide projection gate to make an in-flight row projection wait at
-	// a deterministic, context-cancellable boundary.
-	blockedWorkers := cap(projectionWorkerGate)
+	client := newScriptedResource()
+	firstProjectionStarted := make(chan struct{})
+	var projectionCalls atomic.Int64
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:                &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay:          time.Hour,
+		OpenProjectionLimit:   2,
+		ProjectionWorkerLimit: 2,
+		openProjectionHook: func() {
+			if projectionCalls.Add(1) == 1 {
+				close(firstProjectionStarted)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	// Occupy this Runtime's worker pool to make the stale projection wait at a
+	// deterministic, context-cancellable boundary.
+	blockedWorkers := runtime.projectionWorkers.limit()
 	releaseBlockedWorkers := make(chan struct{})
 	blockedWorkerStarted := make(chan struct{}, blockedWorkers)
 	var blockedWorkerDone sync.WaitGroup
@@ -38,7 +56,7 @@ func TestNewFilterRevisionCancelsStaleProjectionAndPublishesOnlyNewestFilter(t *
 	for range blockedWorkers {
 		go func() {
 			defer blockedWorkerDone.Done()
-			_ = runProjectionWorker(context.Background(), func() error {
+			_ = runtime.projectionWorkers.run(context.Background(), func() error {
 				blockedWorkerStarted <- struct{}{}
 				<-releaseBlockedWorkers
 				return nil
@@ -52,24 +70,6 @@ func TestNewFilterRevisionCancelsStaleProjectionAndPublishesOnlyNewestFilter(t *
 			t.Fatal("could not occupy the projection worker gate")
 		}
 	}
-
-	client := newScriptedResource()
-	firstProjectionStarted := make(chan struct{})
-	var projectionCalls atomic.Int64
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source:              &fakeResourceSource{authority: "cluster-a", client: client},
-		ReleaseDelay:        time.Hour,
-		OpenProjectionLimit: 2,
-		openProjectionHook: func() {
-			if projectionCalls.Add(1) == 1 {
-				close(firstProjectionStarted)
-			}
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
 
 	entry := &resourceRuntime{
 		key: resourceKey{

@@ -677,6 +677,8 @@ extension EngineSupervisor.Configuration {
             arguments += [
                 "--view-release-delay",
                 "\(advancedPerformance.viewReleaseGraceSeconds)s",
+                "--projection-workers",
+                "\(advancedPerformance.projectionWorkerLimit)",
                 "--warm-cache-global-views",
                 "\(advancedPerformance.globalWarmCacheViewLimit)",
                 "--warm-cache-global-objects",

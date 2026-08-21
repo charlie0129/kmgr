@@ -36,6 +36,7 @@ import Testing
     preferences.advancedPerformance = AdvancedPerformancePreferences(
         viewportOverscanScreensPerSide: 17,
         viewReleaseGraceSeconds: 45,
+        projectionWorkerLimit: 11,
         globalWarmCacheViewLimit: 48,
         globalWarmCacheObjectLimit: 500_000,
         globalWarmCacheMemoryPercent: 30,
@@ -128,6 +129,7 @@ import Testing
     preferences.advancedPerformance = AdvancedPerformancePreferences(
         viewportOverscanScreensPerSide: 101,
         viewReleaseGraceSeconds: 301,
+        projectionWorkerLimit: 33,
         globalWarmCacheViewLimit: 0,
         globalWarmCacheObjectLimit: 0,
         globalWarmCacheMemoryPercent: 0,
@@ -163,6 +165,7 @@ import Testing
         "nodeShell.startupTimeoutSeconds",
         "advancedPerformance.viewportOverscanScreensPerSide",
         "advancedPerformance.viewReleaseGraceSeconds",
+        "advancedPerformance.projectionWorkerLimit",
         "advancedPerformance.globalWarmCacheViewLimit",
         "advancedPerformance.globalWarmCacheObjectLimit",
         "advancedPerformance.globalWarmCacheMemoryPercent",

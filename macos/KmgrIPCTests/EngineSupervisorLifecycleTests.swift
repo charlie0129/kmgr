@@ -46,6 +46,7 @@ struct EngineSupervisorLifecycleTests {
             nodeShellStartupTimeoutSeconds: 90,
             advancedPerformance: AdvancedPerformancePreferences(
                 viewReleaseGraceSeconds: 30,
+                projectionWorkerLimit: 11,
                 globalWarmCacheViewLimit: 48,
                 globalWarmCacheObjectLimit: 500_000,
                 globalWarmCacheMemoryPercent: 30,
@@ -75,6 +76,7 @@ struct EngineSupervisorLifecycleTests {
             "--metrics-refresh", "45s",
             "--node-shell-startup-timeout", "90s",
             "--view-release-delay", "30s",
+            "--projection-workers", "11",
             "--warm-cache-global-views", "48",
             "--warm-cache-global-objects", "500000",
             "--warm-cache-global-memory-percent", "30",

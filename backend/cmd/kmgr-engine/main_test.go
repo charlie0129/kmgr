@@ -100,6 +100,17 @@ func TestKubernetesListPageSizeFlagIsValidated(t *testing.T) {
 	}
 }
 
+func TestProjectionWorkerFlagIsValidated(t *testing.T) {
+	if code := run([]string{"--version", "--projection-workers", "12"}); code != 0 {
+		t.Fatalf("run(valid projection worker limit) = %d, want success", code)
+	}
+	for _, value := range []string{"0", "33", "not-an-integer"} {
+		if code := run([]string{"--version", "--projection-workers", value}); code != 2 {
+			t.Errorf("run(--projection-workers %q) = %d, want usage error", value, code)
+		}
+	}
+}
+
 func TestClusterConnectionTimeoutFlagIsValidated(t *testing.T) {
 	if code := run([]string{
 		"--version", "--cluster-connection-timeout", "45s",

@@ -268,6 +268,7 @@ type RuntimeConfig struct {
 	SearchSnapshotObjectLimit   int
 	SearchSnapshotTTL           time.Duration
 	OpenProjectionLimit         int
+	ProjectionWorkerLimit       int
 	OpenGenerationHistory       int
 	openProjectionHook          func()
 	openHandoffHook             func()
@@ -332,6 +333,7 @@ type Runtime struct {
 	transientSearchLists      map[searchSnapshotKey]*transientSearchList
 
 	openProjectionGate chan struct{}
+	projectionWorkers  *projectionWorkerPool
 	openProjectionHook func()
 	openHandoffHook    func()
 	pipelineRunHook    func(context.Context, func(context.Context) error) error
@@ -471,7 +473,8 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	}
 	if config.ReleaseDelay < 0 || config.BatchDelay < 0 || config.PipelinePageSize < 0 || config.PipelineTimeout < 0 ||
 		config.SearchSnapshotLimit < 0 || config.SearchSnapshotObjectLimit < 0 || config.SearchSnapshotTTL < 0 ||
-		config.OpenProjectionLimit < 0 || config.OpenGenerationHistory < 0 ||
+		config.OpenProjectionLimit < 0 || config.ProjectionWorkerLimit < 0 ||
+		config.OpenGenerationHistory < 0 ||
 		config.WarmByteLimit < 0 || config.WarmByteLimitPerAuthority < 0 {
 		return nil, errors.New("view runtime durations and limits must not be negative")
 	}
@@ -564,6 +567,16 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if openProjectionLimit <= 0 || openHistoryLimit <= 0 {
 		return nil, errors.New("open projection limits must be positive")
 	}
+	projectionWorkerLimit := config.ProjectionWorkerLimit
+	if projectionWorkerLimit == 0 {
+		projectionWorkerLimit = DefaultProjectionWorkerLimit()
+	}
+	if projectionWorkerLimit < 1 || projectionWorkerLimit > MaxProjectionWorkerLimit {
+		return nil, fmt.Errorf(
+			"projection worker limit must be between 1 and %d",
+			MaxProjectionWorkerLimit,
+		)
+	}
 	result := &Runtime{
 		source:                         config.Source,
 		metrics:                        config.Metrics,
@@ -593,6 +606,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		searchSnapshotTTL:              searchSnapshotTTL,
 		transientSearchLists:           make(map[searchSnapshotKey]*transientSearchList),
 		openProjectionGate:             make(chan struct{}, openProjectionLimit),
+		projectionWorkers:              newProjectionWorkerPool(projectionWorkerLimit),
 		openProjectionHook:             config.openProjectionHook,
 		openHandoffHook:                config.openHandoffHook,
 		pipelineRunHook:                config.pipelineRunHook,
@@ -652,7 +666,9 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
 	}
-	projector, err := projectorFromProto(sessionID, request.GetSpec(), r.columns, query.filter)
+	projector, err := projectorFromProto(
+		sessionID, request.GetSpec(), r.columns, query.filter, r.projectionWorkers,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidView, err)
 	}
@@ -2958,7 +2974,7 @@ func (s *Subscription) runProjection() {
 				uid := string(object.GetUID())
 				var row *kmgrv1.ResourceRow
 				var visible bool
-				projectionErr = runProjectionWorker(projectionContext, func() error {
+				projectionErr = batchProjector.workerPool.run(projectionContext, func() error {
 					var err error
 					row, visible, err = batchProjector.projectOneAdmittedWithCells(
 						projectionContext, object, serverCells[uid],
@@ -3509,6 +3525,7 @@ func projectorFromProto(
 	spec *kmgrv1.ViewSpec,
 	resolver ColumnProgramResolver,
 	compiledFilter *viewfilter.Filter,
+	workerPool *projectionWorkerPool,
 ) (*Projector, error) {
 	resource := spec.GetResource()
 	namespaceScope := NamespaceScope{}
@@ -3559,6 +3576,7 @@ func projectorFromProto(
 		ColumnExtractors:                   resolved.Extractors,
 		Accelerators:                       accelerators,
 		compiledFilter:                     compiledFilter,
+		workerPool:                         workerPool,
 	})
 }
 

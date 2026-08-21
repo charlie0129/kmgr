@@ -350,7 +350,7 @@ func TestRuntimeIncompleteWarmProjectionDoesNotInventRemoval(t *testing.T) {
 
 	request := openView("session", "view", 1)
 	staleObject := pod("uid-stale", "ns", "stale", "Running", 0, nil, time.Time{})
-	projector, err := projectorFromProto("session", request.GetSpec(), nil, nil)
+	projector, err := projectorFromProto("session", request.GetSpec(), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestRuntimeCompleteWarmProjectionCatchupInvalidatesMissingUID(t *testing.T)
 	defer runtime.Close()
 	request := openView("session", "view", 1)
 	staleObject := pod("uid-missing", "ns", "missing", "Running", 0, nil, time.Time{})
-	projector, err := projectorFromProto("session", request.GetSpec(), nil, nil)
+	projector, err := projectorFromProto("session", request.GetSpec(), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -936,7 +936,9 @@ func installWarmProjectionFixture(
 	rows []*kmgrv1.ResourceRow,
 ) *resourceRuntime {
 	t.Helper()
-	projector, err := projectorFromProto(request.GetContext().GetClusterSessionId(), request.GetSpec(), runtime.columns, nil)
+	projector, err := projectorFromProto(
+		request.GetContext().GetClusterSessionId(), request.GetSpec(), runtime.columns, nil, nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -63,6 +63,10 @@ func run(arguments []string) int {
 		"view-release-delay", view.DefaultViewReleaseDelay,
 		"grace period before releasing an unsubscribed resource pipeline",
 	)
+	projectionWorkers := flags.Int(
+		"projection-workers", view.DefaultProjectionWorkerLimit(),
+		"maximum concurrent resource-row projection workers process-wide",
+	)
 	kubernetesQPS := flags.Float64(
 		"kubernetes-qps", cluster.DefaultClientQPS,
 		"aggregate Kubernetes client requests per second for each authority",
@@ -192,6 +196,14 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "kmgr-engine: --view-release-delay must be between 1s and 5m")
 		return 2
 	}
+	if *projectionWorkers < 1 || *projectionWorkers > view.MaxProjectionWorkerLimit {
+		fmt.Fprintf(
+			os.Stderr,
+			"kmgr-engine: --projection-workers must be between 1 and %d\n",
+			view.MaxProjectionWorkerLimit,
+		)
+		return 2
+	}
 	validatedQPS, err := validateKubernetesRateLimit(*kubernetesQPS, *kubernetesBurst)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
@@ -319,6 +331,7 @@ func run(arguments []string) int {
 		ColumnsPath:                 *columnsPath,
 		MetricsRefreshInterval:      *metricsRefresh,
 		ViewReleaseDelay:            *viewReleaseDelay,
+		ProjectionWorkerLimit:       *projectionWorkers,
 		IdleMetricProviderLimit:     metricCache.idleProviders,
 		IdleMetricSampleLimit:       metricCache.idleSamples,
 		PodMetricsEntryLimit:        metricCache.exactEntries,

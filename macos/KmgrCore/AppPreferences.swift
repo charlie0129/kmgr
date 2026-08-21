@@ -211,6 +211,11 @@ public enum PreferenceControlledMutation: Hashable, Sendable {
 }
 
 public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
+    public static let defaultProjectionWorkerLimit = min(
+        max(ProcessInfo.processInfo.activeProcessorCount, 1),
+        8
+    )
+    public static let projectionWorkerLimitRange = 1...32
     public static let defaultViewReleaseGraceSeconds = 3
     public static let viewReleaseGraceSecondsRange = 1...300
     public static let defaultKubernetesListPageSize = 500
@@ -226,6 +231,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 
     public var viewportOverscanScreensPerSide: Int
     public var viewReleaseGraceSeconds: Int
+    public var projectionWorkerLimit: Int
     public var globalWarmCacheViewLimit: Int
     public var globalWarmCacheObjectLimit: Int
     public var globalWarmCacheMemoryPercent: Int
@@ -250,6 +256,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     public init(
         viewportOverscanScreensPerSide: Int = 10,
         viewReleaseGraceSeconds: Int = AdvancedPerformancePreferences.defaultViewReleaseGraceSeconds,
+        projectionWorkerLimit: Int = AdvancedPerformancePreferences.defaultProjectionWorkerLimit,
         globalWarmCacheViewLimit: Int = 24,
         globalWarmCacheObjectLimit: Int = 250_000,
         globalWarmCacheMemoryPercent: Int = 20,
@@ -273,6 +280,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     ) {
         self.viewportOverscanScreensPerSide = viewportOverscanScreensPerSide
         self.viewReleaseGraceSeconds = viewReleaseGraceSeconds
+        self.projectionWorkerLimit = projectionWorkerLimit
         self.globalWarmCacheViewLimit = globalWarmCacheViewLimit
         self.globalWarmCacheObjectLimit = globalWarmCacheObjectLimit
         self.globalWarmCacheMemoryPercent = globalWarmCacheMemoryPercent
@@ -325,6 +333,12 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
             issues.append(AppPreferenceIssue(
                 field: "advancedPerformance.viewReleaseGraceSeconds",
                 message: "View release grace must be between 1 and 300 seconds."
+            ))
+        }
+        if !Self.projectionWorkerLimitRange.contains(projectionWorkerLimit) {
+            issues.append(AppPreferenceIssue(
+                field: "advancedPerformance.projectionWorkerLimit",
+                message: "Projection workers must be between 1 and 32."
             ))
         }
 
@@ -446,7 +460,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v12"
+    public static let apiVersion = "kmgr.preferences/v13"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences

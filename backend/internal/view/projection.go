@@ -60,6 +60,7 @@ type ProjectionSpec struct {
 	// WorkerLimit bounds concurrent row projection for large snapshots. Zero
 	// selects a conservative process-wide default capped below GOMAXPROCS.
 	WorkerLimit int
+	workerPool  *projectionWorkerPool
 }
 
 type ResourceType struct {
@@ -87,13 +88,49 @@ type Projector struct {
 	namespaces  map[string]struct{}
 	now         func() time.Time
 	workerLimit int
+	workerPool  *projectionWorkerPool
 	cacheKey    projectionCacheKey
 }
 
-// projectionWorkerGate bounds aggregate row work across all Projectors. A
-// per-Projector WorkerLimit still controls one batch's share of this capacity,
-// but concurrent views cannot each create an independent full worker pool.
-var projectionWorkerGate = make(chan struct{}, min(max(goruntime.GOMAXPROCS(0), 1), defaultProjectionWorkerCap))
+// DefaultProjectionWorkerLimit keeps row work below the process scheduler's
+// available parallelism while avoiding excessive allocation/GC contention on
+// very wide machines.
+func DefaultProjectionWorkerLimit() int {
+	return min(max(goruntime.GOMAXPROCS(0), 1), defaultProjectionWorkerCap)
+}
+
+// projectionWorkerPool bounds aggregate row work across all Projectors owned
+// by one Runtime. A per-Projector WorkerLimit still controls one batch's share
+// of this capacity, but concurrent views cannot each create a full worker pool.
+type projectionWorkerPool struct {
+	slots chan struct{}
+}
+
+func newProjectionWorkerPool(limit int) *projectionWorkerPool {
+	return &projectionWorkerPool{slots: make(chan struct{}, limit)}
+}
+
+func (p *projectionWorkerPool) limit() int {
+	if p == nil {
+		return 0
+	}
+	return cap(p.slots)
+}
+
+func (p *projectionWorkerPool) run(ctx context.Context, project func() error) error {
+	select {
+	case p.slots <- struct{}{}:
+		defer func() { <-p.slots }()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return project()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+var defaultProjectionWorkerPool = newProjectionWorkerPool(DefaultProjectionWorkerLimit())
 
 // WithMetrics returns an immutable projection revision for one optional
 // metrics snapshot. Base object projection and metric refreshes may therefore
@@ -161,6 +198,11 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 	}
 	spec.Now = time.Time{}
 	spec.Accelerators = cloneAcceleratorConfig(spec.Accelerators)
+	workerPool := spec.workerPool
+	if workerPool == nil {
+		workerPool = defaultProjectionWorkerPool
+	}
+	spec.workerPool = nil
 	namespaces := make(map[string]struct{}, len(spec.NamespaceScope.Namespaces))
 	for _, namespace := range spec.NamespaceScope.Namespaces {
 		if namespace != "" {
@@ -169,11 +211,12 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 	}
 	workerLimit := spec.WorkerLimit
 	if workerLimit == 0 {
-		workerLimit = cap(projectionWorkerGate)
+		workerLimit = workerPool.limit()
 	}
 	return &Projector{
 		spec: spec, filter: compiledFilter, namespaces: namespaces,
-		now: now, workerLimit: workerLimit, cacheKey: newProjectionCacheKey(spec),
+		now: now, workerLimit: workerLimit, workerPool: workerPool,
+		cacheKey: newProjectionCacheKey(spec),
 	}, nil
 }
 
@@ -216,19 +259,22 @@ func (p *Projector) ProjectContextWithAdditionalCells(
 		visible bool
 	}
 	projected := make([]result, len(objects))
-	err := projectBoundedContext(ctx, len(objects), batch.workerLimit, func(index int) error {
-		object := objects[index]
-		var cells []*kmgrv1.Cell
-		if object != nil {
-			cells = additional[string(object.GetUID())]
-		}
-		row, visible, err := batch.projectOneAdmittedWithCells(ctx, object, cells)
-		if err != nil {
-			return err
-		}
-		projected[index].row, projected[index].visible = row, visible
-		return nil
-	})
+	err := projectBoundedContextWithPool(
+		ctx, len(objects), batch.workerLimit, batch.workerPool,
+		func(index int) error {
+			object := objects[index]
+			var cells []*kmgrv1.Cell
+			if object != nil {
+				cells = additional[string(object.GetUID())]
+			}
+			row, visible, err := batch.projectOneAdmittedWithCells(ctx, object, cells)
+			if err != nil {
+				return err
+			}
+			projected[index].row, projected[index].visible = row, visible
+			return nil
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -246,6 +292,17 @@ func (p *Projector) ProjectContextWithAdditionalCells(
 }
 
 func projectBoundedContext(ctx context.Context, count, workerLimit int, project func(index int) error) error {
+	return projectBoundedContextWithPool(
+		ctx, count, workerLimit, defaultProjectionWorkerPool, project,
+	)
+}
+
+func projectBoundedContextWithPool(
+	ctx context.Context,
+	count, workerLimit int,
+	pool *projectionWorkerPool,
+	project func(index int) error,
+) error {
 	if ctx == nil {
 		return errors.New("projection context must not be nil")
 	}
@@ -255,7 +312,10 @@ func projectBoundedContext(ctx context.Context, count, workerLimit int, project 
 	if count <= 0 || project == nil {
 		return nil
 	}
-	workerCount := min(max(workerLimit, 1), count, cap(projectionWorkerGate))
+	if pool == nil || pool.limit() == 0 {
+		return errors.New("projection worker pool must not be empty")
+	}
+	workerCount := min(max(workerLimit, 1), count, pool.limit())
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var next atomic.Int64
@@ -274,7 +334,7 @@ func projectBoundedContext(ctx context.Context, count, workerLimit int, project 
 				if index >= count {
 					return
 				}
-				if err := runProjectionWorker(workerCtx, func() error { return project(index) }); err != nil {
+				if err := pool.run(workerCtx, func() error { return project(index) }); err != nil {
 					errOnce.Do(func() {
 						firstErr = err
 						cancel()
@@ -289,19 +349,6 @@ func projectBoundedContext(ctx context.Context, count, workerLimit int, project 
 		return firstErr
 	}
 	return ctx.Err()
-}
-
-func runProjectionWorker(ctx context.Context, project func() error) error {
-	select {
-	case projectionWorkerGate <- struct{}{}:
-		defer func() { <-projectionWorkerGate }()
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		return project()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }
 
 // ProjectOne computes a single compact row and whether it belongs to the
@@ -338,7 +385,7 @@ func (p *Projector) projectOneWithCells(
 ) (*kmgrv1.ResourceRow, bool) {
 	var row *kmgrv1.ResourceRow
 	var visible bool
-	_ = runProjectionWorker(context.Background(), func() error {
+	_ = p.workerPool.run(context.Background(), func() error {
 		row, visible, _ = p.projectOneAdmittedWithCells(context.Background(), object, additional)
 		return nil
 	})
