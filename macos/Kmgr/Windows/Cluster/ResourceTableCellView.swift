@@ -1,6 +1,29 @@
 import AppKit
 import KmgrCore
 
+/// Read-only table text that participates in AppKit's field-editor selection
+/// only when the enclosing resource table explicitly routes a mouse gesture
+/// to it. `NSTableView` normally claims cell mouse events for row selection.
+@MainActor
+final class ResourceTableValueTextField: NSTextField {
+    var onSelectionMouseDown: ((NSEvent) -> Bool)?
+    var onSelectionEnded: ((Bool) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        guard onSelectionMouseDown?(event) != false else { return }
+        let selectionEnded = onSelectionEnded
+        super.mouseDown(with: event)
+        let hasSelection = (currentEditor() as? NSTextView)
+            .map { $0.selectedRange().length > 0 } ?? false
+        selectionEnded?(hasSelection)
+    }
+
+    func clearSelectionHandlers() {
+        onSelectionMouseDown = nil
+        onSelectionEnded = nil
+    }
+}
+
 @MainActor
 struct ResourceTableTextAccent {
     var utf16Range: Range<Int>
@@ -79,7 +102,7 @@ struct ResourceTableCellEffectsPolicy {
 /// presentation attribute is replaced on configure and cleared on reuse.
 @MainActor
 class HighlightableResourceTableCellView: NSTableCellView {
-    private let valueLabel = NSTextField(labelWithString: "")
+    private let valueLabel = ResourceTableValueTextField(labelWithString: "")
     private var currentChangeHighlight: ResourceCellHighlightPresentation?
 
     var effectsPolicy = ResourceTableCellEffectsPolicy.systemDefault {
@@ -94,6 +117,9 @@ class HighlightableResourceTableCellView: NSTableCellView {
         valueLabel.maximumNumberOfLines = 1
         valueLabel.cell?.usesSingleLineMode = true
         valueLabel.cell?.wraps = false
+        valueLabel.isSelectable = true
+        valueLabel.isEditable = false
+        valueLabel.focusRingType = .none
         valueLabel.translatesAutoresizingMaskIntoConstraints = false
         valueLabel.setAccessibilityElement(false)
         addSubview(valueLabel)
@@ -175,6 +201,7 @@ class HighlightableResourceTableCellView: NSTableCellView {
         valueLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
         valueLabel.alignment = .left
         valueLabel.toolTip = nil
+        valueLabel.clearSelectionHandlers()
         toolTip = nil
         setAccessibilityLabel(nil)
         setAccessibilityValue(nil)

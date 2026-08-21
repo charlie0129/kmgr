@@ -8560,6 +8560,7 @@ private final class ResourceTableCommandBox {
 private final class ResourceTableView: NSTableView {
     var onCommand: ((ResourceTableCommand) -> Void)?
     var onSelectionGesture: ((ResourceTableSelectionGesture) -> Bool)?
+    private var routesTextMouseDownToTable = false
 
     /// A nil-targeted Edit > Select All command resolves to NSTableView before
     /// `keyDown(with:)` gets a chance to translate Command-A. Route that
@@ -8572,6 +8573,26 @@ private final class ResourceTableView: NSTableView {
             return
         }
         onCommand(.selectAll)
+    }
+
+    /// View-based tables claim cell hits so row selection remains native. For
+    /// the read-only resource value field, route only left-button tracking to
+    /// AppKit's field editor. Context menus and every non-text hit continue to
+    /// belong to the table.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !routesTextMouseDownToTable,
+            Self.isTextSelectionEvent(NSApp.currentEvent),
+            let textField = selectableTextField(at: point)
+        else { return super.hitTest(point) }
+
+        textField.onSelectionMouseDown = { [weak self] event in
+            self?.beginTextSelection(with: event) ?? false
+        }
+        textField.onSelectionEnded = { [weak self] hasSelection in
+            guard !hasSelection, let self else { return }
+            self.window?.makeFirstResponder(self)
+        }
+        return textField
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -8653,6 +8674,61 @@ private final class ResourceTableView: NSTableView {
                 }
             }
             super.keyDown(with: event)
+        }
+    }
+
+    private func selectableTextField(
+        at point: NSPoint
+    ) -> ResourceTableValueTextField? {
+        let row = row(at: point)
+        let column = column(at: point)
+        guard row >= 0, column >= 0,
+            let cell = view(
+                atColumn: column,
+                row: row,
+                makeIfNecessary: false
+            ) as? NSTableCellView,
+            let textField = cell.textField as? ResourceTableValueTextField,
+            textField.bounds.contains(textField.convert(point, from: self))
+        else { return nil }
+        return textField
+    }
+
+    private func beginTextSelection(with event: NSEvent) -> Bool {
+        let modifiers = Self.selectionModifiers(from: event.modifierFlags)
+        guard modifiers.isEmpty else {
+            routeTextMouseDownToTable(event)
+            return false
+        }
+        let row = row(at: convert(event.locationInWindow, from: nil))
+        let gesture = ResourceTableSelectionGesture(
+            row: row >= 0 ? row : nil,
+            modifiers: [],
+            keyboardDirection: nil
+        )
+        guard onSelectionGesture?(gesture) == true else {
+            routeTextMouseDownToTable(event)
+            return false
+        }
+        return true
+    }
+
+    private func routeTextMouseDownToTable(_ event: NSEvent) {
+        routesTextMouseDownToTable = true
+        defer { routesTextMouseDownToTable = false }
+        mouseDown(with: event)
+    }
+
+    private static func isTextSelectionEvent(_ event: NSEvent?) -> Bool {
+        guard let event else { return false }
+        switch event.type {
+        case .leftMouseDown:
+            // Preserve the table's existing double-click primary action.
+            return event.clickCount == 1
+        case .leftMouseDragged, .leftMouseUp:
+            return true
+        default:
+            return false
         }
     }
 
