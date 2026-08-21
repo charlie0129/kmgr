@@ -407,8 +407,8 @@ struct ClusterWorkspaceToolbarTests {
         let panel = try #require(NSApp.windows.first {
             $0.accessibilityLabel() == "Kubernetes API operation history"
         } as? NSPanel)
-        #expect(panel.level == NSWindow.Level.floating)
-        #expect(panel.isFloatingPanel)
+        #expect(panel.level == NSWindow.Level.normal)
+        #expect(!panel.isFloatingPanel)
     }
 
     @Test("warm-cache telemetry appears in the persistent workspace status bar")
