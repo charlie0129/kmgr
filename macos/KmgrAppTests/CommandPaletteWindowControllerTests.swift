@@ -8,6 +8,53 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Command palette window", .serialized)
 struct CommandPaletteWindowControllerTests {
+    @Test("Command-number chooses its ranked result and rows show trailing hints")
+    func commandNumberChoosesRankedResult() throws {
+        let resources = (1...10).map { index in
+            DiscoveredResource(
+                group: "example.io", version: "v1",
+                resource: "resources-\(index)", kind: "Resource \(index)",
+                namespaced: true, verbs: ["list"]
+            )
+        }
+        let controller = makePaletteController(
+            provider: ControllablePaletteSearchProvider(),
+            resources: resources
+        )
+        var openedResource: DiscoveredResource?
+        controller.onOpenResource = { openedResource = $0 }
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let table = try paletteControls(in: controller).table
+
+        #expect(table.numberOfRows == 10)
+        #expect(paletteShortcut(at: 0, in: table) == "⌘1")
+        #expect(paletteShortcut(at: 8, in: table) == "⌘9")
+        #expect(paletteShortcut(at: 9, in: table) == nil)
+
+        let secondCell = try #require(table.view(
+            atColumn: 0,
+            row: 1,
+            makeIfNecessary: true
+        ))
+        secondCell.layoutSubtreeIfNeeded()
+        let secondShortcut = try #require(paletteDescendants(of: secondCell)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityIdentifier() == "command-palette.shortcut" })
+        let shortcutFrame = secondCell.convert(secondShortcut.bounds, from: secondShortcut)
+        #expect(shortcutFrame.maxX <= secondCell.bounds.maxX)
+        #expect(secondCell.bounds.maxX - shortcutFrame.maxX <= 13)
+
+        let event = try paletteCommandKeyEvent(
+            "2",
+            keyCode: 19,
+            windowNumber: window.windowNumber
+        )
+        #expect(window.performKeyEquivalent(with: event))
+        #expect(openedResource == resources[1])
+    }
+
     @Test("search field stays clear of full-size-titlebar traffic lights")
     func searchFieldAvoidsTrafficLights() throws {
         let controller = makePaletteController(provider: ControllablePaletteSearchProvider())
@@ -192,7 +239,8 @@ private struct PaletteControls {
 
 @MainActor
 private func makePaletteController(
-    provider: any ObjectSearchProviding
+    provider: any ObjectSearchProviding,
+    resources: [DiscoveredResource]? = nil
 ) -> CommandPaletteWindowController {
     CommandPaletteWindowController(
         context: .init(
@@ -203,7 +251,7 @@ private func makePaletteController(
                 serverHostname: "example.invalid",
                 defaultNamespace: "default"
             ),
-            resources: [DiscoveredResource(
+            resources: resources ?? [DiscoveredResource(
                 group: "", version: "v1", resource: "pods", kind: "Pod",
                 namespaced: true, verbs: ["list"]
             )],
@@ -268,6 +316,39 @@ private func paletteTitle(at row: Int, in table: NSTableView) -> String? {
     return paletteDescendants(of: cell)
         .compactMap { $0 as? NSTextField }
         .first?.stringValue
+}
+
+@MainActor
+private func paletteShortcut(at row: Int, in table: NSTableView) -> String? {
+    guard row >= 0,
+        let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true)
+    else { return nil }
+    return paletteDescendants(of: cell)
+        .compactMap { $0 as? NSTextField }
+        .first {
+            !$0.isHidden
+                && $0.accessibilityIdentifier() == "command-palette.shortcut"
+        }?.stringValue
+}
+
+@MainActor
+private func paletteCommandKeyEvent(
+    _ characters: String,
+    keyCode: UInt16,
+    windowNumber: Int
+) throws -> NSEvent {
+    try #require(NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: .command,
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: windowNumber,
+        context: nil,
+        characters: characters,
+        charactersIgnoringModifiers: characters,
+        isARepeat: false,
+        keyCode: keyCode
+    ))
 }
 
 @MainActor

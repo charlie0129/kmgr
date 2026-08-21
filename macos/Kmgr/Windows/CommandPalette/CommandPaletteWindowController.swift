@@ -150,6 +150,8 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     private var latestProgress: ObjectSearchProgress?
     private var closing = false
 
+    private static let numberedShortcutCount = 9
+
     var onOpenResource: ((DiscoveredResource) -> Void)?
     var onChangeNamespace: ((String) -> Void)?
     var onOpenObject: ((ResourceIdentity) -> Void)?
@@ -179,6 +181,9 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         window.delegate = self
         window.onCancel = { [weak self] in self?.handleCancel() }
         window.onToggle = { [weak self] in self?.dismissPalette() }
+        window.onChooseNumberedItem = { [weak self] index in
+            self?.chooseNumberedItem(at: index) ?? false
+        }
         configureContent(in: window)
         updateRootItems()
     }
@@ -225,7 +230,8 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         cell.configure(
             title: item.title,
             detail: detail,
-            image: NSImage(systemSymbolName: item.imageName, accessibilityDescription: nil)
+            image: NSImage(systemSymbolName: item.imageName, accessibilityDescription: nil),
+            shortcut: row < Self.numberedShortcutCount ? "⌘\(row + 1)" : nil
         )
         return cell
     }
@@ -268,11 +274,16 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     }
 
     @objc private func activateSelection() {
-        guard items.indices.contains(tableView.selectedRow) else {
+        guard activateItem(at: tableView.selectedRow) else {
             NSSound.beep()
             return
         }
-        let item = items[tableView.selectedRow]
+    }
+
+    @discardableResult
+    private func activateItem(at row: Int) -> Bool {
+        guard items.indices.contains(row) else { return false }
+        let item = items[row]
         switch item {
         case .operation(let operation):
             let callback = onOperation
@@ -290,6 +301,16 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             let callback = onOpenObject
             closeAndRun { callback?(result.identity) }
         }
+        return true
+    }
+
+    private func chooseNumberedItem(at index: Int) -> Bool {
+        guard (0..<Self.numberedShortcutCount).contains(index),
+            items.indices.contains(index)
+        else { return false }
+        tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        tableView.scrollRowToVisible(index)
+        return activateItem(at: index)
     }
 
     private func configureContent(in window: NSWindow) {
@@ -706,14 +727,26 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
 private final class PalettePanel: NSPanel {
     var onCancel: (() -> Void)?
     var onToggle: (() -> Void)?
+    var onChooseNumberedItem: ((Int) -> Bool)?
 
     override var canBecomeKey: Bool { true }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command),
-            event.charactersIgnoringModifiers?.lowercased() == "k"
-        {
+        let characters = event.charactersIgnoringModifiers?.lowercased()
+        if event.modifierFlags.contains(.command), characters == "k" {
             onToggle?()
+            return true
+        }
+        let modifiers = event.modifierFlags.intersection([
+            .command, .shift, .control, .option,
+        ])
+        if modifiers == .command,
+            let characters,
+            characters.count == 1,
+            let number = Int(characters),
+            (1...9).contains(number),
+            onChooseNumberedItem?(number - 1) == true
+        {
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -733,6 +766,7 @@ private final class PaletteResultCell: NSTableCellView {
     private let icon = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
+    private let shortcutLabel = NSTextField(labelWithString: "")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -743,7 +777,16 @@ private final class PaletteResultCell: NSTableCellView {
         detailLabel.lineBreakMode = .byTruncatingTail
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        for value in [icon, titleLabel, detailLabel] {
+        shortcutLabel.font = .monospacedSystemFont(
+            ofSize: NSFont.smallSystemFontSize,
+            weight: .medium
+        )
+        shortcutLabel.textColor = .secondaryLabelColor
+        shortcutLabel.alignment = .right
+        shortcutLabel.setContentHuggingPriority(.required, for: .horizontal)
+        shortcutLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        shortcutLabel.setAccessibilityIdentifier("command-palette.shortcut")
+        for value in [icon, titleLabel, detailLabel, shortcutLabel] {
             value.translatesAutoresizingMaskIntoConstraints = false
             addSubview(value)
         }
@@ -753,20 +796,28 @@ private final class PaletteResultCell: NSTableCellView {
             icon.widthAnchor.constraint(equalToConstant: 20),
             icon.heightAnchor.constraint(equalToConstant: 20),
             titleLabel.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 9),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            titleLabel.trailingAnchor.constraint(equalTo: shortcutLabel.leadingAnchor, constant: -10),
             titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
             detailLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
             detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 1),
+            shortcutLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            shortcutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            shortcutLabel.widthAnchor.constraint(equalToConstant: 28),
         ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
-    func configure(title: String, detail: String, image: NSImage?) {
+    func configure(title: String, detail: String, image: NSImage?, shortcut: String?) {
         titleLabel.stringValue = title
         detailLabel.stringValue = detail
         icon.image = image
+        shortcutLabel.stringValue = shortcut ?? ""
+        shortcutLabel.isHidden = shortcut == nil
+        shortcutLabel.setAccessibilityLabel(shortcut.map {
+            "Keyboard shortcut \($0)"
+        })
     }
 }
