@@ -138,6 +138,8 @@ func TestMetricCacheAndLogConcurrencyFlagsAreValidated(t *testing.T) {
 		"--pod-metrics-positive-sample-limit", "70000",
 		"--pod-metrics-detail-entry-limit", "128",
 		"--pod-metrics-get-concurrency", "12",
+		"--log-queue-records", "8192",
+		"--log-queue-bytes", "12582912",
 		"--log-source-open-concurrency", "9",
 	}); code != 0 {
 		t.Fatalf("run(valid metric/log limits) = %d, want success", code)
@@ -150,6 +152,10 @@ func TestMetricCacheAndLogConcurrencyFlagsAreValidated(t *testing.T) {
 		{"--version", "--pod-metrics-detail-entry-limit", "0"},
 		{"--version", "--pod-metrics-get-concurrency", "-1"},
 		{"--version", "--pod-metrics-get-concurrency", "2147483648"},
+		{"--version", "--log-queue-records", "0"},
+		{"--version", "--log-queue-records", "262145"},
+		{"--version", "--log-queue-bytes", "1048575"},
+		{"--version", "--log-queue-bytes", "536870913"},
 		{"--version", "--log-source-open-concurrency", "0"},
 		{"--version", "--log-source-open-concurrency", "2147483648"},
 	} {

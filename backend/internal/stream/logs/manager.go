@@ -14,6 +14,8 @@ const (
 	DefaultMaxConcurrentOpens  = 16
 	DefaultQueueRecords        = 4096
 	DefaultQueueBytes          = 8 << 20
+	MaximumQueueRecords        = 262_144
+	MaximumQueueBytes          = 512 << 20
 	DefaultMaxRecordBytes      = 256 << 10
 	DefaultBatchRecords        = 128
 	DefaultBatchBytes          = 512 << 10
@@ -102,6 +104,9 @@ func NewManager(config Config) (*Manager, error) {
 		config.QueueBytes <= 0 || config.MaxRecordBytes <= 0 || config.BatchRecords <= 0 ||
 		config.BatchBytes <= 0 || config.GenerationHistory <= 0 {
 		return nil, errors.New("log stream limits must be positive")
+	}
+	if config.QueueRecords > MaximumQueueRecords || config.QueueBytes > MaximumQueueBytes {
+		return nil, errors.New("log stream queue limits exceed their maximum")
 	}
 	config.MaxRecordBytes = min(config.MaxRecordBytes, config.QueueBytes, config.BatchBytes)
 	return &Manager{

@@ -74,6 +74,8 @@ struct ApplicationWindowPresentationTests {
         let logOpenConcurrency = try field(
             "settings.performance.logSourceOpenConcurrency"
         )
+        let logQueueRecords = try field("settings.performance.logQueueRecordLimit")
+        let logQueueMiB = try field("settings.performance.logQueueByteLimitMiB")
         #expect(globalMemory.integerValue == 20)
         #expect(overscan.integerValue == 10)
         #expect(viewReleaseGrace.integerValue == 3)
@@ -86,6 +88,8 @@ struct ApplicationWindowPresentationTests {
         #expect(exactDetails.integerValue == 256)
         #expect(exactConcurrency.integerValue == 16)
         #expect(logOpenConcurrency.integerValue == 16)
+        #expect(logQueueRecords.integerValue == 4_096)
+        #expect(logQueueMiB.integerValue == 8)
         #expect(fields.first {
             $0.accessibilityIdentifier() == "settings.performance.relaunchWarning"
         }?.stringValue.contains("relaunching") == true)
@@ -104,6 +108,8 @@ struct ApplicationWindowPresentationTests {
         exactDetails.stringValue = "128"
         exactConcurrency.stringValue = "12"
         logOpenConcurrency.stringValue = "9"
+        logQueueRecords.stringValue = "8192"
+        logQueueMiB.stringValue = "12"
         let apply = try #require(button(titled: "Apply", beneath: root))
         apply.performClick(nil)
 
@@ -121,6 +127,8 @@ struct ApplicationWindowPresentationTests {
         #expect(store.current.advancedPerformance.exactPodMetricsDetailEntryLimit == 128)
         #expect(store.current.advancedPerformance.exactPodMetricsGETConcurrency == 12)
         #expect(store.current.advancedPerformance.logSourceOpenConcurrency == 9)
+        #expect(store.current.advancedPerformance.logQueueRecordLimit == 8_192)
+        #expect(store.current.advancedPerformance.logQueueByteLimit == 12 << 20)
     }
 
     @Test("log and diagnostic display limits persist from Settings")
@@ -138,18 +146,24 @@ struct ApplicationWindowPresentationTests {
         let lineLimit = try #require(fields.first {
             $0.accessibilityIdentifier() == "settings.logs.maximumDisplayedLineKiB"
         })
+        let renderedLimit = try #require(fields.first {
+            $0.accessibilityIdentifier() == "settings.logs.maximumRenderedTextMiB"
+        })
         let historyLimit = try #require(fields.first {
             $0.accessibilityIdentifier() ==
                 "settings.diagnostics.completedOperationHistoryLimit"
         })
 
         #expect(lineLimit.integerValue == 4)
+        #expect(renderedLimit.integerValue == 32)
         #expect(historyLimit.integerValue == 2_000)
         lineLimit.stringValue = "12"
+        renderedLimit.stringValue = "24"
         historyLimit.stringValue = "3500"
         try #require(button(titled: "Apply", beneath: root)).performClick(nil)
 
         #expect(store.current.logs.maximumDisplayedLineUTF8Bytes == 12 << 10)
+        #expect(store.current.logs.maximumRenderedUTF8Bytes == 24 << 20)
         #expect(store.current.diagnostics.completedOperationHistoryLimit == 3_500)
     }
 

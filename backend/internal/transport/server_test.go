@@ -151,6 +151,10 @@ func TestServerRejectsInvalidMetricCacheAndLogConcurrencyLimits(t *testing.T) {
 		{PodMetricsSampleLimit: -1},
 		{PodMetricsDetailEntryLimit: -1},
 		{PodMetricsGETConcurrency: -1},
+		{LogQueueRecordLimit: -1},
+		{LogQueueByteLimit: -1},
+		{LogQueueRecordLimit: 262_145},
+		{LogQueueByteLimit: (512 << 20) + 1},
 		{LogSourceOpenConcurrency: -1},
 	} {
 		options.Version = "test"

@@ -19,6 +19,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let logRecordLimitField = NSTextField()
     private let logByteLimitField = NSTextField()
     private let renderBatchField = NSTextField()
+    private let maximumRenderedLogTextField = NSTextField()
     private let maximumDisplayedLogLineField = NSTextField()
     private let completedOperationHistoryLimitField = NSTextField()
     private let nodeShellImageField = NSTextField()
@@ -40,6 +41,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let exactPodMetricsSampleLimitField = NSTextField()
     private let exactPodMetricsDetailEntryLimitField = NSTextField()
     private let exactPodMetricsGETConcurrencyField = NSTextField()
+    private let logQueueRecordLimitField = NSTextField()
+    private let logQueueByteLimitField = NSTextField()
     private let logSourceOpenConcurrencyField = NSTextField()
     private let restoreWindowsButton = NSButton(
         checkboxWithTitle: "Restore open cluster windows when Kmgr launches",
@@ -204,6 +207,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         logSourceOpenConcurrencyField.setAccessibilityIdentifier(
             "settings.performance.logSourceOpenConcurrency"
         )
+        logQueueRecordLimitField.setAccessibilityIdentifier(
+            "settings.performance.logQueueRecordLimit"
+        )
+        logQueueByteLimitField.setAccessibilityIdentifier(
+            "settings.performance.logQueueByteLimitMiB"
+        )
+        maximumRenderedLogTextField.setAccessibilityIdentifier(
+            "settings.logs.maximumRenderedTextMiB"
+        )
         maximumDisplayedLogLineField.setAccessibilityIdentifier(
             "settings.logs.maximumDisplayedLineKiB"
         )
@@ -240,6 +252,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 labeledRow("Retained records", control: logRecordLimitField),
                 labeledRow("Retained data", control: logByteLimitField, suffix: "MiB"),
                 labeledRow("Render batching", control: renderBatchField, suffix: "milliseconds"),
+                labeledRow(
+                    "Rendered text",
+                    control: maximumRenderedLogTextField,
+                    suffix: "MiB maximum"
+                ),
                 labeledRow(
                     "Logical line preview",
                     control: maximumDisplayedLogLineField,
@@ -362,7 +379,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                     "GET concurrency",
                     control: exactPodMetricsGETConcurrencyField
                 ),
-                groupHeading("Logs — process-wide"),
+                groupHeading("Log engine — per stream"),
+                labeledRow(
+                    "Queued records",
+                    control: logQueueRecordLimitField
+                ),
+                labeledRow(
+                    "Queued data",
+                    control: logQueueByteLimitField,
+                    suffix: "MiB"
+                ),
+                groupHeading("Log engine — process-wide"),
                 labeledRow(
                     "Concurrent source opens",
                     control: logSourceOpenConcurrencyField
@@ -558,6 +585,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         logRecordLimitField.integerValue = preferences.logs.recordLimit
         logByteLimitField.integerValue = preferences.logs.byteLimit / (1 << 20)
         renderBatchField.integerValue = preferences.logs.renderBatchMilliseconds
+        maximumRenderedLogTextField.integerValue =
+            preferences.logs.maximumRenderedUTF8Bytes / (1 << 20)
         maximumDisplayedLogLineField.integerValue =
             preferences.logs.maximumDisplayedLineUTF8Bytes / (1 << 10)
         completedOperationHistoryLimitField.integerValue =
@@ -598,6 +627,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             preferences.advancedPerformance.exactPodMetricsDetailEntryLimit
         exactPodMetricsGETConcurrencyField.integerValue =
             preferences.advancedPerformance.exactPodMetricsGETConcurrency
+        logQueueRecordLimitField.integerValue =
+            preferences.advancedPerformance.logQueueRecordLimit
+        logQueueByteLimitField.integerValue =
+            preferences.advancedPerformance.logQueueByteLimit / (1 << 20)
         logSourceOpenConcurrencyField.integerValue =
             preferences.advancedPerformance.logSourceOpenConcurrency
         restoreWindowsButton.state = preferences.restoreOpenClusterWindows ? .on : .off
@@ -611,28 +644,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private func preferencesFromControls() -> AppPreferences {
         let appearanceIndex = max(0, appearanceButton.indexOfSelectedItem)
         let namespaceIndex = max(0, namespaceButton.indexOfSelectedItem)
-        let mib = parsedInteger(logByteLimitField)
-        let byteLimit: Int
-        if mib > 0, !mib.multipliedReportingOverflow(by: 1 << 20).overflow {
-            byteLimit = mib * (1 << 20)
-        } else {
-            byteLimit = 0
-        }
-        let displayedLineKiB = parsedInteger(maximumDisplayedLogLineField)
-        let maximumDisplayedLineUTF8Bytes: Int
-        if displayedLineKiB > 0,
-            !displayedLineKiB.multipliedReportingOverflow(by: 1 << 10).overflow
-        {
-            maximumDisplayedLineUTF8Bytes = displayedLineKiB * (1 << 10)
-        } else {
-            maximumDisplayedLineUTF8Bytes = 0
-        }
+        let byteLimit = parsedScaledInteger(logByteLimitField, multiplier: 1 << 20)
+        let maximumRenderedUTF8Bytes = parsedScaledInteger(
+            maximumRenderedLogTextField,
+            multiplier: 1 << 20
+        )
+        let maximumDisplayedLineUTF8Bytes = parsedScaledInteger(
+            maximumDisplayedLogLineField,
+            multiplier: 1 << 10
+        )
         return AppPreferences(
             appearance: AppearancePreference.allCases[safe: appearanceIndex] ?? .system,
             logs: LogDisplayPreferences(
                 recordLimit: parsedInteger(logRecordLimitField),
                 byteLimit: byteLimit,
                 renderBatchMilliseconds: parsedInteger(renderBatchField),
+                maximumRenderedUTF8Bytes: maximumRenderedUTF8Bytes,
                 maximumDisplayedLineUTF8Bytes: maximumDisplayedLineUTF8Bytes
             ),
             metricsRefreshSeconds: parsedInteger(metricsRefreshField),
@@ -691,6 +718,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 exactPodMetricsGETConcurrency: parsedInteger(
                     exactPodMetricsGETConcurrencyField
                 ),
+                logQueueRecordLimit: parsedInteger(logQueueRecordLimitField),
+                logQueueByteLimit: parsedScaledInteger(
+                    logQueueByteLimitField,
+                    multiplier: 1 << 20
+                ),
                 logSourceOpenConcurrency: parsedInteger(
                     logSourceOpenConcurrencyField
                 )
@@ -710,6 +742,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         formatter.allowsFloats = false
         formatter.isLenient = false
         return formatter.number(from: value)?.intValue ?? 0
+    }
+
+    private func parsedScaledInteger(_ field: NSTextField, multiplier: Int) -> Int {
+        let value = parsedInteger(field)
+        guard value > 0 else { return 0 }
+        let result = value.multipliedReportingOverflow(by: multiplier)
+        return result.overflow ? 0 : result.partialValue
     }
 
     private func parsedDouble(_ field: NSTextField) -> Double {

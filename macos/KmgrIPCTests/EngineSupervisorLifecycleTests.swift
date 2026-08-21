@@ -60,6 +60,8 @@ struct EngineSupervisorLifecycleTests {
                 exactPodMetricsSampleLimit: 70_000,
                 exactPodMetricsDetailEntryLimit: 128,
                 exactPodMetricsGETConcurrency: 12,
+                logQueueRecordLimit: 8_192,
+                logQueueByteLimit: 12 << 20,
                 logSourceOpenConcurrency: 9
             ),
             logLevel: " DEBUG "
@@ -84,6 +86,8 @@ struct EngineSupervisorLifecycleTests {
             "--pod-metrics-positive-sample-limit", "70000",
             "--pod-metrics-detail-entry-limit", "128",
             "--pod-metrics-get-concurrency", "12",
+            "--log-queue-records", "8192",
+            "--log-queue-bytes", "12582912",
             "--log-source-open-concurrency", "9",
             "--log-level", "debug",
         ])

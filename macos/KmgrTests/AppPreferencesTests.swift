@@ -14,6 +14,7 @@ import Testing
         recordLimit: 75_000,
         byteLimit: 32 << 20,
         renderBatchMilliseconds: 50,
+        maximumRenderedUTF8Bytes: 24 << 20,
         maximumDisplayedLineUTF8Bytes: 8 << 10
     )
     preferences.diagnostics = DiagnosticsPreferences(
@@ -48,6 +49,8 @@ import Testing
         exactPodMetricsSampleLimit: 70_000,
         exactPodMetricsDetailEntryLimit: 128,
         exactPodMetricsGETConcurrency: 12,
+        logQueueRecordLimit: 8_192,
+        logQueueByteLimit: 12 << 20,
         logSourceOpenConcurrency: 9
     )
     try store.save(preferences)
@@ -56,6 +59,7 @@ import Testing
     #expect(reloaded.current.appearance == .dark)
     #expect(reloaded.current.logs.recordLimit == 75_000)
     #expect(reloaded.current.logs.byteLimit == 32 << 20)
+    #expect(reloaded.current.logs.maximumRenderedUTF8Bytes == 24 << 20)
     #expect(reloaded.current.logs.maximumDisplayedLineUTF8Bytes == 8 << 10)
     #expect(reloaded.current.diagnostics.completedOperationHistoryLimit == 4_000)
     #expect(reloaded.current.nodeShell == preferences.nodeShell)
@@ -109,6 +113,7 @@ import Testing
     preferences.logs.recordLimit = 10
     preferences.logs.byteLimit = 100
     preferences.logs.renderBatchMilliseconds = 1
+    preferences.logs.maximumRenderedUTF8Bytes = 100
     preferences.logs.maximumDisplayedLineUTF8Bytes = 100
     preferences.diagnostics.completedOperationHistoryLimit = 100_001
     preferences.metricsRefreshSeconds = 1
@@ -131,6 +136,8 @@ import Testing
         exactPodMetricsSampleLimit: 0,
         exactPodMetricsDetailEntryLimit: 0,
         exactPodMetricsGETConcurrency: 0,
+        logQueueRecordLimit: 262_145,
+        logQueueByteLimit: 0,
         logSourceOpenConcurrency: 0
     )
     let fields = Set(preferences.validationIssues().map(\.field))
@@ -138,6 +145,7 @@ import Testing
         "logs.recordLimit",
         "logs.byteLimit",
         "logs.renderBatchMilliseconds",
+        "logs.maximumRenderedUTF8Bytes",
         "logs.maximumDisplayedLineUTF8Bytes",
         "diagnostics.completedOperationHistoryLimit",
         "metricsRefreshSeconds",
@@ -159,6 +167,8 @@ import Testing
         "advancedPerformance.exactPodMetricsSampleLimit",
         "advancedPerformance.exactPodMetricsDetailEntryLimit",
         "advancedPerformance.exactPodMetricsGETConcurrency",
+        "advancedPerformance.logQueueRecordLimit",
+        "advancedPerformance.logQueueByteLimit",
         "advancedPerformance.logSourceOpenConcurrency",
     ])
     #expect(ConfirmationPreferences.alwaysConfirmResourceDeletion)

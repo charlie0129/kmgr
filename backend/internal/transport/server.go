@@ -40,6 +40,8 @@ type ServerOptions struct {
 	PodMetricsSampleLimit       int
 	PodMetricsDetailEntryLimit  int
 	PodMetricsGETConcurrency    int
+	LogQueueRecordLimit         int
+	LogQueueByteLimit           int
 	LogSourceOpenConcurrency    int
 	KubernetesQPS               float32
 	KubernetesBurst             int
@@ -184,6 +186,8 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	}
 	logManager, err := streamlogs.NewManager(streamlogs.Config{
 		Resolver:           streamlogs.ClusterResolver{Sessions: sessions},
+		QueueRecords:       options.LogQueueRecordLimit,
+		QueueBytes:         options.LogQueueByteLimit,
 		MaxConcurrentOpens: options.LogSourceOpenConcurrency,
 	})
 	if err != nil {

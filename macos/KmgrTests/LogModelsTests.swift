@@ -666,10 +666,12 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
         recordLimit: 75_000,
         byteLimit: 32 << 20,
         renderBatchMilliseconds: 65,
+        maximumRenderedUTF8Bytes: 20 << 20,
         maximumDisplayedLineUTF8Bytes: 12 << 10
     ))
     #expect(configuration.recordLimit == 75_000)
     #expect(configuration.byteLimit == 32 << 20)
     #expect(configuration.renderBatchMilliseconds == 65)
+    #expect(configuration.maximumRenderedUTF8Bytes == 20 << 20)
     #expect(configuration.maximumDisplayedLineUTF8Bytes == 12 << 10)
 }

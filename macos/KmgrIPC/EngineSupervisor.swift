@@ -694,6 +694,10 @@ extension EngineSupervisor.Configuration {
                 "\(advancedPerformance.exactPodMetricsDetailEntryLimit)",
                 "--pod-metrics-get-concurrency",
                 "\(advancedPerformance.exactPodMetricsGETConcurrency)",
+                "--log-queue-records",
+                "\(advancedPerformance.logQueueRecordLimit)",
+                "--log-queue-bytes",
+                "\(advancedPerformance.logQueueByteLimit)",
                 "--log-source-open-concurrency",
                 "\(advancedPerformance.logSourceOpenConcurrency)",
             ]

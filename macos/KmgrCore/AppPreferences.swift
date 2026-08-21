@@ -45,17 +45,20 @@ public struct LogDisplayPreferences: Codable, Hashable, Sendable {
     public var recordLimit: Int
     public var byteLimit: Int
     public var renderBatchMilliseconds: Int
+    public var maximumRenderedUTF8Bytes: Int
     public var maximumDisplayedLineUTF8Bytes: Int
 
     public init(
         recordLimit: Int = 20_000,
         byteLimit: Int = 16 << 20,
         renderBatchMilliseconds: Int = 40,
+        maximumRenderedUTF8Bytes: Int = 32 << 20,
         maximumDisplayedLineUTF8Bytes: Int = 4 << 10
     ) {
         self.recordLimit = recordLimit
         self.byteLimit = byteLimit
         self.renderBatchMilliseconds = renderBatchMilliseconds
+        self.maximumRenderedUTF8Bytes = maximumRenderedUTF8Bytes
         self.maximumDisplayedLineUTF8Bytes = maximumDisplayedLineUTF8Bytes
     }
 }
@@ -179,6 +182,10 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     public static let viewReleaseGraceSecondsRange = 1...300
     public static let defaultKubernetesListPageSize = 500
     public static let kubernetesListPageSizeRange = 1...10_000
+    public static let defaultLogQueueRecordLimit = 4_096
+    public static let logQueueRecordLimitRange = 1...262_144
+    public static let defaultLogQueueByteLimit = 8 << 20
+    public static let logQueueByteLimitRange = (1 << 20)...(512 << 20)
 
     public var viewportOverscanScreensPerSide: Int
     public var viewReleaseGraceSeconds: Int
@@ -197,6 +204,8 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     public var exactPodMetricsSampleLimit: Int
     public var exactPodMetricsDetailEntryLimit: Int
     public var exactPodMetricsGETConcurrency: Int
+    public var logQueueRecordLimit: Int
+    public var logQueueByteLimit: Int
     public var logSourceOpenConcurrency: Int
 
     public init(
@@ -217,6 +226,8 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         exactPodMetricsSampleLimit: Int = 100_000,
         exactPodMetricsDetailEntryLimit: Int = 256,
         exactPodMetricsGETConcurrency: Int = 16,
+        logQueueRecordLimit: Int = AdvancedPerformancePreferences.defaultLogQueueRecordLimit,
+        logQueueByteLimit: Int = AdvancedPerformancePreferences.defaultLogQueueByteLimit,
         logSourceOpenConcurrency: Int = 16
     ) {
         self.viewportOverscanScreensPerSide = viewportOverscanScreensPerSide
@@ -236,6 +247,8 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         self.exactPodMetricsSampleLimit = exactPodMetricsSampleLimit
         self.exactPodMetricsDetailEntryLimit = exactPodMetricsDetailEntryLimit
         self.exactPodMetricsGETConcurrency = exactPodMetricsGETConcurrency
+        self.logQueueRecordLimit = logQueueRecordLimit
+        self.logQueueByteLimit = logQueueByteLimit
         self.logSourceOpenConcurrency = logSourceOpenConcurrency
     }
 
@@ -352,6 +365,18 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
             field: "advancedPerformance.exactPodMetricsGETConcurrency",
             title: "Exact PodMetrics GET concurrency"
         )
+        if !Self.logQueueRecordLimitRange.contains(logQueueRecordLimit) {
+            issues.append(AppPreferenceIssue(
+                field: "advancedPerformance.logQueueRecordLimit",
+                message: "Log delivery queue records must be between 1 and 262,144 per stream."
+            ))
+        }
+        if !Self.logQueueByteLimitRange.contains(logQueueByteLimit) {
+            issues.append(AppPreferenceIssue(
+                field: "advancedPerformance.logQueueByteLimit",
+                message: "Log delivery queue data must be between 1 MiB and 512 MiB per stream."
+            ))
+        }
         validateCount(
             logSourceOpenConcurrency,
             field: "advancedPerformance.logSourceOpenConcurrency",
@@ -362,7 +387,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v8"
+    public static let apiVersion = "kmgr.preferences/v9"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
@@ -426,6 +451,12 @@ public struct AppPreferences: Codable, Hashable, Sendable {
             issues.append(AppPreferenceIssue(
                 field: "logs.renderBatchMilliseconds",
                 message: "Log render batching must be between 30 and 250 milliseconds."
+            ))
+        }
+        if !((1 << 20)...(512 << 20)).contains(logs.maximumRenderedUTF8Bytes) {
+            issues.append(AppPreferenceIssue(
+                field: "logs.maximumRenderedUTF8Bytes",
+                message: "Rendered log text limit must be between 1 MiB and 512 MiB."
             ))
         }
         if !((1 << 10)...(1 << 20)).contains(logs.maximumDisplayedLineUTF8Bytes) {

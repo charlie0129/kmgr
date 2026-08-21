@@ -153,6 +153,16 @@ func run(arguments []string) int {
 		streamlogs.DefaultMaxConcurrentOpens,
 		"maximum concurrent Kubernetes log-source opens process-wide",
 	)
+	logQueueRecords := flags.Int(
+		"log-queue-records",
+		streamlogs.DefaultQueueRecords,
+		"maximum queued log records for one stream",
+	)
+	logQueueBytes := flags.Int(
+		"log-queue-bytes",
+		streamlogs.DefaultQueueBytes,
+		"maximum queued log payload bytes for one stream",
+	)
 	logLevel := flags.String("log-level", "info", "stderr log level: debug, info, warn, or error")
 	startDevelopmentProfiler := registerDevelopmentProfiler(flags)
 	if err := flags.Parse(arguments); err != nil {
@@ -198,6 +208,27 @@ func run(arguments []string) int {
 		"--log-source-open-concurrency",
 	); err != nil {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
+		return 2
+	}
+	if err := validatePositiveCrossPlatformCount(*logQueueRecords, "--log-queue-records"); err != nil || *logQueueRecords > streamlogs.MaximumQueueRecords {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
+		} else {
+			fmt.Fprintf(
+				os.Stderr,
+				"kmgr-engine: --log-queue-records must not exceed %d\n",
+				streamlogs.MaximumQueueRecords,
+			)
+		}
+		return 2
+	}
+	if *logQueueBytes < 1<<20 || *logQueueBytes > streamlogs.MaximumQueueBytes {
+		fmt.Fprintf(
+			os.Stderr,
+			"kmgr-engine: --log-queue-bytes must be between %d and %d\n",
+			1<<20,
+			streamlogs.MaximumQueueBytes,
+		)
 		return 2
 	}
 	if *showVersion {
@@ -266,6 +297,8 @@ func run(arguments []string) int {
 		PodMetricsSampleLimit:       metricCache.exactSamples,
 		PodMetricsDetailEntryLimit:  metricCache.exactDetails,
 		PodMetricsGETConcurrency:    metricCache.exactConcurrency,
+		LogQueueRecordLimit:         *logQueueRecords,
+		LogQueueByteLimit:           *logQueueBytes,
 		LogSourceOpenConcurrency:    *logSourceOpenConcurrency,
 		KubernetesQPS:               validatedQPS,
 		KubernetesBurst:             *kubernetesBurst,

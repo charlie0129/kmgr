@@ -148,7 +148,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         self.renderBatchMilliseconds = displayConfiguration.renderBatchMilliseconds
         // Preferences may retain far more history than AppKit can safely lay
         // out in one main-thread NSTextView.string replacement.
-        self.maximumRenderedUTF8Bytes = min(displayConfiguration.byteLimit, 32 << 20)
+        self.maximumRenderedUTF8Bytes = min(
+            displayConfiguration.byteLimit,
+            displayConfiguration.maximumRenderedUTF8Bytes
+        )
         self.maximumDisplayedLineUTF8Bytes =
             displayConfiguration.maximumDisplayedLineUTF8Bytes
         self.sourceLabels = LogSourcePresentation.prefixLabels(for: allSources)
@@ -307,7 +310,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         guard configuration != displayConfiguration else { return }
         displayConfiguration = configuration
         renderBatchMilliseconds = configuration.renderBatchMilliseconds
-        maximumRenderedUTF8Bytes = min(configuration.byteLimit, 32 << 20)
+        maximumRenderedUTF8Bytes = min(
+            configuration.byteLimit,
+            configuration.maximumRenderedUTF8Bytes
+        )
         maximumDisplayedLineUTF8Bytes = configuration.maximumDisplayedLineUTF8Bytes
         configurationRevision &+= 1
         let revision = configurationRevision
