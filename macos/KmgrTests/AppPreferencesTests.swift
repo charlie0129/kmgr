@@ -384,7 +384,7 @@ import Testing
     for keys in [
         "⌘N", "⌘K", "/", "↑ / ↓ or K / J", "⇧↑ / ⇧↓ or ⇧-click",
         "⌘-click", "⌘A", "Return", "D", "⌘[ / ⌘]", "Escape", "Y", "⇧Y", "E",
-        "L", "⇧L", "S", "P", "⌘⌫", "⌘S",
+        "L", "⇧L", "S", "P", "R", "⌘⌫", "⌘S",
     ] {
         #expect(shortcuts[keys] != nil, "Missing shortcut reference for \(keys)")
     }
@@ -394,6 +394,7 @@ import Testing
     #expect(shortcuts["⇧Y"] == "Open selected object YAML in a new window")
     #expect(shortcuts["E"] == "Open Events for one object")
     #expect(shortcuts["⇧L"] == "Open previous container logs")
+    #expect(shortcuts["R"] == "Rollout restart the selected workload")
 }
 
 @Test func confirmationPreferencesControlOnlyRestartAndScalingPrompts() {

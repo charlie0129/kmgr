@@ -1651,6 +1651,59 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
+    @Test("R opens the single detailed rollout restart confirmation")
+    func rolloutRestartShortcut() async throws {
+        let deployment = ResourceIdentity(
+            clusterSessionID: "test-session", group: "apps", version: "v1",
+            resource: "deployments", namespace: "default", name: "api",
+            uid: "deployment-restart"
+        )
+        let controller = makeWorkspace(
+            provider: RelationshipDrillDownWorkspaceResourceProvider(source: deployment),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: deployment,
+                resourceVersion: "rv-restart"
+            )),
+            restoration: ClusterWindowRestorationRecord(
+                id: "rollout-restart-shortcut",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
+                    namespaceScope: .namespace("default")
+                )
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { table.numberOfRows == 1 }
+        try await selectResourceRow(0, in: table)
+        #expect(window.makeFirstResponder(table))
+        try await waitUntil {
+            controller.contextualShortcutSnapshot?.items.map(\.keys).contains("R") == true
+        }
+        table.keyDown(with: try workspaceLetterKey("r"))
+        try await waitUntil { window.attachedSheet != nil }
+
+        let confirmation = try #require(window.attachedSheet)
+        let confirmationRoot = try #require(confirmation.contentView)
+        let confirmationText = descendants(of: confirmationRoot)
+            .compactMap { ($0 as? NSTextField)?.stringValue }
+            .joined(separator: "\n")
+        #expect(confirmationText.contains("Restart api?"))
+        #expect(confirmationText.contains("Target: apps/v1/deployments · default/api"))
+        let cancel = try #require(descendants(of: confirmationRoot)
+            .compactMap { $0 as? NSButton }
+            .first { $0.title == "Cancel" })
+        cancel.performClick(nil)
+        try await waitUntil { window.attachedSheet == nil }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("a slower Enter cannot replace a newer dedicated YAML window")
     func explicitDetailSupersedesPendingDrillDown() async throws {
         let pod = toolbarPodIdentity()

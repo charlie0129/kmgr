@@ -79,7 +79,23 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
 
     func beginSheet(for parent: NSWindow) {
         parentWindow = parent
-        parent.beginSheet(window!)
+        guard case .rolloutRestart = mutation else {
+            parent.beginSheet(window!)
+            return
+        }
+
+        let draft: MutationDraft
+        do { draft = try mutationDraft() }
+        catch {
+            parent.beginSheet(window!)
+            show(error)
+            return
+        }
+        if confirmationPreferences.requiresConfirmation(for: .workloadRestart) {
+            confirmInitialRolloutRestart(draft, for: parent)
+        } else {
+            beginProgressSheet(for: parent, draft: draft)
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -234,7 +250,36 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     }
 
     private func confirm(_ draft: MutationDraft) {
+        guard let panel = window, let alert = confirmationAlert(for: draft) else { return }
+        alert.beginSheetModal(for: panel) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.perform(draft)
+        }
+    }
+
+    private func confirmInitialRolloutRestart(
+        _ draft: MutationDraft,
+        for parent: NSWindow
+    ) {
+        guard let alert = confirmationAlert(for: draft) else { return }
+        alert.beginSheetModal(for: parent) { [weak self] response in
+            guard let self else { return }
+            guard response == .alertFirstButtonReturn else {
+                onDismiss?()
+                return
+            }
+            beginProgressSheet(for: parent, draft: draft)
+        }
+    }
+
+    private func beginProgressSheet(for parent: NSWindow, draft: MutationDraft) {
+        primaryButton.isHidden = true
         guard let panel = window else { return }
+        parent.beginSheet(panel)
+        perform(draft)
+    }
+
+    private func confirmationAlert(for draft: MutationDraft) -> NSAlert? {
         let alert = NSAlert()
         alert.alertStyle = .warning
         switch draft {
@@ -255,13 +300,10 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
             )
             alert.addButton(withTitle: "Restart")
         case .metadata:
-            return
+            return nil
         }
         alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: panel) { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            self?.perform(draft)
-        }
+        return alert
     }
 
     static func confirmationInformativeText(
@@ -274,6 +316,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
 
     private func perform(_ draft: MutationDraft) {
         guard task == nil, !terminal else { return }
+        if case .restart = draft { primaryButton.isHidden = true }
         primaryButton.isEnabled = false
         progress.startAnimation(nil)
         statusLabel.toolTip = nil
@@ -362,6 +405,10 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         statusLabel.stringValue = presentation.inlineText
         statusLabel.toolTip = presentation.detailedText
         statusLabel.textColor = .systemRed
+        if case .rolloutRestart = mutation {
+            primaryButton.title = "Retry"
+            primaryButton.isHidden = false
+        }
         primaryButton.isEnabled = true
     }
 

@@ -8,6 +8,44 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Resource mutation window", .serialized)
 struct ResourceMutationWindowControllerTests {
+    @Test("rollout restart presents the detailed confirmation without a preliminary sheet")
+    func rolloutRestartUsesOneConfirmation() async throws {
+        let controller = mutationController(
+            mutation: .rolloutRestart,
+            operationProvider: CapturingMutationOperationProvider()
+        )
+        let parent = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        parent.makeKeyAndOrderFront(nil)
+        controller.beginSheet(for: parent)
+        defer {
+            controller.window?.orderOut(nil)
+            parent.orderOut(nil)
+        }
+
+        let confirmation = try #require(parent.attachedSheet)
+        #expect(confirmation !== controller.window)
+        #expect(controller.window?.sheetParent == nil)
+        let confirmationRoot = try #require(confirmation.contentView)
+        let text = mutationDescendants(of: confirmationRoot)
+            .compactMap { ($0 as? NSTextField)?.stringValue }
+            .joined(separator: "\n")
+        #expect(text.contains("Restart api?"))
+        #expect(text.contains("Cluster: cluster-a"))
+        #expect(text.contains("Context: production"))
+        #expect(text.contains("Target: apps/v1/deployments · team-a/api"))
+        let cancel = try #require(mutationDescendants(of: confirmationRoot)
+            .compactMap { $0 as? NSButton }.first { $0.title == "Cancel" })
+        cancel.performClick(nil)
+        await Task.yield()
+        #expect(parent.attachedSheet == nil)
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("scale sheet keeps the replica form and footer compact")
     func scaleSheetIsCompact() throws {
         let controller = mutationController(

@@ -44,6 +44,7 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
     public var canOpenLogs: Bool
     public var canOpenTerminal: Bool
     public var canStartPortForward: Bool
+    public var canRestart: Bool
     public var canDelete: Bool
 
     public init(
@@ -54,6 +55,7 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
         canOpenLogs: Bool = false,
         canOpenTerminal: Bool = false,
         canStartPortForward: Bool = false,
+        canRestart: Bool = false,
         canDelete: Bool = false
     ) {
         self.canEnterSubresource = canEnterSubresource
@@ -63,6 +65,7 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
         self.canOpenLogs = canOpenLogs
         self.canOpenTerminal = canOpenTerminal
         self.canStartPortForward = canStartPortForward
+        self.canRestart = canRestart
         self.canDelete = canDelete
     }
 }
@@ -133,6 +136,9 @@ public enum ContextualShortcutCatalog {
         }
         if availability.canStartPortForward {
             items.append(item("resource.port-forward", "P", "Start port-forward"))
+        }
+        if availability.canRestart {
+            items.append(item("resource.restart", "R", "Rollout restart"))
         }
         if availability.canDelete {
             items.append(item("resource.delete", "\u{2318}\u{232B}", "Delete selection"))

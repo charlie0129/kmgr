@@ -283,7 +283,9 @@ enum NativeMainMenuBuilder {
         addResponderItem(
             to: menu,
             title: "Rollout Restart…",
-            action: #selector(ClusterWorkspaceWindowController.restartResourceSelection(_:))
+            action: #selector(ClusterWorkspaceWindowController.restartResourceSelection(_:)),
+            keyEquivalent: "r",
+            modifiers: []
         )
         addResponderItem(
             to: menu,

@@ -177,6 +177,12 @@ struct NativeMainMenuBuilderTests {
                 "y",
                 NSEvent.ModifierFlags.shift
             ),
+            (
+                "Rollout Restart…",
+                #selector(ClusterWorkspaceWindowController.restartResourceSelection(_:)),
+                "r",
+                NSEvent.ModifierFlags()
+            ),
         ] {
             let item = try #require(resource.item(withTitle: title))
             expectResponderItem(

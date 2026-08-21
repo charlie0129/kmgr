@@ -15,6 +15,7 @@ struct ContextualShortcutModelsTests {
                 canOpenLogs: true,
                 canOpenTerminal: true,
                 canStartPortForward: true,
+                canRestart: true,
                 canDelete: true
             )
         )
@@ -30,6 +31,7 @@ struct ContextualShortcutModelsTests {
         #expect(snapshot.items.map(\.keys).contains("S"))
         #expect(snapshot.items.map(\.keys).contains("\u{21E7}S"))
         #expect(snapshot.items.map(\.keys).contains("P"))
+        #expect(snapshot.items.map(\.keys).contains("R"))
         #expect(snapshot.items.map(\.keys).contains("\u{2318}\u{232B}"))
         #expect(snapshot.items.map(\.keys).contains("\u{21E7}\u{2318}N"))
 
@@ -45,6 +47,7 @@ struct ContextualShortcutModelsTests {
         #expect(!incompatible.items.map(\.keys).contains("\u{21E7}L"))
         #expect(!incompatible.items.map(\.keys).contains("S"))
         #expect(!incompatible.items.map(\.keys).contains("P"))
+        #expect(!incompatible.items.map(\.keys).contains("R"))
         #expect(!incompatible.items.map(\.keys).contains("\u{2318}\u{232B}"))
     }
 

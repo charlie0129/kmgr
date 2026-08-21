@@ -857,6 +857,7 @@ public struct KeyboardShortcutReference: Hashable, Sendable {
         Self(keys: "S", action: "Open Pod or Node shell"),
         Self(keys: "⇧S", action: "Configure Pod or Node shell"),
         Self(keys: "P", action: "Start a Pod or Service port-forward"),
+        Self(keys: "R", action: "Rollout restart the selected workload"),
         Self(keys: "⌘⌫", action: "Delete selection"),
         Self(keys: "⌘S", action: "Save the active object edit"),
     ]

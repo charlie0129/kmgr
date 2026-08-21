@@ -3440,6 +3440,7 @@ private final class ResourceListViewController: NSViewController,
                 canOpenLogs: canUse(.openLogs),
                 canOpenTerminal: canUse(.openExec),
                 canStartPortForward: canUse(.startPortForward),
+                canRestart: canUse(.restart),
                 canDelete: canUse(.delete)
             )
         )
@@ -8561,6 +8562,7 @@ private final class ResourceTableView: NSTableView {
             }
             onCommand?(event.modifierFlags.contains(.shift) ? .configureExec : .openExec)
         case ("p", _, false): onCommand?(.startPortForward)
+        case ("r", _, false) where unmodified: onCommand?(.restart)
         case ("a", _, true): onCommand?(.selectAll)
         case (_, 51, true): onCommand?(.delete)
         case ("[", _, true):
