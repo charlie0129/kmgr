@@ -204,11 +204,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView
         )
-        NotificationCenter.default.removeObserver(
-            self,
-            name: NSView.frameDidChangeNotification,
-            object: textView
-        )
         onClose?()
     }
 
@@ -227,8 +222,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     func windowDidResize(_ notification: Notification) {
         let wasFollowingTail = followsVisibleTail
-        updateTextDocumentGeometry(followingTail: wasFollowingTail)
         if wasFollowingTail { scrollToTail() }
+        else { updateTextDocumentGeometry() }
         scheduleLayoutMetricsReconciliation(preservingTail: wasFollowingTail)
     }
 
@@ -255,16 +250,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         else { return }
         followsVisibleTail = isAtTail
         updateFollowButtonPresentation()
-    }
-
-    /// NSTextView can refine a noncontiguous document's height after the
-    /// initial tail render has returned. Keep Follow pinned across those late
-    /// frame corrections; a user scroll has already cleared
-    /// `followsVisibleTail` through the clip-view bounds observer above.
-    @objc private func logDocumentFrameDidChange(_ notification: Notification) {
-        guard !isClosing, tailTrackingSuppressionDepth == 0, followsVisibleTail
-        else { return }
-        scrollToTail()
     }
 
     func controlTextDidChange(_ obj: Notification) { scheduleRender() }
@@ -427,13 +412,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         TextDocumentGeometry.configureStreamingLog(
             textView,
             in: scrollView
-        )
-        textView.postsFrameChangedNotifications = true
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(logDocumentFrameDidChange(_:)),
-            name: NSView.frameDidChangeNotification,
-            object: textView
         )
         let clipView = scrollView.contentView
         lastObservedViewportOrigin = clipView.bounds.origin
@@ -1015,8 +993,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         latestDisplayTruncatedLines = result.rendered.displayTruncatedLines
         updateStatusLabel()
         textView.setSelectedRange(result.install.remapSelection(selectedRange))
-        updateTextDocumentGeometry(followingTail: shouldFollowTail)
         if shouldFollowTail { scrollToTail() }
+        else { updateTextDocumentGeometry() }
         needsRenderWhenVisible = false
         keyVisibilityWakePending = false
         logSignposter.endInterval(
@@ -1040,8 +1018,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let wasFollowingTail = followsVisibleTail
         let enabled = wrapButton.state == .on
         scrollView.hasHorizontalScroller = !enabled
-        updateTextDocumentGeometry(followingTail: wasFollowingTail)
         if wasFollowingTail { scrollToTail() }
+        else { updateTextDocumentGeometry() }
         scheduleLayoutMetricsReconciliation(preservingTail: wasFollowingTail)
     }
 
@@ -1090,22 +1068,25 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 currentlyAtTail: followsVisibleTail
             )
             textLayoutMetrics = metrics
-            updateTextDocumentGeometry(followingTail: shouldPreserveTail)
             if shouldPreserveTail { scrollToTail() }
+            else { updateTextDocumentGeometry() }
         }
     }
 
     private func scrollToTail() {
-        // Reflecting the first scroll can itself make TextKit publish a more
-        // accurate noncontiguous document height. Re-evaluate the arithmetic
-        // tail against that new frame before returning; later asynchronous
-        // corrections are handled by `logDocumentFrameDidChange`.
-        for _ in 0..<4 {
+        // A noncontiguous layout can initially clamp the clip view to its
+        // materialized range. That scroll expands the range without changing
+        // our document frame, so retry a bounded number of times until the
+        // arithmetic tail becomes reachable.
+        for _ in 0..<2 {
+            updateTextDocumentGeometry(followingTail: true)
             withTailTrackingSuppressed {
                 TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
             }
-            if isAtTail { break }
         }
+        // Scrolling can resolve a different noncontiguous layout hole. Anchor
+        // the bounded tail suffix once more at its final viewport location.
+        updateTextDocumentGeometry(followingTail: true)
         followsVisibleTail = true
     }
 

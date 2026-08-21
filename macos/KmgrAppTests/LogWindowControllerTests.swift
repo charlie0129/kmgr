@@ -27,7 +27,7 @@ struct LogWindowControllerTests {
         ))
     }
 
-    @Test("streaming log geometry requests only viewport or tail layout")
+    @Test("streaming log geometry requests only viewport or bounded tail layout")
     func streamingGeometryNeverRequestsWholeContainerLayout() throws {
         let storage = NSTextStorage()
         let layoutManager = LayoutRequestSpy()
@@ -89,11 +89,65 @@ struct LogWindowControllerTests {
         )
         #expect(layoutManager.wholeContainerRequestCount == 0)
         #expect(layoutManager.boundingRectRequests.isEmpty)
-        #expect(layoutManager.characterRangeRequests == [NSRange(
-            location: storage.length - 1,
-            length: 1
-        )])
+        let tailRequest = try #require(layoutManager.characterRangeRequests.last)
+        #expect(tailRequest.upperBound == storage.length)
+        #expect(tailRequest.length <= 512 << 10)
+        TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
         #expect(textView.selectedRange() == selection)
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
+    }
+
+    @Test("lazy TextKit layout cannot replace streaming log geometry")
+    func streamingGeometryOwnsDocumentFrame() throws {
+        let textView = NSTextView(
+            frame: NSRect(x: 0, y: 0, width: 560, height: 320)
+        )
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        let scrollView = NSScrollView(
+            frame: NSRect(x: 0, y: 0, width: 560, height: 320)
+        )
+        scrollView.documentView = textView
+        TextDocumentGeometry.configureStreamingLog(textView, in: scrollView)
+
+        let chunks = (0..<200).map { "line-\($0) value value value\n" }
+        textView.string = chunks.joined()
+        let metrics = LogTextLayoutMetrics(
+            chunks: chunks,
+            wrappingColumnCapacity: TextDocumentGeometry
+                .streamingLogWrappingColumnCapacity(textView, in: scrollView)
+        )
+        TextDocumentGeometry.updateStreamingLog(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false,
+            metrics: metrics,
+            followingTail: false
+        )
+        let authoritativeFrame = textView.frame
+
+        let layoutManager = try #require(textView.layoutManager)
+        let textLength = try #require(textView.textStorage?.length)
+        layoutManager.ensureLayout(forCharacterRange: NSRange(
+            location: textLength - 1,
+            length: 1
+        ))
+        #expect(textView.frame == authoritativeFrame)
+
+        TextDocumentGeometry.updateStreamingLog(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false,
+            metrics: metrics,
+            followingTail: true
+        )
+        TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
+
+        #expect(textView.frame == authoritativeFrame)
+        #expect(!textView.isVerticallyResizable)
+        #expect(!textView.isHorizontallyResizable)
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
+        #expect(try visibleLogLineFragmentCount(textView, in: scrollView) >= 10)
     }
 
     @Test("detached log metrics handle chunked CRLF and wrapped lines")
@@ -202,12 +256,23 @@ struct LogWindowControllerTests {
 
             let clock = ContinuousClock()
             let installStart = clock.now
-            textView.textStorage?.append(NSAttributedString(
+            let storage = try #require(textView.textStorage)
+            storage.append(NSAttributedString(
                 string: appendText,
                 attributes: [.font: font]
             ))
             let installDuration = installStart.duration(to: clock.now)
             let tailStart = clock.now
+            for _ in 0..<2 {
+                TextDocumentGeometry.updateStreamingLog(
+                    textView,
+                    in: scrollView,
+                    wrapsToViewport: false,
+                    metrics: metrics,
+                    followingTail: true
+                )
+                TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
+            }
             TextDocumentGeometry.updateStreamingLog(
                 textView,
                 in: scrollView,
@@ -215,7 +280,6 @@ struct LogWindowControllerTests {
                 metrics: metrics,
                 followingTail: true
             )
-            TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
             let tailDuration = tailStart.duration(to: clock.now)
             let totalDuration = installStart.duration(to: clock.now)
 
@@ -230,7 +294,7 @@ struct LogWindowControllerTests {
             }
             let mainActorBudget: Duration = sizeMiB <= 16 ? .seconds(1) : .seconds(2)
             #expect(totalDuration < mainActorBudget)
-            #expect(textView.textStorage?.length == appendText.utf16.count)
+            #expect(storage.length == appendText.utf16.count)
             #expect(metrics.logicalLineCount == fragmentCount + 1)
             #expect(metrics.maximumLineWidthUnits <= fragment.utf8.count + 4)
             #expect(textView.frame.height > scrollView.contentSize.height)
@@ -636,8 +700,8 @@ struct LogWindowControllerTests {
         #expect(!saved.ranOnMainThread)
     }
 
-    @Test("tail following survives a delayed document extent correction")
-    func continuousTailFollowDoesNotDependOnExactPriorGeometry() async throws {
+    @Test("continuous tail following keeps the real final line visible")
+    func continuousTailFollowKeepsActualTailVisible() async throws {
         let provider = OrderedLogWindowProvider()
         let source = logSource(pod: "api", uid: "api-uid", container: "app")
         let controller = LogWindowController(
@@ -682,17 +746,8 @@ struct LogWindowControllerTests {
         ))
         try await waitForLogText(textView) { $0.contains("initial-199") }
         #expect(isLogViewAtTail(textView, in: scrollView))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
         try await Task.sleep(for: .milliseconds(20))
-
-        // TextKit can refine a noncontiguous document extent after the
-        // controller has scrolled. That correction is not a user scroll and
-        // must keep the current viewport pinned as well as preserve follow for
-        // the next batch.
-        textView.setFrameSize(NSSize(
-            width: textView.frame.width,
-            height: textView.frame.height + 32
-        ))
-        #expect(isLogViewAtTail(textView, in: scrollView))
 
         provider.emitRecords(
             generation: 1,
@@ -711,6 +766,7 @@ struct LogWindowControllerTests {
         ))
         try await waitForLogText(textView) { $0.contains("after-correction") }
         #expect(isLogViewAtTail(textView, in: scrollView))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
     }
 
     @Test("large initial tail remains pinned after deferred layout")
@@ -762,6 +818,7 @@ struct LogWindowControllerTests {
         ))
         try await waitForLogText(textView) { $0.contains("initial-499") }
         #expect(isLogViewAtTail(textView, in: scrollView))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
 
         for _ in 0..<20 {
             window.contentView?.layoutSubtreeIfNeeded()
@@ -772,6 +829,7 @@ struct LogWindowControllerTests {
         #expect(follow.state == .on)
         #expect(isLogViewAtTail(textView, in: scrollView),
             "A deferred layout pass moved the initial tail away from the bottom")
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
     }
 
     @Test("viewport scrolling pauses and resumes tail following")
@@ -835,11 +893,13 @@ struct LogWindowControllerTests {
         provider.emitRecords(
             generation: 1,
             sequence: 3,
-            records: [LogRecord(
-                sourceID: source.sourceID,
-                data: Data("while-scrolled-away".utf8),
-                endsWithNewline: true
-            )]
+            records: (0..<100).map { index in
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data("while-scrolled-away-\(index)".utf8),
+                    endsWithNewline: true
+                )
+            }
         )
         try await Task.sleep(for: .milliseconds(20))
         window.makeKeyAndOrderFront(nil)
@@ -847,15 +907,23 @@ struct LogWindowControllerTests {
             name: NSWindow.didBecomeKeyNotification,
             object: window
         ))
-        try await waitForLogText(textView) { $0.contains("while-scrolled-away") }
+        try await waitForLogText(textView) { $0.contains("while-scrolled-away-99") }
         #expect(!isLogViewAtTail(textView, in: scrollView))
         #expect(clipView.bounds.origin == scrolledAwayOrigin)
 
         follow.performClick(nil)
         #expect(follow.state == .on)
         #expect(isLogViewAtTail(textView, in: scrollView))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
         try await Task.sleep(for: .milliseconds(20))
         #expect(!provider.snapshot().contains("start:2"))
+
+        window.setContentSize(NSSize(width: 720, height: 420))
+        controller.windowDidResize(Notification(
+            name: NSWindow.didResizeNotification,
+            object: window
+        ))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
 
         // Returning to the tail manually also re-arms the presentation.
         clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: 0))
@@ -1115,6 +1183,7 @@ private final class LayoutRequestSpy: NSLayoutManager {
 
     override func ensureLayout(for textContainer: NSTextContainer) {
         wholeContainerRequestCount += 1
+        super.ensureLayout(for: textContainer)
     }
 
     override func ensureLayout(
@@ -1122,10 +1191,12 @@ private final class LayoutRequestSpy: NSLayoutManager {
         in textContainer: NSTextContainer
     ) {
         boundingRectRequests.append(bounds)
+        super.ensureLayout(forBoundingRect: bounds, in: textContainer)
     }
 
     override func ensureLayout(forCharacterRange charRange: NSRange) {
         characterRangeRequests.append(charRange)
+        super.ensureLayout(forCharacterRange: charRange)
     }
 
     func resetRequests() {
@@ -1203,6 +1274,74 @@ private func milliseconds(_ duration: Duration) -> Double {
 @MainActor
 private func isLogViewAtTail(_ textView: NSTextView, in scrollView: NSScrollView) -> Bool {
     scrollView.contentView.bounds.maxY >= textView.bounds.maxY - 4
+}
+
+@MainActor
+private func visibleLogLineFragmentCount(
+    _ textView: NSTextView,
+    in scrollView: NSScrollView
+) throws -> Int {
+    let layoutManager = try #require(textView.layoutManager)
+    let textLength = try #require(textView.textStorage?.length)
+    guard textLength > 0 else { return 0 }
+
+    let characterRange = NSRange(
+        location: max(0, textLength - (512 << 10)),
+        length: min(textLength, 512 << 10)
+    )
+    layoutManager.ensureLayout(forCharacterRange: characterRange)
+    let glyphRange = layoutManager.glyphRange(
+        forCharacterRange: characterRange,
+        actualCharacterRange: nil
+    )
+    let origin = textView.textContainerOrigin
+    let visible = scrollView.contentView.bounds.offsetBy(
+        dx: -origin.x,
+        dy: -origin.y
+    )
+    var count = 0
+    layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) {
+        rect, _, _, _, _ in
+        if rect.intersects(visible) { count += 1 }
+    }
+    if !layoutManager.extraLineFragmentRect.isEmpty,
+        layoutManager.extraLineFragmentRect.intersects(visible)
+    {
+        count += 1
+    }
+    return count
+}
+
+@MainActor
+private func isActualLogTailFullyVisible(
+    _ textView: NSTextView,
+    in scrollView: NSScrollView
+) throws -> Bool {
+    let layoutManager = try #require(textView.layoutManager)
+    let textLength = try #require(textView.textStorage?.length)
+    guard textLength > 0 else { return true }
+
+    let characterRange = NSRange(location: textLength - 1, length: 1)
+    layoutManager.ensureLayout(forCharacterRange: characterRange)
+    let glyphRange = layoutManager.glyphRange(
+        forCharacterRange: characterRange,
+        actualCharacterRange: nil
+    )
+    let finalGlyph = min(glyphRange.location, layoutManager.numberOfGlyphs - 1)
+    var tailRect = layoutManager.lineFragmentRect(
+        forGlyphAt: finalGlyph,
+        effectiveRange: nil
+    )
+    if !layoutManager.extraLineFragmentRect.isEmpty {
+        tailRect = tailRect.union(layoutManager.extraLineFragmentRect)
+    }
+    tailRect = tailRect.offsetBy(
+        dx: textView.textContainerOrigin.x,
+        dy: textView.textContainerOrigin.y
+    )
+    let visible = scrollView.contentView.bounds
+    return tailRect.minY >= visible.minY - 0.5
+        && tailRect.maxY <= visible.maxY + 0.5
 }
 
 @MainActor
