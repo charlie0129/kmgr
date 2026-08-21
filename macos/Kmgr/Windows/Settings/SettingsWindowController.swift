@@ -24,6 +24,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let completedOperationHistoryLimitField = NSTextField()
     private let defaultDeleteConcurrencyField = NSTextField()
     private let nodeShellImageField = NSTextField()
+    private let nodeShellStartupTimeoutField = NSTextField()
     private let metricsRefreshField = NSTextField()
     private let viewportOverscanField = NSTextField()
     private let viewReleaseGraceField = NSTextField()
@@ -119,19 +120,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
 
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
-            maximumDisplayedLogLineField, completedOperationHistoryLimitField,
-            nodeShellImageField,
+            maximumRenderedLogTextField, maximumDisplayedLogLineField,
+            completedOperationHistoryLimitField, defaultDeleteConcurrencyField,
+            nodeShellImageField, nodeShellStartupTimeoutField,
             metricsRefreshField,
             viewportOverscanField,
             viewReleaseGraceField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
-            kubernetesQPSField, kubernetesBurstField,
+            kubernetesQPSField, kubernetesBurstField, kubernetesListPageSizeField,
+            clusterConnectionTimeoutField, kubernetesRequestTimeoutField,
             idleMetricProviderLimitField, idleMetricSampleLimitField,
             exactPodMetricsEntryLimitField, exactPodMetricsSampleLimitField,
             exactPodMetricsDetailEntryLimitField,
-            exactPodMetricsGETConcurrencyField, logSourceOpenConcurrencyField,
+            exactPodMetricsGETConcurrencyField, logQueueRecordLimitField,
+            logQueueByteLimitField, logSourceOpenConcurrencyField,
             columnsPathField,
         ] {
             field.delegate = self
@@ -140,18 +144,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         }
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
-            maximumDisplayedLogLineField, completedOperationHistoryLimitField,
-            metricsRefreshField,
+            maximumRenderedLogTextField, maximumDisplayedLogLineField,
+            completedOperationHistoryLimitField, defaultDeleteConcurrencyField,
+            nodeShellStartupTimeoutField, metricsRefreshField,
             viewportOverscanField,
             viewReleaseGraceField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
-            kubernetesQPSField, kubernetesBurstField,
+            kubernetesQPSField, kubernetesBurstField, kubernetesListPageSizeField,
+            clusterConnectionTimeoutField, kubernetesRequestTimeoutField,
             idleMetricProviderLimitField, idleMetricSampleLimitField,
             exactPodMetricsEntryLimitField, exactPodMetricsSampleLimitField,
             exactPodMetricsDetailEntryLimitField,
-            exactPodMetricsGETConcurrencyField, logSourceOpenConcurrencyField,
+            exactPodMetricsGETConcurrencyField, logQueueRecordLimitField,
+            logQueueByteLimitField, logSourceOpenConcurrencyField,
         ] {
             field.alignment = .right
             field.widthAnchor.constraint(equalToConstant: 110).isActive = true
@@ -237,6 +244,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         nodeShellImageField.setAccessibilityIdentifier(
             "settings.nodeShell.globalImage"
         )
+        nodeShellStartupTimeoutField.setAccessibilityIdentifier(
+            "settings.nodeShell.startupTimeoutSeconds"
+        )
         nodeShellImageField.lineBreakMode = .byTruncatingMiddle
         nodeShellImageField.widthAnchor.constraint(
             greaterThanOrEqualToConstant: 360
@@ -313,6 +323,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             title: "Node Shell",
             rows: [
                 labeledRow("Default image", control: nodeShellImageField),
+                labeledRow(
+                    "Startup timeout",
+                    control: nodeShellStartupTimeoutField,
+                    suffix: "seconds (after relaunch)"
+                ),
                 nodeShellHelp,
             ]
         )
@@ -627,6 +642,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         defaultDeleteConcurrencyField.integerValue =
             preferences.resourceOperations.defaultDeleteConcurrency
         nodeShellImageField.stringValue = preferences.nodeShell.globalImage
+        nodeShellStartupTimeoutField.integerValue =
+            preferences.nodeShell.startupTimeoutSeconds
         metricsRefreshField.integerValue = preferences.metricsRefreshSeconds
         viewportOverscanField.integerValue =
             preferences.advancedPerformance.viewportOverscanScreensPerSide
@@ -720,7 +737,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             nodeShell: NodeShellPreferences(
                 globalImage: nodeShellImageField.stringValue,
                 clusterImagesByContextReference: preferencesStore.current.nodeShell
-                    .clusterImagesByContextReference
+                    .clusterImagesByContextReference,
+                startupTimeoutSeconds: parsedInteger(nodeShellStartupTimeoutField)
             ),
             advancedPerformance: AdvancedPerformancePreferences(
                 viewportOverscanScreensPerSide: parsedInteger(

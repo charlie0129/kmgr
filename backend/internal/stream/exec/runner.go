@@ -9,7 +9,6 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	apihttpstream "k8s.io/apimachinery/pkg/util/httpstream"
@@ -23,10 +22,11 @@ import (
 )
 
 type ClientGoRunner struct {
-	Core            coreclient.CoreV1Interface
-	PodUIDs         podidentity.Getter
-	Config          *rest.Config
-	ExecutorFactory ExecutorFactory
+	Core                    coreclient.CoreV1Interface
+	PodUIDs                 podidentity.Getter
+	Config                  *rest.Config
+	ExecutorFactory         ExecutorFactory
+	NodeShellStartupTimeout time.Duration
 }
 
 func (r ClientGoRunner) Run(ctx context.Context, request StartRequest, options RunOptions) error {
@@ -104,7 +104,11 @@ func (r ClientGoRunner) runNodeShell(
 		return err
 	}
 	defer deleteNodeShellPod(pods, helper.Name)
-	if err := waitForNodeShellPod(ctx, pods, helper.Name, helper.UID); err != nil {
+	startupTimeout := r.NodeShellStartupTimeout
+	if startupTimeout == 0 {
+		startupTimeout = DefaultNodeShellStartupTimeout
+	}
+	if err := waitForNodeShellPod(ctx, pods, helper.Name, helper.UID, startupTimeout); err != nil {
 		return err
 	}
 
@@ -151,8 +155,9 @@ func (r ClientGoRunner) streamRemoteCommand(
 }
 
 const (
-	nodeShellContainerName = "nsenter"
-	nodeShellPodTimeout    = time.Minute
+	nodeShellContainerName         = "nsenter"
+	DefaultNodeShellStartupTimeout = time.Minute
+	MaximumNodeShellStartupTimeout = time.Hour
 )
 
 func nodeShellPod(request StartRequest) *corev1.Pod {
@@ -195,16 +200,6 @@ func nodeShellPod(request StartRequest) *corev1.Pod {
 				SecurityContext: &corev1.SecurityContext{
 					Privileged: &privileged,
 				},
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("100m"),
-						corev1.ResourceMemory: resource.MustParse("256Mi"),
-					},
-					Limits: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("100m"),
-						corev1.ResourceMemory: resource.MustParse("256Mi"),
-					},
-				},
 			}},
 		},
 	}
@@ -215,8 +210,9 @@ func waitForNodeShellPod(
 	pods coreclient.PodInterface,
 	name string,
 	uid types.UID,
+	timeout time.Duration,
 ) error {
-	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, nodeShellPodTimeout, true,
+	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, timeout, true,
 		func(ctx context.Context) (bool, error) {
 			pod, err := pods.Get(ctx, name, metav1.GetOptions{})
 			if err != nil {

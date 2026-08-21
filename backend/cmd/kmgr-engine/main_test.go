@@ -115,6 +115,21 @@ func TestClusterConnectionTimeoutFlagIsValidated(t *testing.T) {
 	}
 }
 
+func TestNodeShellStartupTimeoutFlagIsValidated(t *testing.T) {
+	if code := run([]string{
+		"--version", "--node-shell-startup-timeout", "90s",
+	}); code != 0 {
+		t.Fatalf("run(valid node-shell startup timeout) = %d, want success", code)
+	}
+	for _, value := range []string{"0s", "999ms", "3601s", "not-a-duration"} {
+		if code := run([]string{
+			"--version", "--node-shell-startup-timeout", value,
+		}); code != 2 {
+			t.Errorf("run(--node-shell-startup-timeout %q) = %d, want usage error", value, code)
+		}
+	}
+}
+
 func TestWarmCacheFlagsAreValidated(t *testing.T) {
 	if code := run([]string{
 		"--version",

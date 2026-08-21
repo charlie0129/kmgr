@@ -136,6 +136,7 @@ public final class EngineSupervisor {
         public var clientVersion: String
         public var columnsConfigurationPath: String?
         public var metricsRefreshSeconds: Int?
+        public var nodeShellStartupTimeoutSeconds: Int?
         public var advancedPerformance: AdvancedPerformancePreferences?
         public var logLevel: String?
 
@@ -150,6 +151,7 @@ public final class EngineSupervisor {
             clientVersion: String = "dev",
             columnsConfigurationPath: String? = nil,
             metricsRefreshSeconds: Int? = nil,
+            nodeShellStartupTimeoutSeconds: Int? = nil,
             advancedPerformance: AdvancedPerformancePreferences? = nil,
             logLevel: String? = nil
         ) {
@@ -164,6 +166,7 @@ public final class EngineSupervisor {
             self.clientVersion = clientVersion
             self.columnsConfigurationPath = columnsConfigurationPath
             self.metricsRefreshSeconds = metricsRefreshSeconds
+            self.nodeShellStartupTimeoutSeconds = nodeShellStartupTimeoutSeconds
             self.advancedPerformance = advancedPerformance
             self.logLevel = logLevel
         }
@@ -657,6 +660,16 @@ extension EngineSupervisor.Configuration {
         }
         if let metricsRefreshSeconds, metricsRefreshSeconds > 0 {
             arguments += ["--metrics-refresh", "\(metricsRefreshSeconds)s"]
+        }
+        if let nodeShellStartupTimeoutSeconds,
+            NodeShellPreferences.startupTimeoutSecondsRange.contains(
+                nodeShellStartupTimeoutSeconds
+            )
+        {
+            arguments += [
+                "--node-shell-startup-timeout",
+                "\(nodeShellStartupTimeoutSeconds)s",
+            ]
         }
         if let advancedPerformance,
             advancedPerformance.validationIssues().isEmpty

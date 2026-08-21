@@ -43,6 +43,7 @@ struct EngineSupervisorLifecycleTests {
             helperURL: URL(fileURLWithPath: "/tmp/kmgr-engine"),
             columnsConfigurationPath: "/tmp/columns.yaml",
             metricsRefreshSeconds: 45,
+            nodeShellStartupTimeoutSeconds: 90,
             advancedPerformance: AdvancedPerformancePreferences(
                 viewReleaseGraceSeconds: 30,
                 globalWarmCacheViewLimit: 48,
@@ -72,6 +73,7 @@ struct EngineSupervisorLifecycleTests {
             "--socket", "/tmp/a.sock",
             "--columns", "/tmp/columns.yaml",
             "--metrics-refresh", "45s",
+            "--node-shell-startup-timeout", "90s",
             "--view-release-delay", "30s",
             "--warm-cache-global-views", "48",
             "--warm-cache-global-objects", "500000",

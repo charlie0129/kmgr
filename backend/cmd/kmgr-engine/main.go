@@ -15,6 +15,7 @@ import (
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
+	execstream "github.com/charlie0129/kmgr/backend/internal/stream/exec"
 	streamlogs "github.com/charlie0129/kmgr/backend/internal/stream/logs"
 	"github.com/charlie0129/kmgr/backend/internal/systemmemory"
 	"github.com/charlie0129/kmgr/backend/internal/transport"
@@ -78,6 +79,11 @@ func run(arguments []string) int {
 		"cluster-connection-timeout",
 		transport.DefaultConnectionProbeTimeout,
 		"timeout for the Kubernetes connection probe while opening a cluster",
+	)
+	nodeShellStartupTimeout := flags.Duration(
+		"node-shell-startup-timeout",
+		execstream.DefaultNodeShellStartupTimeout,
+		"timeout for a temporary node-shell helper Pod to become running",
 	)
 	warmCache := warmCacheConfiguration{}
 	metricCache := metricCacheConfiguration{}
@@ -208,6 +214,14 @@ func run(arguments []string) int {
 		)
 		return 2
 	}
+	if *nodeShellStartupTimeout < time.Second ||
+		*nodeShellStartupTimeout > execstream.MaximumNodeShellStartupTimeout {
+		fmt.Fprintln(
+			os.Stderr,
+			"kmgr-engine: --node-shell-startup-timeout must be between 1s and 1h",
+		)
+		return 2
+	}
 	if err := validateWarmCacheConfiguration(warmCache); err != nil {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
 		return 2
@@ -314,6 +328,7 @@ func run(arguments []string) int {
 		LogQueueRecordLimit:         *logQueueRecords,
 		LogQueueByteLimit:           *logQueueBytes,
 		LogSourceOpenConcurrency:    *logSourceOpenConcurrency,
+		NodeShellStartupTimeout:     *nodeShellStartupTimeout,
 		KubernetesQPS:               validatedQPS,
 		KubernetesBurst:             *kubernetesBurst,
 		KubernetesListPageSize:      *kubernetesListPageSize,

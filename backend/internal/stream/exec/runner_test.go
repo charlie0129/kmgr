@@ -12,10 +12,10 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -287,12 +287,7 @@ func TestClientGoRunnerCreatesAttachesAndDeletesNodeShellHelper(t *testing.T) {
 		!container.TTY {
 		t.Fatalf("helper container = %#v", container)
 	}
-	wantCPU := resource.MustParse("100m")
-	wantMemory := resource.MustParse("256Mi")
-	if container.Resources.Requests.Cpu().Cmp(wantCPU) != 0 ||
-		container.Resources.Limits.Cpu().Cmp(wantCPU) != 0 ||
-		container.Resources.Requests.Memory().Cmp(wantMemory) != 0 ||
-		container.Resources.Limits.Memory().Cmp(wantMemory) != 0 {
+	if len(container.Resources.Requests) != 0 || len(container.Resources.Limits) != 0 {
 		t.Fatalf("helper resources = %#v", container.Resources)
 	}
 	if len(created.Spec.Tolerations) != 2 ||
@@ -301,6 +296,26 @@ func TestClientGoRunnerCreatesAttachesAndDeletesNodeShellHelper(t *testing.T) {
 		created.Spec.Tolerations[1].Operator != corev1.TolerationOpExists ||
 		created.Spec.Tolerations[1].Effect != corev1.TaintEffectNoExecute {
 		t.Fatalf("helper tolerations = %#v", created.Spec.Tolerations)
+	}
+}
+
+func TestClientGoRunnerHonorsNodeShellStartupTimeoutAndCleansUp(t *testing.T) {
+	t.Parallel()
+	fixture := newNodeShellAPIFixture(t)
+	fixture.helperStatus = corev1.PodStatus{Phase: corev1.PodPending}
+	defer fixture.close()
+	core, config := fixture.client(t)
+	runner := ClientGoRunner{
+		Core: core, Config: config, NodeShellStartupTimeout: 25 * time.Millisecond,
+	}
+
+	err := runner.Run(context.Background(), testNodeShellStart(), RunOptions{})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("startup timeout error = %v, want deadline exceeded", err)
+	}
+	_, deleteCount := fixture.snapshot()
+	if deleteCount != 1 {
+		t.Fatalf("helper delete count after startup timeout = %d", deleteCount)
 	}
 }
 

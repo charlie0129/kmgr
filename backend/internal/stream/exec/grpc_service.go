@@ -21,8 +21,9 @@ import (
 var _ kmgrv1.ExecServiceServer = (*GRPCService)(nil)
 
 type ClusterResolver struct {
-	Sessions        *cluster.SessionRegistry
-	ExecutorFactory ExecutorFactory
+	Sessions                *cluster.SessionRegistry
+	ExecutorFactory         ExecutorFactory
+	NodeShellStartupTimeout time.Duration
 }
 
 func (r ClusterResolver) Resolve(sessionID string) (ResolvedSession, error) {
@@ -43,6 +44,7 @@ func (r ClusterResolver) Resolve(sessionID string) (ResolvedSession, error) {
 		Runner: ClientGoRunner{
 			Core: session.Core(), PodUIDs: podidentity.MetadataGetter{Client: session.Metadata()},
 			Config: config, ExecutorFactory: r.ExecutorFactory,
+			NodeShellStartupTimeout: r.NodeShellStartupTimeout,
 		},
 		Release: lease.Release,
 	}, nil

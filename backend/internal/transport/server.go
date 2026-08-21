@@ -43,6 +43,7 @@ type ServerOptions struct {
 	LogQueueRecordLimit         int
 	LogQueueByteLimit           int
 	LogSourceOpenConcurrency    int
+	NodeShellStartupTimeout     time.Duration
 	KubernetesQPS               float32
 	KubernetesBurst             int
 	KubernetesListPageSize      int64
@@ -81,6 +82,17 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	engine, err := NewEngineService(options.Version, time.Now())
 	if err != nil {
 		return nil, err
+	}
+	nodeShellStartupTimeout := options.NodeShellStartupTimeout
+	if nodeShellStartupTimeout == 0 {
+		nodeShellStartupTimeout = execstream.DefaultNodeShellStartupTimeout
+	}
+	if nodeShellStartupTimeout < time.Second ||
+		nodeShellStartupTimeout > execstream.MaximumNodeShellStartupTimeout {
+		return nil, fmt.Errorf(
+			"node-shell startup timeout must be between 1s and %s",
+			execstream.MaximumNodeShellStartupTimeout,
+		)
 	}
 	catalogs := NewCatalogRegistry(options.CatalogLoader)
 	sessions := cluster.NewSessionRegistry(options.ClientFactory)
@@ -206,7 +218,9 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		return nil, err
 	}
 	execManager, err := execstream.NewManager(execstream.Config{
-		Resolver: execstream.ClusterResolver{Sessions: sessions},
+		Resolver: execstream.ClusterResolver{
+			Sessions: sessions, NodeShellStartupTimeout: nodeShellStartupTimeout,
+		},
 	})
 	if err != nil {
 		logManager.Close()

@@ -24,7 +24,8 @@ import Testing
         globalImage: "registry.example/global-node-shell:1",
         clusterImagesByContextReference: [
             "context-ref-a": "registry.example/cluster-node-shell:2",
-        ]
+        ],
+        startupTimeoutSeconds: 90
     )
     preferences.metricsRefreshSeconds = 30
     preferences.defaultNamespace = .allNamespaces
@@ -123,6 +124,7 @@ import Testing
     preferences.metricsRefreshSeconds = 1
     preferences.columnsConfigurationPath = "relative/columns.yaml"
     preferences.resourceOperations.defaultDeleteConcurrency = 17
+    preferences.nodeShell.startupTimeoutSeconds = 0
     preferences.advancedPerformance = AdvancedPerformancePreferences(
         viewportOverscanScreensPerSide: 101,
         viewReleaseGraceSeconds: 301,
@@ -158,6 +160,7 @@ import Testing
         "metricsRefreshSeconds",
         "columnsConfigurationPath",
         "resourceOperations.defaultDeleteConcurrency",
+        "nodeShell.startupTimeoutSeconds",
         "advancedPerformance.viewportOverscanScreensPerSide",
         "advancedPerformance.viewReleaseGraceSeconds",
         "advancedPerformance.globalWarmCacheViewLimit",
@@ -304,6 +307,7 @@ import Testing
     updated.logs.recordLimit += 1_000
     updated.diagnostics.completedOperationHistoryLimit += 1
     updated.nodeShell.globalImage = "registry.example/node-shell:2"
+    updated.nodeShell.startupTimeoutSeconds = 90
     updated.confirmations.confirmScaling.toggle()
     updated.resourceOperations.defaultDeleteConcurrency = 8
     updated.defaultNamespace = .allNamespaces
@@ -324,7 +328,7 @@ import Testing
     ])
     #expect(delta.changes(activated: .applicationRelaunch) == [
         .workspaceRestoration, .metricsRefresh, .columnsConfigurationPath,
-        .advancedPerformance,
+        .nodeShellStartupTimeout, .advancedPerformance,
     ])
     #expect(delta.requiresApplicationRelaunch)
     #expect(!delta.isEmpty)

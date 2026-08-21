@@ -63,6 +63,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         var engineConfiguration = EngineSupervisor.Configuration.bundled()
         engineConfiguration.columnsConfigurationPath = preferences.current.columnsConfigurationPath
         engineConfiguration.metricsRefreshSeconds = preferences.current.metricsRefreshSeconds
+        engineConfiguration.nodeShellStartupTimeoutSeconds =
+            preferences.current.nodeShell.startupTimeoutSeconds
         engineConfiguration.advancedPerformance = preferences.current.advancedPerformance
         let supervisor = EngineSupervisor(configuration: engineConfiguration)
         self.engineSupervisor = supervisor

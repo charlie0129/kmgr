@@ -73,16 +73,21 @@ public struct DiagnosticsPreferences: Codable, Hashable, Sendable {
 
 public struct NodeShellPreferences: Codable, Hashable, Sendable {
     public static let defaultImage = "alpine:latest"
+    public static let defaultStartupTimeoutSeconds = 60
+    public static let startupTimeoutSecondsRange = 1...3_600
 
     public var globalImage: String
     public var clusterImagesByContextReference: [String: String]
+    public var startupTimeoutSeconds: Int
 
     public init(
         globalImage: String = Self.defaultImage,
-        clusterImagesByContextReference: [String: String] = [:]
+        clusterImagesByContextReference: [String: String] = [:],
+        startupTimeoutSeconds: Int = Self.defaultStartupTimeoutSeconds
     ) {
         self.globalImage = globalImage
         self.clusterImagesByContextReference = clusterImagesByContextReference
+        self.startupTimeoutSeconds = startupTimeoutSeconds
     }
 
     public func effectiveImage(contextReference: String) -> String {
@@ -103,6 +108,12 @@ public struct NodeShellPreferences: Codable, Hashable, Sendable {
             issues.append(AppPreferenceIssue(
                 field: "nodeShell.globalImage",
                 message: "The default node-shell image must be a nonempty image reference of at most 1,024 UTF-8 bytes without whitespace or control characters."
+            ))
+        }
+        if !Self.startupTimeoutSecondsRange.contains(startupTimeoutSeconds) {
+            issues.append(AppPreferenceIssue(
+                field: "nodeShell.startupTimeoutSeconds",
+                message: "Node-shell startup timeout must be between 1 and 3,600 seconds."
             ))
         }
         if clusterImagesByContextReference.count > 1_000 {
@@ -435,7 +446,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v11"
+    public static let apiVersion = "kmgr.preferences/v12"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
@@ -563,6 +574,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
     case columnsConfigurationPath
     case operationHistory
     case nodeShell
+    case nodeShellStartupTimeout
     case advancedPerformance
     case viewportOverscan
 
@@ -580,7 +592,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         case .defaultNamespace, .viewportOverscan:
             .newWorkspace
         case .workspaceRestoration, .metricsRefresh, .columnsConfigurationPath,
-            .advancedPerformance:
+            .nodeShellStartupTimeout, .advancedPerformance:
             .applicationRelaunch
         }
     }
@@ -597,6 +609,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         case .columnsConfigurationPath: "Programmable columns path"
         case .operationHistory: "Completed operation history"
         case .nodeShell: "Node shell defaults"
+        case .nodeShellStartupTimeout: "Node shell startup timeout"
         case .advancedPerformance: "Advanced performance configuration"
         case .viewportOverscan: "List viewport overscan"
         }
@@ -632,8 +645,16 @@ public struct AppPreferencesDelta: Hashable, Sendable {
         if previous.diagnostics != updated.diagnostics {
             changes.insert(.operationHistory)
         }
-        if previous.nodeShell != updated.nodeShell {
+        if previous.nodeShell.globalImage != updated.nodeShell.globalImage ||
+            previous.nodeShell.clusterImagesByContextReference !=
+                updated.nodeShell.clusterImagesByContextReference
+        {
             changes.insert(.nodeShell)
+        }
+        if previous.nodeShell.startupTimeoutSeconds !=
+            updated.nodeShell.startupTimeoutSeconds
+        {
+            changes.insert(.nodeShellStartupTimeout)
         }
         if previous.advancedPerformance.viewportOverscanScreensPerSide
             != updated.advancedPerformance.viewportOverscanScreensPerSide
