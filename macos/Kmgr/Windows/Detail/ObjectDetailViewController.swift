@@ -296,25 +296,6 @@ enum ObjectDetailWatchPresentation {
     }
 }
 
-@MainActor
-private final class ObjectDetailYAMLTextView: NSTextView {
-    var onPlainEditShortcut: (() -> Bool)?
-
-    override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection([
-            .shift, .command, .control, .option,
-        ])
-        if !isEditable,
-            modifiers.isEmpty,
-            event.charactersIgnoringModifiers?.lowercased() == "e",
-            onPlainEditShortcut?() == true
-        {
-            return
-        }
-        super.keyDown(with: event)
-    }
-}
-
 /// A fresh, UID-authoritative detail surface. It replaces the table area in a
 /// workspace; no inspector or bottom drawer is introduced.
 @MainActor
@@ -350,9 +331,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         title: "Cancel Scan", target: nil, action: nil
     )
     private lazy var yamlScrollView =
-        ObjectDetailYAMLTextView.scrollablePlainDocumentContentTextView()
-    private lazy var yamlTextView: ObjectDetailYAMLTextView = {
-        guard let textView = yamlScrollView.documentView as? ObjectDetailYAMLTextView else {
+        YAMLTextView.scrollablePlainDocumentContentTextView()
+    private lazy var yamlTextView: YAMLTextView = {
+        guard let textView = yamlScrollView.documentView as? YAMLTextView else {
             preconditionFailure("AppKit did not create a YAML document text view")
         }
         return textView

@@ -27,7 +27,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     private var isClosing = false
 
     private let scrollView: NSScrollView
-    private let textView: NSTextView
+    private let textView: YAMLTextView
     private var syntaxHighlighter: YAMLSyntaxHighlighter?
     private let targetLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "Ready")
@@ -54,8 +54,8 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         // This factory supplies AppKit's complete plain-document TextKit stack,
         // including the clip view, scrollers, and document sizing behavior.
         // Keep it intact instead of reconstructing or resizing its document.
-        let scrollView = NSTextView.scrollablePlainDocumentContentTextView()
-        guard let textView = scrollView.documentView as? NSTextView else {
+        let scrollView = YAMLTextView.scrollablePlainDocumentContentTextView()
+        guard let textView = scrollView.documentView as? YAMLTextView else {
             preconditionFailure("AppKit did not create a text view for its plain document")
         }
         self.scrollView = scrollView

@@ -638,6 +638,68 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(!cancel.isHidden)
     }
 
+    @Test("plain slash searches read-only YAML and types while editing")
+    func plainSlashFindRespectsEditing() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session", group: "", version: "v1",
+            resource: "configmaps", namespace: "dev", name: "settings",
+            uid: ResourceUID("uid-find")
+        )
+        let source = "apiVersion: v1\nkind: ConfigMap\n"
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: LoadedObjectDetailProvider(
+                detail: ObjectDetail(
+                    identity: identity,
+                    resourceVersion: "rv-find",
+                    yamlUTF8: Data(source.utf8)
+                ),
+                data: ObjectData(
+                    identity: identity,
+                    resourceVersion: "rv-find",
+                    entries: [],
+                    secret: false
+                )
+            ),
+            initialTab: .yaml
+        )
+        controller.loadView()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentViewController = controller
+        window.makeKeyAndOrderFront(nil)
+        controller.viewDidAppear()
+        defer {
+            controller.stop()
+            window.close()
+        }
+
+        let scroll = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "object-detail-yaml-scroll" })
+        let editor = try #require(scroll.documentView as? YAMLTextView)
+        let edit = try #require(descendants(of: controller.view)
+            .compactMap { $0 as? NSButton }
+            .first { $0.title == "Edit" })
+        try await waitUntil { editor.string == source && edit.isEnabled }
+
+        editor.keyDown(with: try yamlKeyEvent("/"))
+        #expect(scroll.isFindBarVisible)
+        #expect(editor.string == source)
+
+        scroll.isFindBarVisible = false
+        edit.performClick(nil)
+        #expect(window.makeFirstResponder(editor))
+        editor.setSelectedRange(NSRange(location: (source as NSString).length, length: 0))
+        editor.keyDown(with: try yamlKeyEvent("/"))
+        #expect(!scroll.isFindBarVisible)
+        #expect(editor.string == source + "/")
+    }
+
     @Test("YAML editing reports only WATCH resource-version changes")
     func yamlEditingWatchConflictRequiresDifferentResourceVersion() async throws {
         let identity = ResourceIdentity(

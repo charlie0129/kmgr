@@ -213,21 +213,45 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(status.toolTip?.contains("UID-pinned") == true)
     }
 
-    @Test("snapshot search uses AppKit's native Command-F find bar")
-    func nativeFindBar() throws {
+    @Test("read-only slash opens native find while editable slash remains YAML input")
+    func slashFindShortcutRespectsEditing() async throws {
         let identity = yamlSnapshotIdentity()
+        let source = "apiVersion: v1\nkind: ConfigMap\n"
         let controller = YAMLSnapshotWindowController(
             session: yamlSnapshotSession(),
             identity: identity,
-            provider: SnapshotObjectDetailProvider(details: [])
+            provider: SnapshotObjectDetailProvider(details: [ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-find",
+                yamlUTF8: Data(source.utf8)
+            )])
         )
+        controller.showWindow(nil)
         defer { controller.close() }
         let root = try #require(controller.window?.contentView)
+        let scroll = try #require(yamlSnapshotDescendants(of: root)
+            .compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "yaml-snapshot-scroll" })
         let textView = try #require(yamlSnapshotDescendants(of: root)
-            .compactMap { $0 as? NSTextView }
+            .compactMap { $0 as? YAMLTextView }
             .first { $0.accessibilityLabel() == "Kubernetes YAML snapshot" })
+        let edit = try #require(yamlSnapshotDescendants(of: root)
+            .compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "yaml-snapshot-edit" })
+        try await yamlSnapshotWaitUntil { textView.string == source && edit.isEnabled }
+
         #expect(textView.usesFindBar)
         #expect(yamlSnapshotDescendants(of: root).contains { $0 is NSSearchField } == false)
+        textView.keyDown(with: try yamlSnapshotKeyEvent("/"))
+        #expect(scroll.isFindBarVisible)
+        #expect(textView.string == source)
+
+        scroll.isFindBarVisible = false
+        edit.performClick(nil)
+        textView.setSelectedRange(NSRange(location: (source as NSString).length, length: 0))
+        textView.keyDown(with: try yamlSnapshotKeyEvent("/"))
+        #expect(!scroll.isFindBarVisible)
+        #expect(textView.string == source + "/")
     }
 
     @Test("dedicated YAML edits preserve drafts across failure and refresh after success")
@@ -652,6 +676,22 @@ private func yamlSnapshotIdentity() -> ResourceIdentity {
 @MainActor
 private func yamlSnapshotDescendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(yamlSnapshotDescendants(of:))
+}
+
+@MainActor
+private func yamlSnapshotKeyEvent(_ characters: String) throws -> NSEvent {
+    try #require(NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: [],
+        timestamp: 0,
+        windowNumber: 0,
+        context: nil,
+        characters: characters,
+        charactersIgnoringModifiers: characters,
+        isARepeat: false,
+        keyCode: 44
+    ))
 }
 
 @MainActor
