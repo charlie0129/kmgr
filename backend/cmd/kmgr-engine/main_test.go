@@ -85,6 +85,21 @@ func TestKubernetesRateLimitFlagsAreValidated(t *testing.T) {
 	}
 }
 
+func TestKubernetesListPageSizeFlagIsValidated(t *testing.T) {
+	if code := run([]string{
+		"--version", "--kubernetes-list-page-size", "750",
+	}); code != 0 {
+		t.Fatalf("run(valid Kubernetes LIST page size) = %d, want success", code)
+	}
+	for _, value := range []string{"0", "-1", "10001", "not-an-integer"} {
+		if code := run([]string{
+			"--version", "--kubernetes-list-page-size", value,
+		}); code != 2 {
+			t.Errorf("run(--kubernetes-list-page-size %q) = %d, want usage error", value, code)
+		}
+	}
+}
+
 func TestWarmCacheFlagsAreValidated(t *testing.T) {
 	if code := run([]string{
 		"--version",

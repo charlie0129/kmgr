@@ -86,11 +86,12 @@ func TestPipelineWatchListStreamsSnapshotAndContinuesSameWatch(t *testing.T) {
 	var statusesMu sync.Mutex
 	var statuses []Status
 	pipeline := mustPipeline(t, PipelineConfig{
-		Client:       client,
-		Store:        uidStore,
-		ForceRelist:  true,
-		PageSize:     2,
-		WatchTimeout: 30 * time.Second,
+		Client:             client,
+		Store:              uidStore,
+		ForceRelist:        true,
+		PageSize:           2,
+		WatchListBatchSize: 2,
+		WatchTimeout:       30 * time.Second,
 		ListOptions: metav1.ListOptions{
 			LabelSelector: "app=kmgr",
 			FieldSelector: "spec.nodeName=worker-a",

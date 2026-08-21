@@ -62,6 +62,7 @@ struct ApplicationWindowPresentationTests {
         )
         let qps = try field("settings.performance.kubernetesQPS")
         let burst = try field("settings.performance.kubernetesBurst")
+        let listPageSize = try field("settings.performance.kubernetesListPageSize")
         let idleProviders = try field("settings.performance.idleMetricProviders")
         let idleSamples = try field("settings.performance.idleMetricSamples")
         let exactEntries = try field("settings.performance.exactPodMetricsEntries")
@@ -77,6 +78,7 @@ struct ApplicationWindowPresentationTests {
         #expect(overscan.integerValue == 10)
         #expect(viewReleaseGrace.integerValue == 3)
         #expect(authorityMemory.integerValue == 20)
+        #expect(listPageSize.integerValue == 500)
         #expect(idleProviders.integerValue == 8)
         #expect(idleSamples.integerValue == 100_000)
         #expect(exactEntries.integerValue == 100_000)
@@ -94,6 +96,7 @@ struct ApplicationWindowPresentationTests {
         authorityMemory.stringValue = "10"
         qps.stringValue = "12.5"
         burst.stringValue = "37"
+        listPageSize.stringValue = "750"
         idleProviders.stringValue = "5"
         idleSamples.stringValue = "75000"
         exactEntries.stringValue = "80000"
@@ -110,6 +113,7 @@ struct ApplicationWindowPresentationTests {
         #expect(store.current.advancedPerformance.authorityWarmCacheMemoryPercent == 10)
         #expect(store.current.advancedPerformance.kubernetesQPS == 12.5)
         #expect(store.current.advancedPerformance.kubernetesBurst == 37)
+        #expect(store.current.advancedPerformance.kubernetesListPageSize == 750)
         #expect(store.current.advancedPerformance.idleMetricProviderLimit == 5)
         #expect(store.current.advancedPerformance.idleMetricSampleLimit == 75_000)
         #expect(store.current.advancedPerformance.exactPodMetricsEntryLimit == 80_000)

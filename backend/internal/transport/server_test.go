@@ -108,6 +108,29 @@ func TestServerRejectsInvalidWarmCacheLimits(t *testing.T) {
 	}
 }
 
+func TestServerConfiguresKubernetesListPageSize(t *testing.T) {
+	server, err := NewServer(strings.Repeat("a", 64), ServerOptions{
+		Version:                "test",
+		ColumnsPath:            t.TempDir() + "/columns.yaml",
+		KubernetesListPageSize: 750,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { server.Shutdown(time.Second) })
+	invalid, err := NewServer(strings.Repeat("a", 64), ServerOptions{
+		Version:                "test",
+		ColumnsPath:            t.TempDir() + "/columns.yaml",
+		KubernetesListPageSize: view.MaximumPipelinePageSize + 1,
+	})
+	if invalid != nil || err == nil {
+		if invalid != nil {
+			invalid.Shutdown(time.Second)
+		}
+		t.Fatalf("NewServer(oversized page) = %#v, %v; want error", invalid, err)
+	}
+}
+
 func TestServerForwardsViewReleaseDelayToRuntimeValidation(t *testing.T) {
 	server, err := NewServer(strings.Repeat("a", 64), ServerOptions{
 		Version: "test", ViewReleaseDelay: -time.Second,

@@ -680,6 +680,8 @@ extension EngineSupervisor.Configuration {
                 "\(advancedPerformance.kubernetesQPS)",
                 "--kubernetes-burst",
                 "\(advancedPerformance.kubernetesBurst)",
+                "--kubernetes-list-page-size",
+                "\(advancedPerformance.kubernetesListPageSize)",
                 "--metrics-idle-provider-limit",
                 "\(advancedPerformance.idleMetricProviderLimit)",
                 "--metrics-idle-sample-limit",

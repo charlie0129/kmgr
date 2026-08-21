@@ -43,6 +43,7 @@ type ServerOptions struct {
 	LogSourceOpenConcurrency    int
 	KubernetesQPS               float32
 	KubernetesBurst             int
+	KubernetesListPageSize      int64
 	WarmViewLimit               int
 	WarmObjectLimit             int
 	WarmByteLimit               int64
@@ -125,6 +126,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		Source:                      view.ClusterResourceSource{Sessions: sessions},
 		Metrics:                     metricSource,
 		Columns:                     columnManager,
+		PipelinePageSize:            options.KubernetesListPageSize,
 		ReleaseDelay:                options.ViewReleaseDelay,
 		WarmViewLimit:               options.WarmViewLimit,
 		WarmObjectLimit:             options.WarmObjectLimit,

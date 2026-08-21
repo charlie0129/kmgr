@@ -28,8 +28,9 @@ import (
 )
 
 const (
-	defaultPageSize     int64 = 500
-	defaultWatchTimeout       = 5 * time.Minute
+	defaultPageSize           int64 = 500
+	defaultWatchListBatchSize       = 500
+	defaultWatchTimeout             = 5 * time.Minute
 )
 
 // ListerWatcher is the read-only portion of client-go's
@@ -118,6 +119,7 @@ type PipelineConfig struct {
 	Store                   *store.UIDStore
 	ListOptions             metav1.ListOptions
 	PageSize                int64
+	WatchListBatchSize      int
 	WatchTimeout            time.Duration
 	ForceRelist             bool
 	InitialLastSynchronized time.Time
@@ -129,19 +131,20 @@ type PipelineConfig struct {
 // Pipeline maintains a UIDStore without clearing it during reconnects or
 // relists. A Pipeline may be run again after Run returns, but not concurrently.
 type Pipeline struct {
-	client            ListerWatcher
-	store             *store.UIDStore
-	listOptions       metav1.ListOptions
-	pageSize          int64
-	watchTimeout      time.Duration
-	forceRelist       bool
-	lastSynchronized  time.Time
-	retryDelay        RetryDelay
-	onStatus          func(Status)
-	onBatch           func(Batch)
-	tableColumns      []metav1.TableColumnDefinition
-	watchListDisabled bool
-	running           atomic.Bool
+	client             ListerWatcher
+	store              *store.UIDStore
+	listOptions        metav1.ListOptions
+	pageSize           int64
+	watchListBatchSize int
+	watchTimeout       time.Duration
+	forceRelist        bool
+	lastSynchronized   time.Time
+	retryDelay         RetryDelay
+	onStatus           func(Status)
+	onBatch            func(Batch)
+	tableColumns       []metav1.TableColumnDefinition
+	watchListDisabled  bool
+	running            atomic.Bool
 }
 
 var ErrAlreadyRunning = errors.New("watcher: pipeline is already running")
@@ -155,6 +158,9 @@ func NewPipeline(config PipelineConfig) (*Pipeline, error) {
 	}
 	if config.PageSize < 0 {
 		return nil, errors.New("watcher: negative page size")
+	}
+	if config.WatchListBatchSize < 0 {
+		return nil, errors.New("watcher: negative WatchList batch size")
 	}
 	if config.WatchTimeout < 0 {
 		return nil, errors.New("watcher: negative watch timeout")
@@ -171,22 +177,27 @@ func NewPipeline(config PipelineConfig) (*Pipeline, error) {
 	if watchTimeout == 0 {
 		watchTimeout = defaultWatchTimeout
 	}
+	watchListBatchSize := config.WatchListBatchSize
+	if watchListBatchSize == 0 {
+		watchListBatchSize = defaultWatchListBatchSize
+	}
 	retryDelay := config.RetryDelay
 	if retryDelay == nil {
 		retryDelay = jitteredExponentialDelay
 	}
 
 	return &Pipeline{
-		client:           config.Client,
-		store:            config.Store,
-		listOptions:      config.ListOptions,
-		pageSize:         pageSize,
-		watchTimeout:     watchTimeout,
-		forceRelist:      config.ForceRelist,
-		lastSynchronized: config.InitialLastSynchronized,
-		retryDelay:       retryDelay,
-		onStatus:         config.OnStatus,
-		onBatch:          config.OnBatch,
+		client:             config.Client,
+		store:              config.Store,
+		listOptions:        config.ListOptions,
+		pageSize:           pageSize,
+		watchListBatchSize: watchListBatchSize,
+		watchTimeout:       watchTimeout,
+		forceRelist:        config.ForceRelist,
+		lastSynchronized:   config.InitialLastSynchronized,
+		retryDelay:         retryDelay,
+		onStatus:           config.OnStatus,
+		onBatch:            config.OnBatch,
 	}, nil
 }
 
@@ -492,7 +503,7 @@ func (p *Pipeline) watchList(ctx context.Context) watchListResult {
 					result.fallback = true
 					return result
 				}
-				if int64(len(pending)) == p.pageSize {
+				if len(pending) == p.watchListBatchSize {
 					pages++
 					removed := p.applyWatchListUpserts(pending)
 					p.publishWatchListBatch(

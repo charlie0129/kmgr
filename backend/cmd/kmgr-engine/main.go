@@ -70,6 +70,10 @@ func run(arguments []string) int {
 		"kubernetes-burst", cluster.DefaultClientBurst,
 		"aggregate Kubernetes client burst for each authority",
 	)
+	kubernetesListPageSize := flags.Int64(
+		"kubernetes-list-page-size", view.DefaultPipelinePageSize,
+		"maximum objects requested in each conventional Kubernetes LIST page",
+	)
 	warmCache := warmCacheConfiguration{}
 	metricCache := metricCacheConfiguration{}
 	flags.IntVar(
@@ -172,6 +176,15 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
 		return 2
 	}
+	if *kubernetesListPageSize < 1 ||
+		*kubernetesListPageSize > view.MaximumPipelinePageSize {
+		fmt.Fprintf(
+			os.Stderr,
+			"kmgr-engine: --kubernetes-list-page-size must be between 1 and %d\n",
+			view.MaximumPipelinePageSize,
+		)
+		return 2
+	}
 	if err := validateWarmCacheConfiguration(warmCache); err != nil {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
 		return 2
@@ -256,6 +269,7 @@ func run(arguments []string) int {
 		LogSourceOpenConcurrency:    *logSourceOpenConcurrency,
 		KubernetesQPS:               validatedQPS,
 		KubernetesBurst:             *kubernetesBurst,
+		KubernetesListPageSize:      *kubernetesListPageSize,
 		WarmViewLimit:               warmCache.globalViews,
 		WarmObjectLimit:             warmCache.globalObjects,
 		WarmByteLimit:               globalWarmBytes,

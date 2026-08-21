@@ -35,19 +35,21 @@ import (
 )
 
 const (
-	DefaultViewReleaseDelay            = 3 * time.Second
-	DefaultViewBatchDelay              = 35 * time.Millisecond
-	DefaultPendingRowLimit             = 4096
-	DefaultWarmViewLimit               = 24
-	DefaultWarmObjectLimit             = 250_000
-	DefaultWarmMemoryPercent           = 20
-	DefaultWarmViewLimitPerAuthority   = 8
-	DefaultWarmObjectLimitPerAuthority = 100_000
-	DefaultSearchSnapshotLimit         = 4
-	DefaultSearchSnapshotObjectLimit   = 250_000
-	DefaultSearchSnapshotTTL           = 30 * time.Second
-	DefaultOpenGenerationHistory       = 1024
-	defaultOpenProjectionLimit         = 4
+	DefaultViewReleaseDelay                  = 3 * time.Second
+	DefaultViewBatchDelay                    = 35 * time.Millisecond
+	DefaultPendingRowLimit                   = 4096
+	DefaultWarmViewLimit                     = 24
+	DefaultWarmObjectLimit                   = 250_000
+	DefaultWarmMemoryPercent                 = 20
+	DefaultWarmViewLimitPerAuthority         = 8
+	DefaultWarmObjectLimitPerAuthority       = 100_000
+	DefaultSearchSnapshotLimit               = 4
+	DefaultSearchSnapshotObjectLimit         = 250_000
+	DefaultSearchSnapshotTTL                 = 30 * time.Second
+	DefaultOpenGenerationHistory             = 1024
+	DefaultPipelinePageSize            int64 = 500
+	MaximumPipelinePageSize            int64 = 10_000
+	defaultOpenProjectionLimit               = 4
 )
 
 var (
@@ -472,6 +474,12 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		config.OpenProjectionLimit < 0 || config.OpenGenerationHistory < 0 ||
 		config.WarmByteLimit < 0 || config.WarmByteLimitPerAuthority < 0 {
 		return nil, errors.New("view runtime durations and limits must not be negative")
+	}
+	if config.PipelinePageSize > MaximumPipelinePageSize {
+		return nil, fmt.Errorf(
+			"view runtime pipeline page size must not exceed %d",
+			MaximumPipelinePageSize,
+		)
 	}
 	releaseDelay := config.ReleaseDelay
 	if releaseDelay == 0 {

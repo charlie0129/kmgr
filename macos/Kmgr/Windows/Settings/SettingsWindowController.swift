@@ -33,6 +33,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let authorityWarmMemoryPercentField = NSTextField()
     private let kubernetesQPSField = NSTextField()
     private let kubernetesBurstField = NSTextField()
+    private let kubernetesListPageSizeField = NSTextField()
     private let idleMetricProviderLimitField = NSTextField()
     private let idleMetricSampleLimitField = NSTextField()
     private let exactPodMetricsEntryLimitField = NSTextField()
@@ -178,6 +179,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         )
         kubernetesBurstField.setAccessibilityIdentifier(
             "settings.performance.kubernetesBurst"
+        )
+        kubernetesListPageSizeField.setAccessibilityIdentifier(
+            "settings.performance.kubernetesListPageSize"
         )
         idleMetricProviderLimitField.setAccessibilityIdentifier(
             "settings.performance.idleMetricProviders"
@@ -330,6 +334,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 groupHeading("Kubernetes API — aggregate per cluster"),
                 labeledRow("Sustained QPS", control: kubernetesQPSField),
                 labeledRow("Burst", control: kubernetesBurstField),
+                labeledRow(
+                    "LIST page size",
+                    control: kubernetesListPageSizeField,
+                    suffix: "objects"
+                ),
                 groupHeading("Metrics LIST cache — process-wide"),
                 labeledRow(
                     "Idle providers",
@@ -575,6 +584,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             preferences.advancedPerformance.kubernetesQPS
         kubernetesBurstField.integerValue =
             preferences.advancedPerformance.kubernetesBurst
+        kubernetesListPageSizeField.integerValue =
+            preferences.advancedPerformance.kubernetesListPageSize
         idleMetricProviderLimitField.integerValue =
             preferences.advancedPerformance.idleMetricProviderLimit
         idleMetricSampleLimitField.integerValue =
@@ -663,6 +674,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 ),
                 kubernetesQPS: parsedDouble(kubernetesQPSField),
                 kubernetesBurst: parsedInteger(kubernetesBurstField),
+                kubernetesListPageSize: parsedInteger(kubernetesListPageSizeField),
                 idleMetricProviderLimit: parsedInteger(
                     idleMetricProviderLimitField
                 ),

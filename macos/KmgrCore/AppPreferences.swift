@@ -177,6 +177,8 @@ public enum PreferenceControlledMutation: Hashable, Sendable {
 public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     public static let defaultViewReleaseGraceSeconds = 3
     public static let viewReleaseGraceSecondsRange = 1...300
+    public static let defaultKubernetesListPageSize = 500
+    public static let kubernetesListPageSizeRange = 1...10_000
 
     public var viewportOverscanScreensPerSide: Int
     public var viewReleaseGraceSeconds: Int
@@ -188,6 +190,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     public var authorityWarmCacheMemoryPercent: Int
     public var kubernetesQPS: Double
     public var kubernetesBurst: Int
+    public var kubernetesListPageSize: Int
     public var idleMetricProviderLimit: Int
     public var idleMetricSampleLimit: Int
     public var exactPodMetricsEntryLimit: Int
@@ -207,6 +210,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         authorityWarmCacheMemoryPercent: Int = 20,
         kubernetesQPS: Double = 40,
         kubernetesBurst: Int = 80,
+        kubernetesListPageSize: Int = AdvancedPerformancePreferences.defaultKubernetesListPageSize,
         idleMetricProviderLimit: Int = 8,
         idleMetricSampleLimit: Int = 100_000,
         exactPodMetricsEntryLimit: Int = 100_000,
@@ -225,6 +229,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         self.authorityWarmCacheMemoryPercent = authorityWarmCacheMemoryPercent
         self.kubernetesQPS = kubernetesQPS
         self.kubernetesBurst = kubernetesBurst
+        self.kubernetesListPageSize = kubernetesListPageSize
         self.idleMetricProviderLimit = idleMetricProviderLimit
         self.idleMetricSampleLimit = idleMetricSampleLimit
         self.exactPodMetricsEntryLimit = exactPodMetricsEntryLimit
@@ -311,6 +316,12 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
             field: "advancedPerformance.kubernetesBurst",
             title: "Kubernetes burst"
         )
+        if !Self.kubernetesListPageSizeRange.contains(kubernetesListPageSize) {
+            issues.append(AppPreferenceIssue(
+                field: "advancedPerformance.kubernetesListPageSize",
+                message: "Kubernetes LIST page size must be between 1 and 10,000 objects."
+            ))
+        }
         validateCount(
             idleMetricProviderLimit,
             field: "advancedPerformance.idleMetricProviderLimit",
@@ -351,7 +362,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v7"
+    public static let apiVersion = "kmgr.preferences/v8"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
