@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -20,6 +21,7 @@ import (
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
 
 	"github.com/charlie0129/kmgr/backend/internal/apioperation"
+	"github.com/charlie0129/kmgr/backend/internal/credentialexec"
 )
 
 const (
@@ -198,6 +200,7 @@ type SessionRegistry struct {
 	warmCacheAuthorityBudget WarmCacheUsage
 	warmCacheAuthorities     map[string]WarmCacheUsage
 	warmCacheGeneration      uint64
+	credentialExec           *credentialexec.Preparer
 }
 
 type sessionEntry struct {
@@ -271,7 +274,31 @@ func NewSessionRegistry(factory ClientFactory) *SessionRegistry {
 		backends:             make(map[backendKey]*sharedBackend),
 		authorities:          make(map[string]*sharedBackend),
 		warmCacheAuthorities: make(map[string]WarmCacheUsage),
+		credentialExec: credentialexec.NewPreparer(credentialexec.PreparerConfig{
+			PluginTimeout: credentialexec.DefaultPluginTimeout,
+		}),
 	}
+}
+
+// SetCredentialPluginTimeout changes the hard deadline applied to every exec
+// credential process. Like client rate limits, it is immutable while sessions
+// are open so one authority cannot silently change authentication behavior.
+func (r *SessionRegistry) SetCredentialPluginTimeout(timeout time.Duration) error {
+	if timeout < time.Second || timeout > credentialexec.MaximumPluginTimeout {
+		return fmt.Errorf(
+			"credential plugin timeout must be between 1s and %s",
+			credentialexec.MaximumPluginTimeout,
+		)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.sessions) != 0 {
+		return errors.New("cannot change credential plugin timeout while sessions are open")
+	}
+	r.credentialExec = credentialexec.NewPreparer(credentialexec.PreparerConfig{
+		PluginTimeout: timeout,
+	})
+	return nil
 }
 
 // SetAuthorityRetiredObserver installs the process-local lifecycle callback
@@ -394,6 +421,12 @@ func (r *SessionRegistry) Open(catalog *Catalog, contextReference string) (*Sess
 	config, err := catalog.RESTConfig(contextReference)
 	if err != nil {
 		return nil, err
+	}
+	r.mu.RLock()
+	credentialExec := r.credentialExec
+	r.mu.RUnlock()
+	if err := credentialExec.Prepare(config); err != nil {
+		return nil, fmt.Errorf("prepare exec authentication for context %q: %w", contextInfo.Name, err)
 	}
 
 	var retiredAuthorities []string

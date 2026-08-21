@@ -92,12 +92,12 @@ struct ClusterManagerModelsTests {
     func unsupportedAuthentication() {
         let issue = ClusterManagerIssue.unsupportedAuthentication(
             contextName: "cloud",
-            mechanism: "exec credential plugin"
+            mechanism: "auth-provider"
         )
         let cloud = context(
             name: "cloud",
             authentication: .unsupported(
-                mechanism: "exec credential plugin",
+                mechanism: "auth-provider",
                 issue: issue
             )
         )
@@ -109,7 +109,7 @@ struct ClusterManagerModelsTests {
         #expect(!model.canOpenSelectedContext)
         #expect(model.selectedContextIssue?.category == .unsupported)
         #expect(model.selectedContextIssue?.contextName == "cloud")
-        #expect(model.selectedContextIssue?.safeDetails["mechanism"] == "exec credential plugin")
+        #expect(model.selectedContextIssue?.safeDetails["mechanism"] == "auth-provider")
         #expect(model.selectedContextIssue?.message.contains("cloud") == true)
     }
 

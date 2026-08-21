@@ -28,8 +28,8 @@ const DefaultNamespace = "default"
 type UnsupportedAuthMechanism string
 
 const (
-	UnsupportedAuthExec     UnsupportedAuthMechanism = "exec"
-	UnsupportedAuthProvider UnsupportedAuthMechanism = "auth-provider"
+	UnsupportedAuthInteractiveExec UnsupportedAuthMechanism = "interactive exec"
+	UnsupportedAuthProvider        UnsupportedAuthMechanism = "auth-provider"
 )
 
 // ContextInfo is credential-free metadata suitable for showing in the
@@ -79,7 +79,7 @@ func (e *ContextNotFoundError) Error() string {
 }
 
 // UnsupportedAuthenticationError is returned before client-go is allowed to
-// construct a transport. In particular, no exec credential command is run.
+// construct a transport.
 type UnsupportedAuthenticationError struct {
 	ContextName  string
 	AuthInfoName string
@@ -144,10 +144,9 @@ func DiscoverWithRules(rules *clientcmd.ClientConfigLoadingRules) (*Catalog, err
 		return nil, errors.New("kubeconfig loading rules must not be nil")
 	}
 
-	// client-go also resolves a relative exec.command as part of loading. kmgr
-	// never needs that path because exec authentication is unsupported. Resolve
-	// only passive credential files so an unavailable plugin cannot prevent the
-	// chooser from identifying it as unsupported.
+	// Resolve paths ourselves after loading so discovery can preserve exact
+	// per-file provenance while still applying client-go's relative credential
+	// and exec-command semantics.
 	loadingRules := *rules
 	loadingRules.DoNotResolvePaths = true
 	config, err := loadingRules.Load()
@@ -455,10 +454,7 @@ func resolveCredentialPaths(config *clientcmdapi.Config) error {
 		if err != nil {
 			return err
 		}
-		if err := clientcmd.ResolvePaths(
-			[]*string{&authInfo.ClientCertificate, &authInfo.ClientKey, &authInfo.TokenFile},
-			base,
-		); err != nil {
+		if err := clientcmd.ResolvePaths(clientcmd.GetAuthInfoFileReferences(authInfo), base); err != nil {
 			return err
 		}
 	}
@@ -478,8 +474,9 @@ func unsupportedAuthentication(authInfo *clientcmdapi.AuthInfo) []UnsupportedAut
 		return nil
 	}
 	var mechanisms []UnsupportedAuthMechanism
-	if authInfo.Exec != nil {
-		mechanisms = append(mechanisms, UnsupportedAuthExec)
+	if authInfo.Exec != nil &&
+		authInfo.Exec.InteractiveMode == clientcmdapi.AlwaysExecInteractiveMode {
+		mechanisms = append(mechanisms, UnsupportedAuthInteractiveExec)
 	}
 	if authInfo.AuthProvider != nil {
 		mechanisms = append(mechanisms, UnsupportedAuthProvider)
@@ -501,6 +498,9 @@ func authenticationHint(authInfo *clientcmdapi.AuthInfo) string {
 	}
 
 	var methods []string
+	if authInfo.Exec != nil {
+		methods = append(methods, "Exec credential plugin")
+	}
 	if authInfo.ClientCertificate != "" || len(authInfo.ClientCertificateData) != 0 {
 		methods = append(methods, "Client certificate")
 	}

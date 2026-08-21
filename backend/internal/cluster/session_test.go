@@ -336,9 +336,14 @@ func TestDifferentCatalogSnapshotsDoNotSilentlyReuseCredentials(t *testing.T) {
 	}
 }
 
-func TestSessionRegistryRejectsUnsupportedAuthenticationBeforeFactory(t *testing.T) {
+func TestSessionRegistryPreparesExecAuthenticationWithoutRunningPlugin(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "config")
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config")
+	pluginPath := filepath.Join(directory, "credential-plugin")
+	if err := os.WriteFile(pluginPath, []byte("#!/bin/sh\nexit 99\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	contents := `
 apiVersion: v1
 kind: Config
@@ -350,7 +355,7 @@ users:
   user:
     exec:
       apiVersion: client.authentication.k8s.io/v1
-      command: never-run
+      command: ./credential-plugin
       interactiveMode: Never
 contexts:
 - name: local
@@ -362,8 +367,59 @@ contexts:
 	catalog := discoverExplicit(t, path)
 	factory := &recordingFactory{}
 	registry := NewSessionRegistry(factory)
+	if err := registry.SetCredentialPluginTimeout(3 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Open(catalog, requireContextNamed(t, catalog, "local").ID); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if len(factory.configs) != 1 || factory.configs[0].ExecProvider == nil {
+		t.Fatalf("factory configs = %#v", factory.configs)
+	}
+	provider := factory.configs[0].ExecProvider
+	resolvedPluginPath := filepath.Clean(pluginPath)
+	if !provider.StdinUnavailable || provider.InteractiveMode != "Never" {
+		t.Fatalf("prepared interactivity = %#v", provider)
+	}
+	if len(provider.Args) < 6 || provider.Args[0] != "credential-plugin-proxy" ||
+		provider.Args[2] != "3s" ||
+		provider.Args[3] != "--command" || provider.Args[4] != resolvedPluginPath ||
+		provider.Args[5] != "--" {
+		t.Fatalf("prepared proxy arguments = %#v", provider.Args)
+	}
+	if provider.PluginPolicy.PolicyType != "Allowlist" || len(provider.PluginPolicy.Allowlist) != 1 ||
+		provider.PluginPolicy.Allowlist[0].Command != provider.Command {
+		t.Fatalf("prepared proxy policy = %#v", provider.PluginPolicy)
+	}
+}
+
+func TestSessionRegistryRejectsLegacyAuthProviderBeforeFactory(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config")
+	contents := `
+apiVersion: v1
+kind: Config
+clusters:
+- name: target
+  cluster: {server: https://cluster.example.test}
+users:
+- name: plugin
+  user:
+    auth-provider:
+      name: oidc
+      config: {client-secret: must-not-leak}
+contexts:
+- name: local
+  context: {cluster: target, user: plugin}
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := discoverExplicit(t, path)
+	factory := &recordingFactory{}
+	registry := NewSessionRegistry(factory)
 	if _, err := registry.Open(catalog, requireContextNamed(t, catalog, "local").ID); err == nil {
-		t.Fatal("unsupported authentication was accepted")
+		t.Fatal("legacy auth provider was accepted")
 	}
 	if len(factory.configs) != 0 {
 		t.Fatal("client factory ran for unsupported authentication")

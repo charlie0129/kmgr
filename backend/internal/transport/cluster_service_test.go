@@ -804,6 +804,9 @@ func TestConnectionErrorClassifiesSafeConnectionFailures(t *testing.T) {
 		reason   string
 	}{
 		{name: "authentication", err: apierrors.NewUnauthorized("private server response"), category: kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION, reason: "AuthenticationRejected"},
+		{name: "credential timeout", err: errors.New("getting credentials: exec: executable helper failed with exit code 124"), category: kmgrv1.ErrorCategory_ERROR_CATEGORY_TIMEOUT, reason: "CredentialPluginTimedOut"},
+		{name: "credential failure", err: errors.New("getting credentials: exec: executable helper failed with exit code 70"), category: kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION, reason: "CredentialPluginFailed"},
+		{name: "invalid credential output", err: errors.New("getting credentials: exec plugin didn't return a status field"), category: kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION, reason: "CredentialPluginFailed"},
 		{name: "tls", err: x509.HostnameError{Certificate: &x509.Certificate{}, Host: "cluster.test"}, category: kmgrv1.ErrorCategory_ERROR_CATEGORY_TLS, reason: "TLSVerificationFailed"},
 		{name: "unreachable", err: &net.DNSError{Err: "no such host", Name: "cluster.test"}, category: kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE, reason: "ClusterUnreachable"},
 	}

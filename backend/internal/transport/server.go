@@ -97,6 +97,13 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	}
 	catalogs := NewCatalogRegistry(options.CatalogLoader)
 	sessions := cluster.NewSessionRegistry(options.ClientFactory)
+	probeTimeout := options.ProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = DefaultConnectionProbeTimeout
+	}
+	if err := sessions.SetCredentialPluginTimeout(probeTimeout); err != nil {
+		return nil, fmt.Errorf("configure credential plugin timeout: %w", err)
+	}
 	if options.KubernetesQPS != 0 || options.KubernetesBurst != 0 {
 		if err := sessions.SetRateLimit(options.KubernetesQPS, options.KubernetesBurst); err != nil {
 			return nil, fmt.Errorf("configure Kubernetes client rate limit: %w", err)
@@ -106,7 +113,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		Catalogs:     catalogs,
 		Sessions:     sessions,
 		Prober:       options.SessionProber,
-		ProbeTimeout: options.ProbeTimeout,
+		ProbeTimeout: probeTimeout,
 		Stopping:     engine.Done(),
 	})
 	columnsCompiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)

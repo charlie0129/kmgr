@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	"github.com/charlie0129/kmgr/backend/internal/credentialexec"
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	execstream "github.com/charlie0129/kmgr/backend/internal/stream/exec"
 	streamlogs "github.com/charlie0129/kmgr/backend/internal/stream/logs"
@@ -49,6 +50,10 @@ func main() {
 }
 
 func run(arguments []string) int {
+	if len(arguments) > 0 && arguments[0] == credentialexec.ProxySubcommand {
+		return credentialexec.RunProxy(arguments[1:], os.Stdin, os.Stdout, os.Stderr)
+	}
+
 	flags := flag.NewFlagSet("kmgr-engine", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	showVersion := flags.Bool("version", false, "print the engine version")

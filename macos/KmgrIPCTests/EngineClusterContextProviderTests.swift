@@ -23,14 +23,14 @@ struct EngineClusterContextProviderTests {
         var unsupported = Kmgr_V1_KubeconfigContext()
         unsupported.name = "cloud"
         unsupported.serverHostname = "api.example.com"
-        unsupported.authenticationHint = "exec"
+        unsupported.authenticationHint = "auth-provider"
         unsupported.authenticationSupported = false
         var authError = Kmgr_V1_StructuredError()
         authError.category = .unsupported
         authError.reason = "UnsupportedAuthentication"
-        authError.message = "Context cloud uses unsupported exec authentication."
+        authError.message = "Context cloud uses unsupported auth-provider authentication."
         authError.contextName = "cloud"
-        authError.safeDetails = ["mechanism": "exec"]
+        authError.safeDetails = ["mechanism": "auth-provider"]
         unsupported.unsupportedAuthenticationError = authError
 
         let rpc = FakeClusterRPC(contexts: [supported, unsupported])
@@ -43,7 +43,7 @@ struct EngineClusterContextProviderTests {
         #expect(contexts[0].sourcePaths == ["/tmp/a", "/tmp/b"])
         #expect(contexts[0].authentication.isSupported)
         #expect(contexts[1].authentication.issue?.category == .unsupported)
-        #expect(contexts[1].authentication.issue?.safeDetails["mechanism"] == "exec")
+        #expect(contexts[1].authentication.issue?.safeDetails["mechanism"] == "auth-provider")
 
         let captured = await rpc.capturedListRequest()
         #expect(captured?.reload == true)

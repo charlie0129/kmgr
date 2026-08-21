@@ -457,7 +457,7 @@ current-context: files
 	}
 }
 
-func TestUnsupportedAuthenticationIsReportedAndNeverExecuted(t *testing.T) {
+func TestExecAuthenticationIsLoadedWithoutRunningAndLegacyProvidersAreRejected(t *testing.T) {
 	tempDirectory := t.TempDir()
 	configPath := filepath.Join(tempDirectory, "config")
 	markerPath := filepath.Join(tempDirectory, "plugin-ran")
@@ -491,6 +491,12 @@ users:
       interactiveMode: Never
     auth-provider:
       name: oidc
+- name: interactive-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: ./credential-plugin
+      interactiveMode: Always
 contexts:
 - name: exec
   context: {cluster: cluster, user: exec-user}
@@ -498,13 +504,28 @@ contexts:
   context: {cluster: cluster, user: provider-user}
 - name: both
   context: {cluster: cluster, user: both-user}
+- name: interactive
+  context: {cluster: cluster, user: interactive-user}
 `)
 
 	catalog := discoverExplicit(t, configPath)
+	execInfo := requireContextNamed(t, catalog, "exec")
+	if len(execInfo.UnsupportedAuthentications) != 0 ||
+		execInfo.AuthenticationHint != "Exec credential plugin" {
+		t.Fatalf("exec context metadata = %#v", execInfo)
+	}
+	execConfig, err := catalog.RESTConfig(execInfo.ID)
+	if err != nil {
+		t.Fatalf("RESTConfig(exec): %v", err)
+	}
+	if execConfig.ExecProvider == nil || execConfig.ExecProvider.Command != pluginPath {
+		t.Fatalf("exec REST config = %#v", execConfig.ExecProvider)
+	}
+
 	checks := map[string][]UnsupportedAuthMechanism{
-		"exec":     {UnsupportedAuthExec},
-		"provider": {UnsupportedAuthProvider},
-		"both":     {UnsupportedAuthExec, UnsupportedAuthProvider},
+		"provider":    {UnsupportedAuthProvider},
+		"both":        {UnsupportedAuthProvider},
+		"interactive": {UnsupportedAuthInteractiveExec},
 	}
 	for contextName, wantMechanisms := range checks {
 		contextInfo := requireContextNamed(t, catalog, contextName)

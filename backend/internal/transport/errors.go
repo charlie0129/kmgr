@@ -5,10 +5,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	"github.com/charlie0129/kmgr/backend/internal/credentialexec"
 	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -23,6 +25,8 @@ func kubeconfigError(err error, operation string) *kmgrv1.StructuredError {
 	}
 	var notFound *cluster.ContextNotFoundError
 	var unsupported *cluster.UnsupportedAuthenticationError
+	var pluginNotFound *credentialexec.ExecutableNotFoundError
+	var interactivePlugin *credentialexec.InteractiveModeUnsupportedError
 	switch {
 	case errors.As(err, &notFound):
 		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
@@ -33,6 +37,14 @@ func kubeconfigError(err error, operation string) *kmgrv1.StructuredError {
 		structured.Reason = "UnsupportedAuthentication"
 		structured.Message = unsupported.Error()
 		structured.ContextName = unsupported.ContextName
+	case errors.As(err, &pluginNotFound):
+		structured.Reason = "CredentialPluginNotFound"
+		structured.Message = "The kubeconfig credential plugin could not be found."
+		structured.SafeDetails = map[string]string{"command": pluginNotFound.Command}
+	case errors.As(err, &interactivePlugin):
+		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED
+		structured.Reason = "InteractiveCredentialPluginUnsupported"
+		structured.Message = "This credential plugin requires terminal input, which kmgr does not provide."
 	case isLocalTLSConfigurationError(err):
 		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TLS
 		structured.Reason = "TLSConfigurationInvalid"
@@ -66,6 +78,19 @@ func connectionError(err error, contextName, serverHostname string) *kmgrv1.Stru
 	var apiStatus apierrors.APIStatus
 	kubeerrors.Enrich(structured, err)
 	switch {
+	case credentialProxyExited(err, credentialexec.ProxyExitTimedOut):
+		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TIMEOUT
+		structured.Reason = "CredentialPluginTimedOut"
+		structured.Message = "The kubeconfig credential plugin timed out."
+	case credentialProxyExited(err, credentialexec.ProxyExitPluginNotFound):
+		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION
+		structured.Reason = "CredentialPluginNotFound"
+		structured.Message = "The kubeconfig credential plugin disappeared before it could run."
+		structured.Retryable = false
+	case isCredentialPluginError(err):
+		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHENTICATION
+		structured.Reason = "CredentialPluginFailed"
+		structured.Message = "The kubeconfig credential plugin failed."
 	case errors.Is(err, context.DeadlineExceeded):
 		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TIMEOUT
 		structured.Reason = "ConnectionTimedOut"
@@ -105,6 +130,20 @@ func connectionError(err error, contextName, serverHostname string) *kmgrv1.Stru
 		structured.Message = "The network timed out while connecting to the Kubernetes API server."
 	}
 	return structured
+}
+
+func credentialProxyExited(err error, code int) bool {
+	return isCredentialPluginError(err) &&
+		strings.Contains(err.Error(), "exec: executable ") &&
+		strings.Contains(err.Error(), fmt.Sprintf("failed with exit code %d", code))
+}
+
+func isCredentialPluginError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiStatus apierrors.APIStatus
+	return !errors.As(err, &apiStatus) && strings.Contains(err.Error(), "getting credentials:")
 }
 
 func unsupportedAuthenticationError(info cluster.ContextInfo) *kmgrv1.StructuredError {

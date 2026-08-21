@@ -15,7 +15,7 @@ contexts and does not substitute static demo data.
 - Xcode 16.4 or later, including the Swift 6.1 toolchain
 - Go 1.26 or later
 - A kubeconfig using static credentials, certificates, basic authentication,
-  or another authentication form that does not invoke an external plugin
+  or a non-interactive `exec` credential plugin
 
 The macOS 15 deployment target is imposed by the maintained gRPC Swift 2 NIO
 transport used for authenticated Unix-domain-socket IPC. The app is intended
@@ -267,10 +267,15 @@ other network-accessible management API. Kubernetes operations use pinned
 `client-go` APIs and structured arguments—Kmgr never constructs or shells out
 to `kubectl` commands.
 
-Kmgr does not copy kubeconfig credentials into app storage. It rejects
-`users[].user.exec` and legacy `auth-provider` entries before connection and
-never invokes cloud CLIs or custom credential programs. It also does not
-provide an ignore-TLS switch.
+Kmgr does not copy kubeconfig credentials into app storage. It supports
+non-interactive `users[].user.exec` credential plugins and invokes them only
+after a context is explicitly opened. A bounded login-zsh probe supplies the
+user's normal command search path; the selected executable then runs through a
+short-lived engine proxy with the connection deadline, bounded output, no
+terminal input, and process-group termination. Legacy `auth-provider` entries
+remain rejected. Opening an exec-auth context therefore trusts its kubeconfig
+command to run with the current user's privileges, just as opening it with
+`kubectl` would. Kmgr also does not provide an ignore-TLS switch.
 
 Diagnostics contain RPC method, duration, status, and safe structural context;
 they must not contain bearer tokens, client keys, Secret contents, exec I/O,
@@ -406,8 +411,8 @@ discoverable listable type.
 ## Known limitations
 
 - macOS only; the native UI requires macOS 15 with the current dependency set.
-- External kubeconfig exec plugins and legacy auth-provider integrations are
-  deliberately unsupported in v1.
+- Kubeconfig exec plugins requiring `interactiveMode: Always` and legacy
+  `auth-provider` integrations are deliberately unsupported.
 - Supported workloads resolve to a bounded, UID-pinned static Pod snapshot;
   following dynamic workload membership is not implemented.
 - Exec reconnect starts a new process; it cannot preserve the original remote
@@ -424,12 +429,15 @@ discoverable listable type.
 
 ## Troubleshooting
 
-- **A context is disabled:** inspect the authentication label. `exec` and
-  `auth-provider` kubeconfig users are rejected intentionally; use a supported
-  static/test context rather than asking Kmgr to invoke a cloud CLI.
-- **Open fails:** the authenticated `/version` probe has an eight-second
-  deadline. Check the server hostname, VPN/network, credential validity, CA,
-  and kubeconfig TLS server-name settings. The failed provisional session is
+- **A context is disabled:** inspect the authentication label. Legacy
+  `auth-provider` users and exec plugins that always require terminal input are
+  rejected intentionally.
+- **An exec-auth context does not open:** ensure its command is available from
+  a fresh login zsh and can authenticate without terminal input. Credential
+  plugins share the connection deadline and are terminated when it expires.
+- **Open fails:** the authenticated `/version` probe has a bounded deadline.
+  Check the server hostname, VPN/network, credential validity, CA, and
+  kubeconfig TLS server-name settings. The failed provisional session is
   closed rather than leaving an apparently connected window.
 - **No rows or a reconnecting banner:** keep the cached table visible and read
   the connection/watch state. A stale resource version can cause a background
