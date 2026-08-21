@@ -280,50 +280,61 @@ struct ApplicationWindowPresentationTests {
         }?.stringValue.contains("unsupported version") == true)
     }
 
-    @Test("a fresh workspace copies the exact-context bookmark frame once")
-    func freshWorkspaceSeedsIndependentFrame() throws {
+    @Test("fresh workspaces share the global last size")
+    func freshWorkspacesUseGlobalSize() throws {
         let columnsDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("kmgr-bookmark-frame-\(UUID().uuidString)")
+            .appendingPathComponent("kmgr-global-window-size-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: columnsDirectory) }
-        let bookmarkFrameName = "ClusterWorkspaceBookmark-test-\(UUID().uuidString)"
-        NSWindow.removeFrame(usingName: bookmarkFrameName)
-        defer { NSWindow.removeFrame(usingName: bookmarkFrameName) }
         let state = bookmarkState(filter: "name:remembered")
+        let rememberedSize = ClusterWorkspaceWindowSize(width: 960, height: 640)
 
-        let source = makeColumnPropagationWorkspace(
+        let first = makeColumnPropagationWorkspace(
             session: bookmarkSession(),
             provider: BookmarkWorkspaceProvider(),
             optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
             columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
-            restorationState: state
+            restorationState: state,
+            initialWindowFrameSize: rememberedSize
         )
-        let sourceWindow = try #require(source.window)
-        let rememberedFrame = sourceWindow.frame.offsetBy(dx: 43, dy: -31)
-        sourceWindow.setFrame(rememberedFrame, display: false)
-        sourceWindow.saveFrame(usingName: bookmarkFrameName)
-        sourceWindow.setFrameAutosaveName("")
-        source.close()
-
-        let fresh = makeColumnPropagationWorkspace(
+        let second = makeColumnPropagationWorkspace(
             session: bookmarkSession(sessionID: "bookmark-session-2"),
             provider: BookmarkWorkspaceProvider(),
             optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
             columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
             restorationState: state,
-            seedFrameAutosaveName: bookmarkFrameName
+            initialWindowFrameSize: rememberedSize
         )
-        let freshWindow = try #require(fresh.window)
+        let firstWindow = try #require(first.window)
+        let secondWindow = try #require(second.window)
         defer {
-            freshWindow.setFrameAutosaveName("")
-            fresh.close()
+            firstWindow.setFrameAutosaveName("")
+            secondWindow.setFrameAutosaveName("")
+            first.close()
+            second.close()
         }
 
-        #expect(freshWindow.frame == rememberedFrame)
-        #expect(freshWindow.frameAutosaveName != bookmarkFrameName)
+        let visibleSize = NSScreen.main?.visibleFrame.size
+        let expectedWidth = max(
+            firstWindow.minSize.width,
+            min(
+                CGFloat(rememberedSize.width),
+                visibleSize?.width ?? CGFloat(rememberedSize.width)
+            )
+        )
+        let expectedHeight = max(
+            firstWindow.minSize.height,
+            min(
+                CGFloat(rememberedSize.height),
+                visibleSize?.height ?? CGFloat(rememberedSize.height)
+            )
+        )
+        #expect(firstWindow.frame.size == secondWindow.frame.size)
+        #expect(abs(firstWindow.frame.width - expectedWidth) < 0.5)
+        #expect(abs(firstWindow.frame.height - expectedHeight) < 0.5)
     }
 
-    @Test("activation checkpoints carry exact context and frame changes debounce")
-    func activationAndFrameCheckpointPolicy() async throws {
+    @Test("activation checkpoints exact context and global size changes debounce")
+    func activationAndWindowSizeCheckpointPolicy() async throws {
         let columnsDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("kmgr-bookmark-callbacks-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: columnsDirectory) }
@@ -336,12 +347,16 @@ struct ApplicationWindowPresentationTests {
         )
         let window = try #require(controller.window)
         var activations: [ClusterWindowRestorationRecord] = []
-        var frameCheckpoints: [ClusterWindowRestorationRecord] = []
+        var restorations: [ClusterWindowRestorationRecord] = []
+        var sizeCheckpoints: [ClusterWorkspaceWindowSize] = []
         controller.onActivationCheckpoint = { activations.append($0) }
-        controller.onFrameCheckpoint = { frameCheckpoints.append($0) }
+        controller.onRestorationCheckpoint = { restorations.append($0) }
+        controller.onWindowSizeCheckpoint = { sizeCheckpoints.append($0) }
         controller.showWindow(nil)
         window.orderOut(nil)
         activations.removeAll(keepingCapacity: true)
+        restorations.removeAll(keepingCapacity: true)
+        sizeCheckpoints.removeAll(keepingCapacity: true)
 
         controller.windowDidBecomeKey(Notification(
             name: NSWindow.didBecomeKeyNotification,
@@ -350,20 +365,31 @@ struct ApplicationWindowPresentationTests {
         #expect(activations.count == 1)
         #expect(activations.first?.state.contextReference == bookmarkSession().contextReference)
         #expect(activations.first?.state.filter == "name:active")
+        #expect(sizeCheckpoints.count == 1)
 
-        controller.windowDidMove(Notification(
-            name: NSWindow.didMoveNotification,
+        controller.windowDidResignKey(Notification(
+            name: NSWindow.didResignKeyNotification,
             object: window
         ))
-        controller.windowDidMove(Notification(
-            name: NSWindow.didMoveNotification,
+        #expect(restorations.last?.state.filter == "name:active")
+
+        sizeCheckpoints.removeAll(keepingCapacity: true)
+        controller.windowDidResize(Notification(
+            name: NSWindow.didResizeNotification,
+            object: window
+        ))
+        controller.windowDidResize(Notification(
+            name: NSWindow.didResizeNotification,
             object: window
         ))
         try await Task.sleep(for: .milliseconds(350))
-        #expect(frameCheckpoints.count == 1)
+        #expect(sizeCheckpoints.count == 1)
+        #expect(abs((sizeCheckpoints.last?.width ?? 0) - window.frame.width) < 0.5)
+        #expect(abs((sizeCheckpoints.last?.height ?? 0) - window.frame.height) < 0.5)
 
         controller.onActivationCheckpoint = nil
-        controller.onFrameCheckpoint = nil
+        controller.onRestorationCheckpoint = nil
+        controller.onWindowSizeCheckpoint = nil
         window.setFrameAutosaveName("")
         controller.close()
     }

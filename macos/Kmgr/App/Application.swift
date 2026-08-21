@@ -33,6 +33,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let engineMetricsRefreshSeconds: Int
     private let columnConfigurationCoordinator: ColumnConfigurationCoordinator
     private let restorationStore: WorkspaceRestorationStore
+    private let workspaceWindowSizeStore: ClusterWorkspaceWindowSizeStore
     private var pendingRestorationNotice: ClusterManagerInitialNotice?
     private let settingsWindowController: SettingsWindowController
     private let portForwardCoordinator: PortForwardCoordinator
@@ -70,6 +71,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.engineSupervisor = supervisor
         let restorationStore = WorkspaceRestorationStore()
         self.restorationStore = restorationStore
+        self.workspaceWindowSizeStore = ClusterWorkspaceWindowSizeStore()
         self.pendingRestorationNotice = restorationStore.loadIssue.map {
             ClusterManagerInitialNotice(
                 title: "Workspace restoration skipped",
@@ -351,6 +353,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func showClusterManager() {
         // Every Command-N starts a fresh chooser so the user can open several
         // independent workspaces, including the same context more than once.
+        workspaceControllers.values.first(where: {
+            $0.window?.isKeyWindow == true
+        })?.checkpointActiveWorkspace()
         let initialNotice = pendingRestorationNotice
         pendingRestorationNotice = nil
         let controller = ClusterManagerWindowController(
@@ -381,7 +386,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 restoration: ClusterWindowRestorationRecord(
                     state: initialState
                 ),
-                seedFrameAutosaveName: bookmark?.frameAutosaveName
+                initialWindowFrameSize: workspaceWindowSizeStore.lastSize
             )
         }
         controller.onClose = { [weak self] in
@@ -393,7 +398,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func openWorkspace(
         for session: OpenedClusterSession,
         restoration: ClusterWindowRestorationRecord,
-        seedFrameAutosaveName: String? = nil,
+        initialWindowFrameSize: ClusterWorkspaceWindowSize? = nil,
         activatesContextBookmarkOnOpen: Bool = true,
         startsAuthenticated: Bool = true
     ) -> ClusterWorkspaceWindowController {
@@ -439,7 +444,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 try preferencesStore.save(preferences)
             },
             restoration: restoration,
-            seedFrameAutosaveName: seedFrameAutosaveName,
+            initialWindowFrameSize: initialWindowFrameSize,
             startsAuthenticated: startsAuthenticated,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
@@ -486,31 +491,23 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.onRestorationCheckpoint = { [weak self] record in
             try? self?.restorationStore.upsert(record)
         }
+        controller.onWindowSizeCheckpoint = { [weak self] size in
+            _ = self?.workspaceWindowSizeStore.save(size)
+        }
         try? restorationStore.upsert(restoration)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         // Initial AppKit activation can precede asynchronous resource
         // restoration. Publish the known opening state explicitly, then
         // observe only later user-driven activations.
-        if activatesContextBookmarkOnOpen,
-            let bookmark = try? restorationStore.activate(restoration)
-        {
-            controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+        if activatesContextBookmarkOnOpen {
+            // The new window is now the source for this exact context's
+            // navigation state. Its size is intentionally global instead.
+            _ = try? restorationStore.activate(restoration)
         }
-        controller.onActivationCheckpoint = { [weak self, weak controller] record in
-            guard let self, !isTerminating, let controller,
-                let bookmark = try? restorationStore.activate(record)
-            else { return }
-            controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
-        }
-        controller.onFrameCheckpoint = { [weak self, weak controller] record in
-            guard let self, let controller,
-                let bookmark = restorationStore.bookmark(
-                    for: record.state.contextReference
-                ),
-                bookmark.sourceWindowID == record.id
-            else { return }
-            controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+        controller.onActivationCheckpoint = { [weak self] record in
+            guard let self, !isTerminating else { return }
+            _ = try? restorationStore.activate(record)
         }
         return controller
     }

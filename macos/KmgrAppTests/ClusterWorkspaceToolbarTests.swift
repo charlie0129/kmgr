@@ -2662,7 +2662,7 @@ func makeColumnPropagationWorkspace(
         NSEvent.pressedMouseButtons == 0
     },
     restorationState: ClusterWindowRestorationState? = nil,
-    seedFrameAutosaveName: String? = nil
+    initialWindowFrameSize: ClusterWorkspaceWindowSize? = nil
 ) -> ClusterWorkspaceWindowController {
     let portForwards = PortForwardCoordinator(provider: NoopPortForwardProvider())
     let restoration = restorationState.map {
@@ -2695,7 +2695,7 @@ func makeColumnPropagationWorkspace(
         logDisplayConfiguration: .default,
         confirmationPreferences: { ConfirmationPreferences() },
         restoration: restoration,
-        seedFrameAutosaveName: seedFrameAutosaveName,
+        initialWindowFrameSize: initialWindowFrameSize,
         onShowPortForwards: {}
     )
 }

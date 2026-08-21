@@ -77,11 +77,6 @@ public struct ClusterContextWorkspaceBookmark: Hashable, Codable, Sendable, Iden
 
     public var contextReference: String { state.contextReference }
 
-    /// Active windows copy their frame here in addition to their independent
-    /// per-window autosave key. A new window reads this key once, then receives
-    /// a fresh independent key of its own.
-    public var frameAutosaveName: String { "ClusterWorkspaceBookmark-\(id)" }
-
     public func validated() throws -> Self {
         var issues = state.validationIssues()
         if !isValidRestorationIdentifier(id) {
@@ -120,8 +115,8 @@ public struct WorkspaceRestorationLoadIssue: Error, LocalizedError, Hashable, Se
 }
 
 /// One versioned, allow-listed document for open cluster windows and reusable
-/// exact-context bookmarks. Frame rectangles remain in AppKit's normal
-/// autosave keys; this document stores only opaque autosave identities.
+/// exact-context navigation bookmarks. Per-window frame rectangles remain in
+/// AppKit's normal autosave keys; global new-window sizing is stored separately.
 @MainActor
 public final class WorkspaceRestorationStore {
     public static let apiVersion = "kmgr.workspace-restoration/v2"

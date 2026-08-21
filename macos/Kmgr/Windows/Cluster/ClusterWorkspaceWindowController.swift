@@ -100,7 +100,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onOpenTerminalWindow: ((TerminalWindowController) -> Void)?
     var onRestorationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
     var onActivationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
-    var onFrameCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
+    var onWindowSizeCheckpoint: ((ClusterWorkspaceWindowSize) -> Void)?
     var contextualShortcutsDidChange: (() -> Void)?
 
     var contextualShortcutSnapshot: ContextualShortcutSnapshot? {
@@ -138,7 +138,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var resourceMutationController: ResourceMutationWindowController?
     private var yamlSnapshotWindowControllers: [ResourceUID: YAMLSnapshotWindowController] = [:]
     private var didStartWorkspace = false
-    private var frameCheckpointTask: Task<Void, Never>?
+    private var windowSizeCheckpointTask: Task<Void, Never>?
 
     init(
         session: OpenedClusterSession,
@@ -180,7 +180,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             $0.isKeyWindow
         },
         restoration: ClusterWindowRestorationRecord,
-        seedFrameAutosaveName: String? = nil,
+        initialWindowFrameSize: ClusterWorkspaceWindowSize? = nil,
         startsAuthenticated: Bool = true,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
@@ -214,11 +214,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         window.toolbarStyle = .unified
         window.minSize = NSSize(width: 820, height: 520)
         window.tabbingMode = .disallowed
-        window.center()
-        if let seedFrameAutosaveName {
-            window.setFrameUsingName(seedFrameAutosaveName)
-        }
-        window.setFrameAutosaveName(restoration.frameAutosaveName)
 
         workspaceController = ClusterWorkspaceViewController(
             session: session,
@@ -248,6 +243,23 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         window.delegate = self
         window.contentViewController = workspaceController
         window.toolbar = workspaceController.makeToolbar()
+        if let initialWindowFrameSize, initialWindowFrameSize.isValid {
+            var frame = window.frame
+            let visibleSize = NSScreen.main?.visibleFrame.size
+            let requestedWidth = CGFloat(initialWindowFrameSize.width)
+            let requestedHeight = CGFloat(initialWindowFrameSize.height)
+            frame.size.width = max(
+                window.minSize.width,
+                min(requestedWidth, visibleSize?.width ?? requestedWidth)
+            )
+            frame.size.height = max(
+                window.minSize.height,
+                min(requestedHeight, visibleSize?.height ?? requestedHeight)
+            )
+            window.setFrame(frame, display: false)
+        }
+        window.center()
+        window.setFrameAutosaveName(restoration.frameAutosaveName)
     }
 
     private func installWorkspaceCallbacks() {
@@ -371,43 +383,58 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        restoration.state = workspaceController.restorationState()
-        onActivationCheckpoint?(restoration)
+        checkpointActiveWorkspace()
     }
 
-    func windowDidMove(_ notification: Notification) {
-        scheduleFrameCheckpoint()
+    func windowDidResignKey(_ notification: Notification) {
+        restoration.state = workspaceController.restorationState()
+        onRestorationCheckpoint?(restoration)
+    }
+
+    /// Command-N snapshots editor text before its normal debounce has fired,
+    /// then marks this window as the source for its exact cluster context.
+    func checkpointActiveWorkspace() {
+        restoration.state = workspaceController.restorationState()
+        onActivationCheckpoint?(restoration)
+        checkpointWindowSize()
     }
 
     func windowDidResize(_ notification: Notification) {
-        scheduleFrameCheckpoint()
+        scheduleWindowSizeCheckpoint()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
-        scheduleFrameCheckpoint()
+        scheduleWindowSizeCheckpoint()
     }
 
-    private func scheduleFrameCheckpoint() {
-        frameCheckpointTask?.cancel()
-        frameCheckpointTask = Task { @MainActor [weak self] in
+    private func scheduleWindowSizeCheckpoint() {
+        windowSizeCheckpointTask?.cancel()
+        windowSizeCheckpointTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .milliseconds(250))
             } catch {
                 return
             }
             guard let self, !Task.isCancelled else { return }
-            frameCheckpointTask = nil
-            restoration.state = workspaceController.restorationState()
-            onFrameCheckpoint?(restoration)
+            windowSizeCheckpointTask = nil
+            checkpointWindowSize()
         }
+    }
+
+    private func checkpointWindowSize() {
+        guard let size = window?.frame.size else { return }
+        onWindowSizeCheckpoint?(ClusterWorkspaceWindowSize(
+            width: size.width,
+            height: size.height
+        ))
     }
 
     /// Cancel helper-backed work without closing windows, changing restoration
     /// state, or issuing one CloseSession RPC per workspace. AppKit keeps the
     /// windows alive until asynchronous application termination is approved.
     func prepareForTermination() {
-        frameCheckpointTask?.cancel()
-        frameCheckpointTask = nil
+        windowSizeCheckpointTask?.cancel()
+        windowSizeCheckpointTask = nil
         logOpenRevision &+= 1
         logOpenTask?.cancel()
         logOpenTask = nil
@@ -427,7 +454,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         yamlWindows.forEach { $0.close() }
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
-        onFrameCheckpoint?(restoration)
+        checkpointWindowSize()
         if isAuthenticated {
             Task { [provider, session] in
                 await provider.closeSession(sessionID: session.sessionID)

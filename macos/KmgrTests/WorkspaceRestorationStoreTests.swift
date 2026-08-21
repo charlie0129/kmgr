@@ -180,8 +180,8 @@ import Testing
     _ = try store.activate(onlyB)
     #expect(store.bookmark(for: referenceB)?.state.filter == "name:other-file")
     #expect(store.bookmarks.count == 2)
-    #expect(store.bookmark(for: referenceA)?.frameAutosaveName
-        != store.bookmark(for: referenceB)?.frameAutosaveName)
+    #expect(store.bookmark(for: referenceA)?.id
+        != store.bookmark(for: referenceB)?.id)
 
     var backgroundFirst = firstA
     backgroundFirst.state.filter = "background-update"
@@ -211,6 +211,39 @@ import Testing
     #expect(store.windows.isEmpty)
     #expect(store.bookmark(for: record.state.contextReference)?.state == record.state)
     #expect(WorkspaceRestorationStore(defaults: storage.defaults).bookmarks == store.bookmarks)
+}
+
+@MainActor
+@Test func newSameContextWindowsInheritLatestResourceNamespaceAndFilter() throws {
+    let storage = try restorationDefaults()
+    defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
+    let store = WorkspaceRestorationStore(defaults: storage.defaults)
+    var active = ClusterWindowRestorationRecord(
+        id: "active-window",
+        state: ClusterWindowRestorationState(
+            contextName: "production",
+            contextReference: "/configs/production.yaml#production",
+            gvr: GVR(group: "", version: "v1", resource: "pods"),
+            namespaceScope: .namespace("team-a"),
+            filter: "status:Running"
+        )
+    )
+    _ = try store.activate(active)
+
+    active.state.gvr = GVR(group: "apps", version: "v1", resource: "deployments")
+    active.state.namespaceScope = .namespace("team-b")
+    active.state.filter = "name:api"
+    try store.upsert(active)
+
+    let inherited = try #require(store.bookmark(
+        for: active.state.contextReference
+    )?.state)
+    #expect(inherited.gvr == active.state.gvr)
+    #expect(inherited.namespaceScope == .namespace("team-b"))
+    #expect(inherited.filter == "name:api")
+    #expect(WorkspaceRestorationStore(defaults: storage.defaults).bookmark(
+        for: active.state.contextReference
+    )?.state == inherited)
 }
 
 @MainActor
