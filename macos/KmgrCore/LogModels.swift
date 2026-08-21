@@ -646,24 +646,21 @@ public struct LogDisplayConfiguration: Hashable, Sendable {
     public var byteLimit: Int
     public var renderBatchMilliseconds: Int
     public var maximumRenderedUTF8Bytes: Int
-    public var maximumDisplayedLineUTF8Bytes: Int
 
     public init(
         recordLimit: Int = 20_000,
         byteLimit: Int = 16 << 20,
         renderBatchMilliseconds: Int = 40,
-        maximumRenderedUTF8Bytes: Int = 32 << 20,
-        maximumDisplayedLineUTF8Bytes: Int = LogTextRenderer.defaultMaximumDisplayedLineUTF8Bytes
+        maximumRenderedUTF8Bytes: Int = 32 << 20
     ) {
         precondition(
-            recordLimit > 0 && byteLimit > 0 && renderBatchMilliseconds > 0 &&
-                maximumRenderedUTF8Bytes > 0 && maximumDisplayedLineUTF8Bytes > 0
+            recordLimit > 0 && byteLimit > 0 && renderBatchMilliseconds > 0
+                && maximumRenderedUTF8Bytes > 0
         )
         self.recordLimit = recordLimit
         self.byteLimit = byteLimit
         self.renderBatchMilliseconds = renderBatchMilliseconds
         self.maximumRenderedUTF8Bytes = maximumRenderedUTF8Bytes
-        self.maximumDisplayedLineUTF8Bytes = maximumDisplayedLineUTF8Bytes
     }
 
     public init(preferences: LogDisplayPreferences) {
@@ -671,8 +668,7 @@ public struct LogDisplayConfiguration: Hashable, Sendable {
             recordLimit: preferences.recordLimit,
             byteLimit: preferences.byteLimit,
             renderBatchMilliseconds: preferences.renderBatchMilliseconds,
-            maximumRenderedUTF8Bytes: preferences.maximumRenderedUTF8Bytes,
-            maximumDisplayedLineUTF8Bytes: preferences.maximumDisplayedLineUTF8Bytes
+            maximumRenderedUTF8Bytes: preferences.maximumRenderedUTF8Bytes
         )
     }
 }
@@ -757,75 +753,57 @@ public actor LogRecordStore {
 }
 
 public struct RenderedLogText: Hashable, Sendable {
-    /// Logical chunks preserve the visible records exactly. In particular,
-    /// fragments of one oversized Kubernetes log line remain joined so saving
-    /// the visible buffer does not introduce display-only line breaks.
+    /// Chunks preserve visible records exactly while allowing the AppKit log
+    /// viewport to retain and lay out an unchanged suffix incrementally.
     public var chunks: [String]
-    /// TextKit-facing chunks may contain explicit continuation boundaries.
-    /// NSTextView cannot lazily lay out the tail of a multi-megabyte paragraph;
-    /// bounded physical paragraphs let noncontiguous layout skip directly to
-    /// the visible region while retaining `chunks` for lossless export.
-    public var displayChunks: [String]
     public var renderedRecords: Int
     public var omittedRecords: Int
     public var omittedSourceBytes: UInt64
     public var outputUTF8Bytes: Int
-    public var displayOutputUTF8Bytes: Int
-    public var displayContinuationBreaks: Int
-    public var displayTruncatedLines: Int
 
     public init(
         chunks: [String],
-        displayChunks: [String],
         renderedRecords: Int,
         omittedRecords: Int,
         omittedSourceBytes: UInt64,
-        outputUTF8Bytes: Int,
-        displayOutputUTF8Bytes: Int,
-        displayContinuationBreaks: Int,
-        displayTruncatedLines: Int
+        outputUTF8Bytes: Int
     ) {
         self.chunks = chunks
-        self.displayChunks = displayChunks
         self.renderedRecords = renderedRecords
         self.omittedRecords = omittedRecords
         self.omittedSourceBytes = omittedSourceBytes
         self.outputUTF8Bytes = outputUTF8Bytes
-        self.displayOutputUTF8Bytes = displayOutputUTF8Bytes
-        self.displayContinuationBreaks = displayContinuationBreaks
-        self.displayTruncatedLines = displayTruncatedLines
     }
 
     public var text: String { chunks.joined() }
-    public var displayText: String { displayChunks.joined() }
 }
 
 /// A minimal streaming edit from one rendered log snapshot to the next. Log
 /// rings evolve by dropping an old prefix and appending a new suffix, so the
-/// AppKit layer can normally retain the shared middle without replacing the
-/// full text storage. A filter change simply degenerates to a bounded replace.
+/// virtual viewport can retain measured chunks. A filter change simply
+/// degenerates to a bounded replace.
 public struct LogTextInstallPlan: Hashable, Sendable {
-    public var previousUTF16Length: Int
     public var removePrefixUTF16Length: Int
-    public var appendText: String
     public var resultUTF16Length: Int
+    /// Number of unchanged chunks at the end of the previous projection and
+    /// the beginning of the replacement. View renderers reuse their measured
+    /// chunk layouts instead of reshaping the retained text.
+    public var retainedChunkCount: Int
+    public var appendedChunkCount: Int
+    public var appendedUTF8Length: Int
 
     public init(
-        previousUTF16Length: Int,
         removePrefixUTF16Length: Int,
-        appendText: String,
-        resultUTF16Length: Int
+        resultUTF16Length: Int,
+        retainedChunkCount: Int,
+        appendedChunkCount: Int,
+        appendedUTF8Length: Int
     ) {
-        self.previousUTF16Length = previousUTF16Length
         self.removePrefixUTF16Length = removePrefixUTF16Length
-        self.appendText = appendText
         self.resultUTF16Length = resultUTF16Length
-    }
-
-    public func applying(to previous: String) -> String {
-        let value = previous as NSString
-        let remove = min(max(0, removePrefixUTF16Length), value.length)
-        return value.substring(from: remove) + appendText
+        self.retainedChunkCount = retainedChunkCount
+        self.appendedChunkCount = appendedChunkCount
+        self.appendedUTF8Length = appendedUTF8Length
     }
 
     public func remapSelection(_ selection: NSRange) -> NSRange {
@@ -851,12 +829,18 @@ public enum LogTextInstallPlanner {
         let retained = previousChunks.suffix(overlap).reduce(into: 0) {
             $0 += $1.utf16.count
         }
-        let append = currentChunks.dropFirst(overlap).joined()
+        var appendedUTF16Length = 0
+        var appendedUTF8Length = 0
+        for chunk in currentChunks.dropFirst(overlap) {
+            appendedUTF16Length += chunk.utf16.count
+            appendedUTF8Length += chunk.utf8.count
+        }
         return LogTextInstallPlan(
-            previousUTF16Length: removed + retained,
             removePrefixUTF16Length: removed,
-            appendText: append,
-            resultUTF16Length: retained + append.utf16.count
+            resultUTF16Length: retained + appendedUTF16Length,
+            retainedChunkCount: overlap,
+            appendedChunkCount: currentChunks.count - overlap,
+            appendedUTF8Length: appendedUTF8Length
         )
     }
 
@@ -889,17 +873,6 @@ public enum LogTextInstallPlanner {
 /// newest matching records when source labels or UTF-8 replacement expansion
 /// would exceed the configured visible-text budget.
 public enum LogTextRenderer {
-    /// Keep the native text surface small even when an application writes a
-    /// JSON document, stack dump, or binary-like payload as one logical line.
-    /// Save continues to use the lossless logical projection.
-    public static let defaultMaximumDisplayedLineUTF8Bytes = 4 << 10
-
-    /// Every bounded continuation fragment gets an independent display
-    /// paragraph. The marker makes the projection unambiguous when Wrap is
-    /// disabled; the logical/export projection omits it.
-    public static let displayContinuationMarker = "↪ "
-    public static let displayTruncationMarker = "… [line truncated; Save preserves full line]"
-
     private struct Candidate {
         var record: LogRecord
         var decoded: String
@@ -909,20 +882,14 @@ public enum LogTextRenderer {
         var decodedUTF8Bytes: Int
     }
 
-    private struct DisplayLineState {
-        var displayedUTF8Bytes = 0
-        var truncated = false
-    }
-
     public static func render(
         records: [LogRecord],
         sourceLabels: [String: String],
         showSourceLabels: Bool,
         filter: String,
-        maximumOutputUTF8Bytes: Int,
-        maximumDisplayedLineUTF8Bytes: Int = defaultMaximumDisplayedLineUTF8Bytes
+        maximumOutputUTF8Bytes: Int
     ) throws -> RenderedLogText {
-        precondition(maximumOutputUTF8Bytes > 0 && maximumDisplayedLineUTF8Bytes > 0)
+        precondition(maximumOutputUTF8Bytes > 0)
         let foldedFilter = filter.lowercased()
         var candidates: [Candidate] = []
         candidates.reserveCapacity(min(records.count, 4_096))
@@ -1000,13 +967,7 @@ public enum LogTextRenderer {
         try Task.checkCancellation()
         var chunks: [String] = []
         chunks.reserveCapacity(candidates.count * 3)
-        var displayChunks: [String] = []
-        displayChunks.reserveCapacity(candidates.count * 3)
         var outputBytes = 0
-        var displayOutputBytes = 0
-        var displayContinuationBreaks = 0
-        var displayTruncatedLines = 0
-        var displayLineStates: [String: DisplayLineState] = [:]
         var previousVisibleSourceID: String?
         var previousVisibleIndex = -1
         var previousVisibleLineOpen = false
@@ -1031,77 +992,17 @@ public enum LogTextRenderer {
             outputBytes += logicalPrefix.utf8.count + candidate.decoded.utf8.count
                 + (record.endsWithNewline ? 1 : 0)
 
-            // The logical/export projection above remains complete. The
-            // TextKit-facing projection is capped independently per source
-            // line, so one pathological line cannot dominate NSTextStorage.
-            // Once the static truncation marker is installed, later hidden
-            // fragments leave the display chunks unchanged and streaming
-            // updates stay incremental.
-            var displayState = record.startsLine
-                ? DisplayLineState()
-                : displayLineStates[record.sourceID] ?? DisplayLineState()
-            if !displayState.truncated {
-                let remaining = max(
-                    0,
-                    maximumDisplayedLineUTF8Bytes - displayState.displayedUTF8Bytes
-                )
-                let truncatesRecord = candidate.decodedUTF8Bytes > remaining
-                let displayed = truncatesRecord
-                    ? utf8Prefix(candidate.decoded, maximumBytes: remaining)
-                    : candidate.decoded
-                let displayedBytes = displayed.utf8.count
-                let displayPrefix = candidate.sourcePrefix + candidate.timestampPrefix
-                    + (record.startsLine ? "" : displayContinuationMarker)
-                if !displayPrefix.isEmpty { displayChunks.append(displayPrefix) }
-                if !displayed.isEmpty { displayChunks.append(displayed) }
-                if truncatesRecord {
-                    if !displayed.isEmpty { displayChunks.append(" ") }
-                    displayChunks.append(displayTruncationMarker)
-                    displayState.truncated = true
-                    displayTruncatedLines += 1
-                }
-                displayChunks.append("\n")
-                displayOutputBytes += displayPrefix.utf8.count + displayedBytes
-                    + (truncatesRecord ? displayTruncationMarker.utf8.count : 0)
-                    + (truncatesRecord && !displayed.isEmpty ? 1 : 0)
-                    + 1
-                displayState.displayedUTF8Bytes += displayedBytes
-                if !record.startsLine {
-                    displayContinuationBreaks += 1
-                }
-            }
-            if record.endsWithNewline {
-                displayLineStates.removeValue(forKey: record.sourceID)
-            } else {
-                displayLineStates[record.sourceID] = displayState
-            }
             previousVisibleSourceID = record.sourceID
             previousVisibleIndex = candidate.recordIndex
             previousVisibleLineOpen = !record.endsWithNewline
         }
         return RenderedLogText(
             chunks: chunks,
-            displayChunks: displayChunks,
             renderedRecords: candidates.count,
             omittedRecords: omittedRecords,
             omittedSourceBytes: omittedBytes,
-            outputUTF8Bytes: outputBytes,
-            displayOutputUTF8Bytes: displayOutputBytes,
-            displayContinuationBreaks: displayContinuationBreaks,
-            displayTruncatedLines: displayTruncatedLines
+            outputUTF8Bytes: outputBytes
         )
-    }
-
-    private static func utf8Prefix(_ value: String, maximumBytes: Int) -> String {
-        guard maximumBytes > 0 else { return "" }
-        let utf8 = value.utf8
-        guard utf8.count > maximumBytes else { return value }
-        var end = utf8.index(utf8.startIndex, offsetBy: maximumBytes)
-        while end > utf8.startIndex, String.Index(end, within: value) == nil {
-            end = utf8.index(before: end)
-        }
-        guard let stringEnd = String.Index(end, within: value) else { return "" }
-        return String(value[..<stringEnd])
     }
 
     private static func displaySafeLabel(_ value: String) -> String {

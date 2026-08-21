@@ -263,10 +263,9 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     #expect(ring.droppedBytes == 6)
 }
 
-@Test func multiMegabyteLogicalLineUsesBoundedPreviewAndLosslessExport() throws {
+@Test func multiMegabyteLogicalLineRemainsCompleteForTheVirtualViewport() throws {
     let fragmentBytes = 64 << 10
     let payloadBytes = 8 << 20
-    let previewBytes = 4 << 10
     var ring = LogRecordRing(
         recordLimit: 1_024,
         byteLimit: payloadBytes + fragmentBytes,
@@ -290,26 +289,19 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
         sourceLabels: [:],
         showSourceLabels: false,
         filter: "",
-        maximumOutputUTF8Bytes: payloadBytes + fragmentBytes,
-        maximumDisplayedLineUTF8Bytes: previewBytes
+        maximumOutputUTF8Bytes: payloadBytes + fragmentBytes
     )
 
-    #expect(rendered.displayContinuationBreaks == 0)
-    #expect(rendered.displayTruncatedLines == 1)
     #expect(rendered.text.utf8.count == payloadBytes + 1)
-    #expect(!rendered.text.contains(LogTextRenderer.displayContinuationMarker))
-    #expect(!rendered.text.contains(LogTextRenderer.displayTruncationMarker))
-    #expect(rendered.displayText.hasPrefix(String(repeating: "x", count: previewBytes)))
-    #expect(rendered.displayText.contains(LogTextRenderer.displayTruncationMarker))
-    #expect(rendered.displayOutputUTF8Bytes <= previewBytes + 64)
-    let physicalLines = rendered.displayText.split(
+    #expect(rendered.text.hasPrefix(String(repeating: "x", count: fragmentBytes)))
+    let physicalLines = rendered.text.split(
         separator: "\n",
         omittingEmptySubsequences: false
     )
     #expect(physicalLines.count == 2)
 }
 
-@Test func linePreviewLimitResetsPerSourceLineAndStaysUnicodeSafe() throws {
+@Test func interleavedLineFragmentsRemainCompleteAndUnicodeSafe() throws {
     let rendered = try LogTextRenderer.render(
         records: [
             LogRecord(
@@ -332,22 +324,16 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
         sourceLabels: ["a": "api", "b": "worker"],
         showSourceLabels: true,
         filter: "",
-        maximumOutputUTF8Bytes: 1 << 10,
-        maximumDisplayedLineUTF8Bytes: 6
+        maximumOutputUTF8Bytes: 1 << 10
     )
 
     #expect(rendered.text == "[api] 12345\n"
         + "[worker] worker\n"
         + "[api] … 🐈tail\n"
         + "[api] next\n")
-    #expect(rendered.displayText == "[api] 12345\n"
-        + "[worker] worker\n"
-        + "[api] ↪ … [line truncated; Save preserves full line]\n"
-        + "[api] next\n")
-    #expect(rendered.displayTruncatedLines == 1)
 }
 
-@Test func hiddenLongLineSuffixDoesNotReinstallTheVisiblePreview() throws {
+@Test func appendedLongLineSuffixInstallsWithoutReplacingItsPrefix() throws {
     func record(_ value: String, startsLine: Bool, endsWithNewline: Bool = false) -> LogRecord {
         LogRecord(
             sourceID: "pod", data: Data(value.utf8),
@@ -357,8 +343,7 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     let previous = try LogTextRenderer.render(
         records: [record("0123456789", startsLine: true)],
         sourceLabels: [:], showSourceLabels: false, filter: "",
-        maximumOutputUTF8Bytes: 1 << 10,
-        maximumDisplayedLineUTF8Bytes: 4
+        maximumOutputUTF8Bytes: 1 << 10
     )
     let current = try LogTextRenderer.render(
         records: [
@@ -366,21 +351,22 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
             record("hidden suffix", startsLine: false, endsWithNewline: true),
         ],
         sourceLabels: [:], showSourceLabels: false, filter: "",
-        maximumOutputUTF8Bytes: 1 << 10,
-        maximumDisplayedLineUTF8Bytes: 4
+        maximumOutputUTF8Bytes: 1 << 10
     )
 
     let plan = LogTextInstallPlanner.plan(
-        previousChunks: previous.displayChunks,
-        currentChunks: current.displayChunks
+        previousChunks: previous.chunks,
+        currentChunks: current.chunks
     )
-    #expect(previous.displayText == current.displayText)
     #expect(plan.removePrefixUTF16Length == 0)
-    #expect(plan.appendText.isEmpty)
+    #expect(plan.retainedChunkCount == previous.chunks.count)
+    #expect(plan.appendedChunkCount == 2)
+    #expect(current.chunks.dropFirst(plan.retainedChunkCount).joined()
+        == "hidden suffix\n")
     #expect(current.text == "0123456789hidden suffix\n")
 }
 
-@Test func oversizedLineEvictionRetainsDisplaySuffixIncrementally() throws {
+@Test func oversizedLineEvictionRebuildsAnUnambiguousLogicalPrefix() throws {
     func record(_ value: String, startsLine: Bool, endsWithNewline: Bool = false) -> LogRecord {
         LogRecord(
             sourceID: "pod",
@@ -413,12 +399,13 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     )
 
     let plan = LogTextInstallPlanner.plan(
-        previousChunks: previous.displayChunks,
-        currentChunks: current.displayChunks
+        previousChunks: previous.chunks,
+        currentChunks: current.chunks
     )
-    #expect(plan.removePrefixUTF16Length == "first\n".utf16.count)
-    #expect(plan.appendText == "↪ fourth\n")
-    #expect(plan.applying(to: previous.displayText) == current.displayText)
+    #expect(plan.removePrefixUTF16Length == previous.text.utf16.count)
+    #expect(plan.retainedChunkCount == 0)
+    #expect(current.chunks.dropFirst(plan.retainedChunkCount).joined()
+        == current.text)
 }
 
 @Test func logRendererPrefixesOnlyTheStartOfAHugeLogicalLine() throws {
@@ -661,8 +648,9 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     )
 
     #expect(plan.removePrefixUTF16Length == "old\n".utf16.count)
-    #expect(plan.appendText == "new 🐈\n")
-    #expect(plan.applying(to: previous.joined()) == current.joined())
+    #expect(plan.retainedChunkCount == 1)
+    #expect(plan.appendedChunkCount == 1)
+    #expect(plan.appendedUTF8Length == "new 🐈\n".utf8.count)
     #expect(plan.resultUTF16Length == current.joined().utf16.count)
     let selection = NSRange(
         location: "old\n".utf16.count + 1,
@@ -680,8 +668,9 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     )
 
     #expect(plan.removePrefixUTF16Length == 0)
-    #expect(plan.appendText == "three\n")
-    #expect(plan.applying(to: previous.joined()) == current.joined())
+    #expect(plan.retainedChunkCount == previous.count)
+    #expect(plan.appendedChunkCount == 1)
+    #expect(plan.appendedUTF8Length == "three\n".utf8.count)
 }
 
 @Test func logInstallPlanFallsBackToBoundedReplaceWhenFilterChanges() {
@@ -693,8 +682,9 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     )
 
     #expect(plan.removePrefixUTF16Length == previous.joined().utf16.count)
-    #expect(plan.appendText == current.joined())
-    #expect(plan.applying(to: previous.joined()) == current.joined())
+    #expect(plan.retainedChunkCount == 0)
+    #expect(plan.appendedChunkCount == current.count)
+    #expect(plan.appendedUTF8Length == current.joined().utf8.count)
     #expect(plan.remapSelection(NSRange(location: 2, length: 3)) == NSRange(location: 0, length: 0))
 }
 
@@ -703,12 +693,10 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
         recordLimit: 75_000,
         byteLimit: 32 << 20,
         renderBatchMilliseconds: 65,
-        maximumRenderedUTF8Bytes: 20 << 20,
-        maximumDisplayedLineUTF8Bytes: 12 << 10
+        maximumRenderedUTF8Bytes: 20 << 20
     ))
     #expect(configuration.recordLimit == 75_000)
     #expect(configuration.byteLimit == 32 << 20)
     #expect(configuration.renderBatchMilliseconds == 65)
     #expect(configuration.maximumRenderedUTF8Bytes == 20 << 20)
-    #expect(configuration.maximumDisplayedLineUTF8Bytes == 12 << 10)
 }

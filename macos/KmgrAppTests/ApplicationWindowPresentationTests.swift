@@ -155,9 +155,6 @@ struct ApplicationWindowPresentationTests {
         )
         let root = try #require(settings.window?.contentView)
         let fields = descendants(of: root).compactMap { $0 as? NSTextField }
-        let lineLimit = try #require(fields.first {
-            $0.accessibilityIdentifier() == "settings.logs.maximumDisplayedLineKiB"
-        })
         let renderedLimit = try #require(fields.first {
             $0.accessibilityIdentifier() == "settings.logs.maximumRenderedTextMiB"
         })
@@ -169,17 +166,14 @@ struct ApplicationWindowPresentationTests {
             $0.accessibilityIdentifier() == "settings.operations.defaultDeleteConcurrency"
         })
 
-        #expect(lineLimit.integerValue == 4)
         #expect(renderedLimit.integerValue == 32)
         #expect(historyLimit.integerValue == 2_000)
         #expect(deleteConcurrency.integerValue == 4)
-        lineLimit.stringValue = "12"
         renderedLimit.stringValue = "24"
         historyLimit.stringValue = "3500"
         deleteConcurrency.stringValue = "12"
         try #require(button(titled: "Apply", beneath: root)).performClick(nil)
 
-        #expect(store.current.logs.maximumDisplayedLineUTF8Bytes == 12 << 10)
         #expect(store.current.logs.maximumRenderedUTF8Bytes == 24 << 20)
         #expect(store.current.diagnostics.completedOperationHistoryLimit == 3_500)
         #expect(store.current.resourceOperations.defaultDeleteConcurrency == 12)

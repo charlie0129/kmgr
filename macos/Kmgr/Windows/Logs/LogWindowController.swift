@@ -2,15 +2,6 @@ import AppKit
 import KmgrCore
 import OSLog
 
-enum LogTailReconciliationPolicy {
-    static func shouldPreserveTail(
-        requestedAtScheduleTime: Bool,
-        currentlyAtTail: Bool
-    ) -> Bool {
-        requestedAtScheduleTime && currentlyAtTail
-    }
-}
-
 enum LogStreamRetryPolicy {
     static let initialDelayMilliseconds: Int64 = 250
     static let maximumBackoffMilliseconds: Int64 = 5_000
@@ -36,7 +27,6 @@ enum LogWindowShortcut: Equatable {
     case focusFilter
     case toggleFollow
     case togglePause
-    case toggleWrap
 
     static func action(
         characters: String?,
@@ -50,7 +40,6 @@ enum LogWindowShortcut: Equatable {
         case "/": .focusFilter
         case "f": .toggleFollow
         case "p": .togglePause
-        case "w": .toggleWrap
         default: nil
         }
     }
@@ -83,15 +72,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var streamingSourceIDs: Set<String> = []
     private var hasOverallStreamFailure = false
     private var renderTask: Task<Void, Never>?
-    private var layoutMetricsTask: Task<Void, Never>?
-    private var layoutMetricsRevision: UInt64 = 0
     private var streamGate = LogStreamGenerationGate()
     private let recordStore: LogRecordStore
     private var options: LogOptions
     private var displayConfiguration: LogDisplayConfiguration
     private var renderBatchMilliseconds: Int
     private var maximumRenderedUTF8Bytes: Int
-    private var maximumDisplayedLineUTF8Bytes: Int
     private var configurationRevision: UInt64 = 0
     private var renderScheduleRevision: UInt64 = 0
     private let sourceLabels: [String: String]
@@ -104,15 +90,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var latestStoreDrops: UInt64 = 0
     private var latestStreamDrops: UInt64 = 0
     private var latestRenderOmissions = 0
-    private var latestDisplayContinuationBreaks = 0
-    private var latestDisplayTruncatedLines = 0
     private var latestStreamState: LogStreamState = .connecting
     private var renderedChunks: [String] = []
-    private var renderedExportChunks: [String] = []
-    private var renderedDisplayUTF16Length = 0
-    private var textLayoutMetrics = LogTextLayoutMetrics.empty
     private var followsVisibleTail = true
-    private var tailTrackingSuppressionDepth = 0
     private var lastObservedViewportOrigin = NSPoint.zero
     private var pendingFollowTailRestore: Bool?
     private var appliedContainerTitle = ""
@@ -122,7 +102,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         category: PerformanceSignpostCatalog.logsCategory
     )
 
-    private let textView = NSTextView()
+    private let logView = LogViewportView(
+        frame: NSRect(x: 0, y: 0, width: 640, height: 320)
+    )
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "Connecting…")
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
@@ -135,7 +117,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private let tailField = NSTextField()
     private let sinceField = NSTextField()
     private let applyButton = NSButton(title: "Apply", target: nil, action: nil)
-    private let wrapButton = NSButton(checkboxWithTitle: "Wrap", target: nil, action: nil)
     private let pauseButton = NSButton(title: "Pause", target: nil, action: nil)
 
     var onClose: (() -> Void)?
@@ -174,14 +155,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         )
         self.displayConfiguration = displayConfiguration
         self.renderBatchMilliseconds = displayConfiguration.renderBatchMilliseconds
-        // Preferences may retain far more history than AppKit can safely lay
-        // out in one main-thread NSTextView.string replacement.
         self.maximumRenderedUTF8Bytes = min(
             displayConfiguration.byteLimit,
             displayConfiguration.maximumRenderedUTF8Bytes
         )
-        self.maximumDisplayedLineUTF8Bytes =
-            displayConfiguration.maximumDisplayedLineUTF8Bytes
         self.sourceLabels = LogSourcePresentation.prefixLabels(for: allSources)
         let titleSources = LogSourcePresentation.titleSummary(for: sources)
         let window = LogShortcutWindow(
@@ -254,9 +231,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     func windowDidResize(_ notification: Notification) {
         let wasFollowingTail = followsVisibleTail
+        updateLogViewportFrame()
         if wasFollowingTail { scrollToTail() }
-        else { updateTextDocumentGeometry() }
-        scheduleLayoutMetricsReconciliation(preservingTail: wasFollowingTail)
     }
 
     /// A stream can deliver its first records between `showWindow` and the
@@ -269,15 +245,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         resumeRenderingIfVisible()
     }
 
-    /// Tail-follow intent is a user interaction state, not a document-geometry
-    /// measurement. TextKit can revise a noncontiguous document's extent after
-    /// a render; only an actual viewport-origin change outside our own geometry
-    /// and scroll operations may pause or resume automatic tail following. A
-    /// viewport pause does not stop the already-established backend stream.
+    /// Tail-follow intent changes only on user viewport movement. Geometry
+    /// updates are suppressed while the deterministic row document is resized
+    /// or scrolled by the controller.
     @objc private func logViewportBoundsDidChange(_ notification: Notification) {
         let origin = scrollView.contentView.bounds.origin
         defer { lastObservedViewportOrigin = origin }
-        guard !isClosing, tailTrackingSuppressionDepth == 0,
+        guard !isClosing, viewportTrackingSuppressionDepth == 0,
             origin != lastObservedViewportOrigin
         else { return }
         followsVisibleTail = isAtTail
@@ -312,10 +286,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         case .togglePause:
             guard pauseButton.isEnabled else { return true }
             togglePause()
-        case .toggleWrap:
-            guard wrapButton.isEnabled else { return true }
-            wrapButton.state = wrapButton.state == .on ? .off : .on
-            toggleWrap()
         }
         return true
     }
@@ -331,7 +301,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             configuration.byteLimit,
             configuration.maximumRenderedUTF8Bytes
         )
-        maximumDisplayedLineUTF8Bytes = configuration.maximumDisplayedLineUTF8Bytes
         configurationRevision &+= 1
         let revision = configurationRevision
         cancelScheduledRender()
@@ -369,15 +338,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         sinceField.identifier = NSUserInterfaceItemIdentifier("log-since-seconds")
         sinceField.widthAnchor.constraint(equalToConstant: 62).isActive = true
         configureContainerButton()
-        wrapButton.state = .off
         followButton.target = self
         followButton.action = #selector(toggleFollow)
         for button in [previousButton, timestampsButton] {
             button.target = self
             button.action = #selector(restartFromControls)
         }
-        wrapButton.target = self
-        wrapButton.action = #selector(toggleWrap)
         pauseButton.target = self
         pauseButton.action = #selector(togglePause)
         containerButton.target = self
@@ -427,7 +393,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         streamToolbar.alignment = .centerY
         streamToolbar.spacing = 7
         let viewToolbar = NSStackView(views: [
-            wrapButton, pauseButton, clearButton, saveButton, NSView(), searchField,
+            pauseButton, clearButton, saveButton, NSView(), searchField,
         ])
         viewToolbar.orientation = .horizontal
         viewToolbar.alignment = .centerY
@@ -444,25 +410,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         statusBar.spacing = 8
         statusBar.translatesAutoresizingMaskIntoConstraints = false
 
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.isRichText = false
-        textView.usesFindBar = true
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        textView.textContainerInset = NSSize(width: 8, height: 8)
-        textView.setAccessibilityLabel("Pod logs")
-
-        scrollView.documentView = textView
+        scrollView.documentView = logView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.identifier = NSUserInterfaceItemIdentifier("log-content-scroll")
-        TextDocumentGeometry.configureStreamingLog(
-            textView,
-            in: scrollView
-        )
         let clipView = scrollView.contentView
         lastObservedViewportOrigin = clipView.bounds.origin
         clipView.postsBoundsChangedNotifications = true
@@ -496,7 +448,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         ])
         window.contentView = root
         root.layoutSubtreeIfNeeded()
-        updateTextDocumentGeometry()
+        updateLogViewportFrame()
     }
 
     @objc private func restartFromControls() {
@@ -922,7 +874,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private func stopStream() {
         cancelAutomaticRetry()
         cancelScheduledRender()
-        cancelLayoutMetricsReconciliation()
         let activeGenerations = Array(streamTasks.keys)
         for generation in activeGenerations {
             streamTasks.removeValue(forKey: generation)?.cancel()
@@ -1015,34 +966,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         if latestRenderOmissions > 0 {
             parts.append("\(latestRenderOmissions.formatted()) omitted from display")
         }
-        if latestDisplayContinuationBreaks > 0 {
-            parts.append("long lines segmented for display")
-        }
-        if latestDisplayTruncatedLines > 0 {
-            parts.append(latestDisplayTruncatedLines == 1
-                ? "1 long line truncated"
-                : "\(latestDisplayTruncatedLines.formatted()) long lines truncated")
-        }
         statusLabel.stringValue = parts.joined(separator: " · ")
-        switch (latestDisplayContinuationBreaks > 0, latestDisplayTruncatedLines > 0) {
-        case (_, true):
-            statusLabel.toolTip = "Long lines show at most \(formattedDisplayedLineLimit). Display markers and breaks are not included when saving."
-        case (true, false):
-            statusLabel.toolTip = "Continuation arrows and line breaks are display-only; Save preserves logical lines."
-        case (false, false):
-            statusLabel.toolTip = nil
-        }
-    }
-
-    private var formattedDisplayedLineLimit: String {
-        let bytes = maximumDisplayedLineUTF8Bytes
-        if bytes.isMultiple(of: 1 << 20) {
-            return "\(bytes / (1 << 20)) MiB"
-        }
-        if bytes.isMultiple(of: 1 << 10) {
-            return "\(bytes / (1 << 10)) KiB"
-        }
-        return "\(bytes.formatted()) bytes"
+        statusLabel.toolTip = nil
     }
 
     /// Coalesce detached formatting and incremental text installation to at
@@ -1083,21 +1008,20 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func render() async {
-        let selectedRange = textView.selectedRange()
+        let selectedRange = logView.selectedRange()
         let filter = searchField.stringValue
         let showLabels = availableSources.count > 1
         let snapshot = await recordStore.snapshot()
         let records = snapshot.records
         let labels = sourceLabels
         let byteLimit = maximumRenderedUTF8Bytes
-        let displayedLineByteLimit = maximumDisplayedLineUTF8Bytes
         let previousChunks = renderedChunks
-        let wrappingColumnCapacity = TextDocumentGeometry
-            .streamingLogWrappingColumnCapacity(textView, in: scrollView)
+        let previousProjection = logView.projection
+        let style = previousProjection.style
         let result: (
             rendered: RenderedLogText,
             install: LogTextInstallPlan,
-            layoutMetrics: LogTextLayoutMetrics
+            projection: LogViewportProjection
         )
         let renderer = Task.detached(priority: .userInitiated) { [logSignposter] in
             let interval = logSignposter.beginInterval(
@@ -1105,29 +1029,32 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 "input_records=\(records.count) output_byte_limit=\(byteLimit) shows_labels=\(showLabels) has_filter=\(!filter.isEmpty)"
             )
             do {
-                let result = try LogTextRenderer.render(
+                let rendered = try LogTextRenderer.render(
                     records: records,
                     sourceLabels: labels,
                     showSourceLabels: showLabels,
                     filter: filter,
-                    maximumOutputUTF8Bytes: byteLimit,
-                    maximumDisplayedLineUTF8Bytes: displayedLineByteLimit
+                    maximumOutputUTF8Bytes: byteLimit
+                )
+                let install = LogTextInstallPlanner.plan(
+                    previousChunks: previousChunks,
+                    currentChunks: rendered.chunks
+                )
+                let projection = try LogViewportProjection.make(
+                    chunks: rendered.chunks,
+                    previous: previousProjection,
+                    retainedChunkCount: install.retainedChunkCount,
+                    style: style
                 )
                 logSignposter.endInterval(
                     PerformanceSignpostCatalog.logTextFormat,
                     interval,
-                    "rendered_records=\(result.renderedRecords) omitted_records=\(result.omittedRecords) output_bytes=\(result.outputUTF8Bytes)"
+                    "rendered_records=\(rendered.renderedRecords) omitted_records=\(rendered.omittedRecords) output_bytes=\(rendered.outputUTF8Bytes)"
                 )
                 return (
-                    rendered: result,
-                    install: LogTextInstallPlanner.plan(
-                        previousChunks: previousChunks,
-                        currentChunks: result.displayChunks
-                    ),
-                    layoutMetrics: LogTextLayoutMetrics(
-                        chunks: result.displayChunks,
-                        wrappingColumnCapacity: wrappingColumnCapacity
-                    )
+                    rendered: rendered,
+                    install: install,
+                    projection: projection
                 )
             } catch {
                 logSignposter.endInterval(
@@ -1154,53 +1081,20 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let shouldFollowTail = followsVisibleTail
         let installInterval = logSignposter.beginInterval(
             PerformanceSignpostCatalog.logTextInstall,
-            "logical_output_bytes=\(result.rendered.outputUTF8Bytes) display_output_bytes=\(result.rendered.displayOutputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) truncated_lines=\(result.rendered.displayTruncatedLines) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendText.utf8.count)"
+            "output_bytes=\(result.rendered.outputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendedUTF8Length)"
         )
-        tailTrackingSuppressionDepth += 1
-        defer { tailTrackingSuppressionDepth -= 1 }
-        let storage = textView.textStorage!
-        if storage.length == result.install.previousUTF16Length {
-            storage.beginEditing()
-            if result.install.removePrefixUTF16Length > 0 {
-                storage.replaceCharacters(
-                    in: NSRange(location: 0, length: result.install.removePrefixUTF16Length),
-                    with: ""
-                )
-            }
-            if !result.install.appendText.isEmpty {
-                storage.append(NSAttributedString(
-                    string: result.install.appendText,
-                    attributes: [.font: textView.font!]
-                ))
-            }
-            storage.endEditing()
-        } else {
-            // Defensive recovery for an unexpected NSTextStorage mutation;
-            // normal streaming updates always take the incremental path.
-            storage.replaceCharacters(
-                in: NSRange(location: 0, length: storage.length),
-                with: result.rendered.displayText
+        withViewportTrackingSuppressed {
+            logView.install(
+                result.projection,
+                viewportSize: scrollView.contentSize
             )
-            if storage.length > 0, let font = textView.font {
-                storage.addAttribute(
-                    .font,
-                    value: font,
-                    range: NSRange(location: 0, length: storage.length)
-                )
-            }
         }
-        renderedChunks = result.rendered.displayChunks
-        renderedExportChunks = result.rendered.chunks
-        renderedDisplayUTF16Length = result.install.resultUTF16Length
-        cancelLayoutMetricsReconciliation()
-        textLayoutMetrics = result.layoutMetrics
+        renderedChunks = result.rendered.chunks
         latestRenderOmissions = result.rendered.omittedRecords
-        latestDisplayContinuationBreaks = result.rendered.displayContinuationBreaks
-        latestDisplayTruncatedLines = result.rendered.displayTruncatedLines
         updateStatusLabel()
-        textView.setSelectedRange(result.install.remapSelection(selectedRange))
+        logView.setSelectedRange(result.install.remapSelection(selectedRange))
         if shouldFollowTail { scrollToTail() }
-        else { updateTextDocumentGeometry() }
+        else { updateLogViewportFrame() }
         needsRenderWhenVisible = false
         keyVisibilityWakePending = false
         logSignposter.endInterval(
@@ -1211,7 +1105,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     private var isAtTail: Bool {
         let visibleMaxY = scrollView.contentView.bounds.maxY
-        return visibleMaxY >= textView.bounds.maxY - 4
+        return visibleMaxY >= logView.bounds.maxY - 4
     }
 
     @objc private func togglePause() {
@@ -1220,92 +1114,33 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         if !isPaused { scheduleRender() }
     }
 
-    @objc private func toggleWrap() {
-        let wasFollowingTail = followsVisibleTail
-        let enabled = wrapButton.state == .on
-        scrollView.hasHorizontalScroller = !enabled
-        if wasFollowingTail { scrollToTail() }
-        else { updateTextDocumentGeometry() }
-        scheduleLayoutMetricsReconciliation(preservingTail: wasFollowingTail)
-    }
-
-    private func updateTextDocumentGeometry(followingTail: Bool = false) {
-        withTailTrackingSuppressed {
-            TextDocumentGeometry.updateStreamingLog(
-                textView,
-                in: scrollView,
-                wrapsToViewport: wrapButton.state == .on,
-                metrics: textLayoutMetrics,
-                followingTail: followingTail
-            )
-        }
-    }
-
-    /// Resizes and Wrap can arrive in rapid bursts. Re-measure immutable
-    /// rendered chunks after a short debounce on a detached executor, then
-    /// install only the content-free arithmetic result on MainActor.
-    private func scheduleLayoutMetricsReconciliation(preservingTail: Bool) {
-        layoutMetricsRevision &+= 1
-        let revision = layoutMetricsRevision
-        layoutMetricsTask?.cancel()
-        let chunks = renderedChunks
-        let capacity = TextDocumentGeometry.streamingLogWrappingColumnCapacity(
-            textView,
-            in: scrollView
-        )
-        layoutMetricsTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(80))
-            guard !Task.isCancelled else { return }
-            let metrics = await Task.detached(priority: .utility) {
-                LogTextLayoutMetrics(
-                    chunks: chunks,
-                    wrappingColumnCapacity: capacity
-                )
-            }.value
-            guard let self, !Task.isCancelled,
-                revision == layoutMetricsRevision,
-                !isClosing
-            else { return }
-            layoutMetricsTask = nil
-            // A resize may have been scheduled while Follow was at the end,
-            // but an intervening user scroll revokes that stale intent.
-            let shouldPreserveTail = LogTailReconciliationPolicy.shouldPreserveTail(
-                requestedAtScheduleTime: preservingTail,
-                currentlyAtTail: followsVisibleTail
-            )
-            textLayoutMetrics = metrics
-            if shouldPreserveTail { scrollToTail() }
-            else { updateTextDocumentGeometry() }
+    private func updateLogViewportFrame() {
+        withViewportTrackingSuppressed {
+            logView.updateDocumentFrame(for: scrollView.contentSize)
         }
     }
 
     private func scrollToTail() {
-        // A noncontiguous layout can initially clamp the clip view to its
-        // materialized range. That scroll expands the range without changing
-        // our document frame, so retry a bounded number of times until the
-        // arithmetic tail becomes reachable.
-        for _ in 0..<2 {
-            updateTextDocumentGeometry(followingTail: true)
-            withTailTrackingSuppressed {
-                TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
-            }
+        updateLogViewportFrame()
+        let clipView = scrollView.contentView
+        let maximumX = max(0, logView.bounds.width - clipView.bounds.width)
+        let maximumY = max(0, logView.bounds.height - clipView.bounds.height)
+        withViewportTrackingSuppressed {
+            clipView.scroll(to: NSPoint(
+                x: min(max(0, clipView.bounds.origin.x), maximumX),
+                y: maximumY
+            ))
+            scrollView.reflectScrolledClipView(clipView)
         }
-        // Scrolling can resolve a different noncontiguous layout hole. Anchor
-        // the bounded tail suffix once more at its final viewport location.
-        updateTextDocumentGeometry(followingTail: true)
         followsVisibleTail = true
     }
 
-    private func withTailTrackingSuppressed<T>(_ operation: () throws -> T) rethrows -> T {
-        tailTrackingSuppressionDepth += 1
-        defer { tailTrackingSuppressionDepth -= 1 }
-        return try operation()
-    }
+    private var viewportTrackingSuppressionDepth = 0
 
-    private func cancelLayoutMetricsReconciliation() {
-        layoutMetricsRevision &+= 1
-        layoutMetricsTask?.cancel()
-        layoutMetricsTask = nil
+    private func withViewportTrackingSuppressed<T>(_ operation: () throws -> T) rethrows -> T {
+        viewportTrackingSuppressionDepth += 1
+        defer { viewportTrackingSuppressionDepth -= 1 }
+        return try operation()
     }
 
     @objc private func clearVisibleBuffer() {
@@ -1318,19 +1153,18 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             guard let self else { return }
             latestStoreDrops = 0
             latestRenderOmissions = 0
-            latestDisplayContinuationBreaks = 0
-            latestDisplayTruncatedLines = 0
             updateStatusLabel()
         }
-        textView.string = ""
+        withViewportTrackingSuppressed {
+            logView.install(
+                .empty(style: logView.projection.style),
+                viewportSize: scrollView.contentSize
+            )
+        }
         renderedChunks.removeAll(keepingCapacity: true)
-        renderedExportChunks.removeAll(keepingCapacity: true)
-        renderedDisplayUTF16Length = 0
-        textLayoutMetrics = .empty
         followsVisibleTail = true
         updateFollowButtonPresentation()
-        cancelLayoutMetricsReconciliation()
-        updateTextDocumentGeometry()
+        updateLogViewportFrame()
     }
 
     private var canRenderNow: Bool {
@@ -1341,7 +1175,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     private func suspendRenderingWhileHidden() {
         guard !canRenderNow else { return }
-        if pendingRender || !textView.string.isEmpty {
+        if pendingRender || logView.projection.textUTF16Length > 0 {
             needsRenderWhenVisible = true
         }
         cancelScheduledRender()
@@ -1370,18 +1204,17 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
-    /// NSTextView is AppKit-owned, so a defensive direct-text snapshot is taken
-    /// on MainActor. Normal rendered logs instead capture their immutable chunk
-    /// array; joining, UTF-8 encoding, and file I/O all stay off MainActor even
-    /// for a multi-megabyte logical line.
+    /// Normal rendered logs capture their immutable chunk array; joining,
+    /// UTF-8 encoding, and file I/O all stay off MainActor even for a
+    /// multi-megabyte logical line.
     func saveVisibleBufferSnapshot(to url: URL) {
-        // Tests and defensive callers can mutate NSTextStorage directly. Use
-        // the lossless logical projection only while it still describes the
-        // installed display; otherwise snapshot the AppKit value as before.
-        let hasCurrentProjection = !renderedChunks.isEmpty
-            && textView.textStorage?.length == renderedDisplayUTF16Length
-        let exportChunks = hasCurrentProjection ? renderedExportChunks : nil
-        let fallbackValue = hasCurrentProjection ? nil : textView.string
+        let renderedUTF16Length = renderedChunks.reduce(into: 0) {
+            $0 += $1.utf16.count
+        }
+        let hasCurrentProjection = renderedUTF16Length
+            == logView.projection.textUTF16Length
+        let exportChunks = hasCurrentProjection ? renderedChunks : nil
+        let fallbackValue = hasCurrentProjection ? nil : logView.string
         let writer = fileWriter
         statusLabel.stringValue = "Saving \(url.lastPathComponent)…"
         statusLabel.toolTip = nil

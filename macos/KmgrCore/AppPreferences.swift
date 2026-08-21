@@ -46,20 +46,17 @@ public struct LogDisplayPreferences: Codable, Hashable, Sendable {
     public var byteLimit: Int
     public var renderBatchMilliseconds: Int
     public var maximumRenderedUTF8Bytes: Int
-    public var maximumDisplayedLineUTF8Bytes: Int
 
     public init(
         recordLimit: Int = 20_000,
         byteLimit: Int = 16 << 20,
         renderBatchMilliseconds: Int = 40,
-        maximumRenderedUTF8Bytes: Int = 32 << 20,
-        maximumDisplayedLineUTF8Bytes: Int = 4 << 10
+        maximumRenderedUTF8Bytes: Int = 32 << 20
     ) {
         self.recordLimit = recordLimit
         self.byteLimit = byteLimit
         self.renderBatchMilliseconds = renderBatchMilliseconds
         self.maximumRenderedUTF8Bytes = maximumRenderedUTF8Bytes
-        self.maximumDisplayedLineUTF8Bytes = maximumDisplayedLineUTF8Bytes
     }
 }
 
@@ -533,12 +530,6 @@ public struct AppPreferences: Codable, Hashable, Sendable {
             issues.append(AppPreferenceIssue(
                 field: "logs.maximumRenderedUTF8Bytes",
                 message: "Rendered log text limit must be between 1 MiB and 512 MiB."
-            ))
-        }
-        if !((1 << 10)...(1 << 20)).contains(logs.maximumDisplayedLineUTF8Bytes) {
-            issues.append(AppPreferenceIssue(
-                field: "logs.maximumDisplayedLineUTF8Bytes",
-                message: "Displayed log line limit must be between 1 KiB and 1 MiB."
             ))
         }
         if !(0...100_000).contains(diagnostics.completedOperationHistoryLimit) {

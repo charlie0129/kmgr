@@ -14,8 +14,7 @@ import Testing
         recordLimit: 75_000,
         byteLimit: 32 << 20,
         renderBatchMilliseconds: 50,
-        maximumRenderedUTF8Bytes: 24 << 20,
-        maximumDisplayedLineUTF8Bytes: 8 << 10
+        maximumRenderedUTF8Bytes: 24 << 20
     )
     preferences.diagnostics = DiagnosticsPreferences(
         completedOperationHistoryLimit: 4_000
@@ -65,7 +64,6 @@ import Testing
     #expect(reloaded.current.logs.recordLimit == 75_000)
     #expect(reloaded.current.logs.byteLimit == 32 << 20)
     #expect(reloaded.current.logs.maximumRenderedUTF8Bytes == 24 << 20)
-    #expect(reloaded.current.logs.maximumDisplayedLineUTF8Bytes == 8 << 10)
     #expect(reloaded.current.diagnostics.completedOperationHistoryLimit == 4_000)
     #expect(reloaded.current.nodeShell == preferences.nodeShell)
     #expect(reloaded.current.metricsRefreshSeconds == 30)
@@ -120,7 +118,6 @@ import Testing
     preferences.logs.byteLimit = 100
     preferences.logs.renderBatchMilliseconds = 1
     preferences.logs.maximumRenderedUTF8Bytes = 100
-    preferences.logs.maximumDisplayedLineUTF8Bytes = 100
     preferences.diagnostics.completedOperationHistoryLimit = 100_001
     preferences.metricsRefreshSeconds = 1
     preferences.columnsConfigurationPath = "relative/columns.yaml"
@@ -157,7 +154,6 @@ import Testing
         "logs.byteLimit",
         "logs.renderBatchMilliseconds",
         "logs.maximumRenderedUTF8Bytes",
-        "logs.maximumDisplayedLineUTF8Bytes",
         "diagnostics.completedOperationHistoryLimit",
         "metricsRefreshSeconds",
         "columnsConfigurationPath",

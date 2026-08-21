@@ -20,7 +20,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let logByteLimitField = NSTextField()
     private let renderBatchField = NSTextField()
     private let maximumRenderedLogTextField = NSTextField()
-    private let maximumDisplayedLogLineField = NSTextField()
     private let completedOperationHistoryLimitField = NSTextField()
     private let defaultDeleteConcurrencyField = NSTextField()
     private let nodeShellImageField = NSTextField()
@@ -121,7 +120,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
 
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
-            maximumRenderedLogTextField, maximumDisplayedLogLineField,
+            maximumRenderedLogTextField,
             completedOperationHistoryLimitField, defaultDeleteConcurrencyField,
             nodeShellImageField, nodeShellStartupTimeoutField,
             metricsRefreshField,
@@ -145,7 +144,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         }
         for field in [
             logRecordLimitField, logByteLimitField, renderBatchField,
-            maximumRenderedLogTextField, maximumDisplayedLogLineField,
+            maximumRenderedLogTextField,
             completedOperationHistoryLimitField, defaultDeleteConcurrencyField,
             nodeShellStartupTimeoutField, metricsRefreshField,
             viewportOverscanField,
@@ -236,9 +235,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         maximumRenderedLogTextField.setAccessibilityIdentifier(
             "settings.logs.maximumRenderedTextMiB"
         )
-        maximumDisplayedLogLineField.setAccessibilityIdentifier(
-            "settings.logs.maximumDisplayedLineKiB"
-        )
         completedOperationHistoryLimitField.setAccessibilityIdentifier(
             "settings.diagnostics.completedOperationHistoryLimit"
         )
@@ -282,11 +278,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                     "Rendered text",
                     control: maximumRenderedLogTextField,
                     suffix: "MiB maximum"
-                ),
-                labeledRow(
-                    "Logical line preview",
-                    control: maximumDisplayedLogLineField,
-                    suffix: "KiB maximum"
                 ),
             ]
         )
@@ -644,8 +635,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         renderBatchField.integerValue = preferences.logs.renderBatchMilliseconds
         maximumRenderedLogTextField.integerValue =
             preferences.logs.maximumRenderedUTF8Bytes / (1 << 20)
-        maximumDisplayedLogLineField.integerValue =
-            preferences.logs.maximumDisplayedLineUTF8Bytes / (1 << 10)
         completedOperationHistoryLimitField.integerValue =
             preferences.diagnostics.completedOperationHistoryLimit
         defaultDeleteConcurrencyField.integerValue =
@@ -716,18 +705,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             maximumRenderedLogTextField,
             multiplier: 1 << 20
         )
-        let maximumDisplayedLineUTF8Bytes = parsedScaledInteger(
-            maximumDisplayedLogLineField,
-            multiplier: 1 << 10
-        )
         return AppPreferences(
             appearance: AppearancePreference.allCases[safe: appearanceIndex] ?? .system,
             logs: LogDisplayPreferences(
                 recordLimit: parsedInteger(logRecordLimitField),
                 byteLimit: byteLimit,
                 renderBatchMilliseconds: parsedInteger(renderBatchField),
-                maximumRenderedUTF8Bytes: maximumRenderedUTF8Bytes,
-                maximumDisplayedLineUTF8Bytes: maximumDisplayedLineUTF8Bytes
+                maximumRenderedUTF8Bytes: maximumRenderedUTF8Bytes
             ),
             metricsRefreshSeconds: parsedInteger(metricsRefreshField),
             defaultNamespace: DefaultNamespacePreference.allCases[safe: namespaceIndex] ?? .contextDefault,
