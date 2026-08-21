@@ -142,6 +142,80 @@ struct ClusterManagerWindowControllerTests {
         #expect(layout.issueFrame(in: root).height > 0)
     }
 
+    @Test("in-flight cluster connection can be cancelled and retried")
+    func cancelInFlightOpenAndRetry() async throws {
+        let context = ClusterContextSummary(
+            name: "remote",
+            clusterName: "production",
+            serverHostname: "api.example.test",
+            defaultNamespace: "default"
+        )
+        let attempts = ClusterOpenAttemptRecorder()
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in [context] },
+                openContext: { reference in
+                    await attempts.recordStart(reference)
+                    do {
+                        try await Task.sleep(for: .seconds(30))
+                        return OpenedClusterSession(
+                            sessionID: "unexpected-session",
+                            contextName: context.name,
+                            clusterName: context.clusterName,
+                            serverHostname: context.serverHostname,
+                            defaultNamespace: context.defaultNamespace
+                        )
+                    } catch is CancellationError {
+                        await attempts.recordCancellation(reference)
+                        throw CancellationError()
+                    }
+                }
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let root = try #require(controller.window?.contentView)
+        let layout = try clusterManagerVerticalLayout(in: root)
+        try await waitForClusterManagerTable(layout.tableView)
+        let buttons = clusterManagerDescendants(of: root).compactMap { $0 as? NSButton }
+        let openButton = try #require(buttons.first {
+            $0.accessibilityLabel() == "Open selected cluster context"
+        })
+        let cancelButton = try #require(buttons.first {
+            $0.accessibilityLabel() == "Cancel opening cluster context"
+        })
+
+        #expect(openButton.isEnabled)
+        #expect(cancelButton.isHidden)
+        openButton.performClick(nil)
+        try await waitForClusterOpenAttempts(attempts, started: 1, cancelled: 0)
+
+        #expect(!openButton.isEnabled)
+        #expect(!cancelButton.isHidden)
+        #expect(cancelButton.isEnabled)
+        #expect(!layout.tableView.isEnabled)
+
+        cancelButton.performClick(nil)
+        #expect(openButton.isEnabled)
+        #expect(cancelButton.isHidden)
+        #expect(layout.tableView.isEnabled)
+
+        // Retry before the cancelled task unwinds. Its late completion must not
+        // clear the state for this replacement attempt.
+        openButton.performClick(nil)
+        try await waitForClusterOpenAttempts(attempts, started: 2, cancelled: 1)
+        #expect(!openButton.isEnabled)
+        #expect(!cancelButton.isHidden)
+        #expect(!layout.tableView.isEnabled)
+
+        cancelButton.performClick(nil)
+        try await waitForClusterOpenAttempts(attempts, started: 2, cancelled: 2)
+        #expect(openButton.isEnabled)
+        #expect(cancelButton.isHidden)
+        #expect(layout.tableView.isEnabled)
+    }
+
     @Test("context rows stay on one line and columns support user resizing")
     func singleLineResizableContextTable() async throws {
         let context = ClusterContextSummary(
@@ -390,6 +464,44 @@ private func waitForClusterManagerIssue(
                 reason: "AppKitTestTimeout",
                 message: "Timed out waiting for the Cluster Manager issue banner.",
                 operation: "test Cluster Manager issue presentation"
+            )
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+private actor ClusterOpenAttemptRecorder {
+    private var startedReferences: [String] = []
+    private var cancelledReferences: [String] = []
+
+    func recordStart(_ reference: String) {
+        startedReferences.append(reference)
+    }
+
+    func recordCancellation(_ reference: String) {
+        cancelledReferences.append(reference)
+    }
+
+    func counts() -> (started: Int, cancelled: Int) {
+        (startedReferences.count, cancelledReferences.count)
+    }
+}
+
+private func waitForClusterOpenAttempts(
+    _ recorder: ClusterOpenAttemptRecorder,
+    started: Int,
+    cancelled: Int,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while await recorder.counts() != (started, cancelled) {
+        guard clock.now < deadline else {
+            throw ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "AppKitTestTimeout",
+                message: "Timed out waiting for cluster open attempt state.",
+                operation: "test Cluster Manager connection cancellation"
             )
         }
         try await Task.sleep(for: .milliseconds(10))

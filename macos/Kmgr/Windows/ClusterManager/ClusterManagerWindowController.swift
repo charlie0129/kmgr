@@ -122,6 +122,8 @@ private final class ClusterManagerViewController: NSViewController,
     private var model = ClusterManagerModel()
     private var loadTask: Task<Void, Never>?
     private var openTask: Task<Void, Never>?
+    private var nextOpenAttemptID: UInt64 = 0
+    private var activeOpenAttemptID: UInt64?
     private var hasStarted = false
     private var isProjectingSelection = false
     private var openingContextName: String?
@@ -145,6 +147,7 @@ private final class ClusterManagerViewController: NSViewController,
     private let issueMetadataLabel = NSTextField(labelWithString: "")
     private let countLabel = NSTextField(labelWithString: "")
     private let openProgress = NSProgressIndicator()
+    private let cancelOpenButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
     private var tableLayoutBinding: TableLayoutBinding?
     private var separatorBelowIssueConstraint: NSLayoutConstraint?
@@ -222,6 +225,12 @@ private final class ClusterManagerViewController: NSViewController,
         openProgress.controlSize = .small
         openProgress.isDisplayedWhenStopped = false
 
+        cancelOpenButton.bezelStyle = .rounded
+        cancelOpenButton.keyEquivalent = "\u{1b}"
+        cancelOpenButton.target = self
+        cancelOpenButton.action = #selector(cancelOpeningContext(_:))
+        cancelOpenButton.setAccessibilityLabel("Cancel opening cluster context")
+
         openButton.bezelStyle = .rounded
         openButton.keyEquivalent = "\r"
         openButton.target = self
@@ -230,7 +239,9 @@ private final class ClusterManagerViewController: NSViewController,
 
         let footerSpacer = NSView()
         footerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let footer = NSStackView(views: [countLabel, footerSpacer, openProgress, openButton])
+        let footer = NSStackView(
+            views: [countLabel, footerSpacer, openProgress, cancelOpenButton, openButton]
+        )
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
@@ -316,9 +327,8 @@ private final class ClusterManagerViewController: NSViewController,
 
     func cancelWork() {
         loadTask?.cancel()
-        openTask?.cancel()
         loadTask = nil
-        openTask = nil
+        cancelOpenAttempt(render: false)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -434,25 +444,31 @@ private final class ClusterManagerViewController: NSViewController,
 
         operationIssue = nil
         openingContextName = context.name
+        nextOpenAttemptID &+= 1
+        let attemptID = nextOpenAttemptID
+        activeOpenAttemptID = attemptID
         renderControlsAndIssue()
         openTask = Task {
-            [weak self, provider, contextName = context.name, contextReference = context.id] in
+            [
+                weak self,
+                provider,
+                contextName = context.name,
+                contextReference = context.id
+            ] in
             do {
                 let session = try await provider.openContext(reference: contextReference)
-                guard let self, !Task.isCancelled else { return }
-                openTask = nil
-                openingContextName = nil
+                guard let self, !Task.isCancelled,
+                    finishOpenAttempt(attemptID)
+                else { return }
                 renderControlsAndIssue()
                 onOpenSession?(session)
             } catch is CancellationError {
-                guard let self else { return }
-                openTask = nil
-                openingContextName = nil
+                guard let self, finishOpenAttempt(attemptID) else { return }
                 renderControlsAndIssue()
             } catch {
-                guard let self, !Task.isCancelled else { return }
-                openTask = nil
-                openingContextName = nil
+                guard let self, !Task.isCancelled,
+                    finishOpenAttempt(attemptID)
+                else { return }
                 operationIssue = Self.presentationIssue(
                     from: error,
                     contextName: contextName,
@@ -461,6 +477,27 @@ private final class ClusterManagerViewController: NSViewController,
                 renderControlsAndIssue()
             }
         }
+    }
+
+    @objc private func cancelOpeningContext(_ sender: Any?) {
+        cancelOpenAttempt(render: true)
+    }
+
+    private func cancelOpenAttempt(render: Bool) {
+        guard let task = openTask else { return }
+        openTask = nil
+        activeOpenAttemptID = nil
+        openingContextName = nil
+        task.cancel()
+        if render { renderControlsAndIssue() }
+    }
+
+    private func finishOpenAttempt(_ attemptID: UInt64) -> Bool {
+        guard activeOpenAttemptID == attemptID else { return false }
+        openTask = nil
+        activeOpenAttemptID = nil
+        openingContextName = nil
+        return true
     }
 
     private func loadContexts(reload: Bool) {
@@ -575,6 +612,8 @@ private final class ClusterManagerViewController: NSViewController,
         searchField.isEnabled = !isOpening
         tableView.isEnabled = !isOpening
         revealButton.isEnabled = model.selectedContext?.sourcePaths.isEmpty == false
+        cancelOpenButton.isHidden = !isOpening
+        cancelOpenButton.isEnabled = isOpening
         openButton.isEnabled = model.canOpenSelectedContext && !isOpening
         openButton.title = isOpening ? "Opening…" : "Open"
         if isOpening {
