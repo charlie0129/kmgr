@@ -93,6 +93,49 @@ struct CommandPaletteWindowControllerTests {
         #expect(!searchFrame.intersects(closeFrame))
     }
 
+    @Test("search viewport grows below the native text baseline")
+    func searchViewportPreservesNativeBaseline() throws {
+        let controller = makePaletteController(provider: ControllablePaletteSearchProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let search = try paletteControls(in: controller).search
+        let cell = try #require(search.cell as? NSSearchFieldCell)
+        let font = try #require(search.font)
+
+        search.stringValue = "g"
+        #expect(window.makeFirstResponder(search))
+        search.layoutSubtreeIfNeeded()
+
+        let fontLineHeight = ceil(
+            font.ascender - font.descender + font.leading
+        )
+        let nativeSearch = NSSearchField(frame: search.bounds)
+        nativeSearch.font = font
+        let nativeCell = try #require(nativeSearch.cell as? NSSearchFieldCell)
+        let nativeTextRect = nativeCell.searchTextRect(forBounds: nativeSearch.bounds)
+        let textRect = cell.searchTextRect(forBounds: search.bounds)
+        let editor = try #require(search.currentEditor() as? NSTextView)
+        let textContainer = try #require(editor.textContainer)
+        let layoutManager = try #require(editor.layoutManager)
+        layoutManager.ensureLayout(for: textContainer)
+        let glyphRange = layoutManager.glyphRange(for: textContainer)
+        let baseline = editor.frame.minY
+            + layoutManager.location(forGlyphAt: glyphRange.location).y
+        let nativeBaseline = nativeTextRect.minY
+            + nativeSearch.firstBaselineOffsetFromTop
+        let unusedSpaceBelowText = editor.bounds.maxY
+            - layoutManager.usedRect(for: textContainer).maxY
+
+        #expect(search.isFlipped)
+        #expect(textRect.height >= fontLineHeight + 4)
+        #expect(textRect.minY == nativeTextRect.minY)
+        #expect(textRect.maxY > nativeTextRect.maxY)
+        #expect(baseline == nativeBaseline)
+        #expect(unusedSpaceBelowText >= 4)
+        #expect(editor.frame == textRect)
+    }
+
     @Test("root kind query includes cached objects with unrelated names")
     func rootKindQueryIncludesCachedObjects() async throws {
         let provider = ControllablePaletteSearchProvider()

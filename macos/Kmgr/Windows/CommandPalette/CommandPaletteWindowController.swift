@@ -759,6 +759,31 @@ private final class PalettePanel: NSPanel {
 
 @MainActor
 private final class PaletteSearchField: NSSearchField {
+    override class var cellClass: AnyClass? {
+        get { PaletteSearchFieldCell.self }
+        set {}
+    }
+}
+
+@MainActor
+private final class PaletteSearchFieldCell: NSSearchFieldCell {
+    private static let descenderPadding: CGFloat = 4
+
+    override func searchTextRect(forBounds rect: NSRect) -> NSRect {
+        var textRect = super.searchTextRect(forBounds: rect)
+        guard let font else { return textRect }
+
+        let fontLineHeight = ceil(
+            font.ascender - font.descender + font.leading
+        )
+        // NSSearchField is flipped. Changing only the height keeps AppKit's
+        // native top edge and baseline while adding space below the glyphs.
+        textRect.size.height = min(
+            rect.maxY - textRect.minY,
+            max(textRect.height, fontLineHeight + Self.descenderPadding)
+        )
+        return textRect
+    }
 }
 
 @MainActor
