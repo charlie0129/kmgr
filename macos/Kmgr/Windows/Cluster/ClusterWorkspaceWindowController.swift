@@ -3599,7 +3599,13 @@ private final class ResourceListViewController: NSViewController,
                 + " previous_destination="
                 + resourceCacheDestinationDescription(history.current)
         )
-        if case .resource = history.current, let current = navigationState() {
+        if case .resource = history.current, var current = navigationState() {
+            // A drill-down is a temporary child of the selected object, so
+            // Back restores that UID. Explicit sidebar/palette navigation is
+            // a new list scope and deliberately leaves no saved selection.
+            if reason != .resourceDrillDown {
+                current.selectedUIDs = []
+            }
             history.replaceCurrent(with: .resource(current))
         }
         let nextGVR = resourceGVR(for: resource)
@@ -3638,13 +3644,15 @@ private final class ResourceListViewController: NSViewController,
                 + " to=\(resourceCacheScopeDescription(scope))"
                 + " rows=\(model.orderedVisibleUIDs.count)"
         )
-        if case .resource = history.current, let current = navigationState() {
+        if case .resource = history.current, var current = navigationState() {
+            current.selectedUIDs = []
             history.replaceCurrent(with: .resource(current))
         }
         self.scope = scope
         pendingScrollAnchor = nil
         if var state = navigationState() {
             state.namespaceSelection = scope
+            state.selectedUIDs = []
             history.navigate(to: .resource(state))
         }
         if let resource {
