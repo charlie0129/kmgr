@@ -108,6 +108,18 @@ func TestServerRejectsInvalidWarmCacheLimits(t *testing.T) {
 	}
 }
 
+func TestServerForwardsViewReleaseDelayToRuntimeValidation(t *testing.T) {
+	server, err := NewServer(strings.Repeat("a", 64), ServerOptions{
+		Version: "test", ViewReleaseDelay: -time.Second,
+	})
+	if server != nil || err == nil {
+		if server != nil {
+			server.Shutdown(time.Second)
+		}
+		t.Fatalf("NewServer(negative view release delay) = %#v, %v; want error", server, err)
+	}
+}
+
 func TestServerRejectsInvalidMetricCacheAndLogConcurrencyLimits(t *testing.T) {
 	for _, options := range []ServerOptions{
 		{IdleMetricProviderLimit: -1},

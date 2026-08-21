@@ -175,7 +175,11 @@ public enum PreferenceControlledMutation: Hashable, Sendable {
 }
 
 public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
+    public static let defaultViewReleaseGraceSeconds = 3
+    public static let viewReleaseGraceSecondsRange = 1...300
+
     public var viewportOverscanScreensPerSide: Int
+    public var viewReleaseGraceSeconds: Int
     public var globalWarmCacheViewLimit: Int
     public var globalWarmCacheObjectLimit: Int
     public var globalWarmCacheMemoryPercent: Int
@@ -194,6 +198,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 
     public init(
         viewportOverscanScreensPerSide: Int = 10,
+        viewReleaseGraceSeconds: Int = AdvancedPerformancePreferences.defaultViewReleaseGraceSeconds,
         globalWarmCacheViewLimit: Int = 24,
         globalWarmCacheObjectLimit: Int = 250_000,
         globalWarmCacheMemoryPercent: Int = 20,
@@ -211,6 +216,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         logSourceOpenConcurrency: Int = 16
     ) {
         self.viewportOverscanScreensPerSide = viewportOverscanScreensPerSide
+        self.viewReleaseGraceSeconds = viewReleaseGraceSeconds
         self.globalWarmCacheViewLimit = globalWarmCacheViewLimit
         self.globalWarmCacheObjectLimit = globalWarmCacheObjectLimit
         self.globalWarmCacheMemoryPercent = globalWarmCacheMemoryPercent
@@ -252,6 +258,12 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
             issues.append(AppPreferenceIssue(
                 field: "advancedPerformance.viewportOverscanScreensPerSide",
                 message: "List overscan must be between 0 and 100 screens per side."
+            ))
+        }
+        if !Self.viewReleaseGraceSecondsRange.contains(viewReleaseGraceSeconds) {
+            issues.append(AppPreferenceIssue(
+                field: "advancedPerformance.viewReleaseGraceSeconds",
+                message: "View release grace must be between 1 and 300 seconds."
             ))
         }
 
@@ -339,7 +351,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v6"
+    public static let apiVersion = "kmgr.preferences/v7"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences

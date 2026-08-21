@@ -23,6 +23,8 @@ import (
 
 var version = "dev"
 
+const maximumViewReleaseDelay = 5 * time.Minute
+
 type warmCacheConfiguration struct {
 	globalViews            int
 	globalObjects          int
@@ -55,6 +57,10 @@ func run(arguments []string) int {
 	metricsRefresh := flags.Duration(
 		"metrics-refresh", metrics.DefaultRefreshInterval,
 		"refresh interval for active Metrics API consumers",
+	)
+	viewReleaseDelay := flags.Duration(
+		"view-release-delay", view.DefaultViewReleaseDelay,
+		"grace period before releasing an unsubscribed resource pipeline",
 	)
 	kubernetesQPS := flags.Float64(
 		"kubernetes-qps", cluster.DefaultClientQPS,
@@ -157,6 +163,10 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "kmgr-engine: --metrics-refresh must be positive")
 		return 2
 	}
+	if *viewReleaseDelay < time.Second || *viewReleaseDelay > maximumViewReleaseDelay {
+		fmt.Fprintln(os.Stderr, "kmgr-engine: --view-release-delay must be between 1s and 5m")
+		return 2
+	}
 	validatedQPS, err := validateKubernetesRateLimit(*kubernetesQPS, *kubernetesBurst)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
@@ -236,6 +246,7 @@ func run(arguments []string) int {
 		Logger:                      logger,
 		ColumnsPath:                 *columnsPath,
 		MetricsRefreshInterval:      *metricsRefresh,
+		ViewReleaseDelay:            *viewReleaseDelay,
 		IdleMetricProviderLimit:     metricCache.idleProviders,
 		IdleMetricSampleLimit:       metricCache.idleSamples,
 		PodMetricsEntryLimit:        metricCache.exactEntries,

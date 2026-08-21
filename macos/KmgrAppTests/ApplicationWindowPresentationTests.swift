@@ -54,6 +54,9 @@ struct ApplicationWindowPresentationTests {
         let overscan = try field(
             "settings.performance.viewportOverscanScreensPerSide"
         )
+        let viewReleaseGrace = try field(
+            "settings.performance.viewReleaseGraceSeconds"
+        )
         let authorityMemory = try field(
             "settings.performance.authorityWarmMemoryPercent"
         )
@@ -72,6 +75,7 @@ struct ApplicationWindowPresentationTests {
         )
         #expect(globalMemory.integerValue == 20)
         #expect(overscan.integerValue == 10)
+        #expect(viewReleaseGrace.integerValue == 3)
         #expect(authorityMemory.integerValue == 20)
         #expect(idleProviders.integerValue == 8)
         #expect(idleSamples.integerValue == 100_000)
@@ -86,6 +90,7 @@ struct ApplicationWindowPresentationTests {
 
         globalMemory.stringValue = "30"
         overscan.stringValue = "17"
+        viewReleaseGrace.stringValue = "45"
         authorityMemory.stringValue = "10"
         qps.stringValue = "12.5"
         burst.stringValue = "37"
@@ -101,6 +106,7 @@ struct ApplicationWindowPresentationTests {
 
         #expect(store.current.advancedPerformance.globalWarmCacheMemoryPercent == 30)
         #expect(store.current.advancedPerformance.viewportOverscanScreensPerSide == 17)
+        #expect(store.current.advancedPerformance.viewReleaseGraceSeconds == 45)
         #expect(store.current.advancedPerformance.authorityWarmCacheMemoryPercent == 10)
         #expect(store.current.advancedPerformance.kubernetesQPS == 12.5)
         #expect(store.current.advancedPerformance.kubernetesBurst == 37)

@@ -24,6 +24,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let nodeShellImageField = NSTextField()
     private let metricsRefreshField = NSTextField()
     private let viewportOverscanField = NSTextField()
+    private let viewReleaseGraceField = NSTextField()
     private let globalWarmViewLimitField = NSTextField()
     private let globalWarmObjectLimitField = NSTextField()
     private let globalWarmMemoryPercentField = NSTextField()
@@ -115,6 +116,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             nodeShellImageField,
             metricsRefreshField,
             viewportOverscanField,
+            viewReleaseGraceField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
@@ -134,6 +136,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             maximumDisplayedLogLineField, completedOperationHistoryLimitField,
             metricsRefreshField,
             viewportOverscanField,
+            viewReleaseGraceField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
             globalWarmMemoryPercentField, authorityWarmViewLimitField,
             authorityWarmObjectLimitField, authorityWarmMemoryPercentField,
@@ -151,6 +154,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         )
         viewportOverscanField.setAccessibilityIdentifier(
             "settings.performance.viewportOverscanScreensPerSide"
+        )
+        viewReleaseGraceField.setAccessibilityIdentifier(
+            "settings.performance.viewReleaseGraceSeconds"
         )
         globalWarmObjectLimitField.setAccessibilityIdentifier(
             "settings.performance.globalWarmObjects"
@@ -272,6 +278,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         )
         warmCacheHelp.textColor = .secondaryLabelColor
         warmCacheHelp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let viewReleaseHelp = NSTextField(wrappingLabelWithString:
+            "After the last window leaves a resource view, its LIST/WATCH pipeline remains active for this grace period. A longer grace improves quick returns but retains network and cache work longer."
+        )
+        viewReleaseHelp.textColor = .secondaryLabelColor
+        viewReleaseHelp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         let relaunchWarning = NSTextField(wrappingLabelWithString:
             "These engine-owned settings apply after quitting and relaunching the application. Existing cluster sessions keep their current limits."
         )
@@ -292,6 +303,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                     control: viewportOverscanField,
                     suffix: "screens per side"
                 ),
+                groupHeading("Resource pipelines"),
+                labeledRow(
+                    "View release grace",
+                    control: viewReleaseGraceField,
+                    suffix: "seconds"
+                ),
+                viewReleaseHelp,
                 warmCacheHelp,
                 groupHeading("Warm cache — global aggregate"),
                 labeledRow("Retained queries", control: globalWarmViewLimitField),
@@ -539,6 +557,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         metricsRefreshField.integerValue = preferences.metricsRefreshSeconds
         viewportOverscanField.integerValue =
             preferences.advancedPerformance.viewportOverscanScreensPerSide
+        viewReleaseGraceField.integerValue =
+            preferences.advancedPerformance.viewReleaseGraceSeconds
         globalWarmViewLimitField.integerValue =
             preferences.advancedPerformance.globalWarmCacheViewLimit
         globalWarmObjectLimitField.integerValue =
@@ -626,6 +646,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 viewportOverscanScreensPerSide: parsedInteger(
                     viewportOverscanField
                 ),
+                viewReleaseGraceSeconds: parsedInteger(viewReleaseGraceField),
                 globalWarmCacheViewLimit: parsedInteger(globalWarmViewLimitField),
                 globalWarmCacheObjectLimit: parsedInteger(globalWarmObjectLimitField),
                 globalWarmCacheMemoryPercent: parsedInteger(

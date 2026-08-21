@@ -33,6 +33,7 @@ type ServerOptions struct {
 	ProbeTimeout                time.Duration
 	ColumnsPath                 string
 	MetricsRefreshInterval      time.Duration
+	ViewReleaseDelay            time.Duration
 	IdleMetricProviderLimit     int
 	IdleMetricSampleLimit       int
 	PodMetricsEntryLimit        int
@@ -124,6 +125,7 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		Source:                      view.ClusterResourceSource{Sessions: sessions},
 		Metrics:                     metricSource,
 		Columns:                     columnManager,
+		ReleaseDelay:                options.ViewReleaseDelay,
 		WarmViewLimit:               options.WarmViewLimit,
 		WarmObjectLimit:             options.WarmObjectLimit,
 		WarmByteLimit:               options.WarmByteLimit,

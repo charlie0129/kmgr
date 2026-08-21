@@ -32,6 +32,7 @@ import Testing
     preferences.columnsConfigurationPath = "~/Library/Application Support/kmgr/custom-columns.yaml"
     preferences.advancedPerformance = AdvancedPerformancePreferences(
         viewportOverscanScreensPerSide: 17,
+        viewReleaseGraceSeconds: 45,
         globalWarmCacheViewLimit: 48,
         globalWarmCacheObjectLimit: 500_000,
         globalWarmCacheMemoryPercent: 30,
@@ -63,6 +64,7 @@ import Testing
     #expect(!reloaded.current.confirmations.confirmWorkloadRestart)
     #expect(reloaded.current.columnsConfigurationPath.hasPrefix("/"))
     #expect(reloaded.current.advancedPerformance == preferences.advancedPerformance)
+    #expect(reloaded.current.advancedPerformance.viewReleaseGraceSeconds == 45)
     #expect(reloaded.loadIssue == nil)
 
     let encoded = try #require(defaults.data(forKey: AppPreferencesStore.storageKey))
@@ -112,6 +114,7 @@ import Testing
     preferences.columnsConfigurationPath = "relative/columns.yaml"
     preferences.advancedPerformance = AdvancedPerformancePreferences(
         viewportOverscanScreensPerSide: 101,
+        viewReleaseGraceSeconds: 301,
         globalWarmCacheViewLimit: 0,
         globalWarmCacheObjectLimit: 0,
         globalWarmCacheMemoryPercent: 0,
@@ -138,6 +141,7 @@ import Testing
         "metricsRefreshSeconds",
         "columnsConfigurationPath",
         "advancedPerformance.viewportOverscanScreensPerSide",
+        "advancedPerformance.viewReleaseGraceSeconds",
         "advancedPerformance.globalWarmCacheViewLimit",
         "advancedPerformance.globalWarmCacheObjectLimit",
         "advancedPerformance.globalWarmCacheMemoryPercent",
@@ -228,6 +232,23 @@ import Testing
     #expect(preferences.validationIssues().contains {
         $0.field == "advancedPerformance.exactPodMetricsEntryLimit"
     })
+}
+
+@Test func viewReleaseGraceUsesBoundedWholeSeconds() {
+    var preferences = AppPreferences()
+    #expect(preferences.advancedPerformance.viewReleaseGraceSeconds == 3)
+    for valid in [1, 300] {
+        preferences.advancedPerformance.viewReleaseGraceSeconds = valid
+        #expect(!preferences.validationIssues().contains {
+            $0.field == "advancedPerformance.viewReleaseGraceSeconds"
+        })
+    }
+    for invalid in [0, 301] {
+        preferences.advancedPerformance.viewReleaseGraceSeconds = invalid
+        #expect(preferences.validationIssues().contains {
+            $0.field == "advancedPerformance.viewReleaseGraceSeconds"
+        })
+    }
 }
 
 @Test func defaultNamespacePreferenceSeedsOnlyNewWorkspaceScope() {

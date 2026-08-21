@@ -44,6 +44,7 @@ struct EngineSupervisorLifecycleTests {
             columnsConfigurationPath: "/tmp/columns.yaml",
             metricsRefreshSeconds: 45,
             advancedPerformance: AdvancedPerformancePreferences(
+                viewReleaseGraceSeconds: 30,
                 globalWarmCacheViewLimit: 48,
                 globalWarmCacheObjectLimit: 500_000,
                 globalWarmCacheMemoryPercent: 30,
@@ -66,6 +67,7 @@ struct EngineSupervisorLifecycleTests {
             "--socket", "/tmp/a.sock",
             "--columns", "/tmp/columns.yaml",
             "--metrics-refresh", "45s",
+            "--view-release-delay", "30s",
             "--warm-cache-global-views", "48",
             "--warm-cache-global-objects", "500000",
             "--warm-cache-global-memory-percent", "30",

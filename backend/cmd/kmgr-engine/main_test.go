@@ -52,6 +52,17 @@ func TestMetricsRefreshFlagIsValidated(t *testing.T) {
 	}
 }
 
+func TestViewReleaseDelayFlagIsValidated(t *testing.T) {
+	if code := run([]string{"--version", "--view-release-delay", "45s"}); code != 0 {
+		t.Fatalf("run(valid --view-release-delay) = %d, want success", code)
+	}
+	for _, value := range []string{"0s", "999ms", "-1s", "301s", "not-a-duration"} {
+		if code := run([]string{"--version", "--view-release-delay", value}); code != 2 {
+			t.Errorf("run(--view-release-delay %q) = %d, want usage error", value, code)
+		}
+	}
+}
+
 func TestKubernetesRateLimitFlagsAreValidated(t *testing.T) {
 	if code := run([]string{
 		"--version", "--kubernetes-qps", "12.5", "--kubernetes-burst", "37",

@@ -662,6 +662,8 @@ extension EngineSupervisor.Configuration {
             advancedPerformance.validationIssues().isEmpty
         {
             arguments += [
+                "--view-release-delay",
+                "\(advancedPerformance.viewReleaseGraceSeconds)s",
                 "--warm-cache-global-views",
                 "\(advancedPerformance.globalWarmCacheViewLimit)",
                 "--warm-cache-global-objects",
