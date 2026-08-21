@@ -6543,6 +6543,9 @@ private final class ResourceListViewController: NSViewController,
         suppressSortChanges = true
         let wasSuppressingSelectionCallbacks = suppressSelectionCallbacks
         suppressSelectionCallbacks = true
+        // Removing the final NSTableColumn resets only the clip view's
+        // horizontal origin. Preserve it across the structural rebuild.
+        let retainedHorizontalScrollOffset = tableView.visibleRect.minX
         defer {
             suppressSortChanges = false
             suppressSelectionCallbacks = wasSuppressingSelectionCallbacks
@@ -6584,6 +6587,16 @@ private final class ResourceListViewController: NSViewController,
             byExtendingSelection: false
         )
         lastAcceptedAppKitSelection = tableView.selectedRowIndexes
+        let currentOrigin = tableView.visibleRect.origin
+        if abs(currentOrigin.x - retainedHorizontalScrollOffset) >= 0.5 {
+            tableView.scroll(NSPoint(
+                x: retainedHorizontalScrollOffset,
+                y: currentOrigin.y
+            ))
+            if let scrollView = tableView.enclosingScrollView {
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+        }
     }
 
     private var installedColumnDefinitions: [ColumnDefinition] {

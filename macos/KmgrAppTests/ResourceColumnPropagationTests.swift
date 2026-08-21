@@ -354,7 +354,7 @@ struct ResourceColumnPropagationTests {
         #expect(nodesProvider.streamRequests.count == originalNodeRequestCount)
     }
 
-    @Test("resource-table drag layout persists and synchronizes by exact GVR")
+    @Test("resource-table drag layout persists without moving the viewport")
     func tableLayoutPersistsAndSynchronizesByExactGVR() async throws {
         let fixture = try ColumnPropagationFixture()
         defer { fixture.remove() }
@@ -362,11 +362,11 @@ struct ResourceColumnPropagationTests {
         let definitions = [
             ColumnDefinition(
                 id: "name", title: "Name", source: .builtin,
-                value: "name", type: .string, width: 160
+                value: "name", type: .string, width: 900
             ),
             ColumnDefinition(
                 id: "status", title: "Status", source: .builtin,
-                value: "status", type: .string, width: 120
+                value: "status", type: .string, width: 900
             ),
         ]
         try ColumnConfigurationFileStore(path: fixture.path).save(
@@ -420,8 +420,14 @@ struct ResourceColumnPropagationTests {
             $0.identifier.rawValue == "status"
         })
         try moveColumn(status, to: 0, in: firstTable)
+        let scrollView = try #require(firstTable.enclosingScrollView)
+        firstTable.layoutSubtreeIfNeeded()
+        firstTable.scroll(NSPoint(x: 300, y: firstTable.visibleRect.minY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        let expectedHorizontalOffset = firstTable.visibleRect.minX
+        #expect(expectedHorizontalOffset > 0)
         let oldWidth = status.width
-        status.width = 333
+        status.width = 960
         firstTable.delegate?.tableViewColumnDidResize?(Notification(
             name: NSTableView.columnDidResizeNotification,
             object: firstTable,
@@ -433,10 +439,10 @@ struct ResourceColumnPropagationTests {
                 .load().views.first(where: { $0.match == match })?.columns
             else { return false }
             return saved.map(\.id) == ["status", "name"]
-                && saved.first?.width == 333
+                && saved.first?.width == 960
                 && secondTable.tableColumns.map { $0.identifier.rawValue }
                     == ["status", "name"]
-                && secondTable.tableColumns.first?.width == 333
+                && secondTable.tableColumns.first?.width == 960
         }
         // Order and preferred width are presentation-only; retaining the same
         // extractor set must not reopen either LIST/WATCH stream.
@@ -444,6 +450,7 @@ struct ResourceColumnPropagationTests {
         #expect(secondProvider.streamRequests.count == initialSecondRequests)
         #expect(firstTable.columnAutoresizingStyle == .noColumnAutoresizing)
         #expect(secondTable.columnAutoresizingStyle == .noColumnAutoresizing)
+        #expect(abs(firstTable.visibleRect.minX - expectedHorizontalOffset) < 0.5)
     }
 
     @Test("exact-GVR file layout wins over stale per-window restoration")
