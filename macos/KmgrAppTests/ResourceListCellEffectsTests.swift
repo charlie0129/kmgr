@@ -267,7 +267,12 @@ struct ResourceListCellEffectsTests {
             columnID: "cpu"
         ).renderedHighlightColor == nil)
 
-        #expect(provider.yieldSnapshot(rows: [], first: false, last: true))
+        #expect(provider.yieldSnapshot(
+            rows: [],
+            first: false,
+            last: true,
+            rowsVisible: 1
+        ))
         #expect(text(in: table, columnID: "status") == "Running")
         #expect(provider.yieldReconciled(rowsVisible: 1))
         try await waitForCellEffects {
@@ -351,15 +356,28 @@ private final class ControlledCellEffectsWorkspaceProvider:
     func yieldSnapshot(
         rows: [ResourceRow],
         first: Bool,
-        last: Bool
+        last: Bool,
+        rowsVisible: UInt64? = nil
     ) -> Bool {
-        guard let emission = nextEmission() else { return false }
+        guard let emission = nextEmission(count: last ? 2 : 1) else { return false }
         emission.state.continuation.yield(testSnapshotInvalidation(
             request: emission.state.request,
             sequence: emission.sequence,
             rows: rows,
             first: first
         ))
+        if last {
+            emission.state.continuation.yield(.status(
+                cursor: StreamCursor(
+                    generation: emission.state.request.generation,
+                    sequence: emission.sequence + 1
+                ),
+                status: ResourceViewStatus(
+                    freshness: .watching,
+                    rowsVisible: rowsVisible ?? UInt64(rows.count)
+                )
+            ))
+        }
         return true
     }
 
@@ -392,11 +410,13 @@ private final class ControlledCellEffectsWorkspaceProvider:
         return true
     }
 
-    private func nextEmission() -> (state: StreamState, sequence: UInt64)? {
+    private func nextEmission(
+        count: UInt64 = 1
+    ) -> (state: StreamState, sequence: UInt64)? {
         lock.withLock {
             guard let state = streams.last else { return nil }
             let sequence = state.nextSequence
-            state.nextSequence &+= 1
+            state.nextSequence &+= count
             return (state, sequence)
         }
     }

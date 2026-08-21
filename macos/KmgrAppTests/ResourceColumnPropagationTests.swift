@@ -1379,10 +1379,17 @@ private final class ColumnPropagationWorkspaceProvider: RangeBackedTestWorkspace
                 sequence: 1,
                 rows: [row]
             ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                status: ResourceViewStatus(
+                    freshness: .watching,
+                    rowsVisible: 1
+                )
+            ))
             if request.stageUntilReconciled {
                 continuation.yield(testReconciliation(
                     request: request,
-                    sequence: 2
+                    sequence: 3
                 ))
             }
             continuation.finish()

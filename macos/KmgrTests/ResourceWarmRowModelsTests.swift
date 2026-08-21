@@ -12,16 +12,19 @@ import Testing
     #expect(ResourceWarmRowPolicy.canRetain(
         existingRowCount: 993,
         previousContext: pods,
+        previousFreshness: .watching,
         nextContext: pods
     ))
     #expect(ResourceWarmRowPolicy.canRetain(
         existingRowCount: 1_000_000,
         previousContext: pods,
+        previousFreshness: .complete,
         nextContext: pods
     ))
     #expect(!ResourceWarmRowPolicy.canRetain(
         existingRowCount: 0,
         previousContext: pods,
+        previousFreshness: .watching,
         nextContext: pods
     ))
 
@@ -45,9 +48,51 @@ import Testing
         #expect(!ResourceWarmRowPolicy.canRetain(
             existingRowCount: 993,
             previousContext: pods,
+            previousFreshness: .watching,
             nextContext: differentContext
         ))
     }
+}
+
+@Test func warmRowsRequireAPreviouslySynchronizedView() {
+    let pods = ResourceWarmRowContext(
+        sessionID: "session-a",
+        gvr: GVR(group: "", version: "v1", resource: "pods"),
+        namespaceSelection: NamespaceSelection()
+    )
+
+    for freshness in [
+        ResourceViewStatus.Freshness.watching,
+        .complete,
+    ] {
+        #expect(ResourceWarmRowPolicy.canRetain(
+            existingRowCount: 50_000,
+            previousContext: pods,
+            previousFreshness: freshness,
+            nextContext: pods
+        ))
+    }
+    for freshness in [
+        ResourceViewStatus.Freshness.loading,
+        .stale,
+        .resuming,
+        .relisting,
+        .reconnecting,
+        .failed,
+    ] {
+        #expect(!ResourceWarmRowPolicy.canRetain(
+            existingRowCount: 50_000,
+            previousContext: pods,
+            previousFreshness: freshness,
+            nextContext: pods
+        ))
+    }
+    #expect(!ResourceWarmRowPolicy.canRetain(
+        existingRowCount: 50_000,
+        previousContext: pods,
+        previousFreshness: nil,
+        nextContext: pods
+    ))
 }
 
 @Test func warmRowDecisionReportsEveryRetentionInput() {
@@ -60,10 +105,12 @@ import Testing
     let accepted = ResourceWarmRowPolicy.decision(
         existingRowCount: 42,
         previousContext: pods,
+        previousFreshness: .watching,
         nextContext: pods
     )
     #expect(accepted.canRetain)
     #expect(accepted.hasExistingRows)
+    #expect(accepted.previousRowsWereSynchronized)
     #expect(accepted.hasPreviousContext)
     #expect(accepted.sameSession)
     #expect(accepted.sameResource)
@@ -76,6 +123,7 @@ import Testing
             gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
             namespaceSelection: .namespace("payments")
         ),
+        previousFreshness: .watching,
         nextContext: pods
     )
     #expect(!rejected.canRetain)
@@ -88,6 +136,7 @@ import Testing
     let firstOpen = ResourceWarmRowPolicy.decision(
         existingRowCount: 42,
         previousContext: nil,
+        previousFreshness: .watching,
         nextContext: pods
     )
     #expect(!firstOpen.canRetain)

@@ -24,10 +24,11 @@ public struct ResourceWarmRowContext: Hashable, Sendable {
 
 /// Explains the exact local decision made before a replacement resource
 /// stream opens. Keeping the comparison structured lets diagnostics identify
-/// which context component rejected retention without logging opaque equality
-/// results or duplicating the policy in the AppKit layer.
+/// which input rejected retention without logging opaque equality results or
+/// duplicating the policy in the AppKit layer.
 public struct ResourceWarmRowDecision: Hashable, Sendable {
     public var hasExistingRows: Bool
+    public var previousRowsWereSynchronized: Bool
     public var hasPreviousContext: Bool
     public var sameSession: Bool
     public var sameResource: Bool
@@ -35,12 +36,14 @@ public struct ResourceWarmRowDecision: Hashable, Sendable {
 
     public init(
         hasExistingRows: Bool,
+        previousRowsWereSynchronized: Bool,
         hasPreviousContext: Bool,
         sameSession: Bool,
         sameResource: Bool,
         sameNamespaceSelection: Bool
     ) {
         self.hasExistingRows = hasExistingRows
+        self.previousRowsWereSynchronized = previousRowsWereSynchronized
         self.hasPreviousContext = hasPreviousContext
         self.sameSession = sameSession
         self.sameResource = sameResource
@@ -49,6 +52,7 @@ public struct ResourceWarmRowDecision: Hashable, Sendable {
 
     public var canRetain: Bool {
         hasExistingRows
+            && previousRowsWereSynchronized
             && hasPreviousContext
             && sameSession
             && sameResource
@@ -57,15 +61,23 @@ public struct ResourceWarmRowDecision: Hashable, Sendable {
 }
 
 /// Pure policy for retaining the GUI's compact UID-keyed rows while a stopped
-/// same-view watch is reopened.
+/// same-view watch is reopened. Only a completed prior ordering is safe to
+/// hold atomically; an interrupted LIST must expose its replacement batches
+/// progressively instead of waiting for final reconciliation.
 public enum ResourceWarmRowPolicy {
     public static func decision(
         existingRowCount: Int,
         previousContext: ResourceWarmRowContext?,
+        previousFreshness: ResourceViewStatus.Freshness?,
         nextContext: ResourceWarmRowContext
     ) -> ResourceWarmRowDecision {
-        ResourceWarmRowDecision(
+        let previousRowsWereSynchronized = switch previousFreshness {
+        case .watching?, .complete?: true
+        default: false
+        }
+        return ResourceWarmRowDecision(
             hasExistingRows: existingRowCount > 0,
+            previousRowsWereSynchronized: previousRowsWereSynchronized,
             hasPreviousContext: previousContext != nil,
             sameSession: previousContext?.sessionID == nextContext.sessionID,
             sameResource: previousContext?.gvr == nextContext.gvr,
@@ -77,11 +89,13 @@ public enum ResourceWarmRowPolicy {
     public static func canRetain(
         existingRowCount: Int,
         previousContext: ResourceWarmRowContext?,
+        previousFreshness: ResourceViewStatus.Freshness?,
         nextContext: ResourceWarmRowContext
     ) -> Bool {
         decision(
             existingRowCount: existingRowCount,
             previousContext: previousContext,
+            previousFreshness: previousFreshness,
             nextContext: nextContext
         ).canRetain
     }

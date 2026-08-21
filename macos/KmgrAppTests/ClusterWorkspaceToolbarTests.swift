@@ -1196,6 +1196,77 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
+    @Test("Back progressively resumes an interrupted partial Pod listing")
+    func backProgressivelyResumesInterruptedPartialPodListing() async throws {
+        let provider = InterruptedPartialResumeWorkspaceResourceProvider(
+            initialRowCount: 3,
+            resumedRowCount: 5,
+            finalRowCount: 8
+        )
+        let pod = provider.firstIdentity
+        let controller = makeWorkspace(
+            provider: provider,
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: pod,
+                resourceVersion: "rv-1",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "containers",
+                    fieldID: "container:api",
+                    label: "Container",
+                    displayText: "api"
+                )],
+                containers: [PodContainerDetail(name: "api", kind: .regular)]
+            ))
+        )
+        controller.showWindow(nil)
+        defer {
+            provider.finish()
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourceTable = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let statusLine = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
+
+        try await waitUntil {
+            provider.streamRequestCount == 1
+                && resourceTable.numberOfRows == 3
+                && statusLine.stringValue.contains("Relisting…")
+        }
+        try await selectResourceRow(0, in: resourceTable)
+        #expect(window.makeFirstResponder(resourceTable))
+        controller.enterResource(nil)
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSTableView }
+                .contains { $0.accessibilityLabel() == "Pod containers" }
+        }
+
+        controller.navigateBack(nil)
+        try await waitUntil {
+            provider.streamRequestCount == 2
+                && resourceTable.numberOfRows == 0
+                && statusLine.stringValue.hasSuffix(" · Loading…")
+        }
+
+        provider.releaseResumedRows()
+        try await waitUntil {
+            resourceTable.numberOfRows == 5
+                && statusLine.stringValue.hasPrefix("5 objects")
+                && statusLine.stringValue.contains("Relisting…")
+        }
+
+        provider.releaseAuthoritativeRows()
+        try await waitUntil {
+            resourceTable.numberOfRows == 8
+                && statusLine.stringValue.hasPrefix("8 objects")
+                && statusLine.stringValue.hasSuffix(" · Watching")
+        }
+    }
+
     @Test("Back atomically clears cached Pods only after an authoritative empty result")
     func backPromotesAuthoritativeEmptyPodReconciliation() async throws {
         let provider = DelayedWarmResumeWorkspaceResourceProvider(rowCount: 3)
@@ -2951,6 +3022,158 @@ private final class WarmResumeSelectionWorkspaceResourceProvider: RangeBackedTes
 
     func finish() {
         lock.withLock { resumeContinuation }?.finish()
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+private final class InterruptedPartialResumeWorkspaceResourceProvider:
+    RangeBackedTestWorkspaceProviding, @unchecked Sendable
+{
+    typealias StreamContinuation = AsyncThrowingStream<
+        ResourceViewMessage,
+        Error
+    >.Continuation
+
+    private let lock = NSLock()
+    private let rows: [ResourceRow]
+    private let initialRowCount: Int
+    private let resumedRowCount: Int
+    private var storedStreamRequestCount = 0
+    private var initialContinuation: StreamContinuation?
+    private var resumeRequest: ResourceViewRequest?
+    private var resumeContinuation: StreamContinuation?
+
+    init(initialRowCount: Int, resumedRowCount: Int, finalRowCount: Int) {
+        precondition(initialRowCount > 0)
+        precondition(initialRowCount < resumedRowCount)
+        precondition(resumedRowCount < finalRowCount)
+        self.initialRowCount = initialRowCount
+        self.resumedRowCount = resumedRowCount
+        rows = (0..<finalRowCount).map { index in
+            let name = index == 0 ? "api" : "pod-\(index)"
+            return ResourceRow(
+                identity: ResourceIdentity(
+                    clusterSessionID: "test-session",
+                    group: "",
+                    version: "v1",
+                    resource: "pods",
+                    namespace: "default",
+                    name: name,
+                    uid: ResourceUID("interrupted-pod-\(index)")
+                ),
+                cells: [Cell(
+                    columnID: "name",
+                    displayText: name,
+                    typedValue: .string(name)
+                )]
+            )
+        }
+    }
+
+    var firstIdentity: ResourceIdentity { rows[0].identity }
+    var streamRequestCount: Int { lock.withLock { storedStreamRequestCount } }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        .init(resources: [DiscoveredResource(
+            group: "",
+            version: "v1",
+            resource: "pods",
+            kind: "Pod",
+            namespaced: true,
+            verbs: ["list", "watch"]
+        )])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { [] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        let requestNumber = lock.withLock { () -> Int in
+            storedStreamRequestCount += 1
+            return storedStreamRequestCount
+        }
+        return AsyncThrowingStream { continuation in
+            if requestNumber == 1 {
+                lock.withLock { initialContinuation = continuation }
+                let initialRows = Array(rows.prefix(initialRowCount))
+                continuation.yield(testSnapshotInvalidation(
+                    request: request,
+                    sequence: 1,
+                    rows: initialRows
+                ))
+                continuation.yield(.status(
+                    cursor: StreamCursor(generation: request.generation, sequence: 2),
+                    status: ResourceViewStatus(
+                        freshness: .relisting,
+                        objectsExamined: UInt64(initialRows.count),
+                        rowsVisible: UInt64(initialRows.count)
+                    )
+                ))
+                return
+            }
+
+            lock.withLock {
+                resumeRequest = request
+                resumeContinuation = continuation
+            }
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 1),
+                status: ResourceViewStatus(freshness: .loading)
+            ))
+        }
+    }
+
+    func releaseResumedRows() {
+        let state = lock.withLock { (resumeRequest, resumeContinuation) }
+        guard let request = state.0, let continuation = state.1 else { return }
+        let resumedRows = Array(rows.prefix(resumedRowCount))
+        continuation.yield(testSnapshotInvalidation(
+            request: request,
+            sequence: 2,
+            rows: resumedRows
+        ))
+        continuation.yield(.status(
+            cursor: StreamCursor(generation: request.generation, sequence: 3),
+            status: ResourceViewStatus(
+                freshness: .relisting,
+                objectsExamined: UInt64(resumedRows.count),
+                rowsVisible: UInt64(resumedRows.count)
+            )
+        ))
+    }
+
+    func releaseAuthoritativeRows() {
+        let state = lock.withLock { (resumeRequest, resumeContinuation) }
+        guard let request = state.0, let continuation = state.1 else { return }
+        continuation.yield(testSnapshotInvalidation(
+            request: request,
+            sequence: 4,
+            rows: Array(rows.dropFirst(resumedRowCount)),
+            first: false
+        ))
+        continuation.yield(.status(
+            cursor: StreamCursor(generation: request.generation, sequence: 5),
+            status: ResourceViewStatus(
+                freshness: .watching,
+                objectsExamined: UInt64(rows.count),
+                rowsVisible: UInt64(rows.count)
+            )
+        ))
+        continuation.yield(testReconciliation(
+            request: request,
+            sequence: 6
+        ))
+    }
+
+    func finish() {
+        let state = lock.withLock { (initialContinuation, resumeContinuation) }
+        state.0?.finish()
+        state.1?.finish()
     }
 
     func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}

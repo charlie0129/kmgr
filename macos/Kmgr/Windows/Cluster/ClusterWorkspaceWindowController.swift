@@ -3255,6 +3255,11 @@ private final class ResourceListViewController: NSViewController,
     private var restorationCheckpointTask: Task<Void, Never>?
     private var freshnessAgeTask: Task<Void, Never>?
     private var resourceViewStatus: ResourceViewStatus?
+    /// Last structured freshness governing warm-row eligibility. Transient
+    /// local text such as "Filtering…" must not erase a synchronized row's
+    /// provenance; opening its replacement immediately changes this to
+    /// `loading` or `resuming`, making an interrupted replacement ineligible.
+    private var warmRowRetentionFreshness: ResourceViewStatus.Freshness?
     /// Records whether retained rows came from a usable projection. A rejected
     /// replacement may keep those rows, but must label them as no longer watched.
     private var hasLastUsableResourceViewStatus = false
@@ -3366,6 +3371,9 @@ private final class ResourceListViewController: NSViewController,
     ) -> String {
         var reasons: [String] = []
         if !decision.hasExistingRows { reasons.append("no-visible-rows") }
+        if !decision.previousRowsWereSynchronized {
+            reasons.append("previous-rows-not-synchronized")
+        }
         if !decision.hasPreviousContext { reasons.append("no-previous-context") }
         if decision.hasPreviousContext, !decision.sameSession {
             reasons.append("session-changed")
@@ -4535,9 +4543,11 @@ private final class ResourceListViewController: NSViewController,
         beginProjectionRequest()
         generationGate.reset()
         let rowsBeforeOpen = model.orderedVisibleUIDs.count
+        let previousFreshness = warmRowRetentionFreshness
         let retentionDecision = ResourceWarmRowPolicy.decision(
             existingRowCount: rowsBeforeOpen,
             previousContext: previousStreamContext,
+            previousFreshness: previousFreshness,
             nextContext: nextStreamContext
         )
         let sameDataContext = lastStreamContext == nextStreamContext
@@ -4548,6 +4558,10 @@ private final class ResourceListViewController: NSViewController,
                 + " next=\(resourceCacheContextDescription(nextStreamContext))"
                 + " destination=\(resourceCacheDestinationDescription(history.current))"
                 + " rows_before=\(rowsBeforeOpen)"
+                + " previous_freshness="
+                + "\(previousFreshness.map(String.init(describing:)) ?? "none")"
+                + " previous_synchronized="
+                + "\(retentionDecision.previousRowsWereSynchronized)"
                 + " has_previous=\(retentionDecision.hasPreviousContext)"
                 + " same_session=\(retentionDecision.sameSession)"
                 + " same_resource=\(retentionDecision.sameResource)"
@@ -5821,6 +5835,7 @@ private final class ResourceListViewController: NSViewController,
         now: Date = Date()
     ) {
         resourceViewStatus = status
+        warmRowRetentionFreshness = status.freshness
         if status.freshness != .loading {
             hasLastUsableResourceViewStatus = true
         }
