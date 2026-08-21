@@ -307,8 +307,6 @@ struct ApplicationWindowPresentationTests {
         let firstWindow = try #require(first.window)
         let secondWindow = try #require(second.window)
         defer {
-            firstWindow.setFrameAutosaveName("")
-            secondWindow.setFrameAutosaveName("")
             first.close()
             second.close()
         }
@@ -333,6 +331,98 @@ struct ApplicationWindowPresentationTests {
         #expect(abs(firstWindow.frame.height - expectedHeight) < 0.5)
     }
 
+    @Test("saved navigation survives reload and seeds a same-context window")
+    func savedNavigationSurvivesReloadAndSeedsNewWindow() async throws {
+        let suite = "kmgr-app-navigation-restoration-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-navigation-restoration-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+
+        let namespaceGate = BookmarkAsyncGate()
+        let firstProvider = BookmarkNavigationWorkspaceProvider(
+            namespaceGate: namespaceGate
+        )
+        let expected = ClusterWindowRestorationState(
+            contextName: "shared",
+            contextReference: bookmarkSession().contextReference,
+            gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
+            namespaceScope: .namespace("team-a"),
+            filter: "name:remembered"
+        )
+        let store = WorkspaceRestorationStore(defaults: defaults)
+        let first = makeColumnPropagationWorkspace(
+            session: bookmarkSession(),
+            provider: firstProvider,
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restorationState: expected
+        )
+        first.onRestorationCheckpoint = { record in
+            try? store.activate(record)
+        }
+        first.showWindow(nil)
+        defer { first.close() }
+
+        try await waitForBookmarkCondition {
+            firstProvider.streamRequests.last.map {
+                $0.resource.id == "apps/v1/deployments"
+                    && !$0.allNamespaces
+                    && $0.namespaces == ["team-a"]
+                    && $0.filterExpression == "name:remembered"
+            } == true
+        }
+        namespaceGate.open()
+        let firstNamespaceControl = try #require(first.window?.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.namespace"
+        }?.view as? NSPopUpButton)
+        try await waitForBookmarkCondition {
+            firstNamespaceControl.titleOfSelectedItem == "team-a"
+        }
+
+        let liveState = first.checkpointActiveWorkspace()
+        #expect(liveState.gvr == expected.gvr)
+        #expect(liveState.namespaceScope == expected.namespaceScope)
+        #expect(liveState.filter == expected.filter)
+
+        // A new store instance is the process-relaunch boundary. Both the
+        // restorable window and the same-context starting state must contain
+        // the live presentation, not the startup defaults.
+        let reloaded = WorkspaceRestorationStore(defaults: defaults)
+        #expect(reloaded.windows.contains { $0.state == liveState })
+        let inherited = try #require(reloaded.lastState(
+            for: bookmarkSession().contextReference
+        ))
+        #expect(inherited == liveState)
+
+        let secondProvider = BookmarkNavigationWorkspaceProvider()
+        let second = makeColumnPropagationWorkspace(
+            session: bookmarkSession(sessionID: "bookmark-session-2"),
+            provider: secondProvider,
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restorationState: inherited
+        )
+        second.showWindow(nil)
+        defer { second.close() }
+        try await waitForBookmarkCondition {
+            secondProvider.streamRequests.last.map {
+                $0.resource.id == "apps/v1/deployments"
+                    && !$0.allNamespaces
+                    && $0.namespaces == ["team-a"]
+                    && $0.filterExpression == "name:remembered"
+            } == true
+        }
+        let secondNamespaceControl = try #require(second.window?.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.namespace"
+        }?.view as? NSPopUpButton)
+        try await waitForBookmarkCondition {
+            secondNamespaceControl.titleOfSelectedItem == "team-a"
+        }
+    }
+
     @Test("activation checkpoints exact context and global size changes debounce")
     func activationAndWindowSizeCheckpointPolicy() async throws {
         let columnsDirectory = FileManager.default.temporaryDirectory
@@ -346,32 +436,33 @@ struct ApplicationWindowPresentationTests {
             restorationState: bookmarkState(filter: "name:active")
         )
         let window = try #require(controller.window)
-        var activations: [ClusterWindowRestorationRecord] = []
-        var restorations: [ClusterWindowRestorationRecord] = []
+        var checkpoints: [ClusterWindowRestorationRecord] = []
+        var activationCount = 0
         var sizeCheckpoints: [ClusterWorkspaceWindowSize] = []
-        controller.onActivationCheckpoint = { activations.append($0) }
-        controller.onRestorationCheckpoint = { restorations.append($0) }
+        controller.onRestorationCheckpoint = { checkpoints.append($0) }
+        controller.onWorkspaceActivated = { activationCount += 1 }
         controller.onWindowSizeCheckpoint = { sizeCheckpoints.append($0) }
         controller.showWindow(nil)
         window.orderOut(nil)
-        activations.removeAll(keepingCapacity: true)
-        restorations.removeAll(keepingCapacity: true)
+        checkpoints.removeAll(keepingCapacity: true)
         sizeCheckpoints.removeAll(keepingCapacity: true)
 
         controller.windowDidBecomeKey(Notification(
             name: NSWindow.didBecomeKeyNotification,
             object: window
         ))
-        #expect(activations.count == 1)
-        #expect(activations.first?.state.contextReference == bookmarkSession().contextReference)
-        #expect(activations.first?.state.filter == "name:active")
+        #expect(checkpoints.count == 1)
+        #expect(checkpoints.first?.state.contextReference == bookmarkSession().contextReference)
+        #expect(checkpoints.first?.state.filter == "name:active")
+        #expect(activationCount == 1)
         #expect(sizeCheckpoints.count == 1)
 
         controller.windowDidResignKey(Notification(
             name: NSWindow.didResignKeyNotification,
             object: window
         ))
-        #expect(restorations.last?.state.filter == "name:active")
+        #expect(checkpoints.last?.state.filter == "name:active")
+        #expect(activationCount == 1)
 
         sizeCheckpoints.removeAll(keepingCapacity: true)
         controller.windowDidResize(Notification(
@@ -387,10 +478,9 @@ struct ApplicationWindowPresentationTests {
         #expect(abs((sizeCheckpoints.last?.width ?? 0) - window.frame.width) < 0.5)
         #expect(abs((sizeCheckpoints.last?.height ?? 0) - window.frame.height) < 0.5)
 
-        controller.onActivationCheckpoint = nil
         controller.onRestorationCheckpoint = nil
+        controller.onWorkspaceActivated = nil
         controller.onWindowSizeCheckpoint = nil
-        window.setFrameAutosaveName("")
         controller.close()
     }
 
@@ -462,6 +552,72 @@ private struct BookmarkStalledWorkspaceProvider: WorkspaceResourceProviding {
     func closeSession(sessionID: String) async {}
 }
 
+private final class BookmarkAsyncGate: @unchecked Sendable {
+    private let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let pair = AsyncStream<Void>.makeStream()
+        stream = pair.stream
+        continuation = pair.continuation
+    }
+
+    func wait() async {
+        for await _ in stream { return }
+    }
+
+    func open() {
+        continuation.yield(())
+        continuation.finish()
+    }
+}
+
+private final class BookmarkNavigationWorkspaceProvider: WorkspaceResourceProviding,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let namespaceGate: BookmarkAsyncGate?
+    private var storedStreamRequests: [ResourceViewRequest] = []
+
+    init(namespaceGate: BookmarkAsyncGate? = nil) {
+        self.namespaceGate = namespaceGate
+    }
+
+    var streamRequests: [ResourceViewRequest] {
+        lock.withLock { storedStreamRequests }
+    }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        .init(resources: [
+            DiscoveredResource(
+                group: "", version: "v1", resource: "pods", kind: "Pod",
+                namespaced: true, verbs: ["list", "watch"]
+            ),
+            DiscoveredResource(
+                group: "apps", version: "v1", resource: "deployments",
+                kind: "Deployment", namespaced: true, verbs: ["list", "watch"]
+            ),
+        ])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] {
+        await namespaceGate?.wait()
+        return ["default", "team-a"]
+    }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        lock.withLock { storedStreamRequests.append(request) }
+        return AsyncThrowingStream { $0.finish() }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
 private struct BookmarkOptionalResourceProvider: OptionalResourceCatalogProviding {
     func discoverOptionalResources(_ request: OptionalResourceCatalogRequest) async throws
         -> OptionalResourceCatalog { throw CancellationError() }
@@ -485,4 +641,21 @@ private func button(titled title: String, beneath root: NSView) -> NSButton? {
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     root.subviews.flatMap { [$0] + descendants(of: $0) }
+}
+
+private struct BookmarkConditionTimeout: Error {}
+
+@MainActor
+private func waitForBookmarkCondition(
+    timeout: Duration = .seconds(2),
+    _ condition: @escaping @MainActor () -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+        if condition() { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    if condition() { return }
+    throw BookmarkConditionTimeout()
 }

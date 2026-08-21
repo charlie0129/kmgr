@@ -36,7 +36,8 @@ import Testing
 
     #expect(reloaded.windows == [first, second])
     #expect(reloaded.windows.map(\.state.contextName) == ["production", "production"])
-    #expect(first.frameAutosaveName != second.frameAutosaveName)
+    #expect(reloaded.lastStates.count == 1)
+    #expect(reloaded.lastState(for: first.state.contextReference) == first.state)
     #expect(reloaded.loadIssue == nil)
 }
 
@@ -55,6 +56,41 @@ import Testing
     try store.remove(id: "window")
     #expect(store.windows.isEmpty)
     #expect(WorkspaceRestorationStore(defaults: storage.defaults).windows.isEmpty)
+}
+
+@MainActor
+@Test func activeWindowIsLastInTheDurableRestoreOrder() throws {
+    let storage = try restorationDefaults()
+    defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
+    let store = WorkspaceRestorationStore(defaults: storage.defaults)
+    let first = ClusterWindowRestorationRecord(
+        id: "window-a",
+        state: ClusterWindowRestorationState(
+            contextName: "shared",
+            contextReference: "context-shared",
+            gvr: GVR(group: "apps", version: "v1", resource: "daemonsets")
+        )
+    )
+    let second = ClusterWindowRestorationRecord(
+        id: "window-b",
+        state: ClusterWindowRestorationState(
+            contextName: "shared",
+            contextReference: "context-shared",
+            gvr: GVR(group: "", version: "v1", resource: "pods")
+        )
+    )
+
+    try store.upsert(first)
+    try store.upsert(second)
+    try store.activate(first)
+    #expect(store.windows.map(\.id) == [second.id, first.id])
+
+    // A passive checkpoint updates that window in place. It must not steal
+    // the frontmost position from the last active workspace.
+    try store.upsert(second)
+    #expect(store.windows.map(\.id) == [second.id, first.id])
+    #expect(WorkspaceRestorationStore(defaults: storage.defaults).windows.map(\.id)
+        == [second.id, first.id])
 }
 
 @Test func restorationWithoutOpaqueContextReferenceIsRejected() throws {
@@ -105,11 +141,23 @@ import Testing
     storage.defaults.set(try JSONSerialization.data(withJSONObject: [
         "apiVersion": "kmgr.workspace-restoration/v99",
         "windows": [],
-        "bookmarks": [],
+        "lastStates": [],
     ]), forKey: WorkspaceRestorationStore.storageKey)
     store = WorkspaceRestorationStore(defaults: storage.defaults)
     #expect(store.windows.isEmpty)
     #expect(store.loadIssue?.reason == .unsupportedVersion)
+    #expect(storage.defaults.object(forKey: WorkspaceRestorationStore.storageKey) == nil)
+
+    storage.defaults.set(try JSONSerialization.data(withJSONObject: [
+        "apiVersion": "kmgr.workspace-restoration/v2",
+        "windows": [],
+        "bookmarks": [],
+    ]), forKey: WorkspaceRestorationStore.storageKey)
+    store = WorkspaceRestorationStore(defaults: storage.defaults)
+    #expect(store.windows.isEmpty)
+    #expect(store.lastStates.isEmpty)
+    #expect(store.loadIssue?.reason == .unsupportedVersion)
+    #expect(storage.defaults.object(forKey: WorkspaceRestorationStore.storageKey) == nil)
 
     let invalidState = ClusterWindowRestorationState(
         contextName: "local",
@@ -139,7 +187,7 @@ import Testing
 }
 
 @MainActor
-@Test func contextBookmarksUseExactOpaqueReferenceAndMostRecentActivation() throws {
+@Test func contextStatesUseExactOpaqueReferenceAndMostRecentActivation() throws {
     let storage = try restorationDefaults()
     defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
     let store = WorkspaceRestorationStore(defaults: storage.defaults)
@@ -167,50 +215,46 @@ import Testing
         )
     )
 
-    let firstBookmark = try store.activate(firstA)
+    try store.activate(firstA)
     try store.upsert(secondA)
-    #expect(store.bookmark(for: referenceA)?.state.filter == "name:first")
-    let secondBookmark = try store.activate(secondA)
-    #expect(secondBookmark.id == firstBookmark.id)
-    #expect(store.bookmark(for: referenceA)?.state.filter == "name:second")
+    #expect(store.lastState(for: referenceA)?.filter == "name:first")
+    try store.activate(secondA)
+    #expect(store.lastState(for: referenceA)?.filter == "name:second")
     var updatedSecond = secondA
     updatedSecond.state.filter = "name:active-update"
     try store.upsert(updatedSecond)
-    #expect(store.bookmark(for: referenceA)?.state.filter == "name:active-update")
-    _ = try store.activate(onlyB)
-    #expect(store.bookmark(for: referenceB)?.state.filter == "name:other-file")
-    #expect(store.bookmarks.count == 2)
-    #expect(store.bookmark(for: referenceA)?.id
-        != store.bookmark(for: referenceB)?.id)
+    #expect(store.lastState(for: referenceA)?.filter == "name:second")
+    try store.activate(onlyB)
+    #expect(store.lastState(for: referenceB)?.filter == "name:other-file")
+    #expect(store.lastStates.count == 2)
 
     var backgroundFirst = firstA
     backgroundFirst.state.filter = "background-update"
     try store.upsert(backgroundFirst)
-    #expect(store.bookmark(for: referenceA)?.state.filter == "name:active-update")
+    #expect(store.lastState(for: referenceA)?.filter == "name:second")
 
     try store.remove(id: secondA.id)
     #expect(store.record(for: secondA.id) == nil)
-    #expect(store.bookmark(for: referenceA)?.sourceWindowID == secondA.id)
-    #expect(store.bookmark(for: referenceA)?.state.filter == "name:active-update")
+    #expect(store.lastState(for: referenceA)?.filter == "name:second")
 
     let reloaded = WorkspaceRestorationStore(defaults: storage.defaults)
-    #expect(reloaded.bookmark(for: referenceA) == store.bookmark(for: referenceA))
-    #expect(reloaded.bookmark(for: referenceB) == store.bookmark(for: referenceB))
+    #expect(reloaded.lastState(for: referenceA) == store.lastState(for: referenceA))
+    #expect(reloaded.lastState(for: referenceB) == store.lastState(for: referenceB))
 }
 
 @MainActor
-@Test func disablingOpenWindowRestorationKeepsContextBookmarks() throws {
+@Test func disablingOpenWindowRestorationKeepsContextStates() throws {
     let storage = try restorationDefaults()
     defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
     let store = WorkspaceRestorationStore(defaults: storage.defaults)
     let record = ClusterWindowRestorationRecord(id: "window", contextName: "local")
-    _ = try store.activate(record)
+    try store.activate(record)
 
     try store.removeAllOpenWindows()
 
     #expect(store.windows.isEmpty)
-    #expect(store.bookmark(for: record.state.contextReference)?.state == record.state)
-    #expect(WorkspaceRestorationStore(defaults: storage.defaults).bookmarks == store.bookmarks)
+    #expect(store.lastState(for: record.state.contextReference) == record.state)
+    #expect(WorkspaceRestorationStore(defaults: storage.defaults).lastStates == store.lastStates)
 }
 
 @MainActor
@@ -228,22 +272,22 @@ import Testing
             filter: "status:Running"
         )
     )
-    _ = try store.activate(active)
+    try store.activate(active)
 
     active.state.gvr = GVR(group: "apps", version: "v1", resource: "deployments")
     active.state.namespaceScope = .namespace("team-b")
     active.state.filter = "name:api"
-    try store.upsert(active)
+    try store.activate(active)
 
-    let inherited = try #require(store.bookmark(
+    let inherited = try #require(store.lastState(
         for: active.state.contextReference
-    )?.state)
+    ))
     #expect(inherited.gvr == active.state.gvr)
     #expect(inherited.namespaceScope == .namespace("team-b"))
     #expect(inherited.filter == "name:api")
-    #expect(WorkspaceRestorationStore(defaults: storage.defaults).bookmark(
+    #expect(WorkspaceRestorationStore(defaults: storage.defaults).lastState(
         for: active.state.contextReference
-    )?.state == inherited)
+    ) == inherited)
 }
 
 @MainActor
@@ -257,7 +301,7 @@ import Testing
         "raw-row-json-sentinel",
     ]
     let store = WorkspaceRestorationStore(defaults: storage.defaults)
-    _ = try store.activate(ClusterWindowRestorationRecord(
+    try store.activate(ClusterWindowRestorationRecord(
         id: "window",
         state: ClusterWindowRestorationState(
             contextName: "production",

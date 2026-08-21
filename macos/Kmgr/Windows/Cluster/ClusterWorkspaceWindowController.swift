@@ -99,7 +99,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onOpenLogWindow: ((LogWindowController) -> Void)?
     var onOpenTerminalWindow: ((TerminalWindowController) -> Void)?
     var onRestorationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
-    var onActivationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
+    var onWorkspaceActivated: (() -> Void)?
     var onWindowSizeCheckpoint: ((ClusterWorkspaceWindowSize) -> Void)?
     var contextualShortcutsDidChange: (() -> Void)?
 
@@ -259,7 +259,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             window.setFrame(frame, display: false)
         }
         window.center()
-        window.setFrameAutosaveName(restoration.frameAutosaveName)
     }
 
     private func installWorkspaceCallbacks() {
@@ -383,20 +382,28 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        checkpointActiveWorkspace()
+        onWorkspaceActivated?()
+        _ = checkpointActiveWorkspace()
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        restoration.state = workspaceController.restorationState()
-        onRestorationCheckpoint?(restoration)
+        _ = checkpointActiveWorkspace()
     }
 
-    /// Command-N snapshots editor text before its normal debounce has fired,
-    /// then marks this window as the source for its exact cluster context.
-    func checkpointActiveWorkspace() {
+    /// Snapshots editor text before its normal debounce has fired and publishes
+    /// the complete active presentation for Command-N or application shutdown.
+    @discardableResult
+    func checkpointActiveWorkspace() -> ClusterWindowRestorationState {
         restoration.state = workspaceController.restorationState()
-        onActivationCheckpoint?(restoration)
+        let state = restoration.state
         checkpointWindowSize()
+        onRestorationCheckpoint?(restoration)
+        return state
+    }
+
+    func checkpointRestoration() {
+        restoration.state = workspaceController.restorationState()
+        onRestorationCheckpoint?(restoration)
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -448,13 +455,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     }
 
     func windowWillClose(_ notification: Notification) {
+        _ = checkpointActiveWorkspace()
         prepareForTermination()
         let yamlWindows = Array(yamlSnapshotWindowControllers.values)
         yamlSnapshotWindowControllers.removeAll()
         yamlWindows.forEach { $0.close() }
-        restoration.state = workspaceController.restorationState()
-        onRestorationCheckpoint?(restoration)
-        checkpointWindowSize()
         if isAuthenticated {
             Task { [provider, session] in
                 await provider.closeSession(sessionID: session.sessionID)
@@ -906,6 +911,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var dataController: ObjectDataViewController?
     private var podContainerController: PodContainerListViewController?
     private var pendingRestorationState: ClusterWindowRestorationState?
+    /// Namespace discovery races resource restoration. Keep the saved scope
+    /// until the toolbar's menu is populated so its default item cannot
+    /// overwrite the restored namespace.
+    private var pendingNamespaceScope: NamespaceSelection?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenYAMLSnapshot: ((ResourceIdentity) -> Void)?
@@ -1095,10 +1104,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         connectsImmediately: Bool = true
     ) {
         guard connectsImmediately else {
+            pendingNamespaceScope = state?.namespaceScope.namespaceSelection
             installRestoredShell(state)
             return
         }
         pendingRestorationState = state
+        pendingNamespaceScope = state?.namespaceScope.namespaceSelection
         connectionActivityView.setState(.connected)
         startConnectionActivityWatch()
         startOperationHistoryWatch()
@@ -1204,6 +1215,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         let resumesCurrentResource = isAuthenticated
             && contentController.resourceCatalogValidated
         let restoredShellState = resumesCurrentResource ? nil : restorationState()
+        if let restoredShellState {
+            pendingNamespaceScope = restoredShellState.namespaceScope.namespaceSelection
+        }
         let previousSessionID = session.sessionID
         session = recoveredSession
         isAuthenticated = true
@@ -1647,6 +1661,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     @objc private func namespaceChanged() {
+        // A user choice made while namespace discovery is still running is
+        // authoritative. Do not let the saved startup scope overwrite it when
+        // the asynchronous menu population finishes.
+        pendingNamespaceScope = nil
         let wasShowingDetail = detailController != nil || dataController != nil
         showResourceList(resume: false)
         contentController.changeNamespaceScope(selectedNamespaceScope())
@@ -2373,7 +2391,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 namespaceControl.removeAllItems()
                 namespaceControl.addItem(withTitle: "All namespaces")
                 namespaceControl.addItems(withTitles: namespaces)
-                if let previous,
+                if let pendingNamespaceScope {
+                    applyNamespaceScopeSelection(pendingNamespaceScope)
+                    self.pendingNamespaceScope = nil
+                } else if let previous,
                     let index = namespaceControl.itemTitles.firstIndex(of: previous)
                 {
                     namespaceControl.selectItem(at: index)
