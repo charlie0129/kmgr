@@ -37,8 +37,8 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
             defer: false
         )
         panel.minSize = NSSize(width: 760, height: 260)
-        panel.level = .floating
-        panel.isFloatingPanel = true
+        panel.level = .normal
+        panel.isFloatingPanel = false
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.tabbingMode = .disallowed

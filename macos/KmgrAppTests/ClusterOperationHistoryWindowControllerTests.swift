@@ -7,7 +7,7 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Operation history window", .serialized)
 struct ClusterOperationHistoryWindowControllerTests {
-    @Test("floating table defaults to exact newest-first ordering and supports sorting")
+    @Test("non-floating table defaults to exact newest-first ordering and supports sorting")
     func tablePresentationAndSorting() throws {
         let rawOperationError =
             "dial tcp 10.0.0.8:6443:  connect: connection refused\nTLS handshake timeout"
@@ -50,8 +50,8 @@ struct ClusterOperationHistoryWindowControllerTests {
         let panel = try #require(controller.window as? NSPanel)
         let root = try #require(panel.contentView)
         let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }.first)
-        #expect(panel.level == NSWindow.Level.floating)
-        #expect(panel.isFloatingPanel)
+        #expect(panel.level == NSWindow.Level.normal)
+        #expect(!panel.isFloatingPanel)
         #expect(table.numberOfRows == 2)
         #expect(table.tableColumns.count == 10)
         #expect(table.tableColumns.map(\.title) == [
