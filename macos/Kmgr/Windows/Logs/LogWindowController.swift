@@ -27,6 +27,7 @@ enum LogWindowShortcut: Equatable {
     case focusFilter
     case toggleFollow
     case togglePause
+    case toggleWrap
 
     static func action(
         characters: String?,
@@ -40,6 +41,7 @@ enum LogWindowShortcut: Equatable {
         case "/": .focusFilter
         case "f": .toggleFollow
         case "p": .togglePause
+        case "w": .toggleWrap
         default: nil
         }
     }
@@ -120,6 +122,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private let tailField = NSTextField()
     private let sinceField = NSTextField()
     private let applyButton = NSButton(title: "Apply", target: nil, action: nil)
+    private let wrapButton = NSButton(checkboxWithTitle: "Wrap", target: nil, action: nil)
     private let pauseButton = NSButton(title: "Pause", target: nil, action: nil)
 
     var onClose: (() -> Void)?
@@ -236,8 +239,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     func windowDidResize(_ notification: Notification) {
         let wasFollowingTail = followsVisibleTail
+        let anchor = wasFollowingTail ? nil : logView.verticalAnchor(
+            at: scrollView.contentView.bounds.minY
+        )
         updateLogViewportFrame()
         if wasFollowingTail { scrollToTail() }
+        else if let anchor { restoreViewport(anchor) }
     }
 
     /// A stream can deliver its first records between `showWindow` and the
@@ -291,6 +298,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         case .togglePause:
             guard pauseButton.isEnabled else { return true }
             togglePause()
+        case .toggleWrap:
+            guard wrapButton.isEnabled else { return true }
+            wrapButton.state = wrapButton.state == .on ? .off : .on
+            toggleWrap()
         }
         return true
     }
@@ -344,6 +355,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         sinceField.identifier = NSUserInterfaceItemIdentifier("log-since-seconds")
         sinceField.widthAnchor.constraint(equalToConstant: 62).isActive = true
         configureContainerButton()
+        wrapButton.state = .off
         followButton.target = self
         followButton.action = #selector(toggleFollow)
         for button in [previousButton, timestampsButton] {
@@ -352,6 +364,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
         pauseButton.target = self
         pauseButton.action = #selector(togglePause)
+        wrapButton.target = self
+        wrapButton.action = #selector(toggleWrap)
         containerButton.target = self
         containerButton.action = #selector(restartFromControls)
         searchField.placeholderString = "Filter visible logs"
@@ -399,7 +413,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         streamToolbar.alignment = .centerY
         streamToolbar.spacing = 7
         let viewToolbar = NSStackView(views: [
-            pauseButton, clearButton, saveButton, NSView(), searchField,
+            wrapButton, pauseButton, clearButton, saveButton, NSView(), searchField,
         ])
         viewToolbar.orientation = .horizontal
         viewToolbar.alignment = .centerY
@@ -1067,7 +1081,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                     chunks: rendered.displayChunks,
                     previous: previousProjection,
                     retainedChunkCount: install.retainedChunkCount,
-                    style: style
+                    style: style,
+                    highlightedText: filter
                 )
                 logSignposter.endInterval(
                     PerformanceSignpostCatalog.logTextFormat,
@@ -1102,6 +1117,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             return
         }
         let shouldFollowTail = followsVisibleTail
+        var viewportAnchor = shouldFollowTail ? nil : logView.verticalAnchor(
+            at: scrollView.contentView.bounds.minY
+        )
+        if var anchor = viewportAnchor {
+            anchor.textIndex = result.install.remapSelection(NSRange(
+                location: anchor.textIndex,
+                length: 0
+            )).location
+            viewportAnchor = anchor
+        }
         let installInterval = logSignposter.beginInterval(
             PerformanceSignpostCatalog.logTextInstall,
             "logical_output_bytes=\(result.rendered.outputUTF8Bytes) display_output_bytes=\(result.rendered.displayOutputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) truncated_lines=\(result.rendered.displayTruncatedLines) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendedUTF8Length)"
@@ -1119,6 +1144,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         updateStatusLabel()
         logView.setSelectedRange(result.install.remapSelection(selectedRange))
         if shouldFollowTail { scrollToTail() }
+        else if let viewportAnchor { restoreViewport(viewportAnchor) }
         else { updateLogViewportFrame() }
         needsRenderWhenVisible = false
         keyVisibilityWakePending = false
@@ -1139,6 +1165,21 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         if !isPaused { scheduleRender() }
     }
 
+    @objc private func toggleWrap() {
+        let wasFollowingTail = followsVisibleTail
+        let anchor = wasFollowingTail ? nil : logView.verticalAnchor(
+            at: scrollView.contentView.bounds.minY
+        )
+        let enabled = wrapButton.state == .on
+        withViewportTrackingSuppressed {
+            scrollView.hasHorizontalScroller = !enabled
+            scrollView.tile()
+            logView.setWrapsLines(enabled, viewportSize: scrollView.contentSize)
+        }
+        if wasFollowingTail { scrollToTail() }
+        else if let anchor { restoreViewport(anchor) }
+    }
+
     private func updateLogViewportFrame() {
         withViewportTrackingSuppressed {
             logView.updateDocumentFrame(for: scrollView.contentSize)
@@ -1152,12 +1193,30 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let maximumY = max(0, logView.bounds.height - clipView.bounds.height)
         withViewportTrackingSuppressed {
             clipView.scroll(to: NSPoint(
-                x: min(max(0, clipView.bounds.origin.x), maximumX),
+                x: logView.wrapsLines
+                    ? 0
+                    : min(max(0, clipView.bounds.origin.x), maximumX),
                 y: maximumY
             ))
             scrollView.reflectScrolledClipView(clipView)
         }
         followsVisibleTail = true
+    }
+
+    private func restoreViewport(_ anchor: LogViewportAnchor) {
+        updateLogViewportFrame()
+        let clipView = scrollView.contentView
+        let maximumX = max(0, logView.bounds.width - clipView.bounds.width)
+        let maximumY = max(0, logView.bounds.height - clipView.bounds.height)
+        withViewportTrackingSuppressed {
+            clipView.scroll(to: NSPoint(
+                x: logView.wrapsLines
+                    ? 0
+                    : min(max(0, clipView.bounds.origin.x), maximumX),
+                y: min(max(0, logView.verticalOffset(for: anchor)), maximumY)
+            ))
+            scrollView.reflectScrolledClipView(clipView)
+        }
     }
 
     private var viewportTrackingSuppressionDepth = 0

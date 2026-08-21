@@ -761,8 +761,8 @@ public actor LogRecordStore {
 public struct RenderedLogText: Hashable, Sendable {
     /// Logical chunks preserve visible records exactly for lossless Save.
     public var chunks: [String]
-    /// Display chunks cap each logical line before Core Text measurement while
-    /// retaining stable chunk boundaries for incremental viewport updates.
+    /// Display chunks cap each logical line while retaining stable chunk
+    /// boundaries for incremental viewport indexing and drawing.
     public var displayChunks: [String]
     public var renderedRecords: Int
     public var omittedRecords: Int
@@ -797,14 +797,14 @@ public struct RenderedLogText: Hashable, Sendable {
 
 /// A minimal streaming edit from one rendered log snapshot to the next. Log
 /// rings evolve by dropping an old prefix and appending a new suffix, so the
-/// virtual viewport can retain measured chunks. A filter change simply
+/// virtual viewport can retain indexed chunks. A filter change simply
 /// degenerates to a bounded replace.
 public struct LogTextInstallPlan: Hashable, Sendable {
     public var removePrefixUTF16Length: Int
     public var resultUTF16Length: Int
     /// Number of unchanged chunks at the end of the previous projection and
-    /// the beginning of the replacement. View renderers reuse their measured
-    /// chunk layouts instead of reshaping the retained text.
+    /// the beginning of the replacement. View renderers reuse their retained
+    /// line indexes instead of rescanning unchanged text.
     public var retainedChunkCount: Int
     public var appendedChunkCount: Int
     public var appendedUTF8Length: Int

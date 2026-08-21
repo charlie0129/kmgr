@@ -83,7 +83,7 @@ struct ContextualShortcutModelsTests {
     @Test("log help advertises its window-wide controls")
     func logs() {
         #expect(ContextualShortcutCatalog.logs.items.map(\.keys) == [
-            "/", "F", "P", "\u{2318}W",
+            "/", "F", "P", "W", "\u{2318}W",
         ])
     }
 

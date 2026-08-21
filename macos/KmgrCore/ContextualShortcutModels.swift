@@ -229,6 +229,7 @@ public enum ContextualShortcutCatalog {
             item("logs.filter", "/", "Focus visible-log filter"),
             item("logs.follow", "F", "Toggle following"),
             item("logs.pause", "P", "Pause or resume display"),
+            item("logs.wrap", "W", "Toggle line wrapping"),
             item("window.close", "\u{2318}W", "Close window"),
         ]
     )

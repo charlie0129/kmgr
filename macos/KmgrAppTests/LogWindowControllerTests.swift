@@ -48,10 +48,11 @@ struct LogWindowControllerTests {
         )
         logView.install(projection, viewportSize: scrollView.contentSize)
 
-        #expect(projection.rows.count == 8_001)
+        #expect(projection.lines.count == 8_001)
+        #expect(logView.visualRowCount == 8_001)
         #expect(logView.frame.height > scrollView.contentSize.height)
         let lineHeight = CGFloat(projection.style.lineHeight)
-        for index in stride(from: 0, to: projection.rows.count - 1, by: 137) {
+        for index in stride(from: 0, to: logView.visualRowCount - 1, by: 137) {
             let current = logViewportRowRect(index, in: logView)
             let next = logViewportRowRect(index + 1, in: logView)
             #expect(current.maxY == next.minY)
@@ -59,7 +60,7 @@ struct LogWindowControllerTests {
         }
 
         let clipView = scrollView.contentView
-        for index in stride(from: projection.rows.count - 1, through: 0, by: -211) {
+        for index in stride(from: logView.visualRowCount - 1, through: 0, by: -211) {
             clipView.scroll(to: NSPoint(
                 x: 0,
                 y: CGFloat(index) * lineHeight
@@ -87,8 +88,8 @@ struct LogWindowControllerTests {
         )
 
         #expect(projection.joinedText() == chunks.joined())
-        #expect(projection.rows.count == 4)
-        #expect(projection.rows.map { projection.substring(in: $0.textRange) } == [
+        #expect(projection.lines.count == 4)
+        #expect(projection.lines.map { projection.substring(in: $0.textRange) } == [
             "alpha", "beta", "gamma", "delta",
         ])
     }
@@ -122,31 +123,27 @@ struct LogWindowControllerTests {
         }
     }
 
-    @Test("16 MiB single line is complete and horizontally segmented")
-    func multiMegabyteSingleLineProjectionStaysWithinBudget() async throws {
-        let fragment = String(repeating: "x", count: 64 << 10)
-        let chunks = Array(repeating: fragment, count: 256) + ["\n"]
+    @Test("16 MiB single line uses arithmetic width and virtual horizontal drawing")
+    func multiMegabyteSingleLineProjectionStaysVirtual() async throws {
+        let chunks = [String(repeating: "x", count: 16 << 20), "\n"]
         let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let style = LogViewportTextStyle(font: font)
         let clock = ContinuousClock()
         let start = clock.now
-        let projection = try await Task.detached(priority: .userInitiated) {
-            try LogViewportProjection.make(
-                chunks: chunks,
-                previous: nil,
-                retainedChunkCount: 0,
-                style: style
-            )
-        }.value
+        let projection = try LogViewportProjection.make(
+            chunks: chunks,
+            previous: nil,
+            retainedChunkCount: 0,
+            style: style
+        )
         let duration = start.duration(to: clock.now)
 
-        #expect(duration < .seconds(2))
+        #expect(duration < .milliseconds(10))
         #expect(projection.textUTF16Length == (16 << 20) + 1)
-        #expect(projection.rows.count == 2)
+        #expect(projection.lines.count == 2)
         #expect(projection.maximumWidth > 100_000_000)
-        #expect(projection.chunks.flatMap(\.pieces).allSatisfy { piece in
-            piece.range.length <= LogViewportProjection.maximumPieceUTF16Length
-        })
+        #expect(projection.maximumCellCount == 16 << 20)
+        #expect(projection.lines[0].indexedVariableBoundaryCount == 0)
 
         let (logView, scrollView) = makeLogViewport(frame: NSRect(
             x: 0, y: 0, width: 800, height: 520
@@ -170,6 +167,7 @@ struct LogWindowControllerTests {
         let drawStart = clock.now
         logView.cacheDisplay(in: farRight, to: bitmap)
         #expect(drawStart.duration(to: clock.now) < .milliseconds(100))
+        #expect(logView.lastDrawnCellCount < 256)
 
         let appendedChunks = chunks + ["tail\n"]
         let appendStart = clock.now
@@ -182,8 +180,83 @@ struct LogWindowControllerTests {
             )
         }.value
         #expect(appendStart.duration(to: clock.now) < .milliseconds(100))
-        #expect(appended.rows.count == 3)
+        #expect(appended.lines.count == 3)
         #expect(appended.joinedText().hasSuffix("\ntail\n"))
+    }
+
+    @Test("fixed Unicode cells wrap arithmetically without changing copied text")
+    func fixedUnicodeCellsWrapWithoutMaterializedRows() throws {
+        let (logView, scrollView) = makeLogViewport(frame: NSRect(
+            x: 0, y: 0, width: 500, height: 300
+        ))
+        let value = "A🐈界e\u{301}BCDEFG\n"
+        let projection = try LogViewportProjection.make(
+            chunks: [value],
+            previous: nil,
+            retainedChunkCount: 0,
+            style: logView.projection.style
+        )
+        logView.install(projection, viewportSize: scrollView.contentSize)
+
+        #expect(projection.lines.count == 2)
+        #expect(projection.lines[0].cellCount == 10)
+        #expect(projection.lines[0].indexedVariableBoundaryCount == 2)
+        #expect(projection.maximumWidth
+            == Double(10) * projection.style.cellWidth)
+
+        let widthForFourCells = CGFloat(projection.style.cellWidth * 4)
+            + logView.textContainerInset.width * 2
+        logView.setWrapsLines(
+            true,
+            viewportSize: NSSize(width: widthForFourCells, height: 300)
+        )
+        #expect(logView.wrappingColumnCapacity == 4)
+        #expect(logView.visualRowCount == 4)
+        #expect((0..<3).map { logView.visualRowText(at: $0) } == [
+            "A🐈界e\u{301}", "BCDE", "FG",
+        ])
+        #expect(logView.string == value)
+
+        let bitmap = try #require(logView.bitmapImageRepForCachingDisplay(
+            in: logView.bounds
+        ))
+        logView.cacheDisplay(in: logView.bounds, to: bitmap)
+        #expect(logView.lastDrawnCellCount == 10)
+        #expect(logView.lastDrawnUnicodeCellCount == 3)
+    }
+
+    @Test("filter matches are highlighted case-insensitively across soft wraps")
+    func filterMatchesAreHighlightedAcrossSoftWraps() throws {
+        let (logView, _) = makeLogViewport(frame: NSRect(
+            x: 0, y: 0, width: 500, height: 300
+        ))
+        let value = "before ERROR after error\n"
+        let projection = try LogViewportProjection.make(
+            chunks: [value],
+            previous: nil,
+            retainedChunkCount: 0,
+            style: logView.projection.style,
+            highlightedText: "error"
+        )
+        let widthForNineCells = CGFloat(projection.style.cellWidth * 9)
+            + logView.textContainerInset.width * 2
+        logView.install(
+            projection,
+            viewportSize: NSSize(width: widthForNineCells, height: 300)
+        )
+        logView.setWrapsLines(
+            true,
+            viewportSize: NSSize(width: widthForNineCells, height: 300)
+        )
+
+        let highlighted = (0..<logView.visualRowCount).flatMap {
+            logView.filterHighlightRanges(forVisualRow: $0)
+        }
+        let unique = Set(highlighted.map { "\($0.location):\($0.length)" })
+        #expect(unique.count == 2)
+        #expect(highlighted.allSatisfy {
+            (value as NSString).substring(with: $0).lowercased() == "error"
+        })
     }
 
     @Test("virtual logs remain selectable and copy exact text")
@@ -249,8 +322,12 @@ struct LogWindowControllerTests {
         let views = descendants(of: root)
         let logView = try #require(views.compactMap { $0 as? LogViewportView }
             .first { $0.accessibilityLabel() == "Pod logs" })
+        let scrollView = try #require(views.compactMap { $0 as? NSScrollView }
+            .first { $0.identifier?.rawValue == "log-content-scroll" })
         let follow = try #require(views.compactMap { $0 as? NSButton }
             .first { $0.title == "Follow" })
+        let wrap = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.title == "Wrap" })
         let pause = try #require(views.compactMap { $0 as? NSButton }
             .first { $0.title == "Pause" })
         let search = try #require(views.compactMap { $0 as? NSSearchField }.first)
@@ -271,6 +348,15 @@ struct LogWindowControllerTests {
         #expect(pause.title == "Resume")
         try sendLogWindowKey("p", to: window)
         #expect(pause.title == "Pause")
+
+        try sendLogWindowKey("w", to: window)
+        #expect(wrap.state == .on)
+        #expect(logView.wrapsLines)
+        #expect(!scrollView.hasHorizontalScroller)
+        try sendLogWindowKey("w", to: window)
+        #expect(wrap.state == .off)
+        #expect(!logView.wrapsLines)
+        #expect(scrollView.hasHorizontalScroller)
 
         try sendLogWindowKey("/", to: window)
         #expect(window.firstResponder === search.currentEditor())
@@ -321,7 +407,7 @@ struct LogWindowControllerTests {
             characters: "w",
             modifiers: [],
             textIsEditable: false
-        ) == nil)
+        ) == .toggleWrap)
         #expect(LogWindowShortcut.action(
             characters: "/",
             modifiers: .option,
@@ -592,6 +678,65 @@ struct LogWindowControllerTests {
         #expect(laidOutText.width > 0)
         #expect(laidOutText.height > 0)
         #expect(laidOutText.intersects(logView.visibleRect))
+    }
+
+    @Test("live filter keeps only matching records and highlights its keyword")
+    func liveFilterHighlightsVisibleMatches() async throws {
+        let provider = OrderedLogWindowProvider()
+        let source = logSource(pod: "api", uid: "api-uid", container: "app")
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [source],
+            provider: provider,
+            displayConfiguration: LogDisplayConfiguration(renderBatchMilliseconds: 1)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let logView = try #require(descendants(of: root)
+            .compactMap { $0 as? LogViewportView }
+            .first { $0.accessibilityLabel() == "Pod logs" })
+        let search = try #require(descendants(of: root)
+            .compactMap { $0 as? NSSearchField }.first)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitStreaming(generation: 1, sequence: 1)
+        provider.emitRecords(
+            generation: 1,
+            sequence: 2,
+            records: [
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data("request ERROR while loading".utf8),
+                    endsWithNewline: true
+                ),
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data("request completed".utf8),
+                    endsWithNewline: true
+                ),
+            ]
+        )
+        try await waitForLogText(logView) { $0.contains("request completed") }
+
+        search.stringValue = "error"
+        controller.controlTextDidChange(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: search
+        ))
+        try await waitForLogText(logView) {
+            $0.contains("request ERROR") && !$0.contains("request completed")
+        }
+
+        #expect(logView.projection.highlightedText == "error")
+        let matches = (0..<logView.visualRowCount).flatMap {
+            logView.filterHighlightRanges(forVisualRow: $0)
+        }
+        #expect(matches.contains {
+            (logView.string as NSString).substring(with: $0) == "ERROR"
+        })
     }
 
     @Test("long lines use the configured display limit and save losslessly")
@@ -1344,7 +1489,8 @@ private func logViewportRowRect(
     return NSRect(
         x: logView.textContainerInset.width,
         y: logView.textContainerInset.height + CGFloat(index) * lineHeight,
-        width: CGFloat(logView.projection.rows[index].width),
+        width: CGFloat(logView.visualRowCellCount(at: index))
+            * CGFloat(logView.projection.style.cellWidth),
         height: lineHeight
     )
 }
@@ -1354,14 +1500,13 @@ private func logViewportVisibleRowRects(
     _ logView: LogViewportView,
     in scrollView: NSScrollView
 ) -> [NSRect] {
-    let rows = logView.projection.rows
-    guard !rows.isEmpty else { return [] }
+    guard logView.visualRowCount > 0 else { return [] }
     let visible = scrollView.contentView.bounds
     let lineHeight = CGFloat(logView.projection.style.lineHeight)
     let first = max(0, Int(floor(
         (visible.minY - logView.textContainerInset.height) / lineHeight
     )))
-    let last = min(rows.count - 1, Int(floor(
+    let last = min(logView.visualRowCount - 1, Int(floor(
         (visible.maxY - logView.textContainerInset.height) / lineHeight
     )))
     guard first <= last else { return [] }
@@ -1394,9 +1539,9 @@ private func isActualLogTailFullyVisible(
     _ logView: LogViewportView,
     in scrollView: NSScrollView
 ) -> Bool {
-    guard !logView.projection.rows.isEmpty else { return true }
+    guard logView.visualRowCount > 0 else { return true }
     let tail = logViewportRowRect(
-        logView.projection.rows.count - 1,
+        logView.visualRowCount - 1,
         in: logView
     )
     let visible = scrollView.contentView.bounds
@@ -1410,7 +1555,7 @@ private func laidOutLogTextRect(in logView: LogViewportView) -> NSRect {
         x: logView.textContainerInset.width,
         y: logView.textContainerInset.height,
         width: CGFloat(logView.projection.maximumWidth),
-        height: CGFloat(logView.projection.rows.count)
+        height: CGFloat(logView.visualRowCount)
             * CGFloat(logView.projection.style.lineHeight)
     )
 }
