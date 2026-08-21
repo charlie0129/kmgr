@@ -1843,7 +1843,11 @@ struct ClusterWorkspaceToolbarTests {
         #expect(statusLine.toolTip?.contains("Label selector: \(selector)") == true)
 
         controller.navigateBack(nil)
-        try await waitUntil { provider.streamRequests.count == 3 }
+        try await waitUntil {
+            provider.streamRequests.count == 3
+                && table.numberOfRows == 1
+                && table.selectedRowIndexes == IndexSet(integer: 0)
+        }
         requests = provider.streamRequests
         #expect(requests[2].resource.resource == "deployments")
         #expect(requests[2].labelSelector.isEmpty)

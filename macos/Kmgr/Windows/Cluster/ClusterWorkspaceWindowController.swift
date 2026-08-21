@@ -4523,6 +4523,12 @@ private final class ResourceListViewController: NSViewController,
             namespaceSelection: scope
         )
         let previousStreamContext = lastStreamContext
+        // History restoration carries UID truth rather than numeric row
+        // positions. A cross-GVR open must invalidate the old selection token,
+        // but that reset must not discard the UIDs captured in the destination
+        // we are restoring.
+        let historySelectionUIDs = reason == .historyRestore
+            ? pendingSelectionUIDs : nil
         generation &+= 1
         if previousStreamContext == nextStreamContext {
             // A new generation has a new numeric ordering even when warm rows
@@ -4535,6 +4541,9 @@ private final class ResourceListViewController: NSViewController,
             // session/GVR/namespace list. Never carry them into another list,
             // including through history restoration.
             resetSelectionAuthority()
+        }
+        if reason == .historyRestore {
+            pendingSelectionUIDs = historySelectionUIDs
         }
         prepareOptionalResourceDiscovery(
             for: resource,
