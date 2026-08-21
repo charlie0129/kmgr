@@ -92,6 +92,24 @@ struct CommandPaletteWindowControllerTests {
         #expect(!searchFrame.intersects(closeFrame))
     }
 
+    @Test("search field editor leaves room for font descenders")
+    func searchFieldFitsFontDescenders() throws {
+        let controller = makePaletteController(provider: ControllablePaletteSearchProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let search = try paletteControls(in: controller).search
+
+        search.stringValue = "g"
+        #expect(window.makeFirstResponder(search))
+        search.layoutSubtreeIfNeeded()
+
+        let editor = try #require(search.currentEditor())
+        let font = try #require(search.font)
+        let requiredHeight = ceil(font.boundingRectForFont.height) + 2
+        #expect(editor.frame.height >= requiredHeight)
+    }
+
     @Test("root kind query includes cached objects with unrelated names")
     func rootKindQueryIncludesCachedObjects() async throws {
         let provider = ControllablePaletteSearchProvider()
