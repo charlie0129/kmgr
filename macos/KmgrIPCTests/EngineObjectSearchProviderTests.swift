@@ -8,6 +8,7 @@ private actor ObjectSearchRPCCapture: ObjectSearchRPC {
     var response = Kmgr_V1_SearchCachedObjectsResponse()
     var searchEvents: [Kmgr_V1_SearchObjectsEvent] = []
     var cachedRequest: Kmgr_V1_SearchCachedObjectsRequest?
+    var cachedTimeout: Duration?
     var streamedRequest: Kmgr_V1_SearchObjectsRequest?
     var overrideResponseRequestID: String?
 
@@ -16,6 +17,7 @@ private actor ObjectSearchRPCCapture: ObjectSearchRPC {
         timeout: Duration
     ) async throws -> Kmgr_V1_SearchCachedObjectsResponse {
         cachedRequest = request
+        cachedTimeout = timeout
         var value = response
         value.requestID = overrideResponseRequestID ?? request.context.requestID
         return value
@@ -39,6 +41,7 @@ private actor ObjectSearchRPCCapture: ObjectSearchRPC {
     func install(_ values: [Kmgr_V1_SearchObjectsEvent]) { searchEvents = values }
     func useResponseRequestID(_ value: String?) { overrideResponseRequestID = value }
     func request() -> Kmgr_V1_SearchCachedObjectsRequest? { cachedRequest }
+    func timeout() -> Duration? { cachedTimeout }
     func searchRequest() -> Kmgr_V1_SearchObjectsRequest? { streamedRequest }
 }
 
@@ -106,6 +109,7 @@ private actor ObjectSearchRPCCapture: ObjectSearchRPC {
     await rpc.install(response)
     let provider = EngineObjectSearchProvider(
         rpc: rpc,
+        unaryTimeout: .seconds(75),
         now: { Date(timeIntervalSince1970: 1_000) },
         requestID: { "cached-request" }
     )
@@ -129,6 +133,8 @@ private actor ObjectSearchRPCCapture: ObjectSearchRPC {
     #expect(value.examinationTruncated)
     let request = await rpc.request()
     #expect(request?.context.requestID == "cached-request")
+    #expect(request?.context.deadlineUnixMs == 1_075_000)
+    #expect(await rpc.timeout() == .seconds(75))
     #expect(request?.context.clusterSessionID == "session")
     #expect(request?.namespaceScope.namespaces == ["team"])
     #expect(request?.query == "api")

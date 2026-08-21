@@ -75,7 +75,7 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
             listTimeout: listTimeout,
             openTimeout: openTimeout,
             readiness: {
-                _ = try await supervisor.waitUntilReady(timeout: .seconds(10))
+                _ = try await supervisor.waitUntilReady(timeout: openTimeout)
             }
         )
     }

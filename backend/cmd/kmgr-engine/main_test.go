@@ -100,6 +100,21 @@ func TestKubernetesListPageSizeFlagIsValidated(t *testing.T) {
 	}
 }
 
+func TestClusterConnectionTimeoutFlagIsValidated(t *testing.T) {
+	if code := run([]string{
+		"--version", "--cluster-connection-timeout", "45s",
+	}); code != 0 {
+		t.Fatalf("run(valid cluster connection timeout) = %d, want success", code)
+	}
+	for _, value := range []string{"0s", "999ms", "601s", "not-a-duration"} {
+		if code := run([]string{
+			"--version", "--cluster-connection-timeout", value,
+		}); code != 2 {
+			t.Errorf("run(--cluster-connection-timeout %q) = %d, want usage error", value, code)
+		}
+	}
+}
+
 func TestWarmCacheFlagsAreValidated(t *testing.T) {
 	if code := run([]string{
 		"--version",

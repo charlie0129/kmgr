@@ -76,11 +76,20 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         let settings = SettingsWindowController(preferencesStore: preferences)
         self.settingsWindowController = settings
+        let clusterConnectionTimeout = Duration.seconds(Int64(
+            preferences.current.advancedPerformance.clusterConnectionTimeoutSeconds
+        ))
+        let kubernetesRequestTimeout = Duration.seconds(Int64(
+            preferences.current.advancedPerformance.kubernetesRequestTimeoutSeconds
+        ))
         self.clusterContextProvider = EngineClusterContextProvider(
-            supervisor: supervisor
+            supervisor: supervisor,
+            listTimeout: kubernetesRequestTimeout,
+            openTimeout: clusterConnectionTimeout
         )
         self.workspaceResourceProvider = EngineWorkspaceResourceProvider(
-            connection: supervisor.connection
+            connection: supervisor.connection,
+            unaryTimeout: kubernetesRequestTimeout
         )
         self.clusterConnectionActivityProvider = EngineClusterConnectionActivityProvider(
             connection: supervisor.connection
@@ -89,22 +98,35 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             connection: supervisor.connection
         )
         self.optionalResourceCatalogProvider = EngineOptionalResourceCatalogProvider(
-            connection: supervisor.connection
+            connection: supervisor.connection,
+            timeout: kubernetesRequestTimeout
         )
         self.columnPreviewProvider = EngineColumnPreviewProvider(
-            connection: supervisor.connection
+            connection: supervisor.connection,
+            timeout: kubernetesRequestTimeout
         )
         self.objectSearchProvider = EngineObjectSearchProvider(
-            connection: supervisor.connection
+            connection: supervisor.connection,
+            unaryTimeout: kubernetesRequestTimeout
         )
         self.objectDetailProvider = EngineObjectDetailProvider(
-            connection: supervisor.connection
+            connection: supervisor.connection,
+            unaryTimeout: kubernetesRequestTimeout
         )
-        self.operationProvider = EngineOperationProvider(connection: supervisor.connection)
-        self.logProvider = EngineLogStreamProvider(connection: supervisor.connection)
+        self.operationProvider = EngineOperationProvider(
+            connection: supervisor.connection,
+            unaryTimeout: kubernetesRequestTimeout
+        )
+        self.logProvider = EngineLogStreamProvider(
+            connection: supervisor.connection,
+            resolutionTimeout: kubernetesRequestTimeout
+        )
         self.execProvider = EngineExecSessionProvider(connection: supervisor.connection)
         let portForwards = PortForwardCoordinator(
-            provider: EnginePortForwardProvider(connection: supervisor.connection)
+            provider: EnginePortForwardProvider(
+                connection: supervisor.connection,
+                unaryTimeout: kubernetesRequestTimeout
+            )
         )
         self.portForwardCoordinator = portForwards
         self.portForwardsWindowController = PortForwardsWindowController(

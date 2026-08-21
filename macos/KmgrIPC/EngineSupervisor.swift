@@ -682,6 +682,8 @@ extension EngineSupervisor.Configuration {
                 "\(advancedPerformance.kubernetesBurst)",
                 "--kubernetes-list-page-size",
                 "\(advancedPerformance.kubernetesListPageSize)",
+                "--cluster-connection-timeout",
+                "\(advancedPerformance.clusterConnectionTimeoutSeconds)s",
                 "--metrics-idle-provider-limit",
                 "\(advancedPerformance.idleMetricProviderLimit)",
                 "--metrics-idle-sample-limit",

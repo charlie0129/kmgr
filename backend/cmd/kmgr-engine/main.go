@@ -74,6 +74,11 @@ func run(arguments []string) int {
 		"kubernetes-list-page-size", view.DefaultPipelinePageSize,
 		"maximum objects requested in each conventional Kubernetes LIST page",
 	)
+	clusterConnectionTimeout := flags.Duration(
+		"cluster-connection-timeout",
+		transport.DefaultConnectionProbeTimeout,
+		"timeout for the Kubernetes connection probe while opening a cluster",
+	)
 	warmCache := warmCacheConfiguration{}
 	metricCache := metricCacheConfiguration{}
 	flags.IntVar(
@@ -195,6 +200,14 @@ func run(arguments []string) int {
 		)
 		return 2
 	}
+	if *clusterConnectionTimeout < time.Second ||
+		*clusterConnectionTimeout > transport.MaximumConnectionProbeTimeout {
+		fmt.Fprintln(
+			os.Stderr,
+			"kmgr-engine: --cluster-connection-timeout must be between 1s and 10m",
+		)
+		return 2
+	}
 	if err := validateWarmCacheConfiguration(warmCache); err != nil {
 		fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
 		return 2
@@ -288,6 +301,7 @@ func run(arguments []string) int {
 	server, err := transport.NewServer(*launchToken, transport.ServerOptions{
 		Version:                     version,
 		Logger:                      logger,
+		ProbeTimeout:                *clusterConnectionTimeout,
 		ColumnsPath:                 *columnsPath,
 		MetricsRefreshInterval:      *metricsRefresh,
 		ViewReleaseDelay:            *viewReleaseDelay,

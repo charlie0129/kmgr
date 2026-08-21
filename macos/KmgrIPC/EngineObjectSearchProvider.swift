@@ -60,6 +60,7 @@ public struct EngineObjectSearchRPC: ObjectSearchRPC {
 
 public struct EngineObjectSearchProvider: ObjectSearchProviding {
     private let rpc: any ObjectSearchRPC
+    private let unaryTimeout: Duration
     private let streamTimeout: Duration
     private let controlTimeout: Duration
     private let maximumBufferedMessages: Int
@@ -68,12 +69,14 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
 
     public init(
         connection: EngineConnection,
+        unaryTimeout: Duration = .seconds(30),
         streamTimeout: Duration = .seconds(120),
         controlTimeout: Duration = .seconds(5),
         maximumBufferedMessages: Int = 32
     ) {
         self.init(
             rpc: EngineObjectSearchRPC(connection: connection),
+            unaryTimeout: unaryTimeout,
             streamTimeout: streamTimeout,
             controlTimeout: controlTimeout,
             maximumBufferedMessages: maximumBufferedMessages
@@ -82,6 +85,7 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
 
     public init(
         rpc: any ObjectSearchRPC,
+        unaryTimeout: Duration = .seconds(30),
         streamTimeout: Duration = .seconds(120),
         controlTimeout: Duration = .seconds(5),
         maximumBufferedMessages: Int = 32,
@@ -90,6 +94,7 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
     ) {
         precondition(maximumBufferedMessages > 0)
         self.rpc = rpc
+        self.unaryTimeout = unaryTimeout
         self.streamTimeout = streamTimeout
         self.controlTimeout = controlTimeout
         self.maximumBufferedMessages = maximumBufferedMessages
@@ -135,7 +140,7 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
         request: CachedObjectSearchRequest
     ) async throws -> CachedObjectSearchResponse {
         var value = Kmgr_V1_SearchCachedObjectsRequest()
-        value.context = context(request.sessionID, timeout: controlTimeout)
+        value.context = context(request.sessionID, timeout: unaryTimeout)
         value.namespaceScope.allNamespaces = request.namespaceScope.allNamespaces
         value.namespaceScope.namespaces = request.namespaceScope.namespaces
         value.query = request.query
@@ -151,7 +156,7 @@ public struct EngineObjectSearchProvider: ObjectSearchProviding {
             return filter
         }
         do {
-            let response = try await rpc.searchCached(value, timeout: controlTimeout)
+            let response = try await rpc.searchCached(value, timeout: unaryTimeout)
             guard response.requestID == value.context.requestID else {
                 throw ObjectSearchBridgeError.envelopeMismatch
             }

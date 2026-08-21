@@ -35,6 +35,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let kubernetesQPSField = NSTextField()
     private let kubernetesBurstField = NSTextField()
     private let kubernetesListPageSizeField = NSTextField()
+    private let clusterConnectionTimeoutField = NSTextField()
+    private let kubernetesRequestTimeoutField = NSTextField()
     private let idleMetricProviderLimitField = NSTextField()
     private let idleMetricSampleLimitField = NSTextField()
     private let exactPodMetricsEntryLimitField = NSTextField()
@@ -185,6 +187,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         )
         kubernetesListPageSizeField.setAccessibilityIdentifier(
             "settings.performance.kubernetesListPageSize"
+        )
+        clusterConnectionTimeoutField.setAccessibilityIdentifier(
+            "settings.performance.clusterConnectionTimeoutSeconds"
+        )
+        kubernetesRequestTimeoutField.setAccessibilityIdentifier(
+            "settings.performance.kubernetesRequestTimeoutSeconds"
         )
         idleMetricProviderLimitField.setAccessibilityIdentifier(
             "settings.performance.idleMetricProviders"
@@ -355,6 +363,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                     "LIST page size",
                     control: kubernetesListPageSizeField,
                     suffix: "objects"
+                ),
+                labeledRow(
+                    "Connection timeout",
+                    control: clusterConnectionTimeoutField,
+                    suffix: "seconds"
+                ),
+                labeledRow(
+                    "Request timeout",
+                    control: kubernetesRequestTimeoutField,
+                    suffix: "seconds"
                 ),
                 groupHeading("Metrics LIST cache — process-wide"),
                 labeledRow(
@@ -615,6 +633,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             preferences.advancedPerformance.kubernetesBurst
         kubernetesListPageSizeField.integerValue =
             preferences.advancedPerformance.kubernetesListPageSize
+        clusterConnectionTimeoutField.integerValue =
+            preferences.advancedPerformance.clusterConnectionTimeoutSeconds
+        kubernetesRequestTimeoutField.integerValue =
+            preferences.advancedPerformance.kubernetesRequestTimeoutSeconds
         idleMetricProviderLimitField.integerValue =
             preferences.advancedPerformance.idleMetricProviderLimit
         idleMetricSampleLimitField.integerValue =
@@ -702,6 +724,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 kubernetesQPS: parsedDouble(kubernetesQPSField),
                 kubernetesBurst: parsedInteger(kubernetesBurstField),
                 kubernetesListPageSize: parsedInteger(kubernetesListPageSizeField),
+                clusterConnectionTimeoutSeconds: parsedInteger(
+                    clusterConnectionTimeoutField
+                ),
+                kubernetesRequestTimeoutSeconds: parsedInteger(
+                    kubernetesRequestTimeoutField
+                ),
                 idleMetricProviderLimit: parsedInteger(
                     idleMetricProviderLimitField
                 ),

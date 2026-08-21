@@ -143,6 +143,21 @@ func TestServerForwardsViewReleaseDelayToRuntimeValidation(t *testing.T) {
 	}
 }
 
+func TestServerConfiguresClusterConnectionTimeout(t *testing.T) {
+	server, err := NewServer(strings.Repeat("a", 64), ServerOptions{
+		Version:      "test",
+		ColumnsPath:  t.TempDir() + "/columns.yaml",
+		ProbeTimeout: 45 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { server.Shutdown(time.Second) })
+	if server.cluster.probeTimeout != 45*time.Second {
+		t.Fatalf("probe timeout = %s, want 45s", server.cluster.probeTimeout)
+	}
+}
+
 func TestServerRejectsInvalidMetricCacheAndLogConcurrencyLimits(t *testing.T) {
 	for _, options := range []ServerOptions{
 		{IdleMetricProviderLimit: -1},

@@ -17,7 +17,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const DefaultConnectionProbeTimeout = 8 * time.Second
+const (
+	DefaultConnectionProbeTimeout = 10 * time.Second
+	MaximumConnectionProbeTimeout = 10 * time.Minute
+)
 
 const connectionActivitySampleInterval = 500 * time.Millisecond
 const operationActivitySampleInterval = 500 * time.Millisecond

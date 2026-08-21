@@ -182,6 +182,10 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     public static let viewReleaseGraceSecondsRange = 1...300
     public static let defaultKubernetesListPageSize = 500
     public static let kubernetesListPageSizeRange = 1...10_000
+    public static let defaultClusterConnectionTimeoutSeconds = 10
+    public static let clusterConnectionTimeoutSecondsRange = 1...600
+    public static let defaultKubernetesRequestTimeoutSeconds = 30
+    public static let kubernetesRequestTimeoutSecondsRange = 1...3_600
     public static let defaultLogQueueRecordLimit = 4_096
     public static let logQueueRecordLimitRange = 1...262_144
     public static let defaultLogQueueByteLimit = 8 << 20
@@ -198,6 +202,8 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
     public var kubernetesQPS: Double
     public var kubernetesBurst: Int
     public var kubernetesListPageSize: Int
+    public var clusterConnectionTimeoutSeconds: Int
+    public var kubernetesRequestTimeoutSeconds: Int
     public var idleMetricProviderLimit: Int
     public var idleMetricSampleLimit: Int
     public var exactPodMetricsEntryLimit: Int
@@ -220,6 +226,8 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         kubernetesQPS: Double = 40,
         kubernetesBurst: Int = 80,
         kubernetesListPageSize: Int = AdvancedPerformancePreferences.defaultKubernetesListPageSize,
+        clusterConnectionTimeoutSeconds: Int = AdvancedPerformancePreferences.defaultClusterConnectionTimeoutSeconds,
+        kubernetesRequestTimeoutSeconds: Int = AdvancedPerformancePreferences.defaultKubernetesRequestTimeoutSeconds,
         idleMetricProviderLimit: Int = 8,
         idleMetricSampleLimit: Int = 100_000,
         exactPodMetricsEntryLimit: Int = 100_000,
@@ -241,6 +249,8 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
         self.kubernetesQPS = kubernetesQPS
         self.kubernetesBurst = kubernetesBurst
         self.kubernetesListPageSize = kubernetesListPageSize
+        self.clusterConnectionTimeoutSeconds = clusterConnectionTimeoutSeconds
+        self.kubernetesRequestTimeoutSeconds = kubernetesRequestTimeoutSeconds
         self.idleMetricProviderLimit = idleMetricProviderLimit
         self.idleMetricSampleLimit = idleMetricSampleLimit
         self.exactPodMetricsEntryLimit = exactPodMetricsEntryLimit
@@ -335,6 +345,22 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
                 message: "Kubernetes LIST page size must be between 1 and 10,000 objects."
             ))
         }
+        if !Self.clusterConnectionTimeoutSecondsRange.contains(
+            clusterConnectionTimeoutSeconds
+        ) {
+            issues.append(AppPreferenceIssue(
+                field: "advancedPerformance.clusterConnectionTimeoutSeconds",
+                message: "Cluster connection timeout must be between 1 and 600 seconds."
+            ))
+        }
+        if !Self.kubernetesRequestTimeoutSecondsRange.contains(
+            kubernetesRequestTimeoutSeconds
+        ) {
+            issues.append(AppPreferenceIssue(
+                field: "advancedPerformance.kubernetesRequestTimeoutSeconds",
+                message: "Kubernetes request timeout must be between 1 and 3,600 seconds."
+            ))
+        }
         validateCount(
             idleMetricProviderLimit,
             field: "advancedPerformance.idleMetricProviderLimit",
@@ -387,7 +413,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v9"
+    public static let apiVersion = "kmgr.preferences/v10"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
