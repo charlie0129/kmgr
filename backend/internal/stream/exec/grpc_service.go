@@ -340,7 +340,10 @@ func deliveryToProto(
 	if delivery.Status != nil {
 		value := delivery.Status
 		converted := &kmgrv1.ExecStatus{
-			State: stateToProto(value.State), ExitCode: value.ExitCode, StatusReason: value.StatusReason,
+			State: stateToProto(value.State), ExitCode: value.ExitCode,
+			StatusReason:       value.StatusReason,
+			DroppedOutputItems: value.DroppedOutputItems,
+			DroppedOutputBytes: value.DroppedOutputBytes,
 		}
 		if value.Err != nil {
 			converted.Error = structuredExecError(value.Err, contextName, target)
@@ -447,10 +450,6 @@ func structuredExecError(err error, contextName string, target Identity) *kmgrv1
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED
 		result.Reason = "WindowsNodeShellUnsupported"
 		result.Message = "This node-shell implementation currently supports Linux Nodes only."
-	case errors.Is(err, ErrOutputBackpressure):
-		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
-		result.Reason = "OutputBackpressure"
-		result.Message = "The terminal receiver could not keep up; the exec session was stopped to keep memory bounded."
 	case apierrors.IsNotFound(err):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
 		if isNodeShell {

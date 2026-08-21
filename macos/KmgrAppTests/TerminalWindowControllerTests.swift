@@ -196,6 +196,36 @@ struct TerminalWindowControllerTests {
         #expect(controller.window?.isVisible == true)
         #expect(closeCount == 0)
     }
+
+    @Test("dropped output remains a warning without ending the terminal")
+    func droppedOutputWarnsWithoutEndingSession() async throws {
+        let provider = OrderedExecProvider()
+        let controller = TerminalWindowController(
+            request: execRequest(command: ["/bin/sh"]),
+            provider: provider
+        )
+        controller.showWindow(nil)
+        defer { closeTerminal(controller) }
+        try await waitForExecEvent(provider) { $0.contains("opened:1") }
+
+        provider.emitStatus(
+            generation: 1,
+            status: ExecStatus(
+                state: .running,
+                statusReason: "Running",
+                droppedOutputItems: 2,
+                droppedOutputBytes: 8
+            )
+        )
+        let status = try terminalStatus(in: controller)
+        try await waitForTerminalControl(status) {
+            $0.stringValue == "Connected — Output dropped"
+        }
+        #expect(status.textColor == .systemOrange)
+        #expect(status.toolTip?.contains("2 output chunks (8 bytes)") == true)
+        #expect(status.toolTip?.contains("remote process is still running") == true)
+        #expect(!(try terminalReconnectButton(in: controller)).isEnabled)
+    }
 }
 }
 

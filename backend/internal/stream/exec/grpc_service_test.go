@@ -68,12 +68,17 @@ func TestDeliveryToProtoUsesCursorAndCopiesOutput(t *testing.T) {
 
 	exitCode := int32(23)
 	statusMessage := deliveryToProto(
-		Delivery{Status: &Status{State: StateExited, ExitCode: &exitCode, StatusReason: "NonZeroExit"}},
+		Delivery{Status: &Status{
+			State: StateExited, ExitCode: &exitCode, StatusReason: "NonZeroExit",
+			DroppedOutputItems: 7, DroppedOutputBytes: 8192,
+		}},
 		"terminal", 9, 43, "local", testStart(9).targetIdentity(),
 	)
 	converted := statusMessage.GetStatus()
 	if converted.GetState() != kmgrv1.ExecConnectionState_EXEC_CONNECTION_STATE_EXITED ||
-		converted.ExitCode == nil || converted.GetExitCode() != 23 || converted.GetStatusReason() != "NonZeroExit" {
+		converted.ExitCode == nil || converted.GetExitCode() != 23 ||
+		converted.GetStatusReason() != "NonZeroExit" ||
+		converted.GetDroppedOutputItems() != 7 || converted.GetDroppedOutputBytes() != 8192 {
 		t.Fatalf("converted status = %#v", converted)
 	}
 }

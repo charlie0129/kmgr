@@ -15,7 +15,11 @@ type outputQueue struct {
 	maxChunkBytes     int
 	peakItems         int
 	peakBytes         int
+	droppedItems      uint64
+	droppedBytes      uint64
 	statuses          []Status
+	latestStatus      Status
+	hasLatestStatus   bool
 	terminal          *Status
 	terminalDelivered bool
 	closed            bool
@@ -23,13 +27,16 @@ type outputQueue struct {
 }
 
 type OutputStats struct {
-	QueuedItems int
-	QueuedBytes int
-	PeakItems   int
-	PeakBytes   int
+	QueuedItems  int
+	QueuedBytes  int
+	PeakItems    int
+	PeakBytes    int
+	DroppedItems uint64
+	DroppedBytes uint64
 }
 
 func newOutputQueue(maxItems, maxBytes, maxChunkBytes int) *outputQueue {
+	maxChunkBytes = min(maxChunkBytes, maxBytes)
 	return &outputQueue{
 		items: make([]Output, maxItems), maxBytes: maxBytes, maxChunkBytes: maxChunkBytes,
 		notify: make(chan struct{}, 1),
@@ -42,7 +49,9 @@ func (q *outputQueue) writer(kind StreamKind) *queueWriter {
 
 // write is intentionally non-blocking. Allowing remotecommand's protocol
 // goroutines to wait on a hidden or stalled GUI can deadlock a TTY session.
-// Exhaustion cancels the exec instead of silently losing terminal bytes.
+// Exhaustion evicts the oldest chunks and reports cumulative loss through
+// status deliveries. The remote process must never deadlock or terminate just
+// because a hidden or stalled GUI is not consuming output quickly enough.
 func (q *outputQueue) write(kind StreamKind, data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
@@ -52,12 +61,14 @@ func (q *outputQueue) write(kind StreamKind, data []byte) (int, error) {
 	if q.closed {
 		return 0, ErrSessionClosed
 	}
-	neededItems := (len(data) + q.maxChunkBytes - 1) / q.maxChunkBytes
-	if q.size+neededItems > len(q.items) || q.bytes+len(data) > q.maxBytes {
-		return 0, ErrOutputBackpressure
-	}
+	dropped := false
 	for offset := 0; offset < len(data); {
 		end := min(offset+q.maxChunkBytes, len(data))
+		chunkBytes := end - offset
+		for q.size == len(q.items) || q.bytes+chunkBytes > q.maxBytes {
+			q.dropOldestLocked()
+			dropped = true
+		}
 		output := Output{Kind: kind, Data: append([]byte(nil), data[offset:end]...)}
 		index := (q.head + q.size) % len(q.items)
 		q.items[index] = output
@@ -67,8 +78,30 @@ func (q *outputQueue) write(kind StreamKind, data []byte) (int, error) {
 	}
 	q.peakItems = max(q.peakItems, q.size)
 	q.peakBytes = max(q.peakBytes, q.bytes)
+	if dropped {
+		q.enqueueDropStatusLocked()
+	}
 	q.signalLocked()
 	return len(data), nil
+}
+
+func (q *outputQueue) dropOldestLocked() {
+	output := q.items[q.head]
+	q.items[q.head] = Output{}
+	q.head = (q.head + 1) % len(q.items)
+	q.size--
+	q.bytes -= len(output.Data)
+	q.droppedItems++
+	q.droppedBytes += uint64(len(output.Data))
+}
+
+func (q *outputQueue) enqueueDropStatusLocked() {
+	if !q.hasLatestStatus {
+		return
+	}
+	status := q.latestStatus
+	q.attachDropStatsLocked(&status)
+	q.enqueueStatusLocked(status)
 }
 
 func (q *outputQueue) finish(status Status) {
@@ -79,6 +112,7 @@ func (q *outputQueue) finish(status Status) {
 	}
 	q.closed = true
 	copyStatus := status
+	q.attachDropStatsLocked(&copyStatus)
 	q.terminal = &copyStatus
 	q.signalLocked()
 }
@@ -89,12 +123,24 @@ func (q *outputQueue) setStatus(status Status) {
 	if q.closed {
 		return
 	}
+	q.attachDropStatsLocked(&status)
+	q.latestStatus = status
+	q.hasLatestStatus = true
+	q.enqueueStatusLocked(status)
+	q.signalLocked()
+}
+
+func (q *outputQueue) enqueueStatusLocked(status Status) {
 	if len(q.statuses) == 2 {
 		q.statuses[1] = status
 	} else {
 		q.statuses = append(q.statuses, status)
 	}
-	q.signalLocked()
+}
+
+func (q *outputQueue) attachDropStatsLocked(status *Status) {
+	status.DroppedOutputItems = q.droppedItems
+	status.DroppedOutputBytes = q.droppedBytes
 }
 
 func (q *outputQueue) next(ctx context.Context) (Delivery, error) {
@@ -140,6 +186,7 @@ func (q *outputQueue) stats() OutputStats {
 	return OutputStats{
 		QueuedItems: q.size, QueuedBytes: q.bytes,
 		PeakItems: q.peakItems, PeakBytes: q.peakBytes,
+		DroppedItems: q.droppedItems, DroppedBytes: q.droppedBytes,
 	}
 }
 

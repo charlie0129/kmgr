@@ -21,7 +21,6 @@ var (
 	ErrTooManySessions             = errors.New("too many active exec sessions")
 	ErrInputClosed                 = errors.New("exec stdin is closed")
 	ErrInputBackpressure           = errors.New("exec stdin queue is full")
-	ErrOutputBackpressure          = errors.New("exec output queue is full")
 	ErrExecutorUnavailable         = errors.New("Kubernetes remote-command transport is unavailable")
 	ErrWindowsNodeShellUnsupported = errors.New("Windows node shell is not supported")
 )
@@ -87,10 +86,12 @@ const (
 )
 
 type Status struct {
-	State        State
-	ExitCode     *int32
-	StatusReason string
-	Err          error
+	State              State
+	ExitCode           *int32
+	StatusReason       string
+	Err                error
+	DroppedOutputItems uint64
+	DroppedOutputBytes uint64
 }
 
 type Delivery struct {

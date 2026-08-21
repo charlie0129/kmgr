@@ -470,13 +470,15 @@ func (*ExecClientMessage_CloseStdin) isExecClientMessage_Payload() {}
 func (*ExecClientMessage_Cancel) isExecClientMessage_Payload() {}
 
 type ExecStatus struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	State         ExecConnectionState    `protobuf:"varint,1,opt,name=state,proto3,enum=kmgr.v1.ExecConnectionState" json:"state,omitempty"`
-	ExitCode      *int32                 `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
-	StatusReason  string                 `protobuf:"bytes,3,opt,name=status_reason,json=statusReason,proto3" json:"status_reason,omitempty"`
-	Error         *StructuredError       `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	State              ExecConnectionState    `protobuf:"varint,1,opt,name=state,proto3,enum=kmgr.v1.ExecConnectionState" json:"state,omitempty"`
+	ExitCode           *int32                 `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
+	StatusReason       string                 `protobuf:"bytes,3,opt,name=status_reason,json=statusReason,proto3" json:"status_reason,omitempty"`
+	Error              *StructuredError       `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	DroppedOutputItems uint64                 `protobuf:"varint,5,opt,name=dropped_output_items,json=droppedOutputItems,proto3" json:"dropped_output_items,omitempty"`
+	DroppedOutputBytes uint64                 `protobuf:"varint,6,opt,name=dropped_output_bytes,json=droppedOutputBytes,proto3" json:"dropped_output_bytes,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ExecStatus) Reset() {
@@ -535,6 +537,20 @@ func (x *ExecStatus) GetError() *StructuredError {
 		return x.Error
 	}
 	return nil
+}
+
+func (x *ExecStatus) GetDroppedOutputItems() uint64 {
+	if x != nil {
+		return x.DroppedOutputItems
+	}
+	return 0
+}
+
+func (x *ExecStatus) GetDroppedOutputBytes() uint64 {
+	if x != nil {
+		return x.DroppedOutputBytes
+	}
+	return 0
 }
 
 type ExecServerMessage struct {
@@ -699,13 +715,15 @@ const file_kmgr_v1_exec_proto_rawDesc = "" +
 	"\vclose_stdin\x18\a \x01(\bH\x00R\n" +
 	"closeStdin\x12\x18\n" +
 	"\x06cancel\x18\b \x01(\bH\x00R\x06cancelB\t\n" +
-	"\apayload\"\xc5\x01\n" +
+	"\apayload\"\xa9\x02\n" +
 	"\n" +
 	"ExecStatus\x122\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x1c.kmgr.v1.ExecConnectionStateR\x05state\x12 \n" +
 	"\texit_code\x18\x02 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12#\n" +
 	"\rstatus_reason\x18\x03 \x01(\tR\fstatusReason\x12.\n" +
-	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05errorB\f\n" +
+	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\x120\n" +
+	"\x14dropped_output_items\x18\x05 \x01(\x04R\x12droppedOutputItems\x120\n" +
+	"\x14dropped_output_bytes\x18\x06 \x01(\x04R\x12droppedOutputBytesB\f\n" +
 	"\n" +
 	"_exit_code\"\xe2\x01\n" +
 	"\x11ExecServerMessage\x12-\n" +

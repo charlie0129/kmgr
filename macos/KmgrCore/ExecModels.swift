@@ -130,17 +130,23 @@ public struct ExecStatus: Hashable, Sendable {
     public var exitCode: Int32?
     public var statusReason: String
     public var issue: ClusterManagerIssue?
+    public var droppedOutputItems: UInt64
+    public var droppedOutputBytes: UInt64
 
     public init(
         state: ExecConnectionState,
         exitCode: Int32? = nil,
         statusReason: String = "",
-        issue: ClusterManagerIssue? = nil
+        issue: ClusterManagerIssue? = nil,
+        droppedOutputItems: UInt64 = 0,
+        droppedOutputBytes: UInt64 = 0
     ) {
         self.state = state
         self.exitCode = exitCode
         self.statusReason = statusReason
         self.issue = issue
+        self.droppedOutputItems = droppedOutputItems
+        self.droppedOutputBytes = droppedOutputBytes
     }
 }
 

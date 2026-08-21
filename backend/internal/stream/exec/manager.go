@@ -282,7 +282,7 @@ func (m *Manager) run(ctx context.Context, op *operation, runner Runner, request
 }
 
 func terminalStatus(ctx context.Context, err error) Status {
-	if ctx.Err() != nil && !errors.Is(err, ErrOutputBackpressure) {
+	if ctx.Err() != nil {
 		return Status{State: StateCancelled, StatusReason: "Cancelled"}
 	}
 	if err == nil {
@@ -293,9 +293,6 @@ func terminalStatus(ctx context.Context, err error) Status {
 	if errors.As(err, &exitError) && exitError.Exited() {
 		code := int32(exitError.ExitStatus())
 		return Status{State: StateExited, ExitCode: &code, StatusReason: "NonZeroExit"}
-	}
-	if errors.Is(err, ErrOutputBackpressure) {
-		return Status{State: StateFailed, StatusReason: "OutputBackpressure", Err: err}
 	}
 	return Status{State: StateFailed, StatusReason: "ExecFailed", Err: err}
 }

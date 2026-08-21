@@ -63,6 +63,8 @@ message ExecStatus {
   optional int32 exit_code = 2;
   string status_reason = 3;
   StructuredError error = 4;
+  uint64 dropped_output_items = 5;
+  uint64 dropped_output_bytes = 6;
 }
 
 message ExecServerMessage {

@@ -48,6 +48,8 @@ private actor ExecRPCCapture: ExecRPC {
     status.status.state = .exited
     status.status.exitCode = 17
     status.status.statusReason = "NonZeroExit"
+    status.status.droppedOutputItems = 3
+    status.status.droppedOutputBytes = 12_345
     await rpc.setResponses([stdout, status])
     await rpc.expectOutboundMessages(4)
 
@@ -79,6 +81,8 @@ private actor ExecRPCCapture: ExecRPC {
     #expect(statusCursor == StreamCursor(generation: 4, sequence: 2))
     #expect(value.state == .exited)
     #expect(value.exitCode == 17)
+    #expect(value.droppedOutputItems == 3)
+    #expect(value.droppedOutputBytes == 12_345)
 
     let sent = await rpc.messages()
     #expect(sent.count == 4)
@@ -115,6 +119,43 @@ private actor ExecRPCCapture: ExecRPC {
     } catch let issue as ClusterManagerIssue {
         #expect(issue.reason == "ExecCursorMismatch")
     }
+}
+
+@Test func execProviderDropsOldestBufferedOutputWithoutEndingSession() async throws {
+    let rpc = ExecRPCCapture()
+    var first = Kmgr_V1_ExecServerMessage()
+    first.cursor.streamID = "terminal-1"
+    first.cursor.generation = 4
+    first.cursor.sequence = 1
+    first.stdout = Data("old".utf8)
+    var second = Kmgr_V1_ExecServerMessage()
+    second.cursor.streamID = "terminal-1"
+    second.cursor.generation = 4
+    second.cursor.sequence = 2
+    second.stdout = Data("new".utf8)
+    var terminal = Kmgr_V1_ExecServerMessage()
+    terminal.cursor.streamID = "terminal-1"
+    terminal.cursor.generation = 4
+    terminal.cursor.sequence = 3
+    terminal.status.state = .exited
+    terminal.status.exitCode = 0
+    await rpc.setResponses([first, second, terminal])
+
+    let provider = EngineExecSessionProvider(rpc: rpc, eventMessageLimit: 1)
+    let session = try await provider.startExec(request: makeRequest())
+    try await Task.sleep(for: .milliseconds(30))
+    var events: [ExecServerEvent] = []
+    for try await event in session.events { events.append(event) }
+
+    #expect(events.count == 1)
+    guard case .status(_, let status) = events[0] else {
+        Issue.record("expected newest terminal status")
+        return
+    }
+    #expect(status.state == .exited)
+    #expect(status.exitCode == 0)
+    #expect(status.droppedOutputItems == 1)
+    #expect(status.droppedOutputBytes == 3)
 }
 
 @Test func execProviderEncodesNodeShellTargetWithoutPodFields() async throws {

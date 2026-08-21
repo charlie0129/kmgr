@@ -517,6 +517,25 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
             statusLabel.textColor = .systemRed
         }
         statusLabel.toolTip = status.statusReason.isEmpty ? nil : status.statusReason
+        if status.droppedOutputItems > 0 || status.droppedOutputBytes > 0 {
+            statusLabel.stringValue += " — Output dropped"
+            if status.state != .failed { statusLabel.textColor = .systemOrange }
+            let chunks = status.droppedOutputItems == 1
+                ? "1 output chunk"
+                : "\(status.droppedOutputItems.formatted()) output chunks"
+            let bytes = status.droppedOutputBytes == 1
+                ? "1 byte"
+                : "\(status.droppedOutputBytes.formatted()) bytes"
+            let consequence = status.state.isTerminal
+                ? "The session was not terminated because of this loss."
+                : "The remote process is still running."
+            let loss = "Dropped \(chunks) (\(bytes)) from the oldest buffered terminal output because the receiver could not keep up. \(consequence)"
+            if let reason = statusLabel.toolTip, !reason.isEmpty {
+                statusLabel.toolTip = "\(reason)\n\n\(loss)"
+            } else {
+                statusLabel.toolTip = loss
+            }
+        }
     }
 
     private func showIssue(_ issue: ClusterManagerIssue) {

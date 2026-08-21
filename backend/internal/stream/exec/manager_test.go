@@ -161,14 +161,12 @@ func TestTTYNeverReceivesSeparateStderr(t *testing.T) {
 	}
 }
 
-func TestOutputBackpressureIsBoundedAndTerminatesSession(t *testing.T) {
+func TestOutputPressureDropsOldestAndSessionContinues(t *testing.T) {
 	t.Parallel()
-	release := make(chan struct{})
 	runner := runnerFunc(func(_ context.Context, _ StartRequest, options RunOptions) error {
 		if options.Started != nil {
 			options.Started()
 		}
-		<-release
 		_, err := options.Stdout.Write([]byte("0123456789abcdef"))
 		return err
 	})
@@ -182,20 +180,35 @@ func TestOutputBackpressureIsBoundedAndTerminatesSession(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	defer session.Close()
-	close(release)
-	waitFor(t, func() bool {
-		session.operation.output.mu.Lock()
-		defer session.operation.output.mu.Unlock()
-		return session.operation.output.terminal != nil
-	}, "output failure")
+	deliveries := collectTerminal(t, session)
 	stats := session.Stats()
 	if stats.PeakItems > 2 || stats.PeakBytes > 8 {
 		t.Fatalf("output queue exceeded bounds: %#v", stats)
 	}
-	deliveries := collectTerminal(t, session)
+	if stats.DroppedItems != 2 || stats.DroppedBytes != 8 {
+		t.Fatalf("output loss counters = %#v", stats)
+	}
+	var retained []byte
+	var reportedLoss bool
+	for _, delivery := range deliveries {
+		if delivery.Output != nil {
+			retained = append(retained, delivery.Output.Data...)
+		}
+		if delivery.Status != nil && delivery.Status.DroppedOutputItems == 2 &&
+			delivery.Status.DroppedOutputBytes == 8 {
+			reportedLoss = true
+		}
+	}
+	if string(retained) != "89abcdef" {
+		t.Fatalf("retained output = %q, want newest tail", retained)
+	}
+	if !reportedLoss {
+		t.Fatalf("deliveries did not report output loss: %#v", deliveries)
+	}
 	terminal := deliveries[len(deliveries)-1].Status
-	if terminal == nil || terminal.State != StateFailed || terminal.StatusReason != "OutputBackpressure" ||
-		!errors.Is(terminal.Err, ErrOutputBackpressure) {
+	if terminal == nil || terminal.State != StateExited || terminal.ExitCode == nil ||
+		*terminal.ExitCode != 0 || terminal.DroppedOutputItems != 2 ||
+		terminal.DroppedOutputBytes != 8 {
 		t.Fatalf("terminal status = %#v", terminal)
 	}
 }

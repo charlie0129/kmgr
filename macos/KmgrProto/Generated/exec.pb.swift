@@ -283,6 +283,10 @@ public struct Kmgr_V1_ExecStatus: Sendable {
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
+  public var droppedOutputItems: UInt64 = 0
+
+  public var droppedOutputBytes: UInt64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -701,7 +705,7 @@ extension Kmgr_V1_ExecClientMessage: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 extension Kmgr_V1_ExecStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecStatus"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0\u{3}exit_code\0\u{3}status_reason\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0\u{3}exit_code\0\u{3}status_reason\0\u{1}error\0\u{3}dropped_output_items\0\u{3}dropped_output_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -713,6 +717,8 @@ extension Kmgr_V1_ExecStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
       case 2: try { try decoder.decodeSingularInt32Field(value: &self._exitCode) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.statusReason) }()
       case 4: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.droppedOutputItems) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.droppedOutputBytes) }()
       default: break
       }
     }
@@ -735,6 +741,12 @@ extension Kmgr_V1_ExecStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
     try { if let v = self._error {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
     } }()
+    if self.droppedOutputItems != 0 {
+      try visitor.visitSingularUInt64Field(value: self.droppedOutputItems, fieldNumber: 5)
+    }
+    if self.droppedOutputBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.droppedOutputBytes, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -743,6 +755,8 @@ extension Kmgr_V1_ExecStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
     if lhs._exitCode != rhs._exitCode {return false}
     if lhs.statusReason != rhs.statusReason {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.droppedOutputItems != rhs.droppedOutputItems {return false}
+    if lhs.droppedOutputBytes != rhs.droppedOutputBytes {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

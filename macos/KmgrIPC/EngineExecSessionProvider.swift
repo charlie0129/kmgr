@@ -89,26 +89,31 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
             messageLimit: outboundMessageLimit
         )
         let eventPair = AsyncThrowingStream<ExecServerEvent, Error>.makeStream(
-            bufferingPolicy: .bufferingOldest(eventMessageLimit)
+            bufferingPolicy: .bufferingNewest(eventMessageLimit)
         )
         let rpc = self.rpc
         let timeout = streamTimeout
-        let eventLimit = eventMessageLimit
         let cursorValidator = ExecServerCursorValidator(request: request)
+        let outputLoss = ExecOutputLossAccumulator()
         let task = Task.detached(priority: .userInitiated) {
             do {
                 try await rpc.exec(outbound: channel.stream, timeout: timeout) { message in
                     try cursorValidator.validate(message.cursor)
-                    let event = try Self.event(from: message)
+                    let event = outputLoss.applying(to: try Self.event(from: message))
                     switch eventPair.continuation.yield(event) {
                     case .enqueued:
                         break
-                    case .dropped:
-                        throw ExecStreamBridgeError.eventBufferExceeded(eventLimit)
+                    case .dropped(let droppedEvent):
+                        // Keep the RPC and remote process alive. With
+                        // bufferingNewest, only the oldest not-yet-rendered
+                        // event is discarded and a later terminal status is
+                        // still guaranteed a place in the buffer.
+                        outputLoss.record(droppedEvent)
+                        break
                     case .terminated:
                         throw CancellationError()
                     @unknown default:
-                        throw ExecStreamBridgeError.eventBufferExceeded(eventLimit)
+                        break
                     }
                 }
                 eventPair.continuation.finish()
@@ -228,7 +233,9 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
                 exitCode: status.hasExitCode ? status.exitCode : nil,
                 statusReason: status.statusReason,
                 issue: status.hasError
-                    ? EngineClusterContextProvider.issue(from: status.error) : nil
+                    ? EngineClusterContextProvider.issue(from: status.error) : nil,
+                droppedOutputItems: status.droppedOutputItems,
+                droppedOutputBytes: status.droppedOutputBytes
             ))
         case .error(let error):
             return .failure(
@@ -260,15 +267,6 @@ public struct EngineExecSessionProvider: ExecSessionProviding {
                 category: .resourceExhausted,
                 reason: "ExecInputBufferExceeded",
                 message: "Terminal input arrived faster than it could be sent. The exec session was stopped safely.",
-                retryable: true,
-                operation: operation,
-                safeDetails: ["buffered_message_limit": String(limit)]
-            )
-        case ExecStreamBridgeError.eventBufferExceeded(let limit):
-            return ClusterManagerIssue(
-                category: .resourceExhausted,
-                reason: "ExecOutputBufferExceeded",
-                message: "Terminal output arrived faster than the window could render it. Reconnect to start a new process.",
                 retryable: true,
                 operation: operation,
                 safeDetails: ["buffered_message_limit": String(limit)]
@@ -497,9 +495,47 @@ private final class ExecOutboundChannel: @unchecked Sendable {
 
 private enum ExecStreamBridgeError: Error {
     case outboundBufferExceeded(Int)
-    case eventBufferExceeded(Int)
     case cursorMismatch
     case missingPayload
+}
+
+private final class ExecOutputLossAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: UInt64 = 0
+    private var bytes: UInt64 = 0
+
+    func record(_ event: ExecServerEvent) {
+        let byteCount: Int
+        switch event {
+        case .stdout(_, let data), .stderr(_, let data):
+            byteCount = data.count
+        case .status, .failure:
+            return
+        }
+        lock.withLock {
+            items = Self.saturatingAdd(items, 1)
+            bytes = Self.saturatingAdd(bytes, UInt64(byteCount))
+        }
+    }
+
+    func applying(to event: ExecServerEvent) -> ExecServerEvent {
+        guard case .status(let cursor, var status) = event else { return event }
+        let loss = lock.withLock { (items, bytes) }
+        status.droppedOutputItems = Self.saturatingAdd(
+            status.droppedOutputItems,
+            loss.0
+        )
+        status.droppedOutputBytes = Self.saturatingAdd(
+            status.droppedOutputBytes,
+            loss.1
+        )
+        return .status(cursor: cursor, status: status)
+    }
+
+    private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        let (value, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : value
+    }
 }
 
 private final class ExecServerCursorValidator: @unchecked Sendable {
