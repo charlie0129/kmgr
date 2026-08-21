@@ -8,6 +8,31 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Terminal windows", .serialized)
 struct TerminalWindowControllerTests {
+    @Test("long terminal identities do not widen the window")
+    func longIdentityStaysWithinWindow() throws {
+        let controller = TerminalWindowController(
+            request: execRequest(
+                command: ["/bin/sh"],
+                contextName: String(repeating: "context-", count: 80),
+                clusterName: String(repeating: "cluster-", count: 30),
+                namespace: String(repeating: "n", count: 63),
+                podName: String(repeating: "p", count: 63),
+                container: String(repeating: "c", count: 63)
+            ),
+            provider: OrderedExecProvider()
+        )
+        defer { closeTerminal(controller) }
+        let window = try #require(controller.window)
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.toolbar?.validateVisibleItems()
+        let identity = try #require(window.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "terminal.identity"
+        }?.view as? NSTextField)
+
+        #expect(window.contentLayoutRect.width <= 900.5)
+        #expect(identity.lineBreakMode == .byTruncatingMiddle)
+    }
+
     @Test("fallback waits for server acceptance before retiring the previous generation")
     func fallbackReplacesLiveLease() async throws {
         let provider = OrderedExecProvider()
@@ -229,7 +254,14 @@ struct TerminalWindowControllerTests {
 }
 }
 
-private func execRequest(command: [String]) -> ExecSessionRequest {
+private func execRequest(
+    command: [String],
+    contextName: String = "production",
+    clusterName: String = "cluster-a",
+    namespace: String = "team-a",
+    podName: String = "api",
+    container: String = "app"
+) -> ExecSessionRequest {
     ExecSessionRequest(
         sessionID: "cluster-session",
         execSessionID: "exec-session",
@@ -240,14 +272,14 @@ private func execRequest(command: [String]) -> ExecSessionRequest {
                 group: "",
                 version: "v1",
                 resource: "pods",
-                namespace: "team-a",
-                name: "api",
+                namespace: namespace,
+                name: podName,
                 uid: ResourceUID("pod-uid")
             ),
-            container: "app"
+            container: container
         )),
-        contextName: "production",
-        clusterName: "cluster-a",
+        contextName: contextName,
+        clusterName: clusterName,
         command: command
     )
 }

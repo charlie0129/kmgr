@@ -265,6 +265,8 @@ public enum PodLogSourcePlanner {
 }
 
 public enum LogSourcePresentation {
+    public static let maximumToolbarSummaryCharacters = 800
+
     public static func titleSummary(for sources: [LogSource]) -> String {
         sources.count == 1 ? displaySafe(sources[0].label) : "\(sources.count) sources"
     }
@@ -273,8 +275,21 @@ public enum LogSourcePresentation {
         contextName: String,
         sources: [LogSource]
     ) -> String {
-        let labels = sources.map { displaySafe($0.label) }.joined(separator: ", ")
-        return "Context: \(displaySafe(contextName)) · Sources: \(labels)"
+        toolbarSummary(
+            contextName: contextName,
+            sources: sources,
+            maximumCharacters: maximumToolbarSummaryCharacters
+        )
+    }
+
+    /// The complete source list for a tooltip or accessibility value. The
+    /// visible toolbar summary is intentionally bounded so source cardinality
+    /// cannot become a window-size input.
+    public static func fullToolbarSummary(
+        contextName: String,
+        sources: [LogSource]
+    ) -> String {
+        toolbarSummary(contextName: contextName, sources: sources, maximumCharacters: .max)
     }
 
     /// A single Pod can use the concise container name requested by the UI.
@@ -294,6 +309,56 @@ public enum LogSourcePresentation {
         value.unicodeScalars.map { scalar in
             CharacterSet.controlCharacters.contains(scalar) ? "�" : String(scalar)
         }.joined()
+    }
+
+    private static func toolbarSummary(
+        contextName: String,
+        sources: [LogSource],
+        maximumCharacters: Int
+    ) -> String {
+        let prefix = "Context: \(displaySafe(contextName)) · Sources: "
+        let labels = sources.map { displaySafe($0.label) }
+        guard maximumCharacters < .max else {
+            return prefix + labels.joined(separator: ", ")
+        }
+        guard prefix.count < maximumCharacters else {
+            return middleTruncated(prefix, to: maximumCharacters)
+        }
+
+        var result = prefix
+        for (index, label) in labels.enumerated() {
+            let separator = index == 0 ? "" : ", "
+            let remainingAfter = labels.count - index - 1
+            let nextMarker = remainingAfter == 0 ? "" : ", … +\(remainingAfter) more"
+            if result.count + separator.count + label.count + nextMarker.count
+                <= maximumCharacters
+            {
+                result.append(separator)
+                result.append(label)
+                continue
+            }
+            let omitted = labels.count - index
+            let marker = omitted == 1 ? "…" : "… +\(omitted) more"
+            let available = maximumCharacters - result.count
+            let suffix = separator + marker
+            result.append(suffix.count <= available
+                ? suffix
+                : middleTruncated(suffix, to: available))
+            break
+        }
+        return result
+    }
+
+    private static func middleTruncated(_ value: String, to limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        guard value.count > limit else { return value }
+        guard limit > 1 else { return "…" }
+        let characters = Array(value)
+        let leadingCount = (limit - 1 + 1) / 2
+        let trailingCount = limit - 1 - leadingCount
+        return String(characters.prefix(leadingCount))
+            + "…"
+            + String(characters.suffix(trailingCount))
     }
 }
 

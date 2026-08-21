@@ -69,6 +69,32 @@ struct ClusterManagerWindowControllerTests {
         #expect(layout.issueFrame(in: root).height > 0)
     }
 
+    @Test("long chooser notices stay within the configured window width")
+    func longInitialNoticeDoesNotWidenWindow() throws {
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in [] },
+                openContext: { _ in throw CancellationError() }
+            ),
+            initialNotice: ClusterManagerInitialNotice(
+                title: "Workspace restoration skipped",
+                message: "Source: " + String(repeating: "/very-long-kubeconfig-segment", count: 400)
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let issueMessage = try #require(clusterManagerDescendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "cluster-manager-issue-message" })
+        root.layoutSubtreeIfNeeded()
+
+        #expect(root.frame.width <= window.contentLayoutRect.width + 0.5)
+        #expect(issueMessage.frame.maxX <= root.bounds.maxX + 0.5)
+    }
+
     @Test("visible open error stays between the table and separator")
     func visibleOpenErrorKeepsIssueRegion() async throws {
         let context = ClusterContextSummary(

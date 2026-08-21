@@ -11,6 +11,27 @@ enum LogTailReconciliationPolicy {
     }
 }
 
+enum LogStreamRetryPolicy {
+    static let initialDelayMilliseconds: Int64 = 250
+    static let maximumBackoffMilliseconds: Int64 = 5_000
+
+    static func delayMilliseconds(
+        failureCount: Int,
+        issue: ClusterManagerIssue?
+    ) -> Int64 {
+        let exponent = min(max(0, failureCount - 1), 5)
+        let exponential = min(
+            maximumBackoffMilliseconds,
+            initialDelayMilliseconds * (Int64(1) << exponent)
+        )
+        let structuredDelay = max(
+            issue?.retryAfterMilliseconds ?? 0,
+            Int64(issue?.kubernetesStatus?.retryAfterSeconds ?? 0) * 1_000
+        )
+        return max(exponential, structuredDelay)
+    }
+}
+
 enum LogWindowShortcut: Equatable {
     case focusFilter
     case toggleFollow
@@ -55,6 +76,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var generation: UInt64 = 0
     private var streamTasks: [UInt64: Task<Void, Never>] = [:]
     private var pendingGeneration: UInt64?
+    private var automaticRetryTask: Task<Void, Never>?
+    private var consecutiveStreamFailures = 0
+    private var lastFailedGeneration: UInt64?
+    private var failedSourceIDs: Set<String> = []
+    private var streamingSourceIDs: Set<String> = []
+    private var hasOverallStreamFailure = false
     private var renderTask: Task<Void, Never>?
     private var layoutMetricsTask: Task<Void, Never>?
     private var layoutMetricsRevision: UInt64 = 0
@@ -98,6 +125,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private let textView = NSTextView()
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "Connecting…")
+    private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
     private let sourceLabel = NSTextField(labelWithString: "")
     private let searchField = NSSearchField()
     private let followButton = NSButton(checkboxWithTitle: "Follow", target: nil, action: nil)
@@ -164,7 +192,11 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         )
         let clusterPresentation = ClusterIdentityPresentation(session: session)
         window.title = "\(clusterPresentation.titlePrefix) — Logs — \(titleSources)"
-        window.minSize = NSSize(width: 560, height: 320)
+        // The two toolbar rows have a measured 760-point minimum with every
+        // stream control visible. Keep the declared resize limit consistent
+        // with that layout so AppKit never leaves the content view wider than
+        // its window while resolving the toolbar's required intrinsic widths.
+        window.minSize = NSSize(width: 760, height: 320)
         window.tabbingMode = .disallowed
         // A log stream is an ephemeral, independently configured surface.
         // Reopening a workspace must never recreate it or merge it into a
@@ -204,11 +236,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView
         )
-        NotificationCenter.default.removeObserver(
-            self,
-            name: NSView.frameDidChangeNotification,
-            object: textView
-        )
         onClose?()
     }
 
@@ -227,8 +254,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     func windowDidResize(_ notification: Notification) {
         let wasFollowingTail = followsVisibleTail
-        updateTextDocumentGeometry(followingTail: wasFollowingTail)
         if wasFollowingTail { scrollToTail() }
+        else { updateTextDocumentGeometry() }
         scheduleLayoutMetricsReconciliation(preservingTail: wasFollowingTail)
     }
 
@@ -255,16 +282,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         else { return }
         followsVisibleTail = isAtTail
         updateFollowButtonPresentation()
-    }
-
-    /// NSTextView can refine a noncontiguous document's height after the
-    /// initial tail render has returned. Keep Follow pinned across those late
-    /// frame corrections; a user scroll has already cleared
-    /// `followsVisibleTail` through the clip-view bounds observer above.
-    @objc private func logDocumentFrameDidChange(_ notification: Notification) {
-        guard !isClosing, tailTrackingSuppressionDepth == 0, followsVisibleTail
-        else { return }
-        scrollToTail()
     }
 
     func controlTextDidChange(_ obj: Notification) { scheduleRender() }
@@ -335,7 +352,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     private func configureContent(in window: NSWindow) {
         let root = NSView()
-        root.translatesAutoresizingMaskIntoConstraints = false
 
         followButton.state = options.follow ? .on : .off
         previousButton.state = options.previous ? .on : .off
@@ -372,9 +388,22 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         searchField.widthAnchor.constraint(equalToConstant: 220).isActive = true
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.cell?.usesSingleLineMode = true
+        statusLabel.cell?.wraps = false
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.identifier = NSUserInterfaceItemIdentifier("log-status")
+        retryButton.target = self
+        retryButton.action = #selector(retryStream)
+        retryButton.isHidden = true
+        retryButton.setAccessibilityLabel("Retry log stream")
+        retryButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         updateSourcePresentation()
         sourceLabel.lineBreakMode = .byTruncatingMiddle
+        sourceLabel.maximumNumberOfLines = 1
+        sourceLabel.cell?.usesSingleLineMode = true
+        sourceLabel.cell?.wraps = false
+        sourceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         sourceLabel.textColor = .secondaryLabelColor
         sourceLabel.setAccessibilityLabel("Log sources")
         sourceLabel.setAccessibilityValue(sourceLabel.stringValue)
@@ -409,6 +438,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         toolbar.spacing = 5
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
+        let statusBar = NSStackView(views: [statusLabel, retryButton, NSView()])
+        statusBar.orientation = .horizontal
+        statusBar.alignment = .centerY
+        statusBar.spacing = 8
+        statusBar.translatesAutoresizingMaskIntoConstraints = false
+
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
@@ -428,13 +463,6 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             textView,
             in: scrollView
         )
-        textView.postsFrameChangedNotifications = true
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(logDocumentFrameDidChange(_:)),
-            name: NSView.frameDidChangeNotification,
-            object: textView
-        )
         let clipView = scrollView.contentView
         lastObservedViewportOrigin = clipView.bounds.origin
         clipView.postsBoundsChangedNotifications = true
@@ -445,13 +473,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             object: clipView
         )
         scrollView.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
         sourceLabel.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(toolbar)
         root.addSubview(sourceLabel)
         root.addSubview(scrollView)
-        root.addSubview(statusLabel)
+        root.addSubview(statusBar)
         NSLayoutConstraint.activate([
             toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
@@ -462,10 +489,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: sourceLabel.bottomAnchor, constant: 5),
-            scrollView.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -4),
-            statusLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            statusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            statusLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -5),
+            scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -4),
+            statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            statusBar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            statusBar.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -5),
         ])
         window.contentView = root
         root.layoutSubtreeIfNeeded()
@@ -535,6 +562,12 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
+    @objc private func retryStream() {
+        guard !retryButton.isHidden, pendingGeneration == nil, !isClosing else { return }
+        cancelAutomaticRetry()
+        startStream()
+    }
+
     private func configureContainerButton() {
         var inventories: [ResourceIdentity: Set<String>] = [:]
         for source in availableSources {
@@ -547,6 +580,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         containerButton.addItems(withTitles: selections.map(\.title))
         containerButton.identifier = NSUserInterfaceItemIdentifier("log-container")
         containerButton.setAccessibilityLabel("Log container")
+        containerButton.cell?.lineBreakMode = .byTruncatingMiddle
+        containerButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         containerButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
 
         let selectedContainers = Set(sources.map(\.container))
@@ -613,21 +648,100 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             contextName: session.contextName,
             sources: sources
         )
+        let fullSummary = LogSourcePresentation.fullToolbarSummary(
+            contextName: session.contextName,
+            sources: sources
+        )
         let clusterSummary = "\(ClusterIdentityPresentation(session: session).labeledCluster) · \(summary)"
+        let fullClusterSummary = "\(ClusterIdentityPresentation(session: session).labeledCluster) · \(fullSummary)"
         let snapshotNote = staticWorkloadSnapshot
             ? "Static workload Pod snapshot; membership changes are not followed—reopen Logs to refresh."
             : ""
-        sourceLabel.stringValue = snapshotNote.isEmpty
+        let visibleText = snapshotNote.isEmpty
             ? clusterSummary
             : "\(clusterSummary) · \(snapshotNote)"
-        sourceLabel.toolTip = sourceLabel.stringValue
-        sourceLabel.setAccessibilityValue(sourceLabel.stringValue)
+        let fullText = snapshotNote.isEmpty
+            ? fullClusterSummary
+            : "\(fullClusterSummary) · \(snapshotNote)"
+        sourceLabel.stringValue = visibleText
+        sourceLabel.toolTip = fullText
+        sourceLabel.setAccessibilityValue(fullText)
         let clusterPresentation = ClusterIdentityPresentation(session: session)
         window?.title = "\(clusterPresentation.titlePrefix) — Logs — \(LogSourcePresentation.titleSummary(for: sources))"
     }
 
+    private var hasTrackedStreamFailure: Bool {
+        hasOverallStreamFailure || !failedSourceIDs.isEmpty
+    }
+
+    private func prepareForEstablishedGeneration() {
+        failedSourceIDs.removeAll(keepingCapacity: true)
+        streamingSourceIDs.removeAll(keepingCapacity: true)
+        hasOverallStreamFailure = false
+        cancelAutomaticRetry()
+        retryButton.isHidden = true
+    }
+
+    private func markStreamHealthyIfPossible() {
+        guard consecutiveStreamFailures > 0 || hasTrackedStreamFailure else { return }
+        guard !hasTrackedStreamFailure,
+            Set(sources.map(\.sourceID)).isSubset(of: streamingSourceIDs)
+        else { return }
+        consecutiveStreamFailures = 0
+        lastFailedGeneration = nil
+        cancelAutomaticRetry()
+        retryButton.isHidden = true
+    }
+
+    private func registerStreamFailure(
+        generation: UInt64,
+        sourceID: String = "",
+        issue: ClusterManagerIssue?
+    ) {
+        if sourceID.isEmpty {
+            hasOverallStreamFailure = true
+        } else {
+            streamingSourceIDs.remove(sourceID)
+            failedSourceIDs.insert(sourceID)
+        }
+        if lastFailedGeneration != generation {
+            if consecutiveStreamFailures < 6 {
+                consecutiveStreamFailures += 1
+            }
+            lastFailedGeneration = generation
+        }
+        retryButton.isHidden = false
+        scheduleAutomaticRetry(issue: issue)
+    }
+
+    private func scheduleAutomaticRetry(issue: ClusterManagerIssue?) {
+        guard options.follow, automaticRetryTask == nil,
+            pendingGeneration == nil, !isClosing
+        else { return }
+        let delay = LogStreamRetryPolicy.delayMilliseconds(
+            failureCount: consecutiveStreamFailures,
+            issue: issue
+        )
+        automaticRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            automaticRetryTask = nil
+            guard options.follow, pendingGeneration == nil, !isClosing,
+                hasTrackedStreamFailure
+            else { return }
+            startStream()
+        }
+    }
+
+    private func cancelAutomaticRetry() {
+        automaticRetryTask?.cancel()
+        automaticRetryTask = nil
+    }
+
     private func startStream() {
         guard pendingGeneration == nil else { return }
+        cancelAutomaticRetry()
+        retryButton.isHidden = true
         generation &+= 1
         if generation == 0 { generation = 1 }
         let activeGeneration = generation
@@ -662,14 +776,27 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                             for: message,
                             contextName: self?.session.contextName ?? ""
                         ) {
+                            let hadEstablishedGeneration = self?.streamGate.expectedGeneration != nil
                             self?.pendingGeneration = nil
                             self?.setStreamControlsEnabled(true)
                             self?.restoreEstablishedStreamConfiguration()
-                            self?.updateStatusLabel()
+                            if hadEstablishedGeneration {
+                                self?.updateStatusLabel()
+                            } else {
+                                self?.latestStreamState = .failed
+                                self?.updateStatusLabel()
+                            }
                             let presentation = issue.userFacingPresentation
-                            self?.statusLabel.stringValue += " · Replacement failed: \(presentation.inlineText)"
+                            let prefix = hadEstablishedGeneration ? "Replacement failed: " : ""
+                            self?.statusLabel.stringValue += " · \(prefix)\(presentation.inlineText)"
                             self?.statusLabel.toolTip = presentation.detailedText
                             self?.statusLabel.textColor = .systemRed
+                            if !hadEstablishedGeneration || self?.hasTrackedStreamFailure == true {
+                                self?.registerStreamFailure(
+                                    generation: activeGeneration,
+                                    issue: issue
+                                )
+                            }
                             await provider.cancelLogs(
                                 sessionID: request.sessionID,
                                 streamID: request.streamID,
@@ -678,6 +805,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                             return
                         }
                         replacementEstablished = true
+                        self?.prepareForEstablishedGeneration()
+                        self?.latestStreamState = .connecting
+                        self?.latestStreamDrops = 0
                         self?.establishedConfiguration = AppliedStreamConfiguration(
                             sources: request.sources,
                             options: request.options,
@@ -698,11 +828,21 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 guard replacementEstablished || Task.isCancelled ||
                     activeGeneration != self?.generation
                 else {
+                    let hadEstablishedGeneration = self?.streamGate.expectedGeneration != nil
                     self?.pendingGeneration = nil
                     self?.setStreamControlsEnabled(true)
                     self?.restoreEstablishedStreamConfiguration()
+                    if !hadEstablishedGeneration {
+                        self?.latestStreamState = .failed
+                    }
                     self?.statusLabel.stringValue = "The log stream ended before connecting."
                     self?.statusLabel.textColor = .systemRed
+                    if !hadEstablishedGeneration || self?.hasTrackedStreamFailure == true {
+                        self?.registerStreamFailure(
+                            generation: activeGeneration,
+                            issue: nil
+                        )
+                    }
                     return
                 }
             } catch {
@@ -713,11 +853,21 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                     pendingGeneration = nil
                     setStreamControlsEnabled(true)
                 }
+                let failureAffectsActiveStream = streamGate.expectedGeneration == activeGeneration
+                    || streamGate.expectedGeneration == nil
+                    || hasTrackedStreamFailure
                 restoreEstablishedStreamConfiguration()
                 let presentation = UserFacingErrorPresentation(error)
                 statusLabel.stringValue = presentation.inlineText
                 statusLabel.toolTip = presentation.detailedText
                 statusLabel.textColor = .systemRed
+                if failureAffectsActiveStream {
+                    latestStreamState = .failed
+                    registerStreamFailure(
+                        generation: activeGeneration,
+                        issue: error as? ClusterManagerIssue
+                    )
+                }
             }
         }
         streamTasks[activeGeneration] = task
@@ -733,7 +883,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         switch message {
         case .failure(_, let issue):
             return issue
-        case .status(_, let status) where status.state == .failed:
+        case .status(_, let status) where status.state == .failed && status.sourceID.isEmpty:
             return status.issue ?? ClusterManagerIssue(
                 category: .unavailable,
                 reason: "LogReplacementFailed",
@@ -742,7 +892,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 contextName: contextName,
                 operation: "stream Pod logs"
             )
-        case .status(_, let status) where status.state == .cancelled:
+        case .status(_, let status) where status.state == .cancelled && status.sourceID.isEmpty:
             return status.issue ?? ClusterManagerIssue(
                 category: .cancelled,
                 reason: "LogReplacementCancelled",
@@ -770,6 +920,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func stopStream() {
+        cancelAutomaticRetry()
         cancelScheduledRender()
         cancelLayoutMetricsReconciliation()
         let activeGenerations = Array(streamTasks.keys)
@@ -801,11 +952,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 "stored_records=\(statistics.recordCount) stored_bytes=\(statistics.byteCount) dropped_records=\(statistics.droppedRecords) cancelled=\(Task.isCancelled)"
             )
             guard !Task.isCancelled else { return }
+            streamingSourceIDs.formUnion(records.map(\.sourceID))
             latestStoreDrops = statistics.droppedRecords
             updateStatusLabel()
+            markStreamHealthyIfPossible()
             needsRenderWhenVisible = true
             if !isPaused { scheduleRender() }
-        case .status(_, let status):
+        case .status(let cursor, let status):
             latestStreamState = status.state
             latestStreamDrops = status.droppedRecords
             updateStatusLabel()
@@ -815,11 +968,42 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 statusLabel.stringValue += " · \(presentation.inlineText)"
                 statusLabel.toolTip = presentation.detailedText
             }
-        case .failure(_, let issue):
+            switch status.state {
+            case .failed:
+                registerStreamFailure(
+                    generation: cursor.generation,
+                    sourceID: status.sourceID,
+                    issue: status.issue
+                )
+            case .streaming:
+                if !status.sourceID.isEmpty {
+                    failedSourceIDs.remove(status.sourceID)
+                    streamingSourceIDs.insert(status.sourceID)
+                }
+                markStreamHealthyIfPossible()
+            case .completed, .cancelled:
+                if status.sourceID.isEmpty {
+                    failedSourceIDs.removeAll(keepingCapacity: true)
+                    streamingSourceIDs.removeAll(keepingCapacity: true)
+                    hasOverallStreamFailure = false
+                    consecutiveStreamFailures = 0
+                    lastFailedGeneration = nil
+                    cancelAutomaticRetry()
+                    retryButton.isHidden = true
+                }
+            case .connecting, .reconnecting:
+                break
+            }
+        case .failure(let cursor, let issue):
+            latestStreamState = .failed
             let presentation = issue.userFacingPresentation
             statusLabel.stringValue = presentation.inlineText
             statusLabel.toolTip = presentation.detailedText
             statusLabel.textColor = .systemRed
+            registerStreamFailure(
+                generation: cursor.generation,
+                issue: issue
+            )
         }
     }
 
@@ -1015,8 +1199,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         latestDisplayTruncatedLines = result.rendered.displayTruncatedLines
         updateStatusLabel()
         textView.setSelectedRange(result.install.remapSelection(selectedRange))
-        updateTextDocumentGeometry(followingTail: shouldFollowTail)
         if shouldFollowTail { scrollToTail() }
+        else { updateTextDocumentGeometry() }
         needsRenderWhenVisible = false
         keyVisibilityWakePending = false
         logSignposter.endInterval(
@@ -1040,8 +1224,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         let wasFollowingTail = followsVisibleTail
         let enabled = wrapButton.state == .on
         scrollView.hasHorizontalScroller = !enabled
-        updateTextDocumentGeometry(followingTail: wasFollowingTail)
         if wasFollowingTail { scrollToTail() }
+        else { updateTextDocumentGeometry() }
         scheduleLayoutMetricsReconciliation(preservingTail: wasFollowingTail)
     }
 
@@ -1090,22 +1274,25 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 currentlyAtTail: followsVisibleTail
             )
             textLayoutMetrics = metrics
-            updateTextDocumentGeometry(followingTail: shouldPreserveTail)
             if shouldPreserveTail { scrollToTail() }
+            else { updateTextDocumentGeometry() }
         }
     }
 
     private func scrollToTail() {
-        // Reflecting the first scroll can itself make TextKit publish a more
-        // accurate noncontiguous document height. Re-evaluate the arithmetic
-        // tail against that new frame before returning; later asynchronous
-        // corrections are handled by `logDocumentFrameDidChange`.
-        for _ in 0..<4 {
+        // A noncontiguous layout can initially clamp the clip view to its
+        // materialized range. That scroll expands the range without changing
+        // our document frame, so retry a bounded number of times until the
+        // arithmetic tail becomes reachable.
+        for _ in 0..<2 {
+            updateTextDocumentGeometry(followingTail: true)
             withTailTrackingSuppressed {
                 TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
             }
-            if isAtTail { break }
         }
+        // Scrolling can resolve a different noncontiguous layout hole. Anchor
+        // the bounded tail suffix once more at its final viewport location.
+        updateTextDocumentGeometry(followingTail: true)
         followsVisibleTail = true
     }
 

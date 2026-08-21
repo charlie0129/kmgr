@@ -256,6 +256,9 @@ enum TextDocumentGeometry {
             fallbackSize: fallbackSize
         )
         textView.layoutManager?.allowsNonContiguousLayout = true
+        textView.isVerticallyResizable = false
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = []
         updateStreamingLog(
             textView,
             in: scrollView,
@@ -281,9 +284,9 @@ enum TextDocumentGeometry {
     }
 
     /// Sizes a log from detached arithmetic measurements, then asks TextKit
-    /// for only the current viewport or the final character when Follow is
-    /// active. It never calls `ensureLayout(for: textContainer)` and never
-    /// reads the whole-container `usedRect` on MainActor.
+    /// for only the current viewport or a bounded tail suffix. It never calls
+    /// `ensureLayout(for: textContainer)` or reads the whole-container
+    /// `usedRect` on MainActor.
     static func updateStreamingLog(
         _ textView: NSTextView,
         in scrollView: NSScrollView,
@@ -331,8 +334,13 @@ enum TextDocumentGeometry {
             height: max(viewportHeight, measuredHeight)
         )
 
-        textView.isHorizontallyResizable = !wrapsToViewport
-        textView.autoresizingMask = wrapsToViewport ? [.width] : []
+        // Detached metrics own the complete streaming-log document frame.
+        // NSTextView's automatic resize path derives a second, partial frame
+        // from noncontiguous TextKit layout and can later replace this one as
+        // the real tail is resolved.
+        textView.isVerticallyResizable = false
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = []
         textContainer.widthTracksTextView = wrapsToViewport
         textContainer.containerSize = NSSize(
             width: wrapsToViewport
@@ -342,12 +350,14 @@ enum TextDocumentGeometry {
         )
         textView.setFrameSize(documentSize)
 
-        let textLength = textView.textStorage?.length ?? 0
-        if followingTail, textLength > 0 {
-            layoutManager.ensureLayout(forCharacterRange: NSRange(
-                location: textLength - 1,
-                length: 1
-            ))
+        if followingTail {
+            anchorStreamingLogTail(
+                textView,
+                layoutManager: layoutManager,
+                documentHeight: documentSize.height,
+                viewportHeight: viewportHeight,
+                lineHeight: lineHeight
+            )
         } else {
             let containerOrigin = textView.textContainerOrigin
             var visible = scrollView.contentView.bounds.offsetBy(
@@ -361,16 +371,106 @@ enum TextDocumentGeometry {
             visible.origin.y = max(0, visible.origin.y)
             layoutManager.ensureLayout(forBoundingRect: visible, in: textContainer)
         }
-        // Noncontiguous tail layout may publish a coarse TextKit extent. Keep
-        // the detached arithmetic frame authoritative until reconciliation.
+        // Noncontiguous layout can publish a coarse TextKit extent. Keep the
+        // detached arithmetic frame authoritative until reconciliation.
         textView.setFrameSize(documentSize)
     }
 
+    private static func anchorStreamingLogTail(
+        _ textView: NSTextView,
+        layoutManager: NSLayoutManager,
+        documentHeight: CGFloat,
+        viewportHeight: CGFloat,
+        lineHeight: CGFloat
+    ) {
+        guard let textStorage = textView.textStorage, textStorage.length > 0 else {
+            return
+        }
+
+        // Keep enough complete logical lines to fill the viewport, but cap the
+        // suffix so a user-configured oversized line cannot make tail following
+        // proportional to the full document.
+        let requiredLines = max(2, Int(ceil(viewportHeight / lineHeight)) + 2)
+        let maximumTailUTF16Length = 512 << 10
+        let string = textStorage.string as NSString
+        var characterStart = textStorage.length
+        for _ in 0..<requiredLines {
+            guard characterStart > 0 else { break }
+            var lineStart = 0
+            string.getLineStart(
+                &lineStart,
+                end: nil,
+                contentsEnd: nil,
+                for: NSRange(location: characterStart - 1, length: 0)
+            )
+            if textStorage.length - lineStart > maximumTailUTF16Length {
+                let cappedStart = max(
+                    0,
+                    textStorage.length - maximumTailUTF16Length
+                )
+                characterStart = string.rangeOfComposedCharacterSequence(
+                    at: cappedStart
+                ).location
+                break
+            }
+            characterStart = lineStart
+        }
+
+        let characterRange = NSRange(
+            location: characterStart,
+            length: textStorage.length - characterStart
+        )
+        layoutManager.ensureLayout(forCharacterRange: characterRange)
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: characterRange,
+            actualCharacterRange: nil
+        )
+        struct LineFragment {
+            var rect: NSRect
+            var usedRect: NSRect
+            var glyphRange: NSRange
+        }
+        var fragments: [LineFragment] = []
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) {
+            rect, usedRect, _, glyphRange, _ in
+            fragments.append(LineFragment(
+                rect: rect,
+                usedRect: usedRect,
+                glyphRange: glyphRange
+            ))
+        }
+        guard !fragments.isEmpty else { return }
+
+        var currentBottom = fragments.dropFirst().reduce(fragments[0].rect.maxY) {
+            max($0, $1.rect.maxY)
+        }
+        if !layoutManager.extraLineFragmentRect.isEmpty {
+            currentBottom = max(
+                currentBottom,
+                layoutManager.extraLineFragmentRect.maxY
+            )
+        }
+        let desiredBottom = max(
+            0,
+            documentHeight - (textView.textContainerInset.height * 2)
+        )
+        let offset = desiredBottom - currentBottom
+        guard abs(offset) > 0.5 else { return }
+
+        let firstFragment = fragments[0]
+        layoutManager.setLineFragmentRect(
+            firstFragment.rect.offsetBy(dx: 0, dy: offset),
+            forGlyphRange: firstFragment.glyphRange,
+            usedRect: firstFragment.usedRect.offsetBy(dx: 0, dy: offset)
+        )
+        // TextKit preserves fragment adjacency, so moving the first fragment
+        // shifts the complete laid-out suffix and its trailing extra line.
+    }
+
     /// Follows a streaming log's vertical tail using the authoritative frame
-    /// computed above. `NSTextView.scrollToEndOfDocument` resolves the final
-    /// glyph rect and can rescan a multi-megabyte logical line even after its
-    /// bounded final paragraph is laid out. Arithmetic scrolling is constant
-    /// work and preserves the user's horizontal position.
+    /// computed above. The bounded suffix has already been anchored to this
+    /// edge, so arithmetic scrolling remains constant work and preserves the
+    /// user's horizontal position.
     static func scrollStreamingLogToTail(
         _ textView: NSTextView,
         in scrollView: NSScrollView

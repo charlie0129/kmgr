@@ -7,6 +7,31 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Log windows", .serialized)
 struct LogWindowControllerTests {
+    @Test("automatic log retry uses bounded backoff and server hints")
+    func automaticRetryPolicy() {
+        #expect(LogStreamRetryPolicy.delayMilliseconds(
+            failureCount: 1,
+            issue: nil
+        ) == 250)
+        #expect(LogStreamRetryPolicy.delayMilliseconds(
+            failureCount: 2,
+            issue: nil
+        ) == 500)
+        #expect(LogStreamRetryPolicy.delayMilliseconds(
+            failureCount: 6,
+            issue: nil
+        ) == 5_000)
+        #expect(LogStreamRetryPolicy.delayMilliseconds(
+            failureCount: 1,
+            issue: ClusterManagerIssue(
+                category: .unavailable,
+                message: "Wait before retrying.",
+                retryable: true,
+                retryAfterMilliseconds: 7_000
+            )
+        ) == 7_000)
+    }
+
     @Test("deferred reconciliation never restores tail after a user scroll")
     func deferredTailIntentRequiresCurrentTailPosition() {
         #expect(LogTailReconciliationPolicy.shouldPreserveTail(
@@ -27,7 +52,7 @@ struct LogWindowControllerTests {
         ))
     }
 
-    @Test("streaming log geometry requests only viewport or tail layout")
+    @Test("streaming log geometry requests only viewport or bounded tail layout")
     func streamingGeometryNeverRequestsWholeContainerLayout() throws {
         let storage = NSTextStorage()
         let layoutManager = LayoutRequestSpy()
@@ -89,11 +114,65 @@ struct LogWindowControllerTests {
         )
         #expect(layoutManager.wholeContainerRequestCount == 0)
         #expect(layoutManager.boundingRectRequests.isEmpty)
-        #expect(layoutManager.characterRangeRequests == [NSRange(
-            location: storage.length - 1,
-            length: 1
-        )])
+        let tailRequest = try #require(layoutManager.characterRangeRequests.last)
+        #expect(tailRequest.upperBound == storage.length)
+        #expect(tailRequest.length <= 512 << 10)
+        TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
         #expect(textView.selectedRange() == selection)
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
+    }
+
+    @Test("lazy TextKit layout cannot replace streaming log geometry")
+    func streamingGeometryOwnsDocumentFrame() throws {
+        let textView = NSTextView(
+            frame: NSRect(x: 0, y: 0, width: 560, height: 320)
+        )
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        let scrollView = NSScrollView(
+            frame: NSRect(x: 0, y: 0, width: 560, height: 320)
+        )
+        scrollView.documentView = textView
+        TextDocumentGeometry.configureStreamingLog(textView, in: scrollView)
+
+        let chunks = (0..<200).map { "line-\($0) value value value\n" }
+        textView.string = chunks.joined()
+        let metrics = LogTextLayoutMetrics(
+            chunks: chunks,
+            wrappingColumnCapacity: TextDocumentGeometry
+                .streamingLogWrappingColumnCapacity(textView, in: scrollView)
+        )
+        TextDocumentGeometry.updateStreamingLog(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false,
+            metrics: metrics,
+            followingTail: false
+        )
+        let authoritativeFrame = textView.frame
+
+        let layoutManager = try #require(textView.layoutManager)
+        let textLength = try #require(textView.textStorage?.length)
+        layoutManager.ensureLayout(forCharacterRange: NSRange(
+            location: textLength - 1,
+            length: 1
+        ))
+        #expect(textView.frame == authoritativeFrame)
+
+        TextDocumentGeometry.updateStreamingLog(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false,
+            metrics: metrics,
+            followingTail: true
+        )
+        TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
+
+        #expect(textView.frame == authoritativeFrame)
+        #expect(!textView.isVerticallyResizable)
+        #expect(!textView.isHorizontallyResizable)
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
+        #expect(try visibleLogLineFragmentCount(textView, in: scrollView) >= 10)
     }
 
     @Test("detached log metrics handle chunked CRLF and wrapped lines")
@@ -202,12 +281,23 @@ struct LogWindowControllerTests {
 
             let clock = ContinuousClock()
             let installStart = clock.now
-            textView.textStorage?.append(NSAttributedString(
+            let storage = try #require(textView.textStorage)
+            storage.append(NSAttributedString(
                 string: appendText,
                 attributes: [.font: font]
             ))
             let installDuration = installStart.duration(to: clock.now)
             let tailStart = clock.now
+            for _ in 0..<2 {
+                TextDocumentGeometry.updateStreamingLog(
+                    textView,
+                    in: scrollView,
+                    wrapsToViewport: false,
+                    metrics: metrics,
+                    followingTail: true
+                )
+                TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
+            }
             TextDocumentGeometry.updateStreamingLog(
                 textView,
                 in: scrollView,
@@ -215,7 +305,6 @@ struct LogWindowControllerTests {
                 metrics: metrics,
                 followingTail: true
             )
-            TextDocumentGeometry.scrollStreamingLogToTail(textView, in: scrollView)
             let tailDuration = tailStart.duration(to: clock.now)
             let totalDuration = installStart.duration(to: clock.now)
 
@@ -230,7 +319,7 @@ struct LogWindowControllerTests {
             }
             let mainActorBudget: Duration = sizeMiB <= 16 ? .seconds(1) : .seconds(2)
             #expect(totalDuration < mainActorBudget)
-            #expect(textView.textStorage?.length == appendText.utf16.count)
+            #expect(storage.length == appendText.utf16.count)
             #expect(metrics.logicalLineCount == fragmentCount + 1)
             #expect(metrics.maximumLineWidthUnits <= fragment.utf8.count + 4)
             #expect(textView.frame.height > scrollView.contentSize.height)
@@ -402,6 +491,74 @@ struct LogWindowControllerTests {
         #expect(label.toolTip == label.stringValue)
         #expect(controller.window?.title.contains("2 sources") == true)
         #expect(controller.window?.title.contains("cluster — production") == true)
+    }
+
+    @Test("many log sources truncate without widening the window")
+    func longSourceSummaryStaysWithinWindow() throws {
+        let sources = (0..<128).map { index in
+            logSource(
+                pod: "pod-\(index)-" + String(repeating: "x", count: 48),
+                uid: "uid-\(index)",
+                container: "application"
+            )
+        }
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session",
+                contextName: "production",
+                clusterName: "cluster",
+                serverHostname: "example.invalid",
+                defaultNamespace: "default"
+            ),
+            sources: sources,
+            provider: NoopLogWindowProvider()
+        )
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let label = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Log sources" })
+
+        root.layoutSubtreeIfNeeded()
+
+        #expect(root.frame.width <= window.contentLayoutRect.width + 0.5)
+        #expect(label.frame.maxX <= root.bounds.maxX + 0.5)
+        #expect(label.intrinsicContentSize.width > label.frame.width)
+        #expect(label.lineBreakMode == .byTruncatingMiddle)
+        #expect(label.maximumNumberOfLines == 1)
+        #expect(label.stringValue.contains("… +"))
+        #expect(label.toolTip?.count ?? 0 > label.stringValue.count)
+        #expect(label.toolTip?.contains("pod-127-") == true)
+
+        window.setContentSize(NSSize(width: window.minSize.width, height: 320))
+        root.layoutSubtreeIfNeeded()
+        #expect(root.frame.width <= window.contentLayoutRect.width + 0.5)
+    }
+
+    @Test("long container names do not widen the log toolbar")
+    func longContainerNameStaysWithinWindow() throws {
+        let container = String(repeating: "c", count: 63)
+        let source = logSource(pod: "api", uid: "api-uid", container: container)
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session",
+                contextName: "production",
+                clusterName: "cluster",
+                serverHostname: "example.invalid",
+                defaultNamespace: "default"
+            ),
+            sources: [source],
+            provider: NoopLogWindowProvider()
+        )
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let popup = try #require(descendants(of: root).compactMap { $0 as? NSPopUpButton }
+            .first { $0.identifier?.rawValue == "log-container" })
+
+        root.layoutSubtreeIfNeeded()
+
+        #expect(root.frame.width <= window.contentLayoutRect.width + 0.5)
+        #expect(popup.frame.maxX <= root.bounds.maxX + 0.5)
     }
 
     @Test("live toolbar exposes container tail and since controls and static scope")
@@ -636,8 +793,8 @@ struct LogWindowControllerTests {
         #expect(!saved.ranOnMainThread)
     }
 
-    @Test("tail following survives a delayed document extent correction")
-    func continuousTailFollowDoesNotDependOnExactPriorGeometry() async throws {
+    @Test("continuous tail following keeps the real final line visible")
+    func continuousTailFollowKeepsActualTailVisible() async throws {
         let provider = OrderedLogWindowProvider()
         let source = logSource(pod: "api", uid: "api-uid", container: "app")
         let controller = LogWindowController(
@@ -682,17 +839,8 @@ struct LogWindowControllerTests {
         ))
         try await waitForLogText(textView) { $0.contains("initial-199") }
         #expect(isLogViewAtTail(textView, in: scrollView))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
         try await Task.sleep(for: .milliseconds(20))
-
-        // TextKit can refine a noncontiguous document extent after the
-        // controller has scrolled. That correction is not a user scroll and
-        // must keep the current viewport pinned as well as preserve follow for
-        // the next batch.
-        textView.setFrameSize(NSSize(
-            width: textView.frame.width,
-            height: textView.frame.height + 32
-        ))
-        #expect(isLogViewAtTail(textView, in: scrollView))
 
         provider.emitRecords(
             generation: 1,
@@ -711,6 +859,7 @@ struct LogWindowControllerTests {
         ))
         try await waitForLogText(textView) { $0.contains("after-correction") }
         #expect(isLogViewAtTail(textView, in: scrollView))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
     }
 
     @Test("large initial tail remains pinned after deferred layout")
@@ -762,6 +911,7 @@ struct LogWindowControllerTests {
         ))
         try await waitForLogText(textView) { $0.contains("initial-499") }
         #expect(isLogViewAtTail(textView, in: scrollView))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
 
         for _ in 0..<20 {
             window.contentView?.layoutSubtreeIfNeeded()
@@ -772,6 +922,7 @@ struct LogWindowControllerTests {
         #expect(follow.state == .on)
         #expect(isLogViewAtTail(textView, in: scrollView),
             "A deferred layout pass moved the initial tail away from the bottom")
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
     }
 
     @Test("viewport scrolling pauses and resumes tail following")
@@ -835,11 +986,13 @@ struct LogWindowControllerTests {
         provider.emitRecords(
             generation: 1,
             sequence: 3,
-            records: [LogRecord(
-                sourceID: source.sourceID,
-                data: Data("while-scrolled-away".utf8),
-                endsWithNewline: true
-            )]
+            records: (0..<100).map { index in
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data("while-scrolled-away-\(index)".utf8),
+                    endsWithNewline: true
+                )
+            }
         )
         try await Task.sleep(for: .milliseconds(20))
         window.makeKeyAndOrderFront(nil)
@@ -847,15 +1000,23 @@ struct LogWindowControllerTests {
             name: NSWindow.didBecomeKeyNotification,
             object: window
         ))
-        try await waitForLogText(textView) { $0.contains("while-scrolled-away") }
+        try await waitForLogText(textView) { $0.contains("while-scrolled-away-99") }
         #expect(!isLogViewAtTail(textView, in: scrollView))
         #expect(clipView.bounds.origin == scrolledAwayOrigin)
 
         follow.performClick(nil)
         #expect(follow.state == .on)
         #expect(isLogViewAtTail(textView, in: scrollView))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
         try await Task.sleep(for: .milliseconds(20))
         #expect(!provider.snapshot().contains("start:2"))
+
+        window.setContentSize(NSSize(width: 720, height: 420))
+        controller.windowDidResize(Notification(
+            name: NSWindow.didResizeNotification,
+            object: window
+        ))
+        #expect(try isActualLogTailFullyVisible(textView, in: scrollView))
 
         // Returning to the tail manually also re-arms the presentation.
         clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: 0))
@@ -891,21 +1052,24 @@ struct LogWindowControllerTests {
     @Test("failed replacement restores controls without retiring established stream")
     func failedReplacementRestoresAppliedConfiguration() async throws {
         let provider = OrderedLogWindowProvider()
+        let source = logSource(pod: "api", uid: "api-uid", container: "app")
         let controller = LogWindowController(
             session: OpenedClusterSession(
                 sessionID: "session", contextName: "production", clusterName: "cluster",
                 serverHostname: "example.invalid", defaultNamespace: "default"
             ),
-            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            sources: [source],
             provider: provider
         )
         controller.showWindow(nil)
         try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
-        provider.emitConnecting(generation: 1)
+        provider.emitStreaming(generation: 1, sequence: 1)
 
         let root = try #require(controller.window?.contentView)
         let follow = try #require(descendants(of: root).compactMap { $0 as? NSButton }
             .first { $0.title == "Follow" })
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-status" })
         try await waitForLogWindowControl(follow, enabled: true)
         #expect(follow.state == .on)
         follow.performClick(nil)
@@ -921,7 +1085,109 @@ struct LogWindowControllerTests {
         let events = provider.snapshot()
         #expect(!events.contains("cancel:1"))
         #expect(!events.contains("terminated:1"))
+
+        // Records from the still-established generation must restore its
+        // streaming presentation after the replacement reports an error.
+        provider.emitRecords(
+            generation: 1,
+            sequence: 2,
+            records: [LogRecord(
+                sourceID: source.sourceID,
+                data: Data("still streaming".utf8),
+                endsWithNewline: true
+            )]
+        )
+        try await waitForLogStatus(status) { $0 == "Streaming" }
         controller.close()
+    }
+
+    @Test("failed non-following streams expose an immediate manual retry")
+    func failedNonFollowingStreamCanRetryManually() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider,
+            options: LogOptions(follow: false)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitStreaming(generation: 1, sequence: 1)
+
+        let root = try #require(controller.window?.contentView)
+        let retry = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Retry" })
+        #expect(retry.isHidden)
+
+        provider.emitFailed(generation: 1, sequence: 2)
+        try await waitForLogWindowControl(retry, hidden: false)
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(!provider.snapshot().contains("start:2"))
+
+        retry.performClick(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        #expect(retry.isHidden)
+        #expect(provider.request(generation: 2)?.options.follow == false)
+    }
+
+    @Test("an initial terminal failure exposes retry before any stream is established")
+    func initialTerminalFailureCanRetry() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider,
+            options: LogOptions(follow: false)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+
+        let root = try #require(controller.window?.contentView)
+        let retry = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Retry" })
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-status" })
+        provider.emitFailed(generation: 1, sequence: 1)
+
+        try await waitForLogWindowControl(retry, hidden: false)
+        try await waitForLogStatus(status) { $0.contains("The test log stream failed") }
+        #expect(status.stringValue.hasPrefix("Failed"))
+        #expect(provider.snapshot().contains("cancel:1"))
+    }
+
+    @Test("failed following streams retry automatically after a delay")
+    func failedFollowingStreamRetriesAutomatically() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitStreaming(generation: 1, sequence: 1)
+
+        let root = try #require(controller.window?.contentView)
+        let retry = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Retry" })
+        provider.emitFailed(generation: 1, sequence: 2)
+        try await waitForLogWindowControl(retry, hidden: false)
+
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        #expect(retry.isHidden)
+        #expect(provider.request(generation: 2)?.options.follow == true)
     }
 
     @Test("first failure message does not retire the established stream")
@@ -1115,6 +1381,7 @@ private final class LayoutRequestSpy: NSLayoutManager {
 
     override func ensureLayout(for textContainer: NSTextContainer) {
         wholeContainerRequestCount += 1
+        super.ensureLayout(for: textContainer)
     }
 
     override func ensureLayout(
@@ -1122,10 +1389,12 @@ private final class LayoutRequestSpy: NSLayoutManager {
         in textContainer: NSTextContainer
     ) {
         boundingRectRequests.append(bounds)
+        super.ensureLayout(forBoundingRect: bounds, in: textContainer)
     }
 
     override func ensureLayout(forCharacterRange charRange: NSRange) {
         characterRangeRequests.append(charRange)
+        super.ensureLayout(forCharacterRange: charRange)
     }
 
     func resetRequests() {
@@ -1206,6 +1475,74 @@ private func isLogViewAtTail(_ textView: NSTextView, in scrollView: NSScrollView
 }
 
 @MainActor
+private func visibleLogLineFragmentCount(
+    _ textView: NSTextView,
+    in scrollView: NSScrollView
+) throws -> Int {
+    let layoutManager = try #require(textView.layoutManager)
+    let textLength = try #require(textView.textStorage?.length)
+    guard textLength > 0 else { return 0 }
+
+    let characterRange = NSRange(
+        location: max(0, textLength - (512 << 10)),
+        length: min(textLength, 512 << 10)
+    )
+    layoutManager.ensureLayout(forCharacterRange: characterRange)
+    let glyphRange = layoutManager.glyphRange(
+        forCharacterRange: characterRange,
+        actualCharacterRange: nil
+    )
+    let origin = textView.textContainerOrigin
+    let visible = scrollView.contentView.bounds.offsetBy(
+        dx: -origin.x,
+        dy: -origin.y
+    )
+    var count = 0
+    layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) {
+        rect, _, _, _, _ in
+        if rect.intersects(visible) { count += 1 }
+    }
+    if !layoutManager.extraLineFragmentRect.isEmpty,
+        layoutManager.extraLineFragmentRect.intersects(visible)
+    {
+        count += 1
+    }
+    return count
+}
+
+@MainActor
+private func isActualLogTailFullyVisible(
+    _ textView: NSTextView,
+    in scrollView: NSScrollView
+) throws -> Bool {
+    let layoutManager = try #require(textView.layoutManager)
+    let textLength = try #require(textView.textStorage?.length)
+    guard textLength > 0 else { return true }
+
+    let characterRange = NSRange(location: textLength - 1, length: 1)
+    layoutManager.ensureLayout(forCharacterRange: characterRange)
+    let glyphRange = layoutManager.glyphRange(
+        forCharacterRange: characterRange,
+        actualCharacterRange: nil
+    )
+    let finalGlyph = min(glyphRange.location, layoutManager.numberOfGlyphs - 1)
+    var tailRect = layoutManager.lineFragmentRect(
+        forGlyphAt: finalGlyph,
+        effectiveRange: nil
+    )
+    if !layoutManager.extraLineFragmentRect.isEmpty {
+        tailRect = tailRect.union(layoutManager.extraLineFragmentRect)
+    }
+    tailRect = tailRect.offsetBy(
+        dx: textView.textContainerOrigin.x,
+        dy: textView.textContainerOrigin.y
+    )
+    let visible = scrollView.contentView.bounds
+    return tailRect.minY >= visible.minY - 0.5
+        && tailRect.maxY <= visible.maxY + 0.5
+}
+
+@MainActor
 private func laidOutLogTextRect(in textView: NSTextView) -> NSRect? {
     guard let layoutManager = textView.layoutManager,
         let textContainer = textView.textContainer
@@ -1267,6 +1604,24 @@ private final class OrderedLogWindowProvider: LogStreamProviding, @unchecked Sen
         continuation?.yield(.status(
             cursor: StreamCursor(generation: generation, sequence: sequence),
             status: LogStatus(state: .streaming)
+        ))
+    }
+
+    func emitFailed(generation: UInt64, sequence: UInt64) {
+        let continuation = lock.withLock { continuations[generation] }
+        continuation?.yield(.status(
+            cursor: StreamCursor(generation: generation, sequence: sequence),
+            status: LogStatus(
+                state: .failed,
+                issue: ClusterManagerIssue(
+                    category: .unavailable,
+                    reason: "PodLogFailed",
+                    message: "The test log stream failed.",
+                    retryable: true,
+                    contextName: "production",
+                    operation: "stream Pod logs"
+                )
+            )
         ))
     }
 
@@ -1378,6 +1733,18 @@ private func waitForLogWindowControl(
         try await Task.sleep(for: .milliseconds(5))
     }
     Issue.record("Timed out waiting for log control enabled=\(enabled)")
+}
+
+@MainActor
+private func waitForLogWindowControl(
+    _ control: NSControl,
+    hidden: Bool
+) async throws {
+    for _ in 0..<200 {
+        if control.isHidden == hidden { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Timed out waiting for log control hidden=\(hidden)")
 }
 
 @MainActor
