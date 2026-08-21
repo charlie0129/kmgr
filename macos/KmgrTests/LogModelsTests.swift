@@ -142,6 +142,43 @@ private func podIdentity(_ name: String, uid: String) -> ResourceIdentity {
     #expect(LogSourcePresentation.titleSummary(for: [source]) == "team-a/api/app")
 }
 
+@Test func logSourcePresentationBoundsLargeToolbarSourceLists() {
+    let sources = (0..<128).map { index in
+        LogSource(
+            identity: podIdentity("pod-\(index)", uid: "uid-\(index)"),
+            container: "app",
+            sourceID: "uid-\(index)/app",
+            label: "team-a/\(String(repeating: "x", count: 40))/app"
+        )
+    }
+    let visible = LogSourcePresentation.toolbarSummary(
+        contextName: "production",
+        sources: sources
+    )
+    let full = LogSourcePresentation.fullToolbarSummary(
+        contextName: "production",
+        sources: sources
+    )
+
+    #expect(visible.count <= LogSourcePresentation.maximumToolbarSummaryCharacters)
+    #expect(visible.contains("… +"))
+    #expect(full.count > visible.count)
+    #expect(full.contains("team-a/" + String(repeating: "x", count: 40) + "/app"))
+}
+
+@Test func logSourcePresentationKeepsItsBoundWithLongContext() {
+    let summary = LogSourcePresentation.toolbarSummary(
+        contextName: String(repeating: "context-", count: 200),
+        sources: [LogSource(
+            identity: podIdentity("api", uid: "api-uid"),
+            container: "app",
+            sourceID: "api-uid/app",
+            label: "team-a/api/app"
+        )]
+    )
+    #expect(summary.count <= LogSourcePresentation.maximumToolbarSummaryCharacters)
+}
+
 @Test func singlePodMultiContainerPrefixesUseContainerNames() {
     let sources = [
         LogSource(

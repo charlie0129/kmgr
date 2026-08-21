@@ -8,6 +8,27 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Command palette window", .serialized)
 struct CommandPaletteWindowControllerTests {
+    @Test("long command-palette scope stays within the panel")
+    func longScopeDoesNotWidenPanel() throws {
+        let contextName = String(repeating: "context-", count: 100)
+        let controller = makePaletteController(
+            provider: ControllablePaletteSearchProvider(),
+            contextName: contextName
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let scope = try #require(paletteDescendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.stringValue.hasPrefix(contextName) })
+        root.layoutSubtreeIfNeeded()
+
+        #expect(root.frame.width <= window.contentLayoutRect.width + 0.5)
+        #expect(scope.frame.maxX <= root.bounds.maxX + 0.5)
+        #expect(scope.lineBreakMode == .byTruncatingTail)
+    }
+
     @Test("Command-number chooses its ranked result and rows show trailing hints")
     func commandNumberChoosesRankedResult() throws {
         let resources = (1...10).map { index in
@@ -240,13 +261,14 @@ private struct PaletteControls {
 @MainActor
 private func makePaletteController(
     provider: any ObjectSearchProviding,
-    resources: [DiscoveredResource]? = nil
+    resources: [DiscoveredResource]? = nil,
+    contextName: String = "palette-context"
 ) -> CommandPaletteWindowController {
     CommandPaletteWindowController(
         context: .init(
             session: OpenedClusterSession(
                 sessionID: "palette-session",
-                contextName: "palette-context",
+                contextName: contextName,
                 clusterName: "palette-cluster",
                 serverHostname: "example.invalid",
                 defaultNamespace: "default"

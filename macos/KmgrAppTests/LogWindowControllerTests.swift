@@ -7,6 +7,31 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Log windows", .serialized)
 struct LogWindowControllerTests {
+    @Test("automatic log retry uses bounded backoff and server hints")
+    func automaticRetryPolicy() {
+        #expect(LogStreamRetryPolicy.delayMilliseconds(
+            failureCount: 1,
+            issue: nil
+        ) == 250)
+        #expect(LogStreamRetryPolicy.delayMilliseconds(
+            failureCount: 2,
+            issue: nil
+        ) == 500)
+        #expect(LogStreamRetryPolicy.delayMilliseconds(
+            failureCount: 6,
+            issue: nil
+        ) == 5_000)
+        #expect(LogStreamRetryPolicy.delayMilliseconds(
+            failureCount: 1,
+            issue: ClusterManagerIssue(
+                category: .unavailable,
+                message: "Wait before retrying.",
+                retryable: true,
+                retryAfterMilliseconds: 7_000
+            )
+        ) == 7_000)
+    }
+
     @Test("deferred reconciliation never restores tail after a user scroll")
     func deferredTailIntentRequiresCurrentTailPosition() {
         #expect(LogTailReconciliationPolicy.shouldPreserveTail(
@@ -466,6 +491,74 @@ struct LogWindowControllerTests {
         #expect(label.toolTip == label.stringValue)
         #expect(controller.window?.title.contains("2 sources") == true)
         #expect(controller.window?.title.contains("cluster — production") == true)
+    }
+
+    @Test("many log sources truncate without widening the window")
+    func longSourceSummaryStaysWithinWindow() throws {
+        let sources = (0..<128).map { index in
+            logSource(
+                pod: "pod-\(index)-" + String(repeating: "x", count: 48),
+                uid: "uid-\(index)",
+                container: "application"
+            )
+        }
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session",
+                contextName: "production",
+                clusterName: "cluster",
+                serverHostname: "example.invalid",
+                defaultNamespace: "default"
+            ),
+            sources: sources,
+            provider: NoopLogWindowProvider()
+        )
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let label = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Log sources" })
+
+        root.layoutSubtreeIfNeeded()
+
+        #expect(root.frame.width <= window.contentLayoutRect.width + 0.5)
+        #expect(label.frame.maxX <= root.bounds.maxX + 0.5)
+        #expect(label.intrinsicContentSize.width > label.frame.width)
+        #expect(label.lineBreakMode == .byTruncatingMiddle)
+        #expect(label.maximumNumberOfLines == 1)
+        #expect(label.stringValue.contains("… +"))
+        #expect(label.toolTip?.count ?? 0 > label.stringValue.count)
+        #expect(label.toolTip?.contains("pod-127-") == true)
+
+        window.setContentSize(NSSize(width: window.minSize.width, height: 320))
+        root.layoutSubtreeIfNeeded()
+        #expect(root.frame.width <= window.contentLayoutRect.width + 0.5)
+    }
+
+    @Test("long container names do not widen the log toolbar")
+    func longContainerNameStaysWithinWindow() throws {
+        let container = String(repeating: "c", count: 63)
+        let source = logSource(pod: "api", uid: "api-uid", container: container)
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session",
+                contextName: "production",
+                clusterName: "cluster",
+                serverHostname: "example.invalid",
+                defaultNamespace: "default"
+            ),
+            sources: [source],
+            provider: NoopLogWindowProvider()
+        )
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let popup = try #require(descendants(of: root).compactMap { $0 as? NSPopUpButton }
+            .first { $0.identifier?.rawValue == "log-container" })
+
+        root.layoutSubtreeIfNeeded()
+
+        #expect(root.frame.width <= window.contentLayoutRect.width + 0.5)
+        #expect(popup.frame.maxX <= root.bounds.maxX + 0.5)
     }
 
     @Test("live toolbar exposes container tail and since controls and static scope")
@@ -959,21 +1052,24 @@ struct LogWindowControllerTests {
     @Test("failed replacement restores controls without retiring established stream")
     func failedReplacementRestoresAppliedConfiguration() async throws {
         let provider = OrderedLogWindowProvider()
+        let source = logSource(pod: "api", uid: "api-uid", container: "app")
         let controller = LogWindowController(
             session: OpenedClusterSession(
                 sessionID: "session", contextName: "production", clusterName: "cluster",
                 serverHostname: "example.invalid", defaultNamespace: "default"
             ),
-            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            sources: [source],
             provider: provider
         )
         controller.showWindow(nil)
         try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
-        provider.emitConnecting(generation: 1)
+        provider.emitStreaming(generation: 1, sequence: 1)
 
         let root = try #require(controller.window?.contentView)
         let follow = try #require(descendants(of: root).compactMap { $0 as? NSButton }
             .first { $0.title == "Follow" })
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-status" })
         try await waitForLogWindowControl(follow, enabled: true)
         #expect(follow.state == .on)
         follow.performClick(nil)
@@ -989,7 +1085,109 @@ struct LogWindowControllerTests {
         let events = provider.snapshot()
         #expect(!events.contains("cancel:1"))
         #expect(!events.contains("terminated:1"))
+
+        // Records from the still-established generation must restore its
+        // streaming presentation after the replacement reports an error.
+        provider.emitRecords(
+            generation: 1,
+            sequence: 2,
+            records: [LogRecord(
+                sourceID: source.sourceID,
+                data: Data("still streaming".utf8),
+                endsWithNewline: true
+            )]
+        )
+        try await waitForLogStatus(status) { $0 == "Streaming" }
         controller.close()
+    }
+
+    @Test("failed non-following streams expose an immediate manual retry")
+    func failedNonFollowingStreamCanRetryManually() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider,
+            options: LogOptions(follow: false)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitStreaming(generation: 1, sequence: 1)
+
+        let root = try #require(controller.window?.contentView)
+        let retry = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Retry" })
+        #expect(retry.isHidden)
+
+        provider.emitFailed(generation: 1, sequence: 2)
+        try await waitForLogWindowControl(retry, hidden: false)
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(!provider.snapshot().contains("start:2"))
+
+        retry.performClick(nil)
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        #expect(retry.isHidden)
+        #expect(provider.request(generation: 2)?.options.follow == false)
+    }
+
+    @Test("an initial terminal failure exposes retry before any stream is established")
+    func initialTerminalFailureCanRetry() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider,
+            options: LogOptions(follow: false)
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+
+        let root = try #require(controller.window?.contentView)
+        let retry = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Retry" })
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-status" })
+        provider.emitFailed(generation: 1, sequence: 1)
+
+        try await waitForLogWindowControl(retry, hidden: false)
+        try await waitForLogStatus(status) { $0.contains("The test log stream failed") }
+        #expect(status.stringValue.hasPrefix("Failed"))
+        #expect(provider.snapshot().contains("cancel:1"))
+    }
+
+    @Test("failed following streams retry automatically after a delay")
+    func failedFollowingStreamRetriesAutomatically() async throws {
+        let provider = OrderedLogWindowProvider()
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [logSource(pod: "api", uid: "api-uid", container: "app")],
+            provider: provider
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        provider.emitStreaming(generation: 1, sequence: 1)
+
+        let root = try #require(controller.window?.contentView)
+        let retry = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.title == "Retry" })
+        provider.emitFailed(generation: 1, sequence: 2)
+        try await waitForLogWindowControl(retry, hidden: false)
+
+        try await waitForLogWindowEvent(provider) { $0.contains("start:2") }
+        #expect(retry.isHidden)
+        #expect(provider.request(generation: 2)?.options.follow == true)
     }
 
     @Test("first failure message does not retire the established stream")
@@ -1409,6 +1607,24 @@ private final class OrderedLogWindowProvider: LogStreamProviding, @unchecked Sen
         ))
     }
 
+    func emitFailed(generation: UInt64, sequence: UInt64) {
+        let continuation = lock.withLock { continuations[generation] }
+        continuation?.yield(.status(
+            cursor: StreamCursor(generation: generation, sequence: sequence),
+            status: LogStatus(
+                state: .failed,
+                issue: ClusterManagerIssue(
+                    category: .unavailable,
+                    reason: "PodLogFailed",
+                    message: "The test log stream failed.",
+                    retryable: true,
+                    contextName: "production",
+                    operation: "stream Pod logs"
+                )
+            )
+        ))
+    }
+
     func emitRecords(generation: UInt64, sequence: UInt64, records: [LogRecord]) {
         let continuation = lock.withLock { continuations[generation] }
         continuation?.yield(.records(
@@ -1517,6 +1733,18 @@ private func waitForLogWindowControl(
         try await Task.sleep(for: .milliseconds(5))
     }
     Issue.record("Timed out waiting for log control enabled=\(enabled)")
+}
+
+@MainActor
+private func waitForLogWindowControl(
+    _ control: NSControl,
+    hidden: Bool
+) async throws {
+    for _ in 0..<200 {
+        if control.isHidden == hidden { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Timed out waiting for log control hidden=\(hidden)")
 }
 
 @MainActor
