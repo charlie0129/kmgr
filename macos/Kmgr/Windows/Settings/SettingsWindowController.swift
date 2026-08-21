@@ -22,6 +22,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let maximumRenderedLogTextField = NSTextField()
     private let maximumDisplayedLogLineField = NSTextField()
     private let completedOperationHistoryLimitField = NSTextField()
+    private let defaultDeleteConcurrencyField = NSTextField()
     private let nodeShellImageField = NSTextField()
     private let metricsRefreshField = NSTextField()
     private let viewportOverscanField = NSTextField()
@@ -230,6 +231,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         completedOperationHistoryLimitField.setAccessibilityIdentifier(
             "settings.diagnostics.completedOperationHistoryLimit"
         )
+        defaultDeleteConcurrencyField.setAccessibilityIdentifier(
+            "settings.operations.defaultDeleteConcurrency"
+        )
         nodeShellImageField.setAccessibilityIdentifier(
             "settings.nodeShell.globalImage"
         )
@@ -286,6 +290,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                     suffix: "per cluster session"
                 ),
                 diagnosticsHelp,
+            ]
+        )
+
+        let resourceOperations = section(
+            title: "Resource Operations",
+            rows: [
+                labeledRow(
+                    "Delete concurrency",
+                    control: defaultDeleteConcurrencyField,
+                    suffix: "default (1–16)"
+                ),
             ]
         )
 
@@ -466,8 +481,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         let shortcuts = section(title: "Keyboard Shortcuts", rows: [shortcutGrid])
 
         let contentStack = NSStackView(views: [
-            general, logs, diagnostics, nodeShell, advancedPerformance, confirmations, columns,
-            shortcuts,
+            general, logs, diagnostics, resourceOperations, nodeShell, advancedPerformance,
+            confirmations, columns, shortcuts,
         ])
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
@@ -475,8 +490,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         contentStack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         for section in [
-            general, logs, diagnostics, nodeShell, advancedPerformance, confirmations, columns,
-            shortcuts,
+            general, logs, diagnostics, resourceOperations, nodeShell, advancedPerformance,
+            confirmations, columns, shortcuts,
         ] {
             section.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -32).isActive = true
         }
@@ -609,6 +624,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             preferences.logs.maximumDisplayedLineUTF8Bytes / (1 << 10)
         completedOperationHistoryLimitField.integerValue =
             preferences.diagnostics.completedOperationHistoryLimit
+        defaultDeleteConcurrencyField.integerValue =
+            preferences.resourceOperations.defaultDeleteConcurrency
         nodeShellImageField.stringValue = preferences.nodeShell.globalImage
         metricsRefreshField.integerValue = preferences.metricsRefreshSeconds
         viewportOverscanField.integerValue =
@@ -690,6 +707,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             confirmations: ConfirmationPreferences(
                 confirmWorkloadRestart: confirmRestartButton.state == .on,
                 confirmScaling: confirmScaleButton.state == .on
+            ),
+            resourceOperations: ResourceOperationPreferences(
+                defaultDeleteConcurrency: parsedInteger(defaultDeleteConcurrencyField)
             ),
             columnsConfigurationPath: columnsPathField.stringValue,
             diagnostics: DiagnosticsPreferences(

@@ -14,6 +14,7 @@ final class DeleteResourcesWindowController: NSWindowController,
     private let session: OpenedClusterSession
     private let request: DeleteResourcesRequest
     private let provider: any ResourceOperationProviding
+    private let defaultConcurrency: UInt32
     private let tableLayoutStore: TableLayoutStore
     private let currentSelectionRevision: @MainActor (
         ResourceSelectionDeleteReference,
@@ -28,6 +29,7 @@ final class DeleteResourcesWindowController: NSWindowController,
     private let advancedOptions = NSStackView()
     private let propagationButton = NSPopUpButton()
     private let graceField = NSTextField()
+    private let concurrencyField = NSTextField()
     private let progressIndicator = NSProgressIndicator()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let primaryButton = NSButton(title: "Delete", target: nil, action: nil)
@@ -53,12 +55,14 @@ final class DeleteResourcesWindowController: NSWindowController,
         session: OpenedClusterSession,
         targets: [ResourceDeleteTarget],
         provider: any ResourceOperationProviding,
+        defaultConcurrency: UInt32 = ResourceDeleteOptions.defaultMaxConcurrency,
         tableLayoutStore: TableLayoutStore? = nil
     ) {
         self.init(
             session: session,
             request: .explicit(targets),
             provider: provider,
+            defaultConcurrency: defaultConcurrency,
             tableLayoutStore: tableLayoutStore,
             currentSelectionRevision: { _, revision in revision }
         )
@@ -68,6 +72,7 @@ final class DeleteResourcesWindowController: NSWindowController,
         session: OpenedClusterSession,
         request: DeleteResourcesRequest,
         provider: any ResourceOperationProviding,
+        defaultConcurrency: UInt32 = ResourceDeleteOptions.defaultMaxConcurrency,
         tableLayoutStore: TableLayoutStore? = nil,
         currentSelectionRevision: @escaping @MainActor (
             ResourceSelectionDeleteReference,
@@ -75,9 +80,13 @@ final class DeleteResourcesWindowController: NSWindowController,
         ) -> ResourceSelectionRevision?
     ) {
         if case .explicit(let targets) = request { precondition(!targets.isEmpty) }
+        precondition((1...ResourceDeleteOptions.maximumMaxConcurrency).contains(
+            defaultConcurrency
+        ))
         self.session = session
         self.request = request
         self.provider = provider
+        self.defaultConcurrency = defaultConcurrency
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.currentSelectionRevision = currentSelectionRevision
         let window = NSWindow(
@@ -201,13 +210,27 @@ final class DeleteResourcesWindowController: NSWindowController,
         graceField.placeholderString = "Server default"
         graceField.alignment = .right
         graceField.widthAnchor.constraint(equalToConstant: 110).isActive = true
-        advancedOptions.setViews([
-            NSTextField(labelWithString: "Propagation"), propagationButton,
-            NSTextField(labelWithString: "Grace seconds"), graceField, NSView(),
-        ], in: .leading)
-        advancedOptions.orientation = .horizontal
-        advancedOptions.alignment = .centerY
-        advancedOptions.spacing = 8
+        concurrencyField.integerValue = Int(defaultConcurrency)
+        concurrencyField.alignment = .right
+        concurrencyField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        concurrencyField.setAccessibilityIdentifier("delete.maxConcurrency")
+        let propagationRow = NSStackView(views: [
+            NSTextField(labelWithString: "Propagation"), propagationButton, NSView(),
+        ])
+        propagationRow.orientation = .horizontal
+        propagationRow.alignment = .centerY
+        propagationRow.spacing = 8
+        let executionRow = NSStackView(views: [
+            NSTextField(labelWithString: "Grace seconds"), graceField,
+            NSTextField(labelWithString: "Concurrency"), concurrencyField, NSView(),
+        ])
+        executionRow.orientation = .horizontal
+        executionRow.alignment = .centerY
+        executionRow.spacing = 8
+        advancedOptions.setViews([propagationRow, executionRow], in: .leading)
+        advancedOptions.orientation = .vertical
+        advancedOptions.alignment = .leading
+        advancedOptions.spacing = 6
         advancedOptions.isHidden = true
         advancedButton.bezelStyle = .disclosure
         advancedButton.controlSize = .small
@@ -586,10 +609,20 @@ final class DeleteResourcesWindowController: NSWindowController,
         case 2: .orphan
         default: .background
         }
+        let concurrencyText = concurrencyField.stringValue.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard let concurrency = UInt32(concurrencyText),
+            (1...ResourceDeleteOptions.maximumMaxConcurrency).contains(concurrency)
+        else {
+            statusLabel.stringValue = "Delete concurrency must be an integer between 1 and 16."
+            statusLabel.textColor = .systemRed
+            return
+        }
         let options = ResourceDeleteOptions(
             propagationPolicy: propagation,
             gracePeriodSeconds: grace,
-            maxConcurrency: 4
+            maxConcurrency: concurrency
         )
         expiryTask?.cancel()
         expiryTask = nil
@@ -817,6 +850,7 @@ final class DeleteResourcesWindowController: NSWindowController,
         advancedButton.isEnabled = !running
         propagationButton.isEnabled = !running
         graceField.isEnabled = !running
+        concurrencyField.isEnabled = !running
         cancelButton.title = running
             ? (isAggregateRequest ? "Cancel" : "Cancel Pending")
             : "Cancel"

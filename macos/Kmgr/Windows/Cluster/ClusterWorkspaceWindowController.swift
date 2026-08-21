@@ -122,6 +122,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let tableLayoutStore: TableLayoutStore
     private let logDisplayConfiguration: LogDisplayConfiguration
     private let confirmationPreferences: @MainActor () -> ConfirmationPreferences
+    private let resourceOperationPreferences: @MainActor () -> ResourceOperationPreferences
     private let nodeShellPreferences: @MainActor () -> NodeShellPreferences
     private let saveNodeShellPreferences: @MainActor (NodeShellPreferences) throws -> Void
     private let workspaceController: ClusterWorkspaceViewController
@@ -163,6 +164,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         logDisplayConfiguration: LogDisplayConfiguration,
         operationHistoryCompletedLimit: Int = 2_000,
         confirmationPreferences: @escaping @MainActor () -> ConfirmationPreferences,
+        resourceOperationPreferences: @escaping @MainActor () -> ResourceOperationPreferences = {
+            ResourceOperationPreferences()
+        },
         nodeShellPreferences: @escaping @MainActor () -> NodeShellPreferences = {
             NodeShellPreferences()
         },
@@ -194,6 +198,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.logDisplayConfiguration = logDisplayConfiguration
         self.confirmationPreferences = confirmationPreferences
+        self.resourceOperationPreferences = resourceOperationPreferences
         self.nodeShellPreferences = nodeShellPreferences
         self.saveNodeShellPreferences = saveNodeShellPreferences
 
@@ -689,6 +694,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             session: session,
             request: request,
             provider: operationProvider,
+            defaultConcurrency: UInt32(
+                resourceOperationPreferences().defaultDeleteConcurrency
+            ),
             tableLayoutStore: tableLayoutStore,
             currentSelectionRevision: { [weak workspaceController] reference, revision in
                 workspaceController?.currentSelectionRevision(

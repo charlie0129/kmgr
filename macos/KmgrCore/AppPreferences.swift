@@ -172,6 +172,28 @@ public struct ConfirmationPreferences: Codable, Hashable, Sendable {
     }
 }
 
+public struct ResourceOperationPreferences: Codable, Hashable, Sendable {
+    public var defaultDeleteConcurrency: Int
+
+    public init(
+        defaultDeleteConcurrency: Int = Int(ResourceDeleteOptions.defaultMaxConcurrency)
+    ) {
+        self.defaultDeleteConcurrency = defaultDeleteConcurrency
+    }
+
+    fileprivate func validationIssues() -> [AppPreferenceIssue] {
+        guard (1...Int(ResourceDeleteOptions.maximumMaxConcurrency)).contains(
+            defaultDeleteConcurrency
+        ) else {
+            return [AppPreferenceIssue(
+                field: "resourceOperations.defaultDeleteConcurrency",
+                message: "Default delete concurrency must be between 1 and 16."
+            )]
+        }
+        return []
+    }
+}
+
 public enum PreferenceControlledMutation: Hashable, Sendable {
     case workloadRestart
     case scaling
@@ -413,7 +435,7 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v10"
+    public static let apiVersion = "kmgr.preferences/v11"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
@@ -421,6 +443,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
     public var defaultNamespace: DefaultNamespacePreference
     public var restoreOpenClusterWindows: Bool
     public var confirmations: ConfirmationPreferences
+    public var resourceOperations: ResourceOperationPreferences
     public var columnsConfigurationPath: String
     public var diagnostics: DiagnosticsPreferences
     public var nodeShell: NodeShellPreferences
@@ -433,6 +456,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         defaultNamespace: DefaultNamespacePreference = .contextDefault,
         restoreOpenClusterWindows: Bool = true,
         confirmations: ConfirmationPreferences = ConfirmationPreferences(),
+        resourceOperations: ResourceOperationPreferences = ResourceOperationPreferences(),
         columnsConfigurationPath: String = AppPreferences.defaultColumnsConfigurationPath,
         diagnostics: DiagnosticsPreferences = DiagnosticsPreferences(),
         nodeShell: NodeShellPreferences = NodeShellPreferences(),
@@ -444,6 +468,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         self.defaultNamespace = defaultNamespace
         self.restoreOpenClusterWindows = restoreOpenClusterWindows
         self.confirmations = confirmations
+        self.resourceOperations = resourceOperations
         self.columnsConfigurationPath = columnsConfigurationPath
         self.diagnostics = diagnostics
         self.nodeShell = nodeShell
@@ -498,6 +523,7 @@ public struct AppPreferences: Codable, Hashable, Sendable {
             ))
         }
         issues.append(contentsOf: nodeShell.validationIssues())
+        issues.append(contentsOf: resourceOperations.validationIssues())
         if !(5...300).contains(metricsRefreshSeconds) {
             issues.append(AppPreferenceIssue(
                 field: "metricsRefreshSeconds",
@@ -530,6 +556,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
     case appearance
     case logDisplay
     case confirmations
+    case resourceOperations
     case defaultNamespace
     case workspaceRestoration
     case metricsRefresh
@@ -547,7 +574,8 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
 
     public var activation: Activation {
         switch self {
-        case .appearance, .logDisplay, .confirmations, .operationHistory, .nodeShell:
+        case .appearance, .logDisplay, .confirmations, .resourceOperations,
+            .operationHistory, .nodeShell:
             .immediate
         case .defaultNamespace, .viewportOverscan:
             .newWorkspace
@@ -562,6 +590,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         case .appearance: "Appearance"
         case .logDisplay: "Log display"
         case .confirmations: "Confirmation prompts"
+        case .resourceOperations: "Resource operation defaults"
         case .defaultNamespace: "Default namespace"
         case .workspaceRestoration: "Open cluster window restoration"
         case .metricsRefresh: "Metrics refresh"
@@ -585,6 +614,9 @@ public struct AppPreferencesDelta: Hashable, Sendable {
         if previous.appearance != updated.appearance { changes.insert(.appearance) }
         if previous.logs != updated.logs { changes.insert(.logDisplay) }
         if previous.confirmations != updated.confirmations { changes.insert(.confirmations) }
+        if previous.resourceOperations != updated.resourceOperations {
+            changes.insert(.resourceOperations)
+        }
         if previous.defaultNamespace != updated.defaultNamespace {
             changes.insert(.defaultNamespace)
         }

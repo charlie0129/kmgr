@@ -122,6 +122,9 @@ public struct ResourceDeleteConfirmationSummary: Hashable, Sendable {
 }
 
 public struct ResourceDeleteOptions: Hashable, Sendable {
+    public static let defaultMaxConcurrency: UInt32 = 4
+    public static let maximumMaxConcurrency: UInt32 = 16
+
     public var propagationPolicy: DeletePropagationPolicy
     public var gracePeriodSeconds: Int64?
     public var maxConcurrency: UInt32
@@ -129,7 +132,7 @@ public struct ResourceDeleteOptions: Hashable, Sendable {
     public init(
         propagationPolicy: DeletePropagationPolicy = .background,
         gracePeriodSeconds: Int64? = nil,
-        maxConcurrency: UInt32 = 4
+        maxConcurrency: UInt32 = ResourceDeleteOptions.defaultMaxConcurrency
     ) {
         self.propagationPolicy = propagationPolicy
         self.gracePeriodSeconds = gracePeriodSeconds

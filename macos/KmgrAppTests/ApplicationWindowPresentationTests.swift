@@ -165,18 +165,24 @@ struct ApplicationWindowPresentationTests {
             $0.accessibilityIdentifier() ==
                 "settings.diagnostics.completedOperationHistoryLimit"
         })
+        let deleteConcurrency = try #require(fields.first {
+            $0.accessibilityIdentifier() == "settings.operations.defaultDeleteConcurrency"
+        })
 
         #expect(lineLimit.integerValue == 4)
         #expect(renderedLimit.integerValue == 32)
         #expect(historyLimit.integerValue == 2_000)
+        #expect(deleteConcurrency.integerValue == 4)
         lineLimit.stringValue = "12"
         renderedLimit.stringValue = "24"
         historyLimit.stringValue = "3500"
+        deleteConcurrency.stringValue = "12"
         try #require(button(titled: "Apply", beneath: root)).performClick(nil)
 
         #expect(store.current.logs.maximumDisplayedLineUTF8Bytes == 12 << 10)
         #expect(store.current.logs.maximumRenderedUTF8Bytes == 24 << 20)
         #expect(store.current.diagnostics.completedOperationHistoryLimit == 3_500)
+        #expect(store.current.resourceOperations.defaultDeleteConcurrency == 12)
     }
 
     @Test("Settings preserves its frame when reopened and when restored")

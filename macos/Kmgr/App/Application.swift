@@ -423,6 +423,10 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             confirmationPreferences: { [weak self] in
                 self?.preferencesStore.current.confirmations ?? ConfirmationPreferences()
             },
+            resourceOperationPreferences: { [weak self] in
+                self?.preferencesStore.current.resourceOperations
+                    ?? ResourceOperationPreferences()
+            },
             nodeShellPreferences: { [weak self] in
                 self?.preferencesStore.current.nodeShell ?? NodeShellPreferences()
             },

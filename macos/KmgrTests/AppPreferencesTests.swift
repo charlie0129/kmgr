@@ -30,6 +30,7 @@ import Testing
     preferences.defaultNamespace = .allNamespaces
     preferences.restoreOpenClusterWindows = false
     preferences.confirmations.confirmWorkloadRestart = false
+    preferences.resourceOperations.defaultDeleteConcurrency = 12
     preferences.columnsConfigurationPath = "~/Library/Application Support/kmgr/custom-columns.yaml"
     preferences.advancedPerformance = AdvancedPerformancePreferences(
         viewportOverscanScreensPerSide: 17,
@@ -69,6 +70,7 @@ import Testing
     #expect(reloaded.current.defaultNamespace == .allNamespaces)
     #expect(!reloaded.current.restoreOpenClusterWindows)
     #expect(!reloaded.current.confirmations.confirmWorkloadRestart)
+    #expect(reloaded.current.resourceOperations.defaultDeleteConcurrency == 12)
     #expect(reloaded.current.columnsConfigurationPath.hasPrefix("/"))
     #expect(reloaded.current.advancedPerformance == preferences.advancedPerformance)
     #expect(reloaded.current.advancedPerformance.viewReleaseGraceSeconds == 45)
@@ -120,6 +122,7 @@ import Testing
     preferences.diagnostics.completedOperationHistoryLimit = 100_001
     preferences.metricsRefreshSeconds = 1
     preferences.columnsConfigurationPath = "relative/columns.yaml"
+    preferences.resourceOperations.defaultDeleteConcurrency = 17
     preferences.advancedPerformance = AdvancedPerformancePreferences(
         viewportOverscanScreensPerSide: 101,
         viewReleaseGraceSeconds: 301,
@@ -154,6 +157,7 @@ import Testing
         "diagnostics.completedOperationHistoryLimit",
         "metricsRefreshSeconds",
         "columnsConfigurationPath",
+        "resourceOperations.defaultDeleteConcurrency",
         "advancedPerformance.viewportOverscanScreensPerSide",
         "advancedPerformance.viewReleaseGraceSeconds",
         "advancedPerformance.globalWarmCacheViewLimit",
@@ -301,6 +305,7 @@ import Testing
     updated.diagnostics.completedOperationHistoryLimit += 1
     updated.nodeShell.globalImage = "registry.example/node-shell:2"
     updated.confirmations.confirmScaling.toggle()
+    updated.resourceOperations.defaultDeleteConcurrency = 8
     updated.defaultNamespace = .allNamespaces
     updated.restoreOpenClusterWindows = false
     updated.metricsRefreshSeconds += 5
@@ -311,7 +316,8 @@ import Testing
     let delta = AppPreferencesDelta(previous: previous, updated: updated)
 
     #expect(delta.changes(activated: .immediate) == [
-        .appearance, .logDisplay, .confirmations, .operationHistory, .nodeShell,
+        .appearance, .logDisplay, .confirmations, .resourceOperations,
+        .operationHistory, .nodeShell,
     ])
     #expect(delta.changes(activated: .newWorkspace) == [
         .defaultNamespace, .viewportOverscan,

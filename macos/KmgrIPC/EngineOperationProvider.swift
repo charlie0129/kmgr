@@ -196,7 +196,6 @@ public struct EngineOperationRPC: OperationRPC {
 }
 
 public struct EngineOperationProvider: ResourceOperationProviding {
-    private static let maximumDeleteConcurrency: UInt32 = 16
     private static let maximumSelectionDeletePreview = 64
     private static let maximumUnaryDeleteTargets = 512
     private static let maximumDeleteTargets = 250_000
@@ -976,10 +975,10 @@ public struct EngineOperationProvider: ResourceOperationProviding {
                 operation: operation
             )
         }
-        guard options.maxConcurrency <= maximumDeleteConcurrency else {
+        guard options.maxConcurrency <= ResourceDeleteOptions.maximumMaxConcurrency else {
             throw validationIssue(
                 reason: "InvalidDeleteConcurrency",
-                message: "Delete concurrency must be between 0 and \(maximumDeleteConcurrency).",
+                message: "Delete concurrency must be between 0 and \(ResourceDeleteOptions.maximumMaxConcurrency).",
                 operation: operation
             )
         }

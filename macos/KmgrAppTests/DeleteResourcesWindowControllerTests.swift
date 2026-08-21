@@ -32,6 +32,60 @@ struct DeleteResourcesWindowControllerTests {
         #expect(disclosure.accessibilityLabel() == "Show advanced deletion options")
     }
 
+    @Test("delete confirmation uses the saved default and accepts a per-delete override")
+    func deleteConcurrencyOverride() async throws {
+        let reference = deleteSelectionReference(count: 1)
+        let revision = ResourceSelectionRevision(generation: 7, indexRevision: 11)
+        let provider = TokenDeleteResourcesProvider(
+            preparation: ResourceSelectionDeletePreparation(
+                selection: reference,
+                currentRevision: revision,
+                hiddenCount: 0,
+                expiresAt: Date().addingTimeInterval(300),
+                preview: [ResourceDeleteTarget(identity: deleteIdentity(
+                    name: "api", uid: "api-uid"
+                ))],
+                previewTruncated: false
+            )
+        )
+        let controller = DeleteResourcesWindowController(
+            session: deleteSession(),
+            request: .selection(reference: reference, currentRevision: revision),
+            provider: provider,
+            defaultConcurrency: 7,
+            currentSelectionRevision: { _, revision in revision }
+        )
+        let parent = NSWindow()
+        controller.beginSheet(for: parent)
+        defer { controller.close() }
+
+        try await waitForDeleteWindow {
+            deleteButtons(in: controller).contains { $0.title == "Delete" && $0.isEnabled }
+        }
+        let root = try #require(controller.window?.contentView)
+        let concurrency = try #require(deleteDescendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityIdentifier() == "delete.maxConcurrency" })
+        #expect(concurrency.integerValue == 7)
+        try #require(deleteButtons(in: controller).first {
+            $0.bezelStyle == .disclosure
+        }).performClick(nil)
+        concurrency.stringValue = "17"
+        try #require(deleteButtons(in: controller).first {
+            $0.title == "Delete"
+        }).performClick(nil)
+        #expect(provider.deleteOptions.isEmpty)
+        #expect(deleteStatus(in: controller).contains("between 1 and 16"))
+
+        concurrency.stringValue = "12"
+        try #require(deleteButtons(in: controller).first {
+            $0.title == "Delete"
+        }).performClick(nil)
+
+        try await waitForDeleteWindow { provider.deleteOptions.count == 1 }
+        #expect(provider.deleteOptions.first?.maxConcurrency == 12)
+    }
+
     @Test("confirmation rows identify each exact target hidden by the current filter")
     func hiddenTargetsAreMarkedInTheirRows() throws {
         let visible = deleteIdentity(name: "api", uid: "api-uid")
@@ -583,6 +637,7 @@ private final class TokenDeleteResourcesProvider: ResourceOperationProviding,
     private var storedPreparationPreviewLimits: [Int] = []
     private var storedPreparationRevisions: [ResourceSelectionRevision] = []
     private var storedDeleteSelections: [ResourceSelectionDeleteReference] = []
+    private var storedDeleteOptions: [ResourceDeleteOptions] = []
 
     init(
         preparation: ResourceSelectionDeletePreparation,
@@ -610,6 +665,10 @@ private final class TokenDeleteResourcesProvider: ResourceOperationProviding,
         lock.withLock { storedDeleteSelections }
     }
 
+    var deleteOptions: [ResourceDeleteOptions] {
+        lock.withLock { storedDeleteOptions }
+    }
+
     func prepareDeleteSelection(
         selection: ResourceSelectionDeleteReference,
         currentRevision: ResourceSelectionRevision,
@@ -629,7 +688,10 @@ private final class TokenDeleteResourcesProvider: ResourceOperationProviding,
         selection: ResourceSelectionDeleteReference,
         options: ResourceDeleteOptions
     ) async throws -> AsyncThrowingStream<OperationProgress, Error> {
-        lock.withLock { storedDeleteSelections.append(selection) }
+        lock.withLock {
+            storedDeleteSelections.append(selection)
+            storedDeleteOptions.append(options)
+        }
         return AsyncThrowingStream { continuation in
             for value in progress { continuation.yield(value) }
             if let progressError {
