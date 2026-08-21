@@ -675,7 +675,7 @@ struct ObjectDetailYAMLPresentationTests {
         controller.viewDidAppear()
         defer {
             controller.stop()
-            window.close()
+            window.orderOut(nil)
         }
 
         let scroll = try #require(descendants(of: controller.view)
