@@ -59,6 +59,29 @@ import Testing
 }
 
 @MainActor
+@Test func terminationSnapshotPrunesEveryClosedWindowAndPreservesContextState() throws {
+    let storage = try restorationDefaults()
+    defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
+    let store = WorkspaceRestorationStore(defaults: storage.defaults)
+    let records = [
+        ClusterWindowRestorationRecord(id: "window-a", contextName: "a"),
+        ClusterWindowRestorationRecord(id: "window-b", contextName: "b"),
+        ClusterWindowRestorationRecord(id: "window-c", contextName: "c"),
+    ]
+    for record in records { try store.activate(record) }
+
+    try store.retainOpenWindows(withIDs: [records[1].id])
+    #expect(store.windows == [records[1]])
+    #expect(store.lastStates.count == records.count)
+    #expect(WorkspaceRestorationStore(defaults: storage.defaults).windows == [records[1]])
+
+    try store.retainOpenWindows(withIDs: [])
+    #expect(store.windows.isEmpty)
+    #expect(store.lastStates.count == records.count)
+    #expect(WorkspaceRestorationStore(defaults: storage.defaults).windows.isEmpty)
+}
+
+@MainActor
 @Test func activeWindowIsLastInTheDurableRestoreOrder() throws {
     let storage = try restorationDefaults()
     defer { storage.defaults.removePersistentDomain(forName: storage.suite) }

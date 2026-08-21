@@ -50,6 +50,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var logWindowControllers: [ObjectIdentifier: LogWindowController] = [:]
     private var terminalWindowControllers: [ObjectIdentifier: TerminalWindowController] = [:]
     private var isTerminating = false
+    private var isAutoTerminatingAfterLastWindowClosed = false
     private var terminationTask: Task<Void, Never>?
 
     override init() {
@@ -261,7 +262,22 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        !portForwardCoordinator.hasActiveForwards
+        guard !portForwardCoordinator.hasActiveForwards else { return false }
+        // AppKit may ask to terminate before the last window's
+        // `windowWillClose` callback has removed its restoration record. Keep
+        // this fact for the final snapshot so Cmd-W on every workspace means
+        // an explicitly empty restore set.
+        if !isTerminating {
+            isAutoTerminatingAfterLastWindowClosed = true
+            // The delegate can run on either side of the final
+            // `windowWillClose` callback. Clear now so a late termination
+            // snapshot cannot preserve controllers that are already gone.
+            try? restorationStore.removeAllOpenWindows()
+            workspaceControllers.values.forEach {
+                $0.onRestorationCheckpoint = nil
+            }
+        }
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -286,6 +302,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             alert.addButton(withTitle: "Stop and Quit")
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else {
+                isAutoTerminatingAfterLastWindowClosed = false
                 return .terminateCancel
             }
         }
@@ -403,6 +420,10 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         initialWindowFrameSize: ClusterWorkspaceWindowSize? = nil,
         startsAuthenticated: Bool = true
     ) -> ClusterWorkspaceWindowController {
+        // A newly opened workspace supersedes any stale last-window-close
+        // notification that may have been delivered before AppKit finished
+        // its termination decision.
+        isAutoTerminatingAfterLastWindowClosed = false
         let controller = ClusterWorkspaceWindowController(
             session: session,
             provider: workspaceResourceProvider,
@@ -453,8 +474,12 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         )
         let identifier = ObjectIdentifier(controller)
         workspaceControllers[identifier] = controller
-        controller.onClose = { [weak self] in
-            guard let self else { return }
+        controller.onClose = { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            // A closed controller can still receive trailing AppKit or model
+            // callbacks during teardown. Disarm persistence before removing
+            // its record so those callbacks cannot resurrect the window.
+            controller.onRestorationCheckpoint = nil
             if !isTerminating {
                 try? restorationStore.remove(id: restoration.id)
             }
@@ -555,14 +580,30 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     private func checkpointWorkspaceStateForTermination() {
-        let active = activeWorkspaceController
-        for controller in workspaceControllers.values {
-            if controller === active {
-                _ = controller.checkpointActiveWorkspace()
-            } else {
-                controller.checkpointRestoration()
+        let controllers = Array(workspaceControllers.values)
+        let openControllers = isAutoTerminatingAfterLastWindowClosed
+            ? []
+            : controllers.filter(\.isOpenForRestoration)
+        if !openControllers.isEmpty {
+            let active = activeWorkspaceController
+            for controller in openControllers {
+                if controller === active {
+                    _ = controller.checkpointActiveWorkspace()
+                } else {
+                    controller.checkpointRestoration()
+                }
             }
         }
+        // Per-window checkpoints update navigation state. This final prune is
+        // the authoritative open-window snapshot and clears records left by
+        // any delayed callback from a controller the user already closed.
+        let openWindowIDs = Set(openControllers.map(\.restorationIdentifier))
+        try? restorationStore.retainOpenWindows(withIDs: openWindowIDs)
+        // `applicationWillTerminate` can be delivered without a preceding
+        // asynchronous termination handshake (for example, during a direct
+        // test or an AppKit shutdown path). Disarm callbacks here as well as
+        // in each controller's normal termination preparation.
+        controllers.forEach { $0.onRestorationCheckpoint = nil }
     }
 
     private var activeWorkspaceController: ClusterWorkspaceWindowController? {

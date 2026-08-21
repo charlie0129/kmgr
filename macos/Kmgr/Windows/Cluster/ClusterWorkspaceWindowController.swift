@@ -137,7 +137,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var resourceMutationController: ResourceMutationWindowController?
     private var yamlSnapshotWindowControllers: [ResourceUID: YAMLSnapshotWindowController] = [:]
     private var didStartWorkspace = false
+    private var isClosing = false
     private var windowSizeCheckpointTask: Task<Void, Never>?
+
+    var restorationIdentifier: String { restoration.id }
+    var isOpenForRestoration: Bool { !isClosing }
 
     init(
         session: OpenedClusterSession,
@@ -292,7 +296,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             self?.showResourceMutation(identity, mutation: mutation)
         }
         workspaceController.onRestorationChanged = { [weak self] state in
-            guard let self else { return }
+            guard let self, !isClosing else { return }
             self.restoration.state = state
             self.onRestorationCheckpoint?(self.restoration)
         }
@@ -387,12 +391,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        guard didStartWorkspace else { return }
+        guard didStartWorkspace, !isClosing else { return }
         _ = checkpointActiveWorkspace()
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard didStartWorkspace else { return }
+        guard didStartWorkspace, !isClosing else { return }
         _ = checkpointActiveWorkspace()
     }
 
@@ -446,6 +450,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     /// state, or issuing one CloseSession RPC per workspace. AppKit keeps the
     /// windows alive until asynchronous application termination is approved.
     func prepareForTermination() {
+        // The final application snapshot has already been taken before this
+        // method runs. AppKit may deliver window/model callbacks while the
+        // asynchronous termination handshake is in flight; none of those
+        // callbacks may write a new restore record after the snapshot prune.
+        onRestorationCheckpoint = nil
         windowSizeCheckpointTask?.cancel()
         windowSizeCheckpointTask = nil
         logOpenRevision &+= 1
@@ -461,6 +470,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     }
 
     func windowWillClose(_ notification: Notification) {
+        guard !isClosing else { return }
+        isClosing = true
         _ = checkpointActiveWorkspace()
         prepareForTermination()
         let yamlWindows = Array(yamlSnapshotWindowControllers.values)

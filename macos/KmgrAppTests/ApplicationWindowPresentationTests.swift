@@ -541,6 +541,47 @@ struct ApplicationWindowPresentationTests {
         controller.close()
     }
 
+    @Test("closed workspace ignores trailing restoration callbacks")
+    func closedWorkspaceCannotRecreateItsRestoreRecord() throws {
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-closed-workspace-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+        let controller = makeColumnPropagationWorkspace(
+            session: bookmarkSession(),
+            provider: BookmarkStalledWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restorationState: bookmarkState(filter: "name:closed")
+        )
+        let window = try #require(controller.window)
+        var checkpoints: [ClusterWindowRestorationRecord] = []
+        controller.onRestorationCheckpoint = { checkpoints.append($0) }
+        controller.showWindow(nil)
+        checkpoints.removeAll(keepingCapacity: true)
+        #expect(controller.isOpenForRestoration)
+
+        controller.windowWillClose(Notification(
+            name: NSWindow.willCloseNotification,
+            object: window
+        ))
+        #expect(checkpoints.count == 1)
+        #expect(!controller.isOpenForRestoration)
+
+        controller.windowDidResignKey(Notification(
+            name: NSWindow.didResignKeyNotification,
+            object: window
+        ))
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        #expect(checkpoints.count == 1)
+
+        controller.onRestorationCheckpoint = nil
+        window.delegate = nil
+        controller.close()
+    }
+
     private func policy(
         terminating: Bool = false,
         workspaces: Int = 0,

@@ -167,6 +167,21 @@ public final class WorkspaceRestorationStore {
         )
     }
 
+    /// Removes records that are no longer owned by a live workspace window.
+    /// The application calls this after checkpointing every live controller at
+    /// termination so delayed callbacks from already-closed windows cannot
+    /// resurrect an older launch's restore set. Existing order is preserved,
+    /// including the active window's final position.
+    public func retainOpenWindows(withIDs openWindowIDs: Set<String>) throws {
+        if loadIssue != nil {
+            reset()
+            return
+        }
+        let retainedWindows = windows.filter { openWindowIDs.contains($0.id) }
+        guard retainedWindows.map(\.id) != windows.map(\.id) else { return }
+        try persist(windows: retainedWindows, lastStates: lastStates)
+    }
+
     /// Consumes only the prior process's open-window set when automatic
     /// restoration is disabled. Last context states remain useful for new
     /// windows opened explicitly later.
