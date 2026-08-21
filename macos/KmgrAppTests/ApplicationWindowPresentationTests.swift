@@ -423,6 +423,61 @@ struct ApplicationWindowPresentationTests {
         }
     }
 
+    @Test("pre-presentation activation cannot erase saved navigation")
+    func activationBeforePresentationDoesNotCheckpointEmptyDefaults() async throws {
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-pre-presentation-activation-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+        let provider = BookmarkNavigationWorkspaceProvider()
+        let expected = ClusterWindowRestorationState(
+            contextName: "shared",
+            contextReference: bookmarkSession().contextReference,
+            gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
+            namespaceScope: .namespace("team-a"),
+            filter: "name:remembered"
+        )
+        let controller = makeColumnPropagationWorkspace(
+            session: bookmarkSession(),
+            provider: provider,
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restorationState: expected
+        )
+        let window = try #require(controller.window)
+        var checkpoints: [ClusterWindowRestorationRecord] = []
+        controller.onRestorationCheckpoint = { checkpoints.append($0) }
+
+        // This models the AppKit notification that a real application window
+        // can deliver synchronously while it is first being presented.
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
+        controller.windowDidResignKey(Notification(
+            name: NSWindow.didResignKeyNotification,
+            object: window
+        ))
+        #expect(checkpoints.isEmpty)
+
+        controller.showWindow(nil)
+        defer {
+            controller.onRestorationCheckpoint = nil
+            controller.close()
+        }
+        try await waitForBookmarkCondition {
+            provider.streamRequests.last.map {
+                $0.resource.id == "apps/v1/deployments"
+                    && !$0.allNamespaces
+                    && $0.namespaces == ["team-a"]
+                    && $0.filterExpression == "name:remembered"
+            } == true
+        }
+        let liveState = controller.checkpointActiveWorkspace()
+        #expect(liveState.gvr == expected.gvr)
+        #expect(liveState.namespaceScope == expected.namespaceScope)
+        #expect(liveState.filter == expected.filter)
+    }
+
     @Test("activation checkpoints exact context and global size changes debounce")
     func activationAndWindowSizeCheckpointPolicy() async throws {
         let columnsDirectory = FileManager.default.temporaryDirectory
@@ -437,10 +492,8 @@ struct ApplicationWindowPresentationTests {
         )
         let window = try #require(controller.window)
         var checkpoints: [ClusterWindowRestorationRecord] = []
-        var activationCount = 0
         var sizeCheckpoints: [ClusterWorkspaceWindowSize] = []
         controller.onRestorationCheckpoint = { checkpoints.append($0) }
-        controller.onWorkspaceActivated = { activationCount += 1 }
         controller.onWindowSizeCheckpoint = { sizeCheckpoints.append($0) }
         controller.showWindow(nil)
         window.orderOut(nil)
@@ -454,7 +507,6 @@ struct ApplicationWindowPresentationTests {
         #expect(checkpoints.count == 1)
         #expect(checkpoints.first?.state.contextReference == bookmarkSession().contextReference)
         #expect(checkpoints.first?.state.filter == "name:active")
-        #expect(activationCount == 1)
         #expect(sizeCheckpoints.count == 1)
 
         controller.windowDidResignKey(Notification(
@@ -462,7 +514,6 @@ struct ApplicationWindowPresentationTests {
             object: window
         ))
         #expect(checkpoints.last?.state.filter == "name:active")
-        #expect(activationCount == 1)
 
         sizeCheckpoints.removeAll(keepingCapacity: true)
         controller.windowDidResize(Notification(
@@ -479,7 +530,6 @@ struct ApplicationWindowPresentationTests {
         #expect(abs((sizeCheckpoints.last?.height ?? 0) - window.frame.height) < 0.5)
 
         controller.onRestorationCheckpoint = nil
-        controller.onWorkspaceActivated = nil
         controller.onWindowSizeCheckpoint = nil
         controller.close()
     }

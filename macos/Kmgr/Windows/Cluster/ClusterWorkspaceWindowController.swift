@@ -99,7 +99,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onOpenLogWindow: ((LogWindowController) -> Void)?
     var onOpenTerminalWindow: ((TerminalWindowController) -> Void)?
     var onRestorationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
-    var onWorkspaceActivated: (() -> Void)?
     var onWindowSizeCheckpoint: ((ClusterWorkspaceWindowSize) -> Void)?
     var contextualShortcutsDidChange: (() -> Void)?
 
@@ -308,13 +307,19 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     }
 
     override func showWindow(_ sender: Any?) {
+        if !didStartWorkspace {
+            // Install the restoration handoff before AppKit can make the
+            // window key. `showWindow` may synchronously emit
+            // `windowDidBecomeKey`; checkpointing before `start` would read
+            // the resource controller's empty defaults and destroy the saved
+            // resource, namespace, and filter before discovery can apply them.
+            didStartWorkspace = true
+            workspaceController.start(
+                restoring: restoration.state,
+                connectsImmediately: isAuthenticated
+            )
+        }
         super.showWindow(sender)
-        guard !didStartWorkspace else { return }
-        didStartWorkspace = true
-        workspaceController.start(
-            restoring: restoration.state,
-            connectsImmediately: isAuthenticated
-        )
     }
 
     /// Keep the last rendered view visible while the shared helper is down.
@@ -382,11 +387,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        onWorkspaceActivated?()
+        guard didStartWorkspace else { return }
         _ = checkpointActiveWorkspace()
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        guard didStartWorkspace else { return }
         _ = checkpointActiveWorkspace()
     }
 

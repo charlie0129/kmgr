@@ -9,7 +9,6 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let logger = Logger(subsystem: Product.bundleIdentifier, category: "application")
     private var chooserControllers: [ObjectIdentifier: ClusterManagerWindowController] = [:]
     private var workspaceControllers: [ObjectIdentifier: ClusterWorkspaceWindowController] = [:]
-    private weak var lastActiveWorkspaceController: ClusterWorkspaceWindowController?
     private var columnsManagerControllers: [ObjectIdentifier: ColumnsManagerWindowController] = [:]
     private let clusterContextProvider: any ClusterContextProviding
     private let workspaceResourceProvider: any WorkspaceResourceProviding
@@ -358,8 +357,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func showClusterManager() {
         // Every Command-N starts a fresh chooser so the user can open several
         // independent workspaces, including the same context more than once.
-        let activeWorkspace = activeWorkspaceController
-        let newWindowSeed = activeWorkspace?.checkpointActiveWorkspace()
+        // Flush a live editor before opening the chooser. The restoration
+        // store remains the single source used after the user picks a context.
+        _ = activeWorkspaceController?.checkpointActiveWorkspace()
         let initialNotice = pendingRestorationNotice
         pendingRestorationNotice = nil
         let controller = ClusterManagerWindowController(
@@ -373,19 +373,12 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let self else { return }
             let initialNamespace = preferencesStore.current.defaultNamespace
                 .initialSelection(contextDefaultNamespace: session.defaultNamespace)
-            var initialState: ClusterWindowRestorationState
-            if let newWindowSeed,
-                newWindowSeed.contextReference == session.contextReference
-            {
-                initialState = newWindowSeed
-            } else {
-                initialState = restorationStore.lastState(for: session.contextReference)
-                    ?? ClusterWindowRestorationState(
-                        contextName: session.contextName,
-                        contextReference: session.contextReference,
-                        namespaceScope: NamespaceScope(initialNamespace)
-                    )
-            }
+            var initialState = restorationStore.lastState(for: session.contextReference)
+                ?? ClusterWindowRestorationState(
+                    contextName: session.contextName,
+                    contextReference: session.contextReference,
+                    namespaceScope: NamespaceScope(initialNamespace)
+                )
             // The opaque reference is the identity. The display name may have
             // changed in the kubeconfig since this state was recorded.
             initialState.contextName = session.contextName
@@ -460,11 +453,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         )
         let identifier = ObjectIdentifier(controller)
         workspaceControllers[identifier] = controller
-        controller.onClose = { [weak self, weak controller] in
+        controller.onClose = { [weak self] in
             guard let self else { return }
-            if lastActiveWorkspaceController === controller {
-                lastActiveWorkspaceController = nil
-            }
             if !isTerminating {
                 try? restorationStore.remove(id: restoration.id)
             }
@@ -497,9 +487,6 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let self, let controller else { return }
             self.showColumns(request, for: controller)
         }
-        controller.onWorkspaceActivated = { [weak self, weak controller] in
-            self?.lastActiveWorkspaceController = controller
-        }
         controller.onRestorationCheckpoint = { [weak self, weak controller] record in
             guard let self, let controller else { return }
             if activeWorkspaceController === controller {
@@ -514,7 +501,6 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         try? restorationStore.upsert(restoration)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
-        lastActiveWorkspaceController = controller
         return controller
     }
 
@@ -580,10 +566,20 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     private var activeWorkspaceController: ClusterWorkspaceWindowController? {
-        let keyWindow = NSApp.keyWindow
-        return workspaceControllers.values.first {
-            $0.window === keyWindow || keyWindow?.parent === $0.window
-        } ?? lastActiveWorkspaceController
+        // AppKit's front-to-back order remains authoritative when a chooser,
+        // sheet, or auxiliary window temporarily owns key status. This avoids
+        // maintaining a second, stale-prone notion of the active workspace.
+        var orderedWindows: [NSWindow] = []
+        if let keyWindow = NSApp.keyWindow { orderedWindows.append(keyWindow) }
+        orderedWindows.append(contentsOf: NSApp.orderedWindows)
+        for window in orderedWindows {
+            if let controller = workspaceControllers.values.first(where: {
+                $0.window === window || window.parent === $0.window
+            }) {
+                return controller
+            }
+        }
+        return nil
     }
 
     private func retainAndShow(_ controller: LogWindowController) {

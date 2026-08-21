@@ -139,7 +139,9 @@ struct ClusterWorkspaceToolbarTests {
         )
 
         try await waitUntil {
-            provider.finishedDiscoveryCount == 1 && provider.streamRequests.count == 1
+            provider.finishedDiscoveryCount == 1
+                && provider.streamRequests.count == 1
+                && controller.validateMenuItem(refreshItem)
         }
         #expect(controller.validateMenuItem(refreshItem))
         controller.refreshAPIResources(nil)
