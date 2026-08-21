@@ -20,7 +20,12 @@ struct ResourceViewRangeCacheTests {
         #expect(ResourceViewViewportPlanner.retainedRange(
             visibleRows: 1_000..<1_800,
             rowsVisible: 10_000
-        ) == 1_000..<1_512)
+        ) == 0..<8_192)
+
+        #expect(ResourceViewViewportPlanner.retainedRange(
+            visibleRows: 1_000..<1_040,
+            rowsVisible: 10_000
+        ) == 600..<1_440)
     }
 
     @Test("bounds retention and fetches only the current sparse window")
@@ -235,7 +240,9 @@ struct ResourceViewRangeCacheTests {
         #expect(cache.metricInterest == nil)
     }
 
-    private func makeCache(maximumCachedRows: Int = 512) -> ResourceViewRangeCache {
+    private func makeCache(
+        maximumCachedRows: Int = ResourceViewInvalidation.maximumRetainedRowCount
+    ) -> ResourceViewRangeCache {
         ResourceViewRangeCache(
             sessionID: "session",
             viewID: "view",

@@ -16,15 +16,14 @@ public enum ResourceViewRangeReception: Hashable, Sendable {
 
 /// Plans one bounded table window from AppKit's absolute visible row indexes.
 /// The retained range includes a configurable number of viewports before and
-/// after the visible rows, while always respecting the
-/// protocol's hard cache bound.
+/// after the visible rows, while preserving bounded per-view memory.
 public enum ResourceViewViewportPlanner {
     public static let defaultOverscanScreensPerSide = 10
 
     public static func retainedRange(
         visibleRows: Range<UInt64>,
         rowsVisible: UInt64,
-        maximumRows: Int = ResourceViewInvalidation.protocolMaximumRangeLength,
+        maximumRows: Int = ResourceViewInvalidation.maximumRetainedRowCount,
         overscanScreensPerSide: Int = defaultOverscanScreensPerSide
     ) -> Range<UInt64> {
         guard rowsVisible > 0, maximumRows > 0 else { return 0..<0 }
@@ -88,7 +87,7 @@ public struct ResourceViewRangeCache: Sendable {
         sessionID: String,
         viewID: String,
         generation: UInt64,
-        maximumCachedRows: Int = ResourceViewInvalidation.protocolMaximumRangeLength
+        maximumCachedRows: Int = ResourceViewInvalidation.maximumRetainedRowCount
     ) {
         precondition(!sessionID.isEmpty)
         precondition(!viewID.isEmpty)

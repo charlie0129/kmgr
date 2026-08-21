@@ -214,7 +214,13 @@ public struct ResourceViewRevision: Hashable, Sendable {
 /// Announces a revision-pinned backend presentation without transporting its
 /// complete rows or UID order. Repeated identical revisions carry hints only.
 public struct ResourceViewInvalidation: Hashable, Sendable {
+    /// One FetchViewRange response remains deliberately small so viewport
+    /// retention can be filled by bounded IPC messages.
     public static let protocolMaximumRangeLength = 512
+    /// Client-side retention may span several bounded range responses. This
+    /// ceiling prevents an extreme viewport/overscan combination from
+    /// retaining an unbounded projected-row window.
+    public static let maximumRetainedRowCount = 8_192
 
     public var presentationRevision: UInt64
     public var indexRevision: UInt64
@@ -333,7 +339,7 @@ public struct ResourceMetricInterestRequest: Hashable, Sendable {
     public var hasValidRange: Bool {
         generation > 0
             && indexRevision > 0
-            && (1...ResourceViewInvalidation.protocolMaximumRangeLength).contains(length)
+            && (1...ResourceViewInvalidation.maximumRetainedRowCount).contains(length)
     }
 }
 

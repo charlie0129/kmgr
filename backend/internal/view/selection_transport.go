@@ -155,7 +155,7 @@ func (r *Runtime) ProjectSelectionRange(
 			ErrInvalidViewRange,
 		)
 	}
-	if err := validateRangeLength(length); err != nil {
+	if err := validateRetentionLength(length); err != nil {
 		return SelectionRangeProjection{}, err
 	}
 

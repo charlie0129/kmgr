@@ -3,6 +3,7 @@ package view
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
@@ -136,6 +137,24 @@ func TestUpdateMetricInterestPinsIndexRevisionAndBounds(t *testing.T) {
 	}
 	if err := runtime.UpdateMetricInterest("session", "view", 7, 2, 0, 0); !errors.Is(err, ErrInvalidViewRange) {
 		t.Fatalf("zero length error = %v", err)
+	}
+}
+
+func TestViewportRetentionCanSpanMultipleFetchRanges(t *testing.T) {
+	uids := make([]string, DefaultViewRangeLength+1)
+	for index := range uids {
+		uids[index] = fmt.Sprintf("uid-%d", index)
+	}
+	runtime, _ := rangeTestRuntime("session", "view", 7, uids...)
+	if err := runtime.UpdateMetricInterest(
+		"session", "view", 7, 2, 0, DefaultViewRangeLength+1,
+	); err != nil {
+		t.Fatalf("retention spanning fetch ranges: %v", err)
+	}
+	if err := runtime.UpdateMetricInterest(
+		"session", "view", 7, 2, 0, DefaultViewRetentionLength+1,
+	); !errors.Is(err, ErrInvalidViewRange) {
+		t.Fatalf("oversized retention error = %v, want %v", err, ErrInvalidViewRange)
 	}
 }
 

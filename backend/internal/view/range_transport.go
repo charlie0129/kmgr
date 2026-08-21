@@ -9,7 +9,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-const DefaultViewRangeLength = 512
+const (
+	DefaultViewRangeLength     = 512
+	DefaultViewRetentionLength = 8_192
+)
 
 var (
 	ErrViewNotFound        = errors.New("resource view was not found")
@@ -106,7 +109,7 @@ func (r *Runtime) UpdateMetricInterest(
 		generation == 0 || indexRevision == 0 {
 		return fmt.Errorf("%w: session, view, generation, and index revision are required", ErrInvalidViewRange)
 	}
-	if err := validateRangeLength(length); err != nil {
+	if err := validateRetentionLength(length); err != nil {
 		return err
 	}
 	subscription, err := r.lockActiveSubscription(sessionID, viewID, generation)
@@ -144,6 +147,15 @@ func validateRangeLength(length uint32) error {
 	if length == 0 || length > DefaultViewRangeLength {
 		return fmt.Errorf(
 			"%w: length must be between 1 and %d", ErrInvalidViewRange, DefaultViewRangeLength,
+		)
+	}
+	return nil
+}
+
+func validateRetentionLength(length uint32) error {
+	if length == 0 || length > DefaultViewRetentionLength {
+		return fmt.Errorf(
+			"%w: length must be between 1 and %d", ErrInvalidViewRange, DefaultViewRetentionLength,
 		)
 	}
 	return nil

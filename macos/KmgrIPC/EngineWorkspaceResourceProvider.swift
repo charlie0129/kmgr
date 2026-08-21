@@ -599,12 +599,12 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
                 indexRevision: indexRevision,
                 operation: "project resource selection range"
             )
-            guard (1...ResourceViewInvalidation.protocolMaximumRangeLength)
+            guard (1...ResourceViewInvalidation.maximumRetainedRowCount)
                 .contains(length)
             else {
                 throw Self.validationIssue(
                     reason: "InvalidSelectionProjectionRange",
-                    message: "A projection length from 1 through 512 is required.",
+                    message: "A projection length from 1 through \(ResourceViewInvalidation.maximumRetainedRowCount) is required.",
                     operation: "project resource selection range"
                 )
             }
@@ -983,7 +983,7 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         else {
             throw validationIssue(
                 reason: "InvalidMetricInterest",
-                message: "A session, view, nonzero revisions, and a viewport length from 1 through 512 are required.",
+                message: "A session, view, nonzero revisions, and a viewport length from 1 through \(ResourceViewInvalidation.maximumRetainedRowCount) are required.",
                 operation: "update metric interest"
             )
         }
