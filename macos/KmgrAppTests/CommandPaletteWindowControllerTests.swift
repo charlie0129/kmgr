@@ -89,6 +89,7 @@ struct CommandPaletteWindowControllerTests {
 
         let searchFrame = root.convert(search.bounds, from: search)
         let closeFrame = root.convert(closeButton.bounds, from: closeButton)
+        #expect(search.frame.height == 40)
         #expect(!searchFrame.intersects(closeFrame))
     }
 

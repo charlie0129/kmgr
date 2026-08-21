@@ -371,7 +371,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
                 equalTo: root.safeAreaLayoutGuide.topAnchor,
                 constant: 12
             ),
-            searchField.heightAnchor.constraint(equalToConstant: 34),
+            searchField.heightAnchor.constraint(equalToConstant: 40),
             scopeLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
             scopeLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
             scopeLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 5),
