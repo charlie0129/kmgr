@@ -78,7 +78,7 @@ struct ClusterManagerWindowControllerTests {
         let iconAlignment = icon.alignmentRect(forFrame: icon.frame)
         let titleAlignment = title.alignmentRect(forFrame: title.frame)
 
-        #expect(abs(iconAlignment.minY - titleAlignment.maxY - stack.spacing) < 0.5)
+        #expect(abs(iconAlignment.minY - titleAlignment.maxY - 16) < 0.5)
     }
 
     @Test("loaded context list collapses the hidden issue region")

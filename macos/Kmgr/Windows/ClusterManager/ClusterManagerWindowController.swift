@@ -1047,6 +1047,7 @@ private final class ClusterManagerViewController: NSViewController,
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 7
+        stack.setCustomSpacing(16, after: stateImageView)
         stack.translatesAutoresizingMaskIntoConstraints = false
         stateView.addSubview(stack)
         NSLayoutConstraint.activate([
