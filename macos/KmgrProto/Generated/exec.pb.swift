@@ -8,7 +8,11 @@
 // For information on using the generated types, please see the documentation:
 //   https://github.com/apple/swift-protobuf/
 
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 import SwiftProtobuf
 
 // If the compiler emits an error on this type, it is because this file
@@ -16,12 +20,12 @@ import SwiftProtobuf
 // incompatible with the version of SwiftProtobuf to which you are linking.
 // Please ensure that you are building against the same version of the API
 // that was used to generate this file.
-fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
+fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
   struct _2: SwiftProtobuf.ProtobufAPIVersion_2 {}
   typealias Version = _2
 }
 
-public enum Kmgr_V1_ExecConnectionState: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_ExecConnectionState: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case connecting // = 1
@@ -71,75 +75,75 @@ public enum Kmgr_V1_ExecConnectionState: SwiftProtobuf.Enum, Swift.CaseIterable 
 
 }
 
-public struct Kmgr_V1_ExecStart: @unchecked Sendable {
+public nonisolated struct Kmgr_V1_ExecStart: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _storage._context ?? Kmgr_V1_RequestContext()}
+    get {_storage._context ?? Kmgr_V1_RequestContext()}
     set {_uniqueStorage()._context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return _storage._context != nil}
+  public var hasContext: Bool {_storage._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {_uniqueStorage()._context = nil}
 
   public var execSessionID: String {
-    get {return _storage._execSessionID}
+    get {_storage._execSessionID}
     set {_uniqueStorage()._execSessionID = newValue}
   }
 
   public var generation: UInt64 {
-    get {return _storage._generation}
+    get {_storage._generation}
     set {_uniqueStorage()._generation = newValue}
   }
 
   public var pod: Kmgr_V1_ResourceIdentity {
-    get {return _storage._pod ?? Kmgr_V1_ResourceIdentity()}
+    get {_storage._pod ?? Kmgr_V1_ResourceIdentity()}
     set {_uniqueStorage()._pod = newValue}
   }
   /// Returns true if `pod` has been explicitly set.
-  public var hasPod: Bool {return _storage._pod != nil}
+  public var hasPod: Bool {_storage._pod != nil}
   /// Clears the value of `pod`. Subsequent reads from it will return its default value.
   public mutating func clearPod() {_uniqueStorage()._pod = nil}
 
   public var container: String {
-    get {return _storage._container}
+    get {_storage._container}
     set {_uniqueStorage()._container = newValue}
   }
 
   public var command: [String] {
-    get {return _storage._command}
+    get {_storage._command}
     set {_uniqueStorage()._command = newValue}
   }
 
   public var tty: Bool {
-    get {return _storage._tty}
+    get {_storage._tty}
     set {_uniqueStorage()._tty = newValue}
   }
 
   public var stdin: Bool {
-    get {return _storage._stdin}
+    get {_storage._stdin}
     set {_uniqueStorage()._stdin = newValue}
   }
 
   public var initialColumns: UInt32 {
-    get {return _storage._initialColumns}
+    get {_storage._initialColumns}
     set {_uniqueStorage()._initialColumns = newValue}
   }
 
   public var initialRows: UInt32 {
-    get {return _storage._initialRows}
+    get {_storage._initialRows}
     set {_uniqueStorage()._initialRows = newValue}
   }
 
   public var nodeShell: Kmgr_V1_NodeShellStart {
-    get {return _storage._nodeShell ?? Kmgr_V1_NodeShellStart()}
+    get {_storage._nodeShell ?? Kmgr_V1_NodeShellStart()}
     set {_uniqueStorage()._nodeShell = newValue}
   }
   /// Returns true if `nodeShell` has been explicitly set.
-  public var hasNodeShell: Bool {return _storage._nodeShell != nil}
+  public var hasNodeShell: Bool {_storage._nodeShell != nil}
   /// Clears the value of `nodeShell`. Subsequent reads from it will return its default value.
   public mutating func clearNodeShell() {_uniqueStorage()._nodeShell = nil}
 
@@ -150,17 +154,17 @@ public struct Kmgr_V1_ExecStart: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-public struct Kmgr_V1_NodeShellStart: Sendable {
+public nonisolated struct Kmgr_V1_NodeShellStart: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var node: Kmgr_V1_ResourceIdentity {
-    get {return _node ?? Kmgr_V1_ResourceIdentity()}
+    get {_node ?? Kmgr_V1_ResourceIdentity()}
     set {_node = newValue}
   }
   /// Returns true if `node` has been explicitly set.
-  public var hasNode: Bool {return self._node != nil}
+  public var hasNode: Bool {self._node != nil}
   /// Clears the value of `node`. Subsequent reads from it will return its default value.
   public mutating func clearNode() {self._node = nil}
 
@@ -175,7 +179,7 @@ public struct Kmgr_V1_NodeShellStart: Sendable {
   fileprivate var _node: Kmgr_V1_ResourceIdentity? = nil
 }
 
-public struct Kmgr_V1_TerminalResize: Sendable {
+public nonisolated struct Kmgr_V1_TerminalResize: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -189,7 +193,7 @@ public struct Kmgr_V1_TerminalResize: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_ExecClientMessage: Sendable {
+public nonisolated struct Kmgr_V1_ExecClientMessage: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -244,7 +248,7 @@ public struct Kmgr_V1_ExecClientMessage: Sendable {
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  public enum OneOf_Payload: Equatable, Sendable {
+  public nonisolated enum OneOf_Payload: Equatable, Sendable {
     case start(Kmgr_V1_ExecStart)
     case stdin(Data)
     case resize(Kmgr_V1_TerminalResize)
@@ -256,7 +260,7 @@ public struct Kmgr_V1_ExecClientMessage: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_ExecStatus: Sendable {
+public nonisolated struct Kmgr_V1_ExecStatus: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -264,22 +268,22 @@ public struct Kmgr_V1_ExecStatus: Sendable {
   public var state: Kmgr_V1_ExecConnectionState = .unspecified
 
   public var exitCode: Int32 {
-    get {return _exitCode ?? 0}
+    get {_exitCode ?? 0}
     set {_exitCode = newValue}
   }
   /// Returns true if `exitCode` has been explicitly set.
-  public var hasExitCode: Bool {return self._exitCode != nil}
+  public var hasExitCode: Bool {self._exitCode != nil}
   /// Clears the value of `exitCode`. Subsequent reads from it will return its default value.
   public mutating func clearExitCode() {self._exitCode = nil}
 
   public var statusReason: String = String()
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -295,17 +299,17 @@ public struct Kmgr_V1_ExecStatus: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_ExecServerMessage: Sendable {
+public nonisolated struct Kmgr_V1_ExecServerMessage: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var cursor: Kmgr_V1_StreamCursor {
-    get {return _cursor ?? Kmgr_V1_StreamCursor()}
+    get {_cursor ?? Kmgr_V1_StreamCursor()}
     set {_cursor = newValue}
   }
   /// Returns true if `cursor` has been explicitly set.
-  public var hasCursor: Bool {return self._cursor != nil}
+  public var hasCursor: Bool {self._cursor != nil}
   /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
   public mutating func clearCursor() {self._cursor = nil}
 
@@ -345,7 +349,7 @@ public struct Kmgr_V1_ExecServerMessage: Sendable {
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  public enum OneOf_Payload: Equatable, Sendable {
+  public nonisolated enum OneOf_Payload: Equatable, Sendable {
     case stdout(Data)
     case stderr(Data)
     case status(Kmgr_V1_ExecStatus)
@@ -360,13 +364,13 @@ public struct Kmgr_V1_ExecServerMessage: Sendable {
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
-fileprivate let _protobuf_package = "kmgr.v1"
+fileprivate nonisolated let _protobuf_package = "kmgr.v1"
 
-extension Kmgr_V1_ExecConnectionState: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ExecConnectionState: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0EXEC_CONNECTION_STATE_UNSPECIFIED\0\u{1}EXEC_CONNECTION_STATE_CONNECTING\0\u{1}EXEC_CONNECTION_STATE_RUNNING\0\u{1}EXEC_CONNECTION_STATE_EXITED\0\u{1}EXEC_CONNECTION_STATE_CANCELLED\0\u{1}EXEC_CONNECTION_STATE_FAILED\0")
 }
 
-extension Kmgr_V1_ExecStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ExecStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecStart"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}exec_session_id\0\u{1}generation\0\u{1}pod\0\u{1}container\0\u{1}command\0\u{1}tty\0\u{1}stdin\0\u{3}initial_columns\0\u{3}initial_rows\0\u{3}node_shell\0")
 
@@ -506,7 +510,7 @@ extension Kmgr_V1_ExecStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
   }
 }
 
-extension Kmgr_V1_NodeShellStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_NodeShellStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".NodeShellStart"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}node\0\u{1}namespace\0\u{1}image\0")
 
@@ -550,7 +554,7 @@ extension Kmgr_V1_NodeShellStart: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_TerminalResize: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_TerminalResize: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TerminalResize"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}columns\0\u{1}rows\0")
 
@@ -585,7 +589,7 @@ extension Kmgr_V1_TerminalResize: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_ExecClientMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ExecClientMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecClientMessage"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}exec_session_id\0\u{1}generation\0\u{1}sequence\0\u{1}start\0\u{1}stdin\0\u{1}resize\0\u{3}close_stdin\0\u{1}cancel\0")
 
@@ -703,7 +707,7 @@ extension Kmgr_V1_ExecClientMessage: SwiftProtobuf.Message, SwiftProtobuf._Messa
   }
 }
 
-extension Kmgr_V1_ExecStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ExecStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecStatus"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0\u{3}exit_code\0\u{3}status_reason\0\u{1}error\0\u{3}dropped_output_items\0\u{3}dropped_output_bytes\0")
 
@@ -762,7 +766,7 @@ extension Kmgr_V1_ExecStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension Kmgr_V1_ExecServerMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ExecServerMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecServerMessage"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}stdout\0\u{1}stderr\0\u{1}status\0\u{1}error\0")
 

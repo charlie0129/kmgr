@@ -15,12 +15,12 @@ import SwiftProtobuf
 // incompatible with the version of SwiftProtobuf to which you are linking.
 // Please ensure that you are building against the same version of the API
 // that was used to generate this file.
-fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
+fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
   struct _2: SwiftProtobuf.ProtobufAPIVersion_2 {}
   typealias Version = _2
 }
 
-public enum Kmgr_V1_HealthState: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_HealthState: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case starting // = 1
@@ -66,7 +66,7 @@ public enum Kmgr_V1_HealthState: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
-public struct Kmgr_V1_ProtocolVersion: Sendable {
+public nonisolated struct Kmgr_V1_ProtocolVersion: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -80,7 +80,7 @@ public struct Kmgr_V1_ProtocolVersion: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_Capability: Sendable {
+public nonisolated struct Kmgr_V1_Capability: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -94,26 +94,26 @@ public struct Kmgr_V1_Capability: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_HandshakeRequest: Sendable {
+public nonisolated struct Kmgr_V1_HandshakeRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
   public var clientProtocol: Kmgr_V1_ProtocolVersion {
-    get {return _clientProtocol ?? Kmgr_V1_ProtocolVersion()}
+    get {_clientProtocol ?? Kmgr_V1_ProtocolVersion()}
     set {_clientProtocol = newValue}
   }
   /// Returns true if `clientProtocol` has been explicitly set.
-  public var hasClientProtocol: Bool {return self._clientProtocol != nil}
+  public var hasClientProtocol: Bool {self._clientProtocol != nil}
   /// Clears the value of `clientProtocol`. Subsequent reads from it will return its default value.
   public mutating func clearClientProtocol() {self._clientProtocol = nil}
 
@@ -127,7 +127,7 @@ public struct Kmgr_V1_HandshakeRequest: Sendable {
   fileprivate var _clientProtocol: Kmgr_V1_ProtocolVersion? = nil
 }
 
-public struct Kmgr_V1_HandshakeResponse: Sendable {
+public nonisolated struct Kmgr_V1_HandshakeResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -135,11 +135,11 @@ public struct Kmgr_V1_HandshakeResponse: Sendable {
   public var requestID: String = String()
 
   public var negotiatedProtocol: Kmgr_V1_ProtocolVersion {
-    get {return _negotiatedProtocol ?? Kmgr_V1_ProtocolVersion()}
+    get {_negotiatedProtocol ?? Kmgr_V1_ProtocolVersion()}
     set {_negotiatedProtocol = newValue}
   }
   /// Returns true if `negotiatedProtocol` has been explicitly set.
-  public var hasNegotiatedProtocol: Bool {return self._negotiatedProtocol != nil}
+  public var hasNegotiatedProtocol: Bool {self._negotiatedProtocol != nil}
   /// Clears the value of `negotiatedProtocol`. Subsequent reads from it will return its default value.
   public mutating func clearNegotiatedProtocol() {self._negotiatedProtocol = nil}
 
@@ -150,11 +150,11 @@ public struct Kmgr_V1_HandshakeResponse: Sendable {
   public var capabilities: [Kmgr_V1_Capability] = []
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -166,17 +166,17 @@ public struct Kmgr_V1_HandshakeResponse: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_HealthRequest: Sendable {
+public nonisolated struct Kmgr_V1_HealthRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -187,7 +187,7 @@ public struct Kmgr_V1_HealthRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_HealthResponse: Sendable {
+public nonisolated struct Kmgr_V1_HealthResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -199,11 +199,11 @@ public struct Kmgr_V1_HealthResponse: Sendable {
   public var startedAtUnixMs: Int64 = 0
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -214,17 +214,17 @@ public struct Kmgr_V1_HealthResponse: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_WatchHealthRequest: Sendable {
+public nonisolated struct Kmgr_V1_WatchHealthRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -237,28 +237,28 @@ public struct Kmgr_V1_WatchHealthRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_HealthEvent: Sendable {
+public nonisolated struct Kmgr_V1_HealthEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var cursor: Kmgr_V1_StreamCursor {
-    get {return _cursor ?? Kmgr_V1_StreamCursor()}
+    get {_cursor ?? Kmgr_V1_StreamCursor()}
     set {_cursor = newValue}
   }
   /// Returns true if `cursor` has been explicitly set.
-  public var hasCursor: Bool {return self._cursor != nil}
+  public var hasCursor: Bool {self._cursor != nil}
   /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
   public mutating func clearCursor() {self._cursor = nil}
 
   public var state: Kmgr_V1_HealthState = .unspecified
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -270,17 +270,17 @@ public struct Kmgr_V1_HealthEvent: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_ShutdownRequest: Sendable {
+public nonisolated struct Kmgr_V1_ShutdownRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -295,13 +295,13 @@ public struct Kmgr_V1_ShutdownRequest: Sendable {
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
-fileprivate let _protobuf_package = "kmgr.v1"
+fileprivate nonisolated let _protobuf_package = "kmgr.v1"
 
-extension Kmgr_V1_HealthState: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_HealthState: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0HEALTH_STATE_UNSPECIFIED\0\u{1}HEALTH_STATE_STARTING\0\u{1}HEALTH_STATE_READY\0\u{1}HEALTH_STATE_DEGRADED\0\u{1}HEALTH_STATE_STOPPING\0")
 }
 
-extension Kmgr_V1_ProtocolVersion: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ProtocolVersion: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProtocolVersion"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}major\0\u{1}minor\0")
 
@@ -336,7 +336,7 @@ extension Kmgr_V1_ProtocolVersion: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension Kmgr_V1_Capability: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_Capability: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Capability"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}version\0")
 
@@ -371,7 +371,7 @@ extension Kmgr_V1_Capability: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension Kmgr_V1_HandshakeRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_HandshakeRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HandshakeRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}client_protocol\0\u{3}client_version\0")
 
@@ -415,7 +415,7 @@ extension Kmgr_V1_HandshakeRequest: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
-extension Kmgr_V1_HandshakeResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_HandshakeResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HandshakeResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}negotiated_protocol\0\u{3}engine_version\0\u{3}engine_instance_id\0\u{1}capabilities\0\u{1}error\0")
 
@@ -474,7 +474,7 @@ extension Kmgr_V1_HandshakeResponse: SwiftProtobuf.Message, SwiftProtobuf._Messa
   }
 }
 
-extension Kmgr_V1_HealthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_HealthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HealthRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0")
 
@@ -508,7 +508,7 @@ extension Kmgr_V1_HealthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
   }
 }
 
-extension Kmgr_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HealthResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}state\0\u{3}started_at_unix_ms\0\u{1}error\0")
 
@@ -557,7 +557,7 @@ extension Kmgr_V1_HealthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_WatchHealthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_WatchHealthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WatchHealthRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}stream_id\0")
 
@@ -596,7 +596,7 @@ extension Kmgr_V1_WatchHealthRequest: SwiftProtobuf.Message, SwiftProtobuf._Mess
   }
 }
 
-extension Kmgr_V1_HealthEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_HealthEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HealthEvent"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}state\0\u{1}error\0")
 
@@ -640,7 +640,7 @@ extension Kmgr_V1_HealthEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
   }
 }
 
-extension Kmgr_V1_ShutdownRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ShutdownRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ShutdownRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}stop_active_port_forwards\0")
 

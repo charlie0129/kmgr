@@ -12,7 +12,7 @@ contexts and does not substitute static demo data.
 ## Requirements
 
 - macOS 15 or later
-- Xcode 16.4 or later, including the Swift 6.1 toolchain
+- Xcode 26.3 or later
 - Go 1.26 or later
 - A kubeconfig using static credentials, certificates, basic authentication,
   or a non-interactive `exec` credential plugin
@@ -32,12 +32,14 @@ make generate  # regenerate checked-in protobuf sources
 
 `make app` defaults to a developer-friendly bundle with a SwiftPM Debug
 executable and a Go helper that retains its symbol and DWARF data. It embeds
-`kmgr-engine` under `Kmgr.app/Contents/Helpers`, signs the nested helper first,
-then ad-hoc signs the bundle. It finishes with a strict offline check of bundle
-metadata, executable layout, nested signatures, and the no-App-Sandbox policy.
-No signing identity is required. The same verifier can inspect an existing
-artifact with `./scripts/verify-app.sh`; the complete deterministic and
-runtime-only release checklist is in
+`kmgr-engine` under `Kmgr.app/Contents/Helpers` and compiles `assets/kmgr.icon`
+into a Tahoe `Assets.car` plus a pre-Tahoe `kmgr.icns` fallback. It signs the
+embedded Swift back-deployment runtime and helper first, then ad-hoc signs the
+bundle. It finishes with a strict offline check of bundle metadata, both
+application-icon resources, executable and runtime-library layout, nested
+signatures, and the no-App-Sandbox policy. No signing identity is required. The
+same verifier can inspect an existing artifact with `./scripts/verify-app.sh`;
+the complete deterministic and runtime-only release checklist is in
 [docs/release-verification.md](docs/release-verification.md).
 
 Use `CONFIGURATION=release make app` for a smaller distribution candidate. It

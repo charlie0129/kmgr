@@ -23,16 +23,15 @@ let package = Package(
             url: "https://github.com/grpc/grpc-swift-nio-transport.git",
             exact: "2.9.1"
         ),
-        // 2.4.x requires SwiftProtobuf 1.38, whose package manifest needs
-        // Swift 6.2. 2.3.0 is the newest integration compatible with our
-        // Swift 6.1 toolchain and the exact SwiftProtobuf pin below.
+        // SwiftProtobuf 1.38 declares the traits required by gRPC under
+        // SwiftPM 6.2.
         .package(
             url: "https://github.com/grpc/grpc-swift-protobuf.git",
-            exact: "2.3.0"
+            exact: "2.4.1"
         ),
         .package(
             url: "https://github.com/apple/swift-protobuf.git",
-            exact: "1.33.1"
+            exact: "1.38.1"
         ),
         .package(
             url: "https://github.com/migueldeicaza/SwiftTerm.git",

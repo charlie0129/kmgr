@@ -8,7 +8,11 @@
 // For information on using the generated types, please see the documentation:
 //   https://github.com/apple/swift-protobuf/
 
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 import SwiftProtobuf
 
 // If the compiler emits an error on this type, it is because this file
@@ -16,12 +20,12 @@ import SwiftProtobuf
 // incompatible with the version of SwiftProtobuf to which you are linking.
 // Please ensure that you are building against the same version of the API
 // that was used to generate this file.
-fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
+fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
   struct _2: SwiftProtobuf.ProtobufAPIVersion_2 {}
   typealias Version = _2
 }
 
-public enum Kmgr_V1_ErrorCategory: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_ErrorCategory: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case authentication // = 1
@@ -99,7 +103,7 @@ public enum Kmgr_V1_ErrorCategory: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
-public enum Kmgr_V1_CellSeverity: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_CellSeverity: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case normal // = 1
@@ -156,7 +160,7 @@ public enum Kmgr_V1_CellSeverity: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
-public enum Kmgr_V1_PropagationPolicy: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_PropagationPolicy: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case background // = 1
@@ -201,7 +205,7 @@ public enum Kmgr_V1_PropagationPolicy: SwiftProtobuf.Enum, Swift.CaseIterable {
 /// RequestContext is present on every request. deadline_unix_ms is an
 /// application-level deadline for queued backend work; callers must also set the
 /// native gRPC deadline so transport cancellation is immediate.
-public struct Kmgr_V1_RequestContext: Sendable {
+public nonisolated struct Kmgr_V1_RequestContext: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -220,7 +224,7 @@ public struct Kmgr_V1_RequestContext: Sendable {
 /// StreamCursor lets the client discard messages from an obsolete stream.
 /// generation changes whenever a stream is replaced; sequence is monotonic
 /// within one generation and starts at one.
-public struct Kmgr_V1_StreamCursor: Sendable {
+public nonisolated struct Kmgr_V1_StreamCursor: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -236,7 +240,7 @@ public struct Kmgr_V1_StreamCursor: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_Empty: Sendable {
+public nonisolated struct Kmgr_V1_Empty: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -246,7 +250,7 @@ public struct Kmgr_V1_Empty: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_Acknowledgement: Sendable {
+public nonisolated struct Kmgr_V1_Acknowledgement: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -262,76 +266,76 @@ public struct Kmgr_V1_Acknowledgement: Sendable {
 
 /// StructuredError is safe to display. It must never contain credentials,
 /// Secret values, exec/log bytes, or complete mutation payloads.
-public struct Kmgr_V1_StructuredError: @unchecked Sendable {
+public nonisolated struct Kmgr_V1_StructuredError: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var category: Kmgr_V1_ErrorCategory {
-    get {return _storage._category}
+    get {_storage._category}
     set {_uniqueStorage()._category = newValue}
   }
 
   public var reason: String {
-    get {return _storage._reason}
+    get {_storage._reason}
     set {_uniqueStorage()._reason = newValue}
   }
 
   public var message: String {
-    get {return _storage._message}
+    get {_storage._message}
     set {_uniqueStorage()._message = newValue}
   }
 
   public var httpStatusCode: Int32 {
-    get {return _storage._httpStatusCode}
+    get {_storage._httpStatusCode}
     set {_uniqueStorage()._httpStatusCode = newValue}
   }
 
   public var retryable: Bool {
-    get {return _storage._retryable}
+    get {_storage._retryable}
     set {_uniqueStorage()._retryable = newValue}
   }
 
   public var retryAfterMs: Int64 {
-    get {return _storage._retryAfterMs}
+    get {_storage._retryAfterMs}
     set {_uniqueStorage()._retryAfterMs = newValue}
   }
 
   public var fieldPath: String {
-    get {return _storage._fieldPath}
+    get {_storage._fieldPath}
     set {_uniqueStorage()._fieldPath = newValue}
   }
 
   public var contextName: String {
-    get {return _storage._contextName}
+    get {_storage._contextName}
     set {_uniqueStorage()._contextName = newValue}
   }
 
   public var operation: String {
-    get {return _storage._operation}
+    get {_storage._operation}
     set {_uniqueStorage()._operation = newValue}
   }
 
   public var resource: Kmgr_V1_ResourceIdentity {
-    get {return _storage._resource ?? Kmgr_V1_ResourceIdentity()}
+    get {_storage._resource ?? Kmgr_V1_ResourceIdentity()}
     set {_uniqueStorage()._resource = newValue}
   }
   /// Returns true if `resource` has been explicitly set.
-  public var hasResource: Bool {return _storage._resource != nil}
+  public var hasResource: Bool {_storage._resource != nil}
   /// Clears the value of `resource`. Subsequent reads from it will return its default value.
   public mutating func clearResource() {_uniqueStorage()._resource = nil}
 
   public var safeDetails: Dictionary<String,String> {
-    get {return _storage._safeDetails}
+    get {_storage._safeDetails}
     set {_uniqueStorage()._safeDetails = newValue}
   }
 
   public var kubernetesStatus: Kmgr_V1_KubernetesStatusDetails {
-    get {return _storage._kubernetesStatus ?? Kmgr_V1_KubernetesStatusDetails()}
+    get {_storage._kubernetesStatus ?? Kmgr_V1_KubernetesStatusDetails()}
     set {_uniqueStorage()._kubernetesStatus = newValue}
   }
   /// Returns true if `kubernetesStatus` has been explicitly set.
-  public var hasKubernetesStatus: Bool {return _storage._kubernetesStatus != nil}
+  public var hasKubernetesStatus: Bool {_storage._kubernetesStatus != nil}
   /// Clears the value of `kubernetesStatus`. Subsequent reads from it will return its default value.
   public mutating func clearKubernetesStatus() {_uniqueStorage()._kubernetesStatus = nil}
 
@@ -345,7 +349,7 @@ public struct Kmgr_V1_StructuredError: @unchecked Sendable {
 /// KubernetesStatusDetails preserves the structured, display-relevant portion
 /// of metav1.StatusDetails. Servers may omit human messages when echoing them
 /// could expose a sensitive object value; reason and field remain available.
-public struct Kmgr_V1_KubernetesStatusDetails: Sendable {
+public nonisolated struct Kmgr_V1_KubernetesStatusDetails: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -371,7 +375,7 @@ public struct Kmgr_V1_KubernetesStatusDetails: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_KubernetesStatusCause: Sendable {
+public nonisolated struct Kmgr_V1_KubernetesStatusCause: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -387,7 +391,7 @@ public struct Kmgr_V1_KubernetesStatusCause: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_ResourceType: Sendable {
+public nonisolated struct Kmgr_V1_ResourceType: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -407,7 +411,7 @@ public struct Kmgr_V1_ResourceType: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_ResourceIdentity: Sendable {
+public nonisolated struct Kmgr_V1_ResourceIdentity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -431,7 +435,7 @@ public struct Kmgr_V1_ResourceIdentity: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_NamespaceScope: Sendable {
+public nonisolated struct Kmgr_V1_NamespaceScope: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -445,7 +449,7 @@ public struct Kmgr_V1_NamespaceScope: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_StringMapEntry: Sendable {
+public nonisolated struct Kmgr_V1_StringMapEntry: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -459,7 +463,7 @@ public struct Kmgr_V1_StringMapEntry: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_ResourceUsageValue: Sendable {
+public nonisolated struct Kmgr_V1_ResourceUsageValue: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -467,29 +471,29 @@ public struct Kmgr_V1_ResourceUsageValue: Sendable {
   public var used: Double = 0
 
   public var requested: Double {
-    get {return _requested ?? 0}
+    get {_requested ?? 0}
     set {_requested = newValue}
   }
   /// Returns true if `requested` has been explicitly set.
-  public var hasRequested: Bool {return self._requested != nil}
+  public var hasRequested: Bool {self._requested != nil}
   /// Clears the value of `requested`. Subsequent reads from it will return its default value.
   public mutating func clearRequested() {self._requested = nil}
 
   public var limit: Double {
-    get {return _limit ?? 0}
+    get {_limit ?? 0}
     set {_limit = newValue}
   }
   /// Returns true if `limit` has been explicitly set.
-  public var hasLimit: Bool {return self._limit != nil}
+  public var hasLimit: Bool {self._limit != nil}
   /// Clears the value of `limit`. Subsequent reads from it will return its default value.
   public mutating func clearLimit() {self._limit = nil}
 
   public var capacity: Double {
-    get {return _capacity ?? 0}
+    get {_capacity ?? 0}
     set {_capacity = newValue}
   }
   /// Returns true if `capacity` has been explicitly set.
-  public var hasCapacity: Bool {return self._capacity != nil}
+  public var hasCapacity: Bool {self._capacity != nil}
   /// Clears the value of `capacity`. Subsequent reads from it will return its default value.
   public mutating func clearCapacity() {self._capacity = nil}
 
@@ -509,11 +513,11 @@ public struct Kmgr_V1_ResourceUsageValue: Sendable {
   /// prefer current usage, then request, limit, and capacity. Absence means
   /// none of those components is available.
   public var sortValue: Double {
-    get {return _sortValue ?? 0}
+    get {_sortValue ?? 0}
     set {_sortValue = newValue}
   }
   /// Returns true if `sortValue` has been explicitly set.
-  public var hasSortValue: Bool {return self._sortValue != nil}
+  public var hasSortValue: Bool {self._sortValue != nil}
   /// Clears the value of `sortValue`. Subsequent reads from it will return its default value.
   public mutating func clearSortValue() {self._sortValue = nil}
 
@@ -531,7 +535,7 @@ public struct Kmgr_V1_ResourceUsageValue: Sendable {
 /// carrying a convenient numeric hint for native UI affordances. Authoritative
 /// comparisons must parse exact with Kubernetes quantity semantics because the
 /// double hint is necessarily approximate for very large or precise values.
-public struct Kmgr_V1_KubernetesQuantityValue: Sendable {
+public nonisolated struct Kmgr_V1_KubernetesQuantityValue: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -547,7 +551,7 @@ public struct Kmgr_V1_KubernetesQuantityValue: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_Cell: Sendable {
+public nonisolated struct Kmgr_V1_Cell: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -628,7 +632,7 @@ public struct Kmgr_V1_Cell: Sendable {
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  public enum OneOf_TypedValue: Equatable, Sendable {
+  public nonisolated enum OneOf_TypedValue: Equatable, Sendable {
     case stringValue(String)
     case numberValue(Double)
     case timestampUnixMs(Int64)
@@ -643,17 +647,17 @@ public struct Kmgr_V1_Cell: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_ResourceRow: Sendable {
+public nonisolated struct Kmgr_V1_ResourceRow: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var identity: Kmgr_V1_ResourceIdentity {
-    get {return _identity ?? Kmgr_V1_ResourceIdentity()}
+    get {_identity ?? Kmgr_V1_ResourceIdentity()}
     set {_identity = newValue}
   }
   /// Returns true if `identity` has been explicitly set.
-  public var hasIdentity: Bool {return self._identity != nil}
+  public var hasIdentity: Bool {self._identity != nil}
   /// Clears the value of `identity`. Subsequent reads from it will return its default value.
   public mutating func clearIdentity() {self._identity = nil}
 
@@ -668,21 +672,21 @@ public struct Kmgr_V1_ResourceRow: Sendable {
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
-fileprivate let _protobuf_package = "kmgr.v1"
+fileprivate nonisolated let _protobuf_package = "kmgr.v1"
 
-extension Kmgr_V1_ErrorCategory: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ErrorCategory: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ERROR_CATEGORY_UNSPECIFIED\0\u{1}ERROR_CATEGORY_AUTHENTICATION\0\u{1}ERROR_CATEGORY_AUTHORIZATION\0\u{1}ERROR_CATEGORY_NOT_FOUND\0\u{1}ERROR_CATEGORY_CONFLICT\0\u{1}ERROR_CATEGORY_VALIDATION\0\u{1}ERROR_CATEGORY_UNAVAILABLE\0\u{1}ERROR_CATEGORY_TIMEOUT\0\u{1}ERROR_CATEGORY_CANCELLED\0\u{1}ERROR_CATEGORY_TLS\0\u{1}ERROR_CATEGORY_UNSUPPORTED\0\u{1}ERROR_CATEGORY_INTERNAL\0\u{1}ERROR_CATEGORY_RESOURCE_EXHAUSTED\0")
 }
 
-extension Kmgr_V1_CellSeverity: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_CellSeverity: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CELL_SEVERITY_UNSPECIFIED\0\u{1}CELL_SEVERITY_NORMAL\0\u{1}CELL_SEVERITY_INFO\0\u{1}CELL_SEVERITY_WARNING\0\u{1}CELL_SEVERITY_ERROR\0\u{1}CELL_SEVERITY_MUTED\0\u{1}CELL_SEVERITY_TERMINATING\0")
 }
 
-extension Kmgr_V1_PropagationPolicy: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_PropagationPolicy: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0PROPAGATION_POLICY_UNSPECIFIED\0\u{1}PROPAGATION_POLICY_BACKGROUND\0\u{1}PROPAGATION_POLICY_FOREGROUND\0\u{1}PROPAGATION_POLICY_ORPHAN\0")
 }
 
-extension Kmgr_V1_RequestContext: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_RequestContext: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RequestContext"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}deadline_unix_ms\0\u{3}cluster_session_id\0")
 
@@ -722,7 +726,7 @@ extension Kmgr_V1_RequestContext: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_StreamCursor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_StreamCursor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StreamCursor"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}stream_id\0\u{1}generation\0\u{1}sequence\0")
 
@@ -762,7 +766,7 @@ extension Kmgr_V1_StreamCursor: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
   }
 }
 
-extension Kmgr_V1_Empty: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_Empty: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Empty"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap()
 
@@ -781,7 +785,7 @@ extension Kmgr_V1_Empty: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementa
   }
 }
 
-extension Kmgr_V1_Acknowledgement: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_Acknowledgement: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Acknowledgement"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}accepted\0")
 
@@ -816,7 +820,7 @@ extension Kmgr_V1_Acknowledgement: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension Kmgr_V1_StructuredError: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_StructuredError: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StructuredError"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}category\0\u{1}reason\0\u{1}message\0\u{3}http_status_code\0\u{1}retryable\0\u{3}retry_after_ms\0\u{3}field_path\0\u{3}context_name\0\u{1}operation\0\u{1}resource\0\u{3}safe_details\0\u{3}kubernetes_status\0")
 
@@ -963,7 +967,7 @@ extension Kmgr_V1_StructuredError: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension Kmgr_V1_KubernetesStatusDetails: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_KubernetesStatusDetails: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".KubernetesStatusDetails"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}group\0\u{1}kind\0\u{1}uid\0\u{1}reason\0\u{1}message\0\u{3}retry_after_seconds\0\u{1}causes\0")
 
@@ -1028,7 +1032,7 @@ extension Kmgr_V1_KubernetesStatusDetails: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-extension Kmgr_V1_KubernetesStatusCause: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_KubernetesStatusCause: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".KubernetesStatusCause"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reason\0\u{1}message\0\u{1}field\0")
 
@@ -1068,7 +1072,7 @@ extension Kmgr_V1_KubernetesStatusCause: SwiftProtobuf.Message, SwiftProtobuf._M
   }
 }
 
-extension Kmgr_V1_ResourceType: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ResourceType: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResourceType"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}group\0\u{1}version\0\u{1}resource\0\u{1}kind\0\u{1}namespaced\0")
 
@@ -1118,7 +1122,7 @@ extension Kmgr_V1_ResourceType: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
   }
 }
 
-extension Kmgr_V1_ResourceIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ResourceIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResourceIdentity"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}cluster_session_id\0\u{1}group\0\u{1}version\0\u{1}resource\0\u{1}namespace\0\u{1}name\0\u{1}uid\0")
 
@@ -1178,7 +1182,7 @@ extension Kmgr_V1_ResourceIdentity: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
-extension Kmgr_V1_NamespaceScope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_NamespaceScope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".NamespaceScope"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}all_namespaces\0\u{1}namespaces\0")
 
@@ -1213,7 +1217,7 @@ extension Kmgr_V1_NamespaceScope: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_StringMapEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_StringMapEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StringMapEntry"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}key\0\u{1}value\0")
 
@@ -1248,7 +1252,7 @@ extension Kmgr_V1_StringMapEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResourceUsageValue"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}used\0\u{1}requested\0\u{1}limit\0\u{1}capacity\0\u{1}unit\0\u{3}resource_name\0\u{3}measured_at_unix_ms\0\u{1}provider\0\u{3}measurement_scope\0\u{3}usage_available\0\u{3}sort_value\0")
 
@@ -1332,7 +1336,7 @@ extension Kmgr_V1_ResourceUsageValue: SwiftProtobuf.Message, SwiftProtobuf._Mess
   }
 }
 
-extension Kmgr_V1_KubernetesQuantityValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_KubernetesQuantityValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".KubernetesQuantityValue"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}exact\0\u{3}sort_value\0\u{1}display\0")
 
@@ -1372,7 +1376,7 @@ extension Kmgr_V1_KubernetesQuantityValue: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-extension Kmgr_V1_Cell: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_Cell: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Cell"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}column_id\0\u{3}display_text\0\u{3}string_value\0\u{3}number_value\0\u{3}timestamp_unix_ms\0\u{1}usage\0\u{1}tooltip\0\u{1}severity\0\u{3}bool_value\0\u{3}opaque_sort_value\0\u{3}integer_value\0\u{3}quantity_value\0")
 
@@ -1534,7 +1538,7 @@ extension Kmgr_V1_Cell: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementat
   }
 }
 
-extension Kmgr_V1_ResourceRow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ResourceRow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResourceRow"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}cells\0")
 

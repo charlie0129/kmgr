@@ -15,12 +15,12 @@ import SwiftProtobuf
 // incompatible with the version of SwiftProtobuf to which you are linking.
 // Please ensure that you are building against the same version of the API
 // that was used to generate this file.
-fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
+fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
   struct _2: SwiftProtobuf.ProtobufAPIVersion_2 {}
   typealias Version = _2
 }
 
-public enum Kmgr_V1_PortForwardState: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_PortForwardState: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case starting // = 1
@@ -70,28 +70,28 @@ public enum Kmgr_V1_PortForwardState: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
-public struct Kmgr_V1_StartPortForwardRequest: Sendable {
+public nonisolated struct Kmgr_V1_StartPortForwardRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
   public var portForwardID: String = String()
 
   public var target: Kmgr_V1_ResourceIdentity {
-    get {return _target ?? Kmgr_V1_ResourceIdentity()}
+    get {_target ?? Kmgr_V1_ResourceIdentity()}
     set {_target = newValue}
   }
   /// Returns true if `target` has been explicitly set.
-  public var hasTarget: Bool {return self._target != nil}
+  public var hasTarget: Bool {self._target != nil}
   /// Clears the value of `target`. Subsequent reads from it will return its default value.
   public mutating func clearTarget() {self._target = nil}
 
@@ -113,7 +113,7 @@ public struct Kmgr_V1_StartPortForwardRequest: Sendable {
   fileprivate var _target: Kmgr_V1_ResourceIdentity? = nil
 }
 
-public struct Kmgr_V1_StartPortForwardResponse: Sendable {
+public nonisolated struct Kmgr_V1_StartPortForwardResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -125,11 +125,11 @@ public struct Kmgr_V1_StartPortForwardResponse: Sendable {
   public var accepted: Bool = false
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -140,17 +140,17 @@ public struct Kmgr_V1_StartPortForwardResponse: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_StopPortForwardRequest: Sendable {
+public nonisolated struct Kmgr_V1_StopPortForwardRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -163,17 +163,17 @@ public struct Kmgr_V1_StopPortForwardRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_RestartPortForwardRequest: Sendable {
+public nonisolated struct Kmgr_V1_RestartPortForwardRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -186,17 +186,17 @@ public struct Kmgr_V1_RestartPortForwardRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_ListPortForwardsRequest: Sendable {
+public nonisolated struct Kmgr_V1_ListPortForwardsRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -209,85 +209,85 @@ public struct Kmgr_V1_ListPortForwardsRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_PortForward: @unchecked Sendable {
+public nonisolated struct Kmgr_V1_PortForward: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var portForwardID: String {
-    get {return _storage._portForwardID}
+    get {_storage._portForwardID}
     set {_uniqueStorage()._portForwardID = newValue}
   }
 
   public var clusterSessionID: String {
-    get {return _storage._clusterSessionID}
+    get {_storage._clusterSessionID}
     set {_uniqueStorage()._clusterSessionID = newValue}
   }
 
   public var contextName: String {
-    get {return _storage._contextName}
+    get {_storage._contextName}
     set {_uniqueStorage()._contextName = newValue}
   }
 
   public var target: Kmgr_V1_ResourceIdentity {
-    get {return _storage._target ?? Kmgr_V1_ResourceIdentity()}
+    get {_storage._target ?? Kmgr_V1_ResourceIdentity()}
     set {_uniqueStorage()._target = newValue}
   }
   /// Returns true if `target` has been explicitly set.
-  public var hasTarget: Bool {return _storage._target != nil}
+  public var hasTarget: Bool {_storage._target != nil}
   /// Clears the value of `target`. Subsequent reads from it will return its default value.
   public mutating func clearTarget() {_uniqueStorage()._target = nil}
 
   public var resolvedPod: Kmgr_V1_ResourceIdentity {
-    get {return _storage._resolvedPod ?? Kmgr_V1_ResourceIdentity()}
+    get {_storage._resolvedPod ?? Kmgr_V1_ResourceIdentity()}
     set {_uniqueStorage()._resolvedPod = newValue}
   }
   /// Returns true if `resolvedPod` has been explicitly set.
-  public var hasResolvedPod: Bool {return _storage._resolvedPod != nil}
+  public var hasResolvedPod: Bool {_storage._resolvedPod != nil}
   /// Clears the value of `resolvedPod`. Subsequent reads from it will return its default value.
   public mutating func clearResolvedPod() {_uniqueStorage()._resolvedPod = nil}
 
   public var remotePort: UInt32 {
-    get {return _storage._remotePort}
+    get {_storage._remotePort}
     set {_uniqueStorage()._remotePort = newValue}
   }
 
   public var localPort: UInt32 {
-    get {return _storage._localPort}
+    get {_storage._localPort}
     set {_uniqueStorage()._localPort = newValue}
   }
 
   public var bindAddress: String {
-    get {return _storage._bindAddress}
+    get {_storage._bindAddress}
     set {_uniqueStorage()._bindAddress = newValue}
   }
 
   public var label: String {
-    get {return _storage._label}
+    get {_storage._label}
     set {_uniqueStorage()._label = newValue}
   }
 
   public var state: Kmgr_V1_PortForwardState {
-    get {return _storage._state}
+    get {_storage._state}
     set {_uniqueStorage()._state = newValue}
   }
 
   public var startedAtUnixMs: Int64 {
-    get {return _storage._startedAtUnixMs}
+    get {_storage._startedAtUnixMs}
     set {_uniqueStorage()._startedAtUnixMs = newValue}
   }
 
   public var updatedAtUnixMs: Int64 {
-    get {return _storage._updatedAtUnixMs}
+    get {_storage._updatedAtUnixMs}
     set {_uniqueStorage()._updatedAtUnixMs = newValue}
   }
 
   public var lastError: Kmgr_V1_StructuredError {
-    get {return _storage._lastError ?? Kmgr_V1_StructuredError()}
+    get {_storage._lastError ?? Kmgr_V1_StructuredError()}
     set {_uniqueStorage()._lastError = newValue}
   }
   /// Returns true if `lastError` has been explicitly set.
-  public var hasLastError: Bool {return _storage._lastError != nil}
+  public var hasLastError: Bool {_storage._lastError != nil}
   /// Clears the value of `lastError`. Subsequent reads from it will return its default value.
   public mutating func clearLastError() {_uniqueStorage()._lastError = nil}
 
@@ -298,7 +298,7 @@ public struct Kmgr_V1_PortForward: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-public struct Kmgr_V1_ListPortForwardsResponse: Sendable {
+public nonisolated struct Kmgr_V1_ListPortForwardsResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -308,11 +308,11 @@ public struct Kmgr_V1_ListPortForwardsResponse: Sendable {
   public var portForwards: [Kmgr_V1_PortForward] = []
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -323,17 +323,17 @@ public struct Kmgr_V1_ListPortForwardsResponse: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_WatchPortForwardsRequest: Sendable {
+public nonisolated struct Kmgr_V1_WatchPortForwardsRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -350,7 +350,7 @@ public struct Kmgr_V1_WatchPortForwardsRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_PortForwardDelta: Sendable {
+public nonisolated struct Kmgr_V1_PortForwardDelta: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -364,35 +364,35 @@ public struct Kmgr_V1_PortForwardDelta: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_PortForwardEvent: Sendable {
+public nonisolated struct Kmgr_V1_PortForwardEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var cursor: Kmgr_V1_StreamCursor {
-    get {return _cursor ?? Kmgr_V1_StreamCursor()}
+    get {_cursor ?? Kmgr_V1_StreamCursor()}
     set {_cursor = newValue}
   }
   /// Returns true if `cursor` has been explicitly set.
-  public var hasCursor: Bool {return self._cursor != nil}
+  public var hasCursor: Bool {self._cursor != nil}
   /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
   public mutating func clearCursor() {self._cursor = nil}
 
   public var delta: Kmgr_V1_PortForwardDelta {
-    get {return _delta ?? Kmgr_V1_PortForwardDelta()}
+    get {_delta ?? Kmgr_V1_PortForwardDelta()}
     set {_delta = newValue}
   }
   /// Returns true if `delta` has been explicitly set.
-  public var hasDelta: Bool {return self._delta != nil}
+  public var hasDelta: Bool {self._delta != nil}
   /// Clears the value of `delta`. Subsequent reads from it will return its default value.
   public mutating func clearDelta() {self._delta = nil}
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -407,13 +407,13 @@ public struct Kmgr_V1_PortForwardEvent: Sendable {
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
-fileprivate let _protobuf_package = "kmgr.v1"
+fileprivate nonisolated let _protobuf_package = "kmgr.v1"
 
-extension Kmgr_V1_PortForwardState: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_PortForwardState: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0PORT_FORWARD_STATE_UNSPECIFIED\0\u{1}PORT_FORWARD_STATE_STARTING\0\u{1}PORT_FORWARD_STATE_LISTENING\0\u{1}PORT_FORWARD_STATE_RECONNECTING\0\u{1}PORT_FORWARD_STATE_FAILED\0\u{1}PORT_FORWARD_STATE_STOPPED\0")
 }
 
-extension Kmgr_V1_StartPortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_StartPortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StartPortForwardRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}port_forward_id\0\u{1}target\0\u{3}remote_port\0\u{3}local_port\0\u{3}bind_address\0\u{1}label\0\u{3}allow_non_loopback\0")
 
@@ -482,7 +482,7 @@ extension Kmgr_V1_StartPortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-extension Kmgr_V1_StartPortForwardResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_StartPortForwardResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StartPortForwardResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}port_forward_id\0\u{1}accepted\0\u{1}error\0")
 
@@ -531,7 +531,7 @@ extension Kmgr_V1_StartPortForwardResponse: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-extension Kmgr_V1_StopPortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_StopPortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StopPortForwardRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}port_forward_id\0")
 
@@ -570,7 +570,7 @@ extension Kmgr_V1_StopPortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf._
   }
 }
 
-extension Kmgr_V1_RestartPortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_RestartPortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RestartPortForwardRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}port_forward_id\0")
 
@@ -609,7 +609,7 @@ extension Kmgr_V1_RestartPortForwardRequest: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-extension Kmgr_V1_ListPortForwardsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ListPortForwardsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListPortForwardsRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}include_stopped\0")
 
@@ -648,7 +648,7 @@ extension Kmgr_V1_ListPortForwardsRequest: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-extension Kmgr_V1_PortForward: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_PortForward: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PortForward"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}port_forward_id\0\u{3}cluster_session_id\0\u{3}context_name\0\u{1}target\0\u{3}resolved_pod\0\u{3}remote_port\0\u{3}local_port\0\u{3}bind_address\0\u{1}label\0\u{1}state\0\u{3}started_at_unix_ms\0\u{3}updated_at_unix_ms\0\u{3}last_error\0")
 
@@ -802,7 +802,7 @@ extension Kmgr_V1_PortForward: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
   }
 }
 
-extension Kmgr_V1_ListPortForwardsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ListPortForwardsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListPortForwardsResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}port_forwards\0\u{1}error\0")
 
@@ -846,7 +846,7 @@ extension Kmgr_V1_ListPortForwardsResponse: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-extension Kmgr_V1_WatchPortForwardsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_WatchPortForwardsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WatchPortForwardsRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}stream_id\0\u{1}generation\0\u{3}include_stopped\0")
 
@@ -895,7 +895,7 @@ extension Kmgr_V1_WatchPortForwardsRequest: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-extension Kmgr_V1_PortForwardDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_PortForwardDelta: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PortForwardDelta"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}upserts\0\u{3}removed_port_forward_ids\0")
 
@@ -930,7 +930,7 @@ extension Kmgr_V1_PortForwardDelta: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
-extension Kmgr_V1_PortForwardEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_PortForwardEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PortForwardEvent"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}delta\0\u{1}error\0")
 

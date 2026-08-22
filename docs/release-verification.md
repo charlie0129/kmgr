@@ -22,11 +22,12 @@ non-parallel execution as its command-line default.
 
 The app verifier does not launch the GUI. It checks the product and bundle
 names, identifier, declared and Mach-O minimum macOS version, package type and
-principal class; requires exactly one main executable and the `kmgr-engine`
-helper; verifies both are executable macOS Mach-O files; performs strict nested
-code-signature verification; rejects host/build-tree dynamic-library and search
-paths plus an App Sandbox entitlement; and executes only
-`kmgr-engine --version`.
+principal class; requires the Tahoe icon stack and pre-Tahoe ICNS fallback;
+requires exactly one main executable and the `kmgr-engine` helper; verifies
+both plus each embedded Swift compatibility library are executable macOS
+Mach-O files; performs strict nested code-signature verification; rejects
+host/build-tree dynamic-library and search paths plus an App Sandbox
+entitlement; and executes only `kmgr-engine --version`.
 
 Before treating an optimized bundle as a distribution candidate, repeat the
 artifact gate in Release configuration:

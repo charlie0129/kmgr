@@ -15,12 +15,12 @@ import SwiftProtobuf
 // incompatible with the version of SwiftProtobuf to which you are linking.
 // Please ensure that you are building against the same version of the API
 // that was used to generate this file.
-fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
+fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
   struct _2: SwiftProtobuf.ProtobufAPIVersion_2 {}
   typealias Version = _2
 }
 
-public enum Kmgr_V1_SortDirection: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_SortDirection: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case ascending // = 1
@@ -58,7 +58,7 @@ public enum Kmgr_V1_SortDirection: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
-public enum Kmgr_V1_ViewFreshness: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_ViewFreshness: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case loading // = 1
@@ -120,7 +120,7 @@ public enum Kmgr_V1_ViewFreshness: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
-public enum Kmgr_V1_OptionalResourceCategory: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_OptionalResourceCategory: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case ephemeralStorage // = 1
@@ -165,7 +165,7 @@ public enum Kmgr_V1_OptionalResourceCategory: SwiftProtobuf.Enum, Swift.CaseIter
 /// Selection tokens are immutable, opaque capabilities scoped to one cluster
 /// session and logical view. Each gesture produces a new token with a fixed
 /// expiry; consuming a token never extends that expiry.
-public enum Kmgr_V1_SelectionGestureKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_SelectionGestureKind: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case replace // = 1
@@ -218,53 +218,53 @@ public enum Kmgr_V1_SelectionGestureKind: SwiftProtobuf.Enum, Swift.CaseIterable
 /// PreviewColumn compiles one draft CEL definition in the authoritative Go
 /// environment and evaluates it against either the selected object (after a
 /// fresh UID-pinned GET) or a deterministic, non-sensitive sample object.
-public struct Kmgr_V1_PreviewColumnRequest: @unchecked Sendable {
+public nonisolated struct Kmgr_V1_PreviewColumnRequest: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _storage._context ?? Kmgr_V1_RequestContext()}
+    get {_storage._context ?? Kmgr_V1_RequestContext()}
     set {_uniqueStorage()._context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return _storage._context != nil}
+  public var hasContext: Bool {_storage._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {_uniqueStorage()._context = nil}
 
   public var resource: Kmgr_V1_ResourceType {
-    get {return _storage._resource ?? Kmgr_V1_ResourceType()}
+    get {_storage._resource ?? Kmgr_V1_ResourceType()}
     set {_uniqueStorage()._resource = newValue}
   }
   /// Returns true if `resource` has been explicitly set.
-  public var hasResource: Bool {return _storage._resource != nil}
+  public var hasResource: Bool {_storage._resource != nil}
   /// Clears the value of `resource`. Subsequent reads from it will return its default value.
   public mutating func clearResource() {_uniqueStorage()._resource = nil}
 
   public var namespaceScope: Kmgr_V1_NamespaceScope {
-    get {return _storage._namespaceScope ?? Kmgr_V1_NamespaceScope()}
+    get {_storage._namespaceScope ?? Kmgr_V1_NamespaceScope()}
     set {_uniqueStorage()._namespaceScope = newValue}
   }
   /// Returns true if `namespaceScope` has been explicitly set.
-  public var hasNamespaceScope: Bool {return _storage._namespaceScope != nil}
+  public var hasNamespaceScope: Bool {_storage._namespaceScope != nil}
   /// Clears the value of `namespaceScope`. Subsequent reads from it will return its default value.
   public mutating func clearNamespaceScope() {_uniqueStorage()._namespaceScope = nil}
 
   public var column: Kmgr_V1_CELColumnDefinition {
-    get {return _storage._column ?? Kmgr_V1_CELColumnDefinition()}
+    get {_storage._column ?? Kmgr_V1_CELColumnDefinition()}
     set {_uniqueStorage()._column = newValue}
   }
   /// Returns true if `column` has been explicitly set.
-  public var hasColumn: Bool {return _storage._column != nil}
+  public var hasColumn: Bool {_storage._column != nil}
   /// Clears the value of `column`. Subsequent reads from it will return its default value.
   public mutating func clearColumn() {_uniqueStorage()._column = nil}
 
   public var selectedObject: Kmgr_V1_ResourceIdentity {
-    get {return _storage._selectedObject ?? Kmgr_V1_ResourceIdentity()}
+    get {_storage._selectedObject ?? Kmgr_V1_ResourceIdentity()}
     set {_uniqueStorage()._selectedObject = newValue}
   }
   /// Returns true if `selectedObject` has been explicitly set.
-  public var hasSelectedObject: Bool {return _storage._selectedObject != nil}
+  public var hasSelectedObject: Bool {_storage._selectedObject != nil}
   /// Clears the value of `selectedObject`. Subsequent reads from it will return its default value.
   public mutating func clearSelectedObject() {_uniqueStorage()._selectedObject = nil}
 
@@ -275,7 +275,7 @@ public struct Kmgr_V1_PreviewColumnRequest: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-public struct Kmgr_V1_CELColumnDefinition: Sendable {
+public nonisolated struct Kmgr_V1_CELColumnDefinition: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -297,18 +297,18 @@ public struct Kmgr_V1_CELColumnDefinition: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_PreviewColumnResponse: @unchecked Sendable {
+public nonisolated struct Kmgr_V1_PreviewColumnResponse: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var requestID: String {
-    get {return _storage._requestID}
+    get {_storage._requestID}
     set {_uniqueStorage()._requestID = newValue}
   }
 
   public var celEnvironment: String {
-    get {return _storage._celEnvironment}
+    get {_storage._celEnvironment}
     set {_uniqueStorage()._celEnvironment = newValue}
   }
 
@@ -317,34 +317,34 @@ public struct Kmgr_V1_PreviewColumnResponse: @unchecked Sendable {
   /// also carries the validation diagnostic. This lets clients teach from maps
   /// and lists without treating them as valid sortable cells.
   public var preview: Kmgr_V1_Cell {
-    get {return _storage._preview ?? Kmgr_V1_Cell()}
+    get {_storage._preview ?? Kmgr_V1_Cell()}
     set {_uniqueStorage()._preview = newValue}
   }
   /// Returns true if `preview` has been explicitly set.
-  public var hasPreview: Bool {return _storage._preview != nil}
+  public var hasPreview: Bool {_storage._preview != nil}
   /// Clears the value of `preview`. Subsequent reads from it will return its default value.
   public mutating func clearPreview() {_uniqueStorage()._preview = nil}
 
   public var usedSampleObject: Bool {
-    get {return _storage._usedSampleObject}
+    get {_storage._usedSampleObject}
     set {_uniqueStorage()._usedSampleObject = newValue}
   }
 
   public var evaluatedObject: Kmgr_V1_ResourceIdentity {
-    get {return _storage._evaluatedObject ?? Kmgr_V1_ResourceIdentity()}
+    get {_storage._evaluatedObject ?? Kmgr_V1_ResourceIdentity()}
     set {_uniqueStorage()._evaluatedObject = newValue}
   }
   /// Returns true if `evaluatedObject` has been explicitly set.
-  public var hasEvaluatedObject: Bool {return _storage._evaluatedObject != nil}
+  public var hasEvaluatedObject: Bool {_storage._evaluatedObject != nil}
   /// Clears the value of `evaluatedObject`. Subsequent reads from it will return its default value.
   public mutating func clearEvaluatedObject() {_uniqueStorage()._evaluatedObject = nil}
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _storage._error ?? Kmgr_V1_StructuredError()}
+    get {_storage._error ?? Kmgr_V1_StructuredError()}
     set {_uniqueStorage()._error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return _storage._error != nil}
+  public var hasError: Bool {_storage._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {_uniqueStorage()._error = nil}
 
@@ -355,7 +355,7 @@ public struct Kmgr_V1_PreviewColumnResponse: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-public struct Kmgr_V1_SortDescriptor: Sendable {
+public nonisolated struct Kmgr_V1_SortDescriptor: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -371,26 +371,26 @@ public struct Kmgr_V1_SortDescriptor: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_ViewSpec: Sendable {
+public nonisolated struct Kmgr_V1_ViewSpec: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var resource: Kmgr_V1_ResourceType {
-    get {return _resource ?? Kmgr_V1_ResourceType()}
+    get {_resource ?? Kmgr_V1_ResourceType()}
     set {_resource = newValue}
   }
   /// Returns true if `resource` has been explicitly set.
-  public var hasResource: Bool {return self._resource != nil}
+  public var hasResource: Bool {self._resource != nil}
   /// Clears the value of `resource`. Subsequent reads from it will return its default value.
   public mutating func clearResource() {self._resource = nil}
 
   public var namespaceScope: Kmgr_V1_NamespaceScope {
-    get {return _namespaceScope ?? Kmgr_V1_NamespaceScope()}
+    get {_namespaceScope ?? Kmgr_V1_NamespaceScope()}
     set {_namespaceScope = newValue}
   }
   /// Returns true if `namespaceScope` has been explicitly set.
-  public var hasNamespaceScope: Bool {return self._namespaceScope != nil}
+  public var hasNamespaceScope: Bool {self._namespaceScope != nil}
   /// Clears the value of `namespaceScope`. Subsequent reads from it will return its default value.
   public mutating func clearNamespaceScope() {self._namespaceScope = nil}
 
@@ -416,36 +416,36 @@ public struct Kmgr_V1_ViewSpec: Sendable {
   fileprivate var _namespaceScope: Kmgr_V1_NamespaceScope? = nil
 }
 
-public struct Kmgr_V1_OpenViewRequest: @unchecked Sendable {
+public nonisolated struct Kmgr_V1_OpenViewRequest: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _storage._context ?? Kmgr_V1_RequestContext()}
+    get {_storage._context ?? Kmgr_V1_RequestContext()}
     set {_uniqueStorage()._context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return _storage._context != nil}
+  public var hasContext: Bool {_storage._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {_uniqueStorage()._context = nil}
 
   public var viewID: String {
-    get {return _storage._viewID}
+    get {_storage._viewID}
     set {_uniqueStorage()._viewID = newValue}
   }
 
   public var generation: UInt64 {
-    get {return _storage._generation}
+    get {_storage._generation}
     set {_uniqueStorage()._generation = newValue}
   }
 
   public var spec: Kmgr_V1_ViewSpec {
-    get {return _storage._spec ?? Kmgr_V1_ViewSpec()}
+    get {_storage._spec ?? Kmgr_V1_ViewSpec()}
     set {_uniqueStorage()._spec = newValue}
   }
   /// Returns true if `spec` has been explicitly set.
-  public var hasSpec: Bool {return _storage._spec != nil}
+  public var hasSpec: Bool {_storage._spec != nil}
   /// Clears the value of `spec`. Subsequent reads from it will return its default value.
   public mutating func clearSpec() {_uniqueStorage()._spec = nil}
 
@@ -453,7 +453,7 @@ public struct Kmgr_V1_OpenViewRequest: @unchecked Sendable {
   /// ViewReconciled only after an authoritative replacement invalidation is
   /// available through FetchViewRange.
   public var stageUntilReconciled: Bool {
-    get {return _storage._stageUntilReconciled}
+    get {_storage._stageUntilReconciled}
     set {_uniqueStorage()._stageUntilReconciled = newValue}
   }
 
@@ -464,17 +464,17 @@ public struct Kmgr_V1_OpenViewRequest: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-public struct Kmgr_V1_CancelViewRequest: Sendable {
+public nonisolated struct Kmgr_V1_CancelViewRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -489,7 +489,7 @@ public struct Kmgr_V1_CancelViewRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_ViewStatus: Sendable {
+public nonisolated struct Kmgr_V1_ViewStatus: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -518,7 +518,7 @@ public struct Kmgr_V1_ViewStatus: Sendable {
 /// ViewSchema carries resource-specific columns discovered from the same
 /// Kubernetes stream as the rows. For custom resources these definitions come
 /// from metav1.Table; no secondary discovery LIST/WATCH is opened.
-public struct Kmgr_V1_ResourceColumnSchema: Sendable {
+public nonisolated struct Kmgr_V1_ResourceColumnSchema: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -547,7 +547,7 @@ public struct Kmgr_V1_ResourceColumnSchema: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_ViewSchema: Sendable {
+public nonisolated struct Kmgr_V1_ViewSchema: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -570,7 +570,7 @@ public struct Kmgr_V1_ViewSchema: Sendable {
 /// refreshes. Both revisions are nonzero, generation-local, and monotonically
 /// increase. An event may repeat both revisions solely to carry new advisory
 /// optional-resource keys; repeated revisions do not invalidate cached rows.
-public struct Kmgr_V1_ViewInvalidation: Sendable {
+public nonisolated struct Kmgr_V1_ViewInvalidation: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -598,17 +598,17 @@ public struct Kmgr_V1_ViewInvalidation: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_FetchViewRangeRequest: Sendable {
+public nonisolated struct Kmgr_V1_FetchViewRangeRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -631,7 +631,7 @@ public struct Kmgr_V1_FetchViewRangeRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_FetchViewRangeResponse: Sendable {
+public nonisolated struct Kmgr_V1_FetchViewRangeResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -661,17 +661,17 @@ public struct Kmgr_V1_FetchViewRangeResponse: Sendable {
 /// numeric range to one exact ordering; stale hints are rejected rather than
 /// silently rebound. Swift chooses its visible-range overscan within the
 /// advertised max_range_length.
-public struct Kmgr_V1_UpdateMetricInterestRequest: Sendable {
+public nonisolated struct Kmgr_V1_UpdateMetricInterestRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -696,7 +696,7 @@ public struct Kmgr_V1_UpdateMetricInterestRequest: Sendable {
 /// authoritative presentation, including the empty case, available through
 /// FetchViewRange. Clients that requested stage_until_reconciled may replace
 /// their retained table atomically when this event arrives.
-public struct Kmgr_V1_ViewReconciled: Sendable {
+public nonisolated struct Kmgr_V1_ViewReconciled: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -712,17 +712,17 @@ public struct Kmgr_V1_ViewReconciled: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_ViewEvent: Sendable {
+public nonisolated struct Kmgr_V1_ViewEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var cursor: Kmgr_V1_StreamCursor {
-    get {return _cursor ?? Kmgr_V1_StreamCursor()}
+    get {_cursor ?? Kmgr_V1_StreamCursor()}
     set {_cursor = newValue}
   }
   /// Returns true if `cursor` has been explicitly set.
-  public var hasCursor: Bool {return self._cursor != nil}
+  public var hasCursor: Bool {self._cursor != nil}
   /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
   public mutating func clearCursor() {self._cursor = nil}
 
@@ -770,7 +770,7 @@ public struct Kmgr_V1_ViewEvent: Sendable {
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  public enum OneOf_Payload: Equatable, Sendable {
+  public nonisolated enum OneOf_Payload: Equatable, Sendable {
     case status(Kmgr_V1_ViewStatus)
     case error(Kmgr_V1_StructuredError)
     case reconciled(Kmgr_V1_ViewReconciled)
@@ -784,17 +784,17 @@ public struct Kmgr_V1_ViewEvent: Sendable {
   fileprivate var _cursor: Kmgr_V1_StreamCursor? = nil
 }
 
-public struct Kmgr_V1_SearchObjectsRequest: Sendable {
+public nonisolated struct Kmgr_V1_SearchObjectsRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -805,20 +805,20 @@ public struct Kmgr_V1_SearchObjectsRequest: Sendable {
   public var queryRevision: UInt64 = 0
 
   public var resource: Kmgr_V1_ResourceType {
-    get {return _resource ?? Kmgr_V1_ResourceType()}
+    get {_resource ?? Kmgr_V1_ResourceType()}
     set {_resource = newValue}
   }
   /// Returns true if `resource` has been explicitly set.
-  public var hasResource: Bool {return self._resource != nil}
+  public var hasResource: Bool {self._resource != nil}
   /// Clears the value of `resource`. Subsequent reads from it will return its default value.
   public mutating func clearResource() {self._resource = nil}
 
   public var namespaceScope: Kmgr_V1_NamespaceScope {
-    get {return _namespaceScope ?? Kmgr_V1_NamespaceScope()}
+    get {_namespaceScope ?? Kmgr_V1_NamespaceScope()}
     set {_namespaceScope = newValue}
   }
   /// Returns true if `namespaceScope` has been explicitly set.
-  public var hasNamespaceScope: Bool {return self._namespaceScope != nil}
+  public var hasNamespaceScope: Bool {self._namespaceScope != nil}
   /// Clears the value of `namespaceScope`. Subsequent reads from it will return its default value.
   public mutating func clearNamespaceScope() {self._namespaceScope = nil}
 
@@ -840,26 +840,26 @@ public struct Kmgr_V1_SearchObjectsRequest: Sendable {
 /// SearchCachedObjects is the root Command Palette's strictly local lookup.
 /// The engine must answer it only from active/warm process-memory stores: it
 /// never opens a resource client and never performs GET, LIST, or WATCH.
-public struct Kmgr_V1_SearchCachedObjectsRequest: Sendable {
+public nonisolated struct Kmgr_V1_SearchCachedObjectsRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
   public var namespaceScope: Kmgr_V1_NamespaceScope {
-    get {return _namespaceScope ?? Kmgr_V1_NamespaceScope()}
+    get {_namespaceScope ?? Kmgr_V1_NamespaceScope()}
     set {_namespaceScope = newValue}
   }
   /// Returns true if `namespaceScope` has been explicitly set.
-  public var hasNamespaceScope: Bool {return self._namespaceScope != nil}
+  public var hasNamespaceScope: Bool {self._namespaceScope != nil}
   /// Clears the value of `namespaceScope`. Subsequent reads from it will return its default value.
   public mutating func clearNamespaceScope() {self._namespaceScope = nil}
 
@@ -882,7 +882,7 @@ public struct Kmgr_V1_SearchCachedObjectsRequest: Sendable {
   fileprivate var _namespaceScope: Kmgr_V1_NamespaceScope? = nil
 }
 
-public struct Kmgr_V1_SearchCachedObjectsResponse: Sendable {
+public nonisolated struct Kmgr_V1_SearchCachedObjectsResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -896,11 +896,11 @@ public struct Kmgr_V1_SearchCachedObjectsResponse: Sendable {
   public var examinationTruncated: Bool = false
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -911,17 +911,17 @@ public struct Kmgr_V1_SearchCachedObjectsResponse: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_SearchResult: Sendable {
+public nonisolated struct Kmgr_V1_SearchResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var identity: Kmgr_V1_ResourceIdentity {
-    get {return _identity ?? Kmgr_V1_ResourceIdentity()}
+    get {_identity ?? Kmgr_V1_ResourceIdentity()}
     set {_identity = newValue}
   }
   /// Returns true if `identity` has been explicitly set.
-  public var hasIdentity: Bool {return self._identity != nil}
+  public var hasIdentity: Bool {self._identity != nil}
   /// Clears the value of `identity`. Subsequent reads from it will return its default value.
   public mutating func clearIdentity() {self._identity = nil}
 
@@ -940,7 +940,7 @@ public struct Kmgr_V1_SearchResult: Sendable {
   fileprivate var _identity: Kmgr_V1_ResourceIdentity? = nil
 }
 
-public struct Kmgr_V1_SearchProgress: Sendable {
+public nonisolated struct Kmgr_V1_SearchProgress: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -960,17 +960,17 @@ public struct Kmgr_V1_SearchProgress: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_SearchObjectsEvent: Sendable {
+public nonisolated struct Kmgr_V1_SearchObjectsEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var cursor: Kmgr_V1_StreamCursor {
-    get {return _cursor ?? Kmgr_V1_StreamCursor()}
+    get {_cursor ?? Kmgr_V1_StreamCursor()}
     set {_cursor = newValue}
   }
   /// Returns true if `cursor` has been explicitly set.
-  public var hasCursor: Bool {return self._cursor != nil}
+  public var hasCursor: Bool {self._cursor != nil}
   /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
   public mutating func clearCursor() {self._cursor = nil}
 
@@ -979,20 +979,20 @@ public struct Kmgr_V1_SearchObjectsEvent: Sendable {
   public var results: [Kmgr_V1_SearchResult] = []
 
   public var progress: Kmgr_V1_SearchProgress {
-    get {return _progress ?? Kmgr_V1_SearchProgress()}
+    get {_progress ?? Kmgr_V1_SearchProgress()}
     set {_progress = newValue}
   }
   /// Returns true if `progress` has been explicitly set.
-  public var hasProgress: Bool {return self._progress != nil}
+  public var hasProgress: Bool {self._progress != nil}
   /// Clears the value of `progress`. Subsequent reads from it will return its default value.
   public mutating func clearProgress() {self._progress = nil}
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -1005,17 +1005,17 @@ public struct Kmgr_V1_SearchObjectsEvent: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_CancelSearchRequest: Sendable {
+public nonisolated struct Kmgr_V1_CancelSearchRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -1036,26 +1036,26 @@ public struct Kmgr_V1_CancelSearchRequest: Sendable {
 /// core/v1 Node and Pod objects already retained for this cluster session and
 /// never opens a resource client or starts a LIST/WATCH or metrics provider.
 /// Callers run it after base rows are visible and may repeat it as caches fill.
-public struct Kmgr_V1_DiscoverOptionalResourcesRequest: Sendable {
+public nonisolated struct Kmgr_V1_DiscoverOptionalResourcesRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
   public var applicableResource: Kmgr_V1_ResourceType {
-    get {return _applicableResource ?? Kmgr_V1_ResourceType()}
+    get {_applicableResource ?? Kmgr_V1_ResourceType()}
     set {_applicableResource = newValue}
   }
   /// Returns true if `applicableResource` has been explicitly set.
-  public var hasApplicableResource: Bool {return self._applicableResource != nil}
+  public var hasApplicableResource: Bool {self._applicableResource != nil}
   /// Clears the value of `applicableResource`. Subsequent reads from it will return its default value.
   public mutating func clearApplicableResource() {self._applicableResource = nil}
 
@@ -1067,7 +1067,7 @@ public struct Kmgr_V1_DiscoverOptionalResourcesRequest: Sendable {
   fileprivate var _applicableResource: Kmgr_V1_ResourceType? = nil
 }
 
-public struct Kmgr_V1_OptionalResource: Sendable {
+public nonisolated struct Kmgr_V1_OptionalResource: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1085,11 +1085,11 @@ public struct Kmgr_V1_OptionalResource: Sendable {
   public var displayName: String = String()
 
   public var applicableResource: Kmgr_V1_ResourceType {
-    get {return _applicableResource ?? Kmgr_V1_ResourceType()}
+    get {_applicableResource ?? Kmgr_V1_ResourceType()}
     set {_applicableResource = newValue}
   }
   /// Returns true if `applicableResource` has been explicitly set.
-  public var hasApplicableResource: Bool {return self._applicableResource != nil}
+  public var hasApplicableResource: Bool {self._applicableResource != nil}
   /// Clears the value of `applicableResource`. Subsequent reads from it will return its default value.
   public mutating func clearApplicableResource() {self._applicableResource = nil}
 
@@ -1102,7 +1102,7 @@ public struct Kmgr_V1_OptionalResource: Sendable {
   fileprivate var _applicableResource: Kmgr_V1_ResourceType? = nil
 }
 
-public struct Kmgr_V1_DiscoverOptionalResourcesResponse: Sendable {
+public nonisolated struct Kmgr_V1_DiscoverOptionalResourcesResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1122,11 +1122,11 @@ public struct Kmgr_V1_DiscoverOptionalResourcesResponse: Sendable {
   public var potentiallyIncomplete: Bool = false
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -1137,7 +1137,7 @@ public struct Kmgr_V1_DiscoverOptionalResourcesResponse: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_SelectionGesture: Sendable {
+public nonisolated struct Kmgr_V1_SelectionGesture: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1164,7 +1164,7 @@ public struct Kmgr_V1_SelectionGesture: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_SelectionAnchor: Sendable {
+public nonisolated struct Kmgr_V1_SelectionAnchor: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1178,7 +1178,7 @@ public struct Kmgr_V1_SelectionAnchor: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_SelectionState: Sendable {
+public nonisolated struct Kmgr_V1_SelectionState: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1192,11 +1192,11 @@ public struct Kmgr_V1_SelectionState: Sendable {
   public var selectedCount: UInt64 = 0
 
   public var anchor: Kmgr_V1_SelectionAnchor {
-    get {return _anchor ?? Kmgr_V1_SelectionAnchor()}
+    get {_anchor ?? Kmgr_V1_SelectionAnchor()}
     set {_anchor = newValue}
   }
   /// Returns true if `anchor` has been explicitly set.
-  public var hasAnchor: Bool {return self._anchor != nil}
+  public var hasAnchor: Bool {self._anchor != nil}
   /// Clears the value of `anchor`. Subsequent reads from it will return its default value.
   public mutating func clearAnchor() {self._anchor = nil}
 
@@ -1213,17 +1213,17 @@ public struct Kmgr_V1_SelectionState: Sendable {
 /// ordering identified by generation/index_revision. A previous token from a
 /// different revision remains valid but is not rebound; the gesture starts a
 /// fresh selection on the requested ordering.
-public struct Kmgr_V1_ApplySelectionGestureRequest: Sendable {
+public nonisolated struct Kmgr_V1_ApplySelectionGestureRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -1236,11 +1236,11 @@ public struct Kmgr_V1_ApplySelectionGestureRequest: Sendable {
   public var previousToken: String = String()
 
   public var gesture: Kmgr_V1_SelectionGesture {
-    get {return _gesture ?? Kmgr_V1_SelectionGesture()}
+    get {_gesture ?? Kmgr_V1_SelectionGesture()}
     set {_gesture = newValue}
   }
   /// Returns true if `gesture` has been explicitly set.
-  public var hasGesture: Bool {return self._gesture != nil}
+  public var hasGesture: Bool {self._gesture != nil}
   /// Clears the value of `gesture`. Subsequent reads from it will return its default value.
   public mutating func clearGesture() {self._gesture = nil}
 
@@ -1252,7 +1252,7 @@ public struct Kmgr_V1_ApplySelectionGestureRequest: Sendable {
   fileprivate var _gesture: Kmgr_V1_SelectionGesture? = nil
 }
 
-public struct Kmgr_V1_ApplySelectionGestureResponse: Sendable {
+public nonisolated struct Kmgr_V1_ApplySelectionGestureResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1260,11 +1260,11 @@ public struct Kmgr_V1_ApplySelectionGestureResponse: Sendable {
   public var requestID: String = String()
 
   public var selection: Kmgr_V1_SelectionState {
-    get {return _selection ?? Kmgr_V1_SelectionState()}
+    get {_selection ?? Kmgr_V1_SelectionState()}
     set {_selection = newValue}
   }
   /// Returns true if `selection` has been explicitly set.
-  public var hasSelection: Bool {return self._selection != nil}
+  public var hasSelection: Bool {self._selection != nil}
   /// Clears the value of `selection`. Subsequent reads from it will return its default value.
   public mutating func clearSelection() {self._selection = nil}
 
@@ -1278,17 +1278,17 @@ public struct Kmgr_V1_ApplySelectionGestureResponse: Sendable {
 /// ProjectSelectionRange maps an immutable token to one bounded range of the
 /// current view by UID. The numeric range is pinned to generation/index_revision
 /// and is rejected if the current ordering has changed.
-public struct Kmgr_V1_ProjectSelectionRangeRequest: Sendable {
+public nonisolated struct Kmgr_V1_ProjectSelectionRangeRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -1311,7 +1311,7 @@ public struct Kmgr_V1_ProjectSelectionRangeRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_ProjectSelectionRangeResponse: Sendable {
+public nonisolated struct Kmgr_V1_ProjectSelectionRangeResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1329,11 +1329,11 @@ public struct Kmgr_V1_ProjectSelectionRangeResponse: Sendable {
   public var rowsVisible: UInt64 = 0
 
   public var selection: Kmgr_V1_SelectionState {
-    get {return _selection ?? Kmgr_V1_SelectionState()}
+    get {_selection ?? Kmgr_V1_SelectionState()}
     set {_selection = newValue}
   }
   /// Returns true if `selection` has been explicitly set.
-  public var hasSelection: Bool {return self._selection != nil}
+  public var hasSelection: Bool {self._selection != nil}
   /// Clears the value of `selection`. Subsequent reads from it will return its default value.
   public mutating func clearSelection() {self._selection = nil}
 
@@ -1341,11 +1341,11 @@ public struct Kmgr_V1_ProjectSelectionRangeResponse: Sendable {
 
   /// Offset inside selected when the token's anchor is present in this range.
   public var anchorOffset: UInt32 {
-    get {return _anchorOffset ?? 0}
+    get {_anchorOffset ?? 0}
     set {_anchorOffset = newValue}
   }
   /// Returns true if `anchorOffset` has been explicitly set.
-  public var hasAnchorOffset: Bool {return self._anchorOffset != nil}
+  public var hasAnchorOffset: Bool {self._anchorOffset != nil}
   /// Clears the value of `anchorOffset`. Subsequent reads from it will return its default value.
   public mutating func clearAnchorOffset() {self._anchorOffset = nil}
 
@@ -1357,7 +1357,7 @@ public struct Kmgr_V1_ProjectSelectionRangeResponse: Sendable {
   fileprivate var _anchorOffset: UInt32? = nil
 }
 
-public struct Kmgr_V1_SelectionPageItem: Sendable {
+public nonisolated struct Kmgr_V1_SelectionPageItem: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1366,11 +1366,11 @@ public struct Kmgr_V1_SelectionPageItem: Sendable {
   public var pinnedIndex: UInt64 = 0
 
   public var identity: Kmgr_V1_ResourceIdentity {
-    get {return _identity ?? Kmgr_V1_ResourceIdentity()}
+    get {_identity ?? Kmgr_V1_ResourceIdentity()}
     set {_identity = newValue}
   }
   /// Returns true if `identity` has been explicitly set.
-  public var hasIdentity: Bool {return self._identity != nil}
+  public var hasIdentity: Bool {self._identity != nil}
   /// Clears the value of `identity`. Subsequent reads from it will return its default value.
   public mutating func clearIdentity() {self._identity = nil}
 
@@ -1383,17 +1383,17 @@ public struct Kmgr_V1_SelectionPageItem: Sendable {
 
 /// Offset is a rank in the selected set rather than a table row index. Paging
 /// remains valid after the source view changes revision or closes.
-public struct Kmgr_V1_FetchSelectionPageRequest: Sendable {
+public nonisolated struct Kmgr_V1_FetchSelectionPageRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -1412,7 +1412,7 @@ public struct Kmgr_V1_FetchSelectionPageRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_FetchSelectionPageResponse: Sendable {
+public nonisolated struct Kmgr_V1_FetchSelectionPageResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1420,11 +1420,11 @@ public struct Kmgr_V1_FetchSelectionPageResponse: Sendable {
   public var requestID: String = String()
 
   public var selection: Kmgr_V1_SelectionState {
-    get {return _selection ?? Kmgr_V1_SelectionState()}
+    get {_selection ?? Kmgr_V1_SelectionState()}
     set {_selection = newValue}
   }
   /// Returns true if `selection` has been explicitly set.
-  public var hasSelection: Bool {return self._selection != nil}
+  public var hasSelection: Bool {self._selection != nil}
   /// Clears the value of `selection`. Subsequent reads from it will return its default value.
   public mutating func clearSelection() {self._selection = nil}
 
@@ -1445,25 +1445,25 @@ public struct Kmgr_V1_FetchSelectionPageResponse: Sendable {
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
-fileprivate let _protobuf_package = "kmgr.v1"
+fileprivate nonisolated let _protobuf_package = "kmgr.v1"
 
-extension Kmgr_V1_SortDirection: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SortDirection: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SORT_DIRECTION_UNSPECIFIED\0\u{1}SORT_DIRECTION_ASCENDING\0\u{1}SORT_DIRECTION_DESCENDING\0")
 }
 
-extension Kmgr_V1_ViewFreshness: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ViewFreshness: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0VIEW_FRESHNESS_UNSPECIFIED\0\u{1}VIEW_FRESHNESS_LOADING\0\u{1}VIEW_FRESHNESS_STALE\0\u{1}VIEW_FRESHNESS_RESUMING\0\u{1}VIEW_FRESHNESS_RELISTING\0\u{1}VIEW_FRESHNESS_WATCHING\0\u{1}VIEW_FRESHNESS_RECONNECTING\0\u{1}VIEW_FRESHNESS_FAILED\0\u{1}VIEW_FRESHNESS_COMPLETE\0")
 }
 
-extension Kmgr_V1_OptionalResourceCategory: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_OptionalResourceCategory: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0OPTIONAL_RESOURCE_CATEGORY_UNSPECIFIED\0\u{1}OPTIONAL_RESOURCE_CATEGORY_EPHEMERAL_STORAGE\0\u{1}OPTIONAL_RESOURCE_CATEGORY_HUGE_PAGE\0\u{1}OPTIONAL_RESOURCE_CATEGORY_ACCELERATOR\0")
 }
 
-extension Kmgr_V1_SelectionGestureKind: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SelectionGestureKind: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SELECTION_GESTURE_KIND_UNSPECIFIED\0\u{1}SELECTION_GESTURE_KIND_REPLACE\0\u{1}SELECTION_GESTURE_KIND_COMMAND_TOGGLE\0\u{1}SELECTION_GESTURE_KIND_SHIFT_EXTEND\0\u{1}SELECTION_GESTURE_KIND_COMMAND_ALL\0\u{1}SELECTION_GESTURE_KIND_CLEAR\0")
 }
 
-extension Kmgr_V1_PreviewColumnRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_PreviewColumnRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PreviewColumnRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{1}resource\0\u{3}namespace_scope\0\u{1}column\0\u{3}selected_object\0")
 
@@ -1561,7 +1561,7 @@ extension Kmgr_V1_PreviewColumnRequest: SwiftProtobuf.Message, SwiftProtobuf._Me
   }
 }
 
-extension Kmgr_V1_CELColumnDefinition: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_CELColumnDefinition: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CELColumnDefinition"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}title\0\u{1}expression\0\u{3}result_type\0\u{1}missing\0\u{3}list_joiner\0")
 
@@ -1616,7 +1616,7 @@ extension Kmgr_V1_CELColumnDefinition: SwiftProtobuf.Message, SwiftProtobuf._Mes
   }
 }
 
-extension Kmgr_V1_PreviewColumnResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_PreviewColumnResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PreviewColumnResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}cel_environment\0\u{1}preview\0\u{3}used_sample_object\0\u{3}evaluated_object\0\u{1}error\0")
 
@@ -1721,7 +1721,7 @@ extension Kmgr_V1_PreviewColumnResponse: SwiftProtobuf.Message, SwiftProtobuf._M
   }
 }
 
-extension Kmgr_V1_SortDescriptor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SortDescriptor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SortDescriptor"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}column_id\0\u{1}direction\0\u{3}nulls_first\0")
 
@@ -1761,7 +1761,7 @@ extension Kmgr_V1_SortDescriptor: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_ViewSpec: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ViewSpec: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewSpec"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}resource\0\u{3}namespace_scope\0\u{3}label_selector\0\u{3}field_selector\0\u{3}filter_expression\0\u{3}filter_revision\0\u{3}column_ids\0\u{3}column_configuration_version\0\u{1}sort\0")
 
@@ -1835,7 +1835,7 @@ extension Kmgr_V1_ViewSpec: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
   }
 }
 
-extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".OpenViewRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{1}spec\0\u{3}stage_until_reconciled\0")
 
@@ -1933,7 +1933,7 @@ extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension Kmgr_V1_CancelViewRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_CancelViewRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CancelViewRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0")
 
@@ -1977,7 +1977,7 @@ extension Kmgr_V1_CancelViewRequest: SwiftProtobuf.Message, SwiftProtobuf._Messa
   }
 }
 
-extension Kmgr_V1_ViewStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ViewStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewStatus"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}freshness\0\u{3}objects_examined\0\u{3}rows_visible\0\u{3}last_synchronized_unix_ms\0\u{3}from_warm_cache\0\u{3}resource_version_hint\0\u{3}metrics_reconciling\0")
 
@@ -2037,7 +2037,7 @@ extension Kmgr_V1_ViewStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension Kmgr_V1_ResourceColumnSchema: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ResourceColumnSchema: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResourceColumnSchema"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}title\0\u{3}result_type\0\u{1}alignment\0\u{1}width\0\u{3}default_visible\0\u{1}priority\0\u{1}format\0\u{1}description\0")
 
@@ -2107,7 +2107,7 @@ extension Kmgr_V1_ResourceColumnSchema: SwiftProtobuf.Message, SwiftProtobuf._Me
   }
 }
 
-extension Kmgr_V1_ViewSchema: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ViewSchema: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewSchema"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}columns\0\u{3}server_table\0\u{1}revision\0")
 
@@ -2147,7 +2147,7 @@ extension Kmgr_V1_ViewSchema: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension Kmgr_V1_ViewInvalidation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ViewInvalidation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewInvalidation"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}presentation_revision\0\u{3}index_revision\0\u{3}rows_visible\0\u{3}max_range_length\0\u{3}observed_optional_resource_keys\0\u{3}observed_optional_resource_keys_truncated\0")
 
@@ -2202,7 +2202,7 @@ extension Kmgr_V1_ViewInvalidation: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
-extension Kmgr_V1_FetchViewRangeRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_FetchViewRangeRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".FetchViewRangeRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{3}presentation_revision\0\u{3}index_revision\0\u{3}start_index\0\u{1}length\0")
 
@@ -2266,7 +2266,7 @@ extension Kmgr_V1_FetchViewRangeRequest: SwiftProtobuf.Message, SwiftProtobuf._M
   }
 }
 
-extension Kmgr_V1_FetchViewRangeResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_FetchViewRangeResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".FetchViewRangeResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}view_id\0\u{1}generation\0\u{3}presentation_revision\0\u{3}index_revision\0\u{3}start_index\0\u{3}rows_visible\0\u{1}rows\0")
 
@@ -2331,7 +2331,7 @@ extension Kmgr_V1_FetchViewRangeResponse: SwiftProtobuf.Message, SwiftProtobuf._
   }
 }
 
-extension Kmgr_V1_UpdateMetricInterestRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_UpdateMetricInterestRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UpdateMetricInterestRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{3}index_revision\0\u{3}start_index\0\u{1}length\0")
 
@@ -2390,7 +2390,7 @@ extension Kmgr_V1_UpdateMetricInterestRequest: SwiftProtobuf.Message, SwiftProto
   }
 }
 
-extension Kmgr_V1_ViewReconciled: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ViewReconciled: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewReconciled"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}rows_visible\0\u{3}presentation_revision\0\u{3}index_revision\0")
 
@@ -2430,7 +2430,7 @@ extension Kmgr_V1_ViewReconciled: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewEvent"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}status\0\u{1}error\0\u{1}reconciled\0\u{1}schema\0\u{1}invalidation\0")
 
@@ -2553,7 +2553,7 @@ extension Kmgr_V1_ViewEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
   }
 }
 
-extension Kmgr_V1_SearchObjectsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SearchObjectsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SearchObjectsRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}search_id\0\u{1}generation\0\u{3}query_revision\0\u{1}resource\0\u{3}namespace_scope\0\u{1}query\0\u{3}result_limit\0\u{3}allow_paginated_list\0")
 
@@ -2627,7 +2627,7 @@ extension Kmgr_V1_SearchObjectsRequest: SwiftProtobuf.Message, SwiftProtobuf._Me
   }
 }
 
-extension Kmgr_V1_SearchCachedObjectsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SearchCachedObjectsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SearchCachedObjectsRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}namespace_scope\0\u{1}query\0\u{3}result_limit\0\u{3}examination_limit\0\u{3}resource_filters\0")
 
@@ -2686,7 +2686,7 @@ extension Kmgr_V1_SearchCachedObjectsRequest: SwiftProtobuf.Message, SwiftProtob
   }
 }
 
-extension Kmgr_V1_SearchCachedObjectsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SearchCachedObjectsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SearchCachedObjectsResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}results\0\u{3}objects_examined\0\u{3}examination_truncated\0\u{1}error\0")
 
@@ -2740,7 +2740,7 @@ extension Kmgr_V1_SearchCachedObjectsResponse: SwiftProtobuf.Message, SwiftProto
   }
 }
 
-extension Kmgr_V1_SearchResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SearchResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SearchResult"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{3}display_text\0\u{3}detail_text\0\u{1}rank\0\u{1}stale\0")
 
@@ -2794,7 +2794,7 @@ extension Kmgr_V1_SearchResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
   }
 }
 
-extension Kmgr_V1_SearchProgress: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SearchProgress: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SearchProgress"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}query_revision\0\u{3}objects_examined\0\u{1}complete\0\u{3}used_direct_get\0\u{3}reusable_snapshot_available\0")
 
@@ -2844,7 +2844,7 @@ extension Kmgr_V1_SearchProgress: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_SearchObjectsEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SearchObjectsEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SearchObjectsEvent"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{3}query_revision\0\u{1}results\0\u{1}progress\0\u{1}error\0")
 
@@ -2898,7 +2898,7 @@ extension Kmgr_V1_SearchObjectsEvent: SwiftProtobuf.Message, SwiftProtobuf._Mess
   }
 }
 
-extension Kmgr_V1_CancelSearchRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_CancelSearchRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CancelSearchRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}search_id\0\u{1}generation\0\u{3}query_revision\0")
 
@@ -2947,7 +2947,7 @@ extension Kmgr_V1_CancelSearchRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
   }
 }
 
-extension Kmgr_V1_DiscoverOptionalResourcesRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_DiscoverOptionalResourcesRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DiscoverOptionalResourcesRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}applicable_resource\0")
 
@@ -2986,7 +2986,7 @@ extension Kmgr_V1_DiscoverOptionalResourcesRequest: SwiftProtobuf.Message, Swift
   }
 }
 
-extension Kmgr_V1_OptionalResource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_OptionalResource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".OptionalResource"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}exact_key\0\u{1}category\0\u{1}present\0\u{3}display_name\0\u{3}applicable_resource\0\u{3}explicitly_configured\0")
 
@@ -3045,7 +3045,7 @@ extension Kmgr_V1_OptionalResource: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
-extension Kmgr_V1_DiscoverOptionalResourcesResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_DiscoverOptionalResourcesResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DiscoverOptionalResourcesResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}resources\0\u{3}nodes_cache_available\0\u{3}pods_cache_available\0\u{3}nodes_snapshot_complete\0\u{3}pods_snapshot_complete\0\u{3}potentially_incomplete\0\u{1}error\0")
 
@@ -3114,7 +3114,7 @@ extension Kmgr_V1_DiscoverOptionalResourcesResponse: SwiftProtobuf.Message, Swif
   }
 }
 
-extension Kmgr_V1_SelectionGesture: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SelectionGesture: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SelectionGesture"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}index\0\u{1}additive\0\u{3}target_uid\0\u{3}anchor_uid\0")
 
@@ -3164,7 +3164,7 @@ extension Kmgr_V1_SelectionGesture: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
-extension Kmgr_V1_SelectionAnchor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SelectionAnchor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SelectionAnchor"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}index\0\u{1}uid\0")
 
@@ -3199,7 +3199,7 @@ extension Kmgr_V1_SelectionAnchor: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension Kmgr_V1_SelectionState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SelectionState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SelectionState"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}token\0\u{1}generation\0\u{3}index_revision\0\u{3}selected_count\0\u{1}anchor\0\u{3}expires_at_unix_ms\0")
 
@@ -3258,7 +3258,7 @@ extension Kmgr_V1_SelectionState: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension Kmgr_V1_ApplySelectionGestureRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ApplySelectionGestureRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ApplySelectionGestureRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{3}index_revision\0\u{3}previous_token\0\u{1}gesture\0")
 
@@ -3317,7 +3317,7 @@ extension Kmgr_V1_ApplySelectionGestureRequest: SwiftProtobuf.Message, SwiftProt
   }
 }
 
-extension Kmgr_V1_ApplySelectionGestureResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ApplySelectionGestureResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ApplySelectionGestureResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}selection\0")
 
@@ -3356,7 +3356,7 @@ extension Kmgr_V1_ApplySelectionGestureResponse: SwiftProtobuf.Message, SwiftPro
   }
 }
 
-extension Kmgr_V1_ProjectSelectionRangeRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ProjectSelectionRangeRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProjectSelectionRangeRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{3}index_revision\0\u{3}start_index\0\u{1}length\0\u{1}token\0")
 
@@ -3420,7 +3420,7 @@ extension Kmgr_V1_ProjectSelectionRangeRequest: SwiftProtobuf.Message, SwiftProt
   }
 }
 
-extension Kmgr_V1_ProjectSelectionRangeResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ProjectSelectionRangeResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProjectSelectionRangeResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}view_id\0\u{1}generation\0\u{3}index_revision\0\u{3}start_index\0\u{3}rows_visible\0\u{1}selection\0\u{1}selected\0\u{3}anchor_offset\0")
 
@@ -3494,7 +3494,7 @@ extension Kmgr_V1_ProjectSelectionRangeResponse: SwiftProtobuf.Message, SwiftPro
   }
 }
 
-extension Kmgr_V1_SelectionPageItem: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_SelectionPageItem: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SelectionPageItem"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pinned_index\0\u{1}identity\0")
 
@@ -3533,7 +3533,7 @@ extension Kmgr_V1_SelectionPageItem: SwiftProtobuf.Message, SwiftProtobuf._Messa
   }
 }
 
-extension Kmgr_V1_FetchSelectionPageRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_FetchSelectionPageRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".FetchSelectionPageRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}token\0\u{1}offset\0\u{1}limit\0")
 
@@ -3587,7 +3587,7 @@ extension Kmgr_V1_FetchSelectionPageRequest: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-extension Kmgr_V1_FetchSelectionPageResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_FetchSelectionPageResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".FetchSelectionPageResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}selection\0\u{1}offset\0\u{1}items\0\u{3}next_offset\0\u{1}done\0")
 

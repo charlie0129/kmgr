@@ -8,7 +8,11 @@
 // For information on using the generated types, please see the documentation:
 //   https://github.com/apple/swift-protobuf/
 
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 import SwiftProtobuf
 
 // If the compiler emits an error on this type, it is because this file
@@ -16,12 +20,12 @@ import SwiftProtobuf
 // incompatible with the version of SwiftProtobuf to which you are linking.
 // Please ensure that you are building against the same version of the API
 // that was used to generate this file.
-fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
+fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
   struct _2: SwiftProtobuf.ProtobufAPIVersion_2 {}
   typealias Version = _2
 }
 
-public enum Kmgr_V1_LogStreamState: SwiftProtobuf.Enum, Swift.CaseIterable {
+public nonisolated enum Kmgr_V1_LogStreamState: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
   case connecting // = 1
@@ -79,17 +83,17 @@ public enum Kmgr_V1_LogStreamState: SwiftProtobuf.Enum, Swift.CaseIterable {
 /// to one UID-pinned Pod snapshot before a log window opens. Membership is
 /// deliberately static; dynamic controller membership is a separate opt-in
 /// behavior represented by LogOptions.follow_workload_membership.
-public struct Kmgr_V1_ResolveLogSourcesRequest: Sendable {
+public nonisolated struct Kmgr_V1_ResolveLogSourcesRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -102,17 +106,17 @@ public struct Kmgr_V1_ResolveLogSourcesRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_ResolvedPodLogSource: Sendable {
+public nonisolated struct Kmgr_V1_ResolvedPodLogSource: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var identity: Kmgr_V1_ResourceIdentity {
-    get {return _identity ?? Kmgr_V1_ResourceIdentity()}
+    get {_identity ?? Kmgr_V1_ResourceIdentity()}
     set {_identity = newValue}
   }
   /// Returns true if `identity` has been explicitly set.
-  public var hasIdentity: Bool {return self._identity != nil}
+  public var hasIdentity: Bool {self._identity != nil}
   /// Clears the value of `identity`. Subsequent reads from it will return its default value.
   public mutating func clearIdentity() {self._identity = nil}
 
@@ -125,7 +129,7 @@ public struct Kmgr_V1_ResolvedPodLogSource: Sendable {
   fileprivate var _identity: Kmgr_V1_ResourceIdentity? = nil
 }
 
-public struct Kmgr_V1_ResolveLogSourcesResponse: Sendable {
+public nonisolated struct Kmgr_V1_ResolveLogSourcesResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -137,11 +141,11 @@ public struct Kmgr_V1_ResolveLogSourcesResponse: Sendable {
   public var staticWorkloadSnapshot: Bool = false
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -152,17 +156,17 @@ public struct Kmgr_V1_ResolveLogSourcesResponse: Sendable {
   fileprivate var _error: Kmgr_V1_StructuredError? = nil
 }
 
-public struct Kmgr_V1_LogSource: Sendable {
+public nonisolated struct Kmgr_V1_LogSource: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var identity: Kmgr_V1_ResourceIdentity {
-    get {return _identity ?? Kmgr_V1_ResourceIdentity()}
+    get {_identity ?? Kmgr_V1_ResourceIdentity()}
     set {_identity = newValue}
   }
   /// Returns true if `identity` has been explicitly set.
-  public var hasIdentity: Bool {return self._identity != nil}
+  public var hasIdentity: Bool {self._identity != nil}
   /// Clears the value of `identity`. Subsequent reads from it will return its default value.
   public mutating func clearIdentity() {self._identity = nil}
 
@@ -179,7 +183,7 @@ public struct Kmgr_V1_LogSource: Sendable {
   fileprivate var _identity: Kmgr_V1_ResourceIdentity? = nil
 }
 
-public struct Kmgr_V1_LogOptions: Sendable {
+public nonisolated struct Kmgr_V1_LogOptions: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -191,38 +195,38 @@ public struct Kmgr_V1_LogOptions: Sendable {
   public var timestamps: Bool = false
 
   public var sinceUnixMs: Int64 {
-    get {return _sinceUnixMs ?? 0}
+    get {_sinceUnixMs ?? 0}
     set {_sinceUnixMs = newValue}
   }
   /// Returns true if `sinceUnixMs` has been explicitly set.
-  public var hasSinceUnixMs: Bool {return self._sinceUnixMs != nil}
+  public var hasSinceUnixMs: Bool {self._sinceUnixMs != nil}
   /// Clears the value of `sinceUnixMs`. Subsequent reads from it will return its default value.
   public mutating func clearSinceUnixMs() {self._sinceUnixMs = nil}
 
   public var sinceSeconds: Int64 {
-    get {return _sinceSeconds ?? 0}
+    get {_sinceSeconds ?? 0}
     set {_sinceSeconds = newValue}
   }
   /// Returns true if `sinceSeconds` has been explicitly set.
-  public var hasSinceSeconds: Bool {return self._sinceSeconds != nil}
+  public var hasSinceSeconds: Bool {self._sinceSeconds != nil}
   /// Clears the value of `sinceSeconds`. Subsequent reads from it will return its default value.
   public mutating func clearSinceSeconds() {self._sinceSeconds = nil}
 
   public var tailLines: Int64 {
-    get {return _tailLines ?? 0}
+    get {_tailLines ?? 0}
     set {_tailLines = newValue}
   }
   /// Returns true if `tailLines` has been explicitly set.
-  public var hasTailLines: Bool {return self._tailLines != nil}
+  public var hasTailLines: Bool {self._tailLines != nil}
   /// Clears the value of `tailLines`. Subsequent reads from it will return its default value.
   public mutating func clearTailLines() {self._tailLines = nil}
 
   public var byteLimit: Int64 {
-    get {return _byteLimit ?? 0}
+    get {_byteLimit ?? 0}
     set {_byteLimit = newValue}
   }
   /// Returns true if `byteLimit` has been explicitly set.
-  public var hasByteLimit: Bool {return self._byteLimit != nil}
+  public var hasByteLimit: Bool {self._byteLimit != nil}
   /// Clears the value of `byteLimit`. Subsequent reads from it will return its default value.
   public mutating func clearByteLimit() {self._byteLimit = nil}
 
@@ -238,17 +242,17 @@ public struct Kmgr_V1_LogOptions: Sendable {
   fileprivate var _byteLimit: Int64? = nil
 }
 
-public struct Kmgr_V1_StartLogsRequest: Sendable {
+public nonisolated struct Kmgr_V1_StartLogsRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -259,11 +263,11 @@ public struct Kmgr_V1_StartLogsRequest: Sendable {
   public var sources: [Kmgr_V1_LogSource] = []
 
   public var options: Kmgr_V1_LogOptions {
-    get {return _options ?? Kmgr_V1_LogOptions()}
+    get {_options ?? Kmgr_V1_LogOptions()}
     set {_options = newValue}
   }
   /// Returns true if `options` has been explicitly set.
-  public var hasOptions: Bool {return self._options != nil}
+  public var hasOptions: Bool {self._options != nil}
   /// Clears the value of `options`. Subsequent reads from it will return its default value.
   public mutating func clearOptions() {self._options = nil}
 
@@ -275,17 +279,17 @@ public struct Kmgr_V1_StartLogsRequest: Sendable {
   fileprivate var _options: Kmgr_V1_LogOptions? = nil
 }
 
-public struct Kmgr_V1_CancelLogsRequest: Sendable {
+public nonisolated struct Kmgr_V1_CancelLogsRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var context: Kmgr_V1_RequestContext {
-    get {return _context ?? Kmgr_V1_RequestContext()}
+    get {_context ?? Kmgr_V1_RequestContext()}
     set {_context = newValue}
   }
   /// Returns true if `context` has been explicitly set.
-  public var hasContext: Bool {return self._context != nil}
+  public var hasContext: Bool {self._context != nil}
   /// Clears the value of `context`. Subsequent reads from it will return its default value.
   public mutating func clearContext() {self._context = nil}
 
@@ -300,7 +304,7 @@ public struct Kmgr_V1_CancelLogsRequest: Sendable {
   fileprivate var _context: Kmgr_V1_RequestContext? = nil
 }
 
-public struct Kmgr_V1_LogRecord: Sendable {
+public nonisolated struct Kmgr_V1_LogRecord: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -323,7 +327,7 @@ public struct Kmgr_V1_LogRecord: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_LogStatus: Sendable {
+public nonisolated struct Kmgr_V1_LogStatus: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -337,11 +341,11 @@ public struct Kmgr_V1_LogStatus: Sendable {
   public var sourceID: String = String()
 
   public var error: Kmgr_V1_StructuredError {
-    get {return _error ?? Kmgr_V1_StructuredError()}
+    get {_error ?? Kmgr_V1_StructuredError()}
     set {_error = newValue}
   }
   /// Returns true if `error` has been explicitly set.
-  public var hasError: Bool {return self._error != nil}
+  public var hasError: Bool {self._error != nil}
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
@@ -354,7 +358,7 @@ public struct Kmgr_V1_LogStatus: Sendable {
 
 /// data is bounded and batched by the engine; receivers must not assume a
 /// record is a UTF-8 line because a single Kubernetes log line may be huge.
-public struct Kmgr_V1_LogBatch: Sendable {
+public nonisolated struct Kmgr_V1_LogBatch: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -368,17 +372,17 @@ public struct Kmgr_V1_LogBatch: Sendable {
   public init() {}
 }
 
-public struct Kmgr_V1_LogEvent: Sendable {
+public nonisolated struct Kmgr_V1_LogEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var cursor: Kmgr_V1_StreamCursor {
-    get {return _cursor ?? Kmgr_V1_StreamCursor()}
+    get {_cursor ?? Kmgr_V1_StreamCursor()}
     set {_cursor = newValue}
   }
   /// Returns true if `cursor` has been explicitly set.
-  public var hasCursor: Bool {return self._cursor != nil}
+  public var hasCursor: Bool {self._cursor != nil}
   /// Clears the value of `cursor`. Subsequent reads from it will return its default value.
   public mutating func clearCursor() {self._cursor = nil}
 
@@ -410,7 +414,7 @@ public struct Kmgr_V1_LogEvent: Sendable {
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  public enum OneOf_Payload: Equatable, Sendable {
+  public nonisolated enum OneOf_Payload: Equatable, Sendable {
     case batch(Kmgr_V1_LogBatch)
     case status(Kmgr_V1_LogStatus)
     case error(Kmgr_V1_StructuredError)
@@ -424,13 +428,13 @@ public struct Kmgr_V1_LogEvent: Sendable {
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
-fileprivate let _protobuf_package = "kmgr.v1"
+fileprivate nonisolated let _protobuf_package = "kmgr.v1"
 
-extension Kmgr_V1_LogStreamState: SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_LogStreamState: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0LOG_STREAM_STATE_UNSPECIFIED\0\u{1}LOG_STREAM_STATE_CONNECTING\0\u{1}LOG_STREAM_STATE_STREAMING\0\u{1}LOG_STREAM_STATE_RECONNECTING\0\u{1}LOG_STREAM_STATE_COMPLETED\0\u{1}LOG_STREAM_STATE_CANCELLED\0\u{1}LOG_STREAM_STATE_FAILED\0")
 }
 
-extension Kmgr_V1_ResolveLogSourcesRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ResolveLogSourcesRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResolveLogSourcesRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{1}resources\0")
 
@@ -469,7 +473,7 @@ extension Kmgr_V1_ResolveLogSourcesRequest: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-extension Kmgr_V1_ResolvedPodLogSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ResolvedPodLogSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResolvedPodLogSource"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}containers\0")
 
@@ -508,7 +512,7 @@ extension Kmgr_V1_ResolvedPodLogSource: SwiftProtobuf.Message, SwiftProtobuf._Me
   }
 }
 
-extension Kmgr_V1_ResolveLogSourcesResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_ResolveLogSourcesResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResolveLogSourcesResponse"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}pods\0\u{3}static_workload_snapshot\0\u{1}error\0")
 
@@ -557,7 +561,7 @@ extension Kmgr_V1_ResolveLogSourcesResponse: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-extension Kmgr_V1_LogSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_LogSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LogSource"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}container\0\u{3}source_id\0\u{3}source_label\0")
 
@@ -606,7 +610,7 @@ extension Kmgr_V1_LogSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
   }
 }
 
-extension Kmgr_V1_LogOptions: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_LogOptions: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LogOptions"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}follow\0\u{1}previous\0\u{1}timestamps\0\u{3}since_unix_ms\0\u{3}since_seconds\0\u{3}tail_lines\0\u{3}byte_limit\0\u{3}follow_workload_membership\0")
 
@@ -675,7 +679,7 @@ extension Kmgr_V1_LogOptions: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension Kmgr_V1_StartLogsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_StartLogsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StartLogsRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}log_stream_id\0\u{1}generation\0\u{1}sources\0\u{1}options\0")
 
@@ -729,7 +733,7 @@ extension Kmgr_V1_StartLogsRequest: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
-extension Kmgr_V1_CancelLogsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_CancelLogsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CancelLogsRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}log_stream_id\0\u{1}generation\0")
 
@@ -773,7 +777,7 @@ extension Kmgr_V1_CancelLogsRequest: SwiftProtobuf.Message, SwiftProtobuf._Messa
   }
 }
 
-extension Kmgr_V1_LogRecord: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_LogRecord: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LogRecord"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}source_id\0\u{1}data\0\u{3}timestamp_unix_ms\0\u{3}ends_with_newline\0\u{3}continues_line\0")
 
@@ -823,7 +827,7 @@ extension Kmgr_V1_LogRecord: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
   }
 }
 
-extension Kmgr_V1_LogStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_LogStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LogStatus"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0\u{3}dropped_records\0\u{3}dropped_bytes\0\u{3}source_id\0\u{1}error\0")
 
@@ -877,7 +881,7 @@ extension Kmgr_V1_LogStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
   }
 }
 
-extension Kmgr_V1_LogBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_LogBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LogBatch"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}records\0\u{3}total_bytes\0")
 
@@ -912,7 +916,7 @@ extension Kmgr_V1_LogBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
   }
 }
 
-extension Kmgr_V1_LogEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Kmgr_V1_LogEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LogEvent"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cursor\0\u{1}batch\0\u{1}status\0\u{1}error\0")
 

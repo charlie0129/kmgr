@@ -7,7 +7,12 @@ app_dir="$repo_root/build/Kmgr.app"
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 helpers_dir="$contents_dir/Helpers"
+frameworks_dir="$contents_dir/Frameworks"
 resources_dir="$contents_dir/Resources"
+icon_source="$repo_root/assets/kmgr.icon"
+icon_name=kmgr
+icon_file="$resources_dir/$icon_name.icns"
+asset_catalog="$resources_dir/Assets.car"
 version=$(git -C "$repo_root" describe --always --dirty 2>/dev/null || print dev)
 
 case "$configuration" in
@@ -22,6 +27,11 @@ case "$configuration" in
   *) print -u2 "CONFIGURATION must be 'debug' or 'release'"; exit 2 ;;
 esac
 
+[[ -d "$icon_source" ]] || {
+  print -u2 "missing Icon Composer document: $icon_source"
+  exit 1
+}
+
 # Assemble from an empty target every time. Reusing an old bundle can retain
 # removed helpers/resources or invalid nested signatures from a prior build.
 if [[ -d "$app_dir" ]]; then
@@ -33,7 +43,24 @@ if [[ -d "$app_dir" ]]; then
   fi
   rm -rf -- "$app_dir"
 fi
-mkdir -p "$macos_dir" "$helpers_dir" "$resources_dir"
+mkdir -p "$macos_dir" "$helpers_dir" "$frameworks_dir" "$resources_dir"
+
+xcrun actool "$icon_source" \
+  --compile "$resources_dir" \
+  --app-icon "$icon_name" \
+  --enable-on-demand-resources NO \
+  --development-region en \
+  --target-device mac \
+  --platform macosx \
+  --enable-icon-stack-fallback-generation=enabled \
+  --include-all-app-icons \
+  --minimum-deployment-target 15.0 \
+  --output-partial-info-plist /dev/null \
+  >/dev/null
+[[ -s "$asset_catalog" && -s "$icon_file" ]] || {
+  print -u2 "actool did not produce the Tahoe icon catalog and pre-Tahoe fallback"
+  exit 1
+}
 
 go build \
   "${go_build_flags[@]}" \
@@ -56,6 +83,31 @@ cp "$swift_bin_dir/Kmgr" "$macos_dir/Kmgr"
 cp "$repo_root/macos/Kmgr/Resources/Info.plist" "$contents_dir/Info.plist"
 chmod 0755 "$macos_dir/Kmgr" "$helpers_dir/kmgr-engine"
 
+xcrun swift-stdlib-tool \
+  --copy \
+  --scan-executable "$macos_dir/Kmgr" \
+  --platform macosx \
+  --destination "$frameworks_dir"
+
+bundle_frameworks_rpath='@executable_path/../Frameworks'
+has_bundle_frameworks_rpath=0
+swift_rpaths=("${(@f)$(/usr/bin/otool -l "$macos_dir/Kmgr" |
+  /usr/bin/awk '$1 == "cmd" && $2 == "LC_RPATH" { getline; getline; print $2 }')}")
+for rpath in "${swift_rpaths[@]}"; do
+  case "$rpath" in
+    "$bundle_frameworks_rpath") has_bundle_frameworks_rpath=1 ;;
+    /usr/lib/swift|@loader_path*|@executable_path*) ;;
+    /*) xcrun install_name_tool -delete_rpath "$rpath" "$macos_dir/Kmgr" ;;
+  esac
+done
+framework_entries=("$frameworks_dir"/*(N.))
+(( ${#framework_entries} > 0 )) || {
+  print -u2 "swift-stdlib-tool did not copy the required compatibility runtime"
+  exit 1
+}
+(( has_bundle_frameworks_rpath )) ||
+  xcrun install_name_tool -add_rpath "$bundle_frameworks_rpath" "$macos_dir/Kmgr"
+
 if [[ "$configuration" == release ]]; then
   # SwiftPM emits a separate dSYM for Release. Remove the copied executable's
   # remaining symbol table before signing; keep the dSYM in macos/.build for
@@ -63,10 +115,14 @@ if [[ "$configuration" == release ]]; then
   xcrun strip -u -r "$macos_dir/Kmgr"
 fi
 
-# Copying and, for Release, stripping SwiftPM's linker-signed executable
-# invalidates its original ad-hoc seal. Sign nested code first, then seal the
-# finished bundle. All binary mutations must remain above these calls.
-# A distribution pipeline can replace both signatures with Developer ID.
+# Copying, changing load paths, and, for Release, stripping SwiftPM's
+# linker-signed executable invalidates its original ad-hoc seal. Sign all
+# nested code first, then seal the finished bundle. All binary mutations must
+# remain above these calls. A distribution pipeline can replace these
+# signatures with Developer ID.
+for framework in "${framework_entries[@]}"; do
+  codesign --force --sign - "$framework"
+done
 codesign --force --sign - "$helpers_dir/kmgr-engine"
 codesign --force --sign - "$app_dir"
 

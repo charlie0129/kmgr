@@ -10,6 +10,10 @@
     <string>Kmgr</string>
     <key>CFBundleIdentifier</key>
     <string>cc.chlc.kmgr</string>
+    <key>CFBundleIconFile</key>
+    <string>kmgr</string>
+    <key>CFBundleIconName</key>
+    <string>kmgr</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
