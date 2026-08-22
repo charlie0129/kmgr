@@ -888,6 +888,12 @@ struct ObjectDetailYAMLPresentationTests {
         let dataEditor = try #require(dataScroll.documentView as? NSTextView)
         try await waitUntil { dataEditor.string == value }
         dataController.view.layoutSubtreeIfNeeded()
+        let dataSplit = try #require(descendants(of: dataController.view)
+            .compactMap { $0 as? NSSplitView }
+            .first { $0.identifier?.rawValue == "object-data-split" })
+        #expect(dataSplit.arrangedSubviews[0].frame.width > 100)
+        #expect(dataSplit.arrangedSubviews[1].frame.width > 100)
+        #expect(keysTable.frame.width > 100)
         #expect(dataScroll.contentSize.width > 100)
         #expect(dataEditor.frame.width > 100)
         #expect(dataEditor.frame.height > 0)
@@ -1437,10 +1443,14 @@ struct ObjectDetailYAMLPresentationTests {
             .first { $0.identifier?.rawValue == "object-data-split" })
         let keyScroll = try #require(descendants(of: root).compactMap { $0 as? NSScrollView }
             .first { $0.identifier?.rawValue == "object-data-keys-scroll" })
+        let keyPane = try #require(descendants(of: root)
+            .first { $0.identifier?.rawValue == "object-data-keys-pane" })
         #expect(split.isVertical)
         #expect(split.arrangedSubviews.count == 2)
-        #expect(split.arrangedSubviews[0] === keyScroll)
+        #expect(split.arrangedSubviews[0] === keyPane)
+        #expect(keyScroll.isDescendant(of: keyPane))
         #expect(split.holdingPriorityForSubview(at: 0) == .defaultHigh)
+        #expect(split.autosaveName == "kmgr.object-data-master-detail")
         #expect(keyScroll.hasHorizontalScroller)
     }
 

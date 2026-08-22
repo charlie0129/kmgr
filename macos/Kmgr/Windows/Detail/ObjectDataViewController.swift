@@ -5,8 +5,20 @@ import KmgrCore
 /// UID-pinned Data GET and every decoded value remains process-memory-only.
 @MainActor
 final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
-    NSTableViewDelegate, NSTextViewDelegate, WorkspaceStatusPublishing
+    NSTableViewDelegate, @preconcurrency NSSplitViewDelegate, NSTextViewDelegate,
+    WorkspaceStatusPublishing
 {
+    private struct SearchMatch {
+        var keyMatched: Bool
+        var valueMatched: Bool
+        var valueSnippet: String?
+    }
+
+    private struct ValueCellPresentation {
+        var displayText: String
+        var accessibilityValue: String
+    }
+
     private enum KeyRow {
         case stored(ObjectDataEntry)
         case missingDraft(key: String, metadata: DataEditorDraftStore.Metadata)
@@ -32,10 +44,14 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private let dataFileWriter: @Sendable (Data, URL) throws -> Void
 
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
-    private let splitView = NSSplitView()
+    private let splitView = ObjectDataSplitView()
     private let keysTable = ObjectDataKeysTableView()
+    private let searchField = NSSearchField()
+    private let searchResultLabel = NSTextField(labelWithString: "")
     private let valueTextView = NSTextView()
     private let valueScroll = NSScrollView()
+    private let selectedKeyLabel = NSTextField(labelWithString: "No key selected")
+    private let selectedKeyDetailsLabel = NSTextField(labelWithString: "")
     private let revealButton = NSButton(
         checkboxWithTitle: "Show decoded values", target: nil, action: nil
     )
@@ -55,6 +71,10 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private var selectedDraftKind: DataValueKind?
     private var selectedCanEditText = false
     private var isInstallingState = false
+    private var visibleRows: [KeyRow] = []
+    private var totalRowCount = 0
+    private var searchMatches: [String: SearchMatch] = [:]
+    private var appliedSearchQuery = ""
     private var secretRevealed = false
     private var authorityUnavailable = false
     private var terminalObjectState = false
@@ -68,6 +88,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private var dataFileTask: Task<Void, Never>?
     private var dataFileGeneration: UInt64 = 0
     private var authoritativeRefreshInFlight = false
+    private var establishedInitialSplitPosition = false
     private var conflictController: DataConflictWindowController?
 
     var onBack: (() -> Void)?
@@ -165,6 +186,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        establishSplitPositionIfNeeded()
         TextDocumentGeometry.update(
             valueTextView,
             in: valueScroll,
@@ -182,6 +204,11 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         cancelDataFileOperation()
         conflictController?.close()
         conflictController = nil
+        searchMatches.removeAll(keepingCapacity: false)
+        visibleRows.removeAll(keepingCapacity: false)
+        totalRowCount = 0
+        appliedSearchQuery = ""
+        searchField.stringValue = ""
         releaseDrafts()
         objectData = nil
     }
@@ -267,6 +294,9 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         splitView.isVertical = true
         splitView.dividerStyle = .thin
         splitView.identifier = .init("object-data-split")
+        splitView.delegate = self
+        splitView.autosaveName = "kmgr.object-data-master-detail"
+        splitView.onResetDivider = { [weak self] in self?.resetSplitPosition() }
         let columns: [(String, String, CGFloat, CGFloat)] = [
             ("key", "Key", 175, 100),
             ("value", "Value", 300, 140),
@@ -296,13 +326,24 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         )
         keysTable.onToggleReveal = { [weak self] in self?.toggleSecretReveal() }
         keysTable.onBack = { [weak self] in self?.onBack?() }
+        keysTable.onFocusSearch = { [weak self] in self?.focusSearch() }
         let keyScroll = NSScrollView()
         keyScroll.identifier = .init("object-data-keys-scroll")
         keyScroll.documentView = keysTable
         keyScroll.hasVerticalScroller = true
         keyScroll.hasHorizontalScroller = true
         keyScroll.autohidesScrollers = true
-        keyScroll.frame = NSRect(x: 0, y: 0, width: 720, height: 500)
+
+        searchField.placeholderString = searchPlaceholder
+        searchField.sendsSearchStringImmediately = true
+        searchField.target = self
+        searchField.action = #selector(searchChanged)
+        searchField.setAccessibilityLabel("Search ConfigMap or Secret data keys and values")
+        searchResultLabel.textColor = .secondaryLabelColor
+        searchResultLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        searchResultLabel.alignment = .right
+        searchResultLabel.lineBreakMode = .byClipping
+        searchResultLabel.setContentHuggingPriority(.required, for: .horizontal)
 
         valueTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         valueTextView.isRichText = false
@@ -338,32 +379,184 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         revealButton.state = .off
         saveKeyButton.target = self
         saveKeyButton.action = #selector(saveCurrentKey)
-
-        let controls = NSStackView(views: [
+        for button in [
             addKeyButton, renameKeyButton, deleteKeyButton, revertKeyButton,
-            importKeyButton, exportKeyButton, revealButton, saveKeyButton, NSView(),
+            importKeyButton, exportKeyButton, revealButton, saveKeyButton,
+        ] {
+            button.controlSize = .small
+        }
+
+        let searchRow = NSStackView(views: [searchField, searchResultLabel])
+        searchRow.orientation = .horizontal
+        searchRow.alignment = .centerY
+        searchRow.spacing = 8
+        let keyControls = NSStackView(views: [
+            addKeyButton, renameKeyButton, deleteKeyButton, NSView(),
         ])
-        controls.orientation = .horizontal
-        controls.alignment = .centerY
-        controls.spacing = 8
+        keyControls.orientation = .horizontal
+        keyControls.alignment = .centerY
+        keyControls.spacing = 8
+        let keyPane = NSView()
+        keyPane.identifier = .init("object-data-keys-pane")
+        for subview in [searchRow, keyControls, revealButton, keyScroll] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            keyPane.addSubview(subview)
+        }
+        NSLayoutConstraint.activate([
+            searchRow.leadingAnchor.constraint(equalTo: keyPane.leadingAnchor, constant: 8),
+            searchRow.trailingAnchor.constraint(equalTo: keyPane.trailingAnchor, constant: -8),
+            searchRow.topAnchor.constraint(equalTo: keyPane.topAnchor, constant: 7),
+            keyControls.leadingAnchor.constraint(equalTo: keyPane.leadingAnchor, constant: 8),
+            keyControls.trailingAnchor.constraint(equalTo: keyPane.trailingAnchor, constant: -8),
+            keyControls.topAnchor.constraint(equalTo: searchRow.bottomAnchor, constant: 6),
+            revealButton.leadingAnchor.constraint(equalTo: keyPane.leadingAnchor, constant: 8),
+            revealButton.topAnchor.constraint(equalTo: keyControls.bottomAnchor, constant: 4),
+            keyScroll.leadingAnchor.constraint(equalTo: keyPane.leadingAnchor),
+            keyScroll.trailingAnchor.constraint(equalTo: keyPane.trailingAnchor),
+            keyScroll.topAnchor.constraint(
+                equalTo: isSecretObject
+                    ? revealButton.bottomAnchor
+                    : keyControls.bottomAnchor,
+                constant: 6
+            ),
+            keyScroll.bottomAnchor.constraint(equalTo: keyPane.bottomAnchor),
+        ])
+
+        selectedKeyLabel.font = .monospacedSystemFont(ofSize: 13, weight: .semibold)
+        selectedKeyLabel.lineBreakMode = .byTruncatingMiddle
+        selectedKeyLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        selectedKeyLabel.setAccessibilityLabel("Selected data key")
+        selectedKeyDetailsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        selectedKeyDetailsLabel.textColor = .secondaryLabelColor
+        selectedKeyDetailsLabel.lineBreakMode = .byTruncatingTail
+        selectedKeyDetailsLabel.setContentCompressionResistancePriority(
+            .defaultLow,
+            for: .horizontal
+        )
+        selectedKeyDetailsLabel.setAccessibilityLabel("Selected data key details")
+        let selectedKeyHeader = NSStackView(views: [
+            selectedKeyLabel, selectedKeyDetailsLabel,
+        ])
+        selectedKeyHeader.orientation = .vertical
+        selectedKeyHeader.alignment = .leading
+        selectedKeyHeader.spacing = 1
+        let header = NSStackView(views: [selectedKeyHeader, NSView(), saveKeyButton])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 8
+        let valueControls = NSStackView(views: [
+            revertKeyButton, importKeyButton, exportKeyButton, NSView(),
+        ])
+        valueControls.orientation = .horizontal
+        valueControls.alignment = .centerY
+        valueControls.spacing = 8
         let editor = NSView()
-        controls.translatesAutoresizingMaskIntoConstraints = false
+        editor.identifier = .init("object-data-editor-pane")
+        header.translatesAutoresizingMaskIntoConstraints = false
+        valueControls.translatesAutoresizingMaskIntoConstraints = false
         valueScroll.translatesAutoresizingMaskIntoConstraints = false
-        editor.addSubview(controls)
+        editor.addSubview(header)
+        editor.addSubview(valueControls)
         editor.addSubview(valueScroll)
         NSLayoutConstraint.activate([
-            controls.leadingAnchor.constraint(equalTo: editor.leadingAnchor, constant: 8),
-            controls.trailingAnchor.constraint(equalTo: editor.trailingAnchor, constant: -8),
-            controls.topAnchor.constraint(equalTo: editor.topAnchor, constant: 7),
+            header.leadingAnchor.constraint(equalTo: editor.leadingAnchor, constant: 8),
+            header.trailingAnchor.constraint(equalTo: editor.trailingAnchor, constant: -8),
+            header.topAnchor.constraint(equalTo: editor.topAnchor, constant: 7),
+            valueControls.leadingAnchor.constraint(equalTo: editor.leadingAnchor, constant: 8),
+            valueControls.trailingAnchor.constraint(equalTo: editor.trailingAnchor, constant: -8),
+            valueControls.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 6),
             valueScroll.leadingAnchor.constraint(equalTo: editor.leadingAnchor),
             valueScroll.trailingAnchor.constraint(equalTo: editor.trailingAnchor),
-            valueScroll.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 5),
+            valueScroll.topAnchor.constraint(equalTo: valueControls.bottomAnchor, constant: 5),
             valueScroll.bottomAnchor.constraint(equalTo: editor.bottomAnchor),
         ])
-        splitView.addArrangedSubview(keyScroll)
+        splitView.addArrangedSubview(keyPane)
         splitView.addArrangedSubview(editor)
         splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
-        splitView.setPosition(720, ofDividerAt: 0)
+        updateSearchPresentation()
+        updateSelectedKeyHeader()
+    }
+
+    private var searchPlaceholder: String {
+        if isSecretObject && !secretRevealed {
+            return "Search keys · show decoded values to search values"
+        }
+        return "Search keys and values"
+    }
+
+    private func establishSplitPositionIfNeeded() {
+        guard !establishedInitialSplitPosition,
+            splitView.arrangedSubviews.count == 2,
+            splitView.bounds.width > splitView.dividerThickness
+        else { return }
+        establishedInitialSplitPosition = true
+        let minimums = splitPaneMinimumWidths()
+        let leftWidth = splitView.arrangedSubviews[0].frame.width
+        let rightWidth = splitView.arrangedSubviews[1].frame.width
+        if leftWidth < minimums.left || rightWidth < minimums.right {
+            resetSplitPosition()
+        }
+    }
+
+    private func resetSplitPosition() {
+        guard splitView.arrangedSubviews.count == 2 else { return }
+        let available = max(0, splitView.bounds.width - splitView.dividerThickness)
+        guard available > 0 else { return }
+        let minimums = splitPaneMinimumWidths()
+        let preferred = available * 0.45
+        let position = min(
+            max(preferred, minimums.left),
+            max(minimums.left, available - minimums.right)
+        )
+        splitView.setPosition(position, ofDividerAt: 0)
+    }
+
+    private func splitPaneMinimumWidths() -> (left: CGFloat, right: CGFloat) {
+        let available = max(0, splitView.bounds.width - splitView.dividerThickness)
+        var left = min(260, max(180, available * 0.30))
+        var right = min(340, max(240, available * 0.38))
+        let draggableReserve = min(40, available * 0.08)
+        let maximumCombined = max(0, available - draggableReserve)
+        if left + right > maximumCombined, left + right > 0 {
+            let scale = maximumCombined / (left + right)
+            left *= scale
+            right *= scale
+        }
+        return (left, right)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainMinCoordinate proposedMinimumPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        guard splitView === self.splitView, dividerIndex == 0 else {
+            return proposedMinimumPosition
+        }
+        return max(proposedMinimumPosition, splitView.bounds.minX + splitPaneMinimumWidths().left)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainMaxCoordinate proposedMaximumPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        guard splitView === self.splitView, dividerIndex == 0 else {
+            return proposedMaximumPosition
+        }
+        return min(proposedMaximumPosition, splitView.bounds.maxX - splitPaneMinimumWidths().right)
+    }
+
+    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+        false
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        shouldCollapseSubview subview: NSView,
+        forDoubleClickOnDividerAt dividerIndex: Int
+    ) -> Bool {
+        false
     }
 
     private func loadData(
@@ -447,20 +640,14 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         authorityUnavailable = false
         terminalObjectState = false
         conflictedKey = nil
-        keysTable.reloadData()
+        rebuildVisibleRows()
 
-        let rows = editorRows
+        let rows = visibleRows
         let selected = preferredKey.flatMap { key in
             rows.firstIndex { $0.key == key }
         } ?? rows.indices.first
         guard let selected else {
-            keysTable.deselectAll(nil)
-            selectedKey = nil
-            selectedEntry = nil
-            selectedDraftKind = nil
-            selectedCanEditText = false
-            valueTextView.string = "No Data entries. Use Add Key to create one."
-            valueTextView.undoManager?.removeAllActions()
+            clearSelectedRow(message: emptyEditorMessage)
             updateControls()
             return
         }
@@ -477,7 +664,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         )
     }
 
-    private var editorRows: [KeyRow] {
+    private var allEditorRows: [KeyRow] {
         let entries = objectData?.entries ?? []
         let storedKeys = Set(entries.map(\.id))
         let missing = drafts.keys
@@ -489,14 +676,153 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         return entries.map(KeyRow.stored) + missing
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { editorRows.count }
+    private var emptyEditorMessage: String {
+        if !appliedSearchQuery.isEmpty {
+            if isSecretObject && !secretRevealed {
+                return "No keys match. Show decoded values to search Secret contents."
+            }
+            return "No keys or values match the current search."
+        }
+        return "No Data entries. Use Add Key to create one."
+    }
+
+    @objc private func searchChanged() {
+        captureSelectedDraft()
+        rebuildVisibleRows(selecting: selectedKey)
+    }
+
+    private func focusSearch() {
+        view.window?.makeFirstResponder(searchField)
+    }
+
+    private func rebuildVisibleRows(selecting preferredKey: String? = nil) {
+        rebuildVisibleRows()
+        reconcileVisibleSelection(preferredKey: preferredKey)
+        updateControls()
+    }
+
+    private func rebuildVisibleRows() {
+        let rows = allEditorRows
+        totalRowCount = rows.count
+        let query = ObjectDataTextSearch.normalizedQuery(searchField.stringValue)
+        appliedSearchQuery = query
+        searchMatches.removeAll(keepingCapacity: true)
+        if query.isEmpty {
+            visibleRows = rows
+        } else {
+            visibleRows = rows.filter { row in
+                guard let match = searchMatch(for: row, query: query) else {
+                    return false
+                }
+                searchMatches[row.key] = match
+                return true
+            }
+        }
+        keysTable.reloadData()
+        updateSearchPresentation()
+    }
+
+    private func searchMatch(for row: KeyRow, query: String) -> SearchMatch? {
+        let keyMatched = ObjectDataTextSearch.contains(row.key, query: query)
+        var valueMatch: ObjectDataTextSearchMatch?
+        if !(objectData?.secret ?? isSecretObject) || secretRevealed {
+            if var draft = drafts.snapshot(for: row.key) {
+                defer { draft.wipe() }
+                valueMatch = ObjectDataTextSearch.match(in: draft.value, query: query)
+            } else if let entry = row.entry {
+                var bytes = copyBytes(from: entry)
+                defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
+                valueMatch = ObjectDataTextSearch.match(in: bytes, query: query)
+            }
+        }
+        guard keyMatched || valueMatch != nil else { return nil }
+        return SearchMatch(
+            keyMatched: keyMatched,
+            valueMatched: valueMatch != nil,
+            valueSnippet: valueMatch?.snippet
+        )
+    }
+
+    private func reconcileVisibleSelection(preferredKey: String?) {
+        let wasInstalling = isInstallingState
+        isInstallingState = true
+        defer { isInstallingState = wasInstalling }
+        let row = preferredKey.flatMap { key in
+            visibleRows.firstIndex { $0.key == key }
+        } ?? visibleRows.indices.first
+        guard let row else {
+            clearSelectedRow(message: emptyEditorMessage)
+            return
+        }
+        keysTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        installSelectedRow(visibleRows[row])
+    }
+
+    private func clearSelectedRow(message: String) {
+        keysTable.deselectAll(nil)
+        selectedKey = nil
+        selectedEntry = nil
+        selectedDraftKind = nil
+        selectedCanEditText = false
+        valueTextView.string = message
+        valueTextView.undoManager?.removeAllActions()
+        updateSelectedKeyHeader()
+    }
+
+    private func updateSearchPresentation() {
+        searchField.placeholderString = searchPlaceholder
+        let total = totalRowCount
+        if appliedSearchQuery.isEmpty {
+            searchResultLabel.stringValue = "\(total.formatted()) key\(total == 1 ? "" : "s")"
+        } else {
+            searchResultLabel.stringValue = "\(visibleRows.count.formatted()) of \(total.formatted())"
+        }
+        searchResultLabel.toolTip = isSecretObject && !secretRevealed
+            ? "Secret contents remain concealed. Reveal decoded values to include them in search."
+            : nil
+    }
+
+    private func updateSelectedKeyHeader() {
+        guard let key = selectedKey else {
+            selectedKeyLabel.stringValue = "No key selected"
+            selectedKeyLabel.setAccessibilityValue("No key selected")
+            selectedKeyDetailsLabel.stringValue = ""
+            selectedKeyDetailsLabel.setAccessibilityValue("")
+            return
+        }
+        let row: KeyRow
+        if let selectedEntry {
+            row = .stored(selectedEntry)
+        } else if let metadata = drafts.metadata(for: key) {
+            row = .missingDraft(key: key, metadata: metadata)
+        } else {
+            selectedKeyLabel.stringValue = "No key selected"
+            selectedKeyLabel.setAccessibilityValue("No key selected")
+            selectedKeyDetailsLabel.stringValue = ""
+            selectedKeyDetailsLabel.setAccessibilityValue("")
+            return
+        }
+        let presentation = rowPresentation(for: row)
+        let details = [
+            presentation.typeText.capitalized,
+            presentation.sizeText,
+            presentation.state.displayText,
+        ].joined(separator: " · ")
+        selectedKeyLabel.stringValue = key
+        selectedKeyLabel.toolTip = key
+        selectedKeyLabel.setAccessibilityValue(key)
+        selectedKeyDetailsLabel.stringValue = details
+        selectedKeyDetailsLabel.setAccessibilityValue(details)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { visibleRows.count }
 
     func tableView(
         _ tableView: NSTableView,
         viewFor tableColumn: NSTableColumn?,
         row: Int
     ) -> NSView? {
-        let rows = editorRows
+        let rows = visibleRows
         guard rows.indices.contains(row), let tableColumn else { return nil }
         let dataRow = rows[row]
         let presentation = rowPresentation(for: dataRow)
@@ -513,9 +839,20 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         }
         let cell = textCell(value, table: tableView, column: tableColumn)
         cell.setAccessibilityLabel(tableColumn.title)
-        cell.setAccessibilityValue(
-            valuePreview?.accessibilityValue ?? presentation.accessibilityValue
-        )
+        let match = searchMatches[dataRow.key]
+        if columnID == "key", match?.keyMatched == true {
+            cell.setAccessibilityValue("Key match: \(presentation.keyText)")
+            applySearchHighlight(to: cell.textField, query: appliedSearchQuery)
+        } else if columnID == "value", match?.valueMatched == true {
+            cell.setAccessibilityValue(
+                "Value match: \(valuePreview?.accessibilityValue ?? value)"
+            )
+            applySearchHighlight(to: cell.textField, query: appliedSearchQuery)
+        } else {
+            cell.setAccessibilityValue(
+                valuePreview?.accessibilityValue ?? presentation.accessibilityValue
+            )
+        }
         switch presentation.state {
         case .saved:
             cell.textField?.textColor = .labelColor
@@ -531,16 +868,11 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         guard notification.object as? NSTableView === keysTable, !isInstallingState else {
             return
         }
-        let previousRow = editorRows.firstIndex { $0.key == selectedKey }
+        let previousRow = visibleRows.firstIndex { $0.key == selectedKey }
         captureSelectedDraft()
-        let rows = editorRows
+        let rows = visibleRows
         guard rows.indices.contains(keysTable.selectedRow) else {
-            selectedKey = nil
-            selectedEntry = nil
-            selectedDraftKind = nil
-            selectedCanEditText = false
-            valueTextView.string = ""
-            valueTextView.undoManager?.removeAllActions()
+            clearSelectedRow(message: emptyEditorMessage)
             updateControls()
             reloadRows([previousRow].compactMap { $0 })
             return
@@ -554,6 +886,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         selectedKey = row.key
         selectedEntry = row.entry
         displaySelectedData()
+        updateSelectedKeyHeader()
     }
 
     @objc private func toggleSecretReveal() {
@@ -562,14 +895,18 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         else { return }
         if secretRevealed { captureSelectedDraft() }
         setSecretReveal(!secretRevealed)
-        displaySelectedData()
         updateControls()
     }
 
     private func setSecretReveal(_ revealed: Bool) {
         secretRevealed = isSecretObject && revealed
+        if isSecretObject && !secretRevealed {
+            // A Secret search term can itself disclose plaintext. Revoking
+            // reveal authority clears it alongside every value snippet.
+            searchField.stringValue = ""
+        }
         revealButton.state = secretRevealed ? .on : .off
-        keysTable.reloadData()
+        rebuildVisibleRows(selecting: selectedKey)
     }
 
     private func displaySelectedData() {
@@ -580,6 +917,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         isInstallingState = true
         defer { isInstallingState = wasInstalling }
         selectedDraftKind = draftMetadata?.kind ?? selectedEntry?.kind
+        updateSelectedKeyHeader()
         if data.secret && !secretRevealed {
             let count = draftMetadata?.byteCount ?? Int(selectedEntry?.byteSize ?? 0)
             valueTextView.string = "Secret value concealed · \(count.formatted()) bytes"
@@ -608,25 +946,39 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         if selectedEntry == nil { showMissingDraftStatus() }
     }
 
-    private func valuePreview(for row: KeyRow) -> DataValuePreviewPresentation? {
+    private func valuePreview(for row: KeyRow) -> ValueCellPresentation? {
+        if let snippet = searchMatches[row.key]?.valueSnippet {
+            return ValueCellPresentation(
+                displayText: snippet,
+                accessibilityValue: snippet
+            )
+        }
         let secret = objectData?.secret ?? isSecretObject
         if var draft = drafts.snapshot(for: row.key) {
             defer { draft.wipe() }
-            return DataValuePreviewPresentation(
+            let presentation = DataValuePreviewPresentation(
                 kind: draft.kind,
                 value: draft.value,
                 secret: secret,
                 hasRevealAuthority: secretRevealed
             )
+            return ValueCellPresentation(
+                displayText: presentation.displayText,
+                accessibilityValue: presentation.accessibilityValue
+            )
         }
         guard let entry = row.entry else { return nil }
         var bytes = copyBytes(from: entry)
         defer { bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex) }
-        return DataValuePreviewPresentation(
+        let presentation = DataValuePreviewPresentation(
             kind: entry.kind,
             value: bytes,
             secret: secret,
             hasRevealAuthority: secretRevealed
+        )
+        return ValueCellPresentation(
+            displayText: presentation.displayText,
+            accessibilityValue: presentation.accessibilityValue
         )
     }
 
@@ -690,6 +1042,29 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         return cell
     }
 
+    private func applySearchHighlight(to field: NSTextField?, query: String) {
+        guard let field, !query.isEmpty, !field.stringValue.isEmpty else { return }
+        let value = field.stringValue as NSString
+        let attributed = NSMutableAttributedString(string: field.stringValue)
+        var remaining = NSRange(location: 0, length: value.length)
+        while remaining.length > 0 {
+            let match = value.range(
+                of: query,
+                options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                range: remaining
+            )
+            guard match.location != NSNotFound, match.length > 0 else { break }
+            attributed.addAttribute(
+                .backgroundColor,
+                value: NSColor.systemYellow.withAlphaComponent(0.35),
+                range: match
+            )
+            let next = match.location + match.length
+            remaining = NSRange(location: next, length: value.length - next)
+        }
+        field.attributedStringValue = attributed
+    }
+
     override func cancelOperation(_ sender: Any?) {
         if leaveValueEditorIfActive() { return }
         onBack?()
@@ -724,7 +1099,26 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         guard notification.object as? NSTextView === valueTextView, !isInstallingState else {
             return
         }
+        let editedKey = selectedKey
         captureSelectedDraft()
+        refreshRowsAfterDraftChange(for: editedKey)
+    }
+
+    private func refreshRowsAfterDraftChange(for editedKey: String?) {
+        if !appliedSearchQuery.isEmpty, let editedKey,
+            let row = visibleRows.first(where: { $0.key == editedKey })
+        {
+            // Keep the active editor stable even when an edit removes its
+            // current match. The next query change performs the authoritative
+            // full filter using this draft; the row preview updates now.
+            if let match = searchMatch(for: row, query: appliedSearchQuery) {
+                searchMatches[editedKey] = match
+            } else {
+                searchMatches.removeValue(forKey: editedKey)
+            }
+        }
+        updateSearchPresentation()
+        updateSelectedKeyHeader()
         updateControls()
         reloadSelectedRow()
     }
@@ -764,6 +1158,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             && hasSelectedDraftChanges
         valueTextView.isEditable = hasSelection && idle && accessible && selectedCanEditText
         revealButton.isEnabled = objectData != nil && !terminalObjectState && idle
+        updateSelectedKeyHeader()
     }
 
     private func reloadSelectedRow() { reloadRows([keysTable.selectedRow]) }
@@ -860,21 +1255,7 @@ extension ObjectDataViewController {
     @objc private func revertCurrentKey() {
         guard let key = selectedKey else { return }
         drafts.remove(key)
-        if let entry = selectedEntry {
-            selectedDraftKind = entry.kind
-            displaySelectedData()
-            reloadSelectedRow()
-        } else {
-            selectedKey = nil
-            selectedEntry = nil
-            selectedDraftKind = nil
-            selectedCanEditText = false
-            keysTable.reloadData()
-            keysTable.deselectAll(nil)
-            valueTextView.string = ""
-            valueTextView.undoManager?.removeAllActions()
-            updateControls()
-        }
+        rebuildVisibleRows(selecting: selectedEntry == nil ? nil : key)
         publishStatus(WorkspaceStatus("Local key changes reverted"))
     }
 
@@ -897,7 +1278,7 @@ extension ObjectDataViewController {
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let key = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let keys = Set(editorRows.map(\.key))
+        let keys = Set(allEditorRows.map(\.key))
         if let message = KubernetesDataKeyValidator.validationMessage(
             for: key,
             existingKeys: keys
@@ -942,7 +1323,7 @@ extension ObjectDataViewController {
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let newKey = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let keys = Set(editorRows.map(\.key))
+        let keys = Set(allEditorRows.map(\.key))
         if let message = KubernetesDataKeyValidator.validationMessage(
             for: newKey,
             existingKeys: keys,
@@ -1008,14 +1389,13 @@ extension ObjectDataViewController {
         } else {
             drafts.replaceExisting(key: key, kind: replacementKind, value: bytes)
         }
-        if selectedKey == key {
+        let preferredKey = selectedKey
+        if preferredKey == key {
             selectedDraftKind = replacementKind
             selectedEntry = entry
             displaySelectedData()
         }
-        if let row = editorRows.firstIndex(where: { $0.key == key }) {
-            reloadRows([row])
-        }
+        rebuildVisibleRows(selecting: preferredKey)
         publishStatus(WorkspaceStatus(
             drafts.contains(key)
                 ? "Loaded \(bytes.count.formatted()) bytes locally for \(key)"
@@ -1035,7 +1415,7 @@ extension ObjectDataViewController {
     }
 
     func importDataFile(from url: URL, forKey key: String) {
-        guard editorRows.contains(where: { $0.key == key }) else { return }
+        guard allEditorRows.contains(where: { $0.key == key }) else { return }
         readImportedBytes(from: url) { [weak self] bytes in
             self?.replaceDataWithImportedBytes(bytes, forKey: key)
         }
@@ -1456,9 +1836,51 @@ extension ObjectDataViewController {
 }
 
 @MainActor
+private final class ObjectDataSplitView: NSSplitView {
+    var onResetDivider: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            let location = convert(event.locationInWindow, from: nil)
+            if dividerIndex(at: location) != nil {
+                onResetDivider?()
+                return
+            }
+        }
+        super.mouseDown(with: event)
+    }
+
+    private func dividerIndex(at point: NSPoint) -> Int? {
+        guard arrangedSubviews.count > 1 else { return nil }
+        for index in 0..<(arrangedSubviews.count - 1) {
+            let preceding = arrangedSubviews[index].frame
+            let divider: NSRect
+            if isVertical {
+                divider = NSRect(
+                    x: preceding.maxX - 3,
+                    y: bounds.minY,
+                    width: dividerThickness + 6,
+                    height: bounds.height
+                )
+            } else {
+                divider = NSRect(
+                    x: bounds.minX,
+                    y: preceding.maxY - 3,
+                    width: bounds.width,
+                    height: dividerThickness + 6
+                )
+            }
+            if divider.contains(point) { return index }
+        }
+        return nil
+    }
+}
+
+@MainActor
 private final class ObjectDataKeysTableView: NSTableView {
     var onToggleReveal: (() -> Void)?
     var onBack: (() -> Void)?
+    var onFocusSearch: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
         guard currentEditor() == nil else { super.keyDown(with: event); return }
@@ -1468,6 +1890,10 @@ private final class ObjectDataKeysTableView: NSTableView {
         switch (event.charactersIgnoringModifiers?.lowercased(), event.keyCode) {
         case ("d", _) where modifiers.isEmpty:
             onToggleReveal?()
+        case ("/", _) where modifiers.isEmpty:
+            onFocusSearch?()
+        case ("f", _) where modifiers == .command:
+            onFocusSearch?()
         case (_, 53) where modifiers.isEmpty:
             onBack?()
         default:

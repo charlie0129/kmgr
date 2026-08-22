@@ -92,8 +92,10 @@ app-wide Port Forwards window.
   visible selection or changing the selected rows.
 - Details provide a structured Summary table where clicking a cell and pressing
   Command-C (or choosing Copy Cell from its context menu) copies the complete
-  value, plus YAML, Events, Relationships, Metrics where meaningful, and a Data
-  editor for ConfigMaps and Secrets. Oversized Summary values stay available
+  value, plus YAML, Events, Relationships, Metrics where meaningful, and a
+  searchable master-detail Data editor for ConfigMaps and Secrets. Its
+  draggable key/value table keeps every key visible while the selected decoded
+  value uses a full multiline editor. Oversized Summary values stay available
   through cell copy while their inline presentation remains bounded.
 - `Y` opens the selected object's editable YAML tab inside Details. Shift-Y
   opens an independent, UID-pinned YAML window with an exact received-byte
@@ -106,8 +108,12 @@ app-wide Port Forwards window.
   common keys, strings, numbers, booleans, nulls, and comments. Highlighting
   reads TextKit's existing backing store and caps each refresh independently of
   total document size.
-- ConfigMap and Secret keys support text and raw binary values. Secret bytes
-  are decoded/encoded by the engine and concealed by default in the UI.
+- ConfigMap and Secret keys support text and raw binary values. Data search
+  matches complete keys, text values, and unsaved drafts rather than only the
+  bounded row preview. Secret bytes are decoded/encoded by the engine and
+  concealed by default; revealing them explicitly also enables value search,
+  while concealing them clears the transient query and result snippets. The UI
+  never asks the user to decode or encode base64.
 - Logs support one or many UID-pinned Pods plus Deployments, StatefulSets,
   DaemonSets, ReplicaSets, Jobs, and CronJobs. A workload is resolved through
   UID-checked controller-owner hops to a bounded, static Pod snapshot; the
@@ -163,6 +169,7 @@ focus, and hides when no supported context is active.
 | Command-K | Open the current workspace's Command Palette |
 | Shift-Command-N | Open the current workspace's namespace picker |
 | `/` | Focus the resource filter |
+| `/` or Command-F in Data | Search ConfigMap/Secret keys and values |
 | Up / Down, `K` / `J` | Move table selection |
 | Shift-click / Shift-Up / Shift-Down | Extend native selection |
 | Command-click | Toggle one selected row |
@@ -392,8 +399,9 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
    remains active and reconnects, then stop it explicitly.
 7. Start a direct Pod forward, replace that Pod with the same name/new UID, and
    verify the record remains Failed rather than switching identity.
-8. Edit a ConfigMap key and a decoded Secret key; exercise a YAML
-   resource-version conflict.
+8. Search all keys and multiline values in a ConfigMap and an explicitly
+   revealed Secret, edit one decoded key in each without handling base64, and
+   exercise a YAML resource-version conflict.
 9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
 10. View both Pod and Node metrics, then compare their behavior with Metrics API

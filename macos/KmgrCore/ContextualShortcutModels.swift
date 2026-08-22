@@ -209,7 +209,9 @@ public enum ContextualShortcutCatalog {
     }
 
     public static func dataEditor(secret: Bool) -> ContextualShortcutSnapshot {
-        var items: [ContextualShortcutItem] = []
+        var items: [ContextualShortcutItem] = [
+            item("data.search", "/ or ⌘F", "Search keys and values"),
+        ]
         if secret {
             items.append(item("data.reveal", "D", "Toggle decoded Secret values"))
         }

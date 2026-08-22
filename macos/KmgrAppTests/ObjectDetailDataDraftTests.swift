@@ -9,6 +9,31 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Object Data editor drafts", .serialized)
 struct ObjectDetailDataDraftTests {
+    @Test("Data text search bounds queries and returns context around full-value matches")
+    func boundedDataTextSearch() throws {
+        let oversized = String(repeating: "界", count: 2_000)
+        let query = ObjectDataTextSearch.normalizedQuery(oversized)
+        #expect(query.count == ObjectDataTextSearch.maximumQueryCharacters)
+        #expect(query.utf8.count <= ObjectDataTextSearch.maximumQueryUTF8Bytes)
+
+        let text = String(repeating: "before ", count: 80)
+            + "deep-marker\nnext line"
+            + String(repeating: " after", count: 80)
+        let match = try #require(ObjectDataTextSearch.match(
+            in: Data(text.utf8),
+            query: "DEEP-MARKER"
+        ))
+        #expect(match.snippet.contains("deep-marker"))
+        #expect(match.snippet.contains("next line"))
+        #expect(match.snippet.hasPrefix("…"))
+        #expect(match.snippet.hasSuffix("…"))
+        #expect(match.snippet.count <= DataValuePreviewPresentation.maximumTextCharacterCount)
+        #expect(ObjectDataTextSearch.match(
+            in: Data([0xff, 0x00, 0x41]),
+            query: "A"
+        ) == nil)
+    }
+
     @Test("draft store keeps independent text and binary values in memory")
     func independentTextAndBinaryDrafts() throws {
         let store = DataEditorDraftStore()
@@ -142,6 +167,183 @@ struct ObjectDetailDataDraftTests {
         #expect(binary.contains("|must-not-render-…|"))
         #expect(binary.hasSuffix("· \(binaryBytes.count) bytes"))
         #expect(try valueAccessibility(in: table, row: 1) == "Binary value: \(binary)")
+    }
+
+    @Test("Data master-detail keeps every key visible and its divider adjustable")
+    func multiKeyMasterDetailLayout() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let controller = ObjectDataViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentViewController = controller
+        controller.viewDidAppear()
+        defer {
+            controller.stop()
+            window.contentViewController = nil
+            window.close()
+        }
+
+        let table = try dataKeysTable(in: controller.view)
+        try await waitForDataRows(table, count: 2)
+        controller.view.layoutSubtreeIfNeeded()
+        let split = try #require(draftDescendants(of: controller.view)
+            .compactMap { $0 as? NSSplitView }
+            .first { $0.identifier?.rawValue == "object-data-split" })
+        #expect(split.arrangedSubviews.count == 2)
+        #expect(split.arrangedSubviews[0].frame.width > 100)
+        #expect(split.arrangedSubviews[1].frame.width > 100)
+        #expect(try row(forKey: "alpha", in: table) >= 0)
+        #expect(try row(forKey: "beta", in: table) >= 0)
+
+        let available = split.bounds.width - split.dividerThickness
+        split.setPosition(available * 0.40, ofDividerAt: 0)
+        split.layoutSubtreeIfNeeded()
+        let narrowerTableWidth = split.arrangedSubviews[0].frame.width
+        split.setPosition(available * 0.55, ofDividerAt: 0)
+        split.layoutSubtreeIfNeeded()
+        #expect(split.arrangedSubviews[0].frame.width > narrowerTableWidth + 20)
+
+        split.setPosition(1, ofDividerAt: 0)
+        split.layoutSubtreeIfNeeded()
+        #expect(split.arrangedSubviews[0].frame.width > 100)
+        #expect(split.arrangedSubviews[1].frame.width > 100)
+
+        let selectedKey = try #require(draftDescendants(of: controller.view)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Selected data key" })
+        #expect(selectedKey.stringValue == "alpha")
+    }
+
+    @Test("ConfigMap search matches complete keys, values, and current drafts")
+    func configMapKeyValueSearch() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let longValue = String(repeating: "prefix-", count: 40)
+            + "deep-marker\nsecond line"
+        let data = ObjectData(
+            identity: fixture.identity,
+            resourceVersion: "rv-1",
+            entries: [
+                dataEntry(key: "alpha", value: longValue, hashByte: 1),
+                dataEntry(key: "beta", value: "ordinary", hashByte: 2),
+                dataEntry(key: "marker-key", value: "other", hashByte: 3),
+            ],
+            secret: false
+        )
+        let controller = ObjectDataViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: data)
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let search = try dataSearchField(in: controller.view)
+        try await waitForDataRows(table, count: 3)
+
+        applyDataSearch("DEEP-MARKER", field: search)
+        try await waitForDataRows(table, count: 1)
+        #expect(try row(forKey: "alpha", in: table) == 0)
+        #expect(try valueText(in: table, row: 0).contains("deep-marker"))
+        #expect(try valueAccessibility(in: table, row: 0).hasPrefix("Value match:"))
+        #expect(editor.string == longValue)
+        editor.string = "edited while filtered"
+        controller.textDidChange(Notification(
+            name: NSText.didChangeNotification,
+            object: editor
+        ))
+        #expect(table.numberOfRows == 1)
+        #expect(editor.string == "edited while filtered")
+
+        applyDataSearch("marker-key", field: search)
+        try await waitForDataRows(table, count: 1)
+        #expect(try row(forKey: "marker-key", in: table) == 0)
+
+        applyDataSearch("", field: search)
+        try await waitForDataRows(table, count: 3)
+        select(row: try row(forKey: "alpha", in: table), in: table, controller: controller)
+        editor.string = "draft-only-marker"
+        controller.textDidChange(Notification(
+            name: NSText.didChangeNotification,
+            object: editor
+        ))
+        applyDataSearch("draft-only", field: search)
+        try await waitForDataRows(table, count: 1)
+        #expect(try row(forKey: "alpha", in: table) == 0)
+        #expect(try valueText(in: table, row: 0) == "draft-only-marker")
+    }
+
+    @Test("Secret search requires reveal authority and never presents base64")
+    func secretValueSearchRevealBoundary() async throws {
+        let fixture = detailFixture(resource: "secrets", secret: true)
+        let controller = ObjectDataViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data)
+        )
+        controller.loadView()
+        controller.viewDidAppear()
+        defer { controller.stop() }
+
+        let table = try dataKeysTable(in: controller.view)
+        let search = try dataSearchField(in: controller.view)
+        let reveal = try #require(dataButtons(in: controller.view)
+            .first { $0.title == "Show decoded values" })
+        try await waitForDataRows(table, count: 2)
+
+        applyDataSearch("server-alpha", field: search)
+        try await waitForDataRows(table, count: 0)
+        reveal.performClick(nil)
+        try await waitForDataRows(table, count: 1)
+        let revealed = try valueText(in: table, row: 0)
+        #expect(revealed.contains("server-alpha"))
+        #expect(!revealed.contains(Data("server-alpha".utf8).base64EncodedString()))
+
+        reveal.performClick(nil)
+        try await waitForDataRows(table, count: 2)
+        #expect(search.stringValue.isEmpty)
+        #expect(try valueText(in: table, row: 0).hasPrefix("Secret concealed"))
+
+        applyDataSearch("beta", field: search)
+        try await waitForDataRows(table, count: 1)
+        #expect(try row(forKey: "beta", in: table) == 0)
+        #expect(try valueText(in: table, row: 0).hasPrefix("Secret concealed"))
+    }
+
+    @Test("slash and Command-F focus Data search from the key table")
+    func dataSearchKeyboardFocus() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let controller = ObjectDataViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data)
+        )
+        let window = NSWindow(contentViewController: controller)
+        controller.viewDidAppear()
+        defer {
+            controller.stop()
+            window.contentViewController = nil
+            window.close()
+        }
+
+        let table = try dataKeysTable(in: controller.view)
+        let search = try dataSearchField(in: controller.view)
+        try await waitForDataRows(table, count: 2)
+        #expect(window.makeFirstResponder(table))
+
+        table.keyDown(with: try dataKeyEvent("/"))
+        #expect(search.currentEditor() != nil)
+
+        #expect(window.makeFirstResponder(table))
+        table.keyDown(with: try dataKeyEvent("f", modifiers: .command))
+        #expect(search.currentEditor() != nil)
     }
 
     @Test("ConfigMap text drafts survive key switches")
@@ -1329,16 +1531,34 @@ private func dataValueEditor(in root: NSView) throws -> NSTextView {
 }
 
 @MainActor
+private func dataSearchField(in root: NSView) throws -> NSSearchField {
+    try #require(draftDescendants(of: root).compactMap { $0 as? NSSearchField }
+        .first {
+            $0.accessibilityLabel()
+                == "Search ConfigMap or Secret data keys and values"
+        })
+}
+
+@MainActor
+private func applyDataSearch(_ query: String, field: NSSearchField) {
+    field.stringValue = query
+    _ = field.sendAction(field.action, to: field.target)
+}
+
+@MainActor
 private func dataButtons(in root: NSView) -> [NSButton] {
     draftDescendants(of: root).compactMap { $0 as? NSButton }
 }
 
 @MainActor
-private func dataKeyEvent(_ characters: String) throws -> NSEvent {
+private func dataKeyEvent(
+    _ characters: String,
+    modifiers: NSEvent.ModifierFlags = []
+) throws -> NSEvent {
     try #require(NSEvent.keyEvent(
         with: .keyDown,
         location: .zero,
-        modifierFlags: [],
+        modifierFlags: modifiers,
         timestamp: 0,
         windowNumber: 0,
         context: nil,

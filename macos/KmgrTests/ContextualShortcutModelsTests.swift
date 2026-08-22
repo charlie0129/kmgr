@@ -75,9 +75,13 @@ struct ContextualShortcutModelsTests {
         )
             .items.map(\.keys) == ["\u{21E7}\u{2318}N", "Escape"])
         #expect(ContextualShortcutCatalog.dataEditor(secret: true)
-            .items.map(\.keys) == ["D", "\u{2318}S", "\u{21E7}\u{2318}N", "Escape"])
+            .items.map(\.keys) == [
+                "/ or \u{2318}F", "D", "\u{2318}S", "\u{21E7}\u{2318}N", "Escape",
+            ])
         #expect(ContextualShortcutCatalog.dataEditor(secret: false)
-            .items.map(\.keys) == ["\u{2318}S", "\u{21E7}\u{2318}N", "Escape"])
+            .items.map(\.keys) == [
+                "/ or \u{2318}F", "\u{2318}S", "\u{21E7}\u{2318}N", "Escape",
+            ])
     }
 
     @Test("log help advertises its window-wide controls")
