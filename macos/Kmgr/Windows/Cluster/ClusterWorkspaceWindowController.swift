@@ -2662,6 +2662,12 @@ private final class ResourceSidebarViewController: NSViewController,
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         outlineView.headerView = nil
+        // A sidebar split-view item otherwise promotes this outline to
+        // AppKit's source-list style. That style paints its blue pressed
+        // emphasis after row drawing, so use the regular full-width style
+        // where our stable gray selection rendering is honored throughout
+        // mouse tracking.
+        outlineView.style = .fullWidth
         outlineView.rowSizeStyle = .small
         outlineView.delegate = self
         outlineView.dataSource = self

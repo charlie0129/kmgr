@@ -517,7 +517,6 @@ struct ClusterWorkspaceToolbarTests {
         let row = try #require(outline.rowView(atRow: selectedRow, makeIfNecessary: true))
         #expect(row.identifier?.rawValue == "sidebar-resource-row")
         row.isSelected = true
-        row.selectionHighlightStyle = .regular
         outline.layoutSubtreeIfNeeded()
         row.layoutSubtreeIfNeeded()
 
@@ -530,8 +529,10 @@ struct ClusterWorkspaceToolbarTests {
             row.cacheDisplay(in: row.bounds, to: bitmap)
             return try #require(
                 bitmap.colorAt(
-                    x: 1,
-                    y: bitmap.pixelsHigh / 4
+                    // The trailing edge is guaranteed to be row background,
+                    // rather than a resource title glyph.
+                    x: max(1, bitmap.pixelsWide - 4),
+                    y: bitmap.pixelsHigh / 2
                 )
             )
         }
