@@ -930,6 +930,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private var palettePresentationTask: Task<Void, Never>?
     private var objectOpenTask: Task<Void, Never>?
     private var objectOpenRevision: UInt64 = 0
+    private var sidebarFocusTask: Task<Void, Never>?
     private var detailController: ObjectDetailViewController?
     private var dataController: ObjectDataViewController?
     private var podContainerController: PodContainerListViewController?
@@ -1052,7 +1053,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 reason: .sidebarSelection
             )
             checkpointRestoration()
-            view.window?.makeFirstResponder(contentController.tableResponder)
+            focusResourceTableAfterSidebarInteraction()
+        }
+        sidebarController.onResourceMouseSelectionFinished = { [weak self] in
+            self?.focusResourceTableAfterSidebarInteraction()
         }
         sidebarController.onResourcesChanged = { [weak self] resources in
             self?.resources = resources
@@ -1541,6 +1545,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         namespaceTask?.cancel()
         palettePresentationTask?.cancel()
         palettePresentationTask = nil
+        sidebarFocusTask?.cancel()
+        sidebarFocusTask = nil
         paletteController?.close()
         paletteController = nil
         invalidateObjectOpenTask()
@@ -1554,6 +1560,23 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         sidebarController.stop()
         contentController.stop()
+    }
+
+    /// AppKit makes the outline the first responder while it tracks a mouse
+    /// click. Defer the handoff until that tracking loop has finished so a
+    /// click on an already-selected row cannot leave keyboard commands in the
+    /// sidebar.
+    private func focusResourceTableAfterSidebarInteraction() {
+        sidebarFocusTask?.cancel()
+        sidebarFocusTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled, let self else { return }
+            defer { self.sidebarFocusTask = nil }
+            guard self.pendingRestorationState == nil,
+                let window = self.viewIfLoaded?.window
+            else { return }
+            _ = window.makeFirstResponder(self.contentController.tableResponder)
+        }
     }
 
     private func updateWarmCacheStatus(from sample: ClusterConnectionActivitySample) {
@@ -2491,6 +2514,46 @@ private extension NSToolbarItem.Identifier {
 }
 
 @MainActor
+private final class ResourceSidebarOutlineView: NSOutlineView {
+    /// Called after AppKit finishes tracking a resource-row mouse click. The
+    /// selection delegate is not called when the clicked row is already
+    /// selected, so this seam also covers that otherwise-silent interaction.
+    var onResourceMouseSelectionFinished: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let clickedRow = row(at: point)
+        let clickedResource = clickedRow >= 0
+            && item(atRow: clickedRow) is DiscoveredResource
+
+        super.mouseDown(with: event)
+
+        if clickedResource { onResourceMouseSelectionFinished?() }
+    }
+}
+
+@MainActor
+private final class SidebarResourceRowView: NSTableRowView {
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("programmatic") }
+
+    /// Keep the sidebar's selected resource gray even while AppKit marks the
+    /// row emphasized during mouse tracking or while the sidebar owns focus.
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        NSColor.unemphasizedSelectedContentBackgroundColor.setFill()
+        dirtyRect.fill()
+    }
+
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+}
+
+@MainActor
 private final class SidebarSectionRowView: NSTableRowView {
     let materialView = NSVisualEffectView()
 
@@ -2553,7 +2616,7 @@ private final class ResourceSidebarViewController: NSViewController,
     private var isAuthenticated: Bool
     private let provider: any WorkspaceResourceProviding
     private let pinStore: SidebarPinStore
-    private let outlineView = NSOutlineView()
+    private let outlineView = ResourceSidebarOutlineView()
     private let searchField = NSSearchField()
     private var sections: [Section] = []
     private var allResources: [DiscoveredResource] = []
@@ -2563,6 +2626,7 @@ private final class ResourceSidebarViewController: NSViewController,
     private var didChooseInitialResource = false
     private var suppressSelectionCallbacks = false
     var onSelectResource: ((DiscoveredResource) -> Void)?
+    var onResourceMouseSelectionFinished: (() -> Void)?
     var onResourcesChanged: (([DiscoveredResource]) -> Void)?
     private(set) var workspaceStatus = WorkspaceStatus(
         "Discovering resource kinds…",
@@ -2602,6 +2666,9 @@ private final class ResourceSidebarViewController: NSViewController,
         outlineView.delegate = self
         outlineView.dataSource = self
         outlineView.autoresizesOutlineColumn = true
+        outlineView.onResourceMouseSelectionFinished = { [weak self] in
+            self?.onResourceMouseSelectionFinished?()
+        }
         outlineView.setAccessibilityLabel("Kubernetes resource kinds")
         outlineView.registerForDraggedTypes([Self.pinPasteboardType])
         outlineView.setDraggingSourceOperationMask(.move, forLocal: true)
@@ -2849,12 +2916,19 @@ private final class ResourceSidebarViewController: NSViewController,
         _ outlineView: NSOutlineView,
         rowViewForItem item: Any
     ) -> NSTableRowView? {
-        guard item is Section else { return nil }
-        let identifier = NSUserInterfaceItemIdentifier("sidebar-section-row")
+        if item is Section {
+            let identifier = NSUserInterfaceItemIdentifier("sidebar-section-row")
+            return outlineView.makeView(
+                withIdentifier: identifier,
+                owner: self
+            ) as? SidebarSectionRowView ?? SidebarSectionRowView(identifier: identifier)
+        }
+        guard item is DiscoveredResource else { return nil }
+        let identifier = NSUserInterfaceItemIdentifier("sidebar-resource-row")
         return outlineView.makeView(
             withIdentifier: identifier,
             owner: self
-        ) as? SidebarSectionRowView ?? SidebarSectionRowView(identifier: identifier)
+        ) as? SidebarResourceRowView ?? SidebarResourceRowView(identifier: identifier)
     }
 
     func outlineView(

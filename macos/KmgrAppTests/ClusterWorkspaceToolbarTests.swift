@@ -504,6 +504,95 @@ struct ClusterWorkspaceToolbarTests {
             .contains { !$0.isEmpty })
     }
 
+    @Test("sidebar resource selection keeps one gray color while emphasized")
+    func sidebarResourceSelectionStaysGrayWhileEmphasized() async throws {
+        let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let outline = try #require(apiResourceOutline(in: window))
+
+        try await waitUntil { outline.selectedRow >= 0 }
+        let selectedRow = outline.selectedRow
+        let row = try #require(outline.rowView(atRow: selectedRow, makeIfNecessary: true))
+        #expect(row.identifier?.rawValue == "sidebar-resource-row")
+        row.isSelected = true
+        row.selectionHighlightStyle = .regular
+        outline.layoutSubtreeIfNeeded()
+        row.layoutSubtreeIfNeeded()
+
+        func renderedSelectionColor(emphasized: Bool) throws -> NSColor {
+            row.isEmphasized = emphasized
+            row.needsDisplay = true
+            let bitmap = try #require(
+                row.bitmapImageRepForCachingDisplay(in: row.bounds)
+            )
+            row.cacheDisplay(in: row.bounds, to: bitmap)
+            return try #require(
+                bitmap.colorAt(
+                    x: 1,
+                    y: bitmap.pixelsHigh / 4
+                )
+            )
+        }
+
+        let gray = try renderedSelectionColor(emphasized: false)
+        let emphasized = try renderedSelectionColor(emphasized: true)
+        #expect(gray.isEqual(emphasized))
+
+        var expected: NSColor?
+        row.effectiveAppearance.performAsCurrentDrawingAppearance {
+            expected = NSColor.unemphasizedSelectedContentBackgroundColor
+                .usingColorSpace(.deviceRGB)
+        }
+        let expectedColor = try #require(expected)
+        #expect(abs(gray.redComponent - expectedColor.redComponent) < 0.02)
+        #expect(abs(gray.greenComponent - expectedColor.greenComponent) < 0.02)
+        #expect(abs(gray.blueComponent - expectedColor.blueComponent) < 0.02)
+    }
+
+    @Test("clicking the selected sidebar resource returns focus to the resource list")
+    func clickingSelectedSidebarResourceRestoresResourceListFocus() async throws {
+        let provider = FilterValidationWorkspaceResourceProvider()
+        let controller = makeWorkspace(provider: provider)
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        window.makeKeyAndOrderFront(nil)
+        let root = try #require(window.contentView)
+        let outline = try #require(apiResourceOutline(in: window))
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil {
+            outline.selectedRow >= 0 && table.numberOfRows == 1
+        }
+        #expect(window.makeFirstResponder(table))
+        let mouseDown = try sidebarRowClick(
+            outline: outline,
+            row: outline.selectedRow,
+            windowNumber: window.windowNumber
+        )
+        let point = outline.convert(
+            NSPoint(x: 8, y: outline.rect(ofRow: outline.selectedRow).midY),
+            to: nil
+        )
+        let screenPoint = window.convertToScreen(NSRect(origin: point, size: .zero)).origin
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let mouseUpEvent = try #require(CGEvent(
+            mouseEventSource: source,
+            mouseType: .leftMouseUp,
+            mouseCursorPosition: screenPoint,
+            mouseButton: .left
+        ))
+        let mouseUp = try #require(NSEvent(cgEvent: mouseUpEvent))
+        window.postEvent(mouseUp, atStart: true)
+        outline.mouseDown(with: mouseDown)
+
+        try await waitUntil { window.firstResponder === table }
+        #expect(provider.streamRequestCount == 1)
+    }
+
     @Test("Port Forwards button gives its title and arrows separate geometry")
     func portForwardsButtonGeometry() throws {
         let controller = makeWorkspace()
@@ -3915,6 +4004,29 @@ private func workspaceLetterKey(
         charactersIgnoringModifiers: characters,
         isARepeat: false,
         keyCode: 1
+    ))
+}
+
+@MainActor
+private func sidebarRowClick(
+    outline: NSOutlineView,
+    row: Int,
+    windowNumber: Int
+) throws -> NSEvent {
+    let location = outline.convert(
+        NSPoint(x: 8, y: outline.rect(ofRow: row).midY),
+        to: nil
+    )
+    return try #require(NSEvent.mouseEvent(
+        with: .leftMouseDown,
+        location: location,
+        modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: windowNumber,
+        context: nil,
+        eventNumber: 1,
+        clickCount: 1,
+        pressure: 1
     ))
 }
 
