@@ -162,6 +162,10 @@ private final class ClusterManagerViewController: NSViewController,
     private let openProgress = NSProgressIndicator()
     private let cancelOpenButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
+    private let normalFooterRow = NSStackView()
+    private let dropFooterRow = NSStackView()
+    private let dropFooterImageView = NSImageView()
+    private let dropFooterLabel = NSTextField(labelWithString: "")
     private var tableLayoutBinding: TableLayoutBinding?
     private var separatorBelowIssueConstraint: NSLayoutConstraint?
     private var separatorBelowTableConstraint: NSLayoutConstraint?
@@ -263,13 +267,53 @@ private final class ClusterManagerViewController: NSViewController,
 
         let footerSpacer = NSView()
         footerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let footer = NSStackView(
-            views: [countLabel, footerSpacer, openProgress, cancelOpenButton, openButton]
+        for item in [countLabel, footerSpacer, openProgress, cancelOpenButton, openButton] {
+            normalFooterRow.addArrangedSubview(item)
+        }
+        normalFooterRow.orientation = .horizontal
+        normalFooterRow.alignment = .centerY
+        normalFooterRow.spacing = 8
+        normalFooterRow.identifier = .init("cluster-manager-normal-footer")
+        normalFooterRow.translatesAutoresizingMaskIntoConstraints = false
+
+        dropFooterImageView.image = NSImage(
+            systemSymbolName: "square.and.arrow.down",
+            accessibilityDescription: nil
         )
-        footer.orientation = .horizontal
-        footer.alignment = .centerY
-        footer.spacing = 8
+        dropFooterImageView.symbolConfiguration = NSImage.SymbolConfiguration(
+            pointSize: 16,
+            weight: .medium
+        )
+        dropFooterImageView.imageScaling = .scaleProportionallyDown
+        dropFooterImageView.contentTintColor = .controlAccentColor
+        dropFooterLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        dropFooterLabel.textColor = .labelColor
+        dropFooterLabel.lineBreakMode = .byTruncatingTail
+        dropFooterLabel.maximumNumberOfLines = 1
+        dropFooterLabel.identifier = .init("cluster-manager-drop-footer-label")
+        dropFooterRow.addArrangedSubview(dropFooterImageView)
+        dropFooterRow.addArrangedSubview(dropFooterLabel)
+        dropFooterRow.orientation = .horizontal
+        dropFooterRow.alignment = .centerY
+        dropFooterRow.spacing = 7
+        dropFooterRow.identifier = .init("cluster-manager-drop-footer")
+        dropFooterRow.translatesAutoresizingMaskIntoConstraints = false
+        dropFooterRow.isHidden = true
+
+        let footer = NSView()
         footer.translatesAutoresizingMaskIntoConstraints = false
+        footer.addSubview(normalFooterRow)
+        footer.addSubview(dropFooterRow)
+        NSLayoutConstraint.activate([
+            normalFooterRow.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
+            normalFooterRow.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
+            normalFooterRow.topAnchor.constraint(equalTo: footer.topAnchor),
+            normalFooterRow.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
+            dropFooterRow.centerXAnchor.constraint(equalTo: footer.centerXAnchor),
+            dropFooterRow.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            dropFooterRow.leadingAnchor.constraint(greaterThanOrEqualTo: footer.leadingAnchor),
+            dropFooterRow.trailingAnchor.constraint(lessThanOrEqualTo: footer.trailingAnchor)
+        ])
 
         let separator = NSBox()
         separator.boxType = .separator
@@ -282,7 +326,9 @@ private final class ClusterManagerViewController: NSViewController,
         tableContainer.onDropFiles = { [weak self] urls in
             self?.addKubeconfigURLs(urls)
         }
-        tableContainer.installOverlay()
+        tableContainer.onDropStateChange = { [weak self] fileCount in
+            self?.updateDropFooter(fileCount: fileCount)
+        }
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: tableContainer.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: tableContainer.trailingAnchor),
@@ -934,6 +980,16 @@ private final class ClusterManagerViewController: NSViewController,
             .update(paths: sourceStore.paths, statuses: addedSourceStatuses)
     }
 
+    private func updateDropFooter(fileCount: Int?) {
+        let count = fileCount.flatMap { $0 > 0 ? $0 : nil }
+        normalFooterRow.isHidden = count != nil
+        dropFooterRow.isHidden = count == nil
+        guard let count else { return }
+        let noun = count == 1 ? "kubeconfig file" : "kubeconfig files"
+        dropFooterLabel.stringValue = "Release to add \(count) \(noun)"
+        dropFooterLabel.toolTip = dropFooterLabel.stringValue
+    }
+
     private func setIssueVisible(_ visible: Bool) {
         // AppKit does not remove a hidden plain NSView from an Auto Layout
         // chain. Bypass its label-derived height while hidden so the context
@@ -1442,16 +1498,18 @@ private final class KubeconfigSourceTableView: NSTableView {
 }
 
 @MainActor
-private final class KubeconfigDropView: NSView {
+final class KubeconfigDropView: NSView {
     var onDropFiles: (([URL]) -> Void)?
-    private let dropOverlay = NSView()
-    private let dropCard = NSView()
-    private let dropImageView = NSImageView()
-    private let dropTitleLabel = NSTextField(labelWithString: "Drop kubeconfig files here")
-    private let dropMessageLabel = NSTextField(labelWithString: "Release to add them to Kmgr")
+    var onDropStateChange: ((Int?) -> Void)?
+
+    private var activeDropFileCount: Int?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        identifier = .init("cluster-manager-drop-target")
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        updateAccentColor()
         registerForDraggedTypes([.fileURL])
     }
 
@@ -1460,83 +1518,21 @@ private final class KubeconfigDropView: NSView {
         fatalError("KubeconfigDropView is programmatic")
     }
 
-    func installOverlay() {
-        dropOverlay.wantsLayer = true
-        dropOverlay.layer?.cornerRadius = 8
-        dropOverlay.layer?.borderWidth = 2
-        dropOverlay.identifier = .init("cluster-manager-drop-overlay")
-        dropOverlay.translatesAutoresizingMaskIntoConstraints = false
-
-        dropCard.wantsLayer = true
-        dropCard.layer?.cornerRadius = 12
-        dropCard.layer?.shadowOpacity = 0.28
-        dropCard.layer?.shadowRadius = 10
-        dropCard.layer?.shadowOffset = NSSize(width: 0, height: -3)
-        dropCard.identifier = .init("cluster-manager-drop-card")
-        dropCard.translatesAutoresizingMaskIntoConstraints = false
-
-        dropImageView.image = NSImage(
-            systemSymbolName: "square.and.arrow.down",
-            accessibilityDescription: nil
-        )
-        dropImageView.symbolConfiguration = NSImage.SymbolConfiguration(
-            pointSize: 26,
-            weight: .medium
-        )
-        dropImageView.imageScaling = .scaleProportionallyDown
-
-        dropTitleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
-        dropTitleLabel.alignment = .center
-        dropMessageLabel.font = .systemFont(ofSize: 13, weight: .regular)
-        dropMessageLabel.alignment = .center
-
-        let content = NSStackView(
-            views: [dropImageView, dropTitleLabel, dropMessageLabel]
-        )
-        content.orientation = .vertical
-        content.alignment = .centerX
-        content.spacing = 5
-        content.translatesAutoresizingMaskIntoConstraints = false
-        dropCard.addSubview(content)
-        dropOverlay.addSubview(dropCard)
-        addSubview(dropOverlay)
-        NSLayoutConstraint.activate([
-            dropOverlay.leadingAnchor.constraint(equalTo: leadingAnchor),
-            dropOverlay.trailingAnchor.constraint(equalTo: trailingAnchor),
-            dropOverlay.topAnchor.constraint(equalTo: topAnchor),
-            dropOverlay.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            dropCard.centerXAnchor.constraint(equalTo: dropOverlay.centerXAnchor),
-            dropCard.centerYAnchor.constraint(equalTo: dropOverlay.centerYAnchor),
-            dropCard.leadingAnchor.constraint(greaterThanOrEqualTo: dropOverlay.leadingAnchor, constant: 24),
-            dropCard.trailingAnchor.constraint(lessThanOrEqualTo: dropOverlay.trailingAnchor, constant: -24),
-
-            content.leadingAnchor.constraint(equalTo: dropCard.leadingAnchor, constant: 34),
-            content.trailingAnchor.constraint(equalTo: dropCard.trailingAnchor, constant: -34),
-            content.topAnchor.constraint(equalTo: dropCard.topAnchor, constant: 20),
-            content.bottomAnchor.constraint(equalTo: dropCard.bottomAnchor, constant: -20)
-        ])
-        updateOverlayColors()
-        dropOverlay.isHidden = true
-    }
-
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        updateOverlayColors()
+        updateAccentColor()
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        guard !fileURLs(from: sender).isEmpty else { return [] }
-        dropOverlay.isHidden = false
-        return .copy
+        updateDropState(from: sender)
     }
 
     override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        fileURLs(from: sender).isEmpty ? [] : .copy
+        updateDropState(from: sender)
     }
 
     override func draggingExited(_ sender: (any NSDraggingInfo)?) {
-        dropOverlay.isHidden = true
+        updateDropState(fileCount: nil)
     }
 
     override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
@@ -1545,14 +1541,37 @@ private final class KubeconfigDropView: NSView {
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         let urls = fileURLs(from: sender)
-        dropOverlay.isHidden = true
+        updateDropState(fileCount: nil)
         guard !urls.isEmpty else { return false }
         onDropFiles?(urls)
         return true
     }
 
     override func concludeDragOperation(_ sender: (any NSDraggingInfo)?) {
-        dropOverlay.isHidden = true
+        updateDropState(fileCount: nil)
+    }
+
+    override func draggingEnded(_ sender: any NSDraggingInfo) {
+        updateDropState(fileCount: nil)
+    }
+
+    func updateDropState(fileCount: Int?) {
+        let count = fileCount.flatMap { $0 > 0 ? $0 : nil }
+        guard activeDropFileCount != count else { return }
+        activeDropFileCount = count
+        layer?.borderWidth = count == nil ? 0 : 2
+        onDropStateChange?(count)
+    }
+
+    private func updateDropState(from sender: any NSDraggingInfo) -> NSDragOperation {
+        let urls = fileURLs(from: sender)
+        guard !urls.isEmpty else {
+            updateDropState(fileCount: nil)
+            return []
+        }
+        sender.numberOfValidItemsForDrop = urls.count
+        updateDropState(fileCount: urls.count)
+        return .copy
     }
 
     private func fileURLs(from sender: any NSDraggingInfo) -> [URL] {
@@ -1565,16 +1584,8 @@ private final class KubeconfigDropView: NSView {
         ) as? [URL]) ?? []
     }
 
-    private func updateOverlayColors() {
-        dropOverlay.layer?.borderColor = NSColor.controlAccentColor.cgColor
-        dropOverlay.layer?.backgroundColor = NSColor.windowBackgroundColor
-            .withAlphaComponent(0.96).cgColor
-        dropCard.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
-        dropCard.layer?.shadowColor = NSColor.black.cgColor
-        let foreground = NSColor.selectedControlTextColor
-        dropImageView.contentTintColor = foreground
-        dropTitleLabel.textColor = foreground
-        dropMessageLabel.textColor = foreground.withAlphaComponent(0.88)
+    private func updateAccentColor() {
+        layer?.borderColor = NSColor.controlAccentColor.cgColor
     }
 }
 

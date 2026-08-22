@@ -406,11 +406,11 @@ struct ClusterManagerWindowControllerTests {
         #expect(removed == [missingPath])
     }
 
-    @Test("file drop prompt masks context rows with a high-contrast card")
-    func fileDropPromptMasksContextRows() async throws {
+    @Test("file drop feedback uses the footer without covering context rows")
+    func fileDropFeedbackUsesFooter() async throws {
         let context = ClusterContextSummary(
-            name: "busy-background",
-            clusterName: "a-cluster-name-behind-the-drop-prompt",
+            name: "visible-context",
+            clusterName: "visible-cluster",
             serverHostname: "api.example.test",
             defaultNamespace: "default",
             sourcePaths: ["/tmp/kubeconfig"]
@@ -430,25 +430,41 @@ struct ClusterManagerWindowControllerTests {
         root.layoutSubtreeIfNeeded()
 
         let descendants = clusterManagerDescendants(of: root)
-        let overlay = try #require(descendants.first {
-            $0.identifier?.rawValue == "cluster-manager-drop-overlay"
+        let dropTarget = try #require(layout.tableContainer as? KubeconfigDropView)
+        let normalFooter = try #require(descendants.first {
+            $0.identifier?.rawValue == "cluster-manager-normal-footer"
         })
-        let card = try #require(descendants.first {
-            $0.identifier?.rawValue == "cluster-manager-drop-card"
+        let dropFooter = try #require(descendants.first {
+            $0.identifier?.rawValue == "cluster-manager-drop-footer"
         })
-        let title = try #require(descendants.compactMap { $0 as? NSTextField }
-            .first { $0.stringValue == "Drop kubeconfig files here" })
-        let message = try #require(descendants.compactMap { $0 as? NSTextField }
-            .first { $0.stringValue == "Release to add them to Kmgr" })
+        let dropLabel = try #require(descendants.first {
+            $0.identifier?.rawValue == "cluster-manager-drop-footer-label"
+        } as? NSTextField)
+        let tableFrame = layout.tableContainer.convert(layout.tableContainer.bounds, to: root)
 
-        #expect(overlay.superview === layout.tableContainer)
-        #expect(overlay.frame.equalTo(layout.tableContainer.bounds))
-        #expect((overlay.layer?.backgroundColor?.alpha ?? 0) >= 0.95)
-        #expect((card.layer?.backgroundColor?.alpha ?? 0) >= 0.99)
-        #expect(title.superview?.superview === card)
-        #expect(message.superview?.superview === card)
-        #expect(title.textColor == NSColor.selectedControlTextColor)
-        #expect((message.textColor?.alphaComponent ?? 0) >= 0.85)
+        #expect(!normalFooter.isHidden)
+        #expect(dropFooter.isHidden)
+        #expect(dropTarget.layer?.borderWidth == 0)
+        #expect(dropTarget.layer?.backgroundColor == nil)
+        #expect(layout.tableView.numberOfRows == 1)
+        #expect(layout.tableView.enclosingScrollView?.isHidden == false)
+
+        dropTarget.updateDropState(fileCount: 3)
+        root.layoutSubtreeIfNeeded()
+
+        #expect(normalFooter.isHidden)
+        #expect(!dropFooter.isHidden)
+        #expect(dropLabel.stringValue == "Release to add 3 kubeconfig files")
+        #expect(dropLabel.textColor == .labelColor)
+        #expect(dropTarget.layer?.borderWidth == 2)
+        #expect(layout.tableContainer.convert(layout.tableContainer.bounds, to: root)
+            .equalTo(tableFrame))
+        #expect(layout.tableView.enclosingScrollView?.isHidden == false)
+
+        dropTarget.updateDropState(fileCount: nil)
+        #expect(!normalFooter.isHidden)
+        #expect(dropFooter.isHidden)
+        #expect(dropTarget.layer?.borderWidth == 0)
     }
 
     @Test("visible matching text uses folded bold ranges")
