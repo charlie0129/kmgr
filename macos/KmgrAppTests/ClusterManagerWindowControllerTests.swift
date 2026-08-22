@@ -7,6 +7,55 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Cluster manager table presentation")
 struct ClusterManagerWindowControllerTests {
+    @Test("loading surface follows a dark window appearance")
+    func loadingSurfaceFollowsDarkAppearance() throws {
+        let application = NSApplication.shared
+        let originalAppearance = application.appearance
+        application.appearance = NSAppearance(named: .aqua)
+        defer { application.appearance = originalAppearance }
+
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in
+                    try await Task.sleep(for: .seconds(30))
+                    return []
+                },
+                openContext: { _ in throw CancellationError() }
+            )
+        )
+        controller.window?.appearance = NSAppearance(named: .aqua)
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        root.layoutSubtreeIfNeeded()
+        let stateView = try #require(clusterManagerDescendants(of: root).first {
+            $0.identifier?.rawValue == "cluster-manager-state-view"
+        })
+        #expect(!stateView.isHidden)
+
+        window.appearance = NSAppearance(named: .darkAqua)
+        root.layoutSubtreeIfNeeded()
+        stateView.needsDisplay = true
+        let bitmap = try #require(
+            stateView.bitmapImageRepForCachingDisplay(in: stateView.bounds)
+        )
+        stateView.cacheDisplay(in: stateView.bounds, to: bitmap)
+        let background = try #require(
+            bitmap.colorAt(x: 1, y: 1)?.usingColorSpace(.deviceRGB)
+        )
+        let maximumComponent = max(
+            background.redComponent,
+            max(background.greenComponent, background.blueComponent)
+        )
+
+        #expect(
+            stateView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        )
+        #expect(maximumComponent < 0.5)
+    }
+
     @Test("loaded context list collapses the hidden issue region")
     func loadedListCollapsesHiddenIssueRegion() async throws {
         let context = ClusterContextSummary(

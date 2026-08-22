@@ -146,7 +146,7 @@ private final class ClusterManagerViewController: NSViewController,
     private let revealButton = NSButton(title: "Reveal Source", target: nil, action: nil)
     private let tableView = ContextTableView()
     private let scrollView = NSScrollView()
-    private let stateView = NSView()
+    private let stateView = ClusterManagerStateView()
     private let stateImageView = NSImageView()
     private let stateTitleLabel = NSTextField(labelWithString: "")
     private let stateMessageLabel = NSTextField(wrappingLabelWithString: "")
@@ -1037,8 +1037,6 @@ private final class ClusterManagerViewController: NSViewController,
     }
 
     private func configureStateView() {
-        stateView.wantsLayer = true
-        stateView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         stateView.translatesAutoresizingMaskIntoConstraints = false
 
         stateImageView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 28, weight: .regular)
@@ -1481,6 +1479,26 @@ final class KubeconfigSourcesPopoverViewController: NSViewController,
         let selected = paths.filter(selectedPaths.contains)
         guard !selected.isEmpty else { return }
         onReveal?(selected)
+    }
+}
+
+@MainActor
+private final class ClusterManagerStateView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        identifier = .init("cluster-manager-state-view")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("ClusterManagerStateView is programmatic")
+    }
+
+    override var isOpaque: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.controlBackgroundColor.setFill()
+        dirtyRect.fill()
     }
 }
 
