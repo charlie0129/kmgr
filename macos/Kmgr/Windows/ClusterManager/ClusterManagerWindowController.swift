@@ -151,8 +151,6 @@ private final class ClusterManagerViewController: NSViewController,
     private let stateTitleLabel = NSTextField(labelWithString: "")
     private let stateMessageLabel = NSTextField(wrappingLabelWithString: "")
     private let stateProgress = NSProgressIndicator()
-    private let stateRetryButton = NSButton(title: "Retry", target: nil, action: nil)
-    private let stateAddButton = NSButton(title: "Add Kubeconfig Files…", target: nil, action: nil)
     private let issueView = NSView()
     private let issueImageView = NSImageView()
     private let issueTitleLabel = NSTextField(labelWithString: "")
@@ -840,9 +838,7 @@ private final class ClusterManagerViewController: NSViewController,
                 symbol: "externaldrive",
                 title: "Kubeconfig contexts",
                 message: "Kmgr will read your configured kubeconfig files.",
-                spinning: false,
-                retry: false,
-                addFiles: false
+                spinning: false
             )
         case .loading(let reload):
             shouldOverlay = model.allContexts.isEmpty
@@ -851,9 +847,7 @@ private final class ClusterManagerViewController: NSViewController,
                     symbol: nil,
                     title: reload ? "Reloading contexts…" : "Reading contexts…",
                     message: "Inspecting kubeconfig files without contacting clusters.",
-                    spinning: true,
-                    retry: false,
-                    addFiles: false
+                    spinning: true
                 )
             }
         case .failed(let issue):
@@ -864,9 +858,7 @@ private final class ClusterManagerViewController: NSViewController,
                     symbol: symbolName(for: issue.category),
                     title: issue.presentationTitle,
                     message: presentation.inlineText,
-                    spinning: false,
-                    retry: true,
-                    addFiles: true
+                    spinning: false
                 )
             }
         case .loaded:
@@ -877,18 +869,14 @@ private final class ClusterManagerViewController: NSViewController,
                         symbol: "externaldrive.badge.questionmark",
                         title: "No kubeconfig contexts found",
                         message: "Add a kubeconfig file, drop one here, or reload after changing your standard kubeconfig files.",
-                        spinning: false,
-                        retry: true,
-                        addFiles: true
+                        spinning: false
                     )
                 } else {
                     showState(
                         symbol: "magnifyingglass",
                         title: "No matching contexts",
                         message: "Try a different context, server, namespace, or source path.",
-                        spinning: false,
-                        retry: false,
-                        addFiles: false
+                        spinning: false
                     )
                 }
             }
@@ -1053,18 +1041,8 @@ private final class ClusterManagerViewController: NSViewController,
         stateProgress.controlSize = .regular
         stateProgress.isDisplayedWhenStopped = false
 
-        stateRetryButton.target = self
-        stateRetryButton.action = #selector(reloadContexts(_:))
-        stateAddButton.target = self
-        stateAddButton.action = #selector(addKubeconfigFiles(_:))
-
-        let actions = NSStackView(views: [stateAddButton, stateRetryButton])
-        actions.orientation = .horizontal
-        actions.alignment = .centerY
-        actions.spacing = 8
-
         let stack = NSStackView(
-            views: [stateImageView, stateProgress, stateTitleLabel, stateMessageLabel, actions]
+            views: [stateImageView, stateProgress, stateTitleLabel, stateMessageLabel]
         )
         stack.orientation = .vertical
         stack.alignment = .centerX
@@ -1171,9 +1149,7 @@ private final class ClusterManagerViewController: NSViewController,
         symbol: String?,
         title: String,
         message: String,
-        spinning: Bool,
-        retry: Bool,
-        addFiles: Bool
+        spinning: Bool
     ) {
         stateImageView.image = symbol.flatMap {
             NSImage(systemSymbolName: $0, accessibilityDescription: title)
@@ -1181,8 +1157,6 @@ private final class ClusterManagerViewController: NSViewController,
         stateImageView.isHidden = symbol == nil
         stateTitleLabel.stringValue = title
         stateMessageLabel.stringValue = message
-        stateRetryButton.isHidden = !retry
-        stateAddButton.isHidden = !addFiles
         if spinning {
             stateProgress.startAnimation(nil)
         } else {
