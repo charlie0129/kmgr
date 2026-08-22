@@ -42,6 +42,9 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private let tableLayoutStore: TableLayoutStore
     private let dataFileReader: @Sendable (URL) throws -> Data
     private let dataFileWriter: @Sendable (Data, URL) throws -> Void
+    private let valueChangeConfirmation: @MainActor (
+        DataValueDiffConfirmationWindowController
+    ) -> DataValueDiffConfirmationWindowController.Choice
 
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
     private let splitView = ObjectDataSplitView()
@@ -86,10 +89,12 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private var operationTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
     private var dataFileTask: Task<Void, Never>?
+    private var valueDiffTask: Task<Void, Never>?
     private var dataFileGeneration: UInt64 = 0
     private var authoritativeRefreshInFlight = false
     private var establishedInitialSplitPosition = false
     private var conflictController: DataConflictWindowController?
+    private var valueDiffController: DataValueDiffConfirmationWindowController?
 
     var onBack: (() -> Void)?
     private(set) var workspaceStatus = WorkspaceStatus("Loading Data…", busy: true)
@@ -109,6 +114,11 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         },
         dataFileWriter: @escaping @Sendable (Data, URL) throws -> Void = {
             try DataValueFileIO.write($0, to: $1)
+        },
+        valueChangeConfirmation: @escaping @MainActor (
+            DataValueDiffConfirmationWindowController
+        ) -> DataValueDiffConfirmationWindowController.Choice = {
+            $0.runModal()
         }
     ) {
         precondition(Self.supports(identity), "Data requires a core/v1 ConfigMap or Secret")
@@ -118,6 +128,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.dataFileReader = dataFileReader
         self.dataFileWriter = dataFileWriter
+        self.valueChangeConfirmation = valueChangeConfirmation
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -129,6 +140,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         operationTask?.cancel()
         recoveryTask?.cancel()
         dataFileTask?.cancel()
+        valueDiffTask?.cancel()
     }
 
     static func supports(_ identity: ResourceIdentity) -> Bool {
@@ -202,6 +214,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         recoveryTask?.cancel()
         recoveryTask = nil
         cancelDataFileOperation()
+        cancelValueDiffReview()
         conflictController?.close()
         conflictController = nil
         searchMatches.removeAll(keepingCapacity: false)
@@ -223,6 +236,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         recoveryTask?.cancel()
         recoveryTask = nil
         cancelDataFileOperation()
+        cancelValueDiffReview()
         conflictController?.close()
         conflictController = nil
         authoritativeRefreshInFlight = false
@@ -1139,6 +1153,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private var dataInteractionIdle: Bool {
         operationTask == nil && conflictController == nil
             && dataFileTask == nil && loadTask == nil && recoveryTask == nil
+            && valueDiffTask == nil && valueDiffController == nil
             && !authoritativeRefreshInFlight && !authorityUnavailable
     }
 
@@ -1158,6 +1173,9 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             && hasSelectedDraftChanges
         valueTextView.isEditable = hasSelection && idle && accessible && selectedCanEditText
         revealButton.isEnabled = objectData != nil && !terminalObjectState && idle
+        let reviewingValue = valueDiffTask != nil || valueDiffController != nil
+        keysTable.isEnabled = !reviewingValue
+        searchField.isEnabled = !reviewingValue
         updateSelectedKeyHeader()
     }
 
@@ -1504,14 +1522,106 @@ extension ObjectDataViewController {
 
     @objc private func saveCurrentKey() {
         captureSelectedDraft()
-        guard let key = selectedKey, var draft = drafts.snapshot(for: key) else { return }
+        guard let data = objectData, let key = selectedKey,
+            valueDiffTask == nil, valueDiffController == nil,
+            var draft = drafts.snapshot(for: key)
+        else { return }
         defer { draft.wipe() }
-        performMutation(.set(
+        let input = DataValueDiffInput(
+            key: key,
+            beforeKind: selectedEntry?.kind,
+            beforeValue: selectedEntry.map(copyBytes(from:)),
+            afterKind: draft.kind,
+            afterValue: draft.value,
+            secret: data.secret
+        )
+        let mutation = DataMutationKind.set(
             key: key,
             kind: draft.kind,
             value: draft.value,
             expectedContentHash: selectedEntry == nil ? Data() : draft.expectedContentHash
-        ), successMessage: "Saved \(key)")
+        )
+        reviewValueChange(input: input, mutation: mutation)
+    }
+
+    private func reviewValueChange(
+        input: DataValueDiffInput,
+        mutation: DataMutationKind
+    ) {
+        guard valueDiffTask == nil, valueDiffController == nil else { return }
+        publishStatus(WorkspaceStatus("Preparing value comparison…", busy: true))
+        valueDiffTask = Task { [weak self, mutation] in
+            var protectedInput = input
+            defer { protectedInput.wipe() }
+            do {
+                let presentation = try await Self.prepareValueDiff(protectedInput)
+                guard let self else { return }
+                defer { finishValueDiffReviewIfNeeded() }
+                guard !Task.isCancelled,
+                    selectedKey == protectedInput.key,
+                    objectData != nil,
+                    !authorityUnavailable,
+                    !terminalObjectState,
+                    !protectedInput.secret || secretRevealed
+                else { return }
+
+                let controller = DataValueDiffConfirmationWindowController(
+                    targetDetails: mutationConfirmationIdentityText,
+                    presentation: presentation
+                )
+                valueDiffController = controller
+                publishStatus(WorkspaceStatus("Review value change"))
+                updateControls()
+                let choice = valueChangeConfirmation(controller)
+                controller.discardTransientPresentation()
+                guard !Task.isCancelled, valueDiffController === controller else { return }
+                valueDiffController = nil
+                valueDiffTask = nil
+                updateControls()
+
+                switch choice {
+                case .save:
+                    performMutation(mutation, successMessage: "Saved \(protectedInput.key)")
+                case .keepEditing:
+                    publishStatus(WorkspaceStatus("Save cancelled · local edit preserved"))
+                    updateControls()
+                    view.window?.makeFirstResponder(valueTextView)
+                }
+            } catch is CancellationError {
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                valueDiffController?.discardTransientPresentation()
+                valueDiffController = nil
+                valueDiffTask = nil
+                show(error: error)
+                updateControls()
+            }
+        }
+        updateControls()
+    }
+
+    private nonisolated static func prepareValueDiff(
+        _ input: DataValueDiffInput
+    ) async throws -> DataValueDiffPresentation {
+        try Task.checkCancellation()
+        let presentation = DataValueDiffPresentation(input: input)
+        try Task.checkCancellation()
+        return presentation
+    }
+
+    private func cancelValueDiffReview() {
+        valueDiffTask?.cancel()
+        valueDiffController?.cancelReview()
+        valueDiffController = nil
+        valueDiffTask = nil
+    }
+
+    private func finishValueDiffReviewIfNeeded() {
+        guard valueDiffTask != nil || valueDiffController != nil else { return }
+        valueDiffController?.discardTransientPresentation()
+        valueDiffController = nil
+        valueDiffTask = nil
+        updateControls()
     }
 
     private func performMutation(_ mutation: DataMutationKind, successMessage: String) {

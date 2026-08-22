@@ -7,24 +7,12 @@ import KmgrCore
 /// produced. The caller must keep this presentation inside the confirmation
 /// flow and discard its rendered lines when that flow ends.
 struct YAMLDiffPresentation {
+    typealias LineRole = DiffTextLineRole
+    typealias Line = DiffTextLine
+
     static let maximumDecodedTextDisplayByteCount = 16 * 1_024
     static let maximumDecodedTextDisplayLineCount = 2_048
     static let maximumDecodedSecretDisplayLineCount = 8_192
-
-    enum LineRole {
-        case context
-        case fileHeader
-        case hunkHeader
-        case addition
-        case removal
-        case sectionHeader
-        case notice
-    }
-
-    struct Line {
-        var text: String
-        var role: LineRole
-    }
 
     struct ChangedPath {
         var path: String

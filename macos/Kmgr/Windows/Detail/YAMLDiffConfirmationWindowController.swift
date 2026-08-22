@@ -16,8 +16,7 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
 
     private let changedPaths: [YAMLDiffPresentation.ChangedPath]
     private let pathsTable = NSTableView()
-    private let diffScrollView: NSScrollView
-    private let diffTextView: NSTextView
+    private let diffDocument: DiffTextDocument
     private let tableLayoutStore: TableLayoutStore
     private var tableLayoutBinding: TableLayoutBinding?
     private var modalChoice = Choice.keepEditing
@@ -31,13 +30,11 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
         let presentation = YAMLDiffPresentation(prepared: prepared)
         changedPaths = presentation.changedPaths
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
-
-        let scrollView = NSTextView.scrollablePlainDocumentContentTextView()
-        guard let textView = scrollView.documentView as? NSTextView else {
-            preconditionFailure("AppKit did not create a diff document text view")
-        }
-        diffScrollView = scrollView
-        diffTextView = textView
+        diffDocument = DiffTextDocument(
+            lines: presentation.lines,
+            identifierPrefix: "yaml-diff",
+            accessibilityLabel: "Prepared YAML unified diff"
+        )
 
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
@@ -177,7 +174,6 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
 
         let diffLabel = NSTextField(labelWithString: "Unified Diff")
         diffLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        configureDiffTextView(with: presentation)
 
         let truncation = NSTextField(wrappingLabelWithString:
             "The unified diff reached the 16 KiB display limit. The prepared edit is complete; only this preview is truncated."
@@ -208,7 +204,7 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
 
         let stack = NSStackView(views: [
             heading, target, changedPathsLabel, pathsScroll, diffLabel,
-            diffScrollView, truncation, buttons,
+            diffDocument.scrollView, truncation, buttons,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -228,13 +224,15 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
             changedPathsLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
             pathsScroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
             diffLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
-            diffScrollView.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
-            diffScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            diffDocument.scrollView.widthAnchor.constraint(
+                equalTo: stack.widthAnchor, constant: -36
+            ),
+            diffDocument.scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
             truncation.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
         ])
         panel.contentView = root
-        panel.initialFirstResponder = diffTextView
+        panel.initialFirstResponder = diffDocument.initialFirstResponder
     }
 
     private func configurePathsTable() {
@@ -262,77 +260,6 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
         )
     }
 
-    private func configureDiffTextView(with presentation: YAMLDiffPresentation) {
-        diffTextView.identifier = .init("yaml-diff-text")
-        diffTextView.setAccessibilityLabel("Prepared YAML unified diff")
-        diffTextView.isEditable = false
-        diffTextView.isSelectable = true
-        diffTextView.isRichText = true
-        diffTextView.usesFindBar = true
-        diffTextView.isAutomaticQuoteSubstitutionEnabled = false
-        diffTextView.isAutomaticDashSubstitutionEnabled = false
-        diffTextView.textContainerInset = NSSize(width: 10, height: 10)
-        diffTextView.textStorage?.setAttributedString(attributedText(for: presentation.lines))
-
-        diffScrollView.identifier = .init("yaml-diff-scroll")
-        diffScrollView.hasVerticalScroller = true
-        diffScrollView.hasHorizontalScroller = true
-        diffScrollView.autohidesScrollers = true
-        diffScrollView.borderType = .bezelBorder
-    }
-
-    private func attributedText(for lines: [YAMLDiffPresentation.Line]) -> NSAttributedString {
-        let result = NSMutableAttributedString()
-        for (index, line) in lines.enumerated() {
-            let attributes = attributes(for: line.role)
-            result.append(NSAttributedString(string: line.text, attributes: attributes))
-            if index != lines.indices.last {
-                result.append(NSAttributedString(string: "\n", attributes: attributes))
-            }
-        }
-        return result
-    }
-
-    private func attributes(
-        for role: YAMLDiffPresentation.LineRole
-    ) -> [NSAttributedString.Key: Any] {
-        let regular = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        switch role {
-        case .context:
-            return [.font: regular, .foregroundColor: NSColor.labelColor]
-        case .fileHeader:
-            return [
-                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold),
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ]
-        case .hunkHeader:
-            return [
-                .font: regular,
-                .foregroundColor: NSColor.systemBlue,
-                .backgroundColor: NSColor.systemBlue.withAlphaComponent(0.10),
-            ]
-        case .addition:
-            return [
-                .font: regular,
-                .foregroundColor: NSColor.systemGreen,
-                .backgroundColor: NSColor.systemGreen.withAlphaComponent(0.10),
-            ]
-        case .removal:
-            return [
-                .font: regular,
-                .foregroundColor: NSColor.systemRed,
-                .backgroundColor: NSColor.systemRed.withAlphaComponent(0.10),
-            ]
-        case .sectionHeader:
-            return [
-                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
-                .foregroundColor: NSColor.labelColor,
-            ]
-        case .notice:
-            return [.font: regular, .foregroundColor: NSColor.systemOrange]
-        }
-    }
-
     private func color(for severity: CellSeverity) -> NSColor {
         switch severity {
         case .warning: .systemOrange
@@ -349,17 +276,14 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
         for path in changedPaths {
             changedPathSummary += "\n\(path.path)\t\(path.beforeSummary)\t\(path.afterSummary)"
         }
-        let copyText = changedPathSummary + "\n\nUnified Diff\n" + diffTextView.string
+        let copyText = changedPathSummary + "\n\nUnified Diff\n" + diffDocument.text
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(copyText, forType: .string)
     }
 
     @objc private func search() {
-        window?.makeFirstResponder(diffTextView)
-        let command = NSMenuItem()
-        command.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
-        diffTextView.performFindPanelAction(command)
+        diffDocument.showFindPanel(in: window)
     }
 
     @objc private func apply() {
@@ -381,6 +305,6 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
     }
 
     private func clearTransientPresentation() {
-        diffTextView.textStorage?.setAttributedString(NSAttributedString())
+        diffDocument.clear()
     }
 }

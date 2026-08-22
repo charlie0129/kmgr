@@ -110,10 +110,14 @@ app-wide Port Forwards window.
   total document size.
 - ConfigMap and Secret keys support text and raw binary values. Data search
   matches complete keys, text values, and unsaved drafts rather than only the
-  bounded row preview. Secret bytes are decoded/encoded by the engine and
-  concealed by default; revealing them explicitly also enables value search,
-  while concealing them clears the transient query and result snippets. The UI
-  never asks the user to decode or encode base64.
+  bounded row preview. Save Key first opens a searchable, value-only review:
+  text uses contextual unified hunks and binary data uses aligned changed-byte
+  rows. Oversized comparisons show bounded context around the actual change
+  while the complete value remains the mutation input. Secret bytes are
+  decoded/encoded by the engine and concealed by default; revealing them
+  explicitly also enables value search and decoded diff review, while
+  concealing them clears transient queries and presentations. The UI never
+  asks the user to decode or encode base64.
 - Logs support one or many UID-pinned Pods plus Deployments, StatefulSets,
   DaemonSets, ReplicaSets, Jobs, and CronJobs. A workload is resolved through
   UID-checked controller-owner hops to a bounded, static Pod snapshot; the
@@ -403,8 +407,9 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
 7. Start a direct Pod forward, replace that Pod with the same name/new UID, and
    verify the record remains Failed rather than switching identity.
 8. Search all keys and multiline values in a ConfigMap and an explicitly
-   revealed Secret, edit one decoded key in each without handling base64, and
-   exercise a YAML resource-version conflict.
+   revealed Secret, edit one decoded key in each without handling base64,
+   inspect and confirm each value-only diff, and exercise a YAML
+   resource-version conflict.
 9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
 10. View both Pod and Node metrics, then compare their behavior with Metrics API

@@ -822,6 +822,73 @@ struct ObjectDetailDataDraftTests {
         #expect(editor.string == "server-alpha")
     }
 
+    @Test("Save Key reviews only the decoded value and Keep Editing preserves the draft")
+    func saveKeyValueReview() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let provider = DraftMutationObjectDetailProvider(
+            detail: fixture.detail,
+            data: fixture.data
+        )
+        let review = DataValueReviewProbe()
+        let controller = ObjectDataViewController(
+            identity: fixture.identity,
+            provider: provider,
+            valueChangeConfirmation: { confirmation in
+                review.reviewCount += 1
+                if let root = confirmation.window?.contentView {
+                    let descendants = draftDescendants(of: root)
+                    review.reviewedKey = descendants.compactMap { $0 as? NSTextField }
+                        .first { $0.identifier?.rawValue == "data-value-diff-key" }?
+                        .stringValue ?? ""
+                    review.reviewedDiff = descendants.compactMap { $0 as? NSTextView }
+                        .first { $0.identifier?.rawValue == "data-value-diff-text" }?
+                        .string ?? ""
+                }
+                return review.choice
+            }
+        )
+        let window = NSWindow(contentViewController: controller)
+        controller.viewDidAppear()
+        defer {
+            controller.stop()
+            window.contentViewController = nil
+            window.close()
+        }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        try await waitForDataRows(table, count: 2)
+
+        select(row: 0, in: table, controller: controller)
+        editor.string = "edited-alpha\nsecond line"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        save.performClick(nil)
+
+        try await waitForCondition { review.reviewCount == 1 && save.isEnabled }
+        #expect(review.reviewedKey == "Key: alpha")
+        #expect(review.reviewedDiff.contains("-server-alpha"))
+        #expect(review.reviewedDiff.contains("+edited-alpha"))
+        #expect(review.reviewedDiff.contains("+second line"))
+        #expect(!review.reviewedDiff.contains("apiVersion:"))
+        #expect(await provider.numberOfUpdateCalls() == 0)
+        #expect(editor.string == "edited-alpha\nsecond line")
+        #expect(editor.isEditable)
+        #expect(window.firstResponder === editor)
+
+        review.choice = .save
+        save.performClick(nil)
+        try await waitForPendingUpdate(provider)
+        #expect(review.reviewCount == 2)
+        let mutation = try #require(await provider.latestMutation())
+        guard case .set(let key, _, let value, _) = mutation else {
+            Issue.record("Expected a reviewed set mutation")
+            return
+        }
+        #expect(key == "alpha")
+        #expect(value == Data("edited-alpha\nsecond line".utf8))
+    }
+
     @Test("save locks editing and a missing sibling draft remains recoverable")
     func saveLocksAndPreservesMissingDraft() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
@@ -832,6 +899,7 @@ struct ObjectDetailDataDraftTests {
         let controller = ObjectDataViewController(
             identity: fixture.identity,
             provider: provider,
+            valueChangeConfirmation: { _ in .save }
         )
         controller.loadView()
         controller.viewDidAppear()
@@ -903,6 +971,7 @@ struct ObjectDetailDataDraftTests {
         let controller = ObjectDataViewController(
             identity: fixture.identity,
             provider: provider,
+            valueChangeConfirmation: { _ in .save }
         )
         controller.loadView()
         let window = NSWindow(contentViewController: controller)
@@ -1016,6 +1085,7 @@ struct ObjectDetailDataDraftTests {
         let controller = ObjectDataViewController(
             identity: fixture.identity,
             provider: provider,
+            valueChangeConfirmation: { _ in .save }
         )
         controller.loadView()
         controller.viewDidAppear()
@@ -1449,6 +1519,14 @@ private actor DraftMutationObjectDetailProvider: ObjectDetailProviding {
         pendingUpdate?.finish()
         pendingUpdate = nil
     }
+}
+
+@MainActor
+private final class DataValueReviewProbe {
+    var choice = DataValueDiffConfirmationWindowController.Choice.keepEditing
+    var reviewCount = 0
+    var reviewedKey = ""
+    var reviewedDiff = ""
 }
 
 private struct DraftObjectDetailProvider: ObjectDetailProviding {
