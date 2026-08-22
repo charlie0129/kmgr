@@ -81,12 +81,6 @@ enum ObjectDetailSummaryPresentation {
         }
     }
 
-    static func copyText(for rows: [ObjectDetailSummaryRow]) -> String {
-        rows.map { row in
-            "\(sectionTitle(row.sectionID))\t\(row.copyLabel)\t\(row.copyValue)"
-        }.joined(separator: "\n")
-    }
-
     private static func summaryRow(
         _ field: ObjectSummaryField,
         conditionTimestamps: ConditionTimestampFormatting,
@@ -210,7 +204,7 @@ enum ObjectDetailSummaryPresentation {
     }
 
     private static func copyHint(forCharacterCount count: Int) -> String {
-        "Value shortened in Summary (\(count.formatted()) characters). Select the row and press Command-C to copy it."
+        "Value shortened in Summary (\(count.formatted()) characters). Click the cell and press Command-C, or choose Copy Cell, to copy it."
     }
 
     private static func sectionTitle(_ sectionID: String) -> String {
@@ -316,7 +310,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         action: nil
     )
     private let contentContainer = NSView()
-    private let summaryTable = CopyableSummaryTableView()
+    private let summaryTable = CapturedCellTableView()
     private let summaryScrollView = NSScrollView()
     private let relationshipsTable = NSTableView()
     private let relationshipsScrollView = NSScrollView()
@@ -584,23 +578,17 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         )
         summaryTable.identifier = .init("object-detail-summary-table")
         summaryTable.setAccessibilityLabel("Kubernetes object summary")
-        summaryTable.allowsMultipleSelection = true
+        summaryTable.allowsMultipleSelection = false
         summaryTable.allowsEmptySelection = true
         summaryTable.rowHeight = 24
         summaryTable.intercellSpacing = NSSize(width: 1, height: 1)
         summaryTable.gridStyleMask = [.solidHorizontalGridLineMask]
-        summaryTable.copyTextForRows = { [weak self] indexes in
-            self?.summaryCopyText(for: indexes)
+        summaryTable.cellValueProvider = { [weak self] row, column in
+            self?.summaryCellCopyValue(row: row, column: column)
         }
-        summaryTable.toolTip = "Select one or more rows and press Command-C to copy them."
+        summaryTable.toolTip = "Click a cell and press Command-C, or choose Copy Cell, to copy its full value."
         let summaryMenu = NSMenu()
-        let copyRowsItem = NSMenuItem(
-            title: "Copy Rows",
-            action: #selector(NSText.copy(_:)),
-            keyEquivalent: ""
-        )
-        copyRowsItem.target = summaryTable
-        summaryMenu.addItem(copyRowsItem)
+        summaryTable.addCopyCellMenuItem(to: summaryMenu)
         summaryTable.menu = summaryMenu
         summaryScrollView.documentView = summaryTable
         summaryScrollView.hasVerticalScroller = true
@@ -874,15 +862,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
     }
 
-    private func summaryCopyText(for indexes: IndexSet) -> String? {
-        let rows = indexes.compactMap { index -> ObjectDetailSummaryRow? in
-            guard summaryItems.indices.contains(index),
-                case .row(let row) = summaryItems[index]
-            else { return nil }
-            return row
+    private func summaryCellCopyValue(row: Int, column: Int) -> String? {
+        guard summaryItems.indices.contains(row),
+            case .row(let item) = summaryItems[row],
+            summaryTable.tableColumns.indices.contains(column)
+        else { return nil }
+        switch summaryTable.tableColumns[column].identifier.rawValue {
+        case "field": return item.copyLabel
+        case "value": return item.copyValue
+        default: return nil
         }
-        guard !rows.isEmpty else { return nil }
-        return ObjectDetailSummaryPresentation.copyText(for: rows)
     }
 
     @objc private func tabChanged() {
@@ -1407,7 +1396,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 let label = NSTextField(labelWithString: "No summary fields are available.")
                 label.identifier = .init("object-detail-summary-empty")
                 label.textColor = .secondaryLabelColor
-                label.isSelectable = true
                 return label
             }
         }
@@ -1445,7 +1433,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             return row.tooltip.isEmpty ? row.displayText : row.tooltip
         }
         guard row.label != row.copyLabel else { return row.label }
-        return "Field name shortened in Summary. Select the row and press Command-C to copy it."
+        return "Field name shortened in Summary. Click the cell and press Command-C, or choose Copy Cell, to copy it."
     }
 
     private func summaryValueColor(_ severity: CellSeverity) -> NSColor {
@@ -1500,11 +1488,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     ? "object-detail-summary-value"
                     : "object-detail-summary-field"
             )
-            label.isSelectable = true
-            label.isEditable = false
             label.lineBreakMode = .byTruncatingTail
             label.maximumNumberOfLines = 1
-            label.focusRingType = .none
             label.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(label)
             cell.textField = label
@@ -1565,19 +1550,4 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     @objc private func backPressed() { onBack?() }
 
-}
-
-@MainActor
-final class CopyableSummaryTableView: NSTableView {
-    var copyTextForRows: ((IndexSet) -> String?)?
-
-    @objc func copy(_ sender: Any?) {
-        guard let value = copyTextForRows?(selectedRowIndexes), !value.isEmpty else {
-            NSSound.beep()
-            return
-        }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(value, forType: .string)
-    }
 }

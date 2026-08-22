@@ -90,10 +90,11 @@ app-wide Port Forwards window.
   and watch updates do not retarget a selection by row index. Clicking a cell
   captures its full value for Command-C or Copy Cell without adding a second
   visible selection or changing the selected rows.
-- Details provide a structured, copyable Summary table, plus YAML, Events,
-  Relationships, Metrics where meaningful, and a Data editor for ConfigMaps
-  and Secrets. Oversized Summary values stay available through row copy while
-  their inline presentation remains bounded.
+- Details provide a structured Summary table where clicking a cell and pressing
+  Command-C (or choosing Copy Cell from its context menu) copies the complete
+  value, plus YAML, Events, Relationships, Metrics where meaningful, and a Data
+  editor for ConfigMaps and Secrets. Oversized Summary values stay available
+  through cell copy while their inline presentation remains bounded.
 - `Y` opens the selected object's editable YAML tab inside Details. Shift-Y
   opens an independent, UID-pinned YAML window with an exact received-byte
   count, explicit refresh, and the same validated edit/apply workflow.

@@ -162,6 +162,15 @@ public final class TableLayoutStore {
         return persistIfNeeded()
     }
 
+    /// Waits for the currently scheduled coalesced save, if any. This is
+    /// useful to lifecycle callers that need to observe durable state without
+    /// guessing how long the debounce or main-actor scheduling will take.
+    internal func waitForPendingSave() async {
+        while let task = pendingSaveTask {
+            await task.value
+        }
+    }
+
     public func reset() {
         pendingSaveTask?.cancel()
         pendingSaveTask = nil

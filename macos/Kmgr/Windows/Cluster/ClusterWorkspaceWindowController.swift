@@ -8636,12 +8636,9 @@ private final class ResourceTableCommandBox {
 }
 
 @MainActor
-private final class ResourceTableView: NSTableView, NSMenuItemValidation {
+private final class ResourceTableView: CapturedCellTableView {
     var onCommand: ((ResourceTableCommand) -> Void)?
     var onSelectionGesture: ((ResourceTableSelectionGesture) -> Bool)?
-    private var capturedCellValue: String?
-
-    var canCopyCapturedCell: Bool { capturedCellValue != nil }
 
     /// A nil-targeted Edit > Select All command resolves to NSTableView before
     /// `keyDown(with:)` gets a chance to translate Command-A. Route that
@@ -8654,14 +8651,6 @@ private final class ResourceTableView: NSTableView, NSMenuItemValidation {
             return
         }
         onCommand(.selectAll)
-    }
-
-    /// Context-menu hits update the copy target without making the clicked row
-    /// authoritative. The existing UID-backed row selection is left intact for
-    /// every resource action in the same menu.
-    override func menu(for event: NSEvent) -> NSMenu? {
-        captureCellValue(at: convert(event.locationInWindow, from: nil))
-        return super.menu(for: event)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -8681,26 +8670,6 @@ private final class ResourceTableView: NSTableView, NSMenuItemValidation {
             return
         }
         super.mouseDown(with: event)
-    }
-
-    /// Edit > Copy and Command-C reach this responder action when the resource
-    /// table owns focus. Capturing the immutable string on the click keeps the
-    /// operation independent of cell reuse, scrolling, and total row count.
-    @objc func copy(_ sender: Any?) {
-        guard let capturedCellValue else {
-            NSSound.beep()
-            return
-        }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(capturedCellValue, forType: .string)
-    }
-
-    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(copy(_:)) {
-            return canCopyCapturedCell
-        }
-        return true
     }
 
     override func keyDown(with event: NSEvent) {
@@ -8766,23 +8735,6 @@ private final class ResourceTableView: NSTableView, NSMenuItemValidation {
             }
             super.keyDown(with: event)
         }
-    }
-
-    private func captureCellValue(at point: NSPoint) {
-        let row = row(at: point)
-        let column = column(at: point)
-        guard row >= 0, column >= 0,
-            let cell = view(
-                atColumn: column,
-                row: row,
-                makeIfNecessary: true
-            ) as? NSTableCellView,
-            let value = cell.textField?.stringValue
-        else {
-            capturedCellValue = nil
-            return
-        }
-        capturedCellValue = value
     }
 
     private static func selectionModifiers(

@@ -1021,7 +1021,7 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(notice.stringValue.contains("Data"))
     }
 
-    @Test("Summary uses copyable sectioned rows for conditions and metadata")
+    @Test("Summary cells copy complete values without text selection")
     func summaryMetadataRendering() async throws {
         let identity = ResourceIdentity(
             clusterSessionID: "session",
@@ -1072,15 +1072,29 @@ struct ObjectDetailYAMLPresentationTests {
             initialTab: .summary
         )
         controller.loadView()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentViewController = controller
+        window.makeKeyAndOrderFront(nil)
         controller.viewDidAppear()
-        defer { controller.stop() }
+        defer {
+            controller.stop()
+            window.orderOut(nil)
+            window.contentViewController = nil
+            NSPasteboard.general.clearContents()
+        }
 
         let table = try #require(descendants(of: controller.view)
             .compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes object summary" })
         try await waitUntil { table.numberOfRows == 10 }
         #expect(table.tableColumns.map(\.title) == ["Field", "Value"])
-        #expect(table is CopyableSummaryTableView)
+        let capturedTable = try #require(table as? CapturedCellTableView)
+        #expect(!capturedTable.canCopyCapturedCell)
 
         let sections = ObjectDetailSummaryPresentation.sections(for: detail)
         #expect(sections.map(\.title) == [
@@ -1122,9 +1136,9 @@ struct ObjectDetailYAMLPresentationTests {
             atColumn: 1, row: 4, makeIfNecessary: true
         ))
         #expect(descendants(of: annotationField).compactMap { $0 as? NSTextField }
-            .contains { $0.stringValue == "example.test/note" && $0.isSelectable })
+            .contains { $0.stringValue == "example.test/note" && !$0.isSelectable })
         #expect(descendants(of: annotationValue).compactMap { $0 as? NSTextField }
-            .contains { $0.stringValue == "first second" && $0.isSelectable })
+            .contains { $0.stringValue == "first second" && !$0.isSelectable })
 
         let payloadValue = try #require(table.view(
             atColumn: 1, row: 5, makeIfNecessary: true
@@ -1139,12 +1153,33 @@ struct ObjectDetailYAMLPresentationTests {
         let summaryScroll = try #require(table.enclosingScrollView)
         #expect(table.frame.width <= summaryScroll.contentSize.width + 1)
 
-        let copyableTable = try #require(table as? CopyableSummaryTableView)
-        copyableTable.selectRowIndexes(IndexSet(integer: 5), byExtendingSelection: false)
-        #expect(copyableTable.tryToPerform(#selector(NSText.copy(_:)), with: nil))
+        capturedTable.mouseDown(with: try summaryCellEvent(
+            table: capturedTable,
+            row: 5,
+            column: 1,
+            type: .leftMouseDown
+        ))
+        #expect(capturedTable.tryToPerform(#selector(NSText.copy(_:)), with: nil))
         #expect(NSPasteboard.general.string(forType: .string)
-            == "Annotations\texample.test/payload\t\(longJSON)")
-        NSPasteboard.general.clearContents()
+            == longJSON)
+
+        let selectedBeforeContextMenu = capturedTable.selectedRowIndexes
+        let contextMenu = try #require(capturedTable.menu(for: try summaryCellEvent(
+            table: capturedTable,
+            row: 4,
+            column: 1,
+            type: .rightMouseDown
+        )))
+        let copyCell = try #require(contextMenu.item(withTitle: "Copy Cell"))
+        #expect(copyCell.isEnabled)
+        #expect(capturedTable.selectedRowIndexes == selectedBeforeContextMenu)
+        #expect(NSApp.sendAction(
+            try #require(copyCell.action),
+            to: copyCell.target,
+            from: copyCell
+        ))
+        #expect(NSPasteboard.general.string(forType: .string) == "first second")
+        #expect(capturedTable.selectedRowIndexes == selectedBeforeContextMenu)
     }
 
     @Test("Summary condition timestamps use local time")
@@ -1180,9 +1215,8 @@ struct ObjectDetailYAMLPresentationTests {
 
         #expect(condition.displayText
             == "True · message since startup · for 1d (since 2025-08-17 18:49:45 +08:00)")
+        #expect(condition.copyLabel == "Ready")
         #expect(condition.copyValue == condition.displayText)
-        #expect(ObjectDetailSummaryPresentation.copyText(for: [condition])
-            == "Conditions\tReady\tTrue · message since startup · for 1d (since 2025-08-17 18:49:45 +08:00)")
         #expect(ObjectDetailSummaryPresentation.compactAge(
             since: transitionTime,
             now: transitionTime.addingTimeInterval(60)
@@ -1260,8 +1294,6 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(!annotation.displayText.contains(String(repeating: "x", count: 100)))
         #expect(annotation.tooltip.contains("Command-C"))
         #expect(annotation.copyValue == longJSON)
-        #expect(ObjectDetailSummaryPresentation.copyText(for: [annotation])
-            == "Annotations\tlong\t\(longJSON)")
     }
 
     @Test("Summary metadata removes control characters")
@@ -1849,6 +1881,33 @@ private func yamlKeyEvent(
         charactersIgnoringModifiers: characters,
         isARepeat: false,
         keyCode: 14
+    ))
+}
+
+@MainActor
+private func summaryCellEvent(
+    table: NSTableView,
+    row: Int,
+    column: Int,
+    type: NSEvent.EventType
+) throws -> NSEvent {
+    let point = table.convert(
+        NSPoint(
+            x: table.rect(ofColumn: column).midX,
+            y: table.rect(ofRow: row).midY
+        ),
+        to: nil
+    )
+    return try #require(NSEvent.mouseEvent(
+        with: type,
+        location: point,
+        modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: table.window?.windowNumber ?? 0,
+        context: nil,
+        eventNumber: 1,
+        clickCount: 1,
+        pressure: 1
     ))
 }
 

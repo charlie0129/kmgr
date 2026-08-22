@@ -68,17 +68,7 @@ import Testing
             for: .portForwards
         ))
     }
-    // The full suite can keep the main actor busy beyond the nominal delay.
-    // Yield at least once after the debounce becomes runnable instead of
-    // assuming this test and the persistence task resume in a fixed order.
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: .seconds(2))
-    repeat {
-        await Task.yield()
-        if store.successfulPersistenceCount > 0 { break }
-        guard clock.now < deadline else { break }
-        try await Task.sleep(for: .milliseconds(5))
-    } while true
+    await store.waitForPendingSave()
 
     #expect(store.successfulPersistenceCount == 1)
     #expect(TableLayoutStore(defaults: defaults).layout(for: .portForwards)
