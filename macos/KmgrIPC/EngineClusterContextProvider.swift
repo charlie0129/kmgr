@@ -98,10 +98,14 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
         self.requestID = requestID
     }
 
-    public func listContexts(reload: Bool) async throws -> [ClusterContextSummary] {
+    public func listContexts(
+        reload: Bool,
+        addedKubeconfigPaths: [String]
+    ) async throws -> ClusterContextCatalog {
         var request = Kmgr_V1_ListContextsRequest()
         request.context = makeRequestContext(timeout: listTimeout)
         request.reload = reload
+        request.addedKubeconfigPaths = addedKubeconfigPaths
 
         do {
             try await readiness()
@@ -115,7 +119,16 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
                 )
             }
             if response.hasError { throw Self.issue(from: response.error) }
-            return response.contexts.map(Self.summary(from:))
+            return ClusterContextCatalog(
+                contexts: response.contexts.map(Self.summary(from:)),
+                addedKubeconfigSources: response.addedKubeconfigSources.map {
+                    AddedKubeconfigSourceStatus(
+                        path: $0.path,
+                        contextCount: Int($0.contextCount),
+                        issue: $0.hasError ? Self.issue(from: $0.error) : nil
+                    )
+                }
+            )
         } catch {
             throw Self.issue(
                 from: error,
@@ -125,10 +138,14 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
         }
     }
 
-    public func openContext(reference: String) async throws -> OpenedClusterSession {
+    public func openContext(
+        reference: String,
+        addedKubeconfigPaths: [String]
+    ) async throws -> OpenedClusterSession {
         var request = Kmgr_V1_OpenSessionRequest()
         request.context = makeRequestContext(timeout: openTimeout)
         request.contextName = reference
+        request.addedKubeconfigPaths = addedKubeconfigPaths
 
         do {
             try await readiness()

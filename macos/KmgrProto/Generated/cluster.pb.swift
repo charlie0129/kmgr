@@ -179,7 +179,9 @@ public struct Kmgr_V1_ListContextsRequest: Sendable {
 
   public var reload: Bool = false
 
-  public var kubeconfigPaths: [String] = []
+  /// Files explicitly added by the user. Each file is cataloged as an
+  /// independent source in addition to normal kubeconfig discovery.
+  public var addedKubeconfigPaths: [String] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -196,6 +198,33 @@ public struct Kmgr_V1_ListContextsResponse: Sendable {
   public var requestID: String = String()
 
   public var contexts: [Kmgr_V1_KubeconfigContext] = []
+
+  public var error: Kmgr_V1_StructuredError {
+    get {return _error ?? Kmgr_V1_StructuredError()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {return self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var addedKubeconfigSources: [Kmgr_V1_AddedKubeconfigSource] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: Kmgr_V1_StructuredError? = nil
+}
+
+public struct Kmgr_V1_AddedKubeconfigSource: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var path: String = String()
+
+  public var contextCount: UInt32 = 0
 
   public var error: Kmgr_V1_StructuredError {
     get {return _error ?? Kmgr_V1_StructuredError()}
@@ -229,7 +258,7 @@ public struct Kmgr_V1_OpenSessionRequest: Sendable {
 
   public var contextName: String = String()
 
-  public var kubeconfigPaths: [String] = []
+  public var addedKubeconfigPaths: [String] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -755,7 +784,7 @@ extension Kmgr_V1_KubeconfigContext: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 extension Kmgr_V1_ListContextsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListContextsRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{1}reload\0\u{3}kubeconfig_paths\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{1}reload\0\u{3}added_kubeconfig_paths\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -765,7 +794,7 @@ extension Kmgr_V1_ListContextsRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
       case 2: try { try decoder.decodeSingularBoolField(value: &self.reload) }()
-      case 3: try { try decoder.decodeRepeatedStringField(value: &self.kubeconfigPaths) }()
+      case 3: try { try decoder.decodeRepeatedStringField(value: &self.addedKubeconfigPaths) }()
       default: break
       }
     }
@@ -782,8 +811,8 @@ extension Kmgr_V1_ListContextsRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if self.reload != false {
       try visitor.visitSingularBoolField(value: self.reload, fieldNumber: 2)
     }
-    if !self.kubeconfigPaths.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.kubeconfigPaths, fieldNumber: 3)
+    if !self.addedKubeconfigPaths.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.addedKubeconfigPaths, fieldNumber: 3)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -791,7 +820,7 @@ extension Kmgr_V1_ListContextsRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
   public static func ==(lhs: Kmgr_V1_ListContextsRequest, rhs: Kmgr_V1_ListContextsRequest) -> Bool {
     if lhs._context != rhs._context {return false}
     if lhs.reload != rhs.reload {return false}
-    if lhs.kubeconfigPaths != rhs.kubeconfigPaths {return false}
+    if lhs.addedKubeconfigPaths != rhs.addedKubeconfigPaths {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -799,7 +828,7 @@ extension Kmgr_V1_ListContextsRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Kmgr_V1_ListContextsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListContextsResponse"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}contexts\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}contexts\0\u{1}error\0\u{3}added_kubeconfig_sources\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -810,6 +839,7 @@ extension Kmgr_V1_ListContextsResponse: SwiftProtobuf.Message, SwiftProtobuf._Me
       case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
       case 2: try { try decoder.decodeRepeatedMessageField(value: &self.contexts) }()
       case 3: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.addedKubeconfigSources) }()
       default: break
       }
     }
@@ -829,12 +859,60 @@ extension Kmgr_V1_ListContextsResponse: SwiftProtobuf.Message, SwiftProtobuf._Me
     try { if let v = self._error {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
     } }()
+    if !self.addedKubeconfigSources.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.addedKubeconfigSources, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Kmgr_V1_ListContextsResponse, rhs: Kmgr_V1_ListContextsResponse) -> Bool {
     if lhs.requestID != rhs.requestID {return false}
     if lhs.contexts != rhs.contexts {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.addedKubeconfigSources != rhs.addedKubeconfigSources {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Kmgr_V1_AddedKubeconfigSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AddedKubeconfigSource"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}path\0\u{3}context_count\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.contextCount) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 1)
+    }
+    if self.contextCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.contextCount, fieldNumber: 2)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Kmgr_V1_AddedKubeconfigSource, rhs: Kmgr_V1_AddedKubeconfigSource) -> Bool {
+    if lhs.path != rhs.path {return false}
+    if lhs.contextCount != rhs.contextCount {return false}
     if lhs._error != rhs._error {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
@@ -843,7 +921,7 @@ extension Kmgr_V1_ListContextsResponse: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 extension Kmgr_V1_OpenSessionRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".OpenSessionRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}context_name\0\u{3}kubeconfig_paths\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}context_name\0\u{3}added_kubeconfig_paths\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -853,7 +931,7 @@ extension Kmgr_V1_OpenSessionRequest: SwiftProtobuf.Message, SwiftProtobuf._Mess
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularMessageField(value: &self._context) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.contextName) }()
-      case 3: try { try decoder.decodeRepeatedStringField(value: &self.kubeconfigPaths) }()
+      case 3: try { try decoder.decodeRepeatedStringField(value: &self.addedKubeconfigPaths) }()
       default: break
       }
     }
@@ -870,8 +948,8 @@ extension Kmgr_V1_OpenSessionRequest: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if !self.contextName.isEmpty {
       try visitor.visitSingularStringField(value: self.contextName, fieldNumber: 2)
     }
-    if !self.kubeconfigPaths.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.kubeconfigPaths, fieldNumber: 3)
+    if !self.addedKubeconfigPaths.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.addedKubeconfigPaths, fieldNumber: 3)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -879,7 +957,7 @@ extension Kmgr_V1_OpenSessionRequest: SwiftProtobuf.Message, SwiftProtobuf._Mess
   public static func ==(lhs: Kmgr_V1_OpenSessionRequest, rhs: Kmgr_V1_OpenSessionRequest) -> Bool {
     if lhs._context != rhs._context {return false}
     if lhs.contextName != rhs.contextName {return false}
-    if lhs.kubeconfigPaths != rhs.kubeconfigPaths {return false}
+    if lhs.addedKubeconfigPaths != rhs.addedKubeconfigPaths {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

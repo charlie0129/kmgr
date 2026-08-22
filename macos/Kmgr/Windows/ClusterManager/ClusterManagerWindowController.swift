@@ -23,6 +23,7 @@ final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate
 
     init(
         provider: any ClusterContextProviding,
+        sourceStore: KubeconfigSourceStore = .shared,
         initialNotice: ClusterManagerInitialNotice? = nil,
         closesAfterOpening: Bool = true,
         tableLayoutStore: TableLayoutStore? = nil
@@ -30,6 +31,7 @@ final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate
         self.closesAfterOpening = closesAfterOpening
         self.managerViewController = ClusterManagerViewController(
             provider: provider,
+            sourceStore: sourceStore,
             initialNotice: initialNotice,
             tableLayoutStore: tableLayoutStore ?? TableLayoutStore()
         )
@@ -70,6 +72,10 @@ final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate
     /// until asynchronous application termination is approved.
     func prepareForTermination() {
         managerViewController.cancelWork()
+    }
+
+    @objc func addKubeconfigFiles(_ sender: Any?) {
+        managerViewController.addKubeconfigFiles(sender)
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -117,6 +123,7 @@ private final class ClusterManagerViewController: NSViewController,
     }
 
     private let provider: any ClusterContextProviding
+    private let sourceStore: KubeconfigSourceStore
     private let initialNotice: ClusterManagerInitialNotice?
     private let tableLayoutStore: TableLayoutStore
     private var model = ClusterManagerModel()
@@ -128,8 +135,13 @@ private final class ClusterManagerViewController: NSViewController,
     private var isProjectingSelection = false
     private var openingContextName: String?
     private var operationIssue: ClusterManagerIssue?
+    private var addedSourceStatuses: [AddedKubeconfigSourceStatus] = []
+    private var sourceStoreObserver: UUID?
+    private var lastRequestedSourcePaths: [String]?
+    private var sourcesPopover: NSPopover?
 
     private let searchField = NSSearchField()
+    private let sourcesButton = NSButton(title: "Kubeconfig Files…", target: nil, action: nil)
     private let reloadButton = NSButton(title: "Reload", target: nil, action: nil)
     private let revealButton = NSButton(title: "Reveal Source", target: nil, action: nil)
     private let tableView = ContextTableView()
@@ -140,6 +152,7 @@ private final class ClusterManagerViewController: NSViewController,
     private let stateMessageLabel = NSTextField(wrappingLabelWithString: "")
     private let stateProgress = NSProgressIndicator()
     private let stateRetryButton = NSButton(title: "Retry", target: nil, action: nil)
+    private let stateAddButton = NSButton(title: "Add Kubeconfig Files…", target: nil, action: nil)
     private let issueView = NSView()
     private let issueImageView = NSImageView()
     private let issueTitleLabel = NSTextField(labelWithString: "")
@@ -155,10 +168,12 @@ private final class ClusterManagerViewController: NSViewController,
 
     init(
         provider: any ClusterContextProviding,
+        sourceStore: KubeconfigSourceStore,
         initialNotice: ClusterManagerInitialNotice?,
         tableLayoutStore: TableLayoutStore
     ) {
         self.provider = provider
+        self.sourceStore = sourceStore
         self.initialNotice = initialNotice
         self.tableLayoutStore = tableLayoutStore
         super.init(nibName: nil, bundle: nil)
@@ -188,6 +203,12 @@ private final class ClusterManagerViewController: NSViewController,
         searchField.setAccessibilityLabel("Search kubeconfig contexts")
 
         configureToolbarButton(
+            sourcesButton,
+            action: #selector(showKubeconfigSources(_:)),
+            imageName: "doc.on.doc",
+            accessibilityLabel: "Manage added kubeconfig files"
+        )
+        configureToolbarButton(
             reloadButton,
             action: #selector(reloadContexts(_:)),
             imageName: "arrow.clockwise",
@@ -200,12 +221,15 @@ private final class ClusterManagerViewController: NSViewController,
             accessibilityLabel: "Reveal selected kubeconfig source"
         )
 
-        let actionRow = NSStackView(views: [searchField, reloadButton, revealButton])
+        let actionRow = NSStackView(
+            views: [searchField, sourcesButton, reloadButton, revealButton]
+        )
         actionRow.orientation = .horizontal
         actionRow.alignment = .centerY
         actionRow.spacing = 8
         actionRow.translatesAutoresizingMaskIntoConstraints = false
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        sourcesButton.setContentHuggingPriority(.required, for: .horizontal)
         reloadButton.setContentHuggingPriority(.required, for: .horizontal)
         revealButton.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -251,10 +275,14 @@ private final class ClusterManagerViewController: NSViewController,
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false
 
-        let tableContainer = NSView()
+        let tableContainer = KubeconfigDropView()
         tableContainer.translatesAutoresizingMaskIntoConstraints = false
         tableContainer.addSubview(scrollView)
         tableContainer.addSubview(stateView)
+        tableContainer.onDropFiles = { [weak self] urls in
+            self?.addKubeconfigURLs(urls)
+        }
+        tableContainer.installOverlay()
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: tableContainer.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: tableContainer.trailingAnchor),
@@ -322,13 +350,21 @@ private final class ClusterManagerViewController: NSViewController,
         super.viewDidAppear()
         guard !hasStarted else { return }
         hasStarted = true
-        loadContexts(reload: false)
+        sourceStoreObserver = sourceStore.observe { [weak self] paths in
+            self?.sourcePathsDidChange(paths)
+        }
     }
 
     func cancelWork() {
         loadTask?.cancel()
         loadTask = nil
         cancelOpenAttempt(render: false)
+        if let sourceStoreObserver {
+            sourceStore.removeObserver(sourceStoreObserver)
+            self.sourceStoreObserver = nil
+        }
+        sourcesPopover?.close()
+        sourcesPopover = nil
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -414,6 +450,176 @@ private final class ClusterManagerViewController: NSViewController,
         loadContexts(reload: true)
     }
 
+    @objc fileprivate func addKubeconfigFiles(_ sender: Any?) {
+        guard openingContextName == nil, let window = view.window else { return }
+        sourcesPopover?.close()
+
+        let panel = NSOpenPanel()
+        panel.title = "Add Kubeconfig Files"
+        panel.message = "Choose one or more kubeconfig files. Kmgr remembers their locations."
+        panel.prompt = "Add"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.resolvesAliases = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK else { return }
+            self?.addKubeconfigURLs(panel.urls)
+        }
+    }
+
+    @objc private func showKubeconfigSources(_ sender: Any?) {
+        if let sourcesPopover, sourcesPopover.isShown {
+            sourcesPopover.close()
+            self.sourcesPopover = nil
+            return
+        }
+
+        let controller = KubeconfigSourcesPopoverViewController()
+        controller.update(paths: sourceStore.paths, statuses: addedSourceStatuses)
+        controller.onAdd = { [weak self] in self?.addKubeconfigFiles(nil) }
+        controller.onRemove = { [weak self] paths in
+            guard let self, sourceStore.remove(paths: paths) else { return }
+            operationIssue = nil
+        }
+        controller.onReveal = { paths in
+            let urls = paths.map { URL(fileURLWithPath: $0).standardizedFileURL }
+                .filter { FileManager.default.fileExists(atPath: $0.path) }
+            if !urls.isEmpty {
+                NSWorkspace.shared.activateFileViewerSelecting(urls)
+            }
+        }
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentViewController = controller
+        sourcesPopover = popover
+        popover.show(
+            relativeTo: sourcesButton.bounds,
+            of: sourcesButton,
+            preferredEdge: .maxY
+        )
+    }
+
+    private func addKubeconfigURLs(_ urls: [URL]) {
+        guard openingContextName == nil else { return }
+        let candidates = urls.compactMap { url -> String? in
+            guard url.isFileURL else { return nil }
+            return KubeconfigSourceStore.normalizedFilePath(url.path)
+        }
+        let existing = Set(sourceStore.paths)
+        var seen = existing
+        let newPaths = candidates.filter { seen.insert($0).inserted }
+        guard !newPaths.isEmpty else {
+            operationIssue = ClusterManagerIssue(
+                category: .conflict,
+                reason: "KubeconfigAlreadyAdded",
+                message: "The selected kubeconfig files are already in Kmgr.",
+                operation: "add kubeconfig files"
+            )
+            renderControlsAndIssue()
+            return
+        }
+        guard sourceStore.paths.count + newPaths.count
+            <= KubeconfigSourceStore.maximumSources
+        else {
+            operationIssue = ClusterManagerIssue(
+                category: .resourceExhausted,
+                reason: "KubeconfigSourceLimitExceeded",
+                message: "Kmgr can remember at most \(KubeconfigSourceStore.maximumSources) added kubeconfig files.",
+                operation: "add kubeconfig files"
+            )
+            renderControlsAndIssue()
+            return
+        }
+        validateAndAddKubeconfigPaths(newPaths)
+    }
+
+    private func validateAndAddKubeconfigPaths(_ newPaths: [String]) {
+        loadTask?.cancel()
+        let proposedPaths = sourceStore.paths + newPaths
+        lastRequestedSourcePaths = proposedPaths
+        let revision = model.beginLoading(reload: true)
+        operationIssue = nil
+        render()
+
+        loadTask = Task { [weak self, provider] in
+            do {
+                let catalog = try await provider.listContexts(
+                    reload: true,
+                    addedKubeconfigPaths: proposedPaths
+                )
+                guard let self, !Task.isCancelled else { return }
+                let proposedStatuses = statuses(
+                    for: proposedPaths,
+                    from: catalog.addedKubeconfigSources
+                )
+                let statusByPath = Dictionary(
+                    uniqueKeysWithValues: proposedStatuses.map { ($0.path, $0) }
+                )
+                let accepted = newPaths.filter { path in
+                    guard let status = statusByPath[path] else { return false }
+                    return status.issue == nil
+                }
+                let rejected = newPaths.compactMap { path -> AddedKubeconfigSourceStatus? in
+                    guard let status = statusByPath[path], status.issue != nil else { return nil }
+                    return status
+                }
+                let finalPaths = sourceStore.paths + accepted
+                lastRequestedSourcePaths = finalPaths
+                if !accepted.isEmpty, !sourceStore.add(paths: accepted) {
+                    throw ClusterManagerIssue(
+                        category: .internalFailure,
+                        reason: "KubeconfigSourcePersistenceFailed",
+                        message: "Kmgr could not remember the selected kubeconfig files.",
+                        operation: "add kubeconfig files"
+                    )
+                }
+                guard model.finishLoading(catalog.contexts, revision: revision) else { return }
+                addedSourceStatuses = statuses(
+                    for: finalPaths,
+                    from: proposedStatuses
+                )
+                loadTask = nil
+                operationIssue = rejectedIssue(rejected)
+                render()
+            } catch is CancellationError {
+                // A newer source set owns presentation.
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                let issue = Self.presentationIssue(
+                    from: error,
+                    contextName: "",
+                    operation: "add kubeconfig files"
+                )
+                guard model.failLoading(with: issue, revision: revision) else { return }
+                loadTask = nil
+                render()
+            }
+        }
+    }
+
+    private func rejectedIssue(
+        _ rejected: [AddedKubeconfigSourceStatus]
+    ) -> ClusterManagerIssue? {
+        guard let first = rejected.first, let firstIssue = first.issue else { return nil }
+        let firstName = URL(fileURLWithPath: first.path).lastPathComponent
+        if rejected.count == 1 {
+            var issue = firstIssue
+            issue.message = "\(firstName) wasn’t added. \(firstIssue.message)"
+            issue.operation = "add kubeconfig files"
+            return issue
+        }
+        return ClusterManagerIssue(
+            category: .validation,
+            reason: "KubeconfigFilesRejected",
+            message: "\(rejected.count) kubeconfig files weren’t added. \(firstName): \(firstIssue.message)",
+            operation: "add kubeconfig files"
+        )
+    }
+
     @objc private func revealSource(_ sender: Any?) {
         guard let context = model.selectedContext else { return }
         let urls = context.sourcePaths.map {
@@ -453,10 +659,14 @@ private final class ClusterManagerViewController: NSViewController,
                 weak self,
                 provider,
                 contextName = context.name,
-                contextReference = context.id
+                contextReference = context.id,
+                addedKubeconfigPaths = sourceStore.paths
             ] in
             do {
-                let session = try await provider.openContext(reference: contextReference)
+                let session = try await provider.openContext(
+                    reference: contextReference,
+                    addedKubeconfigPaths: addedKubeconfigPaths
+                )
                 guard let self, !Task.isCancelled,
                     finishOpenAttempt(attemptID)
                 else { return }
@@ -502,15 +712,25 @@ private final class ClusterManagerViewController: NSViewController,
 
     private func loadContexts(reload: Bool) {
         loadTask?.cancel()
+        let addedKubeconfigPaths = sourceStore.paths
+        lastRequestedSourcePaths = addedKubeconfigPaths
         let revision = model.beginLoading(reload: reload)
         operationIssue = nil
         render()
 
         loadTask = Task { [weak self, provider] in
             do {
-                let contexts = try await provider.listContexts(reload: reload)
+                let catalog = try await provider.listContexts(
+                    reload: reload,
+                    addedKubeconfigPaths: addedKubeconfigPaths
+                )
                 guard let self, !Task.isCancelled else { return }
-                guard model.finishLoading(contexts, revision: revision) else { return }
+                guard lastRequestedSourcePaths == addedKubeconfigPaths else { return }
+                guard model.finishLoading(catalog.contexts, revision: revision) else { return }
+                addedSourceStatuses = statuses(
+                    for: addedKubeconfigPaths,
+                    from: catalog.addedKubeconfigSources
+                )
                 loadTask = nil
                 render()
             } catch is CancellationError {
@@ -526,6 +746,30 @@ private final class ClusterManagerViewController: NSViewController,
                 loadTask = nil
                 render()
             }
+        }
+    }
+
+    private func sourcePathsDidChange(_ paths: [String]) {
+        updateSourcesPresentation()
+        guard lastRequestedSourcePaths != paths else { return }
+        loadContexts(reload: lastRequestedSourcePaths != nil)
+    }
+
+    private func statuses(
+        for paths: [String],
+        from statuses: [AddedKubeconfigSourceStatus]
+    ) -> [AddedKubeconfigSourceStatus] {
+        let byPath = Dictionary(uniqueKeysWithValues: statuses.map { ($0.path, $0) })
+        return paths.map { path in
+            byPath[path] ?? AddedKubeconfigSourceStatus(
+                path: path,
+                issue: ClusterManagerIssue(
+                    category: .internalFailure,
+                    reason: "KubeconfigSourceStatusMissing",
+                    message: "The engine did not report this kubeconfig file’s status.",
+                    operation: "list kubeconfig contexts"
+                )
+            )
         }
     }
 
@@ -551,7 +795,8 @@ private final class ClusterManagerViewController: NSViewController,
                 title: "Kubeconfig contexts",
                 message: "Kmgr will read your configured kubeconfig files.",
                 spinning: false,
-                retry: false
+                retry: false,
+                addFiles: false
             )
         case .loading(let reload):
             shouldOverlay = model.allContexts.isEmpty
@@ -561,7 +806,8 @@ private final class ClusterManagerViewController: NSViewController,
                     title: reload ? "Reloading contexts…" : "Reading contexts…",
                     message: "Inspecting kubeconfig files without contacting clusters.",
                     spinning: true,
-                    retry: false
+                    retry: false,
+                    addFiles: false
                 )
             }
         case .failed(let issue):
@@ -573,7 +819,8 @@ private final class ClusterManagerViewController: NSViewController,
                     title: issue.presentationTitle,
                     message: presentation.inlineText,
                     spinning: false,
-                    retry: true
+                    retry: true,
+                    addFiles: true
                 )
             }
         case .loaded:
@@ -583,9 +830,10 @@ private final class ClusterManagerViewController: NSViewController,
                     showState(
                         symbol: "externaldrive.badge.questionmark",
                         title: "No kubeconfig contexts found",
-                        message: "Reload after adding a context to your kubeconfig files.",
+                        message: "Add a kubeconfig file, drop one here, or reload after changing your standard kubeconfig files.",
                         spinning: false,
-                        retry: true
+                        retry: true,
+                        addFiles: true
                     )
                 } else {
                     showState(
@@ -593,7 +841,8 @@ private final class ClusterManagerViewController: NSViewController,
                         title: "No matching contexts",
                         message: "Try a different context, server, namespace, or source path.",
                         spinning: false,
-                        retry: false
+                        retry: false,
+                        addFiles: false
                     )
                 }
             }
@@ -609,6 +858,7 @@ private final class ClusterManagerViewController: NSViewController,
         defer { onContextualShortcutsChanged?() }
         let isOpening = openingContextName != nil
         reloadButton.isEnabled = !model.isLoading && !isOpening
+        sourcesButton.isEnabled = !isOpening
         searchField.isEnabled = !isOpening
         tableView.isEnabled = !isOpening
         revealButton.isEnabled = model.selectedContext?.sourcePaths.isEmpty == false
@@ -621,6 +871,7 @@ private final class ClusterManagerViewController: NSViewController,
         } else {
             openProgress.stopAnimation(nil)
         }
+        updateSourcesPresentation()
 
         var issue = operationIssue ?? model.selectedContextIssue
         if issue == nil, case .failed(let loadIssue) = model.phase, !model.allContexts.isEmpty {
@@ -661,6 +912,26 @@ private final class ClusterManagerViewController: NSViewController,
         issueMetadataLabel.stringValue = presentation.supplementaryText
         issueMetadataLabel.toolTip = presentation.detailedText
         issueMetadataLabel.isHidden = presentation.supplementaryText.isEmpty
+    }
+
+    private func updateSourcesPresentation() {
+        guard isViewLoaded else { return }
+        let count = sourceStore.paths.count
+        sourcesButton.title = count == 0
+            ? "Kubeconfig Files…"
+            : "Kubeconfig Files (\(count))…"
+        let currentPaths = Set(sourceStore.paths)
+        let issueCount = addedSourceStatuses.reduce(into: 0) { count, status in
+            if currentPaths.contains(status.path), status.issue != nil { count += 1 }
+        }
+        let symbol = issueCount == 0 ? "doc.on.doc" : "exclamationmark.triangle"
+        sourcesButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        sourcesButton.contentTintColor = issueCount == 0 ? nil : .systemOrange
+        sourcesButton.toolTip = issueCount == 0
+            ? "Manage kubeconfig files added to Kmgr"
+            : "\(issueCount) added kubeconfig \(issueCount == 1 ? "file needs" : "files need") attention"
+        (sourcesPopover?.contentViewController as? KubeconfigSourcesPopoverViewController)?
+            .update(paths: sourceStore.paths, statuses: addedSourceStatuses)
     }
 
     private func setIssueVisible(_ visible: Bool) {
@@ -730,9 +1001,16 @@ private final class ClusterManagerViewController: NSViewController,
 
         stateRetryButton.target = self
         stateRetryButton.action = #selector(reloadContexts(_:))
+        stateAddButton.target = self
+        stateAddButton.action = #selector(addKubeconfigFiles(_:))
+
+        let actions = NSStackView(views: [stateAddButton, stateRetryButton])
+        actions.orientation = .horizontal
+        actions.alignment = .centerY
+        actions.spacing = 8
 
         let stack = NSStackView(
-            views: [stateImageView, stateProgress, stateTitleLabel, stateMessageLabel, stateRetryButton]
+            views: [stateImageView, stateProgress, stateTitleLabel, stateMessageLabel, actions]
         )
         stack.orientation = .vertical
         stack.alignment = .centerX
@@ -840,7 +1118,8 @@ private final class ClusterManagerViewController: NSViewController,
         title: String,
         message: String,
         spinning: Bool,
-        retry: Bool
+        retry: Bool,
+        addFiles: Bool
     ) {
         stateImageView.image = symbol.flatMap {
             NSImage(systemSymbolName: $0, accessibilityDescription: title)
@@ -849,6 +1128,7 @@ private final class ClusterManagerViewController: NSViewController,
         stateTitleLabel.stringValue = title
         stateMessageLabel.stringValue = message
         stateRetryButton.isHidden = !retry
+        stateAddButton.isHidden = !addFiles
         if spinning {
             stateProgress.startAnimation(nil)
         } else {
@@ -890,6 +1170,411 @@ private final class ClusterManagerViewController: NSViewController,
             contextName: contextName,
             operation: operation
         )
+    }
+}
+
+@MainActor
+final class KubeconfigSourcesPopoverViewController: NSViewController,
+    NSTableViewDataSource, NSTableViewDelegate
+{
+    var onAdd: (() -> Void)?
+    var onRemove: (([String]) -> Void)?
+    var onReveal: (([String]) -> Void)?
+
+    private var paths: [String] = []
+    private var statusByPath: [String: AddedKubeconfigSourceStatus] = [:]
+    private let tableView = KubeconfigSourceTableView()
+    private let scrollView = NSScrollView()
+    private let emptyLabel = NSTextField(labelWithString: "No kubeconfig files have been added.")
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
+    private let revealButton = NSButton(title: "Reveal", target: nil, action: nil)
+
+    override func loadView() {
+        let root = NSView()
+        root.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: "Added Kubeconfig Files")
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+
+        configureTable()
+
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.alignment = .center
+
+        let addButton = NSButton(title: "Add Files…", target: self, action: #selector(addFiles(_:)))
+        addButton.bezelStyle = .rounded
+        addButton.image = NSImage(
+            systemSymbolName: "plus",
+            accessibilityDescription: nil
+        )
+        addButton.imagePosition = .imageLeading
+        addButton.setAccessibilityLabel("Add kubeconfig files")
+
+        removeButton.target = self
+        removeButton.action = #selector(removeSelected(_:))
+        removeButton.bezelStyle = .rounded
+        removeButton.setAccessibilityLabel("Remove selected kubeconfig files from Kmgr")
+
+        revealButton.target = self
+        revealButton.action = #selector(revealSelected(_:))
+        revealButton.bezelStyle = .rounded
+        revealButton.setAccessibilityLabel("Reveal selected kubeconfig files")
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let actions = NSStackView(views: [addButton, removeButton, spacer, revealButton])
+        actions.orientation = .horizontal
+        actions.alignment = .centerY
+        actions.spacing = 8
+
+        let footer = NSTextField(
+            wrappingLabelWithString:
+                "Kmgr also reads $KUBECONFIG; when unset, it reads kubeconfig files in ~/.kube."
+        )
+        footer.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        footer.textColor = .secondaryLabelColor
+        footer.maximumNumberOfLines = 2
+
+        for subview in [title, scrollView, emptyLabel, actions, footer] {
+            root.addSubview(subview)
+            subview.translatesAutoresizingMaskIntoConstraints = false
+        }
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -16),
+            title.topAnchor.constraint(equalTo: root.topAnchor, constant: 14),
+
+            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            scrollView.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
+            scrollView.heightAnchor.constraint(equalToConstant: 170),
+
+            emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+            emptyLabel.leadingAnchor.constraint(greaterThanOrEqualTo: scrollView.leadingAnchor, constant: 16),
+            emptyLabel.trailingAnchor.constraint(lessThanOrEqualTo: scrollView.trailingAnchor, constant: -16),
+
+            actions.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            actions.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            actions.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 10),
+
+            footer.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            footer.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            footer.topAnchor.constraint(equalTo: actions.bottomAnchor, constant: 12),
+            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14)
+        ])
+
+        tableView.deleteAction = { [weak self] in self?.removeSelected(nil) }
+        view = root
+        preferredContentSize = NSSize(width: 540, height: 286)
+        render()
+    }
+
+    func update(paths: [String], statuses: [AddedKubeconfigSourceStatus]) {
+        let selected = selectedPaths
+        self.paths = paths
+        statusByPath = Dictionary(uniqueKeysWithValues: statuses.map { ($0.path, $0) })
+        guard isViewLoaded else { return }
+        tableView.reloadData()
+        let indexes = IndexSet(paths.indices.filter { selected.contains(paths[$0]) })
+        tableView.selectRowIndexes(indexes, byExtendingSelection: false)
+        render()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { paths.count }
+
+    func tableView(
+        _ tableView: NSTableView,
+        viewFor tableColumn: NSTableColumn?,
+        row: Int
+    ) -> NSView? {
+        guard paths.indices.contains(row), let tableColumn else { return nil }
+        let path = paths[row]
+        let identifier = NSUserInterfaceItemIdentifier(
+            "kubeconfig-source-\(tableColumn.identifier.rawValue)"
+        )
+        let cell: NSTableCellView
+        if let reused = tableView.makeView(withIdentifier: identifier, owner: self)
+            as? NSTableCellView
+        {
+            cell = reused
+        } else {
+            cell = makeCell(identifier: identifier)
+        }
+
+        let value: String
+        let color: NSColor
+        if tableColumn.identifier.rawValue == "file" {
+            let name = URL(fileURLWithPath: path).lastPathComponent
+            let abbreviated = (path as NSString).abbreviatingWithTildeInPath
+            value = "\(name) — \(abbreviated)"
+            color = .labelColor
+        } else if let status = statusByPath[path] {
+            if let issue = status.issue {
+                value = statusText(for: issue)
+                color = .systemOrange
+            } else {
+                value = status.contextCount == 1
+                    ? "1 context"
+                    : "\(status.contextCount) contexts"
+                color = .secondaryLabelColor
+            }
+        } else {
+            value = "Loading…"
+            color = .secondaryLabelColor
+        }
+        cell.textField?.stringValue = value
+        cell.textField?.textColor = color
+        cell.textField?.toolTip = statusByPath[path]?.issue?.userFacingPresentation.detailedText
+            ?? path
+        cell.toolTip = cell.textField?.toolTip
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        renderControls()
+    }
+
+    private var selectedPaths: Set<String> {
+        Set(tableView.selectedRowIndexes.compactMap { index in
+            paths.indices.contains(index) ? paths[index] : nil
+        })
+    }
+
+    private func configureTable() {
+        tableView.headerView = NSTableHeaderView()
+        tableView.rowHeight = 30
+        tableView.intercellSpacing = NSSize(width: 8, height: 2)
+        tableView.allowsMultipleSelection = true
+        tableView.allowsEmptySelection = true
+        tableView.delegate = self
+        tableView.dataSource = self
+        tableView.setAccessibilityLabel("Added kubeconfig files")
+
+        let file = NSTableColumn(identifier: .init("file"))
+        file.title = "File"
+        file.width = 390
+        file.minWidth = 220
+        file.resizingMask = [.autoresizingMask, .userResizingMask]
+        tableView.addTableColumn(file)
+
+        let status = NSTableColumn(identifier: .init("status"))
+        status.title = "Status"
+        status.width = 110
+        status.minWidth = 90
+        status.maxWidth = 150
+        status.resizingMask = [.userResizingMask]
+        tableView.addTableColumn(status)
+
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .bezelBorder
+    }
+
+    private func makeCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
+        let cell = NSTableCellView()
+        cell.identifier = identifier
+        let label = NSTextField(labelWithString: "")
+        label.lineBreakMode = .byTruncatingMiddle
+        label.maximumNumberOfLines = 1
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        cell.textField = label
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 3),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -3),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
+    }
+
+    private func statusText(for issue: ClusterManagerIssue) -> String {
+        switch issue.reason {
+        case "KubeconfigFileMissing": "Missing"
+        case "KubeconfigFileUnreadable": "Unreadable"
+        case "KubeconfigAlreadyDiscovered": "Already read"
+        default: "Invalid"
+        }
+    }
+
+    private func render() {
+        emptyLabel.isHidden = !paths.isEmpty
+        renderControls()
+    }
+
+    private func renderControls() {
+        let selected = selectedPaths
+        removeButton.isEnabled = !selected.isEmpty
+        revealButton.isEnabled = selected.contains {
+            FileManager.default.fileExists(atPath: $0)
+        }
+    }
+
+    @objc private func addFiles(_ sender: Any?) {
+        onAdd?()
+    }
+
+    @objc private func removeSelected(_ sender: Any?) {
+        let selected = paths.filter(selectedPaths.contains)
+        guard !selected.isEmpty else { return }
+        onRemove?(selected)
+    }
+
+    @objc private func revealSelected(_ sender: Any?) {
+        let selected = paths.filter(selectedPaths.contains)
+        guard !selected.isEmpty else { return }
+        onReveal?(selected)
+    }
+}
+
+@MainActor
+private final class KubeconfigSourceTableView: NSTableView {
+    var deleteAction: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 51 || event.keyCode == 117 {
+            deleteAction?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+@MainActor
+private final class KubeconfigDropView: NSView {
+    var onDropFiles: (([URL]) -> Void)?
+    private let dropOverlay = NSView()
+    private let dropCard = NSView()
+    private let dropImageView = NSImageView()
+    private let dropTitleLabel = NSTextField(labelWithString: "Drop kubeconfig files here")
+    private let dropMessageLabel = NSTextField(labelWithString: "Release to add them to Kmgr")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("KubeconfigDropView is programmatic")
+    }
+
+    func installOverlay() {
+        dropOverlay.wantsLayer = true
+        dropOverlay.layer?.cornerRadius = 8
+        dropOverlay.layer?.borderWidth = 2
+        dropOverlay.identifier = .init("cluster-manager-drop-overlay")
+        dropOverlay.translatesAutoresizingMaskIntoConstraints = false
+
+        dropCard.wantsLayer = true
+        dropCard.layer?.cornerRadius = 12
+        dropCard.layer?.shadowOpacity = 0.28
+        dropCard.layer?.shadowRadius = 10
+        dropCard.layer?.shadowOffset = NSSize(width: 0, height: -3)
+        dropCard.identifier = .init("cluster-manager-drop-card")
+        dropCard.translatesAutoresizingMaskIntoConstraints = false
+
+        dropImageView.image = NSImage(
+            systemSymbolName: "square.and.arrow.down",
+            accessibilityDescription: nil
+        )
+        dropImageView.symbolConfiguration = NSImage.SymbolConfiguration(
+            pointSize: 26,
+            weight: .medium
+        )
+        dropImageView.imageScaling = .scaleProportionallyDown
+
+        dropTitleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        dropTitleLabel.alignment = .center
+        dropMessageLabel.font = .systemFont(ofSize: 13, weight: .regular)
+        dropMessageLabel.alignment = .center
+
+        let content = NSStackView(
+            views: [dropImageView, dropTitleLabel, dropMessageLabel]
+        )
+        content.orientation = .vertical
+        content.alignment = .centerX
+        content.spacing = 5
+        content.translatesAutoresizingMaskIntoConstraints = false
+        dropCard.addSubview(content)
+        dropOverlay.addSubview(dropCard)
+        addSubview(dropOverlay)
+        NSLayoutConstraint.activate([
+            dropOverlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+            dropOverlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+            dropOverlay.topAnchor.constraint(equalTo: topAnchor),
+            dropOverlay.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            dropCard.centerXAnchor.constraint(equalTo: dropOverlay.centerXAnchor),
+            dropCard.centerYAnchor.constraint(equalTo: dropOverlay.centerYAnchor),
+            dropCard.leadingAnchor.constraint(greaterThanOrEqualTo: dropOverlay.leadingAnchor, constant: 24),
+            dropCard.trailingAnchor.constraint(lessThanOrEqualTo: dropOverlay.trailingAnchor, constant: -24),
+
+            content.leadingAnchor.constraint(equalTo: dropCard.leadingAnchor, constant: 34),
+            content.trailingAnchor.constraint(equalTo: dropCard.trailingAnchor, constant: -34),
+            content.topAnchor.constraint(equalTo: dropCard.topAnchor, constant: 20),
+            content.bottomAnchor.constraint(equalTo: dropCard.bottomAnchor, constant: -20)
+        ])
+        updateOverlayColors()
+        dropOverlay.isHidden = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateOverlayColors()
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard !fileURLs(from: sender).isEmpty else { return [] }
+        dropOverlay.isHidden = false
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        fileURLs(from: sender).isEmpty ? [] : .copy
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        dropOverlay.isHidden = true
+    }
+
+    override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        !fileURLs(from: sender).isEmpty
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        let urls = fileURLs(from: sender)
+        dropOverlay.isHidden = true
+        guard !urls.isEmpty else { return false }
+        onDropFiles?(urls)
+        return true
+    }
+
+    override func concludeDragOperation(_ sender: (any NSDraggingInfo)?) {
+        dropOverlay.isHidden = true
+    }
+
+    private func fileURLs(from sender: any NSDraggingInfo) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+        ]
+        return (sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: options
+        ) as? [URL]) ?? []
+    }
+
+    private func updateOverlayColors() {
+        dropOverlay.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        dropOverlay.layer?.backgroundColor = NSColor.windowBackgroundColor
+            .withAlphaComponent(0.96).cgColor
+        dropCard.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        dropCard.layer?.shadowColor = NSColor.black.cgColor
+        let foreground = NSColor.selectedControlTextColor
+        dropImageView.contentTintColor = foreground
+        dropTitleLabel.textColor = foreground
+        dropMessageLabel.textColor = foreground.withAlphaComponent(0.88)
     }
 }
 

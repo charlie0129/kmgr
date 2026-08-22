@@ -155,7 +155,10 @@ struct ClusterWorkspaceToolbarTests {
         #expect(apiDiscoveryStatus(in: window)?.stringValue == "Refreshing API resources…")
 
         refreshGate.open()
-        try await waitUntil { provider.finishedDiscoveryCount == 2 }
+        try await waitUntil {
+            provider.finishedDiscoveryCount == 2
+                && controller.validateMenuItem(refreshItem)
+        }
         #expect(controller.validateMenuItem(refreshItem))
         #expect(outline.selectedRow >= 0)
         #expect(provider.streamRequests.count == 1)
@@ -2917,9 +2920,15 @@ private func triggerResourceFilterChange(in window: NSWindow, value: String) thr
 }
 
 private struct StallingRestorationContextProvider: ClusterContextProviding {
-    func listContexts(reload: Bool) async throws -> [ClusterContextSummary] { [] }
+    func listContexts(
+        reload: Bool,
+        addedKubeconfigPaths: [String]
+    ) async throws -> ClusterContextCatalog { ClusterContextCatalog() }
 
-    func openContext(reference: String) async throws -> OpenedClusterSession {
+    func openContext(
+        reference: String,
+        addedKubeconfigPaths: [String]
+    ) async throws -> OpenedClusterSession {
         try await Task.sleep(for: .seconds(60))
         throw CancellationError()
     }

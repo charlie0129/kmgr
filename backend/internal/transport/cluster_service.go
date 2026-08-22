@@ -314,7 +314,10 @@ func (s *ClusterService) ListContexts(
 	defer cancel()
 	response := &kmgrv1.ListContextsResponse{RequestId: request.GetContext().GetRequestId()}
 
-	catalog, err := s.catalogs.Load(request.GetKubeconfigPaths(), request.GetReload())
+	discovery, err := s.catalogs.Load(
+		request.GetAddedKubeconfigPaths(),
+		request.GetReload(),
+	)
 	if err != nil {
 		response.Error = kubeconfigError(err, "list-contexts")
 		return response, nil
@@ -323,7 +326,7 @@ func (s *ClusterService) ListContexts(
 		return nil, contextStatus(err)
 	}
 
-	contexts := catalog.Contexts()
+	contexts := discovery.Catalog.Contexts()
 	response.Contexts = make([]*kmgrv1.KubeconfigContext, 0, len(contexts))
 	for _, info := range contexts {
 		supported := len(info.UnsupportedAuthentications) == 0
@@ -342,6 +345,21 @@ func (s *ClusterService) ListContexts(
 			entry.UnsupportedAuthenticationError = unsupportedAuthenticationError(info)
 		}
 		response.Contexts = append(response.Contexts, entry)
+	}
+	response.AddedKubeconfigSources = make(
+		[]*kmgrv1.AddedKubeconfigSource,
+		0,
+		len(discovery.AddedSources),
+	)
+	for _, source := range discovery.AddedSources {
+		entry := &kmgrv1.AddedKubeconfigSource{
+			Path:         source.Path,
+			ContextCount: uint32(source.ContextCount),
+		}
+		if source.Err != nil {
+			entry.Error = addedKubeconfigSourceError(source.Err)
+		}
+		response.AddedKubeconfigSources = append(response.AddedKubeconfigSources, entry)
 	}
 	return response, nil
 }
@@ -363,11 +381,12 @@ func (s *ClusterService) OpenSession(
 		return nil, status.Error(codes.InvalidArgument, "context reference is required")
 	}
 
-	catalog, err := s.catalogs.Load(request.GetKubeconfigPaths(), false)
+	discovery, err := s.catalogs.Load(request.GetAddedKubeconfigPaths(), false)
 	if err != nil {
 		response.Error = kubeconfigError(err, "open-session")
 		return response, nil
 	}
+	catalog := discovery.Catalog
 	info, ok := catalog.Context(request.GetContextName())
 	if !ok {
 		response.Error = kubeconfigError(

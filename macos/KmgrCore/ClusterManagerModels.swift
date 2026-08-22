@@ -246,12 +246,54 @@ public struct OpenedClusterSession: Hashable, Sendable {
     }
 }
 
+/// Status for one path explicitly added by the user. Failures are scoped to
+/// the file so healthy kubeconfig sources remain usable.
+public struct AddedKubeconfigSourceStatus: Hashable, Sendable {
+    public var path: String
+    public var contextCount: Int
+    public var issue: ClusterManagerIssue?
+
+    public init(
+        path: String,
+        contextCount: Int = 0,
+        issue: ClusterManagerIssue? = nil
+    ) {
+        self.path = path
+        self.contextCount = max(0, contextCount)
+        self.issue = issue
+    }
+
+    public var isUsable: Bool {
+        issue == nil && contextCount > 0
+    }
+}
+
+/// One offline discovery snapshot consumed atomically by Cluster Manager.
+public struct ClusterContextCatalog: Hashable, Sendable {
+    public var contexts: [ClusterContextSummary]
+    public var addedKubeconfigSources: [AddedKubeconfigSourceStatus]
+
+    public init(
+        contexts: [ClusterContextSummary] = [],
+        addedKubeconfigSources: [AddedKubeconfigSourceStatus] = []
+    ) {
+        self.contexts = contexts
+        self.addedKubeconfigSources = addedKubeconfigSources
+    }
+}
+
 /// Integration seam between the AppKit chooser and the supervised engine.
 /// The concrete implementation maps the generated ClusterService messages to
 /// these display-safe values.
 public protocol ClusterContextProviding: Sendable {
-    func listContexts(reload: Bool) async throws -> [ClusterContextSummary]
-    func openContext(reference: String) async throws -> OpenedClusterSession
+    func listContexts(
+        reload: Bool,
+        addedKubeconfigPaths: [String]
+    ) async throws -> ClusterContextCatalog
+    func openContext(
+        reference: String,
+        addedKubeconfigPaths: [String]
+    ) async throws -> OpenedClusterSession
 }
 
 public enum ClusterContextListPhase: Hashable, Sendable {

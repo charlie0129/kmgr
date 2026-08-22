@@ -257,12 +257,14 @@ func (x *KubeconfigContext) GetContextId() string {
 }
 
 type ListContextsRequest struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	Context         *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
-	Reload          bool                   `protobuf:"varint,2,opt,name=reload,proto3" json:"reload,omitempty"`
-	KubeconfigPaths []string               `protobuf:"bytes,3,rep,name=kubeconfig_paths,json=kubeconfigPaths,proto3" json:"kubeconfig_paths,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Context *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	Reload  bool                   `protobuf:"varint,2,opt,name=reload,proto3" json:"reload,omitempty"`
+	// Files explicitly added by the user. Each file is cataloged as an
+	// independent source in addition to normal kubeconfig discovery.
+	AddedKubeconfigPaths []string `protobuf:"bytes,3,rep,name=added_kubeconfig_paths,json=addedKubeconfigPaths,proto3" json:"added_kubeconfig_paths,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ListContextsRequest) Reset() {
@@ -309,20 +311,21 @@ func (x *ListContextsRequest) GetReload() bool {
 	return false
 }
 
-func (x *ListContextsRequest) GetKubeconfigPaths() []string {
+func (x *ListContextsRequest) GetAddedKubeconfigPaths() []string {
 	if x != nil {
-		return x.KubeconfigPaths
+		return x.AddedKubeconfigPaths
 	}
 	return nil
 }
 
 type ListContextsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	Contexts      []*KubeconfigContext   `protobuf:"bytes,2,rep,name=contexts,proto3" json:"contexts,omitempty"`
-	Error         *StructuredError       `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                  protoimpl.MessageState   `protogen:"open.v1"`
+	RequestId              string                   `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Contexts               []*KubeconfigContext     `protobuf:"bytes,2,rep,name=contexts,proto3" json:"contexts,omitempty"`
+	Error                  *StructuredError         `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	AddedKubeconfigSources []*AddedKubeconfigSource `protobuf:"bytes,4,rep,name=added_kubeconfig_sources,json=addedKubeconfigSources,proto3" json:"added_kubeconfig_sources,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *ListContextsResponse) Reset() {
@@ -376,18 +379,85 @@ func (x *ListContextsResponse) GetError() *StructuredError {
 	return nil
 }
 
+func (x *ListContextsResponse) GetAddedKubeconfigSources() []*AddedKubeconfigSource {
+	if x != nil {
+		return x.AddedKubeconfigSources
+	}
+	return nil
+}
+
+type AddedKubeconfigSource struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	ContextCount  uint32                 `protobuf:"varint,2,opt,name=context_count,json=contextCount,proto3" json:"context_count,omitempty"`
+	Error         *StructuredError       `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddedKubeconfigSource) Reset() {
+	*x = AddedKubeconfigSource{}
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddedKubeconfigSource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddedKubeconfigSource) ProtoMessage() {}
+
+func (x *AddedKubeconfigSource) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddedKubeconfigSource.ProtoReflect.Descriptor instead.
+func (*AddedKubeconfigSource) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *AddedKubeconfigSource) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *AddedKubeconfigSource) GetContextCount() uint32 {
+	if x != nil {
+		return x.ContextCount
+	}
+	return 0
+}
+
+func (x *AddedKubeconfigSource) GetError() *StructuredError {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
 type OpenSessionRequest struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	Context         *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
-	ContextName     string                 `protobuf:"bytes,2,opt,name=context_name,json=contextName,proto3" json:"context_name,omitempty"`
-	KubeconfigPaths []string               `protobuf:"bytes,3,rep,name=kubeconfig_paths,json=kubeconfigPaths,proto3" json:"kubeconfig_paths,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	Context              *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	ContextName          string                 `protobuf:"bytes,2,opt,name=context_name,json=contextName,proto3" json:"context_name,omitempty"`
+	AddedKubeconfigPaths []string               `protobuf:"bytes,3,rep,name=added_kubeconfig_paths,json=addedKubeconfigPaths,proto3" json:"added_kubeconfig_paths,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *OpenSessionRequest) Reset() {
 	*x = OpenSessionRequest{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[3]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -399,7 +469,7 @@ func (x *OpenSessionRequest) String() string {
 func (*OpenSessionRequest) ProtoMessage() {}
 
 func (x *OpenSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[3]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -412,7 +482,7 @@ func (x *OpenSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenSessionRequest.ProtoReflect.Descriptor instead.
 func (*OpenSessionRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{3}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *OpenSessionRequest) GetContext() *RequestContext {
@@ -429,9 +499,9 @@ func (x *OpenSessionRequest) GetContextName() string {
 	return ""
 }
 
-func (x *OpenSessionRequest) GetKubeconfigPaths() []string {
+func (x *OpenSessionRequest) GetAddedKubeconfigPaths() []string {
 	if x != nil {
-		return x.KubeconfigPaths
+		return x.AddedKubeconfigPaths
 	}
 	return nil
 }
@@ -451,7 +521,7 @@ type OpenSessionResponse struct {
 
 func (x *OpenSessionResponse) Reset() {
 	*x = OpenSessionResponse{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[4]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -463,7 +533,7 @@ func (x *OpenSessionResponse) String() string {
 func (*OpenSessionResponse) ProtoMessage() {}
 
 func (x *OpenSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[4]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -476,7 +546,7 @@ func (x *OpenSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenSessionResponse.ProtoReflect.Descriptor instead.
 func (*OpenSessionResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{4}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *OpenSessionResponse) GetRequestId() string {
@@ -538,7 +608,7 @@ type CloseSessionRequest struct {
 
 func (x *CloseSessionRequest) Reset() {
 	*x = CloseSessionRequest{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[5]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -550,7 +620,7 @@ func (x *CloseSessionRequest) String() string {
 func (*CloseSessionRequest) ProtoMessage() {}
 
 func (x *CloseSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[5]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -563,7 +633,7 @@ func (x *CloseSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseSessionRequest.ProtoReflect.Descriptor instead.
 func (*CloseSessionRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{5}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CloseSessionRequest) GetContext() *RequestContext {
@@ -590,7 +660,7 @@ type WatchConnectionRequest struct {
 
 func (x *WatchConnectionRequest) Reset() {
 	*x = WatchConnectionRequest{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[6]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -602,7 +672,7 @@ func (x *WatchConnectionRequest) String() string {
 func (*WatchConnectionRequest) ProtoMessage() {}
 
 func (x *WatchConnectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[6]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -615,7 +685,7 @@ func (x *WatchConnectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchConnectionRequest.ProtoReflect.Descriptor instead.
 func (*WatchConnectionRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{6}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *WatchConnectionRequest) GetContext() *RequestContext {
@@ -655,7 +725,7 @@ type ConnectionEvent struct {
 
 func (x *ConnectionEvent) Reset() {
 	*x = ConnectionEvent{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[7]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -667,7 +737,7 @@ func (x *ConnectionEvent) String() string {
 func (*ConnectionEvent) ProtoMessage() {}
 
 func (x *ConnectionEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[7]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -680,7 +750,7 @@ func (x *ConnectionEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionEvent.ProtoReflect.Descriptor instead.
 func (*ConnectionEvent) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{7}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ConnectionEvent) GetCursor() *StreamCursor {
@@ -762,7 +832,7 @@ type WarmCacheUsage struct {
 
 func (x *WarmCacheUsage) Reset() {
 	*x = WarmCacheUsage{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[8]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -774,7 +844,7 @@ func (x *WarmCacheUsage) String() string {
 func (*WarmCacheUsage) ProtoMessage() {}
 
 func (x *WarmCacheUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[8]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -787,7 +857,7 @@ func (x *WarmCacheUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WarmCacheUsage.ProtoReflect.Descriptor instead.
 func (*WarmCacheUsage) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{8}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *WarmCacheUsage) GetRetainedViews() uint64 {
@@ -870,7 +940,7 @@ type WatchOperationsRequest struct {
 
 func (x *WatchOperationsRequest) Reset() {
 	*x = WatchOperationsRequest{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[9]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -882,7 +952,7 @@ func (x *WatchOperationsRequest) String() string {
 func (*WatchOperationsRequest) ProtoMessage() {}
 
 func (x *WatchOperationsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[9]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -895,7 +965,7 @@ func (x *WatchOperationsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchOperationsRequest.ProtoReflect.Descriptor instead.
 func (*WatchOperationsRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{9}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *WatchOperationsRequest) GetContext() *RequestContext {
@@ -939,7 +1009,7 @@ type KubernetesAPIOperation struct {
 
 func (x *KubernetesAPIOperation) Reset() {
 	*x = KubernetesAPIOperation{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[10]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -951,7 +1021,7 @@ func (x *KubernetesAPIOperation) String() string {
 func (*KubernetesAPIOperation) ProtoMessage() {}
 
 func (x *KubernetesAPIOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[10]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -964,7 +1034,7 @@ func (x *KubernetesAPIOperation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KubernetesAPIOperation.ProtoReflect.Descriptor instead.
 func (*KubernetesAPIOperation) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{10}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *KubernetesAPIOperation) GetId() uint64 {
@@ -1089,7 +1159,7 @@ type ClusterOperationBatch struct {
 
 func (x *ClusterOperationBatch) Reset() {
 	*x = ClusterOperationBatch{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[11]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1101,7 +1171,7 @@ func (x *ClusterOperationBatch) String() string {
 func (*ClusterOperationBatch) ProtoMessage() {}
 
 func (x *ClusterOperationBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[11]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1114,7 +1184,7 @@ func (x *ClusterOperationBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterOperationBatch.ProtoReflect.Descriptor instead.
 func (*ClusterOperationBatch) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{11}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ClusterOperationBatch) GetCursor() *StreamCursor {
@@ -1155,7 +1225,7 @@ type DiscoverRequest struct {
 
 func (x *DiscoverRequest) Reset() {
 	*x = DiscoverRequest{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[12]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1167,7 +1237,7 @@ func (x *DiscoverRequest) String() string {
 func (*DiscoverRequest) ProtoMessage() {}
 
 func (x *DiscoverRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[12]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1180,7 +1250,7 @@ func (x *DiscoverRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiscoverRequest.ProtoReflect.Descriptor instead.
 func (*DiscoverRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{12}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DiscoverRequest) GetContext() *RequestContext {
@@ -1210,7 +1280,7 @@ type ApiResource struct {
 
 func (x *ApiResource) Reset() {
 	*x = ApiResource{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[13]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1222,7 +1292,7 @@ func (x *ApiResource) String() string {
 func (*ApiResource) ProtoMessage() {}
 
 func (x *ApiResource) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[13]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1235,7 +1305,7 @@ func (x *ApiResource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApiResource.ProtoReflect.Descriptor instead.
 func (*ApiResource) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{13}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ApiResource) GetType() *ResourceType {
@@ -1290,7 +1360,7 @@ type DiscoverResponse struct {
 
 func (x *DiscoverResponse) Reset() {
 	*x = DiscoverResponse{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[14]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1302,7 +1372,7 @@ func (x *DiscoverResponse) String() string {
 func (*DiscoverResponse) ProtoMessage() {}
 
 func (x *DiscoverResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[14]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1315,7 +1385,7 @@ func (x *DiscoverResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiscoverResponse.ProtoReflect.Descriptor instead.
 func (*DiscoverResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{14}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DiscoverResponse) GetRequestId() string {
@@ -1369,7 +1439,7 @@ type ListNamespacesRequest struct {
 
 func (x *ListNamespacesRequest) Reset() {
 	*x = ListNamespacesRequest{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[15]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1381,7 +1451,7 @@ func (x *ListNamespacesRequest) String() string {
 func (*ListNamespacesRequest) ProtoMessage() {}
 
 func (x *ListNamespacesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[15]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1394,7 +1464,7 @@ func (x *ListNamespacesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNamespacesRequest.ProtoReflect.Descriptor instead.
 func (*ListNamespacesRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{15}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ListNamespacesRequest) GetContext() *RequestContext {
@@ -1415,7 +1485,7 @@ type ListNamespacesResponse struct {
 
 func (x *ListNamespacesResponse) Reset() {
 	*x = ListNamespacesResponse{}
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[16]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1427,7 +1497,7 @@ func (x *ListNamespacesResponse) String() string {
 func (*ListNamespacesResponse) ProtoMessage() {}
 
 func (x *ListNamespacesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_cluster_proto_msgTypes[16]
+	mi := &file_kmgr_v1_cluster_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1440,7 +1510,7 @@ func (x *ListNamespacesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNamespacesResponse.ProtoReflect.Descriptor instead.
 func (*ListNamespacesResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{16}
+	return file_kmgr_v1_cluster_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ListNamespacesResponse) GetRequestId() string {
@@ -1481,20 +1551,25 @@ const file_kmgr_v1_cluster_proto_rawDesc = "" +
 	" unsupported_authentication_error\x18\t \x01(\v2\x18.kmgr.v1.StructuredErrorR\x1eunsupportedAuthenticationError\x12\x1d\n" +
 	"\n" +
 	"context_id\x18\n" +
-	" \x01(\tR\tcontextId\"\x8b\x01\n" +
+	" \x01(\tR\tcontextId\"\x96\x01\n" +
 	"\x13ListContextsRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x16\n" +
-	"\x06reload\x18\x02 \x01(\bR\x06reload\x12)\n" +
-	"\x10kubeconfig_paths\x18\x03 \x03(\tR\x0fkubeconfigPaths\"\x9d\x01\n" +
+	"\x06reload\x18\x02 \x01(\bR\x06reload\x124\n" +
+	"\x16added_kubeconfig_paths\x18\x03 \x03(\tR\x14addedKubeconfigPaths\"\xf7\x01\n" +
 	"\x14ListContextsResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x126\n" +
 	"\bcontexts\x18\x02 \x03(\v2\x1a.kmgr.v1.KubeconfigContextR\bcontexts\x12.\n" +
-	"\x05error\x18\x03 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\x95\x01\n" +
+	"\x05error\x18\x03 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\x12X\n" +
+	"\x18added_kubeconfig_sources\x18\x04 \x03(\v2\x1e.kmgr.v1.AddedKubeconfigSourceR\x16addedKubeconfigSources\"\x80\x01\n" +
+	"\x15AddedKubeconfigSource\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12#\n" +
+	"\rcontext_count\x18\x02 \x01(\rR\fcontextCount\x12.\n" +
+	"\x05error\x18\x03 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\xa0\x01\n" +
 	"\x12OpenSessionRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12!\n" +
-	"\fcontext_name\x18\x02 \x01(\tR\vcontextName\x12)\n" +
-	"\x10kubeconfig_paths\x18\x03 \x03(\tR\x0fkubeconfigPaths\"\xae\x02\n" +
+	"\fcontext_name\x18\x02 \x01(\tR\vcontextName\x124\n" +
+	"\x16added_kubeconfig_paths\x18\x03 \x03(\tR\x14addedKubeconfigPaths\"\xae\x02\n" +
 	"\x13OpenSessionResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12,\n" +
@@ -1625,77 +1700,80 @@ func file_kmgr_v1_cluster_proto_rawDescGZIP() []byte {
 }
 
 var file_kmgr_v1_cluster_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_kmgr_v1_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_kmgr_v1_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_kmgr_v1_cluster_proto_goTypes = []any{
 	(ConnectionState)(0),             // 0: kmgr.v1.ConnectionState
 	(KubernetesAPIOperationState)(0), // 1: kmgr.v1.KubernetesAPIOperationState
 	(*KubeconfigContext)(nil),        // 2: kmgr.v1.KubeconfigContext
 	(*ListContextsRequest)(nil),      // 3: kmgr.v1.ListContextsRequest
 	(*ListContextsResponse)(nil),     // 4: kmgr.v1.ListContextsResponse
-	(*OpenSessionRequest)(nil),       // 5: kmgr.v1.OpenSessionRequest
-	(*OpenSessionResponse)(nil),      // 6: kmgr.v1.OpenSessionResponse
-	(*CloseSessionRequest)(nil),      // 7: kmgr.v1.CloseSessionRequest
-	(*WatchConnectionRequest)(nil),   // 8: kmgr.v1.WatchConnectionRequest
-	(*ConnectionEvent)(nil),          // 9: kmgr.v1.ConnectionEvent
-	(*WarmCacheUsage)(nil),           // 10: kmgr.v1.WarmCacheUsage
-	(*WatchOperationsRequest)(nil),   // 11: kmgr.v1.WatchOperationsRequest
-	(*KubernetesAPIOperation)(nil),   // 12: kmgr.v1.KubernetesAPIOperation
-	(*ClusterOperationBatch)(nil),    // 13: kmgr.v1.ClusterOperationBatch
-	(*DiscoverRequest)(nil),          // 14: kmgr.v1.DiscoverRequest
-	(*ApiResource)(nil),              // 15: kmgr.v1.ApiResource
-	(*DiscoverResponse)(nil),         // 16: kmgr.v1.DiscoverResponse
-	(*ListNamespacesRequest)(nil),    // 17: kmgr.v1.ListNamespacesRequest
-	(*ListNamespacesResponse)(nil),   // 18: kmgr.v1.ListNamespacesResponse
-	(*StructuredError)(nil),          // 19: kmgr.v1.StructuredError
-	(*RequestContext)(nil),           // 20: kmgr.v1.RequestContext
-	(*StreamCursor)(nil),             // 21: kmgr.v1.StreamCursor
-	(*ResourceType)(nil),             // 22: kmgr.v1.ResourceType
-	(*Acknowledgement)(nil),          // 23: kmgr.v1.Acknowledgement
+	(*AddedKubeconfigSource)(nil),    // 5: kmgr.v1.AddedKubeconfigSource
+	(*OpenSessionRequest)(nil),       // 6: kmgr.v1.OpenSessionRequest
+	(*OpenSessionResponse)(nil),      // 7: kmgr.v1.OpenSessionResponse
+	(*CloseSessionRequest)(nil),      // 8: kmgr.v1.CloseSessionRequest
+	(*WatchConnectionRequest)(nil),   // 9: kmgr.v1.WatchConnectionRequest
+	(*ConnectionEvent)(nil),          // 10: kmgr.v1.ConnectionEvent
+	(*WarmCacheUsage)(nil),           // 11: kmgr.v1.WarmCacheUsage
+	(*WatchOperationsRequest)(nil),   // 12: kmgr.v1.WatchOperationsRequest
+	(*KubernetesAPIOperation)(nil),   // 13: kmgr.v1.KubernetesAPIOperation
+	(*ClusterOperationBatch)(nil),    // 14: kmgr.v1.ClusterOperationBatch
+	(*DiscoverRequest)(nil),          // 15: kmgr.v1.DiscoverRequest
+	(*ApiResource)(nil),              // 16: kmgr.v1.ApiResource
+	(*DiscoverResponse)(nil),         // 17: kmgr.v1.DiscoverResponse
+	(*ListNamespacesRequest)(nil),    // 18: kmgr.v1.ListNamespacesRequest
+	(*ListNamespacesResponse)(nil),   // 19: kmgr.v1.ListNamespacesResponse
+	(*StructuredError)(nil),          // 20: kmgr.v1.StructuredError
+	(*RequestContext)(nil),           // 21: kmgr.v1.RequestContext
+	(*StreamCursor)(nil),             // 22: kmgr.v1.StreamCursor
+	(*ResourceType)(nil),             // 23: kmgr.v1.ResourceType
+	(*Acknowledgement)(nil),          // 24: kmgr.v1.Acknowledgement
 }
 var file_kmgr_v1_cluster_proto_depIdxs = []int32{
-	19, // 0: kmgr.v1.KubeconfigContext.unsupported_authentication_error:type_name -> kmgr.v1.StructuredError
-	20, // 1: kmgr.v1.ListContextsRequest.context:type_name -> kmgr.v1.RequestContext
+	20, // 0: kmgr.v1.KubeconfigContext.unsupported_authentication_error:type_name -> kmgr.v1.StructuredError
+	21, // 1: kmgr.v1.ListContextsRequest.context:type_name -> kmgr.v1.RequestContext
 	2,  // 2: kmgr.v1.ListContextsResponse.contexts:type_name -> kmgr.v1.KubeconfigContext
-	19, // 3: kmgr.v1.ListContextsResponse.error:type_name -> kmgr.v1.StructuredError
-	20, // 4: kmgr.v1.OpenSessionRequest.context:type_name -> kmgr.v1.RequestContext
-	19, // 5: kmgr.v1.OpenSessionResponse.error:type_name -> kmgr.v1.StructuredError
-	20, // 6: kmgr.v1.CloseSessionRequest.context:type_name -> kmgr.v1.RequestContext
-	20, // 7: kmgr.v1.WatchConnectionRequest.context:type_name -> kmgr.v1.RequestContext
-	21, // 8: kmgr.v1.ConnectionEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	0,  // 9: kmgr.v1.ConnectionEvent.state:type_name -> kmgr.v1.ConnectionState
-	10, // 10: kmgr.v1.ConnectionEvent.authority_warm_cache:type_name -> kmgr.v1.WarmCacheUsage
-	10, // 11: kmgr.v1.ConnectionEvent.global_warm_cache:type_name -> kmgr.v1.WarmCacheUsage
-	20, // 12: kmgr.v1.WatchOperationsRequest.context:type_name -> kmgr.v1.RequestContext
-	1,  // 13: kmgr.v1.KubernetesAPIOperation.state:type_name -> kmgr.v1.KubernetesAPIOperationState
-	21, // 14: kmgr.v1.ClusterOperationBatch.cursor:type_name -> kmgr.v1.StreamCursor
-	12, // 15: kmgr.v1.ClusterOperationBatch.active:type_name -> kmgr.v1.KubernetesAPIOperation
-	12, // 16: kmgr.v1.ClusterOperationBatch.completed:type_name -> kmgr.v1.KubernetesAPIOperation
-	20, // 17: kmgr.v1.DiscoverRequest.context:type_name -> kmgr.v1.RequestContext
-	22, // 18: kmgr.v1.ApiResource.type:type_name -> kmgr.v1.ResourceType
-	15, // 19: kmgr.v1.DiscoverResponse.resources:type_name -> kmgr.v1.ApiResource
-	19, // 20: kmgr.v1.DiscoverResponse.error:type_name -> kmgr.v1.StructuredError
-	19, // 21: kmgr.v1.DiscoverResponse.warning:type_name -> kmgr.v1.StructuredError
-	20, // 22: kmgr.v1.ListNamespacesRequest.context:type_name -> kmgr.v1.RequestContext
-	19, // 23: kmgr.v1.ListNamespacesResponse.error:type_name -> kmgr.v1.StructuredError
-	3,  // 24: kmgr.v1.ClusterService.ListContexts:input_type -> kmgr.v1.ListContextsRequest
-	5,  // 25: kmgr.v1.ClusterService.OpenSession:input_type -> kmgr.v1.OpenSessionRequest
-	7,  // 26: kmgr.v1.ClusterService.CloseSession:input_type -> kmgr.v1.CloseSessionRequest
-	8,  // 27: kmgr.v1.ClusterService.WatchConnection:input_type -> kmgr.v1.WatchConnectionRequest
-	11, // 28: kmgr.v1.ClusterService.WatchOperations:input_type -> kmgr.v1.WatchOperationsRequest
-	14, // 29: kmgr.v1.ClusterService.Discover:input_type -> kmgr.v1.DiscoverRequest
-	17, // 30: kmgr.v1.ClusterService.ListNamespaces:input_type -> kmgr.v1.ListNamespacesRequest
-	4,  // 31: kmgr.v1.ClusterService.ListContexts:output_type -> kmgr.v1.ListContextsResponse
-	6,  // 32: kmgr.v1.ClusterService.OpenSession:output_type -> kmgr.v1.OpenSessionResponse
-	23, // 33: kmgr.v1.ClusterService.CloseSession:output_type -> kmgr.v1.Acknowledgement
-	9,  // 34: kmgr.v1.ClusterService.WatchConnection:output_type -> kmgr.v1.ConnectionEvent
-	13, // 35: kmgr.v1.ClusterService.WatchOperations:output_type -> kmgr.v1.ClusterOperationBatch
-	16, // 36: kmgr.v1.ClusterService.Discover:output_type -> kmgr.v1.DiscoverResponse
-	18, // 37: kmgr.v1.ClusterService.ListNamespaces:output_type -> kmgr.v1.ListNamespacesResponse
-	31, // [31:38] is the sub-list for method output_type
-	24, // [24:31] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	20, // 3: kmgr.v1.ListContextsResponse.error:type_name -> kmgr.v1.StructuredError
+	5,  // 4: kmgr.v1.ListContextsResponse.added_kubeconfig_sources:type_name -> kmgr.v1.AddedKubeconfigSource
+	20, // 5: kmgr.v1.AddedKubeconfigSource.error:type_name -> kmgr.v1.StructuredError
+	21, // 6: kmgr.v1.OpenSessionRequest.context:type_name -> kmgr.v1.RequestContext
+	20, // 7: kmgr.v1.OpenSessionResponse.error:type_name -> kmgr.v1.StructuredError
+	21, // 8: kmgr.v1.CloseSessionRequest.context:type_name -> kmgr.v1.RequestContext
+	21, // 9: kmgr.v1.WatchConnectionRequest.context:type_name -> kmgr.v1.RequestContext
+	22, // 10: kmgr.v1.ConnectionEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	0,  // 11: kmgr.v1.ConnectionEvent.state:type_name -> kmgr.v1.ConnectionState
+	11, // 12: kmgr.v1.ConnectionEvent.authority_warm_cache:type_name -> kmgr.v1.WarmCacheUsage
+	11, // 13: kmgr.v1.ConnectionEvent.global_warm_cache:type_name -> kmgr.v1.WarmCacheUsage
+	21, // 14: kmgr.v1.WatchOperationsRequest.context:type_name -> kmgr.v1.RequestContext
+	1,  // 15: kmgr.v1.KubernetesAPIOperation.state:type_name -> kmgr.v1.KubernetesAPIOperationState
+	22, // 16: kmgr.v1.ClusterOperationBatch.cursor:type_name -> kmgr.v1.StreamCursor
+	13, // 17: kmgr.v1.ClusterOperationBatch.active:type_name -> kmgr.v1.KubernetesAPIOperation
+	13, // 18: kmgr.v1.ClusterOperationBatch.completed:type_name -> kmgr.v1.KubernetesAPIOperation
+	21, // 19: kmgr.v1.DiscoverRequest.context:type_name -> kmgr.v1.RequestContext
+	23, // 20: kmgr.v1.ApiResource.type:type_name -> kmgr.v1.ResourceType
+	16, // 21: kmgr.v1.DiscoverResponse.resources:type_name -> kmgr.v1.ApiResource
+	20, // 22: kmgr.v1.DiscoverResponse.error:type_name -> kmgr.v1.StructuredError
+	20, // 23: kmgr.v1.DiscoverResponse.warning:type_name -> kmgr.v1.StructuredError
+	21, // 24: kmgr.v1.ListNamespacesRequest.context:type_name -> kmgr.v1.RequestContext
+	20, // 25: kmgr.v1.ListNamespacesResponse.error:type_name -> kmgr.v1.StructuredError
+	3,  // 26: kmgr.v1.ClusterService.ListContexts:input_type -> kmgr.v1.ListContextsRequest
+	6,  // 27: kmgr.v1.ClusterService.OpenSession:input_type -> kmgr.v1.OpenSessionRequest
+	8,  // 28: kmgr.v1.ClusterService.CloseSession:input_type -> kmgr.v1.CloseSessionRequest
+	9,  // 29: kmgr.v1.ClusterService.WatchConnection:input_type -> kmgr.v1.WatchConnectionRequest
+	12, // 30: kmgr.v1.ClusterService.WatchOperations:input_type -> kmgr.v1.WatchOperationsRequest
+	15, // 31: kmgr.v1.ClusterService.Discover:input_type -> kmgr.v1.DiscoverRequest
+	18, // 32: kmgr.v1.ClusterService.ListNamespaces:input_type -> kmgr.v1.ListNamespacesRequest
+	4,  // 33: kmgr.v1.ClusterService.ListContexts:output_type -> kmgr.v1.ListContextsResponse
+	7,  // 34: kmgr.v1.ClusterService.OpenSession:output_type -> kmgr.v1.OpenSessionResponse
+	24, // 35: kmgr.v1.ClusterService.CloseSession:output_type -> kmgr.v1.Acknowledgement
+	10, // 36: kmgr.v1.ClusterService.WatchConnection:output_type -> kmgr.v1.ConnectionEvent
+	14, // 37: kmgr.v1.ClusterService.WatchOperations:output_type -> kmgr.v1.ClusterOperationBatch
+	17, // 38: kmgr.v1.ClusterService.Discover:output_type -> kmgr.v1.DiscoverResponse
+	19, // 39: kmgr.v1.ClusterService.ListNamespaces:output_type -> kmgr.v1.ListNamespacesResponse
+	33, // [33:40] is the sub-list for method output_type
+	26, // [26:33] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_cluster_proto_init() }
@@ -1710,7 +1788,7 @@ func file_kmgr_v1_cluster_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_cluster_proto_rawDesc), len(file_kmgr_v1_cluster_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   17,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

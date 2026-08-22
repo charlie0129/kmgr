@@ -8,6 +8,7 @@ import KmgrCore
 final class RestoredWorkspaceConnectionAttempt {
     private let provider: any ClusterContextProviding
     private let contextReference: String
+    private let addedKubeconfigPaths: [String]
     private var task: Task<Void, Never>?
 
     var onOpened: ((OpenedClusterSession) -> Void)?
@@ -16,10 +17,12 @@ final class RestoredWorkspaceConnectionAttempt {
 
     init(
         provider: any ClusterContextProviding,
-        contextReference: String
+        contextReference: String,
+        addedKubeconfigPaths: [String] = []
     ) {
         self.provider = provider
         self.contextReference = contextReference
+        self.addedKubeconfigPaths = addedKubeconfigPaths
     }
 
     var isRunning: Bool { task != nil }
@@ -28,10 +31,14 @@ final class RestoredWorkspaceConnectionAttempt {
         guard task == nil else { return }
         let provider = provider
         let contextReference = contextReference
+        let addedKubeconfigPaths = addedKubeconfigPaths
         task = Task { [weak self] in
             let result: Result<OpenedClusterSession, Error>
             do {
-                result = .success(try await provider.openContext(reference: contextReference))
+                result = .success(try await provider.openContext(
+                    reference: contextReference,
+                    addedKubeconfigPaths: addedKubeconfigPaths
+                ))
             } catch {
                 result = .failure(error)
             }

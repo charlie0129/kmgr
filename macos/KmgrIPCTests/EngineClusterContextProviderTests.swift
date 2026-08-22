@@ -33,9 +33,27 @@ struct EngineClusterContextProviderTests {
         authError.safeDetails = ["mechanism": "auth-provider"]
         unsupported.unsupportedAuthenticationError = authError
 
-        let rpc = FakeClusterRPC(contexts: [supported, unsupported])
+        var added = Kmgr_V1_AddedKubeconfigSource()
+        added.path = "/tmp/team.yaml"
+        added.contextCount = 2
+        var missing = Kmgr_V1_AddedKubeconfigSource()
+        missing.path = "/tmp/missing.yaml"
+        missing.error.category = .notFound
+        missing.error.reason = "KubeconfigFileMissing"
+        missing.error.message = "The kubeconfig file could not be found."
+        missing.error.operation = "read added kubeconfig"
+        missing.error.retryable = true
+
+        let rpc = FakeClusterRPC(
+            contexts: [supported, unsupported],
+            addedSources: [added, missing]
+        )
         let provider = deterministicProvider(rpc: rpc)
-        let contexts = try await provider.listContexts(reload: true)
+        let catalog = try await provider.listContexts(
+            reload: true,
+            addedKubeconfigPaths: ["/tmp/team.yaml"]
+        )
+        let contexts = catalog.contexts
 
         #expect(contexts.count == 2)
         #expect(contexts[0].name == "local")
@@ -44,9 +62,23 @@ struct EngineClusterContextProviderTests {
         #expect(contexts[0].authentication.isSupported)
         #expect(contexts[1].authentication.issue?.category == .unsupported)
         #expect(contexts[1].authentication.issue?.safeDetails["mechanism"] == "auth-provider")
+        #expect(catalog.addedKubeconfigSources == [
+            AddedKubeconfigSourceStatus(path: "/tmp/team.yaml", contextCount: 2),
+            AddedKubeconfigSourceStatus(
+                path: "/tmp/missing.yaml",
+                issue: ClusterManagerIssue(
+                    category: .notFound,
+                    reason: "KubeconfigFileMissing",
+                    message: "The kubeconfig file could not be found.",
+                    retryable: true,
+                    operation: "read added kubeconfig"
+                )
+            ),
+        ])
 
         let captured = await rpc.capturedListRequest()
         #expect(captured?.reload == true)
+        #expect(captured?.addedKubeconfigPaths == ["/tmp/team.yaml"])
         #expect(captured?.context.requestID == "request-1")
         #expect(captured?.context.deadlineUnixMs == 1_005_000)
     }
@@ -66,7 +98,10 @@ struct EngineClusterContextProviderTests {
         }
         let provider = deterministicProvider(rpc: rpc)
 
-        let session = try await provider.openContext(reference: "context-source-prod")
+        let session = try await provider.openContext(
+            reference: "context-source-prod",
+            addedKubeconfigPaths: ["/tmp/prod.yaml"]
+        )
 
         #expect(session.sessionID == "session-abc")
         #expect(session.contextName == "prod-context")
@@ -74,6 +109,7 @@ struct EngineClusterContextProviderTests {
         #expect(session.defaultNamespace == "apps")
         let request = await rpc.capturedOpenRequest()
         #expect(request?.contextName == "context-source-prod")
+        #expect(request?.addedKubeconfigPaths == ["/tmp/prod.yaml"])
         #expect(request?.context.deadlineUnixMs == 1_010_000)
     }
 
@@ -105,10 +141,16 @@ struct EngineClusterContextProviderTests {
         let provider = deterministicProvider(rpc: rpc)
 
         await #expect(throws: ClusterManagerIssue.self) {
-            try await provider.openContext(reference: "production")
+            try await provider.openContext(
+                reference: "production",
+                addedKubeconfigPaths: []
+            )
         }
         do {
-            _ = try await provider.openContext(reference: "production")
+            _ = try await provider.openContext(
+                reference: "production",
+                addedKubeconfigPaths: []
+            )
             Issue.record("Expected structured TLS error")
         } catch let issue as ClusterManagerIssue {
             #expect(issue.category == .tls)
@@ -140,7 +182,10 @@ struct EngineClusterContextProviderTests {
         let provider = deterministicProvider(rpc: rpc)
 
         do {
-            _ = try await provider.listContexts(reload: false)
+            _ = try await provider.listContexts(
+                reload: false,
+                addedKubeconfigPaths: []
+            )
             Issue.record("Expected unavailable error")
         } catch let issue as ClusterManagerIssue {
             #expect(issue.category == .unavailable)
@@ -181,13 +226,18 @@ private actor FakeClusterRPC: ClusterRPC {
         -> Kmgr_V1_OpenSessionResponse
 
     private let contexts: [Kmgr_V1_KubeconfigContext]
+    private let addedSources: [Kmgr_V1_AddedKubeconfigSource]
     private var listRequest: Kmgr_V1_ListContextsRequest?
     private var openRequest: Kmgr_V1_OpenSessionRequest?
     private var listError: (any Error)?
     private var openResult: OpenResult?
 
-    init(contexts: [Kmgr_V1_KubeconfigContext] = []) {
+    init(
+        contexts: [Kmgr_V1_KubeconfigContext] = [],
+        addedSources: [Kmgr_V1_AddedKubeconfigSource] = []
+    ) {
         self.contexts = contexts
+        self.addedSources = addedSources
     }
 
     func setListError(_ error: any Error) {
@@ -210,6 +260,7 @@ private actor FakeClusterRPC: ClusterRPC {
         var response = Kmgr_V1_ListContextsResponse()
         response.requestID = request.context.requestID
         response.contexts = contexts
+        response.addedKubeconfigSources = addedSources
         return response
     }
 

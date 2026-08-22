@@ -79,6 +79,7 @@ public enum ContextualShortcutCatalog {
             items.append(item("chooser.open", "Return", "Open selected context"))
         }
         items.append(item("chooser.move", "\u{2191} / \u{2193}", "Move context selection"))
+        items.append(item("chooser.add-kubeconfig", "\u{2318}O", "Add kubeconfig files"))
         items.append(item("app.new-cluster", "\u{2318}N", "New Cluster Manager window"))
         items.append(item("window.close", "\u{2318}W", "Close window"))
         return ContextualShortcutSnapshot(

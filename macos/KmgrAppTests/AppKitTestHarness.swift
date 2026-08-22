@@ -88,22 +88,42 @@ extension ClusterWindowRestorationRecord {
 }
 
 struct AnyClusterContextProvider: ClusterContextProviding {
-    private let listOperation: @Sendable (Bool) async throws -> [ClusterContextSummary]
-    private let openOperation: @Sendable (String) async throws -> OpenedClusterSession
+    private let listOperation: @Sendable (Bool, [String]) async throws
+        -> ClusterContextCatalog
+    private let openOperation: @Sendable (String, [String]) async throws
+        -> OpenedClusterSession
 
     init(
         listContexts: @escaping @Sendable (Bool) async throws -> [ClusterContextSummary],
         openContext: @escaping @Sendable (String) async throws -> OpenedClusterSession
     ) {
-        listOperation = listContexts
+        listOperation = { reload, _ in
+            ClusterContextCatalog(contexts: try await listContexts(reload))
+        }
+        openOperation = { reference, _ in try await openContext(reference) }
+    }
+
+    init(
+        listCatalog: @escaping @Sendable (Bool, [String]) async throws
+            -> ClusterContextCatalog,
+        openContext: @escaping @Sendable (String, [String]) async throws
+            -> OpenedClusterSession
+    ) {
+        listOperation = listCatalog
         openOperation = openContext
     }
 
-    func listContexts(reload: Bool) async throws -> [ClusterContextSummary] {
-        try await listOperation(reload)
+    func listContexts(
+        reload: Bool,
+        addedKubeconfigPaths: [String]
+    ) async throws -> ClusterContextCatalog {
+        try await listOperation(reload, addedKubeconfigPaths)
     }
 
-    func openContext(reference: String) async throws -> OpenedClusterSession {
-        try await openOperation(reference)
+    func openContext(
+        reference: String,
+        addedKubeconfigPaths: [String]
+    ) async throws -> OpenedClusterSession {
+        try await openOperation(reference, addedKubeconfigPaths)
     }
 }

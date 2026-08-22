@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"strings"
 
@@ -49,6 +50,36 @@ func kubeconfigError(err error, operation string) *kmgrv1.StructuredError {
 		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_TLS
 		structured.Reason = "TLSConfigurationInvalid"
 		structured.Message = "TLS credentials or certificate-authority configuration could not be loaded."
+	}
+	return structured
+}
+
+func addedKubeconfigSourceError(err error) *kmgrv1.StructuredError {
+	structured := kubeconfigError(err, "read added kubeconfig")
+	switch {
+	case errors.Is(err, cluster.ErrKubeconfigSourceAutomatic):
+		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		structured.Reason = "KubeconfigAlreadyDiscovered"
+		structured.Message = "This file is already read through $KUBECONFIG or ~/.kube."
+	case errors.Is(err, cluster.ErrKubeconfigSourceDuplicate):
+		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_CONFLICT
+		structured.Reason = "KubeconfigAlreadyAdded"
+		structured.Message = "This kubeconfig file is already in the added file list."
+	case errors.Is(err, fs.ErrNotExist):
+		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND
+		structured.Reason = "KubeconfigFileMissing"
+		structured.Message = "The kubeconfig file could not be found."
+		structured.Retryable = true
+	case errors.Is(err, fs.ErrPermission):
+		structured.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_AUTHORIZATION
+		structured.Reason = "KubeconfigFileUnreadable"
+		structured.Message = "The kubeconfig file could not be read with the current permissions."
+	case errors.Is(err, cluster.ErrKubeconfigSourceNotRegular):
+		structured.Reason = "KubeconfigNotRegularFile"
+		structured.Message = "The selected path is not a regular file."
+	case errors.Is(err, cluster.ErrKubeconfigSourceNoContexts):
+		structured.Reason = "KubeconfigHasNoContexts"
+		structured.Message = "The kubeconfig file does not contain any contexts."
 	}
 	return structured
 }

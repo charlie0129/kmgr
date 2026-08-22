@@ -8,30 +8,34 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
 )
 
-// CatalogLoader loads a credential-bearing kubeconfig catalog. Callers must
-// never log a Catalog or its errors without passing them through redaction.
-type CatalogLoader func(paths []string) (*cluster.Catalog, error)
+// CatalogLoader loads a credential-bearing kubeconfig catalog plus isolated
+// outcomes for each user-added file. Callers must never log a discovery or its
+// errors without passing them through redaction.
+type CatalogLoader func(paths []string) (*cluster.KubeconfigDiscovery, error)
 
-// CatalogRegistry retains immutable kubeconfig snapshots by ordered path set.
-// A successful reload replaces only that path set; existing sessions continue
-// to use the snapshot and credentials they were opened with.
+// CatalogRegistry retains immutable kubeconfig discoveries by ordered added
+// path set. A successful reload replaces only that path set; existing sessions
+// continue to use the snapshot and credentials they were opened with.
 type CatalogRegistry struct {
 	mu      sync.RWMutex
 	loader  CatalogLoader
-	entries map[string]*cluster.Catalog
+	entries map[string]*cluster.KubeconfigDiscovery
 }
 
 func NewCatalogRegistry(loader CatalogLoader) *CatalogRegistry {
 	if loader == nil {
-		loader = cluster.DiscoverPaths
+		loader = cluster.DiscoverWithAddedPaths
 	}
 	return &CatalogRegistry{
 		loader:  loader,
-		entries: make(map[string]*cluster.Catalog),
+		entries: make(map[string]*cluster.KubeconfigDiscovery),
 	}
 }
 
-func (r *CatalogRegistry) Load(paths []string, reload bool) (*cluster.Catalog, error) {
+func (r *CatalogRegistry) Load(
+	paths []string,
+	reload bool,
+) (*cluster.KubeconfigDiscovery, error) {
 	key := catalogKey(paths)
 	if !reload {
 		r.mu.RLock()
@@ -60,10 +64,10 @@ func (r *CatalogRegistry) Load(paths []string, reload bool) (*cluster.Catalog, e
 
 func catalogKey(paths []string) string {
 	if len(paths) == 0 {
-		return "\x00ambient"
+		return "\x00ambient-only"
 	}
 	var key strings.Builder
-	key.WriteString("\x00explicit")
+	key.WriteString("\x00added")
 	for _, path := range paths {
 		key.WriteByte(0)
 		key.WriteString(filepath.Clean(path))

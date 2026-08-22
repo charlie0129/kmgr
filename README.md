@@ -60,7 +60,10 @@ already checked into the repository.
    catalogs valid regular kubeconfig files directly inside `~/.kube` as
    independent sources. This makes sibling files such as `work.kubeconfig`
    discoverable without flat-merging same-named users, clusters, or credentials
-   from an unrelated file.
+   from an unrelated file. Use **Kubeconfig Files…**, Command-O, or drag files
+   onto the context table to add kubeconfigs elsewhere. Kmgr remembers only
+   their standardized paths, loads each as an independent source, and reports
+   missing or malformed remembered files without hiding healthy contexts.
 2. Select a context and choose **Open**. This is the explicit connection
    boundary: the engine creates authenticated `client-go` clients and makes a
    short, deadline-bounded `GET /version` probe before accepting the session.
@@ -155,6 +158,7 @@ focus, and hides when no supported context is active.
 | Binding | Action |
 | --- | --- |
 | Command-N | Open a new Cluster Manager window |
+| Command-O | Add kubeconfig files from Cluster Manager |
 | Command-K | Open the current workspace's Command Palette |
 | Shift-Command-N | Open the current workspace's namespace picker |
 | `/` | Focus the resource filter |
@@ -267,7 +271,9 @@ other network-accessible management API. Kubernetes operations use pinned
 `client-go` APIs and structured arguments—Kmgr never constructs or shells out
 to `kubectl` commands.
 
-Kmgr does not copy kubeconfig credentials into app storage. It supports
+Kmgr does not copy kubeconfig credentials into app storage. User-added
+kubeconfigs remain in place; only their absolute paths are persisted, and
+removing one from Cluster Manager never deletes the file. Kmgr supports
 non-interactive `users[].user.exec` credential plugins and invokes them only
 after a context is explicitly opened. A bounded login-zsh probe supplies the
 user's normal command search path; the selected executable then runs through a

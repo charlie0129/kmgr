@@ -33,19 +33,28 @@ message KubeconfigContext {
 message ListContextsRequest {
   RequestContext context = 1;
   bool reload = 2;
-  repeated string kubeconfig_paths = 3;
+  // Files explicitly added by the user. Each file is cataloged as an
+  // independent source in addition to normal kubeconfig discovery.
+  repeated string added_kubeconfig_paths = 3;
 }
 
 message ListContextsResponse {
   string request_id = 1;
   repeated KubeconfigContext contexts = 2;
   StructuredError error = 3;
+  repeated AddedKubeconfigSource added_kubeconfig_sources = 4;
+}
+
+message AddedKubeconfigSource {
+  string path = 1;
+  uint32 context_count = 2;
+  StructuredError error = 3;
 }
 
 message OpenSessionRequest {
   RequestContext context = 1;
   string context_name = 2;
-  repeated string kubeconfig_paths = 3;
+  repeated string added_kubeconfig_paths = 3;
 }
 
 message OpenSessionResponse {

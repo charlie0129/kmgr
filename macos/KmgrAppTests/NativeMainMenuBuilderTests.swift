@@ -18,6 +18,12 @@ struct NativeMainMenuBuilderTests {
             action: #selector(NSWindow.performClose(_:)),
             keyEquivalent: "w"
         )
+        let addKubeconfig = try #require(file.item(withTitle: "Add Kubeconfig Files…"))
+        expectResponderItem(
+            addKubeconfig,
+            action: #selector(ClusterManagerWindowController.addKubeconfigFiles(_:)),
+            keyEquivalent: "o"
+        )
         let save = try #require(file.item(withTitle: "Save"))
         expectResponderItem(
             save,

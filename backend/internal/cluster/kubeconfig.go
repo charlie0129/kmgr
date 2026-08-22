@@ -23,6 +23,13 @@ import (
 // does not declare one.
 const DefaultNamespace = "default"
 
+var (
+	ErrKubeconfigSourceDuplicate  = errors.New("kubeconfig source is duplicated")
+	ErrKubeconfigSourceAutomatic  = errors.New("kubeconfig source is already discovered automatically")
+	ErrKubeconfigSourceNotRegular = errors.New("kubeconfig source is not a regular file")
+	ErrKubeconfigSourceNoContexts = errors.New("kubeconfig source contains no contexts")
+)
+
 // UnsupportedAuthMechanism identifies a kubeconfig authentication mechanism
 // that kmgr deliberately does not run.
 type UnsupportedAuthMechanism string
@@ -57,6 +64,22 @@ type ContextInfo struct {
 type Catalog struct {
 	contexts []ContextInfo
 	bindings map[string]contextBinding
+}
+
+// AddedKubeconfigSource is the credential-free outcome for one user-supplied
+// file. A source failure is intentionally isolated from every other source so
+// one missing or malformed remembered file cannot hide useful contexts.
+type AddedKubeconfigSource struct {
+	Path         string
+	ContextCount int
+	Err          error
+}
+
+// KubeconfigDiscovery is an immutable catalog plus ordered outcomes for the
+// user-added paths that produced it.
+type KubeconfigDiscovery struct {
+	Catalog      *Catalog
+	AddedSources []AddedKubeconfigSource
 }
 
 // contextBinding keeps the exact configuration snapshot that produced a
@@ -134,6 +157,80 @@ func DiscoverPaths(paths []string) (*Catalog, error) {
 	rules.MigrationRules = nil
 	rules.WarnIfAllMissing = false
 	return DiscoverWithRules(rules)
+}
+
+// DiscoverWithAddedPaths preserves normal ambient discovery, then catalogs
+// each supplied file independently. Independent bindings are important for
+// standalone kubeconfigs that reuse context, cluster, or user names. Invalid
+// added files are reported per source and do not fail the useful catalog.
+func DiscoverWithAddedPaths(paths []string) (*KubeconfigDiscovery, error) {
+	catalog, err := Discover()
+	if err != nil {
+		return nil, err
+	}
+
+	result := &KubeconfigDiscovery{
+		Catalog:      catalog,
+		AddedSources: make([]AddedKubeconfigSource, 0, len(paths)),
+	}
+	automaticPathCounts := catalogSourceContextCounts(catalog)
+	seen := make(map[string]struct{}, len(paths))
+	for _, suppliedPath := range paths {
+		path := absoluteSourcePath(suppliedPath)
+		source := AddedKubeconfigSource{Path: path}
+		if suppliedPath == "" {
+			source.Err = errors.New("kubeconfig path must not be empty")
+			result.AddedSources = append(result.AddedSources, source)
+			continue
+		}
+		if _, exists := seen[path]; exists {
+			source.Err = ErrKubeconfigSourceDuplicate
+			result.AddedSources = append(result.AddedSources, source)
+			continue
+		}
+		seen[path] = struct{}{}
+
+		if contextCount, exists := automaticPathCounts[path]; exists {
+			source.ContextCount = contextCount
+			source.Err = ErrKubeconfigSourceAutomatic
+			result.AddedSources = append(result.AddedSources, source)
+			continue
+		}
+
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			source.Err = statErr
+			result.AddedSources = append(result.AddedSources, source)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			source.Err = ErrKubeconfigSourceNotRegular
+			result.AddedSources = append(result.AddedSources, source)
+			continue
+		}
+
+		rules := clientcmd.NewDefaultClientConfigLoadingRules()
+		rules.ExplicitPath = path
+		rules.MigrationRules = nil
+		rules.WarnIfAllMissing = false
+		fileCatalog, loadErr := DiscoverWithRules(rules)
+		if loadErr != nil {
+			source.Err = loadErr
+			result.AddedSources = append(result.AddedSources, source)
+			continue
+		}
+		source.ContextCount = len(fileCatalog.contexts)
+		if source.ContextCount == 0 {
+			source.Err = ErrKubeconfigSourceNoContexts
+			result.AddedSources = append(result.AddedSources, source)
+			continue
+		}
+
+		catalog.append(fileCatalog, false)
+		result.AddedSources = append(result.AddedSources, source)
+	}
+	catalog.finish()
+	return result, nil
 }
 
 // DiscoverWithRules is useful to embed discovery in callers with an explicit
@@ -231,6 +328,19 @@ func homeKubeconfigCandidates(directory, defaultPath string) ([]string, error) {
 		result = append(result, path)
 	}
 	return result, nil
+}
+
+func catalogSourceContextCounts(catalog *Catalog) map[string]int {
+	result := make(map[string]int)
+	if catalog == nil {
+		return result
+	}
+	for _, contextInfo := range catalog.contexts {
+		for _, path := range contextInfo.SourcePaths {
+			result[filepath.Clean(path)]++
+		}
+	}
+	return result
 }
 
 // Contexts returns a copy sorted by exact context name. It never contains

@@ -652,6 +652,100 @@ contexts:
 	}
 }
 
+func TestDiscoverWithAddedPathsKeepsFilesIndependentAndIsolatesFailures(t *testing.T) {
+	home := t.TempDir()
+	defaultPath := filepath.Join(home, ".kube", "config")
+	addedPath := filepath.Join(home, "Downloads", "team.yaml")
+	missingPath := filepath.Join(home, "Downloads", "missing.yaml")
+	malformedPath := filepath.Join(home, "Downloads", "malformed.yaml")
+	writeFile(t, defaultPath, kubeconfigForContext(
+		"shared", "ambient", "https://ambient.example.test",
+	))
+	writeFile(t, addedPath, kubeconfigForContext(
+		"shared", "added", "https://added.example.test",
+	))
+	writeFile(t, malformedPath, "apiVersion: v1\nkind: Config\ncontexts: [\n")
+
+	t.Setenv("HOME", home)
+	t.Setenv(clientcmd.RecommendedConfigPathEnvVar, "")
+	withRecommendedHomeFile(t, defaultPath)
+	discovery, err := DiscoverWithAddedPaths([]string{
+		addedPath,
+		missingPath,
+		malformedPath,
+		defaultPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Catalog.Contexts()) != 2 {
+		t.Fatalf("contexts = %#v", discovery.Catalog.Contexts())
+	}
+	ambient := requireContextNamedFrom(t, discovery.Catalog, "shared", defaultPath)
+	added := requireContextNamedFrom(t, discovery.Catalog, "shared", addedPath)
+	if ambient.ID == added.ID || !ambient.Current || added.Current {
+		t.Fatalf("independent context identities = ambient %#v, added %#v", ambient, added)
+	}
+	addedConfig, err := discovery.Catalog.RESTConfig(added.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addedConfig.Host != "https://added.example.test" {
+		t.Fatalf("added context host = %q", addedConfig.Host)
+	}
+
+	if len(discovery.AddedSources) != 4 {
+		t.Fatalf("added source outcomes = %#v", discovery.AddedSources)
+	}
+	valid := discovery.AddedSources[0]
+	if valid.Path != addedPath || valid.ContextCount != 1 || valid.Err != nil {
+		t.Fatalf("valid added source = %#v", valid)
+	}
+	if missing := discovery.AddedSources[1]; missing.Path != missingPath ||
+		!errors.Is(missing.Err, os.ErrNotExist) {
+		t.Fatalf("missing added source = %#v", missing)
+	}
+	if malformed := discovery.AddedSources[2]; malformed.Path != malformedPath ||
+		malformed.Err == nil {
+		t.Fatalf("malformed added source = %#v", malformed)
+	}
+	if automatic := discovery.AddedSources[3]; automatic.Path != defaultPath ||
+		automatic.ContextCount != 1 ||
+		!errors.Is(automatic.Err, ErrKubeconfigSourceAutomatic) {
+		t.Fatalf("automatic added source = %#v", automatic)
+	}
+}
+
+func TestDiscoverWithAddedPathsRejectsNonFilesAndEmptyConfigs(t *testing.T) {
+	home := t.TempDir()
+	defaultPath := filepath.Join(home, ".kube", "config")
+	directoryPath := filepath.Join(home, "directory")
+	emptyPath := filepath.Join(home, "empty.yaml")
+	writeFile(t, defaultPath, kubeconfigForContext(
+		"ambient", "ambient", "https://ambient.example.test",
+	))
+	if err := os.MkdirAll(directoryPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, emptyPath, "apiVersion: v1\nkind: Config\n")
+
+	t.Setenv("HOME", home)
+	t.Setenv(clientcmd.RecommendedConfigPathEnvVar, "")
+	withRecommendedHomeFile(t, defaultPath)
+	discovery, err := DiscoverWithAddedPaths([]string{directoryPath, emptyPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.AddedSources) != 2 ||
+		!errors.Is(discovery.AddedSources[0].Err, ErrKubeconfigSourceNotRegular) ||
+		!errors.Is(discovery.AddedSources[1].Err, ErrKubeconfigSourceNoContexts) {
+		t.Fatalf("added source validation = %#v", discovery.AddedSources)
+	}
+	if names := contextNames(discovery.Catalog.Contexts()); !reflect.DeepEqual(names, []string{"ambient"}) {
+		t.Fatalf("ambient contexts after invalid additions = %v", names)
+	}
+}
+
 func discoverExplicit(t *testing.T, path string) *Catalog {
 	t.Helper()
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()

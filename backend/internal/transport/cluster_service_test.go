@@ -81,9 +81,9 @@ func TestListContextsIsOfflineAndOpenSessionProbes(t *testing.T) {
 	factory := &serviceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
-		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) {
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.KubeconfigDiscovery, error) {
 			loadCalls++
-			return catalog, nil
+			return &cluster.KubeconfigDiscovery{Catalog: catalog}, nil
 		}),
 		Sessions: sessions,
 		Prober: SessionProbeFunc(func(ctx context.Context, session *cluster.Session) error {
@@ -126,6 +126,60 @@ func TestListContextsIsOfflineAndOpenSessionProbes(t *testing.T) {
 	}
 }
 
+func TestAddedKubeconfigPathsReturnPerFileStatusAndBindOpenSession(t *testing.T) {
+	catalog := serviceCatalog(t)
+	addedPath := "/tmp/missing-team-kubeconfig"
+	loadCalls := 0
+	service := NewClusterService(ClusterServiceOptions{
+		Catalogs: NewCatalogRegistry(func(paths []string) (*cluster.KubeconfigDiscovery, error) {
+			loadCalls++
+			if len(paths) != 1 || paths[0] != addedPath {
+				return nil, fmt.Errorf("unexpected added paths: %v", paths)
+			}
+			return &cluster.KubeconfigDiscovery{
+				Catalog: catalog,
+				AddedSources: []cluster.AddedKubeconfigSource{{
+					Path: addedPath,
+					Err:  os.ErrNotExist,
+				}},
+			}, nil
+		}),
+		Sessions: cluster.NewSessionRegistry(&serviceFactory{}),
+		Prober:   SessionProbeFunc(func(context.Context, *cluster.Session) error { return nil }),
+	})
+
+	listed, err := service.ListContexts(context.Background(), &kmgrv1.ListContextsRequest{
+		Context:              requestContext("list-added"),
+		AddedKubeconfigPaths: []string{addedPath},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.GetError() != nil || len(listed.GetContexts()) != 1 ||
+		len(listed.GetAddedKubeconfigSources()) != 1 {
+		t.Fatalf("list added response = %#v", listed)
+	}
+	source := listed.GetAddedKubeconfigSources()[0]
+	if source.GetPath() != addedPath || source.GetContextCount() != 0 ||
+		source.GetError().GetCategory() != kmgrv1.ErrorCategory_ERROR_CATEGORY_NOT_FOUND ||
+		source.GetError().GetReason() != "KubeconfigFileMissing" ||
+		!source.GetError().GetRetryable() {
+		t.Fatalf("added source status = %#v", source)
+	}
+
+	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
+		Context:              requestContext("open-added"),
+		ContextName:          listed.GetContexts()[0].GetContextId(),
+		AddedKubeconfigPaths: []string{addedPath},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.GetError() != nil || opened.GetClusterSessionId() == "" || loadCalls != 1 {
+		t.Fatalf("source-bound open: loads=%d response=%#v", loadCalls, opened)
+	}
+}
+
 func TestOpenSessionDefaultProbeUsesAuthenticatedVersionRequest(t *testing.T) {
 	t.Parallel()
 	type observedRequest struct {
@@ -155,7 +209,9 @@ func TestOpenSessionDefaultProbeUsesAuthenticatedVersionRequest(t *testing.T) {
 	factory := &recordingDefaultServiceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
-		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) { return catalog, nil }),
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.KubeconfigDiscovery, error) {
+			return &cluster.KubeconfigDiscovery{Catalog: catalog}, nil
+		}),
 		Sessions: sessions,
 	})
 	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
@@ -195,7 +251,9 @@ func TestOpenSessionDefaultProbeHTTP401RollsBackSession(t *testing.T) {
 	factory := &recordingDefaultServiceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
-		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) { return catalog, nil }),
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.KubeconfigDiscovery, error) {
+			return &cluster.KubeconfigDiscovery{Catalog: catalog}, nil
+		}),
 		Sessions: sessions,
 	})
 	opened, err := service.OpenSession(context.Background(), &kmgrv1.OpenSessionRequest{
@@ -224,7 +282,9 @@ func TestOpenSessionProbeFailureReturnsStructuredErrorAndRollsBack(t *testing.T)
 	factory := &serviceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
-		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) { return catalog, nil }),
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.KubeconfigDiscovery, error) {
+			return &cluster.KubeconfigDiscovery{Catalog: catalog}, nil
+		}),
 		Sessions: sessions,
 		Prober: SessionProbeFunc(func(ctx context.Context, session *cluster.Session) error {
 			return context.DeadlineExceeded
@@ -255,7 +315,9 @@ func TestCloseSessionPreservesOnlyPreexistingIndependentLeasesWhenRequested(t *t
 	factory := &serviceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
-		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) { return catalog, nil }),
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.KubeconfigDiscovery, error) {
+			return &cluster.KubeconfigDiscovery{Catalog: catalog}, nil
+		}),
 		Sessions: sessions,
 		Prober:   SessionProbeFunc(func(context.Context, *cluster.Session) error { return nil }),
 	})
@@ -296,7 +358,9 @@ func TestCloseSessionWithoutPreservationForceCloses(t *testing.T) {
 	factory := &serviceFactory{}
 	sessions := cluster.NewSessionRegistry(factory)
 	service := NewClusterService(ClusterServiceOptions{
-		Catalogs: NewCatalogRegistry(func([]string) (*cluster.Catalog, error) { return catalog, nil }),
+		Catalogs: NewCatalogRegistry(func([]string) (*cluster.KubeconfigDiscovery, error) {
+			return &cluster.KubeconfigDiscovery{Catalog: catalog}, nil
+		}),
 		Sessions: sessions,
 		Prober:   SessionProbeFunc(func(context.Context, *cluster.Session) error { return nil }),
 	})

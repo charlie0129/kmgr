@@ -695,13 +695,15 @@ struct LogWindowControllerTests {
         )
         controller.showWindow(nil)
         defer { controller.close() }
-        let root = try #require(controller.window?.contentView)
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
         let logView = try #require(descendants(of: root)
             .compactMap { $0 as? LogViewportView }
             .first { $0.accessibilityLabel() == "Pod logs" })
         let search = try #require(descendants(of: root)
             .compactMap { $0 as? NSSearchField }.first)
         try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+        window.orderOut(nil)
         provider.emitStreaming(generation: 1, sequence: 1)
         provider.emitRecords(
             generation: 1,
@@ -719,14 +721,19 @@ struct LogWindowControllerTests {
                 ),
             ]
         )
-        try await waitForLogText(logView) { $0.contains("request completed") }
+        window.makeKeyAndOrderFront(nil)
+        try await waitForLogText(
+            logView,
+            waking: controller,
+            in: window
+        ) { $0.contains("request completed") }
 
         search.stringValue = "error"
         controller.controlTextDidChange(Notification(
             name: NSControl.textDidChangeNotification,
             object: search
         ))
-        try await waitForLogText(logView) {
+        try await waitForLogText(logView, waking: controller, in: window) {
             $0.contains("request ERROR") && !$0.contains("request completed")
         }
 
@@ -1760,6 +1767,28 @@ private func waitForLogText(
 ) async throws {
     for _ in 0..<200 {
         if condition(logView.string) { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Timed out waiting for rendered log text; got \(logView.string)")
+}
+
+/// SwiftPM's test host is not an active app, so `makeKeyAndOrderFront` does not
+/// reliably preserve AppKit's key-window state across an asynchronous render.
+/// Repeat the real delegate wake while waiting instead of racing scheduler
+/// cleanup from the preceding render.
+@MainActor
+private func waitForLogText(
+    _ logView: LogViewportView,
+    waking controller: LogWindowController,
+    in window: NSWindow,
+    condition: (String) -> Bool
+) async throws {
+    for _ in 0..<200 {
+        if condition(logView.string) { return }
+        controller.windowDidBecomeKey(Notification(
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        ))
         try await Task.sleep(for: .milliseconds(5))
     }
     Issue.record("Timed out waiting for rendered log text; got \(logView.string)")

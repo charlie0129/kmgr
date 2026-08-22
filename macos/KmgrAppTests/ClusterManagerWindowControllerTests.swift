@@ -276,6 +276,179 @@ struct ClusterManagerWindowControllerTests {
         #expect(controller.contextualShortcutSnapshot?.contextID == "cluster-chooser")
         #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("L") == false)
         #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("\u{2318}N") == true)
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("\u{2318}O") == true)
+    }
+
+    @Test("remembered kubeconfig paths bind both listing and opening")
+    func rememberedKubeconfigPathsBindRequests() async throws {
+        let suite = "kmgr-cluster-manager-source-tests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let sourceStore = KubeconfigSourceStore(defaults: defaults)
+        let sourcePath = "/tmp/custom-team-kubeconfig"
+        #expect(sourceStore.add(paths: [sourcePath]))
+
+        let context = ClusterContextSummary(
+            name: "team",
+            clusterName: "team-cluster",
+            serverHostname: "api.team.example.test",
+            defaultNamespace: "platform",
+            sourcePaths: [sourcePath]
+        )
+        let requests = ClusterSourceRequestRecorder()
+        let provider = AnyClusterContextProvider(
+            listCatalog: { reload, paths in
+                await requests.recordList(reload: reload, paths: paths)
+                return ClusterContextCatalog(
+                    contexts: [context],
+                    addedKubeconfigSources: [
+                        AddedKubeconfigSourceStatus(path: sourcePath, contextCount: 1),
+                    ]
+                )
+            },
+            openContext: { reference, paths in
+                await requests.recordOpen(reference: reference, paths: paths)
+                return OpenedClusterSession(
+                    sessionID: "session-team",
+                    contextName: context.name,
+                    clusterName: context.clusterName,
+                    serverHostname: context.serverHostname,
+                    defaultNamespace: context.defaultNamespace
+                )
+            }
+        )
+        let controller = ClusterManagerWindowController(
+            provider: provider,
+            sourceStore: sourceStore,
+            closesAfterOpening: false
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let root = try #require(controller.window?.contentView)
+        let table = try #require(clusterManagerDescendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubeconfig contexts" })
+        try await waitForClusterManagerTable(table)
+        try await waitForClusterSourceRequests(requests, listCount: 1, openCount: 0)
+
+        let sourcesButton = try #require(clusterManagerDescendants(of: root)
+            .compactMap { $0 as? NSButton }
+            .first { $0.accessibilityLabel() == "Manage added kubeconfig files" })
+        #expect(sourcesButton.title == "Kubeconfig Files (1)…")
+        #expect(await requests.lastListPaths() == [sourcePath])
+
+        let openButton = try #require(clusterManagerDescendants(of: root)
+            .compactMap { $0 as? NSButton }
+            .first { $0.accessibilityLabel() == "Open selected cluster context" })
+        openButton.performClick(nil)
+        try await waitForClusterSourceRequests(requests, listCount: 1, openCount: 1)
+        let open = try #require(await requests.lastOpen())
+        #expect(open.reference == context.id)
+        #expect(open.paths == [sourcePath])
+    }
+
+    @Test("kubeconfig files popover lists only user files with actionable status")
+    func kubeconfigFilesPopoverPresentation() throws {
+        let validPath = "/tmp/team.yaml"
+        let missingPath = "/tmp/missing.yaml"
+        let missingIssue = ClusterManagerIssue(
+            category: .notFound,
+            reason: "KubeconfigFileMissing",
+            message: "The kubeconfig file could not be found.",
+            retryable: true,
+            operation: "read added kubeconfig"
+        )
+        let controller = KubeconfigSourcesPopoverViewController()
+        var removed: [String] = []
+        controller.onRemove = { removed = $0 }
+        controller.update(
+            paths: [validPath, missingPath],
+            statuses: [
+                AddedKubeconfigSourceStatus(path: validPath, contextCount: 12),
+                AddedKubeconfigSourceStatus(path: missingPath, issue: missingIssue),
+            ]
+        )
+        let root = controller.view
+        let descendants = clusterManagerDescendants(of: root)
+        let table = try #require(descendants.compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Added kubeconfig files" })
+        #expect(table.numberOfRows == 2)
+
+        let statusColumn = table.column(withIdentifier: .init("status"))
+        let validStatus = try #require(table.view(
+            atColumn: statusColumn,
+            row: 0,
+            makeIfNecessary: true
+        ) as? NSTableCellView)
+        let missingStatus = try #require(table.view(
+            atColumn: statusColumn,
+            row: 1,
+            makeIfNecessary: true
+        ) as? NSTableCellView)
+        #expect(validStatus.textField?.stringValue == "12 contexts")
+        #expect(missingStatus.textField?.stringValue == "Missing")
+
+        let labels = descendants.compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(labels.contains {
+            $0 == "Kmgr also reads $KUBECONFIG; when unset, it reads kubeconfig files in ~/.kube."
+        })
+        #expect(!labels.contains { $0.contains("Always enabled") })
+
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        let removeButton = try #require(descendants.compactMap { $0 as? NSButton }
+            .first {
+                $0.accessibilityLabel()
+                    == "Remove selected kubeconfig files from Kmgr"
+            })
+        #expect(removeButton.isEnabled)
+        removeButton.performClick(nil)
+        #expect(removed == [missingPath])
+    }
+
+    @Test("file drop prompt masks context rows with a high-contrast card")
+    func fileDropPromptMasksContextRows() async throws {
+        let context = ClusterContextSummary(
+            name: "busy-background",
+            clusterName: "a-cluster-name-behind-the-drop-prompt",
+            serverHostname: "api.example.test",
+            defaultNamespace: "default",
+            sourcePaths: ["/tmp/kubeconfig"]
+        )
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in [context] },
+                openContext: { _ in throw CancellationError() }
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let root = try #require(controller.window?.contentView)
+        let layout = try clusterManagerVerticalLayout(in: root)
+        try await waitForClusterManagerTable(layout.tableView)
+        root.layoutSubtreeIfNeeded()
+
+        let descendants = clusterManagerDescendants(of: root)
+        let overlay = try #require(descendants.first {
+            $0.identifier?.rawValue == "cluster-manager-drop-overlay"
+        })
+        let card = try #require(descendants.first {
+            $0.identifier?.rawValue == "cluster-manager-drop-card"
+        })
+        let title = try #require(descendants.compactMap { $0 as? NSTextField }
+            .first { $0.stringValue == "Drop kubeconfig files here" })
+        let message = try #require(descendants.compactMap { $0 as? NSTextField }
+            .first { $0.stringValue == "Release to add them to Kmgr" })
+
+        #expect(overlay.superview === layout.tableContainer)
+        #expect(overlay.frame.equalTo(layout.tableContainer.bounds))
+        #expect((overlay.layer?.backgroundColor?.alpha ?? 0) >= 0.95)
+        #expect((card.layer?.backgroundColor?.alpha ?? 0) >= 0.99)
+        #expect(title.superview?.superview === card)
+        #expect(message.superview?.superview === card)
+        #expect(title.textColor == NSColor.selectedControlTextColor)
+        #expect((message.textColor?.alphaComponent ?? 0) >= 0.85)
     }
 
     @Test("visible matching text uses folded bold ranges")
@@ -487,6 +660,26 @@ private actor ClusterOpenAttemptRecorder {
     }
 }
 
+private actor ClusterSourceRequestRecorder {
+    private var lists: [(reload: Bool, paths: [String])] = []
+    private var opens: [(reference: String, paths: [String])] = []
+
+    func recordList(reload: Bool, paths: [String]) {
+        lists.append((reload, paths))
+    }
+
+    func recordOpen(reference: String, paths: [String]) {
+        opens.append((reference, paths))
+    }
+
+    func counts() -> (lists: Int, opens: Int) {
+        (lists.count, opens.count)
+    }
+
+    func lastListPaths() -> [String]? { lists.last?.paths }
+    func lastOpen() -> (reference: String, paths: [String])? { opens.last }
+}
+
 private func waitForClusterOpenAttempts(
     _ recorder: ClusterOpenAttemptRecorder,
     started: Int,
@@ -502,6 +695,27 @@ private func waitForClusterOpenAttempts(
                 reason: "AppKitTestTimeout",
                 message: "Timed out waiting for cluster open attempt state.",
                 operation: "test Cluster Manager connection cancellation"
+            )
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+private func waitForClusterSourceRequests(
+    _ recorder: ClusterSourceRequestRecorder,
+    listCount: Int,
+    openCount: Int,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while await recorder.counts() != (listCount, openCount) {
+        guard clock.now < deadline else {
+            throw ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "AppKitTestTimeout",
+                message: "Timed out waiting for kubeconfig source requests.",
+                operation: "test Cluster Manager kubeconfig sources"
             )
         }
         try await Task.sleep(for: .milliseconds(10))

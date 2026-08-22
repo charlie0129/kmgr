@@ -11,6 +11,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var workspaceControllers: [ObjectIdentifier: ClusterWorkspaceWindowController] = [:]
     private var columnsManagerControllers: [ObjectIdentifier: ColumnsManagerWindowController] = [:]
     private let clusterContextProvider: any ClusterContextProviding
+    private let kubeconfigSourceStore: KubeconfigSourceStore
     private let workspaceResourceProvider: any WorkspaceResourceProviding
     private let clusterConnectionActivityProvider: any ClusterConnectionActivityProviding
     private let clusterOperationHistoryProvider: any ClusterOperationHistoryProviding
@@ -57,6 +58,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let preferences = AppPreferencesStore()
         self.preferencesStore = preferences
         self.tableLayoutStore = TableLayoutStore()
+        self.kubeconfigSourceStore = KubeconfigSourceStore.shared
         self.engineColumnsConfigurationPath = preferences.current.columnsConfigurationPath
         self.engineMetricsRefreshSeconds = preferences.current.metricsRefreshSeconds
         self.columnConfigurationCoordinator = ColumnConfigurationCoordinator(
@@ -242,7 +244,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 guard let self, let controller else { return }
                 do {
                     let session = try await clusterContextProvider.openContext(
-                        reference: contextReference
+                        reference: contextReference,
+                        addedKubeconfigPaths: self.kubeconfigSourceStore.paths
                     )
                     guard !Task.isCancelled,
                         self.workspaceControllers[identifier] === controller
@@ -381,6 +384,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         pendingRestorationNotice = nil
         let controller = ClusterManagerWindowController(
             provider: clusterContextProvider,
+            sourceStore: kubeconfigSourceStore,
             initialNotice: initialNotice,
             tableLayoutStore: tableLayoutStore
         )
@@ -551,7 +555,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let identifier = ObjectIdentifier(controller)
             let attempt = RestoredWorkspaceConnectionAttempt(
                 provider: clusterContextProvider,
-                contextReference: record.state.contextReference
+                contextReference: record.state.contextReference,
+                addedKubeconfigPaths: kubeconfigSourceStore.paths
             )
             attempt.onOpened = { [weak self, weak controller] session in
                 guard let self, let controller,

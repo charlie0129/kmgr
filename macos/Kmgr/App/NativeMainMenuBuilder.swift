@@ -69,6 +69,12 @@ enum NativeMainMenuBuilder {
             keyEquivalent: "n",
             actions: actions
         )
+        addResponderItem(
+            to: menu,
+            title: "Add Kubeconfig Files…",
+            action: #selector(ClusterManagerWindowController.addKubeconfigFiles(_:)),
+            keyEquivalent: "o"
+        )
         menu.addItem(.separator())
         addResponderItem(
             to: menu,
