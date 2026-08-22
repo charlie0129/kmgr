@@ -18,20 +18,26 @@ protocol ContextualShortcutParentFallbackEligible: AnyObject {}
 
 @MainActor
 final class ContextualShortcutsCoordinator: NSObject {
+    static let isEnabledStorageKey = "kmgr.contextual-shortcuts.enabled"
+
     let shortcutsWindowController: ContextualShortcutsWindowController
 
     private weak var application: NSApplication?
     private weak var observedProviderObject: AnyObject?
+    private let defaults: UserDefaults
     private var isStarted = false
-    private(set) var isEnabled = true
+    private(set) var isEnabled: Bool
     private var refreshTask: Task<Void, Never>?
 
     init(
         application: NSApplication,
+        defaults: UserDefaults = .standard,
         shortcutsWindowController: ContextualShortcutsWindowController =
             ContextualShortcutsWindowController()
     ) {
         self.application = application
+        self.defaults = defaults
+        self.isEnabled = Self.loadIsEnabled(from: defaults)
         self.shortcutsWindowController = shortcutsWindowController
         super.init()
     }
@@ -95,18 +101,35 @@ final class ContextualShortcutsCoordinator: NSObject {
     }
 
     func toggle() {
-        isEnabled.toggle()
-        if !isEnabled {
+        setEnabled(!isEnabled)
+    }
+
+    func closeFromUser() {
+        setEnabled(false)
+    }
+
+    private func setEnabled(_ enabled: Bool) {
+        guard isEnabled != enabled else { return }
+        isEnabled = enabled
+        defaults.set(enabled, forKey: Self.isEnabledStorageKey)
+        if !enabled {
             hideAndUnbind()
         } else {
             scheduleRefresh()
         }
     }
 
-    func closeFromUser() {
-        guard isEnabled else { return }
-        isEnabled = false
-        hideAndUnbind()
+    private static func loadIsEnabled(from defaults: UserDefaults) -> Bool {
+        guard let savedValue = defaults.object(forKey: isEnabledStorageKey) else {
+            return true
+        }
+        guard CFGetTypeID(savedValue as CFTypeRef) == CFBooleanGetTypeID(),
+            let isEnabled = savedValue as? Bool
+        else {
+            defaults.removeObject(forKey: isEnabledStorageKey)
+            return true
+        }
+        return isEnabled
     }
 
     private func refresh() {

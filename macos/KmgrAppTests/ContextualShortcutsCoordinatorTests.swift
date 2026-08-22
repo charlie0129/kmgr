@@ -26,6 +26,8 @@ struct ContextualShortcutsCoordinatorTests {
 
     @Test("active leaf provider wins and deactivation hides the panel")
     func activeLeafWins() throws {
+        let storage = try shortcutsVisibilityStorage()
+        defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
         let parent = ShortcutProviderWindowController(
             snapshot: ContextualShortcutCatalog.resourceList(
                 title: "Pods",
@@ -35,7 +37,10 @@ struct ContextualShortcutsCoordinatorTests {
         let leaf = ShortcutProviderWindowController(
             snapshot: ContextualShortcutCatalog.resourceFilter
         )
-        let coordinator = ContextualShortcutsCoordinator(application: .shared)
+        let coordinator = ContextualShortcutsCoordinator(
+            application: .shared,
+            defaults: storage.defaults
+        )
         defer {
             coordinator.stop()
             parent.window?.removeChildWindow(leaf.window!)
@@ -66,6 +71,8 @@ struct ContextualShortcutsCoordinatorTests {
 
     @Test("unknown child windows get generic help rather than parent table letters")
     func unknownChildIsGeneric() throws {
+        let storage = try shortcutsVisibilityStorage()
+        defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
         let parent = ShortcutProviderWindowController(
             snapshot: ContextualShortcutCatalog.resourceList(
                 title: "Pods",
@@ -73,7 +80,10 @@ struct ContextualShortcutsCoordinatorTests {
             )
         )
         let child = UnknownShortcutChildController()
-        let coordinator = ContextualShortcutsCoordinator(application: .shared)
+        let coordinator = ContextualShortcutsCoordinator(
+            application: .shared,
+            defaults: storage.defaults
+        )
         defer {
             coordinator.stop()
             parent.window?.removeChildWindow(child.window!)
@@ -91,13 +101,18 @@ struct ContextualShortcutsCoordinatorTests {
 
     @Test("parent fallback requires an explicit eligible child")
     func explicitParentFallback() throws {
+        let storage = try shortcutsVisibilityStorage()
+        defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
         let parentSnapshot = ContextualShortcutCatalog.resourceList(
             title: "Services",
             availability: ResourceListShortcutAvailability(canStartPortForward: true)
         )
         let parent = ShortcutProviderWindowController(snapshot: parentSnapshot)
         let child = EligibleShortcutChildController()
-        let coordinator = ContextualShortcutsCoordinator(application: .shared)
+        let coordinator = ContextualShortcutsCoordinator(
+            application: .shared,
+            defaults: storage.defaults
+        )
         defer {
             coordinator.stop()
             parent.window?.removeChildWindow(child.window!)
@@ -110,37 +125,85 @@ struct ContextualShortcutsCoordinatorTests {
         #expect(coordinator.shortcutsWindowController.currentSnapshot == parentSnapshot)
     }
 
-    @Test("closing and the Window menu toggle keep shortcuts disabled until reopened")
-    func closeAndToggle() throws {
+    @Test("closing and the Window menu toggle persist one global visibility state")
+    func closeAndTogglePersistGlobally() throws {
+        let storage = try shortcutsVisibilityStorage()
+        defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
         let host = ShortcutProviderWindowController(snapshot: ContextualShortcutCatalog.resourceFilter)
-        let coordinator = ContextualShortcutsCoordinator(application: .shared)
-        coordinator.shortcutsWindowController.onUserClose = { [weak coordinator] in
-            coordinator?.closeFromUser()
-        }
-        defer {
-            coordinator.stop()
-            host.close()
-        }
+        defer { host.close() }
 
-        coordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
-        let panel = try #require(coordinator.shortcutsWindowController.window)
+        let initialCoordinator = ContextualShortcutsCoordinator(
+            application: .shared,
+            defaults: storage.defaults
+        )
+        initialCoordinator.shortcutsWindowController.onUserClose = { [weak initialCoordinator] in
+            initialCoordinator?.closeFromUser()
+        }
+        defer { initialCoordinator.stop() }
+
+        initialCoordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
+        let panel = try #require(initialCoordinator.shortcutsWindowController.window)
         #expect(panel.isVisible)
-        #expect(coordinator.isEnabled)
+        #expect(initialCoordinator.isEnabled)
 
         panel.performClose(nil)
         #expect(!panel.isVisible)
-        #expect(!coordinator.isEnabled)
-        coordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
+        #expect(!initialCoordinator.isEnabled)
+        initialCoordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
         #expect(!panel.isVisible)
+        initialCoordinator.stop()
 
-        coordinator.toggle()
-        coordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
+        let closedCoordinator = ContextualShortcutsCoordinator(
+            application: .shared,
+            defaults: storage.defaults
+        )
+        defer { closedCoordinator.stop() }
+        #expect(!closedCoordinator.isEnabled)
+        closedCoordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
+        #expect(closedCoordinator.shortcutsWindowController.window?.isVisible == false)
+
+        closedCoordinator.toggle()
+        #expect(closedCoordinator.isEnabled)
+        closedCoordinator.synchronize(isApplicationActive: true, keyWindow: host.window)
+        #expect(closedCoordinator.shortcutsWindowController.window?.isVisible == true)
+        closedCoordinator.stop()
+
+        let reopenedCoordinator = ContextualShortcutsCoordinator(
+            application: .shared,
+            defaults: storage.defaults
+        )
+        defer { reopenedCoordinator.stop() }
+        #expect(reopenedCoordinator.isEnabled)
+    }
+
+    @Test("first launch is enabled and invalid saved visibility resets to that default")
+    func defaultAndInvalidVisibility() throws {
+        let storage = try shortcutsVisibilityStorage()
+        defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
+
+        var coordinator = ContextualShortcutsCoordinator(
+            application: .shared,
+            defaults: storage.defaults
+        )
         #expect(coordinator.isEnabled)
-        #expect(panel.isVisible)
+        #expect(storage.defaults.object(
+            forKey: ContextualShortcutsCoordinator.isEnabledStorageKey
+        ) == nil)
+        coordinator.stop()
 
-        coordinator.toggle()
-        #expect(!coordinator.isEnabled)
-        #expect(!panel.isVisible)
+        storage.defaults.set(
+            "closed",
+            forKey: ContextualShortcutsCoordinator.isEnabledStorageKey
+        )
+        coordinator = ContextualShortcutsCoordinator(
+            application: .shared,
+            defaults: storage.defaults
+        )
+        #expect(coordinator.isEnabled)
+        #expect(storage.defaults.object(
+            forKey: ContextualShortcutsCoordinator.isEnabledStorageKey
+        ) == nil)
+        coordinator.stop()
     }
 }
 }
@@ -202,4 +265,11 @@ private func shortcutKeys(in window: NSWindow?) -> [String] {
 @MainActor
 private func contextualShortcutDescendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(contextualShortcutDescendants(of:))
+}
+
+private func shortcutsVisibilityStorage() throws -> (defaults: UserDefaults, suite: String) {
+    let suite = "KmgrAppTests.ContextualShortcuts.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defaults.removePersistentDomain(forName: suite)
+    return (defaults, suite)
 }

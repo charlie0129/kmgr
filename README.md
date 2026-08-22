@@ -160,7 +160,10 @@ so they do not steal input from filters, YAML/data editors, logs, or terminals.
 Kmgr also keeps one passive **Shortcuts** panel above its windows while the app
 is active. The panel follows the active leaf view (including resource filters,
 Pod containers, object Data, and the Cluster Manager), never takes keyboard
-focus, and hides when no supported context is active.
+focus, and hides when no supported context is active. It is shown by default on
+first launch. Close the panel or use **Window → Hide Shortcuts** to disable it;
+**Window → Show Shortcuts** enables it again. Kmgr remembers this choice
+globally across launches rather than per cluster.
 
 | Binding | Action |
 | --- | --- |
