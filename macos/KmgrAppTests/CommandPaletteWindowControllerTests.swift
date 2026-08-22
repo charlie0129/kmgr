@@ -8,6 +8,27 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Command palette window", .serialized)
 struct CommandPaletteWindowControllerTests {
+    @Test("result text is vertically centered within its row")
+    func resultTextIsVerticallyCentered() throws {
+        let controller = makePaletteController(provider: ControllablePaletteSearchProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let table = try paletteControls(in: controller).table
+        let cell = try #require(table.view(
+            atColumn: 0,
+            row: 0,
+            makeIfNecessary: true
+        ))
+        cell.layoutSubtreeIfNeeded()
+        let labels = paletteDescendants(of: cell).compactMap { $0 as? NSTextField }
+        let title = try #require(labels.first { $0.stringValue == "Go to Pod" })
+        let detail = try #require(labels.first { $0.stringValue == "pods" })
+        let textFrame = cell.convert(title.bounds, from: title)
+            .union(cell.convert(detail.bounds, from: detail))
+
+        #expect(abs(textFrame.midY - cell.bounds.midY) <= 0.5)
+    }
+
     @Test("long command-palette scope stays within the panel")
     func longScopeDoesNotWidenPanel() throws {
         let contextName = String(repeating: "context-", count: 100)

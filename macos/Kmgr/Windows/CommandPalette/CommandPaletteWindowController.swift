@@ -792,6 +792,7 @@ private final class PaletteResultCell: NSTableCellView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let shortcutLabel = NSTextField(labelWithString: "")
+    private let textLayoutGuide = NSLayoutGuide()
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -811,6 +812,7 @@ private final class PaletteResultCell: NSTableCellView {
         shortcutLabel.setContentHuggingPriority(.required, for: .horizontal)
         shortcutLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         shortcutLabel.setAccessibilityIdentifier("command-palette.shortcut")
+        addLayoutGuide(textLayoutGuide)
         for value in [icon, titleLabel, detailLabel, shortcutLabel] {
             value.translatesAutoresizingMaskIntoConstraints = false
             addSubview(value)
@@ -820,12 +822,19 @@ private final class PaletteResultCell: NSTableCellView {
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 20),
             icon.heightAnchor.constraint(equalToConstant: 20),
-            titleLabel.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 9),
-            titleLabel.trailingAnchor.constraint(equalTo: shortcutLabel.leadingAnchor, constant: -10),
-            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            detailLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            textLayoutGuide.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 9),
+            textLayoutGuide.trailingAnchor.constraint(
+                equalTo: shortcutLabel.leadingAnchor,
+                constant: -10
+            ),
+            textLayoutGuide.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: textLayoutGuide.leadingAnchor),
+            titleLabel.trailingAnchor.constraint(equalTo: textLayoutGuide.trailingAnchor),
+            titleLabel.topAnchor.constraint(equalTo: textLayoutGuide.topAnchor),
+            detailLabel.leadingAnchor.constraint(equalTo: textLayoutGuide.leadingAnchor),
+            detailLabel.trailingAnchor.constraint(equalTo: textLayoutGuide.trailingAnchor),
             detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 1),
+            detailLabel.bottomAnchor.constraint(equalTo: textLayoutGuide.bottomAnchor),
             shortcutLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             shortcutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             shortcutLabel.widthAnchor.constraint(equalToConstant: 28),
