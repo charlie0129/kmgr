@@ -1039,7 +1039,7 @@ private final class ClusterManagerViewController: NSViewController,
 
         stateProgress.style = .spinning
         stateProgress.controlSize = .regular
-        stateProgress.isDisplayedWhenStopped = false
+        stateProgress.isHidden = true
 
         let stack = NSStackView(
             views: [stateImageView, stateProgress, stateTitleLabel, stateMessageLabel]
@@ -1158,9 +1158,11 @@ private final class ClusterManagerViewController: NSViewController,
         stateTitleLabel.stringValue = title
         stateMessageLabel.stringValue = message
         if spinning {
+            stateProgress.isHidden = false
             stateProgress.startAnimation(nil)
         } else {
             stateProgress.stopAnimation(nil)
+            stateProgress.isHidden = true
         }
     }
 

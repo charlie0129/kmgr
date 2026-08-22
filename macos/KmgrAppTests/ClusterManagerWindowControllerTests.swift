@@ -56,6 +56,31 @@ struct ClusterManagerWindowControllerTests {
         #expect(maximumComponent < 0.5)
     }
 
+    @Test("empty-state icon uses the configured title spacing")
+    func emptyStateIconUsesConfiguredTitleSpacing() async throws {
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in [] },
+                openContext: { _ in throw CancellationError() }
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let root = try #require(controller.window?.contentView)
+        let title = try await waitForClusterManagerLabel(
+            "No kubeconfig contexts found",
+            in: root
+        )
+        root.layoutSubtreeIfNeeded()
+        let stack = try #require(title.superview as? NSStackView)
+        let icon = try #require(stack.arrangedSubviews.first { $0 is NSImageView })
+        let iconAlignment = icon.alignmentRect(forFrame: icon.frame)
+        let titleAlignment = title.alignmentRect(forFrame: title.frame)
+
+        #expect(abs(iconAlignment.minY - titleAlignment.maxY - stack.spacing) < 0.5)
+    }
+
     @Test("loaded context list collapses the hidden issue region")
     func loadedListCollapsesHiddenIssueRegion() async throws {
         let context = ClusterContextSummary(
@@ -665,6 +690,33 @@ private func clusterManagerVerticalLayout(
 @MainActor
 private func clusterManagerDescendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(clusterManagerDescendants(of:))
+}
+
+@MainActor
+private func waitForClusterManagerLabel(
+    _ value: String,
+    in root: NSView,
+    timeout: Duration = .seconds(2)
+) async throws -> NSTextField {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while true {
+        if let label = clusterManagerDescendants(of: root)
+            .compactMap({ $0 as? NSTextField })
+            .first(where: { $0.stringValue == value })
+        {
+            return label
+        }
+        guard clock.now < deadline else {
+            throw ClusterManagerIssue(
+                category: .internalFailure,
+                reason: "AppKitTestTimeout",
+                message: "Timed out waiting for Cluster Manager state text.",
+                operation: "test Cluster Manager state presentation"
+            )
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
 }
 
 @MainActor
