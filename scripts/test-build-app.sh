@@ -46,6 +46,9 @@ bundle_icon_name=$(/usr/bin/plutil -extract CFBundleIconName raw -o - "$info_pli
   fail "Debug Go builds lost the explicit development-only build tag"
 [[ "$script" == *'go_ldflags=(-s -w -X "main.version=$version")'* ]] ||
   fail "Release Go builds do not strip symbols while injecting the version"
+[[ "$script" == *'/usr/bin/plutil -replace CFBundleShortVersionString'* &&
+  "$script" == *'-string "$version"'* ]] ||
+  fail "the app bundle no longer receives the backend build version"
 [[ "$script" == *'go_build_flags=()'* ]] ||
   fail "Release Go builds no longer clear development-only build tags"
 [[ "$script" == *'"${go_build_flags[@]}"'* ]] ||
@@ -65,13 +68,16 @@ icon_compile_number=$(grep -nF 'xcrun actool "$icon_source"' "$build_script" | c
 runtime_copy_number=$(grep -nF 'xcrun swift-stdlib-tool' "$build_script" | cut -d: -f1)
 rpath_delete_number=$(grep -nF 'xcrun install_name_tool -delete_rpath' "$build_script" | cut -d: -f1)
 framework_sign_number=$(grep -nF 'codesign --force --sign - "$framework"' "$build_script" | cut -d: -f1)
+version_write_number=$(grep -nF '/usr/bin/plutil -replace CFBundleShortVersionString' "$build_script" | cut -d: -f1)
 verify_number=$(grep -nF '"$repo_root/scripts/verify-app.sh" "$app_dir"' "$build_script" | cut -d: -f1)
 [[ -n "$strip_number" && -n "$helper_sign_number" &&
   -n "$bundle_sign_number" && -n "$icon_compile_number" &&
   -n "$runtime_copy_number" && -n "$rpath_delete_number" &&
-  -n "$framework_sign_number" && -n "$verify_number" ]] ||
+  -n "$framework_sign_number" && -n "$version_write_number" &&
+  -n "$verify_number" ]] ||
   fail "could not locate strip/signing commands"
 (( icon_compile_number < helper_sign_number &&
+  version_write_number < helper_sign_number &&
   runtime_copy_number < rpath_delete_number &&
   rpath_delete_number < strip_number &&
   strip_number < framework_sign_number &&

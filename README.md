@@ -35,11 +35,13 @@ executable and a Go helper that retains its symbol and DWARF data. It embeds
 `kmgr-engine` under `Kmgr.app/Contents/Helpers` and compiles `assets/kmgr.icon`
 into a Tahoe `Assets.car` plus a pre-Tahoe `kmgr.icns` fallback. It signs the
 embedded Swift back-deployment runtime and helper first, then ad-hoc signs the
-bundle. It finishes with a strict offline check of bundle metadata, both
-application-icon resources, executable and runtime-library layout, nested
-signatures, and the no-App-Sandbox policy. No signing identity is required. The
-same verifier can inspect an existing artifact with `./scripts/verify-app.sh`;
-the complete deterministic and runtime-only release checklist is in
+bundle. The app and helper versions both use the build's
+`git describe --always --dirty` value. It finishes with a strict offline check
+of bundle metadata, both application-icon resources, executable and
+runtime-library layout, nested signatures, and the no-App-Sandbox policy. No
+signing identity is required. The same verifier can inspect an existing
+artifact with `./scripts/verify-app.sh`; the complete deterministic and
+runtime-only release checklist is in
 [docs/release-verification.md](docs/release-verification.md).
 
 Use `CONFIGURATION=release make app` for a smaller distribution candidate. It

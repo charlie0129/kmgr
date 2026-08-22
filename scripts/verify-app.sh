@@ -70,6 +70,7 @@ bundle_executable=$(plist_value CFBundleExecutable)
 bundle_icon_file=$(plist_value CFBundleIconFile)
 bundle_icon_name=$(plist_value CFBundleIconName)
 bundle_type=$(plist_value CFBundlePackageType)
+bundle_version=$(plist_value CFBundleShortVersionString)
 minimum_system=$(plist_value LSMinimumSystemVersion)
 principal_class=$(plist_value NSPrincipalClass)
 
@@ -89,8 +90,7 @@ principal_class=$(plist_value NSPrincipalClass)
   fail "minimum system is $minimum_system, expected $expected_minimum_system"
 [[ "$principal_class" == NSApplication ]] ||
   fail "NSPrincipalClass is $principal_class, expected NSApplication"
-[[ -n "$(plist_value CFBundleShortVersionString)" ]] ||
-  fail "CFBundleShortVersionString is empty"
+[[ -n "$bundle_version" ]] || fail "CFBundleShortVersionString is empty"
 [[ -n "$(plist_value CFBundleVersion)" ]] || fail "CFBundleVersion is empty"
 
 main_executable="$contents_dir/MacOS/$bundle_executable"
@@ -167,9 +167,13 @@ for executable in "$main_executable" "$helper_executable"; do
     fail "App Sandbox entitlement is not permitted: $executable"
 done
 
-engine_version=$("$helper_executable" --version) ||
+engine_version_output=$("$helper_executable" --version) ||
   fail "embedded helper cannot execute on the build host"
-[[ "$engine_version" == "kmgr-engine "* ]] ||
+[[ "$engine_version_output" == "kmgr-engine "* ]] ||
   fail "embedded helper returned an unexpected version string"
+engine_version=${engine_version_output#kmgr-engine }
+[[ -n "$engine_version" ]] || fail "embedded helper returned an empty version"
+[[ "$bundle_version" == "$engine_version" ]] ||
+  fail "app version $bundle_version does not match engine version $engine_version"
 
 print "verified app bundle: $app_dir"

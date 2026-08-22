@@ -81,6 +81,9 @@ swift_bin_dir=$(swift build \
 
 cp "$swift_bin_dir/Kmgr" "$macos_dir/Kmgr"
 cp "$repo_root/macos/Kmgr/Resources/Info.plist" "$contents_dir/Info.plist"
+/usr/bin/plutil -replace CFBundleShortVersionString \
+  -string "$version" \
+  "$contents_dir/Info.plist"
 chmod 0755 "$macos_dir/Kmgr" "$helpers_dir/kmgr-engine"
 
 xcrun swift-stdlib-tool \
