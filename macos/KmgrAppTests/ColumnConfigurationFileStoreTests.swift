@@ -5,7 +5,7 @@ import Testing
 
 @Test func columnConfigurationFileStoreLoadsPromptStyleYAML() throws {
     let fixture = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         views:
           - match:
@@ -54,7 +54,7 @@ import Testing
 
 @Test func columnConfigurationFileStorePreservesAcceleratorSuffixDefaultAndDisableSentinels() throws {
     let omitted = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         """#)
     #expect(
@@ -63,7 +63,7 @@ import Testing
     )
 
     let disabled = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         accelerators:
           autoDetectSuffixes: []
@@ -73,7 +73,7 @@ import Testing
 
 @Test func columnConfigurationFileStoreReportsDocumentedSchemaErrors() throws {
     let blankTitle = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         views:
           - match: {version: v1, resource: pods}
@@ -83,7 +83,7 @@ import Testing
     #expect(throwsIssue { _ = try blankTitle.store.load() }?.message.contains(".title") == true)
 
     let negativeWidth = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         views:
           - match: {version: v1, resource: pods}
@@ -93,7 +93,7 @@ import Testing
     #expect(throwsIssue { _ = try negativeWidth.store.load() }?.message.contains(".width") == true)
 
     let nonFiniteWidth = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         views:
           - match: {version: v1, resource: pods}
@@ -105,7 +105,7 @@ import Testing
     )
 
     let invalidAccelerator = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         accelerators:
           resources:
@@ -120,7 +120,7 @@ import Testing
 
 @Test func columnConfigurationFileStoreRejectsAnchorsAndAliases() throws {
     let fixture = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         views:
           - match: &podMatch
@@ -138,7 +138,7 @@ import Testing
 
 @Test func columnConfigurationFileStoreRejectsMergeKeys() throws {
     let fixture = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         views:
           - match:
@@ -153,7 +153,7 @@ import Testing
 
 @Test func columnConfigurationFileStoreRejectsUnknownFields() throws {
     let fixture = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         views:
           - match: {version: v1, resource: pods}
@@ -173,7 +173,7 @@ import Testing
 
 @Test func columnConfigurationFileStoreRejectsInvalidFieldTypesAndDuplicateKeys() throws {
     let invalidType = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         views:
           - match: {version: v1, resource: pods}
@@ -189,7 +189,7 @@ import Testing
     #expect(typeIssue?.message.contains("does not match") == true)
 
     let invalidSection = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         accelerators: not-a-mapping
         """#)
@@ -197,7 +197,7 @@ import Testing
     #expect(sectionIssue?.message.contains("does not match") == true)
 
     let duplicateKey = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         apiVersion: duplicate
         celEnvironment: kmgr.cel/v1
         """#)
@@ -207,17 +207,17 @@ import Testing
 
 @Test func columnConfigurationFileStoreRejectsMultipleDocumentsAndNonStringKeys() throws {
     let multipleDocuments = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         ---
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         """#)
     let documentIssue = throwsIssue { _ = try multipleDocuments.store.load() }
     #expect(documentIssue?.message.contains("single-document YAML") == true)
 
     let nonStringKey = try ColumnFileFixture(yaml: #"""
-        apiVersion: kmgr.charlie0129.dev/v1alpha1
+        apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         accelerators:
           resources:

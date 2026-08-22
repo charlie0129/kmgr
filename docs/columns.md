@@ -1,6 +1,6 @@
 # Programmable columns
 
-Column definitions are stored at `~/Library/Application Support/kmgr/columns.yaml`. The file schema starts at `kmgr.charlie0129.dev/v1alpha1`; the independently versioned CEL environment is `kmgr.cel/v1`. A definition must declare its result type. Changing expression semantics requires a new environment version and an explicit migration error rather than silent reinterpretation.
+Column definitions are stored at `~/Library/Application Support/kmgr/columns.yaml`. The file schema starts at `kmgr.chlc.cc/v1alpha1`; the independently versioned CEL environment is `kmgr.cel/v1`. A definition must declare its result type. Changing expression semantics requires a new environment version and an explicit migration error rather than silent reinterpretation.
 
 ## File schema and complete example
 
@@ -15,7 +15,7 @@ rewrite anchors, aliases, merge keys, custom tags, and non-string mapping keys.
 This example exercises every supported top-level and per-column field:
 
 ```yaml
-apiVersion: kmgr.charlie0129.dev/v1alpha1
+apiVersion: kmgr.chlc.cc/v1alpha1
 celEnvironment: kmgr.cel/v1
 
 accelerators:
@@ -88,7 +88,7 @@ The top-level fields are:
 
 | Field | Required | Contract |
 | --- | --- | --- |
-| `apiVersion` | yes | Must be exactly `kmgr.charlie0129.dev/v1alpha1`. |
+| `apiVersion` | yes | Must be exactly `kmgr.chlc.cc/v1alpha1`. |
 | `celEnvironment` | yes | Must be exactly `kmgr.cel/v1`. It versions CEL syntax, activation, helpers, and coercion independently from the file shape. |
 | `views` | no | Ordered exact-GVR layouts. An omitted or unmatched GVR uses Kmgr's built-in layout. |
 | `accelerators` | no | Exact-resource and suffix rules for optional accelerator discovery; omission uses the default suffixes. |

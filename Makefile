@@ -1,6 +1,6 @@
 SHELL := /bin/zsh
 
-.PHONY: all generate test app run clean test-build test-go test-swift
+.PHONY: all generate test app app-release run clean test-build test-go test-swift clean-app-preferences
 
 all: test
 
@@ -34,3 +34,7 @@ run: app
 
 clean:
 	rm -rf build bin macos/.build .build
+
+clean-app-preferences:
+	rm -rf ~/Library/Application\ Support/kmgr
+	rm -f ~/Library/Preferences/cc.chlc.kmgr.plist

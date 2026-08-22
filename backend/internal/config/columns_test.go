@@ -77,7 +77,7 @@ func TestParseColumnsRejectsLegacyNativeTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = ParseColumns([]byte(`
-apiVersion: kmgr.charlie0129.dev/v1alpha1
+apiVersion: kmgr.chlc.cc/v1alpha1
 celEnvironment: kmgr.cel/v1
 views:
 - match: {version: v1, resource: pods}
@@ -97,7 +97,7 @@ func TestParseColumnsCompilesVersionedCELAndResolvesRequestedPrograms(t *testing
 		t.Fatal(err)
 	}
 	compiled, err := ParseColumns([]byte(`
-apiVersion: kmgr.charlie0129.dev/v1alpha1
+apiVersion: kmgr.chlc.cc/v1alpha1
 celEnvironment: kmgr.cel/v1
 views:
   - match:
@@ -139,7 +139,7 @@ func TestCompiledColumnsExposesExactAcceleratorConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	compiled, err := ParseColumns([]byte(`
-apiVersion: kmgr.charlie0129.dev/v1alpha1
+apiVersion: kmgr.chlc.cc/v1alpha1
 celEnvironment: kmgr.cel/v1
 accelerators:
   autoDetectSuffixes: [/gpu, /ppu]
@@ -177,7 +177,7 @@ func TestParseColumnsPreservesOmittedAndExplicitlyEmptyAcceleratorSuffixes(t *te
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			compiled, err := ParseColumns([]byte(
-				"apiVersion: kmgr.charlie0129.dev/v1alpha1\n"+
+				"apiVersion: kmgr.chlc.cc/v1alpha1\n"+
 					"celEnvironment: kmgr.cel/v1\n"+acceleratorYAML,
 			), compiler)
 			if err != nil {
@@ -237,7 +237,7 @@ func TestParseColumnsRejectsInvalidPresentationAndAcceleratorSchema(t *testing.T
 		name, body := name, body
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			input := "apiVersion: kmgr.charlie0129.dev/v1alpha1\n" +
+			input := "apiVersion: kmgr.chlc.cc/v1alpha1\n" +
 				"celEnvironment: kmgr.cel/v1\n" + body
 			if _, err := ParseColumns([]byte(input), compiler); err == nil {
 				t.Fatalf("invalid schema accepted:\n%s", input)
@@ -269,7 +269,7 @@ func TestResolvePreservesDisplayIDAndUsesConfiguredExtractorValue(t *testing.T) 
 		t.Fatal(err)
 	}
 	compiled, err := ParseColumns([]byte(`
-apiVersion: kmgr.charlie0129.dev/v1alpha1
+apiVersion: kmgr.chlc.cc/v1alpha1
 celEnvironment: kmgr.cel/v1
 views:
 - match: {version: v1, resource: pods}
@@ -310,7 +310,7 @@ func TestResolveUsesEnabledDefinitionsWhenRequestOmitsColumnIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	compiled, err := ParseColumns([]byte(`
-apiVersion: kmgr.charlie0129.dev/v1alpha1
+apiVersion: kmgr.chlc.cc/v1alpha1
 celEnvironment: kmgr.cel/v1
 views:
 - match: {version: v1, resource: pods}
@@ -356,7 +356,7 @@ func TestParseColumnsCompileValidatesSourceValueContracts(t *testing.T) {
 		name, column := name, column
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			input := "apiVersion: kmgr.charlie0129.dev/v1alpha1\n" +
+			input := "apiVersion: kmgr.chlc.cc/v1alpha1\n" +
 				"celEnvironment: kmgr.cel/v1\nviews:\n" +
 				"- match: {version: v1, resource: pods}\n  columns:\n  - " + column + "\n"
 			if _, err := ParseColumns([]byte(input), compiler); err == nil {
@@ -426,9 +426,9 @@ func TestParseColumnsRejectsUnknownFieldsEnvironmentAndDuplicateIDs(t *testing.T
 	}
 	cases := []string{
 		"apiVersion: wrong\ncelEnvironment: kmgr.cel/v1\n",
-		"apiVersion: kmgr.charlie0129.dev/v1alpha1\ncelEnvironment: future\n",
-		"apiVersion: kmgr.charlie0129.dev/v1alpha1\ncelEnvironment: kmgr.cel/v1\nunknown: true\n",
-		`apiVersion: kmgr.charlie0129.dev/v1alpha1
+		"apiVersion: kmgr.chlc.cc/v1alpha1\ncelEnvironment: future\n",
+		"apiVersion: kmgr.chlc.cc/v1alpha1\ncelEnvironment: kmgr.cel/v1\nunknown: true\n",
+		`apiVersion: kmgr.chlc.cc/v1alpha1
 celEnvironment: kmgr.cel/v1
 views:
 - match: {version: v1, resource: pods}
@@ -451,7 +451,7 @@ func TestColumnManagerKeepsLastValidProgramsAfterInvalidExternalEdit(t *testing.
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "columns.yaml")
-	valid := []byte(`apiVersion: kmgr.charlie0129.dev/v1alpha1
+	valid := []byte(`apiVersion: kmgr.chlc.cc/v1alpha1
 celEnvironment: kmgr.cel/v1
 views:
 - match: {version: v1, resource: pods}

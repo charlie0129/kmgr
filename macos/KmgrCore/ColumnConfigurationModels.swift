@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 public enum ColumnConfigurationSchema {
-    public static let apiVersion = "kmgr.charlie0129.dev/v1alpha1"
+    public static let apiVersion = "kmgr.chlc.cc/v1alpha1"
     public static let celEnvironment = "kmgr.cel/v1"
 }
 

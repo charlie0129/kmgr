@@ -6,13 +6,10 @@ programmatic AppKit interface with an out-of-process Go engine built on
 engine owns Kubernetes discovery, LIST/WATCH streams, caches, metrics,
 mutations, logs, exec, and port-forwards.
 
-The current build is an end-to-end developer release. It opens real kubeconfig
-contexts and does not substitute static demo data.
-
 ## Requirements
 
 - macOS 15 or later
-- Xcode 26.3 or later
+- Xcode 26 or later
 - Go 1.26 or later
 - A kubeconfig using static credentials, certificates, basic authentication,
   or a non-interactive `exec` credential plugin
@@ -44,7 +41,7 @@ artifact with `./scripts/verify-app.sh`; the complete deterministic and
 runtime-only release checklist is in
 [docs/release-verification.md](docs/release-verification.md).
 
-Use `CONFIGURATION=release make app` for a smaller distribution candidate. It
+Use `make app-release` for a smaller distribution candidate. It
 builds optimized Swift code, removes the copied Swift executable's symbol table
 while leaving SwiftPM's separate dSYM under `macos/.build` for archival, and
 builds the Go helper with `-s -w` while retaining `-trimpath` and the injected
@@ -220,7 +217,7 @@ Column definitions live at:
 ~/Library/Application Support/kmgr/columns.yaml
 ```
 
-The schema is `kmgr.charlie0129.dev/v1alpha1` and the independently versioned
+The schema is `kmgr.chlc.cc/v1alpha1` and the independently versioned
 CEL environment is `kmgr.cel/v1`. The Columns window can enable and reorder
 definitions, choose GVR-compatible built-in or metric extractors from a native
 catalog, enter exact scheduler resources, add or edit CEL definitions, preview

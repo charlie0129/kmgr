@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	ColumnsAPIVersion  = "kmgr.charlie0129.dev/v1alpha1"
+	ColumnsAPIVersion  = "kmgr.chlc.cc/v1alpha1"
 	DefaultColumnsFile = "columns.yaml"
 )
 
