@@ -17,6 +17,11 @@
 - Do not trade scalability for implementation convenience without discussing it with the user first.
 - If the requested behavior cannot be implemented efficiently at the target scale, stop and explain the constraint and alternatives before implementing it.
 
+## Reuse and existing implementations
+
+- Before implementing behavior, you can search the repository and relevant git history for existing implementations, helpers, dependencies, UI patterns, and tests that solve the same or a closely related problem.
+- If extending an existing implementation or extracting a clean shared component produces simpler code, prefer it over introducing parallel logic. On the other hand, if it would introduce unnecessary complexity, prefer a separate implementation.
+
 ## UX and accessibility
 
 - Prefer keyboard-first workflows. Primary actions should be reachable without a mouse, with predictable focus behavior and native keyboard shortcuts where appropriate.
