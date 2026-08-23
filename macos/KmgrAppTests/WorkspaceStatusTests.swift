@@ -88,7 +88,7 @@ struct WorkspaceStatusTests {
         var board = WorkspaceStatusBoard()
         board.set(WorkspaceStatus(
             "12 Pods · Watching",
-            toolTip: "Label selector: app=api"
+            toolTip: "The current resource query is explicit."
         ), for: .content)
         board.set(WorkspaceStatus(
             "47 resource kinds · discovery incomplete",
@@ -108,7 +108,7 @@ struct WorkspaceStatusTests {
         ))
         #expect(status.severity == .error)
         #expect(!status.busy)
-        #expect(status.toolTip?.contains("Label selector: app=api") == true)
+        #expect(status.toolTip?.contains("The current resource query is explicit.") == true)
         #expect(status.toolTip?.contains("One API group is unavailable.") == true)
         #expect(status.toolTip?.contains("Namespace access was denied.") == true)
     }

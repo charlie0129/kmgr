@@ -28,8 +28,8 @@ public enum ResourceDrillDownPlan: Hashable, Sendable {
 }
 
 /// Formats explicit Kubernetes clauses embedded in the visible resource
-/// query. Kubernetes field-selector values are escaped first; the complete
-/// clause is then quoted using the resource-query grammar's escaping rules.
+/// query. Kubernetes field-selector values retain Kubernetes' own escaping;
+/// the outer query quote is only used to preserve whitespace in the clause.
 public enum ResourceQueryExpression {
     public static func nativeLabelSelector(_ selector: String) -> String {
         quotedClause(prefix: "labelSelector", value: selector)
@@ -48,7 +48,6 @@ public enum ResourceQueryExpression {
 
     private static func quotedClause(prefix: String, value: String) -> String {
         let escaped = value
-            .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         return "\(prefix):\"\(escaped)\""
     }

@@ -116,10 +116,10 @@ func TestNativeSelectorsAreExplicitAndMatchLocally(t *testing.T) {
 	}
 }
 
-func TestNativeFieldSelectorEscapesValuesThroughVisibleQueryGrammar(t *testing.T) {
+func TestNativeFieldSelectorPreservesKubernetesEscapes(t *testing.T) {
 	t.Parallel()
 	compiled, err := Compile(
-		`fieldSelector:"metadata.name=a\\\\b\\,c\\=d"`,
+		`fieldSelector:"metadata.name=a\\b\,c\=d"`,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -132,6 +132,22 @@ func TestNativeFieldSelectorEscapesValuesThroughVisibleQueryGrammar(t *testing.T
 		Fields: map[string]string{"metadata.name": `a\b,c=d`},
 	}) {
 		t.Fatal("escaped native field selector did not match its literal value")
+	}
+}
+
+func TestNativeFieldSelectorPreservesKubernetesEscapesTypedByTheUser(t *testing.T) {
+	t.Parallel()
+	compiled, err := Compile(`fieldSelector:"metadata.name=a\,b"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := compiled.NativeFieldSelectors(), []string{`metadata.name=a\,b`}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("native field selectors = %#v, want %#v", got, want)
+	}
+	if !compiled.Match(Candidate{
+		Fields: map[string]string{"metadata.name": "a,b"},
+	}) {
+		t.Fatal("native field selector did not match its escaped literal value")
 	}
 }
 

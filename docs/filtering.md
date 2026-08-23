@@ -28,7 +28,7 @@ Structured local terms are:
 | `field:path==value` | Field value exactly equals `value` (case-sensitive) |
 
 Single or double quotes preserve spaces, and a backslash escapes the next
-character. Keys and field paths are exact and case-sensitive.
+character in local terms. Keys and field paths are exact and case-sensitive.
 
 ## Explicit Kubernetes selectors
 
@@ -47,6 +47,10 @@ fieldSelector:"spec.nodeName=worker-1"
 selectors. Multiple native clauses are ANDed. They are the only query terms
 sent as LIST/WATCH selectors; local `label:` and `field:` terms never become
 implicit API filters.
+
+The contents of an explicit native selector are passed to Kubernetes
+unchanged, including Kubernetes backslash escapes such as `\,`, `\=`, and
+`\\`. The surrounding query quote only groups the clause.
 
 A malformed native selector is an inline query error. It is never silently
 dropped or replaced with a broader query.

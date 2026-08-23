@@ -112,10 +112,10 @@ import Testing
     ))
 }
 
-@Test func nativeFieldQueryEscapesKubernetesAndVisibleQuerySyntax() {
+@Test func nativeFieldQueryPreservesKubernetesEscapes() {
     #expect(ResourceQueryExpression.nativeFieldSelector(
         path: "metadata.name", equals: #"a\b,c=d"#
-    ) == #"fieldSelector:"metadata.name=a\\\\b\\,c\\=d""#)
+    ) == #"fieldSelector:"metadata.name=a\\b\,c\=d""#)
 }
 
 @Test func unsupportedAndEmptyResourcesHaveNoDrillDown() {

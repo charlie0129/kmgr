@@ -192,10 +192,33 @@ func tokenize(input string) ([]token, error) {
 		start := offset
 		var builder strings.Builder
 		var quote rune
+		nativeSelector := isNativeSelectorToken(input[start:])
 		for offset < len(input) {
 			r, width = utf8.DecodeRuneInString(input[offset:])
 			if quote == 0 && unicode.IsSpace(r) {
 				break
+			}
+			// Native Kubernetes selector bodies use their own backslash
+			// escaping for commas, equals, and backslashes. Preserve the body
+			// byte-for-byte and let the Kubernetes parser validate it. Quotes
+			// still delimit the outer query token; native selector syntax does
+			// not use them for its own grammar.
+			if nativeSelector {
+				if r == '\'' || r == '"' {
+					if quote == 0 {
+						quote = r
+						offset += width
+						continue
+					}
+					if quote == r {
+						quote = 0
+						offset += width
+						continue
+					}
+				}
+				builder.WriteRune(r)
+				offset += width
+				continue
 			}
 			if r == '\\' {
 				offset += width
@@ -230,6 +253,15 @@ func tokenize(input string) ([]token, error) {
 		}
 	}
 	return tokens, nil
+}
+
+func isNativeSelectorToken(input string) bool {
+	for _, prefix := range []string{"labelselector:", "fieldselector:"} {
+		if len(input) >= len(prefix) && strings.EqualFold(input[:len(prefix)], prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseTerm(value token) (compiledTerm, error) {
