@@ -335,6 +335,14 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.engineDidDisconnect(message: message)
     }
 
+    func engineDidRestart() {
+        workspaceController.engineDidRestart()
+    }
+
+    func clearEngineRestartNotice() {
+        workspaceController.clearEngineRestartNotice()
+    }
+
     func engineRecoveryFailed(_ error: Error) {
         workspaceController.engineRecoveryFailed(error)
     }
@@ -1218,6 +1226,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             retryable: true,
             operation: "watch Kubernetes API operations"
         ))
+    }
+
+    func engineDidRestart() {
+        rightPaneController.setSupplementalStatus(
+            EngineWorkspaceStatus.restarted,
+            for: .engine
+        )
+    }
+
+    func clearEngineRestartNotice() {
+        rightPaneController.setSupplementalStatus(nil, for: .engine)
     }
 
     func engineRecoveryFailed(_ error: Error) {

@@ -249,9 +249,11 @@ sharing.
 
 For redacted helper RPC timing, launch the app from a terminal with
 `KMGR_ENGINE_LOG_LEVEL=debug` as described in the README. The supervisor passes
-the validated level to the helper and inherits its stderr only for this explicit
-diagnostic mode. The helper logs only RPC method, duration, and status and never
-request/response bodies.
+the validated level to the helper, captures its stderr in the bounded
+process-memory diagnostics tail, and tees the same output to the launching
+terminal only for this explicit diagnostic mode. The helper logs only RPC
+method, duration, and status and never request/response bodies. The engine
+diagnostics tail is not persisted to disk or OSLog.
 
 ## Go helper profiles
 

@@ -894,6 +894,8 @@ public enum LogTextRenderer {
         .defaultMaximumDisplayedLineUTF8Bytes
     public static let displayTruncationMarker =
         "… [line truncated; Save preserves full line]"
+    public static let retainedBufferDisplayTruncationMarker =
+        "… [line truncated for display; additional text retained in memory]"
 
     private struct Candidate {
         var record: LogRecord
@@ -910,9 +912,13 @@ public enum LogTextRenderer {
         showSourceLabels: Bool,
         filter: String,
         maximumOutputUTF8Bytes: Int,
-        maximumDisplayedLineUTF8Bytes: Int = defaultMaximumDisplayedLineUTF8Bytes
+        maximumDisplayedLineUTF8Bytes: Int = defaultMaximumDisplayedLineUTF8Bytes,
+        displayTruncationMarker: String = LogTextRenderer.displayTruncationMarker
     ) throws -> RenderedLogText {
-        precondition(maximumOutputUTF8Bytes > 0 && maximumDisplayedLineUTF8Bytes > 0)
+        precondition(
+            maximumOutputUTF8Bytes > 0 && maximumDisplayedLineUTF8Bytes > 0
+                && !displayTruncationMarker.isEmpty
+        )
         let foldedFilter = filter.lowercased()
         var candidates: [Candidate] = []
         candidates.reserveCapacity(min(records.count, 4_096))
@@ -1020,7 +1026,8 @@ public enum LogTextRenderer {
         }
         let display = try makeDisplayProjection(
             chunks: chunks,
-            maximumLineUTF8Bytes: maximumDisplayedLineUTF8Bytes
+            maximumLineUTF8Bytes: maximumDisplayedLineUTF8Bytes,
+            truncationMarker: displayTruncationMarker
         )
         return RenderedLogText(
             chunks: chunks,
@@ -1046,7 +1053,8 @@ public enum LogTextRenderer {
     /// display chunks between streaming updates.
     private static func makeDisplayProjection(
         chunks: [String],
-        maximumLineUTF8Bytes: Int
+        maximumLineUTF8Bytes: Int,
+        truncationMarker: String
     ) throws -> DisplayProjection {
         var result: [String] = []
         result.reserveCapacity(chunks.count)
@@ -1095,7 +1103,7 @@ public enum LogTextRenderer {
                         append(prefix)
                         displayedLineUTF8Bytes += prefix.utf8.count
                         if displayedLineUTF8Bytes > 0 { append(" ") }
-                        append(displayTruncationMarker)
+                        append(truncationMarker)
                         lineIsTruncated = true
                         truncatedLines += 1
                     }

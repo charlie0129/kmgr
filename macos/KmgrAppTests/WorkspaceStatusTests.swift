@@ -113,6 +113,20 @@ struct WorkspaceStatusTests {
         #expect(status.toolTip?.contains("Namespace access was denied.") == true)
     }
 
+    @Test("engine restart warning points to diagnostics without becoming a control")
+    func engineRestartWarning() {
+        var board = WorkspaceStatusBoard()
+        board.set(WorkspaceStatus("12 Pods · Watching"), for: .content)
+        board.set(EngineWorkspaceStatus.restarted, for: .engine)
+
+        let status = board.presented
+        #expect(status.text == "12 Pods · Watching · Engine restarted unexpectedly")
+        #expect(status.severity == .warning)
+        #expect(status.busy == false)
+        #expect(status.toolTip?.contains("Window → Engine Diagnostics…") == true)
+        #expect(status.toolTip?.contains("retained engine log") == true)
+    }
+
     @Test("one fixed footer survives content swaps and ignores retired publishers")
     func persistentFooter() throws {
         let connection = ClusterConnectionActivityView()
@@ -148,6 +162,11 @@ struct WorkspaceStatusTests {
         #expect(host.activeContentController === second)
         #expect(statusDescendants(of: host.view).contains { $0 === originalBar })
         #expect(statusDescendants(of: host.view).contains { $0 === connection })
+
+        host.setSupplementalStatus(EngineWorkspaceStatus.restarted, for: .engine)
+        #expect(statusLabel.stringValue == "Second · Engine restarted unexpectedly")
+        #expect(statusLabel.accessibilityHelp()?.contains("Engine Diagnostics…") == true)
+        host.setSupplementalStatus(nil, for: .engine)
 
         host.updateContentStatus(WorkspaceStatus(
             String(repeating: "long status ", count: 2_000),

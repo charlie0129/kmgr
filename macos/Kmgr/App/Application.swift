@@ -44,11 +44,13 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var engineStateObserver: UUID?
     private var readyEngineInstanceID: String?
     private var helperRecoveryRequired = false
+    private var hasPresentedEngineFailureDiagnostics = false
     private var workspaceRecoveryTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
     private var restoredWorkspaceAttempts: [
         ObjectIdentifier: RestoredWorkspaceConnectionAttempt
     ] = [:]
     private var logWindowControllers: [ObjectIdentifier: LogWindowController] = [:]
+    private var engineDiagnosticsWindowController: EngineDiagnosticsWindowController?
     private var terminalWindowControllers: [ObjectIdentifier: TerminalWindowController] = [:]
     private var isTerminating = false
     private var isAutoTerminatingAfterLastWindowClosed = false
@@ -157,6 +159,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 for controller in logWindowControllers.values {
                     controller.applyDisplayConfiguration(configuration)
                 }
+                engineDiagnosticsWindowController?.applyDisplayConfiguration(configuration)
             }
             if delta.contains(.operationHistory) {
                 for controller in workspaceControllers.values {
@@ -194,12 +197,20 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func engineStateChanged(_ state: EngineConnectionState) {
         switch state {
         case .ready(let information):
+            let hadReadyGeneration = readyEngineInstanceID != nil
             let isNewGeneration = readyEngineInstanceID.map {
                 $0 != information.instanceID
             } ?? false
+            let recoveredAfterDisconnect = helperRecoveryRequired
             readyEngineInstanceID = information.instanceID
-            guard helperRecoveryRequired || isNewGeneration else { return }
+            if hadReadyGeneration && (isNewGeneration || recoveredAfterDisconnect) {
+                for controller in workspaceControllers.values {
+                    controller.engineDidRestart()
+                }
+            }
+            guard recoveredAfterDisconnect || isNewGeneration else { return }
             helperRecoveryRequired = false
+            hasPresentedEngineFailureDiagnostics = false
             recoverWorkspacesAfterHelperRestart()
         case .disconnected(let message):
             guard readyEngineInstanceID != nil, !isTerminating else { return }
@@ -217,6 +228,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     operation: "restart Kubernetes engine"
                 ))
             }
+            guard !hasPresentedEngineFailureDiagnostics else { return }
+            hasPresentedEngineFailureDiagnostics = true
+            showEngineDiagnostics(nil)
         case .stopped, .starting, .restarting, .stopping:
             break
         }
@@ -333,6 +347,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         for controller in logWindowControllers.values {
             controller.prepareForTermination()
         }
+        engineDiagnosticsWindowController?.prepareForTermination()
         for controller in terminalWindowControllers.values {
             controller.prepareForTermination()
         }
@@ -656,6 +671,32 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.window?.makeKeyAndOrderFront(nil)
     }
 
+    @objc private func showEngineDiagnostics(_ sender: Any?) {
+        if let controller = engineDiagnosticsWindowController {
+            controller.showWindow(sender)
+            controller.window?.makeKeyAndOrderFront(sender)
+        } else {
+            let controller = EngineDiagnosticsWindowController(
+                store: engineSupervisor.diagnosticsStore,
+                displayConfiguration: LogDisplayConfiguration(
+                    preferences: preferencesStore.current.logs
+                )
+            )
+            engineDiagnosticsWindowController = controller
+            controller.onClose = { [weak self, weak controller] in
+                guard self?.engineDiagnosticsWindowController === controller else {
+                    return
+                }
+                self?.engineDiagnosticsWindowController = nil
+            }
+            controller.showWindow(sender)
+            controller.window?.makeKeyAndOrderFront(sender)
+        }
+        for controller in workspaceControllers.values {
+            controller.clearEngineRestartNotice()
+        }
+    }
+
     private var hasVisibleIndependentWindow: Bool {
         if settingsWindowController.window?.isVisible == true
             || portForwardsWindowController.window?.isVisible == true
@@ -663,6 +704,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return true
         }
         if logWindowControllers.values.contains(where: { $0.window?.isVisible == true }) {
+            return true
+        }
+        if engineDiagnosticsWindowController?.window?.isVisible == true {
             return true
         }
         return terminalWindowControllers.values.contains {
@@ -769,6 +813,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             showSettings: #selector(showSettings(_:)),
             newClusterWindow: #selector(showClusterManager),
             showCommandPalette: #selector(showCommandPalette(_:)),
+            showEngineDiagnostics: #selector(showEngineDiagnostics(_:)),
             showPortForwards: #selector(showPortForwards(_:)),
             toggleShortcuts: #selector(toggleShortcuts(_:)),
             cycleWindowsForward: #selector(cycleWindowsForward(_:)),

@@ -202,6 +202,7 @@ struct EngineSupervisorLifecycleTests {
         fi
         count=$((count + 1))
         printf '%s\\n' "$count" > "$count_file"
+        printf 'engine-startup-marker-%s\\n' "$count" >&2
         exit 17
         """
         try Data(script.utf8).write(to: helper, options: .atomic)
@@ -235,6 +236,16 @@ struct EngineSupervisorLifecycleTests {
             return
         }
         #expect(message.contains("status 17"))
+        let diagnostics = await supervisor.diagnosticsStore.latestUnexpectedSnapshot()
+        #expect(diagnostics?.unexpected == true)
+        #expect(diagnostics?.termination == EngineTermination(
+            status: 17,
+            reason: .exit
+        ))
+        let diagnosticText = diagnostics?.records
+            .map { String(decoding: $0.data, as: UTF8.self) }
+            .joined() ?? ""
+        #expect(diagnosticText.contains("engine-startup-marker-3"))
         let launches = try String(contentsOf: countURL, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         #expect(launches == "3")

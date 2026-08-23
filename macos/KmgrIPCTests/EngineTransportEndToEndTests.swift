@@ -67,6 +67,19 @@ struct EngineTransportEndToEndTests {
             #expect(second.instanceID != first.instanceID)
             #expect(secondGeneration.processID != firstGeneration.processID)
             #expect(secondGeneration.socketPath != firstGeneration.socketPath)
+            let firstDiagnostics = try #require(
+                await supervisor.diagnosticsStore.latestUnexpectedSnapshot()
+            )
+            #expect(firstDiagnostics.engineInstanceID == first.instanceID)
+            #expect(firstDiagnostics.readyAt != nil)
+            #expect(firstDiagnostics.termination == EngineTermination(
+                status: SIGKILL,
+                reason: .uncaughtSignal
+            ))
+            let firstDiagnosticText = firstDiagnostics.records
+                .map { String(decoding: $0.data, as: UTF8.self) }
+                .joined(separator: "\n")
+            #expect(firstDiagnosticText.contains("engine-generation-marker-1"))
             #expect(!FileManager.default.fileExists(
                 atPath: URL(fileURLWithPath: firstGeneration.socketPath)
                     .deletingLastPathComponent().path
@@ -183,6 +196,7 @@ private struct EngineProcessFixture {
             done
             printf '%s\\n' "$$" > "$state_dir/pid.$generation"
             printf '%s\\n' "$socket_path" > "$state_dir/socket.$generation"
+            printf 'engine-generation-marker-%s\\n' "$generation" >&2
             export KUBECONFIG=\(shellQuote(isolatedKubeconfigURL.path))
             exec \(shellQuote(helperURL.path)) "$@"
             """
