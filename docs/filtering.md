@@ -38,3 +38,9 @@ Each workspace remembers the current filter by exact group, version, and
 resource. Switching to a GVR not visited in that window starts with an empty
 filter, so a Pod query cannot silently filter Nodes. Returning to a previously
 visited GVR restores that resource's last filter.
+
+A relationship drill-down (for example, opening a workload's Pods) also starts
+with a canonical Kubernetes selector. Editing or replacing the filter text
+clears that implicit selector, so a keyword query searches all objects in the
+current resource and namespace scope. Leaving the filter unchanged preserves
+the drill-down scope.

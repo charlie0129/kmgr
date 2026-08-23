@@ -3414,8 +3414,9 @@ private final class ResourceListViewController: NSViewController,
     private var resource: DiscoveredResource?
     var currentResource: DiscoveredResource? { resource }
     private var scope = NamespaceSelection()
-    /// Immutable Kubernetes-native relationship constraints for the current
-    /// navigation entry. Editing the kmgr filter must never discard them.
+    /// Kubernetes-native relationship constraints installed by a drill-down.
+    /// They remain active until the user edits the filter, at which point the
+    /// filter becomes an independent query over the complete resource list.
     private var labelSelector = ""
     private var fieldSelector = ""
     private var relationshipFilterActive = false
@@ -4305,9 +4306,7 @@ private final class ResourceListViewController: NSViewController,
         filterRevision &+= 1
         filterTask?.cancel()
         filterField.stringValue = value
-        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            clearRelationshipFilterIfNeeded()
-        }
+        clearRelationshipFilterIfNeeded()
         rememberCurrentFilter()
         openStream(reason: .programmaticFilter)
         onRestorationChanged?()
@@ -4559,9 +4558,7 @@ private final class ResourceListViewController: NSViewController,
 
     func controlTextDidChange(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
-        if filterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            clearRelationshipFilterIfNeeded()
-        }
+        clearRelationshipFilterIfNeeded()
         clearTransientCellPresentation()
         filterRevision &+= 1
         filterTask?.cancel()

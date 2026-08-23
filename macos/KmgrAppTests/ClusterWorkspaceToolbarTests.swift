@@ -919,8 +919,8 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
-    @Test("native relationship selectors survive filter commits without intermediate streams")
-    func nativeSelectorsSurviveCommittedFilter() async throws {
+    @Test("editing a relationship-scoped filter searches without native selectors")
+    func editingRelationshipFilterClearsNativeSelectorsOnCommit() async throws {
         let provider = FilterValidationWorkspaceResourceProvider()
         let restoration = ClusterWindowRestorationRecord(
             id: "native-selector-filter",
@@ -957,17 +957,17 @@ struct ClusterWorkspaceToolbarTests {
         let requests = provider.streamRequests
         #expect(requests.map(\.labelSelector) == [
             "app in (api,worker),!retired",
-            "app in (api,worker),!retired",
+            "",
         ])
         #expect(requests.map(\.fieldSelector) == [
             "metadata.namespace=default",
-            "metadata.namespace=default",
+            "",
         ])
         #expect(requests.last?.filterExpression == "status:Running")
     }
 
-    @Test("stable filter debounce retains native relationship selectors")
-    func nativeSelectorsSurviveStableFilterDebounce() async throws {
+    @Test("editing a relationship-scoped filter clears native selectors on debounce")
+    func editingRelationshipFilterClearsNativeSelectorsOnDebounce() async throws {
         let provider = FilterValidationWorkspaceResourceProvider()
         let controller = makeWorkspace(
             provider: provider,
@@ -991,7 +991,7 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil(timeout: .seconds(1)) {
             provider.streamRequestCount == 2
         }
-        #expect(provider.streamRequests.last?.labelSelector == "app=api")
+        #expect(provider.streamRequests.last?.labelSelector.isEmpty == true)
         #expect(provider.streamRequests.last?.filterExpression == "label:tier==frontend")
     }
 
@@ -2106,8 +2106,8 @@ struct ClusterWorkspaceToolbarTests {
         #expect(requests[3].filterExpression == "label:app==api")
     }
 
-    @Test("clearing a workload drill-down filter restores all Pods and selects Pods")
-    func clearingWorkloadDrillDownRestoresPods() async throws {
+    @Test("replacing a workload drill-down filter restores all Pods and selects Pods")
+    func replacingWorkloadDrillDownFilterRestoresAllPods() async throws {
         let daemonSet = ResourceIdentity(
             clusterSessionID: "test-session", group: "apps", version: "v1",
             resource: "daemonsets", namespace: "default", name: "agent",
@@ -2127,7 +2127,7 @@ struct ClusterWorkspaceToolbarTests {
                 podLabelSelector: selector
             )),
             restoration: ClusterWindowRestorationRecord(
-                id: "clear-workload-selector",
+                id: "replace-workload-selector",
                 state: ClusterWindowRestorationState(
                     contextName: "test-context",
                     gvr: GVR(group: "apps", version: "v1", resource: "daemonsets"),
@@ -2151,13 +2151,13 @@ struct ClusterWorkspaceToolbarTests {
         #expect(provider.streamRequests[1].resource.resource == "pods")
         #expect(provider.streamRequests[1].labelSelector == selector)
 
-        try triggerResourceFilterChange(in: window, value: "")
+        try triggerResourceFilterChange(in: window, value: "worker")
         try await waitUntil(timeout: .seconds(1)) { provider.streamRequests.count == 3 }
-        let restored = provider.streamRequests[2]
-        #expect(restored.resource.resource == "pods")
-        #expect(restored.labelSelector.isEmpty)
-        #expect(restored.fieldSelector.isEmpty)
-        #expect(restored.filterExpression.isEmpty)
+        let replacement = provider.streamRequests[2]
+        #expect(replacement.resource.resource == "pods")
+        #expect(replacement.labelSelector.isEmpty)
+        #expect(replacement.fieldSelector.isEmpty)
+        #expect(replacement.filterExpression == "worker")
         let selected = outline.selectedRow >= 0
             ? outline.item(atRow: outline.selectedRow) as? DiscoveredResource
             : nil
