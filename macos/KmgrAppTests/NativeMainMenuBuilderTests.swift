@@ -105,6 +105,11 @@ struct NativeMainMenuBuilderTests {
 
         #expect(submenu("Resource", in: built.main) != nil)
         #expect(window.item(withTitle: "Command Palette…") != nil)
+        let diagnostics = try #require(window.item(withTitle: "Engine Diagnostics…"))
+        #expect(diagnostics.target === target)
+        #expect(diagnostics.action == #selector(MenuTarget.diagnostics(_:)))
+        #expect(diagnostics.keyEquivalent == "e")
+        #expect(diagnostics.keyEquivalentModifierMask == [.command, .shift])
         #expect(window.item(withTitle: "Port Forwards") != nil)
         let shortcuts = try #require(window.item(withTitle: "Show Shortcuts"))
         #expect(shortcuts.target === target)
@@ -237,6 +242,7 @@ struct NativeMainMenuBuilderTests {
             showSettings: #selector(MenuTarget.settings(_:)),
             newClusterWindow: #selector(MenuTarget.newWindow(_:)),
             showCommandPalette: #selector(MenuTarget.palette(_:)),
+            showEngineDiagnostics: #selector(MenuTarget.diagnostics(_:)),
             showPortForwards: #selector(MenuTarget.forwards(_:)),
             toggleShortcuts: #selector(MenuTarget.shortcuts(_:)),
             cycleWindowsForward: #selector(MenuTarget.cycleForward(_:)),
@@ -267,6 +273,7 @@ private final class MenuTarget: NSObject {
     @objc func settings(_ sender: Any?) {}
     @objc func newWindow(_ sender: Any?) {}
     @objc func palette(_ sender: Any?) {}
+    @objc func diagnostics(_ sender: Any?) {}
     @objc func forwards(_ sender: Any?) {}
     @objc func shortcuts(_ sender: Any?) {}
     @objc func cycleForward(_ sender: Any?) {}

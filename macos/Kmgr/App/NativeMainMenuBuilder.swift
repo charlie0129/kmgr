@@ -10,6 +10,7 @@ struct NativeMainMenuActions {
     let showSettings: Selector
     let newClusterWindow: Selector
     let showCommandPalette: Selector
+    let showEngineDiagnostics: Selector
     let showPortForwards: Selector
     let toggleShortcuts: Selector
     let cycleWindowsForward: Selector
@@ -358,6 +359,14 @@ enum NativeMainMenuBuilder {
             title: "Command Palette…",
             action: actions.showCommandPalette,
             keyEquivalent: "k",
+            actions: actions
+        )
+        addApplicationItem(
+            to: menu,
+            title: "Engine Diagnostics…",
+            action: actions.showEngineDiagnostics,
+            keyEquivalent: "e",
+            modifiers: [.command, .shift],
             actions: actions
         )
         addApplicationItem(

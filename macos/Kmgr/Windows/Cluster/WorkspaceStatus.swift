@@ -48,6 +48,7 @@ enum WorkspaceStatusSource: Hashable, Sendable {
     case namespace
     case workspaceOperation
     case warmCache
+    case engine
 }
 
 struct WorkspaceStatusBoard: Hashable, Sendable {
@@ -133,12 +134,21 @@ struct WorkspaceStatusBoard: Hashable, Sendable {
     ) -> Int {
         switch source {
         case .workspaceOperation: 5
+        case .engine: 4
         case .content: 3
         case .discovery: status.busy ? 4 : 2
         case .namespace: 1
         case .warmCache: 0
         }
     }
+}
+
+enum EngineWorkspaceStatus {
+    static let restarted = WorkspaceStatus(
+        "Engine restarted unexpectedly",
+        severity: .warning,
+        toolTip: "The Kubernetes engine restarted unexpectedly. Open Window → Engine Diagnostics… to inspect the retained engine log."
+    )
 }
 
 enum WarmCacheWorkspaceStatus {

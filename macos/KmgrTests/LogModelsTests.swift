@@ -339,6 +339,27 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     #expect(rendered.displayTruncatedLines == 1)
 }
 
+@Test func retainedBufferRendererUsesItsOwnTruncationExplanation() throws {
+    let marker = LogTextRenderer.retainedBufferDisplayTruncationMarker
+    let rendered = try LogTextRenderer.render(
+        records: [
+            LogRecord(
+                sourceID: "engine",
+                data: Data("abcdef".utf8),
+                endsWithNewline: true
+            )
+        ],
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 10,
+        maximumDisplayedLineUTF8Bytes: 3,
+        displayTruncationMarker: marker
+    )
+
+    #expect(rendered.displayText == "abc \(marker)\n")
+}
+
 @Test func hiddenLongLineSuffixDoesNotReinstallItsBoundedDisplay() throws {
     func record(_ value: String, startsLine: Bool) -> LogRecord {
         LogRecord(

@@ -245,6 +245,7 @@ public final class EngineSupervisor {
         }
     }
     public nonisolated let connection = EngineConnection()
+    public nonisolated let diagnosticsStore = EngineDiagnosticsStore()
 
     private let configuration: Configuration
     private let logger = Logger(subsystem: "cc.chlc.kmgr", category: "engine-supervisor")
@@ -410,7 +411,7 @@ public final class EngineSupervisor {
             baseDirectoryURL: configuration.temporaryDirectoryURL
         )
         let process = Process()
-        let stderrPipe = configuration.normalizedLogLevel == nil ? Pipe() : nil
+        let stderrPipe = Pipe()
         let exitWaiter = ProcessExitWaiter()
         process.executableURL = configuration.helperURL
         let helperArguments = configuration.helperArguments(
@@ -419,43 +420,33 @@ public final class EngineSupervisor {
         process.arguments = helperArguments
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
-        if let stderrPipe {
-            process.standardError = stderrPipe
-        } else {
-            // A valid, explicitly configured log level is a local diagnostic
-            // opt-in. Inherit stderr so a terminal-launched app can expose the
-            // helper's already-redacted structured records without persisting
-            // them or copying them into the app's ordinary OSLog stream.
-            process.standardError = FileHandle.standardError
-        }
+        process.standardError = stderrPipe
         process.terminationHandler = { process in
             exitWaiter.signal(status: process.terminationStatus)
         }
 
+        _ = await diagnosticsStore.beginGeneration()
         do {
             try process.run()
         } catch {
+            _ = await diagnosticsStore.finishGeneration(
+                termination: nil,
+                unexpected: !shutdownRequested
+            )
             try? endpoint.cleanup()
             throw error
         }
         currentProcess = process
 
-        let diagnosticsTask = stderrPipe.map { pipe in
-            Task.detached(priority: .utility) {
-                let handle = pipe.fileHandleForReading
-                while !Task.isCancelled {
-                    do {
-                        guard let data = try handle.read(upToCount: 4_096), !data.isEmpty else {
-                            break
-                        }
-                        // The engine owns formatting/redaction. Draining without
-                        // mirroring raw text keeps diagnostics out of app logs.
-                    } catch {
-                        break
-                    }
-                }
-            }
-        }
+        // Always drain the pipe so a noisy helper can never block on a full
+        // stderr buffer. Explicit terminal diagnostics remain available as a
+        // tee, while the in-memory store retains the same bounded tail for the
+        // app's diagnostics window.
+        let diagnosticsTask = startDiagnosticsReader(
+            pipe: stderrPipe,
+            mirrorTo: configuration.normalizedLogLevel == nil
+                ? nil : FileHandle.standardError
+        )
 
         let transport: HTTP2ClientTransport.Posix
         let client: EngineConnection.Client
@@ -485,7 +476,11 @@ public final class EngineSupervisor {
             currentConnectionTask = connectionTask
         } catch {
             await stopProcess(process, waiter: exitWaiter)
-            diagnosticsTask?.cancel()
+            await diagnosticsTask.value
+            _ = await diagnosticsStore.finishGeneration(
+                termination: termination(for: process),
+                unexpected: !shutdownRequested
+            )
             try? endpoint.cleanup()
             throw error
         }
@@ -497,6 +492,9 @@ public final class EngineSupervisor {
             // succeeded. The supervisor retains `currentClient` privately so
             // shutdown can still stop a helper whose startup is in progress.
             let readyAt = ContinuousClock.now
+            await diagnosticsStore.markReady(
+                instanceID: information.instanceID
+            )
             connection.install(client)
             state = .ready(information)
             let status = await exitWaiter.wait()
@@ -507,7 +505,11 @@ public final class EngineSupervisor {
             client.beginGracefulShutdown()
             connectionTask.cancel()
             currentConnectionTask = nil
-            diagnosticsTask?.cancel()
+            await diagnosticsTask.value
+            _ = await diagnosticsStore.finishGeneration(
+                termination: termination(for: process),
+                unexpected: !shutdownRequested
+            )
             try? endpoint.cleanup()
             return EngineGenerationExit(status: status, readyDuration: readyDuration)
         } catch {
@@ -518,10 +520,49 @@ public final class EngineSupervisor {
             client.beginGracefulShutdown()
             connectionTask.cancel()
             currentConnectionTask = nil
-            diagnosticsTask?.cancel()
+            await diagnosticsTask.value
+            _ = await diagnosticsStore.finishGeneration(
+                termination: termination(for: process),
+                unexpected: !shutdownRequested
+            )
             try? endpoint.cleanup()
             throw error
         }
+    }
+
+    private func startDiagnosticsReader(
+        pipe: Pipe,
+        mirrorTo: FileHandle?
+    ) -> Task<Void, Never> {
+        let diagnosticsStore = self.diagnosticsStore
+        return Task.detached(priority: .utility) {
+            let handle = pipe.fileHandleForReading
+            while !Task.isCancelled {
+                do {
+                    guard let data = try handle.read(upToCount: 4_096), !data.isEmpty else {
+                        break
+                    }
+                    await diagnosticsStore.append(data: data)
+                    if let mirrorTo {
+                        try? mirrorTo.write(contentsOf: data)
+                    }
+                } catch {
+                    break
+                }
+            }
+        }
+    }
+
+    private func termination(for process: Process) -> EngineTermination {
+        let reason: EngineTerminationReason = switch process.terminationReason {
+        case .exit: .exit
+        case .uncaughtSignal: .uncaughtSignal
+        @unknown default: .unknown
+        }
+        return EngineTermination(
+            status: process.terminationStatus,
+            reason: reason
+        )
     }
 
     private func handshake(

@@ -136,6 +136,7 @@ final class WorkspaceRightPaneViewController: NSViewController {
         case .error: .systemRed
         }
         statusLabel.setAccessibilityValue(status.text)
+        statusLabel.setAccessibilityHelp(status.toolTip)
         if status.busy {
             progressIndicator.isHidden = false
             progressIndicator.startAnimation(nil)

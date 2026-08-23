@@ -300,11 +300,12 @@ remain rejected. Opening an exec-auth context therefore trusts its kubeconfig
 command to run with the current user's privileges, just as opening it with
 `kubectl` would. Kmgr also does not provide an ignore-TLS switch.
 
-Diagnostics contain RPC method, duration, status, and safe structural context;
-they must not contain bearer tokens, client keys, Secret contents, exec I/O,
-log records, or full mutation payloads. Secret plaintext, log buffers, and
-terminal buffers are excluded from restoration. Port-forwards default to
-`127.0.0.1`; broader binds require explicit confirmation.
+Application diagnostics contain RPC method, duration, status, and safe
+structural context; they must not contain bearer tokens, client keys, Secret
+contents, exec I/O, workload log records, or full mutation payloads. Secret
+plaintext, log buffers, and terminal buffers are excluded from restoration.
+Port-forwards default to `127.0.0.1`; broader binds require explicit
+confirmation.
 
 ## State and diagnostics
 
@@ -327,17 +328,31 @@ estimate is intentionally conservative and is neither an RSS measurement nor a
 promise that the Go allocator will return the same number of bytes to the
 operating system immediately after eviction.
 
-The engine emits structured, redacted JSON diagnostics on stderr. The GUI
-normally drains that stream without mirroring raw text into application logs.
-To inspect actual helper RPC timing from a terminal without persisting it, run:
+The engine emits structured, redacted JSON diagnostics on stderr. Kmgr always
+drains that stream into a bounded, process-memory-only tail (20,000 records and
+16 MiB by default). The current generation is available while the helper is
+running; after an unexpected exit, the latest unexpected generation and its
+termination metadata remain available until a later unexpected generation
+replaces it. Engine diagnostics are not written to disk and are not forwarded
+to OSLog.
+
+Open **Window → Engine Diagnostics…** to inspect the retained tail. The window
+supports filtering, wrapping, and refresh. After a successful recovery, the
+workspace footer shows a non-clickable **Engine restarted unexpectedly**
+warning with the same menu path. If restart recovery exhausts its attempts,
+Kmgr opens the diagnostics window automatically.
+
+To additionally mirror redacted helper RPC timing to a terminal, launch the
+app with an explicit log level:
 
 ```sh
 KMGR_ENGINE_LOG_LEVEL=debug build/Kmgr.app/Contents/MacOS/Kmgr
 ```
 
 Accepted levels are `debug`, `info`, `warn`, and `error`; any other value is
-ignored and retains the normal drained-stderr behavior. Set `KMGR_ENGINE_PATH`
-to an absolute local engine executable in the same command to test a separately
+ignored. The terminal mirror is an explicit diagnostic tee; the in-memory tail
+continues to be captured at the same time. Set `KMGR_ENGINE_PATH` to an
+absolute local engine executable in the same command to test a separately
 built helper. Debug app builds also contain an opt-in, loopback-only Go
 profiler; it is absent from Release helpers and is documented with the
 performance harness in
