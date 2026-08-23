@@ -854,12 +854,23 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(summaryDocument.frame.width > 100)
         #expect(summaryDocument.frame.height > 0)
         #expect(summaryDocument.accessibilityLabel() == "Kubernetes object summary")
-        #expect(summaryDocument.numberOfRows == 2)
+        let summaryRow = try #require((0..<summaryDocument.numberOfRows).first { row in
+            guard let field = summaryDocument.view(
+                atColumn: 0, row: row, makeIfNecessary: true
+            ), let value = summaryDocument.view(
+                atColumn: 1, row: row, makeIfNecessary: true
+            ) else { return false }
+            return descendants(of: field).contains {
+                ($0 as? NSTextField)?.stringValue == "Name"
+            } && descendants(of: value).contains {
+                ($0 as? NSTextField)?.stringValue == "settings"
+            }
+        })
         let summaryField = try #require(summaryDocument.view(
-            atColumn: 0, row: 1, makeIfNecessary: true
+            atColumn: 0, row: summaryRow, makeIfNecessary: true
         ))
         let summaryValue = try #require(summaryDocument.view(
-            atColumn: 1, row: 1, makeIfNecessary: true
+            atColumn: 1, row: summaryRow, makeIfNecessary: true
         ))
         #expect(descendants(of: summaryField).contains {
             ($0 as? NSTextField)?.stringValue == "Name"
@@ -1041,6 +1052,9 @@ struct ObjectDetailYAMLPresentationTests {
             uid: ResourceUID("uid")
         )
         let longJSON = "{\"payload\":\"\(String(repeating: "x", count: 2_000))\"}"
+        let longJSONPreview = String(
+            longJSON.prefix(ObjectDetailSummaryPresentation.maximumVisibleValueCharacters - 1)
+        ) + "…"
         let transitionTime = Date(timeIntervalSince1970: 1_755_428_985)
         let detail = ObjectDetail(
             identity: identity,
@@ -1115,21 +1129,23 @@ struct ObjectDetailYAMLPresentationTests {
             "app\tapi",
             "tier\tfrontend",
             "example.test/note\tfirst second",
-            "example.test/payload\tJSON value omitted · \(longJSON.count.formatted()) characters",
+            "example.test/payload\t\(longJSONPreview)",
             "Available\tTrue",
             "Progressing\t\(localCondition)",
         ])
 
         let conditionsHeading = try #require(table.view(
             atColumn: 0, row: 8, makeIfNecessary: true
-        ) as? NSTextField)
+        ))
         let conditionField = try #require(table.view(
             atColumn: 0, row: 9, makeIfNecessary: true
         ))
         let conditionValue = try #require(table.view(
             atColumn: 1, row: 9, makeIfNecessary: true
         ))
-        #expect(conditionsHeading.stringValue == "Conditions")
+        #expect(descendants(of: conditionsHeading).contains {
+            ($0 as? NSTextField)?.stringValue == "Conditions"
+        })
         #expect(descendants(of: conditionField).contains {
             ($0 as? NSTextField)?.stringValue == "Progressing"
         })
@@ -1153,7 +1169,7 @@ struct ObjectDetailYAMLPresentationTests {
         ))
         #expect(descendants(of: payloadValue).compactMap { $0 as? NSTextField }
             .contains {
-                $0.stringValue == "JSON value omitted · \(longJSON.count.formatted()) characters"
+                $0.stringValue == longJSONPreview
                     && $0.maximumNumberOfLines == 1
             })
         controller.view.setFrameSize(NSSize(width: 520, height: 500))
@@ -1219,7 +1235,9 @@ struct ObjectDetailYAMLPresentationTests {
             conditionTimeZone: timeZone,
             now: now
         )
-        let condition = try #require(sections.first?.rows.first)
+        let condition = try #require(
+            sections.first { $0.id == "conditions" }?.rows.first
+        )
 
         #expect(condition.displayText
             == "True · message since startup · for 1d (since 2025-08-17 18:49:45 +08:00)")
@@ -1269,7 +1287,7 @@ struct ObjectDetailYAMLPresentationTests {
         ])
     }
 
-    @Test("Summary omits long JSON and bounds metadata entry counts")
+    @Test("Summary bounds metadata values and entry counts")
     func boundedSummaryMetadata() throws {
         let identity = ResourceIdentity(
             clusterSessionID: "session",
@@ -1285,23 +1303,32 @@ struct ObjectDetailYAMLPresentationTests {
                 .map { (String(format: "key-%03d", $0), "value-\($0)") }
         )
         let longJSON = "{\"payload\":\"\(String(repeating: "x", count: 2_000))\"}"
+        let longText = (0..<200).map { _ in "plain-value" }.joined(separator: " ")
         let sections = ObjectDetailSummaryPresentation.sections(for: ObjectDetail(
             identity: identity,
             resourceVersion: "rv-1",
             labels: labels,
-            annotations: ["long": longJSON]
+            annotations: ["long": longJSON, "plain": longText]
         ))
         let labelFields = try #require(sections.first { $0.id == "labels" }).rows
-        let annotation = try #require(sections.first { $0.id == "annotations" }?.rows.first)
+        let annotations = try #require(sections.first { $0.id == "annotations" }).rows
+        let annotation = try #require(annotations.first { $0.label == "long" })
+        let plainAnnotation = try #require(annotations.first { $0.label == "plain" })
+        let expectedJSONPreview = String(
+            longJSON.prefix(ObjectDetailSummaryPresentation.maximumVisibleValueCharacters - 1)
+        ) + "…"
+        let expectedPlainPreview = String(
+            longText.prefix(ObjectDetailSummaryPresentation.maximumVisibleValueCharacters - 1)
+        ) + "…"
 
         #expect(labelFields.count
             == ObjectDetailSummaryPresentation.maximumMetadataEntriesPerSection + 1)
         #expect(labelFields.last?.displayText == "10 not shown")
-        #expect(annotation.displayText
-            == "JSON value omitted · \(longJSON.count.formatted()) characters")
-        #expect(!annotation.displayText.contains(String(repeating: "x", count: 100)))
+        #expect(annotation.displayText == expectedJSONPreview)
+        #expect(plainAnnotation.displayText == expectedPlainPreview)
         #expect(annotation.tooltip.contains("Command-C"))
         #expect(annotation.copyValue == longJSON)
+        #expect(plainAnnotation.copyValue == longText)
     }
 
     @Test("Summary metadata removes control characters")

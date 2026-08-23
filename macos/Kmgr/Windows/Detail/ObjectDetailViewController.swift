@@ -126,16 +126,7 @@ enum ObjectDetailSummaryPresentation {
         var rows = visible.map { key, value in
             let normalizedKey = normalizedText(key)
             let normalizedValue = normalizedText(value)
-            let omitValue = sectionID == "annotations"
-                && normalizedValue.count > maximumVisibleValueCharacters
-            let displayText: String
-            if omitValue {
-                let description = looksLikeJSON(normalizedValue) ? "JSON value" : "Long value"
-                displayText = "\(description) omitted · \(normalizedValue.count.formatted()) characters"
-            } else {
-                displayText = visibleValue(normalizedValue)
-            }
-            let shortened = omitValue || normalizedValue.count > maximumVisibleValueCharacters
+            let shortened = normalizedValue.count > maximumVisibleValueCharacters
             return ObjectDetailSummaryRow(
                 sectionID: sectionID,
                 fieldID: key,
@@ -143,7 +134,7 @@ enum ObjectDetailSummaryPresentation {
                     normalizedKey,
                     maximumCharacters: maximumVisibleKeyCharacters
                 ),
-                displayText: displayText,
+                displayText: visibleValue(normalizedValue),
                 copyLabel: normalizedKey,
                 copyValue: normalizedValue,
                 tooltip: shortened
@@ -182,11 +173,6 @@ enum ObjectDetailSummaryPresentation {
             .joined()
             .split(whereSeparator: \Character.isWhitespace)
             .joined(separator: " ")
-    }
-
-    private static func looksLikeJSON(_ value: String) -> Bool {
-        (value.hasPrefix("{") && value.hasSuffix("}"))
-            || (value.hasPrefix("[") && value.hasSuffix("]"))
     }
 
     static func compactAge(since date: Date, now: Date) -> String {

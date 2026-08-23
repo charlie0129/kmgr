@@ -100,8 +100,9 @@ app-wide Port Forwards window.
   behavior, structured-text highlighting, whitespace markers, staged row
   states, and save review while keeping their validation rules separate. Details also
   provide YAML, Events, Relationships, Metrics where meaningful, and Data for
-  ConfigMaps and Secrets. Oversized Summary values stay available through cell
-  copy while their inline presentation remains bounded.
+  ConfigMaps and Secrets. Oversized Summary values, including metadata values,
+  stay available through cell copy while their inline presentation remains
+  bounded to one line.
 - `Y` opens the selected object's editable YAML tab inside Details. Shift-Y
   opens an independent, UID-pinned YAML window with an exact received-byte
   count, explicit refresh, and the same validated edit/apply workflow.
