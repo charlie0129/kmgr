@@ -538,16 +538,15 @@ public final class EngineSupervisor {
         return Task.detached(priority: .utility) {
             let handle = pipe.fileHandleForReading
             while !Task.isCancelled {
-                do {
-                    guard let data = try handle.read(upToCount: 4_096), !data.isEmpty else {
-                        break
-                    }
-                    await diagnosticsStore.append(data: data)
-                    if let mirrorTo {
-                        try? mirrorTo.write(contentsOf: data)
-                    }
-                } catch {
-                    break
+                // `availableData` returns as soon as any pipe bytes can be
+                // read. A fixed-length FileHandle read can otherwise hold
+                // sparse lifecycle logs until its requested block fills or
+                // the helper closes stderr.
+                let data = handle.availableData
+                guard !data.isEmpty else { break }
+                await diagnosticsStore.append(data: data)
+                if let mirrorTo {
+                    try? mirrorTo.write(contentsOf: data)
                 }
             }
         }
