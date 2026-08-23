@@ -6,6 +6,21 @@ struct ClusterManagerInitialNotice: Hashable, Sendable {
     var message: String
 }
 
+enum ClusterManagerShortcut: Equatable {
+    case focusSearch
+
+    static func action(
+        characters: String?,
+        modifiers: NSEvent.ModifierFlags,
+        textIsEditable: Bool
+    ) -> Self? {
+        guard !textIsEditable,
+            modifiers.intersection([.shift, .command, .control, .option]).isEmpty
+        else { return nil }
+        return characters?.lowercased() == "/" ? .focusSearch : nil
+    }
+}
+
 @MainActor
 final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate,
     ContextualShortcutProviding
@@ -36,7 +51,7 @@ final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate
             tableLayoutStore: tableLayoutStore ?? TableLayoutStore()
         )
 
-        let window = NSWindow(
+        let window = ClusterManagerShortcutWindow(
             contentRect: NSRect(x: 0, y: 0, width: 880, height: 520),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -49,6 +64,9 @@ final class ClusterManagerWindowController: NSWindowController, NSWindowDelegate
 
         super.init(window: window)
         window.delegate = self
+        window.keyDownHandler = { [weak self] event in
+            self?.managerViewController.performClusterManagerShortcut(event) ?? false
+        }
         window.contentViewController = managerViewController
         managerViewController.onContextualShortcutsChanged = { [weak self] in
             self?.contextualShortcutsDidChange?()
@@ -203,6 +221,9 @@ private final class ClusterManagerViewController: NSViewController,
         searchField.sendsSearchStringImmediately = true
         searchField.delegate = self
         searchField.setAccessibilityLabel("Search kubeconfig contexts")
+        searchField.setAccessibilityHelp(
+            "Search kubeconfig contexts. Press / from the chooser to focus this field."
+        )
 
         configureToolbarButton(
             sourcesButton,
@@ -1005,6 +1026,7 @@ private final class ClusterManagerViewController: NSViewController,
         tableView.target = self
         tableView.doubleAction = #selector(openSelectedContext(_:))
         tableView.returnAction = { [weak self] in self?.openSelectedContext(nil) }
+        tableView.focusSearchAction = { [weak self] in self?.focusSearch() }
         tableView.setAccessibilityLabel("Kubeconfig contexts")
 
         for column in Column.allCases {
@@ -1022,6 +1044,38 @@ private final class ClusterManagerViewController: NSViewController,
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.borderType = .bezelBorder
+    }
+
+    @discardableResult
+    func performClusterManagerShortcut(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+            let action = ClusterManagerShortcut.action(
+                characters: event.charactersIgnoringModifiers,
+                modifiers: event.modifierFlags,
+                textIsEditable: isEditingText
+            )
+        else { return false }
+        guard !event.isARepeat else { return true }
+        switch action {
+        case .focusSearch:
+            guard searchField.isEnabled else { return true }
+            focusSearch()
+        }
+        return true
+    }
+
+    private func focusSearch() {
+        guard searchField.isEnabled else { return }
+        view.window?.makeFirstResponder(searchField)
+        searchField.selectText(nil)
+    }
+
+    private var isEditingText: Bool {
+        guard let firstResponder = view.window?.firstResponder else { return false }
+        if let textView = firstResponder as? NSTextView {
+            return textView.isEditable
+        }
+        return (firstResponder as? NSTextField)?.isEditable == true
     }
 
     private func configureStateView() {
@@ -1587,13 +1641,40 @@ final class KubeconfigDropView: NSView {
 @MainActor
 private final class ContextTableView: NSTableView {
     var returnAction: (() -> Void)?
+    var focusSearchAction: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
+        guard currentEditor() == nil else {
+            super.keyDown(with: event)
+            return
+        }
+        if ClusterManagerShortcut.action(
+            characters: event.charactersIgnoringModifiers,
+            modifiers: event.modifierFlags,
+            textIsEditable: false
+        ) == .focusSearch {
+            guard !event.isARepeat else { return }
+            focusSearchAction?()
+            return
+        }
         if event.keyCode == 36 || event.keyCode == 76 {
             returnAction?()
             return
         }
         super.keyDown(with: event)
+    }
+}
+
+/// Intercepts the chooser's unmodified search shortcut before AppKit routes it
+/// to a focused non-editable control. Text editors are deliberately left alone
+/// so a slash remains ordinary search-field input while the user is typing.
+@MainActor
+private final class ClusterManagerShortcutWindow: NSWindow {
+    var keyDownHandler: ((NSEvent) -> Bool)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, keyDownHandler?(event) == true { return }
+        super.sendEvent(event)
     }
 }
 

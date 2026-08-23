@@ -175,6 +175,7 @@ globally across launches rather than per cluster.
 | --- | --- |
 | Command-N | Open a new Cluster Manager window |
 | Command-O | Add kubeconfig files from Cluster Manager |
+| `/` in Cluster Manager | Search kubeconfig contexts |
 | Command-K | Open the current workspace's Command Palette |
 | Shift-Command-N | Open the current workspace's namespace picker |
 | `/` | Focus the resource filter |
