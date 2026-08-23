@@ -125,6 +125,7 @@ final class ExecConfigurationWindowController: NSWindowController,
         executableField.delegate = self
         executableField.setAccessibilityLabel("Remote executable")
 
+        TextDocumentGeometry.prepareForPreciseScrolling(argumentsTextView)
         argumentsTextView.isRichText = false
         argumentsTextView.isAutomaticQuoteSubstitutionEnabled = false
         argumentsTextView.isAutomaticDashSubstitutionEnabled = false

@@ -206,6 +206,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         _ textView: NSTextView,
         accessibilityLabel: String
     ) -> NSScrollView {
+        TextDocumentGeometry.prepareForPreciseScrolling(textView)
         textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false

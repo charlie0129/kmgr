@@ -165,16 +165,18 @@ final class DataConflictWindowController: NSWindowController, NSWindowDelegate {
         summary.textColor = .secondaryLabelColor
         summary.maximumNumberOfLines = 3
 
-        let textView = NSTextView()
+        let scroll = NSTextView.scrollablePlainDocumentContentTextView()
+        guard let textView = scroll.documentView as? NSTextView else {
+            preconditionFailure("AppKit did not create a conflict value text view")
+        }
+        TextDocumentGeometry.prepareForPreciseScrolling(textView)
         textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.isRichText = false
         textView.isEditable = false
         textView.isSelectable = value.valueText != nil
-        textView.string = value.valueText ?? value.placeholderText
         textView.textColor = value.valueText == nil ? .secondaryLabelColor : .labelColor
         textView.textContainerInset = NSSize(width: 7, height: 7)
-        let scroll = NSScrollView()
-        scroll.documentView = textView
+        textView.string = value.valueText ?? value.placeholderText
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
 

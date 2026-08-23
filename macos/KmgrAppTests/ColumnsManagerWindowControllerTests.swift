@@ -198,6 +198,7 @@ struct ColumnsManagerWindowControllerTests {
 
         #expect(expression.isEditable)
         #expect(expression.isSelectable)
+        expectPreciseScrollingLayout(expression)
         #expect(examplesButton.bezelStyle == .helpButton)
         #expect(examplesButton.action != nil)
         #expect(selectionTip.stringValue.contains("Select one"))
@@ -205,6 +206,7 @@ struct ColumnsManagerWindowControllerTests {
         #expect(!selectionTip.isHidden)
         #expect(!preview.isEditable)
         #expect(preview.isSelectable)
+        expectPreciseScrollingLayout(preview)
         #expect(frame(of: preview, in: root).height <= 160)
         #expect(titleField.nextKeyView === expression)
         #expect(expression.nextKeyView === resultType)

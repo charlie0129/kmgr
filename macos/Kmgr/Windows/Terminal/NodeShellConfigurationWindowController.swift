@@ -143,6 +143,7 @@ final class NodeShellConfigurationWindowController: NSWindowController,
         executableField.setAccessibilityIdentifier("node-shell.executable")
         executableField.setAccessibilityLabel("Host executable")
 
+        TextDocumentGeometry.prepareForPreciseScrolling(argumentsTextView)
         argumentsTextView.isRichText = false
         argumentsTextView.isAutomaticQuoteSubstitutionEnabled = false
         argumentsTextView.isAutomaticDashSubstitutionEnabled = false

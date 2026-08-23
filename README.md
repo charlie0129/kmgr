@@ -426,8 +426,9 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
    verify the record remains Failed rather than switching identity.
 8. Search all keys and multiline values in a ConfigMap and an explicitly
    revealed Secret, edit one decoded key in each without handling base64,
-   inspect and confirm each value-only diff, and exercise a YAML
-   resource-version conflict.
+   inspect and confirm each value-only diff, scroll a long diff smoothly with
+   both a trackpad and mouse wheel, and exercise a YAML resource-version
+   conflict.
 9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
 10. View both Pod and Node metrics, then compare their behavior with Metrics API

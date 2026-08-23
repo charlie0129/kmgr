@@ -42,13 +42,27 @@ final class DiffTextDocument {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.textContainerInset = NSSize(width: 10, height: 10)
-        textView.textStorage?.setAttributedString(Self.attributedText(for: lines))
 
         scrollView.identifier = .init("\(identifierPrefix)-scroll")
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.borderType = .bezelBorder
+
+        TextDocumentGeometry.configure(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false
+        )
+        textView.textStorage?.setAttributedString(Self.attributedText(for: lines))
+        TextDocumentGeometry.update(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false
+        )
+        // Retain the factory document's viewport-filling behavior for short
+        // diffs while TextKit keeps longer documents at their laid-out height.
+        textView.autoresizingMask = [.width, .height]
     }
 
     var text: String {

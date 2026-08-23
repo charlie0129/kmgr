@@ -6,12 +6,24 @@ import AppKit
 /// out text must fit inside that frame.
 @MainActor
 enum TextDocumentGeometry {
+    /// Uses TextKit 1 for scrollable documents before their content is
+    /// installed. On macOS 15, TextKit 2 can stall AppKit's concurrent
+    /// precise-scrolling path used by trackpads even when scrollbar and mouse
+    /// wheel scrolling remain smooth.
+    static func prepareForPreciseScrolling(_ textView: NSTextView) {
+        guard let layoutManager = textView.layoutManager else {
+            preconditionFailure("AppKit did not create a text layout manager")
+        }
+        layoutManager.allowsNonContiguousLayout = true
+    }
+
     static func configure(
         _ textView: NSTextView,
         in scrollView: NSScrollView,
         wrapsToViewport: Bool,
         fallbackSize: NSSize = NSSize(width: 640, height: 320)
     ) {
+        prepareForPreciseScrolling(textView)
         let viewport = scrollView.contentSize
         textView.frame = NSRect(
             origin: .zero,

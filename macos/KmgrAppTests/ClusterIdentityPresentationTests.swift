@@ -65,6 +65,12 @@ struct ClusterIdentityPresentationTests {
             #expect(values.contains { $0.contains("production/admin@corp") })
         }
 
+        let execRoot = try #require(exec.window?.contentView)
+        let arguments = try #require(identityDescendants(of: execRoot)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Remote command arguments, one per line" })
+        expectPreciseScrollingLayout(arguments)
+
         let forwardRoot = try #require(forward.window?.contentView)
         forwardRoot.layoutSubtreeIfNeeded()
         let forwardViews = identityDescendants(of: forwardRoot)
@@ -124,6 +130,12 @@ struct ClusterIdentityPresentationTests {
             .compactMap { ($0 as? NSTextField)?.stringValue }
             .joined(separator: "\n")
         #expect(conflictText.contains(expected))
+        let conflictValues = identityDescendants(of: conflictRoot)
+            .compactMap { $0 as? NSTextView }
+        #expect(conflictValues.count == 2)
+        for value in conflictValues {
+            expectPreciseScrollingLayout(value)
+        }
     }
 
     @Test("terminal and app-wide forward records retain cluster context")

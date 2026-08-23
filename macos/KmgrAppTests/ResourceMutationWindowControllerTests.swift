@@ -101,6 +101,7 @@ struct ResourceMutationWindowControllerTests {
             #expect(editor.isVerticallyResizable)
             #expect(!editor.isHorizontallyResizable)
             #expect(editor.textContainer?.widthTracksTextView == true)
+            expectPreciseScrollingLayout(editor)
             #expect(scrollView.hasVerticalScroller)
             #expect(scrollView.borderType == .bezelBorder)
             #expect(editor.accessibilityHelp()?.contains("per line") == true)

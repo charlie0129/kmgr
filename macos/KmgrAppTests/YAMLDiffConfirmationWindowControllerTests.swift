@@ -158,6 +158,13 @@ struct YAMLDiffConfirmationWindowControllerTests {
         #expect(textView.isSelectable)
         #expect(textView.isRichText)
         #expect(textView.usesFindBar)
+        expectPreciseScrollingLayout(textView)
+        #expect(textView.isVerticallyResizable)
+        #expect(textView.isHorizontallyResizable)
+        #expect(textView.autoresizingMask.contains(.height))
+        #expect(textView.textContainer?.widthTracksTextView == false)
+        #expect(textView.textContainer?.containerSize.width
+            == CGFloat.greatestFiniteMagnitude)
         #expect(search.title == "Search")
         #expect(apply.keyEquivalent == "\r")
         #expect(keepEditing.keyEquivalent == "\u{1b}")

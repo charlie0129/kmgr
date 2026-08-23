@@ -189,6 +189,13 @@ struct DataValueDiffConfirmationWindowControllerTests {
         #expect(textView.isSelectable)
         #expect(!textView.isEditable)
         #expect(textView.usesFindBar)
+        expectPreciseScrollingLayout(textView)
+        #expect(textView.isVerticallyResizable)
+        #expect(textView.isHorizontallyResizable)
+        #expect(textView.autoresizingMask.contains(.height))
+        #expect(textView.textContainer?.widthTracksTextView == false)
+        #expect(textView.textContainer?.containerSize.width
+            == CGFloat.greatestFiniteMagnitude)
         #expect(search.title == "Search")
         #expect(save.keyEquivalent == "\r")
         #expect(keepEditing.keyEquivalent == "\u{1b}")

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import KmgrCore
 import Testing
@@ -5,6 +6,20 @@ import Testing
 
 @Suite("AppKit tests", .serialized)
 struct AppKitTestHarness {}
+
+@MainActor
+func expectPreciseScrollingLayout(
+    _ textView: NSTextView,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    // Check TextKit 2 first: reading layoutManager below would itself switch
+    // an incorrectly configured view to TextKit 1 and could mask a regression.
+    #expect(textView.textLayoutManager == nil, sourceLocation: sourceLocation)
+    #expect(
+        textView.layoutManager?.allowsNonContiguousLayout == true,
+        sourceLocation: sourceLocation
+    )
+}
 
 // AppKit fixtures use deterministic opaque identities; production must always
 // receive the exact reference published by kubeconfig discovery.

@@ -720,7 +720,7 @@ final class SyntaxHighlighter: NSObject {
 
         // Temporary colors must not make TextKit lay out an entire large value
         // before it can paint the visible neighborhood.
-        textView.layoutManager?.allowsNonContiguousLayout = true
+        TextDocumentGeometry.prepareForPreciseScrolling(textView)
         scrollView.contentView.postsBoundsChangedNotifications = true
         let center = NotificationCenter.default
         center.addObserver(

@@ -1263,6 +1263,7 @@ final class CELColumnEditorWindowController: NSWindowController,
         alignmentButton.target = self
         alignmentButton.action = #selector(choiceChanged)
 
+        TextDocumentGeometry.prepareForPreciseScrolling(expressionView)
         expressionView.delegate = self
         expressionView.frame = NSRect(x: 0, y: 0, width: 560, height: 140)
         expressionView.isEditable = true
@@ -1344,6 +1345,7 @@ final class CELColumnEditorWindowController: NSWindowController,
         noSelectionTipLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         previewStateLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        TextDocumentGeometry.prepareForPreciseScrolling(previewValueView)
         previewValueView.frame = NSRect(x: 0, y: 0, width: 560, height: 140)
         previewValueView.isEditable = false
         previewValueView.isSelectable = true
