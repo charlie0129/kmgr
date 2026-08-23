@@ -155,14 +155,13 @@ struct SyntaxHighlighterTests {
         )
 
         #expect(highlighter.whitespaceVisualizationEnabled)
-        #expect(textView.layoutManager?.showsInvisibleCharacters == true)
-        #expect(textView.layoutManager?.showsControlCharacters == true)
+        expectPreciseScrollingLayout(textView)
+        expectWhitespaceVisualization(textView, enabled: true)
         #expect(textView.string == source)
 
         highlighter.setWhitespaceVisualization(false)
         #expect(!highlighter.whitespaceVisualizationEnabled)
-        #expect(textView.layoutManager?.showsInvisibleCharacters == false)
-        #expect(textView.layoutManager?.showsControlCharacters == false)
+        expectWhitespaceVisualization(textView, enabled: false)
         #expect(textView.string == source)
     }
 
@@ -179,9 +178,146 @@ struct SyntaxHighlighterTests {
         )
 
         #expect(!highlighter.whitespaceVisualizationEnabled)
-        #expect(textView.layoutManager?.showsInvisibleCharacters == false)
-        #expect(textView.layoutManager?.showsControlCharacters == false)
+        expectWhitespaceVisualization(textView, enabled: false)
         #expect(textView.string == "00000000  00 FF 10 80  |....|")
+    }
+
+    @Test("whitespace markers change presentation without changing the document")
+    func whitespaceMarkersArePresentationOnly() throws {
+        let scrollView = NSTextView.scrollablePlainDocumentContentTextView()
+        let textView = try #require(scrollView.documentView as? NSTextView)
+        textView.frame = NSRect(x: 0, y: 0, width: 360, height: 120)
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        let source = "metadata:\n  name:\tapi  \n\tlabels:\n    app: kmgr\u{0001}\n"
+        textView.string = source
+        let highlighter = SyntaxHighlighter(
+            textView: textView,
+            scrollView: scrollView,
+            mode: .yaml
+        )
+        TextDocumentGeometry.update(textView, in: scrollView, wrapsToViewport: true)
+        let layoutManager = try #require(textView.layoutManager)
+        let textContainer = try #require(textView.textContainer)
+        layoutManager.ensureLayout(for: textContainer)
+        let glyphRange = layoutManager.glyphRange(
+            forBoundingRect: textView.bounds,
+            in: textContainer
+        )
+
+        func render() throws -> Data {
+            let image = try #require(NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: Int(textView.bounds.width),
+                pixelsHigh: Int(textView.bounds.height),
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bitmapFormat: [],
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ))
+            let context = try #require(NSGraphicsContext(bitmapImageRep: image))
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            NSColor.white.setFill()
+            NSBezierPath(rect: textView.bounds).fill()
+            layoutManager.drawGlyphs(forGlyphRange: glyphRange, at: textView.textContainerOrigin)
+            context.flushGraphics()
+            NSGraphicsContext.restoreGraphicsState()
+            let byteCount = image.bytesPerRow * image.pixelsHigh
+            let bytes = try #require(image.bitmapData).withMemoryRebound(
+                to: UInt8.self,
+                capacity: byteCount
+            ) { Data(bytes: $0, count: byteCount) }
+            return bytes
+        }
+
+        let enabled = try render()
+        highlighter.setWhitespaceVisualization(false)
+        let disabled = try render()
+
+        #expect(enabled != disabled)
+        #expect(textView.string == source)
+    }
+
+    @Test("large whitespace rendering stays within the visible range budget")
+    func largeWhitespaceRenderingBound() throws {
+        let row = "    field:\tvalue  \n"
+        let byteTarget = 2 * 1_024 * 1_024
+        let source = String(repeating: row, count: byteTarget / row.utf8.count + 1)
+        let scrollView = NSTextView.scrollablePlainDocumentContentTextView()
+        let textView = try #require(scrollView.documentView as? NSTextView)
+        scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        textView.string = source
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        TextDocumentGeometry.configure(
+            textView,
+            in: scrollView,
+            wrapsToViewport: true,
+            fallbackSize: NSSize(width: 640, height: 320)
+        )
+        let highlighter = SyntaxHighlighter(
+            textView: textView,
+            scrollView: scrollView,
+            mode: .yaml
+        )
+        let layoutManager = try #require(textView.layoutManager)
+        let textContainer = try #require(textView.textContainer)
+        textView.setFrameSize(NSSize(width: 640, height: 320))
+        textContainer.containerSize = NSSize(
+            width: 640,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let visibleGlyphs = layoutManager.glyphRange(
+            forBoundingRect: NSRect(x: 0, y: 0, width: 640, height: 320),
+            in: textContainer
+        )
+        #expect(visibleGlyphs.length < source.utf16.count / 100)
+
+        let image = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 640,
+            pixelsHigh: 320,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        let context = try #require(NSGraphicsContext(bitmapImageRep: image))
+        let clock = ContinuousClock()
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        let start = clock.now
+        layoutManager.drawGlyphs(
+            forGlyphRange: visibleGlyphs,
+            at: textView.textContainerOrigin
+        )
+        context.flushGraphics()
+        let duration = start.duration(to: clock.now)
+        NSGraphicsContext.restoreGraphicsState()
+
+        if ProcessInfo.processInfo.environment["KMGR_PERF_DIAGNOSTICS"] == "1"
+            || ProcessInfo.processInfo.environment["KMGR_PERF_BUDGETS"] == "1"
+        {
+            print(
+                "kmgr whitespace diagnostic: rendered \(visibleGlyphs.length) of "
+                    + "\(source.utf16.count) UTF-16 code units in \(duration)"
+            )
+        }
+        if ProcessInfo.processInfo.environment["KMGR_PERF_BUDGETS"] == "1" {
+            #expect(
+                duration <= .milliseconds(16),
+                "Visible whitespace rendering exceeded one 60 Hz display frame."
+            )
+        }
+        #expect(highlighter.whitespaceVisualizationEnabled)
+        #expect(textView.string == source)
     }
 
     @Test("large JSON values retain bounded per-refresh lexer work")

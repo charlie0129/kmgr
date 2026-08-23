@@ -114,7 +114,7 @@ app-wide Port Forwards window.
   key-value editors apply the same YAML colors to `.yml`/`.yaml` keys and
   best-effort JSON colors to object or array values, including nested annotation
   values. Spaces, tabs, line endings, and other control characters in YAML and
-  text values use native TextKit whitespace glyphs; binary
+  text values use quiet editor-style TextKit whitespace markers; binary
   previews keep their ordinary hex spacing. These markers are presentation
   only, so the stored bytes, accessibility value, copy/paste, and undo history
   remain unchanged. Highlighting reads TextKit's existing backing store and

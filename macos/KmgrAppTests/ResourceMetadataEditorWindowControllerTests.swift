@@ -138,8 +138,7 @@ struct ResourceMetadataEditorWindowControllerTests {
         try await metadataWaitUntil {
             metadataTemporaryColor(in: editor, at: kindLocation) == .systemPurple
         }
-        #expect(editor.layoutManager?.showsInvisibleCharacters == true)
-        #expect(editor.layoutManager?.showsControlCharacters == true)
+        expectWhitespaceVisualization(editor, enabled: true)
 
         editor.string = #"{"kind":"Deployment","replicas":3,"nested":{"ready":true}}"#
         controller.textDidChange(Notification(

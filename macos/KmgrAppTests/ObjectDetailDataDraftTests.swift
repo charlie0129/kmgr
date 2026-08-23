@@ -302,8 +302,7 @@ struct ObjectDetailDataDraftTests {
         try await waitForCondition {
             temporaryColor(in: editor, at: yamlKeyLocation) == .systemPurple
         }
-        #expect(editor.layoutManager?.showsInvisibleCharacters == true)
-        #expect(editor.layoutManager?.showsControlCharacters == true)
+        expectWhitespaceVisualization(editor, enabled: true)
 
         select(row: try row(forKey: "payload", in: table), in: table, controller: controller)
         let jsonKeyLocation = (editor.string as NSString).range(of: "\"name\"").location
@@ -318,13 +317,11 @@ struct ObjectDetailDataDraftTests {
         try await waitForCondition {
             temporaryColor(in: editor, at: plainLocation) == nil
         }
-        #expect(editor.layoutManager?.showsInvisibleCharacters == true)
-        #expect(editor.layoutManager?.showsControlCharacters == true)
+        expectWhitespaceVisualization(editor, enabled: true)
 
         select(row: try row(forKey: "archive", in: table), in: table, controller: controller)
         #expect(temporaryColor(in: editor, at: 0) == nil)
-        #expect(editor.layoutManager?.showsInvisibleCharacters == false)
-        #expect(editor.layoutManager?.showsControlCharacters == false)
+        expectWhitespaceVisualization(editor, enabled: false)
         #expect(editor.string.contains("00 FF 10"))
     }
 
@@ -365,22 +362,19 @@ struct ObjectDetailDataDraftTests {
         try await waitForDataRows(table, count: 1)
         #expect(editor.string.contains("concealed"))
         #expect(temporaryColor(in: editor, at: 0) == nil)
-        #expect(editor.layoutManager?.showsInvisibleCharacters == false)
-        #expect(editor.layoutManager?.showsControlCharacters == false)
+        expectWhitespaceVisualization(editor, enabled: false)
 
         reveal.performClick(nil)
         let keyLocation = (editor.string as NSString).range(of: "\"token\"").location
         try await waitForCondition {
             temporaryColor(in: editor, at: keyLocation) == .systemPurple
         }
-        #expect(editor.layoutManager?.showsInvisibleCharacters == true)
-        #expect(editor.layoutManager?.showsControlCharacters == true)
+        expectWhitespaceVisualization(editor, enabled: true)
 
         reveal.performClick(nil)
         #expect(editor.string.contains("decoded-secret") == false)
         #expect(temporaryColor(in: editor, at: 0) == nil)
-        #expect(editor.layoutManager?.showsInvisibleCharacters == false)
-        #expect(editor.layoutManager?.showsControlCharacters == false)
+        expectWhitespaceVisualization(editor, enabled: false)
     }
 
     @Test("Value column safely labels binary bytes and truncates long text")

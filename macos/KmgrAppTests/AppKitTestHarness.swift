@@ -21,6 +21,28 @@ func expectPreciseScrollingLayout(
     )
 }
 
+@MainActor
+func expectWhitespaceVisualization(
+    _ textView: NSTextView,
+    enabled: Bool,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    let layoutManager = textView.layoutManager as? WhitespaceLayoutManager
+    #expect(layoutManager != nil, sourceLocation: sourceLocation)
+    #expect(
+        layoutManager?.whitespaceVisualizationEnabled == enabled,
+        sourceLocation: sourceLocation
+    )
+    #expect(
+        layoutManager?.showsInvisibleCharacters == false,
+        sourceLocation: sourceLocation
+    )
+    #expect(
+        layoutManager?.showsControlCharacters == false,
+        sourceLocation: sourceLocation
+    )
+}
+
 // AppKit fixtures use deterministic opaque identities; production must always
 // receive the exact reference published by kubeconfig discovery.
 extension ClusterContextSummary {

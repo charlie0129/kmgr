@@ -766,8 +766,8 @@ final class SyntaxHighlighter: NSObject {
         if mode != .none { invalidate() }
     }
 
-    /// Toggles AppKit's layout-only whitespace markers without touching the
-    /// syntax colors or the document backing store.
+    /// Toggles the layout-only whitespace renderer without touching syntax
+    /// colors or the document backing store.
     func setWhitespaceVisualization(_ enabled: Bool) {
         guard whitespaceVisualizationEnabled != enabled else { return }
         whitespaceVisualizationEnabled = enabled

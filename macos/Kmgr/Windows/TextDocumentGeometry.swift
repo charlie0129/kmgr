@@ -17,24 +17,48 @@ enum TextDocumentGeometry {
         layoutManager.allowsNonContiguousLayout = true
     }
 
-    /// Asks TextKit to draw whitespace and control characters using its
-    /// native invisible-character glyphs. This changes presentation only:
-    /// the document string, selections, copy/paste, and undo history remain
-    /// byte-for-byte unchanged.
+    /// Installs the editor-style whitespace renderer used by structured text
+    /// editors. This changes presentation only: the document string,
+    /// selections, copy/paste, and undo history remain unchanged.
     ///
     /// Keep this on the TextKit 1 layout manager used by the app's large
-    /// editors. AppKit invalidates the affected glyph display when either
-    /// option changes, so callers do not need to insert marker characters or
-    /// maintain a second rendered string.
+    /// editors. The renderer invalidates presentation when its state changes,
+    /// so callers do not need to insert marker characters or maintain a second
+    /// rendered string.
     static func configureWhitespaceVisualization(
         _ textView: NSTextView,
         enabled: Bool
     ) {
-        guard let layoutManager = textView.layoutManager else {
+        guard let existingLayoutManager = textView.layoutManager else {
             preconditionFailure("AppKit did not create a text layout manager")
         }
-        layoutManager.showsInvisibleCharacters = enabled
-        layoutManager.showsControlCharacters = enabled
+
+        let layoutManager: WhitespaceLayoutManager
+        if let existingLayoutManager = existingLayoutManager as? WhitespaceLayoutManager {
+            layoutManager = existingLayoutManager
+        } else {
+            let replacement = WhitespaceLayoutManager()
+            replacement.delegate = existingLayoutManager.delegate
+            replacement.usesDefaultHyphenation = existingLayoutManager.usesDefaultHyphenation
+            replacement.usesFontLeading = existingLayoutManager.usesFontLeading
+            replacement.allowsNonContiguousLayout = existingLayoutManager.allowsNonContiguousLayout
+            replacement.limitsLayoutForSuspiciousContents =
+                existingLayoutManager.limitsLayoutForSuspiciousContents
+            replacement.backgroundLayoutEnabled = existingLayoutManager.backgroundLayoutEnabled
+            replacement.defaultAttachmentScaling = existingLayoutManager.defaultAttachmentScaling
+            replacement.typesetterBehavior = existingLayoutManager.typesetterBehavior
+            replacement.typesetter = existingLayoutManager.typesetter
+            guard let textContainer = textView.textContainer else {
+                preconditionFailure("AppKit did not create a text container")
+            }
+            textContainer.replaceLayoutManager(replacement)
+            layoutManager = replacement
+        }
+
+        // The custom renderer replaces AppKit's heavy built-in glyphs.
+        layoutManager.showsInvisibleCharacters = false
+        layoutManager.showsControlCharacters = false
+        layoutManager.whitespaceVisualizationEnabled = enabled
     }
 
     static func configure(
