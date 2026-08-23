@@ -645,9 +645,10 @@ enum SyntaxHighlightingPalette {
     }
 }
 
-/// Chooses a presentation lexer for a decoded text Data value. This is a
-/// bounded heuristic, intentionally separate from validation or serialization.
-enum DataSyntaxHighlightingModeDetector {
+/// Chooses a presentation lexer for an editable key/value text value. This is
+/// a bounded heuristic, intentionally separate from validation or
+/// serialization.
+enum KeyValueSyntaxHighlightingModeDetector {
     static let maximumBoundaryWhitespaceScan = 4 * 1_024
 
     static func mode(

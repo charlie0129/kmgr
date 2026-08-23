@@ -71,41 +71,41 @@ struct SyntaxHighlighterTests {
         #expect(texts(for: .keyword, in: tokens, source: json) == ["true", "null"])
     }
 
-    @Test("Data syntax mode uses YAML keys and JSON object or array boundaries")
-    func dataSyntaxModes() {
-        #expect(DataSyntaxHighlightingModeDetector.mode(
+    @Test("key-value syntax mode uses YAML keys and JSON object or array boundaries")
+    func keyValueSyntaxModes() {
+        #expect(KeyValueSyntaxHighlightingModeDetector.mode(
             forKey: "settings.YAML",
             isTextValue: true,
             source: "plain text" as NSString
         ) == .yaml)
-        #expect(DataSyntaxHighlightingModeDetector.mode(
+        #expect(KeyValueSyntaxHighlightingModeDetector.mode(
             forKey: "settings",
             isTextValue: true,
             source: "  {\"enabled\": true}  " as NSString
         ) == .json)
-        #expect(DataSyntaxHighlightingModeDetector.mode(
+        #expect(KeyValueSyntaxHighlightingModeDetector.mode(
             forKey: "settings",
             isTextValue: true,
             source: "\n[ {\"name\": \"api\"} ]\n" as NSString
         ) == .json)
-        #expect(DataSyntaxHighlightingModeDetector.mode(
+        #expect(KeyValueSyntaxHighlightingModeDetector.mode(
             forKey: "settings",
             isTextValue: true,
             source: "not structured" as NSString
         ) == .none)
-        #expect(DataSyntaxHighlightingModeDetector.mode(
+        #expect(KeyValueSyntaxHighlightingModeDetector.mode(
             forKey: "settings",
             isTextValue: true,
             source: "{\"enabled\": true" as NSString,
             retaining: .json
         ) == .json)
-        #expect(DataSyntaxHighlightingModeDetector.mode(
+        #expect(KeyValueSyntaxHighlightingModeDetector.mode(
             forKey: "settings",
             isTextValue: true,
             source: "ordinary replacement" as NSString,
             retaining: .json
         ) == .none)
-        #expect(DataSyntaxHighlightingModeDetector.mode(
+        #expect(KeyValueSyntaxHighlightingModeDetector.mode(
             forKey: "settings.yaml",
             isTextValue: false,
             source: "kind: Deployment" as NSString

@@ -149,6 +149,16 @@ final class DiffTextDocument {
         textView.textStorage?.setAttributedString(NSAttributedString())
     }
 
+    func replace(lines: [DiffTextLine]) {
+        textView.textStorage?.setAttributedString(Self.attributedText(for: lines))
+        TextDocumentGeometry.update(
+            textView,
+            in: scrollView,
+            wrapsToViewport: false
+        )
+        textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+    }
+
     private static func attributedText(for lines: [DiffTextLine]) -> NSAttributedString {
         let result = NSMutableAttributedString()
         for (index, line) in lines.enumerated() {

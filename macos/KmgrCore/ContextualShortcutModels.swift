@@ -217,7 +217,7 @@ public enum ContextualShortcutCatalog {
         if secret {
             items.append(item("data.reveal", "D", "Toggle decoded Secret values"))
         }
-        items.append(item("data.save", "\u{2318}S", "Save selected key"))
+        items.append(item("data.save", "\u{2318}S", "Review and save staged changes"))
         items.append(namespaceItem)
         items.append(item("subresource.back", "Escape", "Back to resource list"))
         return ContextualShortcutSnapshot(
@@ -236,7 +236,7 @@ public enum ContextualShortcutCatalog {
             items: [
                 item("metadata.search", "/ or ⌘F", "Search keys and values"),
                 item("metadata.edit-value", "Return", "Edit selected value"),
-                item("metadata.save", "⌘S", "Save \(kind.title.lowercased())"),
+                item("metadata.save", "⌘S", "Review and save staged changes"),
                 item("metadata.cancel", "Escape", "Cancel editing"),
             ]
         )

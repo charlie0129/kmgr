@@ -96,8 +96,9 @@ app-wide Port Forwards window.
   value. Labels and Annotations remain visible as separate sections even when
   empty; each has its own editor, and Return on a selected metadata row opens
   that kind with the key selected. The metadata and ConfigMap/Secret Data
-  editors share a searchable, draggable key/value split-view interaction while
-  keeping their validation and mutation semantics separate. Details also
+  editors use the same searchable, draggable key/value split view, keyboard
+  behavior, structured-text highlighting, whitespace markers, staged row
+  states, and save review while keeping their validation rules separate. Details also
   provide YAML, Events, Relationships, Metrics where meaningful, and Data for
   ConfigMaps and Secrets. Oversized Summary values stay available through cell
   copy while their inline presentation remains bounded.
@@ -108,21 +109,24 @@ app-wide Port Forwards window.
   material JSON Patch before the semantic diff is shown. UID/resourceVersion
   test operations prevent retargeting or stale writes, unchanged unknown fields
   are preserved, and force field ownership is unsupported.
-- YAML viewing and editing use lightweight visible-range syntax colors. The
-  decoded Data value editor applies the same YAML colors to `.yml`/`.yaml`
-  keys, and best-effort JSON colors to object or array values, including nested
-  structures. Spaces, tabs, line endings, and other control characters in
-  YAML and decoded text values use native TextKit whitespace glyphs; binary
+- YAML viewing and editing use lightweight visible-range syntax colors. Shared
+  key-value editors apply the same YAML colors to `.yml`/`.yaml` keys and
+  best-effort JSON colors to object or array values, including nested annotation
+  values. Spaces, tabs, line endings, and other control characters in YAML and
+  text values use native TextKit whitespace glyphs; binary
   previews keep their ordinary hex spacing. These markers are presentation
   only, so the stored bytes, accessibility value, copy/paste, and undo history
   remain unchanged. Highlighting reads TextKit's existing backing store and
   caps each refresh independently of total document size.
-- ConfigMap and Secret keys support text and raw binary values. Data search
-  matches complete keys, text values, and unsaved drafts rather than only the
-  bounded row preview. Save Key first opens a searchable, value-only review:
-  text uses contextual unified hunks and binary data uses aligned changed-byte
-  rows. Oversized comparisons show bounded context around the actual change
-  while the complete value remains the mutation input. Secret bytes are
+- ConfigMap and Secret keys support text and raw binary values. Add, edit,
+  rename, and delete operations stay local until **Save Changes**. Data search
+  matches complete keys, text values, and staged drafts rather than only the
+  bounded row preview. Saving opens a master-detail review: the left side lists
+  every Added, Modified, Renamed, or Deleted key with before/after summaries;
+  the right side lazily renders the selected value. Text uses contextual unified
+  hunks and binary data uses aligned changed-byte rows. Oversized comparisons
+  show bounded context around the actual change while complete values remain the
+  atomic batch mutation input. Secret bytes are
   decoded/encoded by the engine and concealed by default; revealing them
   explicitly also enables value search and decoded diff review, while
   concealing them clears transient queries and presentations. The UI never
@@ -151,8 +155,10 @@ app-wide Port Forwards window.
 - Delete, scale, rollout restart, separate Edit Labels and Edit Annotations
   actions, and copy actions are exposed through native menus. Metadata editors
   load an authoritative UID/resourceVersion and submit one sparse optimistic
-  mutation. Deletes carry UID preconditions and report per-object partial
-  failures.
+  mutation. Label, annotation, ConfigMap, and Secret editors preserve failed or
+  conflicted batches for another review, and prompt before discarding staged
+  changes on close or Back. Deletes carry UID preconditions and report
+  per-object partial failures.
 
 ### Relationships and scan cost
 
@@ -437,12 +443,13 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
 7. Start a direct Pod forward, replace that Pod with the same name/new UID, and
    verify the record remains Failed rather than switching identity.
 8. Search all keys and multiline values in a ConfigMap and an explicitly
-   revealed Secret, edit one decoded key in each without handling base64,
-   inspect and confirm each value-only diff, scroll a long diff smoothly with
-   both a trackpad and mouse wheel, and exercise a YAML resource-version
-   conflict. In Details, edit one label and one multiline annotation through
-   their separate key/value editors, including Return on the selected Summary
-   row, and verify each save refreshes that exact object's Summary.
+   revealed Secret, stage multiple decoded key changes in each without handling
+   base64, inspect every entry in the master-detail review, scroll a long diff
+   smoothly with both a trackpad and mouse wheel, and exercise a Data conflict.
+   In Details, edit one label and one multiline annotation through their
+   separate key/value editors, including Return on the selected Summary row,
+   review the staged changes, and verify each save refreshes that exact object's
+   Summary.
 9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
 10. View both Pod and Node metrics, then compare their behavior with Metrics API

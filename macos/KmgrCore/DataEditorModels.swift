@@ -32,13 +32,19 @@ public enum KubernetesDataKeyValidator {
 
 public enum DataEditorRowState: String, Hashable, Sendable {
     case saved
-    case unsaved
+    case added
+    case modified
+    case renamed
+    case deleted
     case conflict
 
     public var displayText: String {
         switch self {
         case .saved: "Saved"
-        case .unsaved: "Unsaved"
+        case .added: "Added"
+        case .modified: "Modified"
+        case .renamed: "Renamed"
+        case .deleted: "Deleted"
         case .conflict: "Conflict"
         }
     }
@@ -378,20 +384,20 @@ public struct DataEditorRowPresentation: Hashable, Sendable {
         isSelected: Bool,
         draftKind: DataValueKind? = nil,
         draftByteSize: UInt64? = nil,
-        hasUnsavedChanges: Bool = false,
+        draftState: DataEditorRowState? = nil,
         hasConflict: Bool = false
     ) {
         // Unsaved drafts can remain when another key is selected. Callers pass
         // metadata for this row's draft only; a conflict without a local draft
         // continues to use the stored metadata.
-        let usesDraftMetadata = isSelected || hasUnsavedChanges
+        let usesDraftMetadata = isSelected || draftState != nil
         let effectiveKind = usesDraftMetadata ? (draftKind ?? storedKind) : storedKind
         let effectiveByteSize = usesDraftMetadata
             ? (draftByteSize ?? storedByteSize)
             : storedByteSize
         let rowState: DataEditorRowState = hasConflict
             ? .conflict
-            : (hasUnsavedChanges ? .unsaved : .saved)
+            : (draftState ?? .saved)
         let countText = effectiveByteSize == 1
             ? "1 byte"
             : "\(effectiveByteSize.formatted()) bytes"

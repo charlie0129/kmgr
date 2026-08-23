@@ -33,7 +33,7 @@ import Testing
     #expect(row.accessibilityValue == "settings.yaml, text, 1 byte, Saved")
 }
 
-@Test func dataEditorUnsavedRowUsesDraftTypeAndByteCount() {
+@Test func dataEditorModifiedRowUsesDraftTypeAndByteCount() {
     let row = DataEditorRowPresentation(
         key: "archive",
         storedKind: .text,
@@ -41,17 +41,17 @@ import Testing
         isSelected: true,
         draftKind: .binary,
         draftByteSize: 8_192,
-        hasUnsavedChanges: true
+        draftState: .modified
     )
 
     #expect(row.typeText == "binary")
     #expect(row.sizeText.contains("8"))
     #expect(row.sizeText.hasSuffix("bytes"))
-    #expect(row.state == .unsaved)
-    #expect(row.accessibilityValue.contains("Unsaved"))
+    #expect(row.state == .modified)
+    #expect(row.accessibilityValue.contains("Modified"))
 }
 
-@Test func dataEditorUnselectedUnsavedRowKeepsItsOwnDraftMetadata() {
+@Test func dataEditorUnselectedModifiedRowKeepsItsOwnDraftMetadata() {
     let row = DataEditorRowPresentation(
         key: "archive",
         storedKind: .text,
@@ -59,12 +59,12 @@ import Testing
         isSelected: false,
         draftKind: .binary,
         draftByteSize: 8_192,
-        hasUnsavedChanges: true
+        draftState: .modified
     )
 
     #expect(row.typeText == "binary")
     #expect(row.sizeText.contains("8"))
-    #expect(row.state == .unsaved)
+    #expect(row.state == .modified)
 }
 
 @Test func dataEditorConflictTakesPrecedenceWithoutAcceptingAValuePreview() {
@@ -75,7 +75,7 @@ import Testing
         isSelected: true,
         draftKind: .text,
         draftByteSize: 30,
-        hasUnsavedChanges: true,
+        draftState: .modified,
         hasConflict: true
     )
 

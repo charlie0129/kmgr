@@ -12,14 +12,14 @@ struct ObjectDetailDataDraftTests {
     @Test("Data text search bounds queries and returns context around full-value matches")
     func boundedDataTextSearch() throws {
         let oversized = String(repeating: "界", count: 2_000)
-        let query = ObjectDataTextSearch.normalizedQuery(oversized)
-        #expect(query.count == ObjectDataTextSearch.maximumQueryCharacters)
-        #expect(query.utf8.count <= ObjectDataTextSearch.maximumQueryUTF8Bytes)
+        let query = KeyValueTextSearch.normalizedQuery(oversized)
+        #expect(query.count == KeyValueTextSearch.maximumQueryCharacters)
+        #expect(query.utf8.count <= KeyValueTextSearch.maximumQueryUTF8Bytes)
 
         let text = String(repeating: "before ", count: 80)
             + "deep-marker\nnext line"
             + String(repeating: " after", count: 80)
-        let match = try #require(ObjectDataTextSearch.match(
+        let match = try #require(KeyValueTextSearch.match(
             in: Data(text.utf8),
             query: "DEEP-MARKER"
         ))
@@ -28,7 +28,7 @@ struct ObjectDetailDataDraftTests {
         #expect(match.snippet.hasPrefix("…"))
         #expect(match.snippet.hasSuffix("…"))
         #expect(match.snippet.count <= DataValuePreviewPresentation.maximumTextCharacterCount)
-        #expect(ObjectDataTextSearch.match(
+        #expect(KeyValueTextSearch.match(
             in: Data([0xff, 0x00, 0x41]),
             query: "A"
         ) == nil)
@@ -44,47 +44,167 @@ struct ObjectDetailDataDraftTests {
             key: "archive",
             kind: .binary,
             value: binary,
-            storedKind: .binary,
-            valueMatchesStored: false,
-            storedContentHash: binaryHash
+            baselineKind: .binary,
+            valueMatchesBaseline: false,
+            baselineContentHash: binaryHash
         )
         store.update(
             key: "config",
             kind: .binary,
             value: Data("plain text bytes".utf8),
-            storedKind: .text,
-            valueMatchesStored: true,
-            storedContentHash: Data(repeating: 3, count: 32)
+            baselineKind: .text,
+            valueMatchesBaseline: true,
+            baselineContentHash: Data(repeating: 3, count: 32)
         )
 
         var binaryDraft = try #require(store.snapshot(for: "archive"))
-        defer {
-            binaryDraft.value.resetBytes(
-                in: binaryDraft.value.startIndex..<binaryDraft.value.endIndex
-            )
-        }
-        #expect(binaryDraft.kind == .binary)
-        #expect(binaryDraft.value == binary)
+        defer { binaryDraft.wipe() }
+        #expect(binaryDraft.afterKind == .binary)
+        #expect(binaryDraft.afterValue == binary)
         #expect(binaryDraft.expectedContentHash == binaryHash)
         #expect(store.metadata(for: "archive")?.kind == .binary)
         #expect(store.metadata(for: "archive")?.byteCount == 4)
 
-        let kindOnlyDraft = try #require(store.snapshot(for: "config"))
-        #expect(kindOnlyDraft.kind == .binary)
-        #expect(kindOnlyDraft.value == Data("plain text bytes".utf8))
+        var kindOnlyDraft = try #require(store.snapshot(for: "config"))
+        defer { kindOnlyDraft.wipe() }
+        #expect(kindOnlyDraft.afterKind == .binary)
+        #expect(kindOnlyDraft.afterValue == Data("plain text bytes".utf8))
 
         store.update(
             key: "archive",
             kind: .binary,
             value: originalBinary,
-            storedKind: .binary,
-            valueMatchesStored: true,
-            storedContentHash: binaryHash
+            baselineKind: .binary,
+            valueMatchesBaseline: true,
+            baselineContentHash: binaryHash
         )
         #expect(store.snapshot(for: "archive") == nil)
         #expect(store.snapshot(for: "config") != nil)
         store.removeAll()
         #expect(store.isEmpty)
+    }
+
+    @Test("draft store stages add, rename, and delete as one reversible batch")
+    func stagedStructuralBatch() throws {
+        let store = DataEditorDraftStore()
+        let oldHash = Data(repeating: 1, count: 32)
+        let deletedHash = Data(repeating: 2, count: 32)
+        store.add(key: "new", kind: .text, value: Data("created".utf8))
+        store.rename(
+            key: "old",
+            to: "renamed",
+            baselineKind: .text,
+            baselineValue: Data("original".utf8),
+            baselineContentHash: oldHash
+        )
+        store.delete(key: "gone", baselineContentHash: deletedHash)
+
+        #expect(store.changedKeyCount == 3)
+        #expect(store.displayedKeys(baselineKeys: ["gone", "keep", "old"])
+            == ["gone", "keep", "new", "renamed"])
+        var snapshots = store.allSnapshots()
+        defer {
+            for index in snapshots.indices { snapshots[index].wipe() }
+        }
+        #expect(snapshots.count == 3)
+        #expect(snapshots[0].beforeKey == "gone" && snapshots[0].afterKey == nil)
+        #expect(snapshots[1].beforeKey == nil && snapshots[1].afterKey == "new")
+        #expect(snapshots[2].beforeKey == "old" && snapshots[2].afterKey == "renamed")
+
+        let mutations = store.mutations()
+        #expect(mutations.count == 3)
+        guard case .delete(let deletedKey, let deleteHash) = mutations[0],
+            case .set(let addedKey, .text, let addedValue, let addHash) = mutations[1],
+            case .rename(let oldKey, let newKey, let renameHash) = mutations[2]
+        else {
+            Issue.record("Expected deterministic delete, add, and rename mutations")
+            return
+        }
+        #expect(deletedKey == "gone")
+        #expect(deleteHash == deletedHash)
+        #expect(addedKey == "new")
+        #expect(addedValue == Data("created".utf8))
+        #expect(addHash.isEmpty)
+        #expect(oldKey == "old")
+        #expect(newKey == "renamed")
+        #expect(renameHash == oldHash)
+
+        #expect(store.revert(key: "renamed") == "old")
+        #expect(store.revert(key: "gone") == "gone")
+        #expect(store.revert(key: "new") == nil)
+        #expect(store.isEmpty)
+
+        store.rename(
+            key: "old",
+            to: "renamed",
+            baselineKind: .text,
+            baselineValue: Data("original".utf8),
+            baselineContentHash: oldHash
+        )
+        store.rename(
+            key: "renamed",
+            to: "old",
+            baselineKind: .text,
+            baselineValue: Data("original".utf8),
+            baselineContentHash: oldHash
+        )
+        #expect(store.isEmpty)
+
+        store.rename(
+            key: "old",
+            to: "renamed",
+            baselineKind: .text,
+            baselineValue: Data("original".utf8),
+            baselineContentHash: oldHash
+        )
+        let freshHash = Data(repeating: 9, count: 32)
+        store.rebase(
+            displayKey: "renamed",
+            currentKind: .binary,
+            currentValue: Data([0x01, 0x02]),
+            currentContentHash: freshHash
+        )
+        var rebasedRename = try #require(store.snapshot(for: "renamed"))
+        defer { rebasedRename.wipe() }
+        #expect(rebasedRename.afterKind == .binary)
+        #expect(rebasedRename.afterValue == Data([0x01, 0x02]))
+        #expect(rebasedRename.expectedContentHash == freshHash)
+        #expect(rebasedRename.valueChanged == false)
+
+        store.removeAll()
+        store.add(key: "appeared", kind: .text, value: Data("local".utf8))
+        store.rebase(
+            displayKey: "appeared",
+            currentKind: .text,
+            currentValue: Data("server".utf8),
+            currentContentHash: freshHash
+        )
+        #expect(store.metadata(for: "appeared")?.state == .modified)
+        var appeared = try #require(store.snapshot(for: "appeared"))
+        defer { appeared.wipe() }
+        #expect(appeared.beforeKey == "appeared")
+        #expect(appeared.expectedContentHash == freshHash)
+
+        store.removeAll()
+        store.update(
+            key: "vanished",
+            kind: .text,
+            value: Data("local".utf8),
+            baselineKind: .text,
+            valueMatchesBaseline: false,
+            baselineContentHash: oldHash
+        )
+        store.rebase(
+            displayKey: "vanished",
+            currentKind: nil,
+            currentValue: nil,
+            currentContentHash: nil
+        )
+        #expect(store.metadata(for: "vanished")?.state == .added)
+        var vanished = try #require(store.snapshot(for: "vanished"))
+        defer { vanished.wipe() }
+        #expect(vanished.beforeKey == nil)
+        #expect(vanished.expectedContentHash.isEmpty)
     }
 
     @Test("ConfigMap Value column previews stored and unsaved decoded text")
@@ -303,17 +423,19 @@ struct ObjectDetailDataDraftTests {
         let table = try dataKeysTable(in: controller.view)
         try await waitForDataRows(table, count: 2)
 
-        let truncated = try valueText(in: table, row: 0)
+        let longRow = try row(forKey: "long", in: table)
+        let archiveRow = try row(forKey: "archive", in: table)
+        let truncated = try valueText(in: table, row: longRow)
         #expect(truncated.count == DataValuePreviewPresentation.maximumTextCharacterCount)
         #expect(truncated.hasSuffix("…"))
         #expect(truncated != longText)
-        #expect(try valueAccessibility(in: table, row: 0).contains("truncated preview"))
+        #expect(try valueAccessibility(in: table, row: longRow).contains("truncated preview"))
 
-        let binary = try valueText(in: table, row: 1)
+        let binary = try valueText(in: table, row: archiveRow)
         #expect(binary.hasPrefix("6D 75 73 74"))
         #expect(binary.contains("|must-not-render-…|"))
         #expect(binary.hasSuffix("· \(binaryBytes.count) bytes"))
-        #expect(try valueAccessibility(in: table, row: 1) == "Binary value: \(binary)")
+        #expect(try valueAccessibility(in: table, row: archiveRow) == "Binary value: \(binary)")
     }
 
     @Test("Data master-detail keeps every key visible and its divider adjustable")
@@ -518,18 +640,18 @@ struct ObjectDetailDataDraftTests {
         #expect(editor.string == "server-alpha")
         editor.string = "draft-alpha"
         controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
-        #expect(!rename.isEnabled)
+        #expect(rename.isEnabled)
 
         select(row: 1, in: table, controller: controller)
         #expect(editor.string == "server-beta")
-        #expect(try stateText(in: table, row: 0) == "Unsaved")
+        #expect(try stateText(in: table, row: 0) == "Modified")
 
         editor.string = "draft-beta"
         controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
         select(row: 0, in: table, controller: controller)
         #expect(editor.string == "draft-alpha")
-        #expect(try stateText(in: table, row: 1) == "Unsaved")
-        #expect(!rename.isEnabled)
+        #expect(try stateText(in: table, row: 1) == "Modified")
+        #expect(rename.isEnabled)
     }
 
     @Test("Secret drafts survive conceal, reveal, and key switches without previews")
@@ -547,7 +669,7 @@ struct ObjectDetailDataDraftTests {
         let editor = try dataValueEditor(in: controller.view)
         let reveal = try #require(dataButtons(in: controller.view)
             .first { $0.title == "Show decoded values" })
-        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Changes" })
         try await waitForDataRows(table, count: 2)
 
         select(row: 0, in: table, controller: controller)
@@ -572,7 +694,7 @@ struct ObjectDetailDataDraftTests {
         #expect(!editor.string.contains("draft-secret-alpha"))
         #expect(!editor.isEditable)
         #expect(!save.isEnabled)
-        #expect(try stateText(in: table, row: 0) == "Unsaved")
+        #expect(try stateText(in: table, row: 0) == "Modified")
         #expect(!(try valueText(in: table, row: 0)).contains("draft-secret-alpha"))
         #expect(!(try valueAccessibility(in: table, row: 0)).contains("draft-secret-alpha"))
 
@@ -611,7 +733,7 @@ struct ObjectDetailDataDraftTests {
         #expect(editor.string.contains("00 FF 10 80"))
         #expect(editor.string.contains("|....|"))
         #expect(!editor.isEditable)
-        #expect(try stateText(in: table, row: 0) == "Unsaved")
+        #expect(try stateText(in: table, row: 0) == "Modified")
 
         reveal.performClick(nil)
         #expect(editor.string == "Secret value concealed · 4 bytes")
@@ -650,7 +772,7 @@ struct ObjectDetailDataDraftTests {
         controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
         #expect(reveal.state == .on)
         #expect(editor.string == "server-alphad")
-        #expect(try stateText(in: table, row: 0) == "Unsaved")
+        #expect(try stateText(in: table, row: 0) == "Modified")
     }
 
     @Test("initial Data errors are structured and retry the same UID-pinned request")
@@ -738,7 +860,7 @@ struct ObjectDetailDataDraftTests {
         }
         #expect(reveal.state == .off)
         #expect(editor.string.contains("draft-survives-recovery") == false)
-        #expect(try stateText(in: table, row: 0) == "Unsaved")
+        #expect(try stateText(in: table, row: 0) == "Modified")
         #expect(controller.identity.clusterSessionID == "recovered-session")
         #expect(await provider.requestedSessionIDs()
             == [fixture.identity.clusterSessionID, "recovered-session"])
@@ -825,7 +947,7 @@ struct ObjectDetailDataDraftTests {
 
         let table = try dataKeysTable(in: controller.view)
         let editor = try dataValueEditor(in: controller.view)
-        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Changes" })
         let rename = try #require(dataButtons(in: controller.view).first { $0.title == "Rename" })
         try await waitForDataRows(table, count: 1)
 
@@ -918,7 +1040,7 @@ struct ObjectDetailDataDraftTests {
         select(row: betaRow, in: table, controller: controller)
         probe.releaseRead()
         try await waitForCondition {
-            (try? stateText(in: table, row: alphaRow)) == "Unsaved"
+            (try? stateText(in: table, row: alphaRow)) == "Modified"
         }
         #expect(try stateText(in: table, row: betaRow) == "Saved")
         #expect(editor.string == "server-beta")
@@ -974,7 +1096,7 @@ struct ObjectDetailDataDraftTests {
         #expect(editor.string == "server-alpha")
     }
 
-    @Test("Save Key reviews only the decoded value and Keep Editing preserves the draft")
+    @Test("Save Changes reviews decoded values and Keep Editing preserves the draft")
     func saveKeyValueReview() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
         let provider = DraftMutationObjectDetailProvider(
@@ -988,13 +1110,17 @@ struct ObjectDetailDataDraftTests {
             valueChangeConfirmation: { confirmation in
                 review.reviewCount += 1
                 if let root = confirmation.window?.contentView {
-                    let descendants = draftDescendants(of: root)
-                    review.reviewedKey = descendants.compactMap { $0 as? NSTextField }
-                        .first { $0.identifier?.rawValue == "data-value-diff-key" }?
-                        .stringValue ?? ""
-                    review.reviewedDiff = descendants.compactMap { $0 as? NSTextView }
-                        .first { $0.identifier?.rawValue == "data-value-diff-text" }?
-                        .string ?? ""
+                    for _ in 0..<100 {
+                        let descendants = draftDescendants(of: root)
+                        review.reviewedKey = descendants.compactMap { $0 as? NSTextField }
+                            .first { $0.identifier?.rawValue == "key-value-diff-key" }?
+                            .stringValue ?? ""
+                        review.reviewedDiff = descendants.compactMap { $0 as? NSTextView }
+                            .first { $0.identifier?.rawValue == "key-value-diff-text" }?
+                            .string ?? ""
+                        if review.reviewedDiff.contains("+edited-alpha") { break }
+                        try? await Task.sleep(for: .milliseconds(2))
+                    }
                 }
                 return review.choice
             }
@@ -1009,7 +1135,7 @@ struct ObjectDetailDataDraftTests {
 
         let table = try dataKeysTable(in: controller.view)
         let editor = try dataValueEditor(in: controller.view)
-        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Changes" })
         try await waitForDataRows(table, count: 2)
 
         select(row: 0, in: table, controller: controller)
@@ -1018,7 +1144,7 @@ struct ObjectDetailDataDraftTests {
         save.performClick(nil)
 
         try await waitForCondition { review.reviewCount == 1 && save.isEnabled }
-        #expect(review.reviewedKey == "Key: alpha")
+        #expect(review.reviewedKey == "Modified: alpha")
         #expect(review.reviewedDiff.contains("-server-alpha"))
         #expect(review.reviewedDiff.contains("+edited-alpha"))
         #expect(review.reviewedDiff.contains("+second line"))
@@ -1026,7 +1152,7 @@ struct ObjectDetailDataDraftTests {
         #expect(await provider.numberOfUpdateCalls() == 0)
         #expect(editor.string == "edited-alpha\nsecond line")
         #expect(editor.isEditable)
-        #expect(window.firstResponder === editor)
+        #expect(window.firstResponder === table)
 
         review.choice = .save
         save.performClick(nil)
@@ -1041,8 +1167,8 @@ struct ObjectDetailDataDraftTests {
         #expect(value == Data("edited-alpha\nsecond line".utf8))
     }
 
-    @Test("save locks editing and a missing sibling draft remains recoverable")
-    func saveLocksAndPreservesMissingDraft() async throws {
+    @Test("one batch save locks editing and applies every staged key")
+    func batchSaveLocksAndAppliesEveryDraft() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
         let provider = DraftMutationObjectDetailProvider(
             detail: fixture.detail,
@@ -1059,7 +1185,7 @@ struct ObjectDetailDataDraftTests {
 
         let table = try dataKeysTable(in: controller.view)
         let editor = try dataValueEditor(in: controller.view)
-        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Changes" })
         let rename = try #require(dataButtons(in: controller.view).first { $0.title == "Rename" })
         try await waitForDataRows(table, count: 2)
 
@@ -1074,11 +1200,26 @@ struct ObjectDetailDataDraftTests {
         try await waitForPendingUpdate(provider)
         #expect(!editor.isEditable)
         #expect(!rename.isEnabled)
+        let submitted = await provider.latestMutationBatch()
+        #expect(submitted.count == 2)
+        var submittedValues: [String: Data] = [:]
+        for mutation in submitted {
+            if case .set(let key, _, let value, _) = mutation {
+                submittedValues[key] = value
+            }
+        }
+        #expect(submittedValues == [
+            "alpha": Data("saved-alpha".utf8),
+            "beta": Data("draft-beta".utf8),
+        ])
 
         let refreshed = ObjectData(
             identity: fixture.identity,
             resourceVersion: "rv-2",
-            entries: [dataEntry(key: "alpha", value: "saved-alpha", hashByte: 9)],
+            entries: [
+                dataEntry(key: "alpha", value: "saved-alpha", hashByte: 9),
+                dataEntry(key: "beta", value: "draft-beta", hashByte: 10),
+            ],
             secret: false
         )
         await provider.blockNextDataFetch()
@@ -1088,33 +1229,17 @@ struct ObjectDetailDataDraftTests {
         await provider.resumeDataFetch()
         try await waitForDataFetches(provider, count: 2)
         try await waitForCondition {
-            guard let beta = try? row(forKey: "beta", in: table) else { return false }
-            return (try? stateText(in: table, row: beta)) == "Conflict"
+            guard let alpha = try? row(forKey: "alpha", in: table),
+                let beta = try? row(forKey: "beta", in: table)
+            else { return false }
+            return (try? stateText(in: table, row: alpha)) == "Saved"
+                && (try? stateText(in: table, row: beta)) == "Saved"
         }
-
-        let betaRow = try row(forKey: "beta", in: table)
-        #expect(try stateText(in: table, row: betaRow) == "Conflict")
-        select(row: betaRow, in: table, controller: controller)
-        #expect(editor.string == "draft-beta")
-        #expect(save.isEnabled)
-        #expect(!rename.isEnabled)
-
-        save.performClick(nil)
-        try await waitForUpdateCalls(provider, count: 2)
-        let latestMutation = await provider.latestMutation()
-        let recreation = try #require(latestMutation)
-        guard case .set(let key, let kind, let value, let expectedHash) = recreation else {
-            Issue.record("Expected a create-only set mutation for the tombstone draft")
-            return
-        }
-        #expect(key == "beta")
-        #expect(kind == .text)
-        #expect(value == Data("draft-beta".utf8))
-        #expect(expectedHash.isEmpty)
+        #expect(!save.isEnabled)
     }
 
-    @Test("conflict sheet and retry keep the submitted editor locked")
-    func conflictRetryKeepsEditorLocked() async throws {
+    @Test("conflict rebase requires a fresh review before retrying the batch")
+    func conflictRebaseRequiresFreshReview() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
         let provider = DraftMutationObjectDetailProvider(
             detail: fixture.detail,
@@ -1135,7 +1260,7 @@ struct ObjectDetailDataDraftTests {
 
         let table = try dataKeysTable(in: controller.view)
         let editor = try dataValueEditor(in: controller.view)
-        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Key" })
+        let save = try #require(dataButtons(in: controller.view).first { $0.title == "Save Changes" })
         try await waitForDataRows(table, count: 2)
 
         select(row: 0, in: table, controller: controller)
@@ -1163,6 +1288,11 @@ struct ObjectDetailDataDraftTests {
             .first { $0.title == "Retry with Current Version" })
         #expect(retry.isEnabled)
         retry.performClick(nil)
+        try await waitForCondition { window.attachedSheet == nil && editor.isEditable }
+        #expect(await provider.numberOfUpdateCalls() == 1)
+        #expect(save.isEnabled)
+
+        save.performClick(nil)
         try await waitForUpdateCalls(provider, count: 2)
         #expect(!editor.isEditable)
 
@@ -1245,7 +1375,7 @@ struct ObjectDetailDataDraftTests {
 
         let table = try dataKeysTable(in: controller.view)
         let buttons = dataButtons(in: controller.view)
-        let save = try #require(buttons.first { $0.title == "Save Key" })
+        let save = try #require(buttons.first { $0.title == "Save Changes" })
         try await waitForDataRows(table, count: 1)
         select(row: 0, in: table, controller: controller)
         if secret {
@@ -1254,7 +1384,7 @@ struct ObjectDetailDataDraftTests {
         }
 
         controller.replaceSelectedDataWithImportedBytes(importedBytes)
-        #expect(try stateText(in: table, row: 0) == "Unsaved")
+        #expect(try stateText(in: table, row: 0) == "Modified")
         #expect(save.isEnabled)
         save.performClick(nil)
         try await waitForPendingUpdate(provider)
@@ -1273,9 +1403,14 @@ struct ObjectDetailDataDraftTests {
     @Test("Escape leaves Data value editing before navigating Back")
     func escapeLeavesDataEditorBeforeBack() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
+        var discardRequests = 0
         let controller = ObjectDataViewController(
             identity: fixture.identity,
             provider: DraftObjectDetailProvider(detail: fixture.detail, data: fixture.data),
+            discardChangesConfirmation: {
+                discardRequests += 1
+                return discardRequests == 2
+            }
         )
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
@@ -1310,10 +1445,16 @@ struct ObjectDetailDataDraftTests {
         #expect(backCount == 0)
         #expect(window.firstResponder === table)
         #expect(editor.string == "draft-kept-after-escape")
-        #expect(try stateText(in: table, row: 0) == "Unsaved")
+        #expect(try stateText(in: table, row: 0) == "Modified")
+
+        controller.cancelOperation(nil)
+        #expect(backCount == 0)
+        #expect(discardRequests == 1)
+        #expect(try stateText(in: table, row: 0) == "Modified")
 
         controller.cancelOperation(nil)
         #expect(backCount == 1)
+        #expect(discardRequests == 2)
     }
 
     private func dataEntry(key: String, value: String, hashByte: UInt8) -> ObjectDataEntry {
@@ -1627,6 +1768,8 @@ private actor DraftMutationObjectDetailProvider: ObjectDetailProviding {
 
     func latestMutation() -> DataMutationKind? { latestMutations.last }
 
+    func latestMutationBatch() -> [DataMutationKind] { latestMutations }
+
     func blockNextDataFetch() { shouldBlockNextDataFetch = true }
 
     func hasBlockedDataFetch() -> Bool { blockedDataFetch != nil }
@@ -1675,7 +1818,7 @@ private actor DraftMutationObjectDetailProvider: ObjectDetailProviding {
 
 @MainActor
 private final class DataValueReviewProbe {
-    var choice = DataValueDiffConfirmationWindowController.Choice.keepEditing
+    var choice = KeyValueDiffConfirmationWindowController.Choice.keepEditing
     var reviewCount = 0
     var reviewedKey = ""
     var reviewedDiff = ""

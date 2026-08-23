@@ -16,6 +16,7 @@ public enum TableSurfaceID: String, CaseIterable, Codable, Hashable, Sendable {
     case operationHistory = "operation-history"
     case deleteConfirmation = "delete-confirmation"
     case yamlDiffPaths = "yaml-diff-paths"
+    case keyValueDiffChanges = "key-value-diff-changes"
 }
 
 public struct TableColumnLayout: Codable, Hashable, Sendable {

@@ -336,9 +336,31 @@ public enum ResourceMetadataKind: String, Hashable, Sendable {
 /// renames to become one sparse optimistic mutation without serializing the
 /// complete object.
 public struct ResourceMetadataDraft: Hashable, Sendable {
+    public struct Change: Hashable, Sendable {
+        public var beforeKey: String?
+        public var afterKey: String?
+        public var beforeValue: String?
+        public var afterValue: String?
+
+        public init(
+            beforeKey: String?,
+            afterKey: String?,
+            beforeValue: String?,
+            afterValue: String?
+        ) {
+            self.beforeKey = beforeKey
+            self.afterKey = afterKey
+            self.beforeValue = beforeValue
+            self.afterValue = afterValue
+        }
+    }
+
     public let kind: ResourceMetadataKind
     private let baselineValues: [String: String]
     private var values: [String: String]
+    /// Original key to current key. The API mutation remains remove+set, while
+    /// the editor and review preserve the user's rename intent.
+    private var renames: [String: String] = [:]
 
     public init(
         kind: ResourceMetadataKind,
@@ -349,18 +371,20 @@ public struct ResourceMetadataDraft: Hashable, Sendable {
         self.values = baselineValues
     }
 
-    public var hasChanges: Bool { values != baselineValues }
+    public var hasChanges: Bool { values != baselineValues || !renames.isEmpty }
 
     /// The union retains deleted keys long enough for the UI to show a
     /// reversible draft row instead of silently dropping the user's action.
     public var allKeys: [String] {
-        Set(baselineValues.keys).union(values.keys).sorted()
+        Set(baselineValues.keys).union(values.keys)
+            .subtracting(renames.keys)
+            .sorted()
     }
 
     public func value(for key: String) -> String? { values[key] }
 
     public func baselineValue(for key: String) -> String? {
-        baselineValues[key]
+        baselineValues[renameSource(for: key) ?? key]
     }
 
     public func isDeleted(_ key: String) -> Bool {
@@ -368,11 +392,20 @@ public struct ResourceMetadataDraft: Hashable, Sendable {
     }
 
     public func isAdded(_ key: String) -> Bool {
-        baselineValues[key] == nil && values[key] != nil
+        renameSource(for: key) == nil
+            && baselineValues[key] == nil && values[key] != nil
     }
 
     public func isChanged(_ key: String) -> Bool {
-        baselineValues[key] != values[key]
+        renameSource(for: key) != nil || baselineValues[key] != values[key]
+    }
+
+    public func isRenamed(_ key: String) -> Bool {
+        renameSource(for: key) != nil
+    }
+
+    public func renameSource(for key: String) -> String? {
+        renames.first { $0.value == key }?.key
     }
 
     public mutating func setValue(_ value: String, for key: String) {
@@ -380,23 +413,43 @@ public struct ResourceMetadataDraft: Hashable, Sendable {
     }
 
     public mutating func addKey(_ key: String, value: String = "") throws {
-        try Self.validateKey(key, existingKeys: Set(allKeys))
+        try Self.validateKey(key, existingKeys: occupiedKeys)
         values[key] = value
     }
 
     public mutating func renameKey(_ key: String, to newKey: String) throws {
         guard key != newKey else { return }
         guard let value = values[key] else { return }
-        try Self.validateKey(newKey, existingKeys: Set(allKeys))
+        if let original = renameSource(for: key), newKey == original {
+            renames.removeValue(forKey: original)
+            values.removeValue(forKey: key)
+            values[original] = value
+            return
+        }
+        try Self.validateKey(newKey, existingKeys: occupiedKeys)
+        if let original = renameSource(for: key) {
+            renames[original] = newKey
+        } else if baselineValues[key] != nil {
+            renames[key] = newKey
+        }
         values.removeValue(forKey: key)
         values[newKey] = value
     }
 
     public mutating func removeKey(_ key: String) {
+        if let original = renameSource(for: key) {
+            renames.removeValue(forKey: original)
+        }
         values.removeValue(forKey: key)
     }
 
     public mutating func revertKey(_ key: String) {
+        if let original = renameSource(for: key), let baseline = baselineValues[original] {
+            renames.removeValue(forKey: original)
+            values.removeValue(forKey: key)
+            values[original] = baseline
+            return
+        }
         if let baseline = baselineValues[key] {
             values[key] = baseline
         } else {
@@ -407,7 +460,11 @@ public struct ResourceMetadataDraft: Hashable, Sendable {
     public func changes() throws -> ResourceMetadataChanges {
         var set: [String: String] = [:]
         var remove: [String] = []
-        for key in allKeys {
+        // The API only needs the desired sparse map. Rename intent is retained
+        // separately for the review; the final merge patch is the ordinary
+        // baseline-to-desired set/remove diff, which also handles swaps and
+        // delete/re-add sequences without overlapping operations.
+        for key in Set(baselineValues.keys).union(values.keys).sorted() {
             switch (baselineValues[key], values[key]) {
             case (let before?, let after?) where before == after:
                 continue
@@ -419,7 +476,41 @@ public struct ResourceMetadataDraft: Hashable, Sendable {
                 continue
             }
         }
-        return try kind.changes(set: set, remove: remove)
+        return try kind.changes(set: set, remove: remove.sorted())
+    }
+
+    public var changeList: [Change] {
+        var result: [Change] = renames.sorted { $0.key < $1.key }.map { source, destination in
+            Change(
+                beforeKey: source,
+                afterKey: destination,
+                beforeValue: baselineValues[source],
+                afterValue: values[destination]
+            )
+        }
+        let renameSources = Set(renames.keys)
+        let renameDestinations = Set(renames.values)
+        for key in Set(baselineValues.keys).union(values.keys).sorted()
+            where !renameSources.contains(key) && !renameDestinations.contains(key)
+        {
+            let before = baselineValues[key]
+            let after = values[key]
+            guard before != after else { continue }
+            result.append(Change(
+                beforeKey: before == nil ? nil : key,
+                afterKey: after == nil ? nil : key,
+                beforeValue: before,
+                afterValue: after
+            ))
+        }
+        return result
+    }
+
+    private var occupiedKeys: Set<String> {
+        // Validate against the desired map, not the original map. A key that
+        // was deleted or renamed away is available for a staged replacement;
+        // the final sparse patch can then remove and set those keys atomically.
+        Set(values.keys)
     }
 
     private static func validateKey(

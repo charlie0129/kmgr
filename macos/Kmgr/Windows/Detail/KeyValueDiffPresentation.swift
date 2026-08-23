@@ -1,27 +1,54 @@
 import Foundation
 import KmgrCore
 
-struct DataValueDiffInput: Sendable {
-    var key: String
+enum KeyValueChangeKind: String, Hashable, Sendable {
+    case added = "Added"
+    case modified = "Modified"
+    case renamed = "Renamed"
+    case deleted = "Deleted"
+}
+
+struct KeyValueDiffInput: Sendable {
+    var beforeKey: String?
+    var afterKey: String?
     var beforeKind: DataValueKind?
     var beforeValue: Data?
-    var afterKind: DataValueKind
-    var afterValue: Data
-    var secret: Bool
+    var afterKind: DataValueKind?
+    var afterValue: Data?
+    var sensitive: Bool
+
+    var changeKind: KeyValueChangeKind {
+        if beforeKey == nil { return .added }
+        if afterKey == nil { return .deleted }
+        if beforeKey != afterKey { return .renamed }
+        return .modified
+    }
+
+    var displayKey: String {
+        switch (beforeKey, afterKey) {
+        case (let before?, let after?) where before != after:
+            "\(before) → \(after)"
+        case (let before?, _): before
+        case (_, let after?): after
+        case (nil, nil): "Unknown key"
+        }
+    }
 
     mutating func wipe() {
         if var beforeValue {
             self.beforeValue = nil
             beforeValue.resetBytes(in: beforeValue.startIndex..<beforeValue.endIndex)
         }
-        afterValue.resetBytes(in: afterValue.startIndex..<afterValue.endIndex)
-        afterValue.removeAll(keepingCapacity: false)
+        if var afterValue {
+            self.afterValue = nil
+            afterValue.resetBytes(in: afterValue.startIndex..<afterValue.endIndex)
+        }
     }
 }
 
-/// A bounded, AppKit-independent rendering plan for one decoded Data value.
-/// Secret callers must keep the rendered strings inside the active review flow.
-struct DataValueDiffPresentation: Sendable {
+/// Bounded, AppKit-independent rendering plan for one key/value change.
+/// Sensitive callers must keep rendered strings inside the active review flow.
+struct KeyValueDiffPresentation: Sendable {
     static let contextLineCount = 3
     static let maximumLineDiffInputByteCount = 512 * 1_024
     static let maximumLineDiffLineCount = 10_000
@@ -37,32 +64,38 @@ struct DataValueDiffPresentation: Sendable {
         case binary
     }
 
-    let key: String
+    let beforeKey: String?
+    let afterKey: String?
+    let displayKey: String
+    let changeKind: KeyValueChangeKind
     let beforeKind: DataValueKind?
-    let afterKind: DataValueKind
+    let afterKind: DataValueKind?
     let beforeByteCount: Int?
-    let afterByteCount: Int
-    let secret: Bool
+    let afterByteCount: Int?
+    let sensitive: Bool
     let format: Format
     let lines: [DiffTextLine]
     let previewTruncated: Bool
 
-    init(input: DataValueDiffInput) {
-        key = input.key
+    init(input: KeyValueDiffInput) {
+        beforeKey = input.beforeKey
+        afterKey = input.afterKey
+        displayKey = input.displayKey
+        changeKind = input.changeKind
         beforeKind = input.beforeKind
         afterKind = input.afterKind
         beforeByteCount = input.beforeValue?.count
-        afterByteCount = input.afterValue.count
-        secret = input.secret
+        afterByteCount = input.afterValue?.count
+        sensitive = input.sensitive
 
         let beforeText = input.beforeValue.flatMap(Self.decodedText)
-        let afterText = Self.decodedText(input.afterValue)
-        let canUseTextDiff = input.afterKind == .text
+        let afterText = input.afterValue.flatMap(Self.decodedText)
+        let canUseTextDiff = (input.afterKind == nil || input.afterKind == .text)
             && (input.beforeKind == nil || input.beforeKind == .text)
-            && afterText != nil
+            && (input.afterValue == nil || afterText != nil)
             && (input.beforeValue == nil || beforeText != nil)
 
-        if canUseTextDiff, let afterText {
+        if canUseTextDiff {
             format = .text
             let rendered = Self.textDiff(before: beforeText, after: afterText)
             lines = rendered.lines
@@ -72,7 +105,8 @@ struct DataValueDiffPresentation: Sendable {
             let rendered = Self.binaryDiff(
                 before: input.beforeValue,
                 after: input.afterValue,
-                kindChanged: input.beforeKind != nil && input.beforeKind != input.afterKind
+                kindChanged: input.beforeKind != nil && input.afterKind != nil
+                    && input.beforeKind != input.afterKind
             )
             lines = rendered.lines
             previewTruncated = rendered.truncated
@@ -90,7 +124,9 @@ struct DataValueDiffPresentation: Sendable {
         let before = beforeKind.map {
             "\(Self.kindText($0)) · \(Self.byteCountText(beforeByteCount ?? 0))"
         } ?? "Absent"
-        let after = "\(Self.kindText(afterKind)) · \(Self.byteCountText(afterByteCount))"
+        let after = afterKind.map {
+            "\(Self.kindText($0)) · \(Self.byteCountText(afterByteCount ?? 0))"
+        } ?? "Absent"
         return "\(before) → \(after)"
     }
 
@@ -128,9 +164,9 @@ struct DataValueDiffPresentation: Sendable {
             let separatorBytes = lines.isEmpty ? 0 : 1
             let requiredBytes = separatorBytes + text.utf8.count
             let noticeReserve = 256
-            guard lines.count < DataValueDiffPresentation.maximumRenderedLineCount,
+            guard lines.count < KeyValueDiffPresentation.maximumRenderedLineCount,
                 utf8ByteCount + requiredBytes
-                    <= DataValueDiffPresentation.maximumRenderedUTF8ByteCount - noticeReserve
+                    <= KeyValueDiffPresentation.maximumRenderedUTF8ByteCount - noticeReserve
             else {
                 truncated = true
                 return false
@@ -160,9 +196,9 @@ struct DataValueDiffPresentation: Sendable {
 
     private static func textDiff(
         before: String?,
-        after: String
+        after: String?
     ) -> (lines: [DiffTextLine], truncated: Bool) {
-        let inputBytes = (before?.utf8.count ?? 0) + after.utf8.count
+        let inputBytes = (before?.utf8.count ?? 0) + (after?.utf8.count ?? 0)
         guard inputBytes <= maximumLineDiffInputByteCount else {
             return focusedTextDiff(before: before, after: after)
         }
@@ -177,8 +213,16 @@ struct DataValueDiffPresentation: Sendable {
                 content: "<absent>", hasNewline: false, synthetic: true
             )]
         }
-        guard let afterLines = textLines(after, maximumCount: maximumLineDiffLineCount) else {
-            return focusedTextDiff(before: before, after: after)
+        let afterLines: [TextLine]
+        if let after {
+            guard let parsed = textLines(after, maximumCount: maximumLineDiffLineCount) else {
+                return focusedTextDiff(before: before, after: after)
+            }
+            afterLines = parsed
+        } else {
+            afterLines = [TextLine(
+                content: "<absent>", hasNewline: false, synthetic: true
+            )]
         }
         let comparisonProduct = beforeLines.count.multipliedReportingOverflow(
             by: afterLines.count
@@ -348,17 +392,18 @@ struct DataValueDiffPresentation: Sendable {
 
     private static func focusedTextDiff(
         before: String?,
-        after: String
+        after: String?
     ) -> (lines: [DiffTextLine], truncated: Bool) {
         let beforeValue = before ?? "<absent>"
-        let bounds = changedBounds(before: beforeValue, after: after)
+        let afterValue = after ?? "<absent>"
+        let bounds = changedBounds(before: beforeValue, after: afterValue)
         let beforeExcerpt = focusedExcerpt(
             beforeValue,
             changeStart: bounds.beforeStart,
             changeEnd: bounds.beforeEnd
         )
         let afterExcerpt = focusedExcerpt(
-            after,
+            afterValue,
             changeStart: bounds.afterStart,
             changeEnd: bounds.afterEnd
         )
@@ -468,10 +513,10 @@ struct DataValueDiffPresentation: Sendable {
 
     private static func binaryDiff(
         before: Data?,
-        after: Data,
+        after: Data?,
         kindChanged: Bool
     ) -> (lines: [DiffTextLine], truncated: Bool) {
-        let totalByteCount = max(before?.count ?? 0, after.count)
+        let totalByteCount = max(before?.count ?? 0, after?.count ?? 0)
         let totalRowCount = (totalByteCount + 15) / 16
         var changedRows: [Int] = []
         changedRows.reserveCapacity(min(totalRowCount, maximumBinaryRowCount + 1))
@@ -525,7 +570,7 @@ struct DataValueDiffPresentation: Sendable {
             value: after,
             other: before,
             selectedRows: selectedRows,
-            absent: false,
+            absent: after == nil,
             marker: "+",
             role: .addition,
             to: &lines

@@ -6,19 +6,20 @@ import Testing
 
 extension AppKitTestHarness {
 @MainActor
-@Suite("Data value diff confirmation", .serialized)
-struct DataValueDiffConfirmationWindowControllerTests {
+@Suite("Shared key-value diff confirmation", .serialized)
+struct KeyValueDiffConfirmationWindowControllerTests {
     @Test("text values produce contextual unified hunks and preserve newline state")
     func textPresentation() throws {
         let before = "one\ntwo\nthree\nold value\nfive\nsix\nseven\neight"
         let after = "one\ntwo\nthree\nnew value\nfive\nsix\nseven\neight\n"
-        let presentation = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "settings.ini",
+        let presentation = KeyValueDiffPresentation(input: KeyValueDiffInput(
+            beforeKey: "settings.ini",
+            afterKey: "settings.ini",
             beforeKind: .text,
             beforeValue: Data(before.utf8),
             afterKind: .text,
             afterValue: Data(after.utf8),
-            secret: false
+            sensitive: false
         ))
 
         #expect(presentation.format == .text)
@@ -31,13 +32,14 @@ struct DataValueDiffConfirmationWindowControllerTests {
         #expect(presentation.text.contains("\\ No newline at end of value"))
         #expect(!presentation.previewTruncated)
 
-        let createdEmpty = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "recreated",
+        let createdEmpty = KeyValueDiffPresentation(input: KeyValueDiffInput(
+            beforeKey: nil,
+            afterKey: "recreated",
             beforeKind: nil,
             beforeValue: nil,
             afterKind: .text,
             afterValue: Data(),
-            secret: false
+            sensitive: false
         ))
         #expect(createdEmpty.metadataText == "Absent → Text · 0 bytes")
         #expect(createdEmpty.text.contains("-<absent>"))
@@ -48,13 +50,14 @@ struct DataValueDiffConfirmationWindowControllerTests {
     func focusedLongLinePresentation() {
         let prefix = String(repeating: "p", count: 12_000)
         let suffix = String(repeating: "s", count: 12_000)
-        let presentation = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "large.json",
+        let presentation = KeyValueDiffPresentation(input: KeyValueDiffInput(
+            beforeKey: "large.json",
+            afterKey: "large.json",
             beforeKind: .text,
             beforeValue: Data((prefix + "OLD-MARKER" + suffix).utf8),
             afterKind: .text,
             afterValue: Data((prefix + "NEW-MARKER" + suffix).utf8),
-            secret: false
+            sensitive: false
         ))
 
         #expect(presentation.previewTruncated)
@@ -62,50 +65,53 @@ struct DataValueDiffConfirmationWindowControllerTests {
         #expect(presentation.text.contains("NEW-MARKER"))
         #expect(presentation.text.contains("bounded changed text region"))
         #expect(presentation.text.utf8.count
-            < DataValueDiffPresentation.maximumRenderedUTF8ByteCount)
+            < KeyValueDiffPresentation.maximumRenderedUTF8ByteCount)
 
         let fragmentedBefore = (0..<3_000).map { "old-\($0)" }.joined(separator: "\n")
         let fragmentedAfter = (0..<3_000).map { "new-\($0)" }.joined(separator: "\n")
-        let fragmented = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "fragmented.txt",
+        let fragmented = KeyValueDiffPresentation(input: KeyValueDiffInput(
+            beforeKey: "fragmented.txt",
+            afterKey: "fragmented.txt",
             beforeKind: .text,
             beforeValue: Data(fragmentedBefore.utf8),
             afterKind: .text,
             afterValue: Data(fragmentedAfter.utf8),
-            secret: false
+            sensitive: false
         ))
         #expect(fragmented.previewTruncated)
         #expect(fragmented.text.contains("bounded changed text region"))
         #expect(fragmented.text.utf8.count
-            < DataValueDiffPresentation.maximumRenderedUTF8ByteCount)
+            < KeyValueDiffPresentation.maximumRenderedUTF8ByteCount)
 
-        let newlineHeavy = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "lines.txt",
+        let newlineHeavy = KeyValueDiffPresentation(input: KeyValueDiffInput(
+            beforeKey: "lines.txt",
+            afterKey: "lines.txt",
             beforeKind: .text,
             beforeValue: Data(String(repeating: "a\n", count: 20_000).utf8),
             afterKind: .text,
             afterValue: Data(String(repeating: "b\n", count: 20_000).utf8),
-            secret: false
+            sensitive: false
         ))
         #expect(newlineHeavy.previewTruncated)
         #expect(newlineHeavy.text.contains("bounded changed text region"))
         #expect(newlineHeavy.text.utf8.count
-            < DataValueDiffPresentation.maximumRenderedUTF8ByteCount)
+            < KeyValueDiffPresentation.maximumRenderedUTF8ByteCount)
 
         let combining = "a" + String(repeating: "\u{301}", count: 30_000)
-        let combiningHeavy = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "unicode.txt",
+        let combiningHeavy = KeyValueDiffPresentation(input: KeyValueDiffInput(
+            beforeKey: "unicode.txt",
+            afterKey: "unicode.txt",
             beforeKind: .text,
             beforeValue: Data((combining + "OLD").utf8),
             afterKind: .text,
             afterValue: Data((combining + "NEW").utf8),
-            secret: false
+            sensitive: false
         ))
         #expect(combiningHeavy.previewTruncated)
         #expect(combiningHeavy.text.contains("OLD"))
         #expect(combiningHeavy.text.contains("NEW"))
         #expect(combiningHeavy.text.utf8.count
-            < DataValueDiffPresentation.maximumRenderedUTF8ByteCount)
+            < KeyValueDiffPresentation.maximumRenderedUTF8ByteCount)
     }
 
     @Test("binary comparison centers its bounded output on changed bytes")
@@ -114,13 +120,14 @@ struct DataValueDiffConfirmationWindowControllerTests {
         var after = before
         before[800] = 0x10
         after[800] = 0xFF
-        let presentation = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "archive.bin",
+        let presentation = KeyValueDiffPresentation(input: KeyValueDiffInput(
+            beforeKey: "archive.bin",
+            afterKey: "archive.bin",
             beforeKind: .binary,
             beforeValue: before,
             afterKind: .binary,
             afterValue: after,
-            secret: false
+            sensitive: false
         ))
 
         #expect(presentation.format == .binary)
@@ -132,57 +139,97 @@ struct DataValueDiffConfirmationWindowControllerTests {
 
         let manyBefore = Data(repeating: 0x00, count: 1_024)
         let manyAfter = Data(repeating: 0xFF, count: 1_024)
-        let bounded = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "many.bin",
+        let bounded = KeyValueDiffPresentation(input: KeyValueDiffInput(
+            beforeKey: "many.bin",
+            afterKey: "many.bin",
             beforeKind: .binary,
             beforeValue: manyBefore,
             afterKind: .binary,
             afterValue: manyAfter,
-            secret: false
+            sensitive: false
         ))
         #expect(bounded.previewTruncated)
         #expect(bounded.text.contains("additional changed byte rows omitted"))
     }
 
-    @Test("resizable Secret review exposes decoded diff controls and clears its document")
-    func secretWindowPresentation() throws {
-        let presentation = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "token",
-            beforeKind: .text,
-            beforeValue: Data("old-secret\nline-two".utf8),
-            afterKind: .text,
-            afterValue: Data("new-secret\nline-two".utf8),
-            secret: true
-        ))
-        let controller = DataValueDiffConfirmationWindowController(
+    @Test("master-detail Secret review presents every change kind and clears values")
+    func secretWindowPresentation() async throws {
+        let inputs = [
+            KeyValueDiffInput(
+                beforeKey: "token",
+                afterKey: "token",
+                beforeKind: .text,
+                beforeValue: Data("old-secret\nline-two".utf8),
+                afterKind: .text,
+                afterValue: Data("new-secret\nline-two".utf8),
+                sensitive: true
+            ),
+            KeyValueDiffInput(
+                beforeKey: nil,
+                afterKey: "added",
+                beforeKind: nil,
+                beforeValue: nil,
+                afterKind: .text,
+                afterValue: Data("new".utf8),
+                sensitive: true
+            ),
+            KeyValueDiffInput(
+                beforeKey: "old-name",
+                afterKey: "new-name",
+                beforeKind: .binary,
+                beforeValue: Data([0x01]),
+                afterKind: .binary,
+                afterValue: Data([0x01]),
+                sensitive: true
+            ),
+            KeyValueDiffInput(
+                beforeKey: "deleted",
+                afterKey: nil,
+                beforeKind: .text,
+                beforeValue: Data("gone".utf8),
+                afterKind: nil,
+                afterValue: nil,
+                sensitive: true
+            ),
+        ]
+        let controller = KeyValueDiffConfirmationWindowController(
+            editorTitle: "Secret Data",
             targetDetails: "Context reference: /tmp/kubeconfig#dev · UID uid-1",
-            presentation: presentation
+            inputs: inputs
         )
         defer { controller.close() }
 
         let panel = try #require(controller.window)
         let root = try #require(panel.contentView)
-        let views = dataValueDiffDescendants(of: root)
+        let views = keyValueDiffDescendants(of: root)
+        let changesTable = try #require(views.compactMap { $0 as? NSTableView }
+            .first { $0.identifier?.rawValue == "key-value-diff-changes" })
         let textView = try #require(views.compactMap { $0 as? NSTextView }
-            .first { $0.identifier?.rawValue == "data-value-diff-text" })
+            .first { $0.identifier?.rawValue == "key-value-diff-text" })
         let secretNotice = try #require(views.compactMap { $0 as? NSTextField }
-            .first { $0.identifier?.rawValue == "data-value-diff-secret-notice" })
+            .first { $0.identifier?.rawValue == "key-value-diff-sensitive-notice" })
         let copy = try #require(views.compactMap { $0 as? NSButton }
-            .first { $0.identifier?.rawValue == "data-value-diff-copy-all" })
+            .first { $0.identifier?.rawValue == "key-value-diff-copy" })
         let search = try #require(views.compactMap { $0 as? NSButton }
-            .first { $0.identifier?.rawValue == "data-value-diff-search" })
+            .first { $0.identifier?.rawValue == "key-value-diff-search" })
         let save = try #require(views.compactMap { $0 as? NSButton }
-            .first { $0.identifier?.rawValue == "data-value-diff-save" })
+            .first { $0.identifier?.rawValue == "key-value-diff-save" })
         let keepEditing = try #require(views.compactMap { $0 as? NSButton }
-            .first { $0.identifier?.rawValue == "data-value-diff-keep-editing" })
+            .first { $0.identifier?.rawValue == "key-value-diff-keep-editing" })
 
-        #expect(panel.title == "Review Value Change")
+        try await waitForKeyValueDiff { textView.string.contains("new-secret") }
+        #expect(panel.title == "Review Secret Data Changes")
         #expect(panel.styleMask.contains(.resizable))
         #expect(panel.isRestorable == false)
-        #expect(panel.minSize == NSSize(width: 640, height: 420))
-        #expect(views.compactMap { $0 as? NSTableView }.isEmpty)
+        #expect(panel.minSize == NSSize(width: 760, height: 480))
+        #expect(changesTable.numberOfRows == 4)
+        let changeValues = (0..<changesTable.numberOfRows).compactMap { row in
+            (changesTable.view(atColumn: 0, row: row, makeIfNecessary: true)
+                as? NSTableCellView)?.textField?.stringValue
+        }
+        #expect(changeValues == ["Modified", "Added", "Renamed", "Deleted"])
         #expect(!secretNotice.isHidden)
-        #expect(secretNotice.stringValue.contains("not Kubernetes base64"))
+        #expect(secretNotice.stringValue.contains("not Kubernetes base64 text"))
         #expect(textView.string.contains("old-secret"))
         #expect(textView.string.contains("new-secret"))
         #expect(!textView.string.contains(Data("old-secret".utf8).base64EncodedString()))
@@ -218,8 +265,8 @@ struct DataValueDiffConfirmationWindowControllerTests {
         defer { pasteboard.clearContents() }
         copy.performClick(nil)
         let copied = pasteboard.string(forType: .string)
-        #expect(copied?.hasPrefix("Key: token\nText · 19 bytes → Text · 19 bytes") == true)
-        #expect(copied?.contains("Decoded Secret value — not Kubernetes base64 text.") == true)
+        #expect(copied?.hasPrefix("Modified: token\nText · 19 bytes → Text · 19 bytes") == true)
+        #expect(copied?.contains("Unified Value Diff") == true)
         #expect(copied?.hasSuffix(textView.string) == true)
 
         controller.discardTransientPresentation()
@@ -228,17 +275,19 @@ struct DataValueDiffConfirmationWindowControllerTests {
 
     @Test("review is a parent sheet and never enters an application-modal loop")
     func sheetPresentation() async throws {
-        let presentation = DataValueDiffPresentation(input: DataValueDiffInput(
-            key: "token",
+        let input = KeyValueDiffInput(
+            beforeKey: "token",
+            afterKey: "token",
             beforeKind: .text,
             beforeValue: Data("old-secret".utf8),
             afterKind: .text,
             afterValue: Data("new-secret".utf8),
-            secret: true
-        ))
-        let controller = DataValueDiffConfirmationWindowController(
+            sensitive: true
+        )
+        let controller = KeyValueDiffConfirmationWindowController(
+            editorTitle: "Secret Data",
             targetDetails: "Context reference: /tmp/kubeconfig#dev · UID uid-1",
-            presentation: presentation
+            inputs: [input]
         )
         let parent = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
@@ -249,11 +298,11 @@ struct DataValueDiffConfirmationWindowControllerTests {
         parent.makeKeyAndOrderFront(nil)
         let panel = try #require(controller.window)
         let root = try #require(panel.contentView)
-        let views = dataValueDiffDescendants(of: root)
+        let views = keyValueDiffDescendants(of: root)
         let textView = try #require(views.compactMap { $0 as? NSTextView }
-            .first { $0.identifier?.rawValue == "data-value-diff-text" })
+            .first { $0.identifier?.rawValue == "key-value-diff-text" })
         let save = try #require(views.compactMap { $0 as? NSButton }
-            .first { $0.identifier?.rawValue == "data-value-diff-save" })
+            .first { $0.identifier?.rawValue == "key-value-diff-save" })
         let reviewTask = Task { @MainActor in
             await controller.runSheet(for: parent)
         }
@@ -280,8 +329,19 @@ struct DataValueDiffConfirmationWindowControllerTests {
 }
 
 @MainActor
-private func dataValueDiffDescendants(of root: NSView) -> [NSView] {
-    [root] + root.subviews.flatMap(dataValueDiffDescendants(of:))
+private func keyValueDiffDescendants(of root: NSView) -> [NSView] {
+    [root] + root.subviews.flatMap(keyValueDiffDescendants(of:))
+}
+
+private func waitForKeyValueDiff(
+    _ condition: @escaping @MainActor () -> Bool
+) async throws {
+    for _ in 0..<100 {
+        if await condition() { return }
+        try await Task.sleep(for: .milliseconds(2))
+    }
+    Issue.record("selected key-value diff was not rendered")
+    throw CancellationError()
 }
 
 @MainActor

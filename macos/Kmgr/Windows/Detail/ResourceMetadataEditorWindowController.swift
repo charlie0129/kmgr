@@ -13,6 +13,7 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         case saved = "Saved"
         case added = "Added"
         case modified = "Modified"
+        case renamed = "Renamed"
         case deleted = "Deleted"
     }
 
@@ -22,37 +23,40 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
     private let initialKey: String?
     private let detailProvider: any ObjectDetailProviding
     private let operationProvider: any ResourceOperationProviding
-    private let tableLayoutStore: TableLayoutStore
+    private let changeConfirmation: (@MainActor (
+        KeyValueDiffConfirmationWindowController
+    ) async -> KeyValueDiffConfirmationWindowController.Choice)?
+    private let discardChangesConfirmation: (@MainActor () -> Bool)?
+    private let keyPrompt: (@MainActor (KeyValueEditorKeyPrompt.Request) -> String?)?
 
-    private let splitView = KeyValueEditorSplitView()
-    private let searchField = NSSearchField()
-    private let countLabel = NSTextField(labelWithString: "")
-    private let keysTable = KeyValueEditorTableView()
-    private let keysScroll = NSScrollView()
-    private let newKeyField = NSTextField()
-    private let addButton = NSButton(title: "Add", target: nil, action: nil)
-    private let deleteButton = NSButton(title: "Delete", target: nil, action: nil)
+    private let editorView: KeyValueEditorView
+    private var splitView: KeyValueEditorSplitView { editorView.splitView }
+    private var searchField: NSSearchField { editorView.searchField }
+    private var countLabel: NSTextField { editorView.resultLabel }
+    private var keysTable: KeyValueEditorTableView { editorView.tableView }
+    private var valueTextView: NSTextView { editorView.valueTextView }
+    private var valueScrollView: NSScrollView { editorView.valueScrollView }
+    private let addButton = NSButton(title: "Add Key", target: nil, action: nil)
+    private let deleteButton = NSButton(title: "Delete Key", target: nil, action: nil)
     private let revertButton = NSButton(title: "Revert", target: nil, action: nil)
-    private let keyField = NSTextField()
     private let renameButton = NSButton(title: "Rename", target: nil, action: nil)
-    private let stateLabel = NSTextField(labelWithString: "")
-    private let valueTextView = NSTextView()
-    private let valueScroll = NSScrollView()
     private let instructionLabel = NSTextField(labelWithString: "")
     private let progress = NSProgressIndicator()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
-    private let saveButton = NSButton(title: "Save", target: nil, action: nil)
+    private let saveButton = NSButton(title: "Save Changes", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
 
     private var draft: ResourceMetadataDraft?
     private var expectedResourceVersion: String?
     private var visibleKeys: [String] = []
+    private var appliedSearchQuery = ""
     private var selectedKey: String?
     private var isInstallingState = false
     private var loadTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
+    private var reviewTask: Task<Void, Never>?
+    private var reviewController: KeyValueDiffConfirmationWindowController?
     private var parentWindow: NSWindow?
-    private var tableLayoutBinding: TableLayoutBinding?
     private var didDismiss = false
 
     var onSaved: (() -> Void)?
@@ -70,15 +74,27 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         initialKey: String? = nil,
         detailProvider: any ObjectDetailProviding,
         operationProvider: any ResourceOperationProviding,
-        tableLayoutStore: TableLayoutStore? = nil
+        tableLayoutStore: TableLayoutStore? = nil,
+        changeConfirmation: (@MainActor (
+            KeyValueDiffConfirmationWindowController
+        ) async -> KeyValueDiffConfirmationWindowController.Choice)? = nil,
+        discardChangesConfirmation: (@MainActor () -> Bool)? = nil,
+        keyPrompt: (@MainActor (KeyValueEditorKeyPrompt.Request) -> String?)? = nil
     ) {
+        let resolvedTableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.session = session
         self.identity = identity
         self.kind = kind
         self.initialKey = initialKey
         self.detailProvider = detailProvider
         self.operationProvider = operationProvider
-        self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
+        self.changeConfirmation = changeConfirmation
+        self.discardChangesConfirmation = discardChangesConfirmation
+        self.keyPrompt = keyPrompt
+        self.editorView = KeyValueEditorView(
+            configuration: Self.editorConfiguration(kind: kind),
+            tableLayoutStore: resolvedTableLayoutStore
+        )
 
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 570),
@@ -102,6 +118,26 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
     deinit {
         loadTask?.cancel()
         operationTask?.cancel()
+        reviewTask?.cancel()
+    }
+
+    private static func editorConfiguration(
+        kind: ResourceMetadataKind
+    ) -> KeyValueEditorView.Configuration {
+        KeyValueEditorView.Configuration(
+            identifierPrefix: "resource-metadata-editor",
+            splitAutosaveName: "kmgr.resource-metadata-master-detail",
+            tableAccessibilityLabel: "\(kind.title) keys and values",
+            valueAccessibilityLabel: "Selected \(kind.singularTitle.lowercased()) value",
+            tableSurface: .objectMetadataKeys,
+            columns: [
+                .init(id: "key", title: "Key", width: 210, minimumWidth: 120),
+                .init(id: "value", title: "Value", width: 240, minimumWidth: 120),
+                .init(id: "state", title: "State", width: 82, minimumWidth: 68),
+            ],
+            preferredLeadingFraction: 0.46,
+            paneMinimums: .init(leading: 280, trailing: 300)
+        )
     }
 
     func beginSheet(for parent: NSWindow) {
@@ -114,17 +150,24 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
     func dismissForEngineRecovery() {
         loadTask?.cancel()
         operationTask?.cancel()
+        reviewTask?.cancel()
+        reviewController?.cancelReview()
         loadTask = nil
         operationTask = nil
+        reviewTask = nil
+        reviewController = nil
         dismissSheet()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard operationTask == nil else {
+        guard operationTask == nil, reviewTask == nil,
+            reviewController == nil
+        else {
             NSSound.beep()
             return false
         }
-        return true
+        captureSelectedValue()
+        return shouldDiscardChangesIfNeeded()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -143,24 +186,7 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         instructionLabel.textColor = .secondaryLabelColor
         instructionLabel.setAccessibilityLabel("\(kind.title) editing rules")
 
-        configureKeyPane()
-        configureValuePane()
-        splitView.isVertical = true
-        splitView.dividerStyle = .thin
-        splitView.identifier = .init("resource-metadata-editor-split")
-        splitView.autosaveName = "kmgr.resource-metadata-master-detail"
-        splitView.preferredLeadingFraction = 0.46
-        splitView.paneMinimumsProvider = {
-            KeyValueEditorSplitView.PaneMinimums(leading: 280, trailing: 300)
-        }
-        splitView.onDidResize = { [weak self] in
-            guard let self else { return }
-            TextDocumentGeometry.update(
-                self.valueTextView,
-                in: self.valueScroll,
-                wrapsToViewport: true
-            )
-        }
+        configureEditor()
 
         progress.style = .spinning
         progress.controlSize = .small
@@ -177,9 +203,7 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         saveButton.action = #selector(save)
         saveButton.keyEquivalent = "s"
         saveButton.keyEquivalentModifierMask = [.command]
-        let footer = NSStackView(views: [
-            progress, statusLabel, NSView(), cancelButton, saveButton,
-        ])
+        let footer = NSStackView(views: [progress, statusLabel, NSView(), cancelButton])
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
@@ -187,9 +211,9 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         let root = NSView()
         target.translatesAutoresizingMaskIntoConstraints = false
         instructionLabel.translatesAutoresizingMaskIntoConstraints = false
-        splitView.translatesAutoresizingMaskIntoConstraints = false
+        editorView.translatesAutoresizingMaskIntoConstraints = false
         footer.translatesAutoresizingMaskIntoConstraints = false
-        for child in [target, instructionLabel, splitView, footer] {
+        for child in [target, instructionLabel, editorView, footer] {
             root.addSubview(child)
         }
         NSLayoutConstraint.activate([
@@ -199,38 +223,21 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
             instructionLabel.leadingAnchor.constraint(equalTo: target.leadingAnchor),
             instructionLabel.trailingAnchor.constraint(equalTo: target.trailingAnchor),
             instructionLabel.topAnchor.constraint(equalTo: target.bottomAnchor, constant: 5),
-            splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            splitView.topAnchor.constraint(equalTo: instructionLabel.bottomAnchor, constant: 8),
+            editorView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            editorView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            editorView.topAnchor.constraint(equalTo: instructionLabel.bottomAnchor, constant: 8),
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
-            footer.topAnchor.constraint(equalTo: splitView.bottomAnchor, constant: 8),
+            footer.topAnchor.constraint(equalTo: editorView.bottomAnchor, constant: 8),
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
         ])
         panel.contentView = root
         updateControls()
     }
 
-    private func configureKeyPane() {
-        for (identifier, title, width, minimumWidth) in [
-            ("key", "Key", CGFloat(210), CGFloat(120)),
-            ("value", "Value", CGFloat(240), CGFloat(120)),
-            ("state", "State", CGFloat(82), CGFloat(68)),
-        ] {
-            let column = NSTableColumn(identifier: .init(identifier))
-            column.title = title
-            column.width = width
-            column.minWidth = minimumWidth
-            column.resizingMask = .userResizingMask
-            keysTable.addTableColumn(column)
-        }
+    private func configureEditor() {
         keysTable.delegate = self
         keysTable.dataSource = self
-        keysTable.usesAlternatingRowBackgroundColors = true
-        keysTable.allowsEmptySelection = true
-        keysTable.allowsMultipleSelection = false
-        keysTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        keysTable.setAccessibilityLabel("\(kind.title) keys and values")
         keysTable.onFocusSearch = { [weak self] in
             guard let self else { return }
             self.window?.makeFirstResponder(self.searchField)
@@ -240,136 +247,33 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
             self.window?.makeFirstResponder(self.valueTextView)
         }
         keysTable.onBack = { [weak self] in self?.cancel() }
-        tableLayoutBinding = TableLayoutBinding(
-            tableView: keysTable,
-            surface: .objectMetadataKeys,
-            store: tableLayoutStore
-        )
-        keysScroll.documentView = keysTable
-        keysScroll.hasVerticalScroller = true
-        keysScroll.hasHorizontalScroller = true
-        keysScroll.autohidesScrollers = true
-        keysScroll.identifier = .init("resource-metadata-keys-scroll")
 
-        searchField.placeholderString = "Search keys and values"
-        searchField.sendsSearchStringImmediately = true
         searchField.target = self
         searchField.action = #selector(searchChanged)
         searchField.setAccessibilityLabel("Search \(kind.title.lowercased())")
-        countLabel.textColor = .secondaryLabelColor
-        countLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        countLabel.alignment = .right
-        countLabel.setContentHuggingPriority(.required, for: .horizontal)
-        let searchRow = NSStackView(views: [searchField, countLabel])
-        searchRow.orientation = .horizontal
-        searchRow.alignment = .centerY
-        searchRow.spacing = 8
-
-        newKeyField.placeholderString = "New \(kind.singularTitle.lowercased()) key"
-        newKeyField.delegate = self
-        newKeyField.target = self
-        newKeyField.action = #selector(addKey)
-        newKeyField.setAccessibilityLabel("New \(kind.singularTitle.lowercased()) key")
         addButton.target = self
         addButton.action = #selector(addKey)
+        renameButton.target = self
+        renameButton.action = #selector(renameKey)
         deleteButton.target = self
         deleteButton.action = #selector(deleteKey)
         revertButton.target = self
         revertButton.action = #selector(revertKey)
-        for button in [addButton, deleteButton, revertButton] {
+        valueTextView.delegate = self
+        for button in [addButton, renameButton, deleteButton, revertButton, saveButton] {
             button.controlSize = .small
         }
-        let addRow = NSStackView(views: [newKeyField, addButton])
-        addRow.orientation = .horizontal
-        addRow.alignment = .centerY
-        addRow.spacing = 6
-        let actions = NSStackView(views: [deleteButton, revertButton, NSView()])
-        actions.orientation = .horizontal
-        actions.alignment = .centerY
-        actions.spacing = 8
-
-        let pane = NSView()
-        pane.identifier = .init("resource-metadata-keys-pane")
-        for child in [searchRow, addRow, actions, keysScroll] {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            pane.addSubview(child)
-        }
-        NSLayoutConstraint.activate([
-            searchRow.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 8),
-            searchRow.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
-            searchRow.topAnchor.constraint(equalTo: pane.topAnchor, constant: 7),
-            addRow.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 8),
-            addRow.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
-            addRow.topAnchor.constraint(equalTo: searchRow.bottomAnchor, constant: 6),
-            actions.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 8),
-            actions.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
-            actions.topAnchor.constraint(equalTo: addRow.bottomAnchor, constant: 5),
-            keysScroll.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
-            keysScroll.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
-            keysScroll.topAnchor.constraint(equalTo: actions.bottomAnchor, constant: 6),
-            keysScroll.bottomAnchor.constraint(equalTo: pane.bottomAnchor),
+        editorView.setLeadingActionViews([
+            addButton, renameButton, deleteButton, NSView(),
         ])
-        splitView.addArrangedSubview(pane)
-    }
-
-    private func configureValuePane() {
-        let keyLabel = NSTextField(labelWithString: "Key")
-        keyLabel.setAccessibilityLabel("Selected metadata key label")
-        keyField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        keyField.delegate = self
-        keyField.target = self
-        keyField.action = #selector(renameKey)
-        keyField.setAccessibilityLabel("Selected \(kind.singularTitle.lowercased()) key")
-        renameButton.target = self
-        renameButton.action = #selector(renameKey)
-        renameButton.controlSize = .small
-        stateLabel.textColor = .secondaryLabelColor
-        stateLabel.alignment = .right
-        stateLabel.setContentHuggingPriority(.required, for: .horizontal)
-        stateLabel.setAccessibilityLabel("Selected metadata entry state")
-        let header = NSStackView(views: [keyLabel, keyField, renameButton, stateLabel])
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 7
-
-        valueTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        valueTextView.isRichText = false
-        valueTextView.isEditable = false
-        valueTextView.isSelectable = true
-        valueTextView.allowsUndo = true
-        valueTextView.isAutomaticQuoteSubstitutionEnabled = false
-        valueTextView.isAutomaticDashSubstitutionEnabled = false
-        valueTextView.isAutomaticTextReplacementEnabled = false
-        valueTextView.isAutomaticSpellingCorrectionEnabled = false
-        valueTextView.delegate = self
-        valueTextView.setAccessibilityLabel("Selected \(kind.singularTitle.lowercased()) value")
-        valueScroll.documentView = valueTextView
-        valueScroll.hasVerticalScroller = true
-        valueScroll.hasHorizontalScroller = false
-        valueScroll.identifier = .init("resource-metadata-value-scroll")
-        TextDocumentGeometry.configure(
-            valueTextView,
-            in: valueScroll,
-            wrapsToViewport: true
+        editorView.setHeaderActionViews([saveButton])
+        editorView.setTrailingActionViews([revertButton, NSView()])
+        editorView.selectedKeyLabel.setAccessibilityLabel(
+            "Selected \(kind.singularTitle.lowercased()) key"
         )
-
-        let pane = NSView()
-        pane.identifier = .init("resource-metadata-value-pane")
-        header.translatesAutoresizingMaskIntoConstraints = false
-        valueScroll.translatesAutoresizingMaskIntoConstraints = false
-        pane.addSubview(header)
-        pane.addSubview(valueScroll)
-        NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 8),
-            header.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
-            header.topAnchor.constraint(equalTo: pane.topAnchor, constant: 7),
-            valueScroll.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
-            valueScroll.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
-            valueScroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 7),
-            valueScroll.bottomAnchor.constraint(equalTo: pane.bottomAnchor),
-        ])
-        splitView.addArrangedSubview(pane)
-        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
+        editorView.selectedKeyDetailsLabel.setAccessibilityLabel(
+            "Selected metadata entry state"
+        )
     }
 
     private func loadMetadata() {
@@ -399,7 +303,7 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
                     "Resource version \(target.expectedResourceVersion) · \(draft?.allKeys.count ?? 0) \(kind.title.lowercased())"
                 )
                 window?.makeFirstResponder(
-                    draft?.allKeys.isEmpty == true ? newKeyField : keysTable
+                    draft?.allKeys.isEmpty == true ? addButton : keysTable
                 )
             } catch {
                 guard !Task.isCancelled else { return }
@@ -414,51 +318,68 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
     }
 
     @objc private func addKey() {
-        guard draft != nil, operationTask == nil else { return }
-        let key = newKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else {
-            window?.makeFirstResponder(newKeyField)
-            return
-        }
+        guard draft != nil, editorInteractionIdle else { return }
+        let request = KeyValueEditorKeyPrompt.Request(
+            action: .add,
+            singularTitle: kind.singularTitle,
+            currentValue: nil,
+            informativeText: mutationTargetDetails(
+                note: "The new \(kind.singularTitle.lowercased()) remains local until Save Changes."
+            )
+        )
+        let requestedKey = keyPrompt.map { $0(request) }
+            ?? KeyValueEditorKeyPrompt.run(request)
+        guard let key = requestedKey else { return }
         captureSelectedValue()
         guard var draft = self.draft else { return }
         do {
             try draft.addKey(key)
             self.draft = draft
-            newKeyField.stringValue = ""
             searchField.stringValue = ""
             rebuildVisibleKeys(selecting: key)
-            setStatus("Added \(kind.singularTitle.lowercased()) \(key)")
+            setStatus(
+                "Added \(kind.singularTitle.lowercased()) \(key) locally · Save Changes to apply"
+            )
             window?.makeFirstResponder(valueTextView)
         } catch {
             show(error)
-            window?.makeFirstResponder(newKeyField)
         }
     }
 
     @objc private func renameKey() {
         guard let selectedKey, draft?.value(for: selectedKey) != nil,
-            operationTask == nil
+            editorInteractionIdle
         else { return }
         captureSelectedValue()
         guard var draft = self.draft else { return }
-        let newKey = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = KeyValueEditorKeyPrompt.Request(
+            action: .rename,
+            singularTitle: kind.singularTitle,
+            currentValue: selectedKey,
+            informativeText: mutationTargetDetails(
+                note: "The rename remains local until Save Changes."
+            )
+        )
+        let requestedKey = keyPrompt.map { $0(request) }
+            ?? KeyValueEditorKeyPrompt.run(request)
+        guard let newKey = requestedKey else { return }
         guard newKey != selectedKey else { return }
         do {
             try draft.renameKey(selectedKey, to: newKey)
             self.draft = draft
             searchField.stringValue = ""
             rebuildVisibleKeys(selecting: newKey)
-            setStatus("Renamed \(kind.singularTitle.lowercased()) to \(newKey)")
+            setStatus(
+                "Renamed \(selectedKey) to \(newKey) locally · Save Changes to apply"
+            )
         } catch {
             show(error)
-            window?.makeFirstResponder(keyField)
         }
     }
 
     @objc private func deleteKey() {
         guard let selectedKey, draft?.value(for: selectedKey) != nil,
-            operationTask == nil
+            editorInteractionIdle
         else { return }
         captureSelectedValue()
         guard var draft = self.draft else { return }
@@ -475,16 +396,17 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
 
     @objc private func revertKey() {
         guard let selectedKey, var draft, draft.isChanged(selectedKey),
-            operationTask == nil
+            editorInteractionIdle
         else { return }
+        let preferredKey = draft.renameSource(for: selectedKey) ?? selectedKey
         draft.revertKey(selectedKey)
         self.draft = draft
-        rebuildVisibleKeys(selecting: selectedKey)
+        rebuildVisibleKeys(selecting: preferredKey)
         setStatus("Reverted \(selectedKey)")
     }
 
     @objc private func save() {
-        guard operationTask == nil, draft != nil,
+        guard editorInteractionIdle, draft != nil,
             let expectedResourceVersion
         else { return }
         captureSelectedValue()
@@ -496,6 +418,71 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
             show(error)
             return
         }
+        let inputs = draft.changeList.map { change in
+            KeyValueDiffInput(
+                beforeKey: change.beforeKey,
+                afterKey: change.afterKey,
+                beforeKind: change.beforeValue == nil ? nil : .text,
+                beforeValue: change.beforeValue.map { Data($0.utf8) },
+                afterKind: change.afterValue == nil ? nil : .text,
+                afterValue: change.afterValue.map { Data($0.utf8) },
+                sensitive: false
+            )
+        }
+        reviewChanges(
+            inputs: inputs,
+            changes: changes,
+            expectedResourceVersion: expectedResourceVersion
+        )
+    }
+
+    private func reviewChanges(
+        inputs: [KeyValueDiffInput],
+        changes: ResourceMetadataChanges,
+        expectedResourceVersion: String
+    ) {
+        guard !inputs.isEmpty, let parent = window else { return }
+        setStatus("Preparing change review…", busy: true)
+        updateControls()
+        reviewTask = Task { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            defer { finishReviewIfNeeded() }
+            let controller = KeyValueDiffConfirmationWindowController(
+                editorTitle: kind.title,
+                targetDetails: mutationTargetDetails(note: kind.setInstruction),
+                inputs: inputs
+            )
+            reviewController = controller
+            setStatus("Review \(inputs.count.formatted()) staged changes")
+            updateControls()
+            let choice: KeyValueDiffConfirmationWindowController.Choice
+            if let changeConfirmation {
+                choice = await changeConfirmation(controller)
+            } else {
+                choice = await controller.runSheet(for: parent)
+            }
+            controller.discardTransientPresentation()
+            guard !Task.isCancelled, reviewController === controller else { return }
+            reviewController = nil
+            reviewTask = nil
+            updateControls()
+            switch choice {
+            case .save:
+                submitChanges(
+                    changes,
+                    expectedResourceVersion: expectedResourceVersion
+                )
+            case .keepEditing:
+                setStatus("Save cancelled · local changes preserved")
+                window?.makeFirstResponder(keysTable)
+            }
+        }
+    }
+
+    private func submitChanges(
+        _ changes: ResourceMetadataChanges,
+        expectedResourceVersion: String
+    ) {
         setStatus("Saving \(kind.title.lowercased())…", busy: true)
         updateControls()
         operationTask = Task { [weak self, operationProvider, identity] in
@@ -546,11 +533,23 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         }
     }
 
+    private func finishReviewIfNeeded() {
+        guard reviewTask != nil || reviewController != nil else { return }
+        reviewController?.discardTransientPresentation()
+        reviewController = nil
+        reviewTask = nil
+        updateControls()
+    }
+
     @objc private func cancel() {
-        guard operationTask == nil else {
+        guard operationTask == nil, reviewTask == nil,
+            reviewController == nil
+        else {
             NSSound.beep()
             return
         }
+        captureSelectedValue()
+        guard shouldDiscardChangesIfNeeded() else { return }
         dismissSheet()
     }
 
@@ -559,7 +558,19 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
     }
 
     override func cancelOperation(_ sender: Any?) {
+        if leaveValueEditorIfActive() { return }
         cancel()
+    }
+
+    private func leaveValueEditorIfActive() -> Bool {
+        guard let window,
+            let responderView = window.firstResponder as? NSView,
+            responderView === valueTextView
+                || responderView.isDescendant(of: valueScrollView)
+        else { return false }
+        captureSelectedValue()
+        window.makeFirstResponder(keysTable)
+        return true
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -573,6 +584,7 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         else { return }
         draft.setValue(valueTextView.string, for: selectedKey)
         self.draft = draft
+        editorView.updateSyntaxHighlighting(key: selectedKey, isTextValue: true)
         reloadSelectedRow()
         updateSelectedStatePresentation(selectedKey, in: draft)
         updateControls()
@@ -603,6 +615,12 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         cell.setAccessibilityValue(value)
         cell.textField?.textColor = tableColumn.identifier.rawValue == "state"
             && state != .saved ? stateColor(state) : .labelColor
+        if !appliedSearchQuery.isEmpty {
+            editorView.applySearchHighlight(
+                to: cell.textField,
+                query: appliedSearchQuery
+            )
+        }
         return cell
     }
 
@@ -633,22 +651,23 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
             selectKey(nil)
             return
         }
-        let query = searchField.stringValue
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        let query = KeyValueTextSearch.normalizedQuery(searchField.stringValue)
+        appliedSearchQuery = query
         let allKeys = draft.allKeys
         if query.isEmpty {
             visibleKeys = allKeys
         } else {
             visibleKeys = allKeys.filter { key in
-                key.lowercased().contains(query)
-                    || (draft.value(for: key) ?? draft.baselineValue(for: key) ?? "")
-                        .lowercased().contains(query)
+                KeyValueTextSearch.contains(key, query: query)
+                    || KeyValueTextSearch.contains(
+                        draft.value(for: key) ?? draft.baselineValue(for: key) ?? "",
+                        query: query
+                    )
             }
         }
         keysTable.reloadData()
         countLabel.stringValue = query.isEmpty
-            ? "\(allKeys.count.formatted())"
+            ? "\(allKeys.count.formatted()) key\(allKeys.count == 1 ? "" : "s")"
             : "\(visibleKeys.count.formatted()) of \(allKeys.count.formatted())"
 
         let selection = preferredKey.flatMap { key in
@@ -677,19 +696,25 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         isInstallingState = true
         defer { isInstallingState = wasInstalling }
         guard let selectedKey, let draft else {
-            keyField.stringValue = ""
-            stateLabel.stringValue = ""
+            editorView.selectedKeyLabel.stringValue = "No key selected"
+            editorView.selectedKeyLabel.setAccessibilityValue("No key selected")
+            editorView.selectedKeyDetailsLabel.stringValue = ""
+            editorView.selectedKeyDetailsLabel.setAccessibilityValue("")
             valueTextView.string = draft == nil
                 ? "Loading current metadata…"
-                : "No \(kind.title.lowercased()). Enter a key on the left to add one."
+                : "No \(kind.title.lowercased()). Use Add Key to create one."
             valueTextView.undoManager?.removeAllActions()
+            editorView.clearSyntaxHighlighting()
             return
         }
-        keyField.stringValue = selectedKey
+        editorView.selectedKeyLabel.stringValue = selectedKey
+        editorView.selectedKeyLabel.toolTip = selectedKey
+        editorView.selectedKeyLabel.setAccessibilityValue(selectedKey)
         updateSelectedStatePresentation(selectedKey, in: draft)
         valueTextView.string = draft.value(for: selectedKey)
             ?? draft.baselineValue(for: selectedKey) ?? ""
         valueTextView.undoManager?.removeAllActions()
+        editorView.updateSyntaxHighlighting(key: selectedKey, isTextValue: true)
     }
 
     private func updateSelectedStatePresentation(
@@ -697,28 +722,30 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         in draft: ResourceMetadataDraft
     ) {
         let state = rowState(key, in: draft)
-        stateLabel.stringValue = state.rawValue
-        stateLabel.textColor = stateColor(state)
+        editorView.selectedKeyDetailsLabel.stringValue = state.rawValue
+        editorView.selectedKeyDetailsLabel.textColor = stateColor(state)
+        editorView.selectedKeyDetailsLabel.setAccessibilityValue(state.rawValue)
+    }
+
+    private var editorInteractionIdle: Bool {
+        loadTask == nil && operationTask == nil
+            && reviewTask == nil && reviewController == nil
     }
 
     private func updateControls() {
-        let idle = loadTask == nil && operationTask == nil
+        let idle = editorInteractionIdle
         let loaded = draft != nil && expectedResourceVersion != nil
         let currentExists = selectedKey.flatMap { draft?.value(for: $0) } != nil
         let currentChanged = selectedKey.map { draft?.isChanged($0) == true } == true
-        newKeyField.isEnabled = idle && loaded
         addButton.isEnabled = idle && loaded
-            && !newKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        keyField.isEnabled = idle && currentExists
         renameButton.isEnabled = idle && currentExists
-            && selectedKey != keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         deleteButton.isEnabled = idle && currentExists
         revertButton.isEnabled = idle && currentChanged
         valueTextView.isEditable = idle && currentExists
         valueTextView.isSelectable = loaded
         saveButton.isEnabled = idle && loaded && draft?.hasChanges == true
         cancelButton.isEnabled = operationTask == nil
-        if loadTask != nil || operationTask != nil {
+        if loadTask != nil || operationTask != nil || reviewTask != nil {
             progress.startAnimation(nil)
         } else {
             progress.stopAnimation(nil)
@@ -728,6 +755,7 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
     private func rowState(_ key: String, in draft: ResourceMetadataDraft) -> RowState {
         if draft.isDeleted(key) { return .deleted }
         if draft.isAdded(key) { return .added }
+        if draft.isRenamed(key) { return .renamed }
         if draft.isChanged(key) { return .modified }
         return .saved
     }
@@ -736,7 +764,7 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         switch state {
         case .saved: .secondaryLabelColor
         case .added: .systemGreen
-        case .modified: .systemOrange
+        case .modified, .renamed: .systemOrange
         case .deleted: .systemRed
         }
     }
@@ -825,6 +853,21 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         statusLabel.textColor = .systemRed
         progress.stopAnimation(nil)
         updateControls()
+    }
+
+    private func mutationTargetDetails(note: String) -> String {
+        let target = ClusterIdentityPresentation(session: session).targetDetails(identity)
+        return "\(target)\n\n\(note)"
+    }
+
+    private func shouldDiscardChangesIfNeeded() -> Bool {
+        guard draft?.hasChanges == true else { return true }
+        return discardChangesConfirmation?()
+            ?? KeyValueEditorDiscardConfirmation.shouldDiscard(
+                editorTitle: kind.title,
+                targetDetails: ClusterIdentityPresentation(session: session)
+                    .targetDetails(identity)
+            )
     }
 
     private func dismissSheet() {

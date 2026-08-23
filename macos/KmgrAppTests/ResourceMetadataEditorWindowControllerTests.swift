@@ -12,6 +12,7 @@ struct ResourceMetadataEditorWindowControllerTests {
     func labelsEditorWorkflow() async throws {
         let identity = metadataIdentity()
         let operations = MetadataEditorOperationProvider()
+        var promptedKeys = ["owner", "temporary", "app.kubernetes.io/name"]
         let controller = ResourceMetadataEditorWindowController(
             session: metadataSession(),
             identity: identity,
@@ -23,7 +24,9 @@ struct ResourceMetadataEditorWindowControllerTests {
                 labels: ["legacy": "true", "team": "platform"],
                 annotations: ["team": "Platform Team"]
             )),
-            operationProvider: operations
+            operationProvider: operations,
+            changeConfirmation: { _ in .save },
+            keyPrompt: { _ in promptedKeys.removeFirst() }
         )
         let parent = metadataParentWindow()
         parent.makeKeyAndOrderFront(nil)
@@ -57,37 +60,19 @@ struct ResourceMetadataEditorWindowControllerTests {
 
         valueEditor.string = "runtime"
         controller.textDidChange(Notification(name: NSText.didChangeNotification, object: valueEditor))
-        selectedKey.stringValue = "owner"
-        controller.controlTextDidChange(Notification(
-            name: NSControl.textDidChangeNotification,
-            object: selectedKey
-        ))
         try metadataButton("Rename", in: root).performClick(nil)
         try await metadataWaitUntil { selectedKey.stringValue == "owner" }
 
         try selectMetadataRow("legacy", in: table, controller: controller)
-        try metadataButton("Delete", in: root).performClick(nil)
+        try metadataButton("Delete Key", in: root).performClick(nil)
 
-        let newKey = try #require(metadataDescendants(of: root)
-            .compactMap { $0 as? NSTextField }
-            .first { $0.accessibilityLabel() == "New label key" })
-        newKey.stringValue = "temporary"
-        controller.controlTextDidChange(Notification(
-            name: NSControl.textDidChangeNotification,
-            object: newKey
-        ))
-        try metadataButton("Add", in: root).performClick(nil)
+        try metadataButton("Add Key", in: root).performClick(nil)
         try metadataButton("Revert", in: root).performClick(nil)
-        newKey.stringValue = "app.kubernetes.io/name"
-        controller.controlTextDidChange(Notification(
-            name: NSControl.textDidChangeNotification,
-            object: newKey
-        ))
-        try metadataButton("Add", in: root).performClick(nil)
+        try metadataButton("Add Key", in: root).performClick(nil)
         valueEditor.string = "api"
         controller.textDidChange(Notification(name: NSText.didChangeNotification, object: valueEditor))
 
-        try metadataButton("Save", in: root).performClick(nil)
+        try metadataButton("Save Changes", in: root).performClick(nil)
         let call = try await metadataWaitForCall(operations)
         #expect(call.identity == identity)
         #expect(call.expectedResourceVersion == "rv-7")
@@ -99,6 +84,84 @@ struct ResourceMetadataEditorWindowControllerTests {
         #expect(call.changes.annotations.isEmpty)
         #expect(call.changes.removeAnnotationKeys.isEmpty)
         try await metadataWaitUntil { parent.attachedSheet == nil }
+    }
+
+    @Test("annotation JSON highlighting, Keep Editing, and dirty close share Data behavior")
+    func annotationStructuredEditingAndDirtyClose() async throws {
+        let identity = metadataIdentity()
+        let operations = MetadataEditorOperationProvider()
+        var reviewCount = 0
+        var discardRequests = 0
+        var dismissCount = 0
+        let key = "kubectl.kubernetes.io/last-applied-configuration"
+        let controller = ResourceMetadataEditorWindowController(
+            session: metadataSession(),
+            identity: identity,
+            kind: .annotations,
+            initialKey: key,
+            detailProvider: MetadataEditorDetailProvider(detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-json",
+                annotations: [key: #"{"kind":"Deployment","replicas":2}"#]
+            )),
+            operationProvider: operations,
+            changeConfirmation: { _ in
+                reviewCount += 1
+                return .keepEditing
+            },
+            discardChangesConfirmation: {
+                discardRequests += 1
+                return discardRequests == 2
+            }
+        )
+        controller.onDismiss = { dismissCount += 1 }
+        let parent = metadataParentWindow()
+        parent.makeKeyAndOrderFront(nil)
+        controller.beginSheet(for: parent)
+        defer {
+            if parent.attachedSheet != nil { controller.dismissForEngineRecovery() }
+            parent.orderOut(nil)
+        }
+
+        let root = try #require(controller.window?.contentView)
+        let table = try #require(metadataDescendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Annotations keys and values" })
+        let editor = try #require(metadataDescendants(of: root)
+            .compactMap { $0 as? NSTextView }
+            .first { $0.accessibilityLabel() == "Selected annotation value" })
+        let status = try #require(metadataDescendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Metadata editor status" })
+        try await metadataWaitUntil { editor.string.contains("Deployment") }
+        let kindLocation = (editor.string as NSString).range(of: #""kind""#).location
+        try await metadataWaitUntil {
+            metadataTemporaryColor(in: editor, at: kindLocation) == .systemPurple
+        }
+        #expect(editor.layoutManager?.showsInvisibleCharacters == true)
+        #expect(editor.layoutManager?.showsControlCharacters == true)
+
+        editor.string = #"{"kind":"Deployment","replicas":3,"nested":{"ready":true}}"#
+        controller.textDidChange(Notification(
+            name: NSText.didChangeNotification,
+            object: editor
+        ))
+        #expect(try metadataStateText(in: table, row: 0) == "Modified")
+        try metadataButton("Save Changes", in: root).performClick(nil)
+        try await metadataWaitUntil { status.stringValue.contains("Save cancelled") }
+        #expect(reviewCount == 1)
+        #expect(await operations.updateAttemptCount() == 0)
+        #expect(editor.string.contains(#""nested""#))
+        #expect(try metadataButton("Save Changes", in: root).isEnabled)
+
+        controller.cancelOperation(nil)
+        #expect(parent.attachedSheet === controller.window)
+        #expect(discardRequests == 1)
+        #expect(dismissCount == 0)
+        controller.cancelOperation(nil)
+        try await metadataWaitUntil { parent.attachedSheet == nil }
+        #expect(discardRequests == 2)
+        #expect(dismissCount == 1)
     }
 
     @Test("annotation conflicts retain multiline local edits for retry")
@@ -115,7 +178,8 @@ struct ResourceMetadataEditorWindowControllerTests {
                 resourceVersion: "rv-9",
                 annotations: ["example.com/note": "before"]
             )),
-            operationProvider: operations
+            operationProvider: operations,
+            changeConfirmation: { _ in .save }
         )
         let parent = metadataParentWindow()
         parent.makeKeyAndOrderFront(nil)
@@ -138,7 +202,7 @@ struct ResourceMetadataEditorWindowControllerTests {
         editor.setSelectedRange(NSRange(location: 4, length: 0))
         controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
         #expect(editor.selectedRange() == NSRange(location: 4, length: 0))
-        let save = try metadataButton("Save", in: root)
+        let save = try metadataButton("Save Changes", in: root)
         save.performClick(nil)
         try await metadataWaitUntil { status.stringValue.contains("HTTP 409") }
         #expect(editor.string == local)
@@ -168,7 +232,8 @@ struct ResourceMetadataEditorWindowControllerTests {
                 resourceVersion: "rv-10",
                 labels: ["team": "platform"]
             )),
-            operationProvider: operations
+            operationProvider: operations,
+            changeConfirmation: { _ in .save }
         )
         let parent = metadataParentWindow()
         parent.makeKeyAndOrderFront(nil)
@@ -188,7 +253,7 @@ struct ResourceMetadataEditorWindowControllerTests {
 
         editor.string = "runtime"
         controller.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
-        try metadataButton("Save", in: root).performClick(nil)
+        try metadataButton("Save Changes", in: root).performClick(nil)
 
         try await metadataWaitUntil { status.stringValue.contains("without a final result") }
         #expect(editor.string == "runtime")
@@ -397,6 +462,34 @@ private func selectMetadataRow(
         name: NSTableView.selectionDidChangeNotification,
         object: table
     ))
+}
+
+@MainActor
+private func metadataStateText(in table: NSTableView, row: Int) throws -> String {
+    let column = try #require(table.tableColumns.firstIndex {
+        $0.identifier.rawValue == "state"
+    })
+    let cell = try #require(table.view(
+        atColumn: column,
+        row: row,
+        makeIfNecessary: true
+    ) as? NSTableCellView)
+    return cell.textField?.stringValue ?? ""
+}
+
+@MainActor
+private func metadataTemporaryColor(
+    in textView: NSTextView,
+    at location: Int
+) -> NSColor? {
+    guard location != NSNotFound, location >= 0,
+        location < (textView.string as NSString).length
+    else { return nil }
+    return textView.layoutManager?.temporaryAttribute(
+        .foregroundColor,
+        atCharacterIndex: location,
+        effectiveRange: nil
+    ) as? NSColor
 }
 
 private func metadataWaitForCall(

@@ -153,6 +153,40 @@ struct FixedTableLayoutControllerTests {
         expectFixedControllerLayout(layout, in: table)
     }
 
+    @Test("key-value review restores its changed-key table")
+    func keyValueReviewChanges() throws {
+        let fixture = try fixedControllerLayoutFixture()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suite) }
+        let layout = TableLayout(columns: [
+            .init(id: "key", width: 330),
+            .init(id: "change", width: 110),
+            .init(id: "before", width: 150),
+            .init(id: "after", width: 165),
+        ])
+        #expect(fixture.store.set(layout, for: .keyValueDiffChanges))
+        let controller = KeyValueDiffConfirmationWindowController(
+            editorTitle: "Annotations",
+            targetDetails: "cluster · context · deployment/api",
+            inputs: [KeyValueDiffInput(
+                beforeKey: "example.com/note",
+                afterKey: "example.com/note",
+                beforeKind: .text,
+                beforeValue: Data("before".utf8),
+                afterKind: .text,
+                afterValue: Data("after".utf8),
+                sensitive: false
+            )],
+            tableLayoutStore: fixture.store
+        )
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let table = try fixedControllerTable(
+            labeled: "Staged key value changes",
+            beneath: root
+        )
+        expectFixedControllerLayout(layout, in: table)
+    }
+
     @Test("Columns manager and native picker use distinct fixed surfaces")
     func columnsSurfaces() throws {
         let fixture = try fixedControllerLayoutFixture()

@@ -2391,7 +2391,13 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         checkpointRestoration()
     }
 
-    func navigateBack() { goBack() }
+    func navigateBack() {
+        if let dataController {
+            dataController.requestBack()
+        } else {
+            goBack()
+        }
+    }
 
     @objc private func goForward() {
         guard let destination = contentController.goForward() else { return }

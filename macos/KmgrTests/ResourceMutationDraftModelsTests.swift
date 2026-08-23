@@ -50,12 +50,42 @@ import Testing
         baselineValues: ["old.example.com/note": "before", "keep": "same"]
     )
     try draft.renameKey("old.example.com/note", to: "example.com/note")
-    #expect(draft.isDeleted("old.example.com/note"))
-    #expect(draft.isAdded("example.com/note"))
-    draft.revertKey("old.example.com/note")
+    #expect(draft.isRenamed("example.com/note"))
+    #expect(!draft.isAdded("example.com/note"))
+    #expect(draft.changeList == [.init(
+        beforeKey: "old.example.com/note",
+        afterKey: "example.com/note",
+        beforeValue: "before",
+        afterValue: "before"
+    )])
+    try draft.renameKey("example.com/note", to: "old.example.com/note")
+    #expect(!draft.hasChanges)
+    try draft.renameKey("old.example.com/note", to: "example.com/note")
     draft.revertKey("example.com/note")
     #expect(!draft.hasChanges)
     #expect(throws: ResourceMutationDraftError.self) { try draft.changes() }
+}
+
+@Test func metadataDraftAllowsReusingKeysRemovedByStagedChanges() throws {
+    var draft = ResourceMetadataDraft(
+        kind: .annotations,
+        baselineValues: ["old.example.com/a": "a", "old.example.com/b": "b"]
+    )
+    try draft.renameKey("old.example.com/a", to: "example.com/a")
+    try draft.renameKey("old.example.com/b", to: "old.example.com/a")
+    #expect(try draft.changes().annotations == [
+        "example.com/a": "a",
+        "old.example.com/a": "b",
+    ])
+    #expect(try draft.changes().removeAnnotationKeys == ["old.example.com/b"])
+
+    draft.removeKey("old.example.com/a")
+    try draft.addKey("old.example.com/a", value: "replacement")
+    #expect(try draft.changes().annotations == [
+        "example.com/a": "a",
+        "old.example.com/a": "replacement",
+    ])
+    #expect(try draft.changes().removeAnnotationKeys == ["old.example.com/b"])
 }
 
 @Test func metadataDraftRejectsInvalidKeysDuplicatesAndValues() throws {
