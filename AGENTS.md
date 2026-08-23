@@ -33,7 +33,7 @@
 
 ## Removing or replacing behavior
 
-- Removal means deletion, not converting the removed implementation into negative assertions.
+- Do not add negative assertions to prove that old implementation details are absent. Just test the new behavior.
 - Before removing or replacing behavior, inspect the commit or history that introduced it. Use that history to identify the complete cleanup scope.
 - Delete obsolete production code, tests, test hooks, identifiers, assets, documentation, generated references, and compatibility paths associated with the removed behavior.
 - Delete tests that only covered the removed implementation. Add or update tests only for the new user-visible behavior or an enduring public contract.
