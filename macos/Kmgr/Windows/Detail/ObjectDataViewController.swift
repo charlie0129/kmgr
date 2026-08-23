@@ -216,6 +216,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         cancelDataFileOperation()
         cancelValueDiffReview()
         valueSyntaxHighlighter?.setMode(.none)
+        valueSyntaxHighlighter?.setWhitespaceVisualization(false)
         valueSyntaxKey = nil
         conflictController?.close()
         conflictController = nil
@@ -379,7 +380,8 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         valueSyntaxHighlighter = SyntaxHighlighter(
             textView: valueTextView,
             scrollView: valueScroll,
-            mode: .none
+            mode: .none,
+            whitespaceVisualizationEnabled: false
         )
 
         addKeyButton.target = self
@@ -788,6 +790,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         valueTextView.string = message
         valueTextView.undoManager?.removeAllActions()
         valueSyntaxHighlighter?.setMode(.none)
+        valueSyntaxHighlighter?.setWhitespaceVisualization(false)
         valueSyntaxKey = nil
         updateSelectedKeyHeader()
     }
@@ -935,12 +938,14 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private func displaySelectedData() {
         guard let data = objectData, let key = selectedKey else {
             valueSyntaxHighlighter?.setMode(.none)
+            valueSyntaxHighlighter?.setWhitespaceVisualization(false)
             valueSyntaxKey = nil
             return
         }
         let draftMetadata = drafts.metadata(for: key)
         guard selectedEntry != nil || draftMetadata != nil else {
             valueSyntaxHighlighter?.setMode(.none)
+            valueSyntaxHighlighter?.setWhitespaceVisualization(false)
             valueSyntaxKey = nil
             return
         }
@@ -993,6 +998,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             retaining: retainedMode
         )
         valueSyntaxHighlighter.setMode(mode)
+        valueSyntaxHighlighter.setWhitespaceVisualization(selectedCanEditText)
         valueSyntaxKey = selectedCanEditText ? selectedKey : nil
     }
 
@@ -1239,6 +1245,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             valueTextView.undoManager?.removeAllActions()
         }
         valueSyntaxHighlighter?.setMode(.none)
+        valueSyntaxHighlighter?.setWhitespaceVisualization(false)
         valueSyntaxKey = nil
     }
 

@@ -576,6 +576,8 @@ struct ObjectDetailYAMLPresentationTests {
         #expect(scroll.verticalRulerView == nil)
         #expect(textView.isRichText == false)
         #expect(textView.usesFindBar)
+        #expect(textView.layoutManager?.showsInvisibleCharacters == true)
+        #expect(textView.layoutManager?.showsControlCharacters == true)
 
         let toggle = try #require(descendants(of: root).compactMap { $0 as? NSButton }
             .first { $0.title == "Show Managed Fields" })

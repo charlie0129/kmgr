@@ -42,6 +42,8 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(textView.isSelectable)
         #expect(textView.isRichText == false)
         #expect(textView.usesFindBar)
+        #expect(textView.layoutManager?.showsInvisibleCharacters == true)
+        #expect(textView.layoutManager?.showsControlCharacters == true)
         #expect(scroll.hasVerticalScroller)
         #expect(scroll.hasHorizontalScroller)
         #expect(scroll.hasVerticalRuler == false)

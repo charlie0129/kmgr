@@ -708,19 +708,26 @@ final class SyntaxHighlighter: NSObject {
     private var refreshScheduled = false
     private var paintedRange: NSRange?
     private(set) var mode: SyntaxHighlightingMode
+    private(set) var whitespaceVisualizationEnabled: Bool
 
     init(
         textView: NSTextView,
         scrollView: NSScrollView,
-        mode: SyntaxHighlightingMode = .yaml
+        mode: SyntaxHighlightingMode = .yaml,
+        whitespaceVisualizationEnabled: Bool = true
     ) {
         self.textView = textView
         self.mode = mode
+        self.whitespaceVisualizationEnabled = whitespaceVisualizationEnabled
         super.init()
 
         // Temporary colors must not make TextKit lay out an entire large value
         // before it can paint the visible neighborhood.
         TextDocumentGeometry.prepareForPreciseScrolling(textView)
+        TextDocumentGeometry.configureWhitespaceVisualization(
+            textView,
+            enabled: whitespaceVisualizationEnabled
+        )
         scrollView.contentView.postsBoundsChangedNotifications = true
         let center = NotificationCenter.default
         center.addObserver(
@@ -743,6 +750,15 @@ final class SyntaxHighlighter: NSObject {
         self.mode = mode
         clearPaintedRange()
         if mode != .none { invalidate() }
+    }
+
+    /// Toggles AppKit's layout-only whitespace markers without touching the
+    /// syntax colors or the document backing store.
+    func setWhitespaceVisualization(_ enabled: Bool) {
+        guard whitespaceVisualizationEnabled != enabled else { return }
+        whitespaceVisualizationEnabled = enabled
+        guard let textView else { return }
+        TextDocumentGeometry.configureWhitespaceVisualization(textView, enabled: enabled)
     }
 
     deinit {

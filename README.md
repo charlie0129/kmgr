@@ -108,8 +108,12 @@ app-wide Port Forwards window.
 - YAML viewing and editing use lightweight visible-range syntax colors. The
   decoded Data value editor applies the same YAML colors to `.yml`/`.yaml`
   keys, and best-effort JSON colors to object or array values, including nested
-  structures. Highlighting reads TextKit's existing backing store and caps
-  each refresh independently of total document size.
+  structures. Spaces, tabs, line endings, and other control characters in
+  YAML and decoded text values use native TextKit whitespace glyphs; binary
+  previews keep their ordinary hex spacing. These markers are presentation
+  only, so the stored bytes, accessibility value, copy/paste, and undo history
+  remain unchanged. Highlighting reads TextKit's existing backing store and
+  caps each refresh independently of total document size.
 - ConfigMap and Secret keys support text and raw binary values. Data search
   matches complete keys, text values, and unsaved drafts rather than only the
   bounded row preview. Save Key first opens a searchable, value-only review:

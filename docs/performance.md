@@ -175,7 +175,8 @@ reload latency.
 `SyntaxHighlighterTests` installs synthetic 2 MiB YAML and JSON documents in
 factory-created `NSTextView` instances. It verifies that one highlighting
 refresh scans only a bounded visible neighborhood, uses temporary layout
-attributes, and does not place syntax colors in the text storage.
+attributes, renders whitespace through TextKit's layout manager, and does not
+place syntax colors or whitespace markers in the text storage.
 
 Run the Release diagnostic and opt-in one-frame lexer/apply budget with:
 

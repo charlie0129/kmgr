@@ -94,8 +94,9 @@ gates above:
   user-authorized context.
 - Interactively validating logs, exec, and resilient port-forwards against real
   Pods and Services.
-- Validating YAML, searchable ConfigMap/Secret key-value editing, bounded
-  YAML/JSON value highlighting, and the decoded value-only save review, plus
+- Validating YAML, searchable ConfigMap/Secret key-value editing, visible
+  whitespace markers in YAML/text editors, bounded YAML/JSON value
+  highlighting, and the decoded value-only save review, plus
   scale, restart, metadata, and delete mutations. These require separate
   authorization for disposable objects and are not implied by permission to
   perform read-only checks.

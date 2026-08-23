@@ -17,6 +17,26 @@ enum TextDocumentGeometry {
         layoutManager.allowsNonContiguousLayout = true
     }
 
+    /// Asks TextKit to draw whitespace and control characters using its
+    /// native invisible-character glyphs. This changes presentation only:
+    /// the document string, selections, copy/paste, and undo history remain
+    /// byte-for-byte unchanged.
+    ///
+    /// Keep this on the TextKit 1 layout manager used by the app's large
+    /// editors. AppKit invalidates the affected glyph display when either
+    /// option changes, so callers do not need to insert marker characters or
+    /// maintain a second rendered string.
+    static func configureWhitespaceVisualization(
+        _ textView: NSTextView,
+        enabled: Bool
+    ) {
+        guard let layoutManager = textView.layoutManager else {
+            preconditionFailure("AppKit did not create a text layout manager")
+        }
+        layoutManager.showsInvisibleCharacters = enabled
+        layoutManager.showsControlCharacters = enabled
+    }
+
     static func configure(
         _ textView: NSTextView,
         in scrollView: NSScrollView,

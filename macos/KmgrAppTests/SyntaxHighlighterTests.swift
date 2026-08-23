@@ -142,6 +142,48 @@ struct SyntaxHighlighterTests {
         #expect(temporaryColor(in: textView, at: keyLocation) == nil)
     }
 
+    @Test("structured editors render whitespace through TextKit without changing text")
+    func whitespaceVisualization() throws {
+        let source = "kind:\tDeployment  \nreplicas: 3\n"
+        let scrollView = NSTextView.scrollablePlainDocumentContentTextView()
+        let textView = try #require(scrollView.documentView as? NSTextView)
+        textView.string = source
+        let highlighter = SyntaxHighlighter(
+            textView: textView,
+            scrollView: scrollView,
+            mode: .yaml
+        )
+
+        #expect(highlighter.whitespaceVisualizationEnabled)
+        #expect(textView.layoutManager?.showsInvisibleCharacters == true)
+        #expect(textView.layoutManager?.showsControlCharacters == true)
+        #expect(textView.string == source)
+
+        highlighter.setWhitespaceVisualization(false)
+        #expect(!highlighter.whitespaceVisualizationEnabled)
+        #expect(textView.layoutManager?.showsInvisibleCharacters == false)
+        #expect(textView.layoutManager?.showsControlCharacters == false)
+        #expect(textView.string == source)
+    }
+
+    @Test("binary value presentations keep whitespace markers disabled")
+    func binaryValueWhitespaceVisualization() throws {
+        let scrollView = NSTextView.scrollablePlainDocumentContentTextView()
+        let textView = try #require(scrollView.documentView as? NSTextView)
+        textView.string = "00000000  00 FF 10 80  |....|"
+        let highlighter = SyntaxHighlighter(
+            textView: textView,
+            scrollView: scrollView,
+            mode: .none,
+            whitespaceVisualizationEnabled: false
+        )
+
+        #expect(!highlighter.whitespaceVisualizationEnabled)
+        #expect(textView.layoutManager?.showsInvisibleCharacters == false)
+        #expect(textView.layoutManager?.showsControlCharacters == false)
+        #expect(textView.string == "00000000  00 FF 10 80  |....|")
+    }
+
     @Test("large JSON values retain bounded per-refresh lexer work")
     func largeJSONDocumentBound() throws {
         let jsonString = "[" + String(
