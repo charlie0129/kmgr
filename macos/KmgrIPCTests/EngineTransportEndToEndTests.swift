@@ -44,6 +44,12 @@ struct EngineTransportEndToEndTests {
             #expect(first.protocolMinor >= 1)
             #expect(first.capabilities["engine.health"] == 1)
             #expect(first.capabilities["logs.resolve-sources"] == 1)
+            let startupDiagnosticText = try await waitForCurrentDiagnostics(
+                from: supervisor,
+                containing: ["engine-generation-marker-1", "engine ready"]
+            )
+            #expect(startupDiagnosticText.contains("engine-generation-marker-1"))
+            #expect(startupDiagnosticText.contains("engine ready"))
 
             let firstGeneration = try await fixture.generation(1)
             try await expectBadTokenRejected(socketPath: firstGeneration.socketPath)
@@ -334,6 +340,26 @@ private func expectBadTokenRejected(socketPath: String) async throws {
     } catch let error as RPCError {
         guard error.code == .unauthenticated else { throw error }
     }
+}
+
+@MainActor
+private func waitForCurrentDiagnostics(
+    from supervisor: EngineSupervisor,
+    containing expectedFragments: [String]
+) async throws -> String {
+    let deadline = ContinuousClock.now + .seconds(2)
+    while ContinuousClock.now < deadline {
+        if let snapshot = await supervisor.diagnosticsStore.currentSnapshot() {
+            let text = snapshot.records
+                .map { String(decoding: $0.data, as: UTF8.self) }
+                .joined(separator: "\n")
+            if expectedFragments.allSatisfy(text.contains) { return text }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    throw EngineTransportEndToEndTestError.fixtureTimedOut(
+        "live engine diagnostics"
+    )
 }
 
 @MainActor
