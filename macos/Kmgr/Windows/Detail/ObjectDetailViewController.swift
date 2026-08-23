@@ -1155,7 +1155,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                     expectedResourceVersion: detail.resourceVersion,
                     forceFieldOwnership: false
                 )
-                guard confirm(prepared: prepared) else {
+                guard await confirm(prepared: prepared) else {
                     publishStatus(WorkspaceStatus("Save cancelled"))
                     return
                 }
@@ -1195,14 +1195,15 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         updateYAMLEditControls()
     }
 
-    private func confirm(prepared: PreparedYAMLEdit) -> Bool {
+    private func confirm(prepared: PreparedYAMLEdit) async -> Bool {
         guard !prepared.diff.isEmpty else { return true }
+        guard let parent = view.window else { return false }
         let controller = YAMLDiffConfirmationWindowController(
             targetDetails: mutationConfirmationIdentityText,
             prepared: prepared,
             tableLayoutStore: tableLayoutStore
         )
-        return controller.runModal() == .apply
+        return await controller.runSheet(for: parent) == .apply
     }
 
     private func finishYAMLEdit() {

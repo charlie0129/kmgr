@@ -194,10 +194,81 @@ struct YAMLDiffConfirmationWindowControllerTests {
         controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
         #expect(textView.string.isEmpty)
     }
+
+    @Test("review is a parent sheet and never enters an application-modal loop")
+    func sheetPresentation() async throws {
+        let prepared = PreparedYAMLEdit(
+            normalizedYAMLUTF8: Data("kind: Secret\n".utf8),
+            currentResourceVersion: "rv-3",
+            diff: [SemanticDiffEntry(
+                path: "data.token",
+                beforeSummary: "<redacted>",
+                afterSummary: "<redacted>",
+                beforeDecodedSecretValue: SensitiveBytes(Data("old-secret".utf8)),
+                afterDecodedSecretValue: SensitiveBytes(Data("new-secret".utf8))
+            )],
+            unifiedDiffUTF8: Data("""
+                --- server
+                +++ edited
+                @@ -1 +1 @@
+                -kind: ConfigMap
+                +kind: Secret
+                """.utf8)
+        )
+        let controller = YAMLDiffConfirmationWindowController(
+            targetDetails: "Context reference: /tmp/kubeconfig#dev · UID uid-1",
+            prepared: prepared
+        )
+        let parent = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        parent.makeKeyAndOrderFront(nil)
+        let panel = try #require(controller.window)
+        let root = try #require(panel.contentView)
+        let views = yamlDiffDescendants(of: root)
+        let textView = try #require(views.compactMap { $0 as? NSTextView }
+            .first { $0.identifier?.rawValue == "yaml-diff-text" })
+        let apply = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "yaml-diff-apply" })
+        let reviewTask = Task { @MainActor in
+            await controller.runSheet(for: parent)
+        }
+        defer {
+            reviewTask.cancel()
+            if parent.attachedSheet === panel { parent.endSheet(panel) }
+            panel.orderOut(nil)
+            parent.orderOut(nil)
+        }
+
+        try await waitForYAMLDiffSheet(parent: parent, sheet: panel)
+        #expect(panel.sheetParent === parent)
+        #expect(NSApp.modalWindow == nil)
+
+        apply.performClick(nil)
+        let choice = await reviewTask.value
+        if case .apply = choice {} else {
+            Issue.record("expected Apply to finish the sheet with .apply")
+        }
+        #expect(parent.attachedSheet == nil)
+        #expect(textView.string.isEmpty)
+    }
 }
 }
 
 @MainActor
 private func yamlDiffDescendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(yamlDiffDescendants)
+}
+
+@MainActor
+private func waitForYAMLDiffSheet(parent: NSWindow, sheet: NSWindow) async throws {
+    for _ in 0..<100 {
+        if parent.attachedSheet === sheet { return }
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    Issue.record("YAML diff review sheet was not attached to its parent")
+    throw CancellationError()
 }

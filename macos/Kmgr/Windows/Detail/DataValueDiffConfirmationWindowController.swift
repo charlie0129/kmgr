@@ -6,7 +6,7 @@ import AppKit
 final class DataValueDiffConfirmationWindowController: NSWindowController,
     NSWindowDelegate
 {
-    enum Choice {
+    enum Choice: Sendable {
         case save
         case keepEditing
     }
@@ -16,8 +16,9 @@ final class DataValueDiffConfirmationWindowController: NSWindowController,
     private let diffLabel: String
     private let secret: Bool
     private let diffDocument: DiffTextDocument
-    private var modalChoice = Choice.keepEditing
-    private var isRunningModal = false
+    private let reviewSession = DiffReviewSheetSession<Choice>(
+        cancellationChoice: .keepEditing
+    )
 
     init(
         targetDetails: String,
@@ -56,22 +57,19 @@ final class DataValueDiffConfirmationWindowController: NSWindowController,
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
-    func runModal() -> Choice {
+    func runSheet(for parent: NSWindow) async -> Choice {
         guard let window else { return .keepEditing }
-        modalChoice = .keepEditing
-        isRunningModal = true
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.runModal(for: window)
-        isRunningModal = false
-        window.orderOut(nil)
+        let choice = await reviewSession.run(window: window, asSheetFor: parent)
         discardTransientPresentation()
-        return modalChoice
+        return choice
     }
 
     func cancelReview() {
-        modalChoice = .keepEditing
-        finishModal(with: .cancel)
+        if reviewSession.isActive {
+            reviewSession.cancel()
+        } else {
+            window?.close()
+        }
         discardTransientPresentation()
     }
 
@@ -80,16 +78,16 @@ final class DataValueDiffConfirmationWindowController: NSWindowController,
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard isRunningModal else {
+        guard reviewSession.isActive else {
             discardTransientPresentation()
             return true
         }
-        modalChoice = .keepEditing
-        NSApp.stopModal(withCode: .cancel)
+        reviewSession.cancel()
         return false
     }
 
     func windowWillClose(_ notification: Notification) {
+        reviewSession.cancel()
         discardTransientPresentation()
     }
 
@@ -213,18 +211,19 @@ final class DataValueDiffConfirmationWindowController: NSWindowController,
     }
 
     @objc private func save() {
-        modalChoice = .save
-        finishModal(with: .OK)
+        finishReview(with: .save, response: .OK)
     }
 
     @objc private func keepEditing() {
-        modalChoice = .keepEditing
-        finishModal(with: .cancel)
+        finishReview(with: .keepEditing, response: .cancel)
     }
 
-    private func finishModal(with response: NSApplication.ModalResponse) {
-        if isRunningModal {
-            NSApp.stopModal(withCode: response)
+    private func finishReview(
+        with choice: Choice,
+        response: NSApplication.ModalResponse
+    ) {
+        if reviewSession.isActive {
+            reviewSession.finish(with: choice, response: response)
         } else {
             window?.close()
         }

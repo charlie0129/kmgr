@@ -434,7 +434,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
                     expectedResourceVersion: editingBasis.resourceVersion,
                     forceFieldOwnership: false
                 )
-                guard confirm(prepared: prepared) else {
+                guard await confirm(prepared: prepared) else {
                     statusLabel.stringValue = "Save cancelled"
                     return
                 }
@@ -492,14 +492,15 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         updateEditingControls()
     }
 
-    private func confirm(prepared: PreparedYAMLEdit) -> Bool {
+    private func confirm(prepared: PreparedYAMLEdit) async -> Bool {
         guard !prepared.diff.isEmpty else { return true }
+        guard let parent = window else { return false }
         let controller = YAMLDiffConfirmationWindowController(
             targetDetails: ClusterIdentityPresentation(session: session).targetDetails(identity),
             prepared: prepared,
             tableLayoutStore: tableLayoutStore
         )
-        return controller.runModal() == .apply
+        return await controller.runSheet(for: parent) == .apply
     }
 
     private func finishYAMLEdit() {

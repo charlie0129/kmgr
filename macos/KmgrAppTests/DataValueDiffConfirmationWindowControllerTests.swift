@@ -225,10 +225,71 @@ struct DataValueDiffConfirmationWindowControllerTests {
         controller.discardTransientPresentation()
         #expect(textView.string.isEmpty)
     }
+
+    @Test("review is a parent sheet and never enters an application-modal loop")
+    func sheetPresentation() async throws {
+        let presentation = DataValueDiffPresentation(input: DataValueDiffInput(
+            key: "token",
+            beforeKind: .text,
+            beforeValue: Data("old-secret".utf8),
+            afterKind: .text,
+            afterValue: Data("new-secret".utf8),
+            secret: true
+        ))
+        let controller = DataValueDiffConfirmationWindowController(
+            targetDetails: "Context reference: /tmp/kubeconfig#dev · UID uid-1",
+            presentation: presentation
+        )
+        let parent = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        parent.makeKeyAndOrderFront(nil)
+        let panel = try #require(controller.window)
+        let root = try #require(panel.contentView)
+        let views = dataValueDiffDescendants(of: root)
+        let textView = try #require(views.compactMap { $0 as? NSTextView }
+            .first { $0.identifier?.rawValue == "data-value-diff-text" })
+        let save = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "data-value-diff-save" })
+        let reviewTask = Task { @MainActor in
+            await controller.runSheet(for: parent)
+        }
+        defer {
+            reviewTask.cancel()
+            if parent.attachedSheet === panel { parent.endSheet(panel) }
+            panel.orderOut(nil)
+            parent.orderOut(nil)
+        }
+
+        try await waitForDiffSheet(parent: parent, sheet: panel)
+        #expect(panel.sheetParent === parent)
+        #expect(NSApp.modalWindow == nil)
+
+        save.performClick(nil)
+        let choice = await reviewTask.value
+        if case .save = choice {} else {
+            Issue.record("expected Save to finish the sheet with .save")
+        }
+        #expect(parent.attachedSheet == nil)
+        #expect(textView.string.isEmpty)
+    }
 }
 }
 
 @MainActor
 private func dataValueDiffDescendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(dataValueDiffDescendants(of:))
+}
+
+@MainActor
+private func waitForDiffSheet(parent: NSWindow, sheet: NSWindow) async throws {
+    for _ in 0..<100 {
+        if parent.attachedSheet === sheet { return }
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    Issue.record("diff review sheet was not attached to its parent")
+    throw CancellationError()
 }

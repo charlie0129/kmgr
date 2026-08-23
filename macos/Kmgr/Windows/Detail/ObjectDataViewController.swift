@@ -42,9 +42,9 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private let tableLayoutStore: TableLayoutStore
     private let dataFileReader: @Sendable (URL) throws -> Data
     private let dataFileWriter: @Sendable (Data, URL) throws -> Void
-    private let valueChangeConfirmation: @MainActor (
+    private let valueChangeConfirmation: (@MainActor (
         DataValueDiffConfirmationWindowController
-    ) -> DataValueDiffConfirmationWindowController.Choice
+    ) async -> DataValueDiffConfirmationWindowController.Choice)?
 
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
     private let splitView = ObjectDataSplitView()
@@ -117,11 +117,9 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         dataFileWriter: @escaping @Sendable (Data, URL) throws -> Void = {
             try DataValueFileIO.write($0, to: $1)
         },
-        valueChangeConfirmation: @escaping @MainActor (
+        valueChangeConfirmation: (@MainActor (
             DataValueDiffConfirmationWindowController
-        ) -> DataValueDiffConfirmationWindowController.Choice = {
-            $0.runModal()
-        }
+        ) async -> DataValueDiffConfirmationWindowController.Choice)? = nil
     ) {
         precondition(Self.supports(identity), "Data requires a core/v1 ConfigMap or Secret")
         self.identity = identity
@@ -1613,7 +1611,14 @@ extension ObjectDataViewController {
                 valueDiffController = controller
                 publishStatus(WorkspaceStatus("Review value change"))
                 updateControls()
-                let choice = valueChangeConfirmation(controller)
+                let choice: DataValueDiffConfirmationWindowController.Choice
+                if let valueChangeConfirmation {
+                    choice = await valueChangeConfirmation(controller)
+                } else if let parent = view.window {
+                    choice = await controller.runSheet(for: parent)
+                } else {
+                    choice = .keepEditing
+                }
                 controller.discardTransientPresentation()
                 guard !Task.isCancelled, valueDiffController === controller else { return }
                 valueDiffController = nil

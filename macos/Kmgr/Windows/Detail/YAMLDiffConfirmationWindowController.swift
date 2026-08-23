@@ -4,12 +4,12 @@ import KmgrCore
 /// A transient, resizable confirmation window for prepared YAML edits.
 ///
 /// The text storage is the sole retained copy of rendered decoded Secret
-/// values. It is cleared as soon as the modal presentation ends.
+/// values. It is cleared as soon as the sheet presentation ends.
 @MainActor
 final class YAMLDiffConfirmationWindowController: NSWindowController,
     NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate
 {
-    enum Choice {
+    enum Choice: Sendable {
         case apply
         case keepEditing
     }
@@ -19,8 +19,9 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
     private let diffDocument: DiffTextDocument
     private let tableLayoutStore: TableLayoutStore
     private var tableLayoutBinding: TableLayoutBinding?
-    private var modalChoice = Choice.keepEditing
-    private var isRunningModal = false
+    private let reviewSession = DiffReviewSheetSession<Choice>(
+        cancellationChoice: .keepEditing
+    )
 
     init(
         targetDetails: String,
@@ -59,30 +60,33 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
-    func runModal() -> Choice {
+    func runSheet(for parent: NSWindow) async -> Choice {
         guard let window else { return .keepEditing }
-        modalChoice = .keepEditing
-        isRunningModal = true
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.runModal(for: window)
-        isRunningModal = false
-        window.orderOut(nil)
+        let choice = await reviewSession.run(window: window, asSheetFor: parent)
         clearTransientPresentation()
-        return modalChoice
+        return choice
+    }
+
+    func cancelReview() {
+        if reviewSession.isActive {
+            reviewSession.cancel()
+        } else {
+            window?.close()
+        }
+        clearTransientPresentation()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard isRunningModal else {
+        guard reviewSession.isActive else {
             clearTransientPresentation()
             return true
         }
-        modalChoice = .keepEditing
-        NSApp.stopModal(withCode: .cancel)
+        reviewSession.cancel()
         return false
     }
 
     func windowWillClose(_ notification: Notification) {
+        reviewSession.cancel()
         clearTransientPresentation()
     }
 
@@ -287,18 +291,19 @@ final class YAMLDiffConfirmationWindowController: NSWindowController,
     }
 
     @objc private func apply() {
-        modalChoice = .apply
-        finishModal(with: .OK)
+        finishReview(with: .apply, response: .OK)
     }
 
     @objc private func keepEditing() {
-        modalChoice = .keepEditing
-        finishModal(with: .cancel)
+        finishReview(with: .keepEditing, response: .cancel)
     }
 
-    private func finishModal(with response: NSApplication.ModalResponse) {
-        if isRunningModal {
-            NSApp.stopModal(withCode: response)
+    private func finishReview(
+        with choice: Choice,
+        response: NSApplication.ModalResponse
+    ) {
+        if reviewSession.isActive {
+            reviewSession.finish(with: choice, response: response)
         } else {
             window?.close()
         }

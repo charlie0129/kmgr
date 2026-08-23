@@ -15,6 +15,71 @@ struct DiffTextLine: Hashable, Sendable {
     var role: DiffTextLineRole
 }
 
+/// Suspends a diff review's async save flow while AppKit presents a regular
+/// parent-window sheet. `NSApplication.runModal(for:)` uses a nested event
+/// loop that starves AppKit's concurrent precise-scrolling updates, even
+/// though direct mouse-wheel and scrollbar events continue to work.
+@MainActor
+final class DiffReviewSheetSession<Choice: Sendable> {
+    private let cancellationChoice: Choice
+    private var selectedChoice: Choice
+    private var continuation: CheckedContinuation<Choice, Never>?
+    private weak var sheetWindow: NSWindow?
+
+    init(cancellationChoice: Choice) {
+        self.cancellationChoice = cancellationChoice
+        selectedChoice = cancellationChoice
+    }
+
+    var isActive: Bool { continuation != nil }
+
+    func run(window: NSWindow, asSheetFor parent: NSWindow) async -> Choice {
+        guard continuation == nil, window.sheetParent == nil,
+            parent.attachedSheet == nil, !Task.isCancelled
+        else { return cancellationChoice }
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                selectedChoice = cancellationChoice
+                self.continuation = continuation
+                sheetWindow = window
+                parent.beginSheet(window) { [weak self] _ in
+                    self?.complete()
+                }
+            }
+        } onCancel: { [weak self] in
+            Task { @MainActor in self?.cancel() }
+        }
+    }
+
+    func finish(
+        with choice: Choice,
+        response: NSApplication.ModalResponse
+    ) {
+        guard continuation != nil else { return }
+        selectedChoice = choice
+        guard let sheetWindow, let parent = sheetWindow.sheetParent else {
+            complete()
+            return
+        }
+        parent.endSheet(sheetWindow, returnCode: response)
+    }
+
+    func cancel() {
+        guard continuation != nil else { return }
+        finish(with: cancellationChoice, response: .cancel)
+    }
+
+    private func complete() {
+        guard let continuation else { return }
+        let result = selectedChoice
+        self.continuation = nil
+        sheetWindow = nil
+        selectedChoice = cancellationChoice
+        continuation.resume(returning: result)
+    }
+}
+
 /// Shared AppKit document for transient YAML and key-value diff reviews.
 @MainActor
 final class DiffTextDocument {
