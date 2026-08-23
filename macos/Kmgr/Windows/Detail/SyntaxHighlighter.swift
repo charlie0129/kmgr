@@ -632,6 +632,19 @@ enum SyntaxHighlightingMode: Equatable {
     case json
 }
 
+@MainActor
+enum SyntaxHighlightingPalette {
+    static func color(for kind: SyntaxTokenKind) -> NSColor {
+        switch kind {
+        case .key: .systemPurple
+        case .string: .systemRed
+        case .number: .systemBlue
+        case .keyword: .systemOrange
+        case .comment: .secondaryLabelColor
+        }
+    }
+}
+
 /// Chooses a presentation lexer for a decoded text Data value. This is a
 /// bounded heuristic, intentionally separate from validation or serialization.
 enum DataSyntaxHighlightingModeDetector {
@@ -801,7 +814,7 @@ final class SyntaxHighlighter: NSObject {
         let paint: (SyntaxToken) -> Void = { token in
             layoutManager.addTemporaryAttribute(
                 .foregroundColor,
-                value: Self.color(for: token.kind),
+                value: SyntaxHighlightingPalette.color(for: token.kind),
                 forCharacterRange: token.range
             )
         }
@@ -927,16 +940,6 @@ final class SyntaxHighlighter: NSObject {
             layoutManager: layoutManager
         )
         self.paintedRange = nil
-    }
-
-    private static func color(for kind: SyntaxTokenKind) -> NSColor {
-        switch kind {
-        case .key: .systemPurple
-        case .string: .systemRed
-        case .number: .systemBlue
-        case .keyword: .systemOrange
-        case .comment: .secondaryLabelColor
-        }
     }
 
     @objc private func documentDidChange(_ notification: Notification) { invalidate() }

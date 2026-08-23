@@ -94,6 +94,78 @@ struct LogWindowControllerTests {
         ])
     }
 
+    @Test("only exact object-boundary log lines receive JSON highlighting")
+    func JSONHighlightingRequiresExactObjectBoundaries() throws {
+        let values = [
+            "{\"name\":\"api\",\"replicas\":3,\"ready\":true}",
+            "[{\"name\":\"array-root\"}]",
+            " {\"name\":\"leading-space\"}",
+            "{\"name\":\"trailing-space\"} ",
+            "{\"name\":\"wrong-closing-delimiter\"]",
+        ]
+        let (logView, scrollView) = makeLogViewport(frame: NSRect(
+            x: 0, y: 0, width: 800, height: 400
+        ))
+        let projection = try LogViewportProjection.make(
+            chunks: [
+                "{\"name\":\"api\",",
+                "\"replicas\":3,\"ready\":true}",
+                "\n" + values.dropFirst().joined(separator: "\n") + "\n",
+            ],
+            previous: nil,
+            retainedChunkCount: 0,
+            style: logView.projection.style
+        )
+
+        #expect(projection.lines.prefix(values.count).map(\.hasJSONObjectBoundaries) == [
+            true, false, false, false, false,
+        ])
+        let line = projection.lines[0]
+        let highlight = projection.jsonHighlight(
+            inLine: 0,
+            intersecting: 0..<line.cellCount
+        )
+        func texts(for kind: SyntaxTokenKind) -> [String] {
+            highlight.tokens.filter { $0.kind == kind }.map {
+                projection.substring(in: $0.range)
+            }
+        }
+        #expect(texts(for: .key) == ["\"name\"", "\"replicas\"", "\"ready\""])
+        #expect(texts(for: .string) == ["\"api\""])
+        #expect(texts(for: .number) == ["3"])
+        #expect(texts(for: .keyword) == ["true"])
+        for lineIndex in 1..<values.count {
+            let plainLine = projection.lines[lineIndex]
+            let plain = projection.jsonHighlight(
+                inLine: lineIndex,
+                intersecting: 0..<plainLine.cellCount
+            )
+            #expect(plain.tokens.isEmpty)
+            #expect(plain.scannedUTF16Length == 0)
+        }
+
+        logView.install(projection, viewportSize: scrollView.contentSize)
+        let bitmap = try #require(
+            logView.bitmapImageRepForCachingDisplay(in: logView.bounds)
+        )
+        logView.cacheDisplay(in: logView.bounds, to: bitmap)
+        #expect(logView.lastJSONTokenCount == highlight.tokens.count)
+        #expect(logView.lastJSONScannedUTF16Length == line.textRange.length)
+
+        let wrappedWidth = CGFloat(projection.style.cellWidth * 12)
+            + logView.textContainerInset.width * 2
+        logView.setWrapsLines(
+            true,
+            viewportSize: NSSize(width: wrappedWidth, height: 400)
+        )
+        let wrappedBitmap = try #require(
+            logView.bitmapImageRepForCachingDisplay(in: logView.bounds)
+        )
+        logView.cacheDisplay(in: logView.bounds, to: wrappedBitmap)
+        #expect(logView.visualRowCount > projection.lines.count)
+        #expect(logView.lastJSONTokenCount > 0)
+    }
+
     @Test("tail scrolling always exposes the complete final empty row")
     func virtualTailIsFullyVisibleAfterResize() throws {
         let chunks = (0..<500).map { index in
@@ -125,7 +197,16 @@ struct LogWindowControllerTests {
 
     @Test("16 MiB single line uses arithmetic width and virtual horizontal drawing")
     func multiMegabyteSingleLineProjectionStaysVirtual() async throws {
-        let chunks = [String(repeating: "x", count: 16 << 20), "\n"]
+        let targetLength = 16 << 20
+        let prefix = "{\"value\":\""
+        let suffix = "\"}"
+        let value = prefix
+            + String(
+                repeating: "x",
+                count: targetLength - prefix.utf8.count - suffix.utf8.count
+            )
+            + suffix
+        let chunks = [value, "\n"]
         let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let style = LogViewportTextStyle(font: font)
         let clock = ContinuousClock()
@@ -144,6 +225,7 @@ struct LogWindowControllerTests {
         #expect(projection.maximumWidth > 100_000_000)
         #expect(projection.maximumCellCount == 16 << 20)
         #expect(projection.lines[0].indexedVariableBoundaryCount == 0)
+        #expect(projection.lines[0].hasJSONObjectBoundaries)
 
         let (logView, scrollView) = makeLogViewport(frame: NSRect(
             x: 0, y: 0, width: 800, height: 520
@@ -168,6 +250,11 @@ struct LogWindowControllerTests {
         logView.cacheDisplay(in: farRight, to: bitmap)
         #expect(drawStart.duration(to: clock.now) < .milliseconds(100))
         #expect(logView.lastDrawnCellCount < 256)
+        #expect(logView.lastJSONTokenCount > 0)
+        #expect(
+            logView.lastJSONScannedUTF16Length
+                <= LogViewportProjection.maximumJSONHighlightCells
+        )
 
         let appendedChunks = chunks + ["tail\n"]
         let appendStart = clock.now

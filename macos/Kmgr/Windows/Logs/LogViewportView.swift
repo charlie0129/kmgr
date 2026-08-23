@@ -42,6 +42,9 @@ struct LogViewportLine: Sendable {
     var textRange: NSRange
     var cellCount: Int
     var isASCII: Bool
+    /// Exact rendered-line boundary heuristic; this is intentionally not JSON
+    /// validation and deliberately excludes array-root logs.
+    var hasJSONObjectBoundaries: Bool
     private var variableBoundaries: [LogViewportCellBoundary]
 
     var indexedVariableBoundaryCount: Int { variableBoundaries.count }
@@ -50,11 +53,13 @@ struct LogViewportLine: Sendable {
         textRange: NSRange,
         cellCount: Int,
         isASCII: Bool,
+        hasJSONObjectBoundaries: Bool,
         variableBoundaries: [LogViewportCellBoundary]
     ) {
         self.textRange = textRange
         self.cellCount = cellCount
         self.isASCII = isASCII
+        self.hasJSONObjectBoundaries = hasJSONObjectBoundaries
         self.variableBoundaries = variableBoundaries
     }
 
@@ -121,10 +126,19 @@ struct LogViewportLine: Sendable {
     }
 }
 
+struct LogViewportJSONHighlight {
+    var tokens: [SyntaxToken]
+    var scannedUTF16Length: Int
+}
+
 /// Main-actor-independent text and cell index. It contains no glyphs, pixel
 /// widths, or materialized wrapped rows. A normal ASCII cell needs no index
 /// entry; only extended graphemes spanning multiple UTF-16 units are recorded.
 struct LogViewportProjection: Sendable {
+    static let maximumJSONHighlightCells = 16 * 1_024
+    private static let jsonHighlightLookbehindCells = 1_024
+    private static let jsonHighlightLookaheadCells = 4 * 1_024
+
     var style: LogViewportTextStyle
     var chunks: [String]
     var chunkStarts: [Int]
@@ -149,6 +163,7 @@ struct LogViewportProjection: Sendable {
                 textRange: NSRange(location: 0, length: 0),
                 cellCount: 0,
                 isASCII: true,
+                hasJSONObjectBoundaries: false,
                 variableBoundaries: []
             )],
             textUTF16Length: 0,
@@ -188,6 +203,7 @@ struct LogViewportProjection: Sendable {
                 textRange: NSRange(location: previous.textUTF16Length, length: 0),
                 cellCount: 0,
                 isASCII: true,
+                hasJSONObjectBoundaries: false,
                 variableBoundaries: []
             )
             let rebuildStart = finalLine.textRange.location
@@ -327,6 +343,66 @@ struct LogViewportProjection: Sendable {
         return result
     }
 
+    /// Reuses the editor's lightweight lexer, but never materializes or scans
+    /// an entire pathological log line merely to color the visible viewport.
+    /// The returned ranges use the projection's global UTF-16 coordinates.
+    func jsonHighlight(
+        inLine lineIndex: Int,
+        intersecting requestedCells: Range<Int>
+    ) -> LogViewportJSONHighlight {
+        let empty = LogViewportJSONHighlight(tokens: [], scannedUTF16Length: 0)
+        guard lines.indices.contains(lineIndex), !requestedCells.isEmpty else {
+            return empty
+        }
+        let line = lines[lineIndex]
+        guard line.hasJSONObjectBoundaries else { return empty }
+
+        let targetStart = max(0, min(requestedCells.lowerBound, line.cellCount))
+        let requestedEnd = max(targetStart, min(requestedCells.upperBound, line.cellCount))
+        guard requestedEnd > targetStart else { return empty }
+
+        let scanStart = max(0, targetStart - Self.jsonHighlightLookbehindCells)
+        let scanCapacity = min(
+            Self.maximumJSONHighlightCells,
+            line.cellCount - scanStart
+        )
+        let hardEnd = scanStart + scanCapacity
+        let targetEnd = min(requestedEnd, hardEnd)
+        guard targetEnd > targetStart else { return empty }
+        let availableAfterTarget = line.cellCount - targetEnd
+        let scanEnd = min(
+            hardEnd,
+            targetEnd + min(Self.jsonHighlightLookaheadCells, availableAfterTarget)
+        )
+        let scanSourceRange = line.textRange(forCells: scanStart..<scanEnd)
+        let targetSourceRange = line.textRange(forCells: targetStart..<targetEnd)
+        let source = substring(in: scanSourceRange) as NSString
+        guard source.length > 0 else { return empty }
+
+        var tokens: [SyntaxToken] = []
+        JSONSyntaxLexer.enumerateTokens(
+            in: source,
+            range: NSRange(location: 0, length: source.length)
+        ) { token in
+            let globalStart = scanSourceRange.location + token.range.location
+            let globalEnd = globalStart + token.range.length
+            let clippedStart = max(globalStart, targetSourceRange.location)
+            let clippedEnd = min(globalEnd, NSMaxRange(targetSourceRange))
+            guard clippedEnd > clippedStart else { return }
+            tokens.append(SyntaxToken(
+                kind: token.kind,
+                range: NSRange(
+                    location: clippedStart,
+                    length: clippedEnd - clippedStart
+                )
+            ))
+        }
+        return LogViewportJSONHighlight(
+            tokens: tokens,
+            scannedUTF16Length: source.length
+        )
+    }
+
     private var codeUnitBeforeEnd: unichar? {
         guard textUTF16Length > 0 else { return nil }
         let value = substring(in: NSRange(
@@ -374,6 +450,8 @@ struct LogViewportProjection: Sendable {
         var globalOffset: Int
         var lineParts: [String] = []
         var lineIsASCII = true
+        var lineFirstCodeUnit: unichar?
+        var lineLastCodeUnit: unichar?
         var previousTerminatorWasCarriageReturn: Bool
         var isFinished = false
 
@@ -445,6 +523,10 @@ struct LogViewportProjection: Sendable {
             range: Range<Int>
         ) {
             guard !range.isEmpty else { return }
+            recordLineBoundaries(
+                first: unichar(bytes[range.lowerBound]),
+                last: unichar(bytes[range.upperBound - 1])
+            )
             if range.lowerBound == 0, range.upperBound == bytes.count {
                 lineParts.append(chunk)
             } else {
@@ -474,6 +556,10 @@ struct LogViewportProjection: Sendable {
                         location: cursor,
                         length: segmentEnd - cursor
                     )
+                    recordLineBoundaries(
+                        first: value.character(at: cursor),
+                        last: value.character(at: segmentEnd - 1)
+                    )
                     lineParts.append(
                         cursor == 0 && segmentEnd == value.length
                             ? chunk
@@ -494,6 +580,14 @@ struct LogViewportProjection: Sendable {
                 cursor = NSMaxRange(newline)
             }
             globalOffset += utf16Length
+        }
+
+        private mutating func recordLineBoundaries(
+            first: unichar,
+            last: unichar
+        ) {
+            if lineFirstCodeUnit == nil { lineFirstCodeUnit = first }
+            lineLastCodeUnit = last
         }
 
         private mutating func finishNewline(
@@ -552,11 +646,16 @@ struct LogViewportProjection: Sendable {
         private mutating func finishLine(at end: Int) {
             let length = max(0, end - lineStart)
             let range = NSRange(location: lineStart, length: length)
+            let hasJSONObjectBoundaries = lineFirstCodeUnit == 0x7B
+                && lineLastCodeUnit == 0x7D
+            lineFirstCodeUnit = nil
+            lineLastCodeUnit = nil
             if lineIsASCII {
                 lines.append(LogViewportLine(
                     textRange: range,
                     cellCount: length,
                     isASCII: true,
+                    hasJSONObjectBoundaries: hasJSONObjectBoundaries,
                     variableBoundaries: []
                 ))
                 lineParts.removeAll(keepingCapacity: true)
@@ -591,6 +690,7 @@ struct LogViewportProjection: Sendable {
                 textRange: range,
                 cellCount: cellCount,
                 isASCII: false,
+                hasJSONObjectBoundaries: hasJSONObjectBoundaries,
                 variableBoundaries: boundaries
             ))
         }
@@ -689,6 +789,8 @@ final class LogViewportView: NSView, NSMenuItemValidation {
     /// into glyph work during a viewport draw.
     private(set) var lastDrawnCellCount = 0
     private(set) var lastDrawnUnicodeCellCount = 0
+    private(set) var lastJSONTokenCount = 0
+    private(set) var lastJSONScannedUTF16Length = 0
 
     var selectedRangeValue = NSRange(location: 0, length: 0) {
         didSet { setNeedsDisplay(visibleRect) }
@@ -833,6 +935,8 @@ final class LogViewportView: NSView, NSMenuItemValidation {
         dirtyRect.fill()
         lastDrawnCellCount = 0
         lastDrawnUnicodeCellCount = 0
+        lastJSONTokenCount = 0
+        lastJSONScannedUTF16Length = 0
 
         let lineHeight = CGFloat(projection.style.lineHeight)
         guard lineHeight > 0, visualRowCount > 0 else { return }
@@ -922,38 +1026,85 @@ final class LogViewportView: NSView, NSMenuItemValidation {
         guard !cells.isEmpty else { return }
         let sourceRange = line.textRange(forCells: cells)
         let value = projection.substring(in: sourceRange)
+        let jsonHighlight = projection.jsonHighlight(
+            inLine: visual.lineIndex,
+            intersecting: cells
+        )
         lastDrawnCellCount += cells.count
+        lastJSONTokenCount += jsonHighlight.tokens.count
+        lastJSONScannedUTF16Length += jsonHighlight.scannedUTF16Length
 
         if line.isASCII,
             value.utf8.allSatisfy({ $0 >= 0x20 && $0 < 0x7f })
         {
-            (value as NSString).draw(
-                at: NSPoint(x: xPosition(forCell: cells.lowerBound, in: visual), y: top),
-                withAttributes: attributes
+            let origin = NSPoint(
+                x: xPosition(forCell: cells.lowerBound, in: visual),
+                y: top
             )
+            if jsonHighlight.tokens.isEmpty {
+                (value as NSString).draw(at: origin, withAttributes: attributes)
+            } else {
+                let styled = NSMutableAttributedString(
+                    string: value,
+                    attributes: attributes
+                )
+                for token in jsonHighlight.tokens {
+                    let clipped = NSIntersectionRange(token.range, sourceRange)
+                    guard clipped.length > 0 else { continue }
+                    styled.addAttribute(
+                        .foregroundColor,
+                        value: SyntaxHighlightingPalette.color(for: token.kind),
+                        range: NSRange(
+                            location: clipped.location - sourceRange.location,
+                            length: clipped.length
+                        )
+                    )
+                }
+                styled.draw(at: origin)
+            }
             return
         }
 
         var cell = cells.lowerBound
+        var textIndex = sourceRange.location
+        var tokenIndex = 0
         var asciiRun = String()
         var asciiRunStart = cell
+        var asciiRunKind: SyntaxTokenKind?
+
+        func tokenKind(at location: Int) -> SyntaxTokenKind? {
+            while tokenIndex < jsonHighlight.tokens.count,
+                NSMaxRange(jsonHighlight.tokens[tokenIndex].range) <= location
+            {
+                tokenIndex += 1
+            }
+            guard tokenIndex < jsonHighlight.tokens.count else { return nil }
+            let token = jsonHighlight.tokens[tokenIndex]
+            return token.range.location <= location && location < NSMaxRange(token.range)
+                ? token.kind : nil
+        }
 
         func flushASCII() {
             guard !asciiRun.isEmpty else { return }
             (asciiRun as NSString).draw(
                 at: NSPoint(x: xPosition(forCell: asciiRunStart, in: visual), y: top),
-                withAttributes: attributes
+                withAttributes: textAttributes(attributes, syntaxKind: asciiRunKind)
             )
             asciiRun.removeAll(keepingCapacity: true)
         }
 
         for character in value {
+            let syntaxKind = tokenKind(at: textIndex)
             let isPrintableASCII = character.unicodeScalars.count == 1
                 && character.unicodeScalars.first.map {
                     $0.isASCII && $0.value >= 0x20 && $0.value < 0x7f
                 } == true
             if isPrintableASCII {
-                if asciiRun.isEmpty { asciiRunStart = cell }
+                if !asciiRun.isEmpty, asciiRunKind != syntaxKind { flushASCII() }
+                if asciiRun.isEmpty {
+                    asciiRunStart = cell
+                    asciiRunKind = syntaxKind
+                }
                 asciiRun.append(character)
             } else {
                 flushASCII()
@@ -963,13 +1114,27 @@ final class LogViewportView: NSView, NSMenuItemValidation {
                         String(character),
                         at: xPosition(forCell: cell, in: visual),
                         top: top,
-                        attributes: attributes
+                        attributes: textAttributes(
+                            attributes,
+                            syntaxKind: syntaxKind
+                        )
                     )
                 }
             }
             cell += 1
+            textIndex += character.utf16.count
         }
         flushASCII()
+    }
+
+    private func textAttributes(
+        _ base: [NSAttributedString.Key: Any],
+        syntaxKind: SyntaxTokenKind?
+    ) -> [NSAttributedString.Key: Any] {
+        guard let syntaxKind else { return base }
+        var result = base
+        result[.foregroundColor] = SyntaxHighlightingPalette.color(for: syntaxKind)
+        return result
     }
 
     private func drawFixedCell(
