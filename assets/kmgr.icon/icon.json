@@ -23,10 +23,10 @@
           "image-name" : "logo.svg",
           "name" : "logo",
           "position" : {
-            "scale" : 1,
+            "scale" : 1.1,
             "translation-in-points" : [
               0,
-              -3.7463879894587535
+              -8
             ]
           }
         }
