@@ -75,6 +75,7 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
 public enum ContextualShortcutCatalog {
     public static func clusterChooser(canOpenSelection: Bool) -> ContextualShortcutSnapshot {
         var items: [ContextualShortcutItem] = []
+        items.append(item("chooser.search", "/", "Search kubeconfig contexts"))
         if canOpenSelection {
             items.append(item("chooser.open", "Return", "Open selected context"))
         }

@@ -348,9 +348,72 @@ struct ClusterManagerWindowControllerTests {
         defer { controller.close() }
 
         #expect(controller.contextualShortcutSnapshot?.contextID == "cluster-chooser")
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("/") == true)
         #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("L") == false)
         #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("\u{2318}N") == true)
         #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("\u{2318}O") == true)
+    }
+
+    @Test("slash focuses the Cluster Manager context search")
+    func contextSearchKeyboardFocus() async throws {
+        let context = ClusterContextSummary(
+            name: "local",
+            clusterName: "local-cluster",
+            serverHostname: "127.0.0.1",
+            defaultNamespace: "default"
+        )
+        let controller = ClusterManagerWindowController(
+            provider: AnyClusterContextProvider(
+                listContexts: { _ in [context] },
+                openContext: { _ in throw CancellationError() }
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(clusterManagerDescendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubeconfig contexts" })
+        let search = try #require(clusterManagerDescendants(of: root)
+            .compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Search kubeconfig contexts" })
+        try await waitForClusterManagerTable(table)
+
+        #expect(window.makeFirstResponder(table))
+        table.keyDown(with: try clusterManagerKeyEvent("/", window: window))
+        #expect(window.firstResponder === search.currentEditor())
+
+        #expect(window.makeFirstResponder(table))
+        window.sendEvent(try clusterManagerKeyEvent("/", window: window))
+        #expect(window.firstResponder === search.currentEditor())
+
+        search.stringValue = "query"
+        #expect(window.makeFirstResponder(search))
+        let editor = try #require(search.currentEditor() as? NSTextView)
+        editor.selectedRange = NSRange(location: editor.string.utf16.count, length: 0)
+        window.sendEvent(try clusterManagerKeyEvent("/", window: window))
+        #expect(search.stringValue == "query/")
+    }
+
+    @Test("Cluster Manager search matching ignores modified and editable input")
+    func contextSearchShortcutMatching() {
+        #expect(ClusterManagerShortcut.action(
+            characters: "/",
+            modifiers: [],
+            textIsEditable: false
+        ) == .focusSearch)
+        #expect(ClusterManagerShortcut.action(
+            characters: "/",
+            modifiers: .command,
+            textIsEditable: false
+        ) == nil)
+        #expect(ClusterManagerShortcut.action(
+            characters: "/",
+            modifiers: [],
+            textIsEditable: true
+        ) == nil)
     }
 
     @Test("remembered kubeconfig paths bind both listing and opening")
@@ -690,6 +753,25 @@ private func clusterManagerVerticalLayout(
 @MainActor
 private func clusterManagerDescendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(clusterManagerDescendants(of:))
+}
+
+@MainActor
+private func clusterManagerKeyEvent(
+    _ characters: String,
+    window: NSWindow
+) throws -> NSEvent {
+    try #require(NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: [],
+        timestamp: 0,
+        windowNumber: window.windowNumber,
+        context: nil,
+        characters: characters,
+        charactersIgnoringModifiers: characters,
+        isARepeat: false,
+        keyCode: 0
+    ))
 }
 
 @MainActor
