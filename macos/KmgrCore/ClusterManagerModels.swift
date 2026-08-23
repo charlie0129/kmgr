@@ -4,6 +4,13 @@ import Foundation
 /// kubeconfig context. Providers must not put credentials or kubeconfig
 /// contents in these fields.
 public struct ClusterManagerIssue: Error, Hashable, Sendable {
+    /// Stable reasons used when a revision-pinned resource-view request loses
+    /// the race with a newer backend view. These are deliberately distinct
+    /// from the broad validation category: malformed requests and expired
+    /// tokens must remain visible to the caller.
+    public static let staleResourceViewRevisionReason = "StaleResourceViewRevision"
+    public static let staleResourceViewGenerationReason = "StaleResourceViewGeneration"
+
     public struct KubernetesStatus: Hashable, Sendable {
         public struct Cause: Hashable, Sendable {
             public var reason: String
@@ -68,6 +75,24 @@ public struct ClusterManagerIssue: Error, Hashable, Sendable {
     public var operation: String
     public var safeDetails: [String: String]
     public var kubernetesStatus: KubernetesStatus?
+
+    /// True only for the expected revision/generation race of a pinned
+    /// resource-view request. Callers may safely discard this one request and
+    /// wait for the newer view invalidation; other validation failures are
+    /// actionable and must not be folded into this case.
+    public var isStaleResourceViewRequest: Bool {
+        guard category == .validation else { return false }
+        if reason == Self.staleResourceViewRevisionReason
+            || reason == Self.staleResourceViewGenerationReason
+        {
+            return true
+        }
+        let normalizedMessage = message
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalizedMessage.hasPrefix("resource view revision is stale")
+            || normalizedMessage.hasPrefix("resource view generation is stale")
+    }
 
     public init(
         category: Category,

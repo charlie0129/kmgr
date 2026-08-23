@@ -112,6 +112,99 @@ struct ResourceViewportVirtualizationTests {
         #expect(provider.metricInterests.count == sendsAfterTeardown)
     }
 
+    @Test("invalid range failures remain visible while the watch stays healthy")
+    func invalidRangeFailureIsNotSuppressed() async throws {
+        let provider = ControlledViewportWorkspaceProvider(rowCount: 100)
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "range-invalid"
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let table = try resourceTable(in: controller)
+        let statusLine = try workspaceStatusLine(in: controller)
+        try await waitForViewport {
+            table.numberOfRows == 100
+                && self.cellText(in: table, row: 0) == "pod-0"
+                && statusLine.stringValue.hasSuffix(" · Watching")
+        }
+
+        provider.failNextRange(
+            ClusterManagerIssue(
+                category: .validation,
+                reason: "InvalidTestViewRange",
+                message: "The requested test resource range is outside the current index.",
+                operation: "fetch test resource range"
+            )
+        )
+        provider.emitInvalidation(presentationRevision: 2, indexRevision: 2)
+        try await waitForViewport {
+            statusLine.stringValue.contains("outside the current index")
+                && statusLine.stringValue.contains("Watching")
+        }
+
+        provider.failNextRange(
+            ClusterManagerIssue(
+                category: .validation,
+                reason: ClusterManagerIssue.staleResourceViewRevisionReason,
+                message: "resource view revision is stale: requested index 2, current 3",
+                operation: "fetch test resource range"
+            )
+        )
+        provider.emitInvalidation(presentationRevision: 3, indexRevision: 3)
+        try await waitForViewport {
+            provider.fetchRequests.contains { $0.revision.presentation == 3 }
+                && statusLine.stringValue.contains("outside the current index")
+                && statusLine.stringValue.contains("Watching")
+        }
+
+        provider.emitInvalidation(presentationRevision: 4, indexRevision: 4)
+        try await waitForViewport {
+            !statusLine.stringValue.contains("outside the current index")
+                && statusLine.stringValue.hasSuffix(" · Watching")
+        }
+    }
+
+    @Test("stale selection projection races do not become inline errors")
+    func staleSelectionProjectionIsSuppressed() async throws {
+        let provider = ControlledViewportWorkspaceProvider(rowCount: 100)
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "selection-projection-stale"
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let table = try resourceTable(in: controller)
+        let statusLine = try workspaceStatusLine(in: controller)
+        try await waitForViewport {
+            table.numberOfRows == 100
+                && self.cellText(in: table, row: 0) == "pod-0"
+        }
+        table.selectRowIndexes(IndexSet(integer: 5), byExtendingSelection: false)
+        try await waitForViewport {
+            provider.selectionApplications.count == 1
+                && !provider.selectionProjections.isEmpty
+        }
+        let projectionAttempts = provider.selectionProjectionAttempts
+
+        provider.failNextSelectionProjection(
+            ClusterManagerIssue(
+                category: .validation,
+                reason: ClusterManagerIssue.staleResourceViewRevisionReason,
+                message: "resource view revision is stale: requested index 1, current 2",
+                operation: "project test selection"
+            )
+        )
+        provider.emitInvalidation(presentationRevision: 2, indexRevision: 1)
+        try await waitForViewport {
+            provider.fetchRequests.contains { $0.revision.presentation == 2 }
+                && provider.selectionProjectionAttempts > projectionAttempts
+                && !statusLine.stringValue.contains("resource view revision is stale")
+        }
+    }
+
     @Test("cell copy stays full, selection-neutral, and reuse-safe at 50k rows")
     func capturedCellCopy() async throws {
         let longValue = "controller-with-a-very-long-generated-pod-name-"
@@ -1151,6 +1244,15 @@ struct ResourceViewportVirtualizationTests {
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
     }
 
+    private func workspaceStatusLine(
+        in controller: ClusterWorkspaceWindowController
+    ) throws -> NSTextField {
+        let root = try #require(controller.window?.contentView)
+        return try #require(viewportDescendants(of: root)
+            .compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
+    }
+
     private func namespaceControl(
         in controller: ClusterWorkspaceWindowController
     ) throws -> NSPopUpButton {
@@ -1344,6 +1446,7 @@ private final class ControlledViewportWorkspaceProvider:
     private var storedFetchRequests: [ResourceViewRangeRequest] = []
     private var storedMetricInterests: [ResourceMetricInterestRequest] = []
     private var shouldDelayNextRange = false
+    private var nextRangeError: ClusterManagerIssue?
     private var storedDelayedRequest: ResourceViewRangeRequest?
     private var delayedContinuation: CheckedContinuation<Void, Never>?
     private var streamContinuation:
@@ -1369,11 +1472,13 @@ private final class ControlledViewportWorkspaceProvider:
     private var selectionsByToken: [String: TestSelection] = [:]
     private var storedSelectionApplications: [SelectionApplication] = []
     private var storedSelectionProjections: [ResourceSelectionProjection] = []
+    private var storedSelectionProjectionAttempts = 0
     private var storedSelectionApplicationAttempts = 0
     private var storedSelectionPageRequests: [SelectionPageRequest] = []
     private var failNextSelection = false
     private var delayNextSelection = false
     private var delayedSelectionContinuation: CheckedContinuation<Void, Never>?
+    private var nextSelectionProjectionError: ClusterManagerIssue?
     private var missingStableSelectionUIDs: Set<ResourceUID> = []
 
     init(
@@ -1425,6 +1530,10 @@ private final class ControlledViewportWorkspaceProvider:
         lock.withLock { storedSelectionProjections }
     }
 
+    var selectionProjectionAttempts: Int {
+        lock.withLock { storedSelectionProjectionAttempts }
+    }
+
     var selectionApplicationAttempts: Int {
         lock.withLock { storedSelectionApplicationAttempts }
     }
@@ -1443,6 +1552,10 @@ private final class ControlledViewportWorkspaceProvider:
 
     func delayNextRange() {
         lock.withLock { shouldDelayNextRange = true }
+    }
+
+    func failNextRange(_ error: ClusterManagerIssue) {
+        lock.withLock { nextRangeError = error }
     }
 
     func releaseDelayedRange() {
@@ -1471,6 +1584,10 @@ private final class ControlledViewportWorkspaceProvider:
             return result
         }
         continuation?.resume()
+    }
+
+    func failNextSelectionProjection(_ error: ClusterManagerIssue) {
+        lock.withLock { nextSelectionProjectionError = error }
     }
 
     func emitInvalidation(
@@ -1571,11 +1688,13 @@ private final class ControlledViewportWorkspaceProvider:
     func fetchViewRange(
         request: ResourceViewRangeRequest
     ) async throws -> ResourceViewRange {
-        let delay = lock.withLock { () -> Bool in
+        let (delay, injectedError) = lock.withLock { () -> (Bool, ClusterManagerIssue?) in
             storedFetchRequests.append(request)
-            guard shouldDelayNextRange else { return false }
+            let injectedError = nextRangeError
+            nextRangeError = nil
+            guard shouldDelayNextRange else { return (false, injectedError) }
             shouldDelayNextRange = false
-            return true
+            return (true, injectedError)
         }
         if delay {
             await withCheckedContinuation { continuation in
@@ -1585,6 +1704,8 @@ private final class ControlledViewportWorkspaceProvider:
                 }
             }
         }
+
+        if let injectedError { throw injectedError }
 
         guard request.startIndex <= UInt64(rowCount) else {
             throw ClusterManagerIssue(
@@ -1751,7 +1872,14 @@ private final class ControlledViewportWorkspaceProvider:
         length: Int,
         token: String
     ) async throws -> ResourceSelectionProjection {
-        try lock.withLock {
+        let injectedError = lock.withLock {
+            storedSelectionProjectionAttempts += 1
+            let error = nextSelectionProjectionError
+            nextSelectionProjectionError = nil
+            return error
+        }
+        if let injectedError { throw injectedError }
+        return try lock.withLock {
             guard let selection = selectionsByToken[token] else {
                 throw ClusterManagerIssue(
                     category: .validation,

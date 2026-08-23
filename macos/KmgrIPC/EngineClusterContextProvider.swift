@@ -281,7 +281,7 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
         if let rpc = error as? RPCError {
             return ClusterManagerIssue(
                 category: category(from: rpc.code),
-                reason: rpc.code.description,
+                reason: reason(from: rpc),
                 message: safeRPCMessage(rpc),
                 retryable: rpc.code == .unavailable || rpc.code == .deadlineExceeded,
                 contextName: contextName,
@@ -366,6 +366,22 @@ public struct EngineClusterContextProvider: ClusterContextProviding {
         case .resourceExhausted: .resourceExhausted
         default: .internalFailure
         }
+    }
+
+    private static func reason(from error: RPCError) -> String {
+        guard error.code == .failedPrecondition else {
+            return error.code.description
+        }
+        let message = error.message
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if message.hasPrefix("resource view revision is stale") {
+            return ClusterManagerIssue.staleResourceViewRevisionReason
+        }
+        if message.hasPrefix("resource view generation is stale") {
+            return ClusterManagerIssue.staleResourceViewGenerationReason
+        }
+        return error.code.description
     }
 
     private static func safeRPCMessage(_ error: RPCError) -> String {

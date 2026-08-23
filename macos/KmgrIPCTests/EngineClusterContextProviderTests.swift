@@ -196,6 +196,42 @@ struct EngineClusterContextProviderTests {
         }
     }
 
+    @Test("classifies only resource-view stale preconditions as revision races")
+    func classifiesStaleResourceViewPrecondition() {
+        let stale = EngineClusterContextProvider.issue(
+            from: RPCError(
+                code: .failedPrecondition,
+                message: "resource view revision is stale: requested index 4, current 5"
+            ),
+            contextName: "",
+            operation: "fetch resource view range"
+        )
+        #expect(stale.reason == ClusterManagerIssue.staleResourceViewRevisionReason)
+        #expect(stale.isStaleResourceViewRequest)
+
+        let expired = EngineClusterContextProvider.issue(
+            from: RPCError(
+                code: .failedPrecondition,
+                message: "selection token expired"
+            ),
+            contextName: "",
+            operation: "project resource selection range"
+        )
+        #expect(expired.reason == RPCError.Code.failedPrecondition.description)
+        #expect(!expired.isStaleResourceViewRequest)
+
+        let invalidRange = EngineClusterContextProvider.issue(
+            from: RPCError(
+                code: .invalidArgument,
+                message: "invalid resource view range: start index 101 exceeds row count 100"
+            ),
+            contextName: "",
+            operation: "fetch resource view range"
+        )
+        #expect(invalidRange.category == .validation)
+        #expect(!invalidRange.isStaleResourceViewRequest)
+    }
+
     @Test("restart backoff is bounded and stops after the attempt budget")
     func boundedRestartBackoff() {
         let policy = EngineRestartPolicy(

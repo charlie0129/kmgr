@@ -90,11 +90,33 @@ public enum ResourceListTableTopAnchor: Hashable, Sendable {
 /// Presentation state for the optional inline issue row above a resource
 /// table. Keeping the anchor choice explicit prevents a hidden label from
 /// continuing to reserve an empty row.
+public enum ResourceListInlineIssueScope: String, Hashable, Sendable, CaseIterable {
+    case stream
+    case range
+    case selection
+    case configuration
+    case general
+}
+
+/// Presentation state for scoped inline issues. A successful range or
+/// selection operation can remove only its own superseded issue while an
+/// unrelated stream/configuration problem remains available to the user.
 public struct ResourceListInlineIssueState: Hashable, Sendable {
-    public private(set) var message: String?
+    private struct Entry: Hashable, Sendable {
+        var message: String
+        var sequence: UInt64
+    }
+
+    private var entries: [ResourceListInlineIssueScope: Entry] = [:]
+    private var nextSequence: UInt64 = 0
+
+    public var message: String? { activeEntry?.value.message }
+    public var scope: ResourceListInlineIssueScope? { activeEntry?.key }
 
     public init(message: String? = nil) {
-        self.message = message
+        if let message {
+            show(message)
+        }
     }
 
     public var isHidden: Bool { message == nil }
@@ -103,11 +125,27 @@ public struct ResourceListInlineIssueState: Hashable, Sendable {
         isHidden ? .header : .issueRow
     }
 
-    public mutating func show(_ message: String) {
-        self.message = message
+    public mutating func show(
+        _ message: String,
+        scope: ResourceListInlineIssueScope = .general
+    ) {
+        nextSequence &+= 1
+        entries[scope] = Entry(message: message, sequence: nextSequence)
     }
 
     public mutating func hide() {
-        message = nil
+        entries.removeAll(keepingCapacity: true)
+    }
+
+    public mutating func hide(scope: ResourceListInlineIssueScope) {
+        entries.removeValue(forKey: scope)
+    }
+
+    public func contains(scope: ResourceListInlineIssueScope) -> Bool {
+        entries[scope] != nil
+    }
+
+    private var activeEntry: (key: ResourceListInlineIssueScope, value: Entry)? {
+        entries.max { lhs, rhs in lhs.value.sequence < rhs.value.sequence }
     }
 }

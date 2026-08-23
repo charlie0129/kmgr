@@ -81,4 +81,22 @@ struct ResourceListPresentationTests {
         #expect(state.message == nil)
         #expect(state.tableTopAnchor == .header)
     }
+
+    @Test("scoped issue state clears only the completed operation")
+    func scopedInlineIssueState() {
+        var state = ResourceListInlineIssueState()
+        state.show("The watch failed.", scope: .stream)
+        state.show("The range request failed.", scope: .range)
+
+        #expect(state.message == "The range request failed.")
+        #expect(state.scope == .range)
+        #expect(state.contains(scope: .stream))
+
+        state.hide(scope: .range)
+        #expect(state.message == "The watch failed.")
+        #expect(state.scope == .stream)
+
+        state.hide(scope: .stream)
+        #expect(state.isHidden)
+    }
 }

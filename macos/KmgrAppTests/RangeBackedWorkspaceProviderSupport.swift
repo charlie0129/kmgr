@@ -300,15 +300,29 @@ private final class TestResourceViewRangeStore: @unchecked Sendable {
                 viewID: request.viewID,
                 generation: request.revision.generation
             )
-            guard let state = states[key],
-                request.revision.presentation == state.presentationRevision,
-                request.revision.index == state.indexRevision,
-                request.startIndex <= UInt64(state.rows.count)
+            guard let state = states[key] else {
+                throw ClusterManagerIssue(
+                    category: .notFound,
+                    reason: "TestViewNotFound",
+                    message: "The test resource view does not exist.",
+                    operation: "fetch test resource range"
+                )
+            }
+            guard request.revision.presentation == state.presentationRevision,
+                request.revision.index == state.indexRevision
             else {
                 throw ClusterManagerIssue(
                     category: .validation,
-                    reason: "StaleTestViewRange",
+                    reason: ClusterManagerIssue.staleResourceViewRevisionReason,
                     message: "The test resource presentation changed.",
+                    operation: "fetch test resource range"
+                )
+            }
+            guard request.startIndex <= UInt64(state.rows.count) else {
+                throw ClusterManagerIssue(
+                    category: .validation,
+                    reason: "InvalidTestViewRange",
+                    message: "The requested test resource range is outside the current index.",
                     operation: "fetch test resource range"
                 )
             }
@@ -341,7 +355,7 @@ private final class TestResourceViewRangeStore: @unchecked Sendable {
             )
             guard let current = states[key], current.indexRevision == indexRevision else {
                 throw selectionIssue(
-                    reason: "StaleTestSelectionRevision",
+                    reason: ClusterManagerIssue.staleResourceViewRevisionReason,
                     message: "The test resource ordering changed before the selection gesture was applied.",
                     operation: "apply test resource selection gesture"
                 )
@@ -479,14 +493,20 @@ private final class TestResourceViewRangeStore: @unchecked Sendable {
                 viewID: viewID,
                 generation: generation
             )
-            guard let current = states[key], current.indexRevision == indexRevision,
-                length > 0,
+            guard let current = states[key], current.indexRevision == indexRevision else {
+                throw selectionIssue(
+                    reason: ClusterManagerIssue.staleResourceViewRevisionReason,
+                    message: "The test resource ordering changed before selection projection.",
+                    operation: "project test resource selection"
+                )
+            }
+            guard length > 0,
                 length <= ResourceViewInvalidation.protocolMaximumRangeLength,
                 startIndex <= UInt64(current.rows.count)
             else {
                 throw selectionIssue(
                     reason: "InvalidTestSelectionProjection",
-                    message: "The requested test selection projection is stale or invalid.",
+                    message: "The requested test selection projection is invalid.",
                     operation: "project test resource selection"
                 )
             }

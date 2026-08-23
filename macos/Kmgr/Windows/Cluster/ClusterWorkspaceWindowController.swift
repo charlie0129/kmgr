@@ -3387,9 +3387,14 @@ private final class ResourceListViewController: NSViewController,
     private let filterField = NSSearchField()
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
+    private struct InlineIssuePresentation: Hashable {
+        var toolTip: String?
+        var severity: WorkspaceStatus.Severity
+    }
     private var inlineIssueState = ResourceListInlineIssueState()
-    private var inlineIssueToolTip: String?
-    private var inlineIssueSeverity: WorkspaceStatus.Severity = .error
+    private var inlineIssuePresentations: [
+        ResourceListInlineIssueScope: InlineIssuePresentation
+    ] = [:]
     private var freshnessText = "Idle"
     private var freshnessBusy = false
     private var freshnessSeverity: WorkspaceStatus.Severity = .informational
@@ -3972,6 +3977,7 @@ private final class ResourceListViewController: NSViewController,
         installFreshnessText("Disconnected", severity: .warning)
         showInlineIssue(
             "The Kubernetes engine restarted. Rows shown here are from the last connected generation.",
+            scope: .stream,
             severity: .warning
         )
         updateStatusLine()
@@ -4000,7 +4006,12 @@ private final class ResourceListViewController: NSViewController,
         clearSparseTableProjection()
         tableView.reloadData()
         installFreshnessText("Disconnected", severity: .warning)
-        showInlineIssue(message, severity: .warning, toolTip: toolTip)
+        showInlineIssue(
+            message,
+            scope: .stream,
+            severity: .warning,
+            toolTip: toolTip
+        )
         updateStatusLine()
         publishContextualShortcutsIfChanged()
     }
@@ -4169,7 +4180,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func showCommandContextError(_ error: Error) {
-        show(error: error)
+        show(error: error, scope: .selection)
     }
 
     @discardableResult
@@ -4483,6 +4494,7 @@ private final class ResourceListViewController: NSViewController,
                     ))
                     return
                 }
+                clearInlineIssue(scope: .selection)
                 presentColumns(
                     resource: resource,
                     selectedObject: page.items[0].identity
@@ -4494,7 +4506,7 @@ private final class ResourceListViewController: NSViewController,
                     error: error,
                     token: selection.token
                 )
-                show(error: error)
+                show(error: error, scope: .selection)
             }
         }
     }
@@ -4972,7 +4984,7 @@ private final class ResourceListViewController: NSViewController,
                     generation: request.generation
                 )
                 self?.endProjectionRequest(outcome: "failed")
-                self?.show(error: error)
+                self?.show(error: error, scope: .stream)
             }
         }
     }
@@ -5059,6 +5071,9 @@ private final class ResourceListViewController: NSViewController,
             } else {
                 installResourceViewStatus(status)
             }
+            if status.freshness == .watching || status.freshness == .complete {
+                clearInlineIssue(scope: .stream)
+            }
         case .invalidation(_, let invalidation):
             observeOptionalResourceKeys(
                 invalidation.observedOptionalResourceKeys,
@@ -5070,6 +5085,9 @@ private final class ResourceListViewController: NSViewController,
                 invalidation: invalidation
             )
             rangeCache = cache
+            if disposition != .rejectedStale, disposition != .rejectedInvalid {
+                clearInlineIssue(scope: .stream)
+            }
             guard disposition != .rejectedStale,
                 disposition != .rejectedInvalid,
                 disposition != .hintsOnly
@@ -5142,7 +5160,7 @@ private final class ResourceListViewController: NSViewController,
                     + " retaining=\(isRetainingWarmRowsForCurrentStream)"
             )
             endProjectionRequest(outcome: "failed")
-            show(error: issue)
+            show(error: issue, scope: .stream)
         }
         updateStatusLine()
         if shouldPublishContextualShortcuts {
@@ -5266,6 +5284,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func resetSelectionAuthority() {
+        clearInlineIssue(scope: .selection)
         failSelectionGestureFences(error: selectionScopeChangedIssue())
         selectionGestureTask?.cancel()
         selectionGestureTask = nil
@@ -5314,6 +5333,7 @@ private final class ResourceListViewController: NSViewController,
 
     private func clearDisplayedSelection(token: String) {
         guard displayedSelectionState?.token == token else { return }
+        clearInlineIssue(scope: .selection)
         selectionExpiryTask?.cancel()
         selectionExpiryTask = nil
         displayedSelectionState = nil
@@ -5449,6 +5469,7 @@ private final class ResourceListViewController: NSViewController,
                 ticket.startIndex + UInt64(ticket.length)
             )
         )
+        clearInlineIssue(scope: .selection)
         updateStatusLine()
         publishContextualShortcutsIfChanged()
     }
@@ -5463,8 +5484,17 @@ private final class ResourceListViewController: NSViewController,
         guard currentSelectionRevision == ticket.revision,
             displayedSelectionState?.token == ticket.token
         else { return }
+        if let issue = error as? ClusterManagerIssue,
+            issue.isStaleResourceViewRequest
+        {
+            traceResourceCache(
+                "event=selection_projection_ignored cause=revision-race"
+                    + " index=\(ticket.revision.indexRevision)"
+            )
+            return
+        }
         clearDisplayedSelectionIfExpired(error: error, token: ticket.token)
-        show(error: error)
+        show(error: error, scope: .selection)
     }
 
     private func applyLoadedSelectionProjection(
@@ -5633,8 +5663,21 @@ private final class ResourceListViewController: NSViewController,
         guard ticket == rangeFetchTicket, var cache = rangeCache else { return }
         let reception = cache.receive(range, for: request)
         rangeFetchRequests.remove(request)
-        guard reception != .rejectedRace, reception != .rejectedInvalid else {
+        guard reception != .rejectedRace else {
             rangeCache = cache
+            return
+        }
+        if reception == .rejectedInvalid {
+            rangeCache = cache
+            show(
+                error: ClusterManagerIssue(
+                    category: .internalFailure,
+                    reason: "InvalidResourceViewRangeResponse",
+                    message: "The engine returned an invalid resource-view range.",
+                    operation: "fetch resource view range"
+                ),
+                scope: .range
+            )
             return
         }
         rangeCache = cache
@@ -5658,6 +5701,7 @@ private final class ResourceListViewController: NSViewController,
         if presentedTableRange == range.startIndex..<(
             range.startIndex + UInt64(range.rows.count)
         ), presentedRangeRevision == range.revision {
+            clearInlineIssue(scope: .range)
             return
         }
         if isRetainingWarmRowsForCurrentStream,
@@ -5689,7 +5733,7 @@ private final class ResourceListViewController: NSViewController,
         rangeCache = cache
         guard requestWasCurrent else { return }
         if let issue = error as? ClusterManagerIssue,
-            issue.category == .validation
+            issue.isStaleResourceViewRequest
         {
             // A pinned range is expected to lose a race when the backing view
             // advances before the control invalidation is delivered. The next
@@ -5703,7 +5747,7 @@ private final class ResourceListViewController: NSViewController,
             )
             return
         }
-        show(error: error)
+        show(error: error, scope: .range)
     }
 
     private func installFetchedRange(
@@ -5802,6 +5846,7 @@ private final class ResourceListViewController: NSViewController,
         reloadVisibleCellPresentation(at: affectedCellAddresses)
         scheduleCellHighlightRefresh()
         markBaseViewUsableForOptionalResourceDiscovery()
+        clearInlineIssue(scope: .range)
         retainedRowsLastSynchronizedAt = nil
         if !isRetainingWarmRowsForCurrentStream {
             installRangeStatus(rowCount: range.rowsVisible)
@@ -6115,12 +6160,27 @@ private final class ResourceListViewController: NSViewController,
         projectionRequestGeneration = nil
     }
 
-    private func show(error: Error) {
+    private func show(
+        error: Error,
+        scope explicitScope: ResourceListInlineIssueScope? = nil
+    ) {
+        let scope = explicitScope ?? issueScope(for: error)
+        if let issue = error as? ClusterManagerIssue,
+            issue.isStaleResourceViewRequest
+        {
+            traceResourceCache(
+                "event=issue_ignored cause=revision-race"
+                    + " operation=\(issue.operation)"
+            )
+            return
+        }
         let presentation = UserFacingErrorPresentation(error)
         showInlineIssue(
             presentation.inlineText,
+            scope: scope,
             toolTip: presentation.detailedText
         )
+        guard scope == .stream else { return }
         if let issue = error as? ClusterManagerIssue,
             issue.category == .validation
         {
@@ -6140,6 +6200,30 @@ private final class ResourceListViewController: NSViewController,
             return
         }
         installFreshnessText("Disconnected", severity: .error)
+    }
+
+    private func issueScope(for error: Error) -> ResourceListInlineIssueScope {
+        guard let issue = error as? ClusterManagerIssue else { return .general }
+        let operation = issue.operation.lowercased()
+        if operation.contains("selection") || issue.reason.contains("Selection") {
+            return .selection
+        }
+        if operation.contains("range")
+            || operation.contains("viewport")
+            || operation.contains("metric interest")
+        {
+            return .range
+        }
+        if operation.contains("column") || operation.contains("filter") {
+            return .configuration
+        }
+        if operation.contains("stream")
+            || operation.contains("watch")
+            || operation.contains("resource view")
+        {
+            return .stream
+        }
+        return .general
     }
 
     private func installResourceViewStatus(
@@ -6205,18 +6289,27 @@ private final class ResourceListViewController: NSViewController,
 
     private func showInlineIssue(
         _ message: String,
+        scope: ResourceListInlineIssueScope = .general,
         severity: WorkspaceStatus.Severity = .error,
         toolTip: String? = nil
     ) {
-        inlineIssueState.show(message)
-        inlineIssueToolTip = toolTip
-        inlineIssueSeverity = severity
+        inlineIssueState.show(message, scope: scope)
+        inlineIssuePresentations[scope] = InlineIssuePresentation(
+            toolTip: toolTip,
+            severity: severity
+        )
+        updateStatusLine()
+    }
+
+    private func clearInlineIssue(scope: ResourceListInlineIssueScope) {
+        inlineIssueState.hide(scope: scope)
+        inlineIssuePresentations.removeValue(forKey: scope)
         updateStatusLine()
     }
 
     private func hideInlineIssue() {
         inlineIssueState.hide()
-        inlineIssueToolTip = nil
+        inlineIssuePresentations.removeAll(keepingCapacity: true)
         updateStatusLine()
     }
 
@@ -6467,10 +6560,13 @@ private final class ResourceListViewController: NSViewController,
             toolTipParts.append("Field selector: \(fieldSelector)")
         }
         if let issue = inlineIssueState.message {
+            let presentation = inlineIssueState.scope.flatMap {
+                inlineIssuePresentations[$0]
+            }
             workspaceStatus = WorkspaceStatus(
                 "\(issue) · \(freshnessText)",
-                severity: inlineIssueSeverity,
-                toolTip: inlineIssueToolTip
+                severity: presentation?.severity ?? .error,
+                toolTip: presentation?.toolTip
             )
         } else {
             workspaceStatus = WorkspaceStatus(
@@ -6921,6 +7017,7 @@ private final class ResourceListViewController: NSViewController,
         ) { [weak self] error in
             self?.showInlineIssue(
                 "Could not save the shared column layout. \(error.localizedDescription)",
+                scope: .configuration,
                 severity: .error
             )
         }
@@ -7116,6 +7213,7 @@ private final class ResourceListViewController: NSViewController,
         if restoration.gvr != nil, discoveredResources.isEmpty {
             showInlineIssue(
                 "The saved resource target is not present in authenticated discovery.",
+                scope: .configuration,
                 severity: .warning
             )
         }
@@ -7876,6 +7974,7 @@ private final class ResourceListViewController: NSViewController,
             return
         }
         pendingUIDSelectionGestureSequences.remove(pending.sequence)
+        clearInlineIssue(scope: .selection)
         displayedSelectionState = state
         scheduleSelectionExpiry(for: state)
         if currentSelectionRevision == pending.revision {
@@ -7921,7 +8020,16 @@ private final class ResourceListViewController: NSViewController,
             // an actionable backend error.
             return
         }
-        show(error: error)
+        if let issue = error as? ClusterManagerIssue,
+            issue.isStaleResourceViewRequest
+        {
+            traceResourceCache(
+                "event=selection_gesture_ignored cause=revision-race"
+                    + " index=\(pending.revision.indexRevision)"
+            )
+            return
+        }
+        show(error: error, scope: .selection)
     }
 
     private func discardSelectionPlaceholder(
@@ -8349,12 +8457,13 @@ private final class ResourceListViewController: NSViewController,
                     NSSound.beep()
                     return
                 }
+                clearInlineIssue(scope: .selection)
                 handle(command, identities: identities, hiddenSelectionUIDs: [])
             } catch {
                 guard !Task.isCancelled else { return }
                 selectionCommandTask = nil
                 clearDisplayedSelectionIfExpired(error: error, token: token)
-                show(error: error)
+                show(error: error, scope: .selection)
             }
         }
     }
@@ -8571,6 +8680,7 @@ private final class ResourceListViewController: NSViewController,
                     show(error: selectionScopeChangedIssue())
                     return
                 }
+                clearInlineIssue(scope: .selection)
                 handle(command, identities: identities, hiddenSelectionUIDs: [])
             } catch {
                 guard !Task.isCancelled else { return }
@@ -8579,7 +8689,7 @@ private final class ResourceListViewController: NSViewController,
                     error: error,
                     token: reference.token
                 )
-                show(error: error)
+                show(error: error, scope: .selection)
             }
         }
     }
