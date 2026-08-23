@@ -931,17 +931,10 @@ func TestCompletedSearchSnapshotRequiresExactLogicalScopeAndSelectors(t *testing
 			},
 		},
 		{
-			name: "label selector",
+			name: "native query",
 			mutate: func(request *kmgrv1.OpenViewRequest) {
 				request.Spec.NamespaceScope = &kmgrv1.NamespaceScope{Namespaces: []string{"b", "a"}}
-				request.Spec.LabelSelector = "app=api"
-			},
-		},
-		{
-			name: "field selector",
-			mutate: func(request *kmgrv1.OpenViewRequest) {
-				request.Spec.NamespaceScope = &kmgrv1.NamespaceScope{Namespaces: []string{"a", "b"}}
-				request.Spec.FieldSelector = "status.phase=Running"
+				request.Spec.FilterExpression = `labelSelector:"app=api" fieldSelector:"status.phase=Running"`
 			},
 		},
 	}

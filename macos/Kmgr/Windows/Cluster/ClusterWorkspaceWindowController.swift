@@ -1166,11 +1166,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onContextualShortcutsChanged = { [weak self] in
             self?.onContextualShortcutsChanged?()
         }
-        contentController.onDrillDownFilterCleared = { [weak self] in
-            guard let self, let resource = contentController.currentResource else { return }
-            sidebarController.selectResource(matchingCurrent: resource.id)
-            checkpointRestoration()
-        }
         addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebarController))
         addSplitViewItem(NSSplitViewItem(viewController: rightPaneController))
         splitViewItems[0].minimumThickness = 180
@@ -2163,8 +2158,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             && current.version == returnState.version
             && current.resource == returnState.resource
             && current.namespaceSelection == returnState.namespaceSelection
-            && current.labelSelector == returnState.labelSelector
-            && current.fieldSelector == returnState.fieldSelector
             && current.filter == returnState.filter
             && contentController.selectionOperationTicketIsCurrent(
                 selectionTicket
@@ -2196,8 +2189,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             resource: target,
             scope: query.namespaceScope,
             initialFilter: query.filterExpression,
-            labelSelector: query.labelSelector,
-            fieldSelector: query.fieldSelector,
             reason: .resourceDrillDown
         )
         sidebarController.selectResource(matchingCurrent: target.id)
@@ -2221,7 +2212,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.open(
             resource: target,
             scope: targetScope,
-            initialFilter: "field:involvedObject.uid==\(identity.uid.rawValue)",
+            initialFilter: ResourceQueryExpression.nativeFieldSelector(
+                path: "involvedObject.uid", equals: identity.uid.rawValue
+            ),
             reason: .resourceDrillDown
         )
         sidebarController.selectResource(matchingCurrent: target.id)
@@ -3400,7 +3393,6 @@ private final class ResourceListViewController: NSViewController,
     private var freshnessSeverity: WorkspaceStatus.Severity = .informational
     private(set) var workspaceStatus = WorkspaceStatus("0 objects · 0 selected · Idle")
     var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
-    var onDrillDownFilterCleared: (() -> Void)?
     private var model = ResourceTableModel()
     private var rowChangeDetector = ResourceRowChangeDetector(columnDefinitions: [])
     private var cellHighlightStore = ResourceCellHighlightStore()
@@ -3414,12 +3406,6 @@ private final class ResourceListViewController: NSViewController,
     private var resource: DiscoveredResource?
     var currentResource: DiscoveredResource? { resource }
     private var scope = NamespaceSelection()
-    /// Kubernetes-native relationship constraints installed by a drill-down.
-    /// They remain active until the user edits the filter, at which point the
-    /// filter becomes an independent query over the complete resource list.
-    private var labelSelector = ""
-    private var fieldSelector = ""
-    private var relationshipFilterActive = false
     private var viewID = UUID().uuidString.lowercased()
     private var generation: UInt64 = 0
     private var lastCancelledGeneration: UInt64 = 0
@@ -3436,7 +3422,6 @@ private final class ResourceListViewController: NSViewController,
     private var optionalResourceOverlayState = OptionalResourceOverlayLifetimeState()
     private var filterTask: Task<Void, Never>?
     private var filterMemory = ResourceFilterMemory()
-    private let filterCompletionTrigger = ResourceFilterCompletionTrigger()
     private var isFilterShortcutContextActive = false
     private var lastPublishedShortcutSnapshot: ContextualShortcutSnapshot?
     private var suppressSelectionCallbacks = false
@@ -3769,8 +3754,8 @@ private final class ResourceListViewController: NSViewController,
         filterField.placeholderString = "Filter resources  /"
         filterField.setAccessibilityLabel("Filter Kubernetes resources")
         filterField.setAccessibilityHelp(
-            "Type a name or structured filter. Suggestions are best effort. "
-                + "Return applies the filter and returns to the resource list."
+            "Type keywords or structured filters. Use labelSelector or fieldSelector "
+                + "for explicit Kubernetes selectors. Return applies the query."
         )
         filterField.delegate = self
         filterField.sendsSearchStringImmediately = true
@@ -3860,8 +3845,6 @@ private final class ResourceListViewController: NSViewController,
         resource: DiscoveredResource,
         scope: NamespaceSelection,
         initialFilter: String? = nil,
-        labelSelector: String = "",
-        fieldSelector: String = "",
         reason: ResourceStreamOpenReason
     ) {
         traceResourceCache(
@@ -3894,14 +3877,10 @@ private final class ResourceListViewController: NSViewController,
         installFilterForNavigation(restoredFilter, resourceGVR: nextGVR)
         self.resource = resource
         self.scope = scope
-        self.labelSelector = labelSelector
-        self.fieldSelector = fieldSelector
-        relationshipFilterActive = !labelSelector.isEmpty || !fieldSelector.isEmpty
         pendingScrollAnchor = nil
         let state = ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
             kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope,
-            labelSelector: labelSelector, fieldSelector: fieldSelector,
             filter: restoredFilter
         )
         history.navigate(to: .resource(state))
@@ -4186,7 +4165,6 @@ private final class ResourceListViewController: NSViewController,
 
     @discardableResult
     func handleEscape() -> Bool {
-        filterCompletionTrigger.reset()
         let firstResponder = view.window?.firstResponder
         let filterOwnsResponder = firstResponder === filterField
             || filterField.currentEditor() === firstResponder
@@ -4302,24 +4280,14 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func setFilter(_ value: String) {
-        filterCompletionTrigger.reset()
         filterRevision &+= 1
         filterTask?.cancel()
         filterField.stringValue = value
-        clearRelationshipFilterIfNeeded()
         rememberCurrentFilter()
         openStream(reason: .programmaticFilter)
         onRestorationChanged?()
         setFilterShortcutContextActive(true)
         view.window?.makeFirstResponder(filterField)
-    }
-
-    private func clearRelationshipFilterIfNeeded() {
-        guard relationshipFilterActive else { return }
-        relationshipFilterActive = false
-        labelSelector = ""
-        fieldSelector = ""
-        onDrillDownFilterCleared?()
     }
 
     func captureNavigationState() -> ResourceNavigationState? {
@@ -4546,19 +4514,16 @@ private final class ResourceListViewController: NSViewController,
 
     func controlTextDidBeginEditing(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
-        filterCompletionTrigger.reset()
         setFilterShortcutContextActive(true)
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
-        filterCompletionTrigger.reset()
         setFilterShortcutContextActive(false)
     }
 
     func controlTextDidChange(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
-        clearRelationshipFilterIfNeeded()
         clearTransientCellPresentation()
         filterRevision &+= 1
         filterTask?.cancel()
@@ -4578,39 +4543,6 @@ private final class ResourceListViewController: NSViewController,
             self?.openStream(reason: .debouncedFilter)
             self?.onRestorationChanged?()
         }
-        filterCompletionTrigger.textDidChange(
-            editor: filterField.currentEditor() as? NSTextView,
-            isCurrentEditor: { [weak self] editor in
-                self?.filterField.currentEditor() === editor
-            },
-            hasCandidates: { [weak self] editor in
-                guard let self, let resource else { return false }
-                return !ResourceFilterCompletionCatalog.completions(
-                    in: editor.string,
-                    partialWordRange: editor.rangeForUserCompletion,
-                    context: ResourceFilterCompletionContext(resource: resource)
-                ).isEmpty
-            }
-        )
-    }
-
-    func control(
-        _ control: NSControl,
-        textView: NSTextView,
-        completions _: [String],
-        forPartialWordRange partialWordRange: NSRange,
-        indexOfSelectedItem selectedIndex: UnsafeMutablePointer<Int>
-    ) -> [String] {
-        // Do not let AppKit preview a candidate by rewriting the live filter.
-        // The user can explicitly choose one, while Return continues to apply
-        // exactly the text they typed.
-        selectedIndex.pointee = -1
-        guard control === filterField, let resource else { return [] }
-        return ResourceFilterCompletionCatalog.completions(
-            in: textView.string,
-            partialWordRange: partialWordRange,
-            context: ResourceFilterCompletionContext(resource: resource)
-        )
     }
 
     func control(
@@ -4624,7 +4556,6 @@ private final class ResourceListViewController: NSViewController,
 
         // Do not make an explicit Return wait for the typing debounce. This
         // also gives keyboard navigation back to the resource table.
-        filterCompletionTrigger.reset()
         filterTask?.cancel()
         filterTask = nil
         rememberCurrentFilter()
@@ -4944,8 +4875,6 @@ private final class ResourceListViewController: NSViewController,
             resource: resource,
             allNamespaces: scope.allNamespaces,
             namespaces: scope.namespaces,
-            labelSelector: labelSelector,
-            fieldSelector: fieldSelector,
             filterExpression: filterField.stringValue,
             filterRevision: filterRevision,
             columnIDs: columnIDs,
@@ -6544,18 +6473,9 @@ private final class ResourceListViewController: NSViewController,
             "\(authoritativeRowCount.formatted()) objects",
             selection,
         ]
-        if !labelSelector.isEmpty || !fieldSelector.isEmpty {
-            statusParts.append("Kubernetes selector active")
-        }
         statusParts.append(freshnessText)
         let text = statusParts.joined(separator: " · ")
-        var toolTipParts = [text]
-        if !labelSelector.isEmpty {
-            toolTipParts.append("Label selector: \(labelSelector)")
-        }
-        if !fieldSelector.isEmpty {
-            toolTipParts.append("Field selector: \(fieldSelector)")
-        }
+        let toolTipParts = [text]
         if let issue = inlineIssueState.message {
             let presentation = inlineIssueState.scope.flatMap {
                 inlineIssuePresentations[$0]
@@ -7091,7 +7011,6 @@ private final class ResourceListViewController: NSViewController,
         return ResourceNavigationState(
             group: resource.group, version: resource.version, resource: resource.resource,
             kind: resource.kind, namespaced: resource.namespaced, namespaceSelection: scope,
-            labelSelector: labelSelector, fieldSelector: fieldSelector,
             filter: filterField.stringValue,
             sortColumnID: sort.first?.columnID,
             sortDescending: !(sort.first?.ascending ?? true),
@@ -7115,8 +7034,6 @@ private final class ResourceListViewController: NSViewController,
             contextReference: contextReference,
             gvr: state.map { GVR(group: $0.group, version: $0.version, resource: $0.resource) },
             namespaceScope: NamespaceScope(scope),
-            labelSelector: labelSelector,
-            fieldSelector: fieldSelector,
             filter: filterField.stringValue,
             sort: sorts,
             isSidebarVisible: isSidebarVisible,
@@ -7136,11 +7053,7 @@ private final class ResourceListViewController: NSViewController,
         else { return false }
         resource = restored
         scope = restoration.namespaceScope.namespaceSelection
-        labelSelector = restoration.labelSelector
-        fieldSelector = restoration.fieldSelector
-        relationshipFilterActive = !labelSelector.isEmpty || !fieldSelector.isEmpty
         pendingScrollAnchor = restoration.scrollAnchor
-        filterCompletionTrigger.reset()
         filterField.stringValue = restoration.filter
         filterMemory.remember(restoration.filter, for: resourceGVR(for: restored))
         suppressPresentationCheckpoint = true
@@ -7156,8 +7069,6 @@ private final class ResourceListViewController: NSViewController,
             group: restored.group, version: restored.version, resource: restored.resource,
             kind: restored.kind, namespaced: restored.namespaced,
             namespaceSelection: scope,
-            labelSelector: restoration.labelSelector,
-            fieldSelector: restoration.fieldSelector,
             filter: restoration.filter,
             sortColumnID: restoration.sort.first?.columnID,
             sortDescending: !(restoration.sort.first?.ascending ?? true),
@@ -7184,9 +7095,6 @@ private final class ResourceListViewController: NSViewController,
         }
 
         resource = nil
-        labelSelector = ""
-        fieldSelector = ""
-        relationshipFilterActive = false
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
@@ -7221,9 +7129,6 @@ private final class ResourceListViewController: NSViewController,
     func rejectRestoredResourceValidation(_ error: Error) {
         resourceCatalogValidated = false
         resource = nil
-        labelSelector = ""
-        fieldSelector = ""
-        relationshipFilterActive = false
         history = WorkspaceNavigationHistory()
         pendingScrollAnchor = nil
         pendingSelectionUIDs = nil
@@ -7242,7 +7147,6 @@ private final class ResourceListViewController: NSViewController,
     func applyRestoredShell(_ restoration: ClusterWindowRestorationState) {
         isAuthenticated = false
         scope = restoration.namespaceScope.namespaceSelection
-        filterCompletionTrigger.reset()
         filterField.stringValue = restoration.filter
 
         let shell = RestoredWorkspaceShell(record: ClusterWindowRestorationRecord(
@@ -7280,9 +7184,6 @@ private final class ResourceListViewController: NSViewController,
             verbs: ["list", "watch"]
         )
         scope = state.namespaceSelection
-        labelSelector = state.labelSelector
-        fieldSelector = state.fieldSelector
-        relationshipFilterActive = !labelSelector.isEmpty || !fieldSelector.isEmpty
         pendingScrollAnchor = state.scrollAnchor
         pendingSelectionUIDs = state.selectedUIDs
         installFilterForNavigation(
@@ -7305,7 +7206,6 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func installFilterForNavigation(_ filter: String, resourceGVR: GVR) {
-        filterCompletionTrigger.reset()
         filterTask?.cancel()
         filterTask = nil
         if filterField.stringValue != filter {

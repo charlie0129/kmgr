@@ -116,9 +116,8 @@ struct EngineWorkspaceResourceProviderTests {
             ),
             allNamespaces: false,
             namespaces: ["apps"],
-            labelSelector: "app in (api,worker)",
-            fieldSelector: "spec.nodeName=worker-1",
-            filterExpression: "status:Running",
+            filterExpression:
+                "labelSelector:\"app in (api,worker)\" fieldSelector:\"spec.nodeName=worker-1\" status:Running",
             filterRevision: 4,
             columnIDs: ["name", "ready", "large", "memory", "cpu", "debug", "sort"],
             sort: [
@@ -251,9 +250,8 @@ struct EngineWorkspaceResourceProviderTests {
         #expect(captured?.stageUntilReconciled == true)
         #expect(captured?.spec.resource.resource == "pods")
         #expect(captured?.spec.namespaceScope.namespaces == ["apps"])
-        #expect(captured?.spec.labelSelector == "app in (api,worker)")
-        #expect(captured?.spec.fieldSelector == "spec.nodeName=worker-1")
-        #expect(captured?.spec.filterExpression == "status:Running")
+        #expect(captured?.spec.filterExpression ==
+            "labelSelector:\"app in (api,worker)\" fieldSelector:\"spec.nodeName=worker-1\" status:Running")
         #expect(captured?.spec.filterRevision == 4)
         #expect(captured?.spec.columnIds == ["name", "ready", "large", "memory", "cpu", "debug", "sort"])
         #expect(captured?.spec.sort.first?.direction == .descending)

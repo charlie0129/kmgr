@@ -138,8 +138,7 @@ import Testing
         contextName: "default",
         contextReference: "context-source-stable-id",
         gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
-        labelSelector: "app in (api,worker)",
-        fieldSelector: "metadata.name=frontend"
+        filter: "labelSelector:\"app in (api,worker)\""
     )
     let decoded = try JSONDecoder().decode(
         ClusterWindowRestorationState.self,
@@ -148,8 +147,7 @@ import Testing
 
     #expect(decoded.contextName == "default")
     #expect(decoded.contextReference == "context-source-stable-id")
-    #expect(decoded.labelSelector == "app in (api,worker)")
-    #expect(decoded.fieldSelector == "metadata.name=frontend")
+    #expect(decoded.filter == "labelSelector:\"app in (api,worker)\"")
 }
 
 @MainActor
@@ -189,15 +187,6 @@ import Testing
     #expect(throws: RestorationValidationError.self) {
         try store.upsert(ClusterWindowRestorationRecord(id: "window", state: invalidState))
     }
-
-    let invalidSelector = ClusterWindowRestorationState(
-        contextName: "local",
-        labelSelector: String(
-            repeating: "x",
-            count: ClusterWindowRestorationState.maximumQueryBytes + 1
-        )
-    )
-    #expect(invalidSelector.validationIssues().contains { $0.path == "labelSelector" })
 
     let invalidSort = ClusterWindowRestorationState(
         contextName: "local",

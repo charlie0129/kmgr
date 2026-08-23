@@ -3,6 +3,7 @@ package view
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -15,27 +16,18 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 )
 
-func TestPlanViewQueryCanonicalizesAndMergesExplicitAndDerivedSelectors(t *testing.T) {
+func TestPlanViewQueryUsesOnlyExplicitNativeClauses(t *testing.T) {
 	t.Parallel()
 	spec := &kmgrv1.ViewSpec{
 		Resource: &kmgrv1.ResourceType{
 			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
 		},
-		LabelSelector: `tier in (frontend,api),app==web,app=web,!debug,zone notin (west,east)`,
-		FieldSelector: `metadata.name==pod\,one,spec.nodeName!=old`,
 		FilterExpression: strings.Join([]string{
+			`labelSelector:"app=api,track in (canary,stable),zone notin (east,west)"`,
+			`fieldSelector:"spec.nodeName=worker-1"`,
 			`label:team`,
-			`label:app==web`,
-			`label:app=WEB`,
-			`label:bad$key`,
-			`label:bad==bad/value`,
-			`field:metadata.name=="pod,one"`,
-			`field:metadata.namespace==ns`,
-			`field:spec.nodeName=="node=one"`,
 			`field:status.phase==Running`,
-			`field:metadata.uid`,
-			`name:pod`,
-			`ready`,
+			`api`,
 		}, " "),
 	}
 
@@ -43,165 +35,57 @@ func TestPlanViewQueryCanonicalizesAndMergesExplicitAndDerivedSelectors(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := plan.labelSelector, `!debug,app=web,team,tier in (api,frontend),zone notin (east,west)`; got != want {
+	if got, want := plan.labelSelector,
+		`app=api,track in (canary,stable),zone notin (east,west)`; got != want {
 		t.Fatalf("label selector = %q, want %q", got, want)
 	}
-	if got, want := plan.fieldSelector, `metadata.name=pod\,one,metadata.namespace=ns,spec.nodeName!=old,spec.nodeName=node\=one`; got != want {
+	if got, want := plan.fieldSelector, `spec.nodeName=worker-1`; got != want {
 		t.Fatalf("field selector = %q, want %q", got, want)
+	}
+	if got := plan.filter.NativeLabelSelectors(); !reflect.DeepEqual(got,
+		[]string{`app=api,track in (canary,stable),zone notin (east,west)`}) {
+		t.Fatalf("native labels = %#v", got)
 	}
 
 	candidate := viewFilterCandidateForPlannerTest()
 	if !plan.filter.Match(candidate) {
-		t.Fatal("complete local filter did not match its candidate")
+		t.Fatal("complete visible query did not match its candidate")
 	}
-	candidate.Labels["app"] = "Web"
+	candidate.Labels["track"] = "blue"
 	if plan.filter.Match(candidate) {
-		t.Fatal("pushed exact label term was not retained for local correctness")
+		t.Fatal("native in selector was not retained for local correctness")
 	}
 }
 
-func TestPlanViewQueryPushesOnlyApprovedFieldTerms(t *testing.T) {
-	t.Parallel()
-	filterExpression := strings.Join([]string{
-		`field:metadata.name==n`,
-		`field:metadata.namespace==ns`,
-		`field:spec.nodeName==node`,
-		`field:involvedObject.uid==uid`,
-		`field:status.phase==Running`,
-		`field:spec.nodeName=partial`,
-		`field:metadata.uid`,
-	}, " ")
-	tests := []struct {
-		name     string
-		resource *kmgrv1.ResourceType
-		want     string
-	}{
-		{
-			name: "core Pod",
-			resource: &kmgrv1.ResourceType{
-				Version: "v1", Resource: "pods", Namespaced: true,
-			},
-			want: `metadata.name=n,metadata.namespace=ns,spec.nodeName=node`,
-		},
-		{
-			name: "core Event",
-			resource: &kmgrv1.ResourceType{
-				Version: "v1", Resource: "events", Namespaced: true,
-			},
-			want: `involvedObject.uid=uid,metadata.name=n,metadata.namespace=ns`,
-		},
-		{
-			name: "namespaced CRD",
-			resource: &kmgrv1.ResourceType{
-				Group: "example.io", Version: "v1", Resource: "widgets", Namespaced: true,
-			},
-			want: `metadata.name=n,metadata.namespace=ns`,
-		},
-		{
-			name: "cluster scoped resource",
-			resource: &kmgrv1.ResourceType{
-				Version: "v1", Resource: "nodes",
-			},
-			want: `metadata.name=n`,
-		},
-		{
-			name: "non-core Pod GVR",
-			resource: &kmgrv1.ResourceType{
-				Group: "example.io", Version: "v1", Resource: "pods", Namespaced: true,
-			},
-			want: `metadata.name=n,metadata.namespace=ns`,
-		},
-		{
-			name: "events.k8s.io Event",
-			resource: &kmgrv1.ResourceType{
-				Group: "events.k8s.io", Version: "v1", Resource: "events", Namespaced: true,
-			},
-			want: `metadata.name=n,metadata.namespace=ns`,
-		},
-	}
-
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			plan, err := planViewQuery(&kmgrv1.ViewSpec{
-				Resource: test.resource, FilterExpression: filterExpression,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if plan.fieldSelector != test.want {
-				t.Fatalf("field selector = %q, want %q", plan.fieldSelector, test.want)
-			}
-		})
-	}
-}
-
-func TestPlanViewQueryPushesOnlyKubernetesValidLabelTerms(t *testing.T) {
+func TestPlanViewQueryDoesNotPushBareOrLocalTerms(t *testing.T) {
 	t.Parallel()
 	plan, err := planViewQuery(&kmgrv1.ViewSpec{
-		Resource: &kmgrv1.ResourceType{
-			Group: "example.io", Version: "v1", Resource: "widgets", Namespaced: true,
-		},
-		FilterExpression: strings.Join([]string{
-			`label:valid`,
-			`label:app==API`,
-			`label:app=api`,
-			`label:bad$key`,
-			`label:valid==bad/value`,
-		}, " "),
+		Resource:         &kmgrv1.ResourceType{Version: "v1", Resource: "pods"},
+		FilterExpression: `api label:app==api field:spec.nodeName==worker-1`,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := plan.labelSelector, `app=API,valid`; got != want {
-		t.Fatalf("label selector = %q, want %q", got, want)
+	if plan.labelSelector != "" || plan.fieldSelector != "" {
+		t.Fatalf("local query unexpectedly pushed selectors: %q / %q", plan.labelSelector, plan.fieldSelector)
 	}
 }
 
-func TestPlanViewQueryDeduplicatesOnlyIdenticalRequirements(t *testing.T) {
+func TestPlanViewQueryRejectsInvalidExplicitNativeSelectors(t *testing.T) {
 	t.Parallel()
-	plan, err := planViewQuery(&kmgrv1.ViewSpec{
-		Resource: &kmgrv1.ResourceType{
-			Version: "v1", Resource: "pods", Namespaced: true,
-		},
-		LabelSelector:    `app in (web,api),app!=old,app==api`,
-		FieldSelector:    `metadata.name==api,metadata.name=api`,
-		FilterExpression: `label:app label:app==api label:app==api field:metadata.name==api`,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := plan.labelSelector, `app,app in (api,web),app!=old,app=api`; got != want {
-		t.Fatalf("label selector = %q, want %q", got, want)
-	}
-	if got, want := plan.fieldSelector, `metadata.name=api`; got != want {
-		t.Fatalf("field selector = %q, want %q", got, want)
-	}
-}
-
-func TestPlanViewQueryRejectsInvalidExplicitSelectors(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		labels string
-		fields string
-		want   string
-	}{
-		{name: "label", labels: `app in (`, want: "parse label selector"},
-		{name: "field", fields: `metadata.name`, want: "parse field selector"},
-	}
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
+	for _, query := range []string{
+		`labelSelector:"app in ("`,
+		`fieldSelector:"metadata.name`,
+	} {
+		query := query
+		t.Run(query, func(t *testing.T) {
 			t.Parallel()
 			_, err := planViewQuery(&kmgrv1.ViewSpec{
-				Resource:      &kmgrv1.ResourceType{Version: "v1", Resource: "pods", Namespaced: true},
-				LabelSelector: test.labels,
-				FieldSelector: test.fields,
+				Resource:         &kmgrv1.ResourceType{Version: "v1", Resource: "pods"},
+				FilterExpression: query,
 			})
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want containing %q", err, test.want)
+			if err == nil {
+				t.Fatalf("query %q unexpectedly compiled", query)
 			}
 		})
 	}
@@ -213,7 +97,7 @@ func TestProjectorReusesQueryPlanCompiledFilter(t *testing.T) {
 		Resource:         &kmgrv1.ResourceType{Version: "v1", Resource: "pods", Namespaced: true},
 		NamespaceScope:   &kmgrv1.NamespaceScope{Namespaces: []string{"ns"}},
 		ColumnIds:        []string{"name"},
-		FilterExpression: `label:app==api`,
+		FilterExpression: `labelSelector:"app=api"`,
 	}
 	plan, err := planViewQuery(spec)
 	if err != nil {
@@ -228,7 +112,7 @@ func TestProjectorReusesQueryPlanCompiledFilter(t *testing.T) {
 	}
 }
 
-func TestRuntimeUsesCanonicalPlannedSelectorsForSharingAndListWatch(t *testing.T) {
+func TestRuntimeUsesExplicitNativeSelectorsForSharingAndListWatch(t *testing.T) {
 	t.Parallel()
 	client := newSelectorRecordingClient()
 	source := &fakeResourceSource{authority: "cluster-a", client: client}
@@ -241,9 +125,9 @@ func TestRuntimeUsesCanonicalPlannedSelectorsForSharingAndListWatch(t *testing.T
 	defer runtime.Close()
 
 	firstRequest := openView("session-1", "pods-1", 1)
-	firstRequest.Spec.LabelSelector = `env=prod,app==api`
 	firstRequest.Spec.FilterExpression = strings.Join([]string{
-		`label:team`, `label:app==api`, `field:spec.nodeName==node-a`, `name:first`,
+		`labelSelector:"env=prod,app==api"`,
+		`label:team`, `fieldSelector:"spec.nodeName=node-a"`, `name:first`,
 	}, " ")
 	first, err := runtime.Open(firstRequest)
 	if err != nil {
@@ -253,9 +137,9 @@ func TestRuntimeUsesCanonicalPlannedSelectorsForSharingAndListWatch(t *testing.T
 	eventually(t, time.Second, func() bool { return client.delegate.watchCalls.Load() == 1 })
 
 	secondRequest := openView("session-2", "pods-2", 1)
-	secondRequest.Spec.LabelSelector = `app=api,env==prod`
 	secondRequest.Spec.FilterExpression = strings.Join([]string{
-		`name:second`, `field:spec.nodeName==node-a`, `label:app==api`, `label:team`,
+		`name:second`, `fieldSelector:"spec.nodeName=node-a"`,
+		`labelSelector:"app=api,env==prod"`, `label:team`,
 	}, " ")
 	second, err := runtime.Open(secondRequest)
 	if err != nil {
@@ -278,7 +162,7 @@ func TestRuntimeUsesCanonicalPlannedSelectorsForSharingAndListWatch(t *testing.T
 		"LIST":  listOptions[0],
 		"WATCH": watchOptions[0],
 	} {
-		if got, want := options.LabelSelector, `app=api,env=prod,team`; got != want {
+		if got, want := options.LabelSelector, `app=api,env=prod`; got != want {
 			t.Fatalf("%s label selector = %q, want %q", operation, got, want)
 		}
 		if got, want := options.FieldSelector, `spec.nodeName=node-a`; got != want {
@@ -287,10 +171,7 @@ func TestRuntimeUsesCanonicalPlannedSelectorsForSharingAndListWatch(t *testing.T
 	}
 
 	thirdRequest := openView("session-3", "pods-3", 1)
-	thirdRequest.Spec.LabelSelector = `env=prod`
-	thirdRequest.Spec.FilterExpression = strings.Join([]string{
-		`label:team`, `label:app==web`, `field:spec.nodeName==node-a`,
-	}, " ")
+	thirdRequest.Spec.FilterExpression = `labelSelector:"env=prod" label:team`
 	third, err := runtime.Open(thirdRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -302,7 +183,7 @@ func TestRuntimeUsesCanonicalPlannedSelectorsForSharingAndListWatch(t *testing.T
 	}
 }
 
-func TestRuntimeRejectsInvalidExplicitSelectorBeforeOpeningResource(t *testing.T) {
+func TestRuntimeRejectsInvalidNativeQueryBeforeOpeningResource(t *testing.T) {
 	t.Parallel()
 	source := &fakeResourceSource{authority: "cluster-a", client: newScriptedResource()}
 	runtime, err := NewRuntime(RuntimeConfig{Source: source})
@@ -312,12 +193,12 @@ func TestRuntimeRejectsInvalidExplicitSelectorBeforeOpeningResource(t *testing.T
 	defer runtime.Close()
 
 	request := openView("session", "pods", 1)
-	request.Spec.LabelSelector = `app in (`
+	request.Spec.FilterExpression = `labelSelector:"app in ("`
 	if _, err := runtime.Open(request); !errors.Is(err, ErrInvalidView) {
 		t.Fatalf("Open error = %v, want ErrInvalidView", err)
 	}
 	if got := source.opens.Load(); got != 0 {
-		t.Fatalf("resource opens after invalid selector = %d, want 0", got)
+		t.Fatalf("resource opens after invalid query = %d, want 0", got)
 	}
 }
 
@@ -326,13 +207,12 @@ func viewFilterCandidateForPlannerTest() viewfilter.Candidate {
 		Namespace: "ns",
 		Name:      "pod-one",
 		Labels: map[string]string{
-			"team": "platform", "app": "web", "bad$key": "present", "bad": "bad/value",
+			"team": "platform", "app": "api", "track": "canary", "zone": "central",
 		},
 		Fields: map[string]string{
-			"metadata.name": "pod,one", "metadata.namespace": "ns",
-			"spec.nodeName": "node=one", "status.phase": "Running", "metadata.uid": "uid",
+			"spec.nodeName": "worker-1", "status.phase": "Running",
 		},
-		VisibleText: []string{"Ready"},
+		VisibleText: []string{"Ready", "api"},
 	}
 }
 

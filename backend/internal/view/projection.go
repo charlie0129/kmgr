@@ -83,13 +83,14 @@ type SortDescriptor struct {
 }
 
 type Projector struct {
-	spec        ProjectionSpec
-	filter      *viewfilter.Filter
-	namespaces  map[string]struct{}
-	now         func() time.Time
-	workerLimit int
-	workerPool  *projectionWorkerPool
-	cacheKey    projectionCacheKey
+	spec             ProjectionSpec
+	filter           *viewfilter.Filter
+	filterFieldPaths []string
+	namespaces       map[string]struct{}
+	now              func() time.Time
+	workerLimit      int
+	workerPool       *projectionWorkerPool
+	cacheKey         projectionCacheKey
 }
 
 // DefaultProjectionWorkerLimit keeps row work below the process scheduler's
@@ -214,7 +215,8 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 		workerLimit = workerPool.limit()
 	}
 	return &Projector{
-		spec: spec, filter: compiledFilter, namespaces: namespaces,
+		spec: spec, filter: compiledFilter,
+		filterFieldPaths: compiledFilter.FieldPaths(), namespaces: namespaces,
 		now: now, workerLimit: workerLimit, workerPool: workerPool,
 		cacheKey: newProjectionCacheKey(spec),
 	}, nil
@@ -446,13 +448,13 @@ func (p *Projector) projectOneAdmittedWithCells(
 		visibleText = append(visibleText, cell.GetDisplayText())
 	}
 
-	fields := make(map[string]string)
-	for _, term := range p.filter.Terms() {
-		if term.Kind != viewfilter.Field {
-			continue
-		}
-		if value, found := nestedScalar(object.Object, term.Key); found {
-			fields[term.Key] = value
+	var fields map[string]string
+	if len(p.filterFieldPaths) > 0 {
+		fields = make(map[string]string, len(p.filterFieldPaths))
+		for _, path := range p.filterFieldPaths {
+			if value, found := nestedScalar(object.Object, path); found {
+				fields[path] = value
+			}
 		}
 	}
 	if !p.filter.Match(viewfilter.Candidate{

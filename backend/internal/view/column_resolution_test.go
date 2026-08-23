@@ -109,7 +109,7 @@ func TestRuntimeMetricPlanPassesLabelsAndNeverBroadensFieldSelectedPods(t *testi
 
 	sharedRequest := openView("session", "label-selected", 1)
 	sharedRequest.Spec.ColumnIds = []string{"name", PodCPUColumn}
-	sharedRequest.Spec.LabelSelector = "tier=frontend,app==api"
+	sharedRequest.Spec.FilterExpression = `labelSelector:"tier=frontend,app==api"`
 	shared, err := runtime.Open(sharedRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestRuntimeMetricPlanPassesLabelsAndNeverBroadensFieldSelectedPods(t *testi
 
 	fieldRequest := openView("session", "field-selected", 1)
 	fieldRequest.Spec.ColumnIds = []string{"name", PodCPUColumn}
-	fieldRequest.Spec.FilterExpression = "field:spec.nodeName==node-a"
+	fieldRequest.Spec.FilterExpression = `fieldSelector:"spec.nodeName=node-a"`
 	fieldSelected, err := runtime.Open(fieldRequest)
 	if err != nil {
 		t.Fatal(err)

@@ -112,11 +112,9 @@ public struct ResourceViewRequest: Hashable, Sendable {
     public var resource: DiscoveredResource
     public var allNamespaces: Bool
     public var namespaces: [String]
-    /// Canonical Kubernetes selectors applied by the API server. These are
-    /// independent of the editable kmgr filter, which remains the final local
-    /// correctness predicate.
-    public var labelSelector: String
-    public var fieldSelector: String
+    /// The complete query visible in the resource search field. Kubernetes
+    /// selectors are derived from its explicit labelSelector:/fieldSelector:
+    /// clauses by the engine.
     public var filterExpression: String
     public var filterRevision: UInt64
     public var columnIDs: [String]
@@ -137,8 +135,6 @@ public struct ResourceViewRequest: Hashable, Sendable {
         resource: DiscoveredResource,
         allNamespaces: Bool,
         namespaces: [String],
-        labelSelector: String = "",
-        fieldSelector: String = "",
         filterExpression: String = "",
         filterRevision: UInt64 = 0,
         columnIDs: [String] = [],
@@ -152,8 +148,6 @@ public struct ResourceViewRequest: Hashable, Sendable {
         self.resource = resource
         self.allNamespaces = allNamespaces
         self.namespaces = namespaces
-        self.labelSelector = labelSelector
-        self.fieldSelector = fieldSelector
         self.filterExpression = filterExpression
         self.filterRevision = filterRevision
         self.columnIDs = columnIDs

@@ -947,6 +947,10 @@ func installWarmProjectionFixture(
 		t.Fatal(err)
 	}
 	resource := request.GetSpec().GetResource()
+	query, err := planViewQuery(request.GetSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
 	entry := &resourceRuntime{
 		key: resourceKey{
 			authorityID: "cluster-a",
@@ -954,8 +958,8 @@ func installWarmProjectionFixture(
 			version:     resource.GetVersion(),
 			resource:    resource.GetResource(),
 			namespace:   namespacePlan.cacheNamespace,
-			labels:      request.GetSpec().GetLabelSelector(),
-			fields:      request.GetSpec().GetFieldSelector(),
+			labels:      query.labelSelector,
+			fields:      query.fieldSelector,
 		},
 		store:            store.New(),
 		client:           client,

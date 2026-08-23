@@ -5,8 +5,6 @@ public struct ResourceDrillDownQuery: Hashable, Sendable {
     public var version: String
     public var resource: String
     public var namespaceScope: NamespaceSelection
-    public var labelSelector: String
-    public var fieldSelector: String
     public var filterExpression: String
 
     public init(
@@ -14,16 +12,12 @@ public struct ResourceDrillDownQuery: Hashable, Sendable {
         version: String,
         resource: String,
         namespaceScope: NamespaceSelection,
-        labelSelector: String = "",
-        fieldSelector: String = "",
-        filterExpression: String = ""
+        filterExpression: String
     ) {
         self.group = group
         self.version = version
         self.resource = resource
         self.namespaceScope = namespaceScope
-        self.labelSelector = labelSelector
-        self.fieldSelector = fieldSelector
         self.filterExpression = filterExpression
     }
 }
@@ -33,10 +27,36 @@ public enum ResourceDrillDownPlan: Hashable, Sendable {
     case containers(pod: ResourceIdentity, values: [PodContainerDetail])
 }
 
+/// Formats explicit Kubernetes clauses embedded in the visible resource
+/// query. Kubernetes field-selector values are escaped first; the complete
+/// clause is then quoted using the resource-query grammar's escaping rules.
+public enum ResourceQueryExpression {
+    public static func nativeLabelSelector(_ selector: String) -> String {
+        quotedClause(prefix: "labelSelector", value: selector)
+    }
+
+    public static func nativeFieldSelector(path: String, equals value: String) -> String {
+        let escapedValue = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: ",", with: "\\,")
+            .replacingOccurrences(of: "=", with: "\\=")
+        return quotedClause(
+            prefix: "fieldSelector",
+            value: "\(path)=\(escapedValue)"
+        )
+    }
+
+    private static func quotedClause(prefix: String, value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\(prefix):\"\(escaped)\""
+    }
+}
+
 /// Maps a freshly fetched, UID-authoritative object to the useful child view
-/// entered by Return. Kubernetes-native relationship selectors stay separate
-/// from the editable display filter so the complete server-side semantics are
-/// retained even when kmgr's smaller filter grammar cannot express them.
+/// entered by Return. Relationship selectors are written directly into the
+/// editable query so the field remains the only source of truth.
 public enum ResourceDrillDownPlanner {
     public static func hasPotentialTarget(_ identity: ResourceIdentity) -> Bool {
         switch (identity.group, identity.version, identity.resource) {
@@ -68,12 +88,11 @@ public enum ResourceDrillDownPlanner {
             let containers = ExecContainerCatalog.orderedDetails(from: detail.containers)
             return containers.isEmpty ? nil : .containers(pod: identity, values: containers)
         case ("", "v1", "nodes"):
-            guard let filter = fieldFilter(path: "spec.nodeName", value: identity.name) else {
-                return nil
-            }
             return .resource(podQuery(
                 scope: NamespaceSelection(),
-                filterExpression: filter
+                filterExpression: ResourceQueryExpression.nativeFieldSelector(
+                    path: "spec.nodeName", equals: identity.name
+                )
             ))
         case ("", "v1", "namespaces"):
             guard !identity.name.isEmpty else { return nil }
@@ -93,8 +112,9 @@ public enum ResourceDrillDownPlanner {
                 ? NamespaceSelection() : .namespace(identity.namespace)
             return .resource(podQuery(
                 scope: scope,
-                labelSelector: detail.podLabelSelector,
-                filterExpression: selectorDisplayFilter(from: detail.summaryFields)
+                filterExpression: ResourceQueryExpression.nativeLabelSelector(
+                    detail.podLabelSelector
+                )
             ))
         default:
             return nil
@@ -103,46 +123,14 @@ public enum ResourceDrillDownPlanner {
 
     private static func podQuery(
         scope: NamespaceSelection,
-        labelSelector: String = "",
-        fieldSelector: String = "",
-        filterExpression: String = ""
+        filterExpression: String
     ) -> ResourceDrillDownQuery {
         ResourceDrillDownQuery(
             group: "",
             version: "v1",
             resource: "pods",
             namespaceScope: scope,
-            labelSelector: labelSelector,
-            fieldSelector: fieldSelector,
             filterExpression: filterExpression
         )
-    }
-
-    /// Match-label terms remain useful, readable local correctness checks.
-    /// Match expressions and omitted display rows are intentionally ignored
-    /// here because `podLabelSelector` carries the complete canonical query.
-    private static func selectorDisplayFilter(from fields: [ObjectSummaryField]) -> String {
-        fields.compactMap { field -> String? in
-            guard field.sectionID == "selectors",
-                field.fieldID.hasPrefix("selector:"),
-                safeFilterToken(field.label), safeFilterToken(field.displayText)
-            else { return nil }
-            return "label:\(field.label)==\(field.displayText)"
-        }.joined(separator: " ")
-    }
-
-    private static func fieldFilter(path: String, value: String) -> String? {
-        guard safeFilterToken(path), safeFilterToken(value) else { return nil }
-        return "field:\(path)==\(value)"
-    }
-
-    private static func safeFilterToken(_ value: String) -> Bool {
-        !value.isEmpty
-            && !value.contains(where: { $0.isWhitespace })
-            && !value.contains("=")
-            && !value.contains("\\")
-            && !value.contains("\"")
-            && !value.contains("'")
-            && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
     }
 }

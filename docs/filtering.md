@@ -1,10 +1,19 @@
-# Resource filter grammar
+# Resource query language
 
-The resource-list filter is deliberately small and deterministic. It is parsed and evaluated by `kmgr-engine`; it never invokes a shell or evaluates a scripting language.
+The search field is the complete resource query. It is parsed once by
+`kmgr-engine`; no additional selector or relationship filter is stored behind
+the field. Whitespace-separated terms are combined with AND.
 
-Whitespace-separated terms are combined with AND. Bare terms match a case-insensitive substring in the visible cells, name, namespace, or status. Single or double quotes preserve spaces, and a backslash escapes the next character.
+## Local terms
 
-Structured terms are:
+Bare terms search the visible cells, name, namespace, and status using a
+case-insensitive substring match:
+
+```text
+api ready
+```
+
+Structured local terms are:
 
 | Form | Meaning |
 | --- | --- |
@@ -12,35 +21,51 @@ Structured terms are:
 | `name:value` | Name contains `value` |
 | `status:value` | Typed status text contains `value` |
 | `label:key` | Label key is present |
-| `label:key=value` | Label key is present and its value contains `value` |
-| `label:key==value` | Label key is present and its value exactly equals `value` (case-sensitive) |
+| `label:key=value` | Label value contains `value` (case-insensitive) |
+| `label:key==value` | Label value exactly equals `value` (case-sensitive) |
 | `field:path` | Projected field path is present |
-| `field:path=value` | Projected field path is present and its scalar text contains `value` |
-| `field:path==value` | Projected field path is present and its scalar text exactly equals `value` (case-sensitive) |
+| `field:path=value` | Field value contains `value` (case-insensitive) |
+| `field:path==value` | Field value exactly equals `value` (case-sensitive) |
 
-Keys and field paths are exact and case-sensitive. A single `=` uses a
-case-insensitive substring match; `==` uses case-sensitive exact equality. An
-unknown prefix, missing key/value, unterminated quote, or trailing escape is a
-parse error. The UI keeps the query visible and reports that error inline while
-retaining the last valid result set.
+Single or double quotes preserve spaces, and a backslash escapes the next
+character. Keys and field paths are exact and case-sensitive.
 
-Examples:
+## Explicit Kubernetes selectors
+
+Native Kubernetes selectors use explicit prefixes. Their contents are parsed
+with Kubernetes' own selector parsers and are also checked locally against the
+projected object:
 
 ```text
-api status:running
-namespace:"team platform" label:app=controller
-field:spec.nodeName=worker-3
+labelSelector:"app=api,track in (canary,stable),zone notin (east,west)"
+fieldSelector:"spec.nodeName=worker-1"
 ```
 
-## Per-resource filter memory
+`labelSelector:` accepts the Kubernetes label-selector grammar, including
+`=`, `==`, `!=`, `in`, `notin`, bare-key existence, and `!key` absence.
+`fieldSelector:` accepts the operators supported by Kubernetes field
+selectors. Multiple native clauses are ANDed. They are the only query terms
+sent as LIST/WATCH selectors; local `label:` and `field:` terms never become
+implicit API filters.
 
-Each workspace remembers the current filter by exact group, version, and
-resource. Switching to a GVR not visited in that window starts with an empty
-filter, so a Pod query cannot silently filter Nodes. Returning to a previously
-visited GVR restores that resource's last filter.
+A malformed native selector is an inline query error. It is never silently
+dropped or replaced with a broader query.
 
-A relationship drill-down (for example, opening a workload's Pods) also starts
-with a canonical Kubernetes selector. Editing or replacing the filter text
-clears that implicit selector, so a keyword query searches all objects in the
-current resource and namespace scope. Leaving the filter unchanged preserves
-the drill-down scope.
+## Relationship drill-downs
+
+Opening a workload's Pods, a node's Pods, or an object's Events writes its
+complete native selector into the search field, for example:
+
+```text
+labelSelector:"app=api,track in (canary,stable)"
+```
+
+Editing or replacing that text edits the one query and therefore immediately
+removes or changes the relationship constraint. History and window restoration
+store the same visible query string.
+
+## Per-resource query memory
+
+Each workspace remembers the query by exact group, version, and resource.
+Switching to an unseen resource starts with an empty query; returning to a
+previously visited resource restores its last visible query.

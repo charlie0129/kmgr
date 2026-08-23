@@ -394,10 +394,6 @@ public nonisolated struct Kmgr_V1_ViewSpec: Sendable {
   /// Clears the value of `namespaceScope`. Subsequent reads from it will return its default value.
   public mutating func clearNamespaceScope() {self._namespaceScope = nil}
 
-  public var labelSelector: String = String()
-
-  public var fieldSelector: String = String()
-
   public var filterExpression: String = String()
 
   public var filterRevision: UInt64 = 0
@@ -1763,7 +1759,7 @@ nonisolated extension Kmgr_V1_SortDescriptor: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Kmgr_V1_ViewSpec: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ViewSpec"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}resource\0\u{3}namespace_scope\0\u{3}label_selector\0\u{3}field_selector\0\u{3}filter_expression\0\u{3}filter_revision\0\u{3}column_ids\0\u{3}column_configuration_version\0\u{1}sort\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}resource\0\u{3}namespace_scope\0\u{4}\u{3}filter_expression\0\u{3}filter_revision\0\u{3}column_ids\0\u{3}column_configuration_version\0\u{1}sort\0\u{b}label_selector\0\u{b}field_selector\0\u{c}\u{3}\u{1}\u{c}\u{4}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1773,8 +1769,6 @@ nonisolated extension Kmgr_V1_ViewSpec: SwiftProtobuf.Message, SwiftProtobuf._Me
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularMessageField(value: &self._resource) }()
       case 2: try { try decoder.decodeSingularMessageField(value: &self._namespaceScope) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.labelSelector) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self.fieldSelector) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.filterExpression) }()
       case 6: try { try decoder.decodeSingularUInt64Field(value: &self.filterRevision) }()
       case 7: try { try decoder.decodeRepeatedStringField(value: &self.columnIds) }()
@@ -1796,12 +1790,6 @@ nonisolated extension Kmgr_V1_ViewSpec: SwiftProtobuf.Message, SwiftProtobuf._Me
     try { if let v = self._namespaceScope {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
     } }()
-    if !self.labelSelector.isEmpty {
-      try visitor.visitSingularStringField(value: self.labelSelector, fieldNumber: 3)
-    }
-    if !self.fieldSelector.isEmpty {
-      try visitor.visitSingularStringField(value: self.fieldSelector, fieldNumber: 4)
-    }
     if !self.filterExpression.isEmpty {
       try visitor.visitSingularStringField(value: self.filterExpression, fieldNumber: 5)
     }
@@ -1823,8 +1811,6 @@ nonisolated extension Kmgr_V1_ViewSpec: SwiftProtobuf.Message, SwiftProtobuf._Me
   public static func ==(lhs: Kmgr_V1_ViewSpec, rhs: Kmgr_V1_ViewSpec) -> Bool {
     if lhs._resource != rhs._resource {return false}
     if lhs._namespaceScope != rhs._namespaceScope {return false}
-    if lhs.labelSelector != rhs.labelSelector {return false}
-    if lhs.fieldSelector != rhs.fieldSelector {return false}
     if lhs.filterExpression != rhs.filterExpression {return false}
     if lhs.filterRevision != rhs.filterRevision {return false}
     if lhs.columnIds != rhs.columnIds {return false}

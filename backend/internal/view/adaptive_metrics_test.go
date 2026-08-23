@@ -44,7 +44,7 @@ func TestMetricInterestFetchesOnlyPinnedViewportPods(t *testing.T) {
 
 	request := openView("session", "pods", 1)
 	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
-	request.Spec.FilterExpression = "field:spec.nodeName==node-a"
+	request.Spec.FilterExpression = `fieldSelector:"spec.nodeName=node-a"`
 	subscription, err := runtime.Open(request)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestMetricInterestLatestRangeCancelsOlderApply(t *testing.T) {
 	defer runtime.Close()
 	request := openView("session", "pods", 1)
 	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
-	request.Spec.FilterExpression = "field:spec.nodeName==node-a"
+	request.Spec.FilterExpression = `fieldSelector:"spec.nodeName=node-a"`
 	subscription, err := runtime.Open(request)
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +200,7 @@ func TestCompleteExactMetricsAtomicallyReconcileGlobalSort(t *testing.T) {
 	request := openView("session", "sorted", 1)
 	request.StageUntilReconciled = true
 	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
-	request.Spec.FilterExpression = "field:spec.nodeName==node-a"
+	request.Spec.FilterExpression = `fieldSelector:"spec.nodeName=node-a"`
 	request.Spec.Sort = []*kmgrv1.SortDescriptor{{
 		ColumnId: PodCPUColumn, Direction: kmgrv1.SortDirection_SORT_DIRECTION_DESCENDING,
 	}}
@@ -265,7 +265,7 @@ func TestCompleteExactMetricsDiscardInvalidatedScanUntilCadence(t *testing.T) {
 	defer runtime.Close()
 	request := openView("session", "invalidated", 1)
 	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
-	request.Spec.FilterExpression = "field:spec.nodeName==node-a"
+	request.Spec.FilterExpression = `fieldSelector:"spec.nodeName=node-a"`
 	request.Spec.Sort = []*kmgrv1.SortDescriptor{{
 		ColumnId: PodCPUColumn, Direction: kmgrv1.SortDirection_SORT_DIRECTION_DESCENDING,
 	}}
@@ -337,8 +337,7 @@ func TestCompleteExactMetricsCoverFilterHiddenBaseCandidates(t *testing.T) {
 	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
 	// Bare text searches rendered cells, so both base Pods are initially hidden
 	// and complete coverage must come from the raw store rather than s.order.
-	request.Spec.FilterExpression = "0.25"
-	request.Spec.FieldSelector = "spec.nodeName=node-a"
+	request.Spec.FilterExpression = `0.25 fieldSelector:"spec.nodeName=node-a"`
 	subscription, err := runtime.Open(request)
 	if err != nil {
 		t.Fatal(err)
@@ -382,7 +381,7 @@ func TestCompleteExactMetricsCoalesceBaseChurnUntilCadence(t *testing.T) {
 	defer runtime.Close()
 	request := openView("session", "changing", 1)
 	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
-	request.Spec.FilterExpression = "field:spec.nodeName==node-a"
+	request.Spec.FilterExpression = `fieldSelector:"spec.nodeName=node-a"`
 	request.Spec.Sort = []*kmgrv1.SortDescriptor{{
 		ColumnId: PodCPUColumn, Direction: kmgrv1.SortDirection_SORT_DIRECTION_DESCENDING,
 	}}
@@ -465,7 +464,7 @@ func TestCompleteExactMetricsRefreshOnCacheCadence(t *testing.T) {
 	defer runtime.Close()
 	request := openView("session", "refreshing", 1)
 	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
-	request.Spec.FilterExpression = "field:spec.nodeName==node-a"
+	request.Spec.FilterExpression = `fieldSelector:"spec.nodeName=node-a"`
 	request.Spec.Sort = []*kmgrv1.SortDescriptor{{
 		ColumnId: PodCPUColumn, Direction: kmgrv1.SortDirection_SORT_DIRECTION_DESCENDING,
 	}}

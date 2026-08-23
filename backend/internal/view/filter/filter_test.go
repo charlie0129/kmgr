@@ -79,6 +79,82 @@ func TestAllTermsAreConjunctive(t *testing.T) {
 	}
 }
 
+func TestNativeSelectorsAreExplicitAndMatchLocally(t *testing.T) {
+	t.Parallel()
+	compiled, err := Compile(
+		`labelSelector:"app=api,track in (canary,stable),zone notin (east,west)" ` +
+			`fieldSelector:"spec.nodeName=worker-1" ready`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := compiled.NativeLabelSelectors(),
+		[]string{"app=api,track in (canary,stable),zone notin (east,west)"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("native label selectors = %#v, want %#v", got, want)
+	}
+	if got, want := compiled.NativeFieldSelectors(), []string{"spec.nodeName=worker-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("native field selectors = %#v, want %#v", got, want)
+	}
+	if got, want := compiled.FieldPaths(), []string{"spec.nodeName"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("field paths = %#v, want %#v", got, want)
+	}
+
+	matching := Candidate{
+		Labels: map[string]string{
+			"app": "api", "track": "canary", "zone": "central",
+		},
+		Fields:      map[string]string{"spec.nodeName": "worker-1"},
+		VisibleText: []string{"Ready"},
+	}
+	if !compiled.Match(matching) {
+		t.Fatal("native selector query did not match")
+	}
+	matching.Labels["track"] = "blue"
+	if compiled.Match(matching) {
+		t.Fatal("native in selector matched a value outside its set")
+	}
+}
+
+func TestNativeFieldSelectorEscapesValuesThroughVisibleQueryGrammar(t *testing.T) {
+	t.Parallel()
+	compiled, err := Compile(
+		`fieldSelector:"metadata.name=a\\\\b\\,c\\=d"`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := compiled.NativeFieldSelectors(),
+		[]string{`metadata.name=a\\b\,c\=d`}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("native field selectors = %#v, want %#v", got, want)
+	}
+	if !compiled.Match(Candidate{
+		Fields: map[string]string{"metadata.name": `a\b,c=d`},
+	}) {
+		t.Fatal("escaped native field selector did not match its literal value")
+	}
+}
+
+func TestBareTextRemainsLocalKeywordSearch(t *testing.T) {
+	t.Parallel()
+	compiled, err := Compile("api ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := compiled.NativeLabelSelectors(); len(got) != 0 {
+		t.Fatalf("bare text produced native label selectors: %#v", got)
+	}
+	if got := compiled.NativeFieldSelectors(); len(got) != 0 {
+		t.Fatalf("bare text produced native field selectors: %#v", got)
+	}
+	if !compiled.Match(Candidate{
+		Name:        "api-server",
+		VisibleText: []string{"Ready"},
+	}) {
+		t.Fatal("bare text did not match visible local content")
+	}
+}
+
 func TestQuotesAndEscapes(t *testing.T) {
 	t.Parallel()
 	compiled, err := Compile(`"hello world" web\ server`)
@@ -99,6 +175,10 @@ func TestParseErrorsIncludeOffset(t *testing.T) {
 		`unknown:value`,
 		`label:=value`,
 		`field:path=`,
+		`labelSelector:"app in ("`,
+		`fieldSelector:"metadata.name`,
+		`labelSelector:" "`,
+		`fieldSelector:","`,
 		`trailing\`,
 	} {
 		t.Run(query, func(t *testing.T) {

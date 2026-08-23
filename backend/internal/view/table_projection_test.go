@@ -85,6 +85,28 @@ func TestTableObjectPolicyUsesMetadataOnlyForMetadataAndServerDependencies(t *te
 	if got := tableObjectPolicy(metadataProjector); got != metav1.IncludeMetadata {
 		t.Fatalf("metadata/server projection policy = %q", got)
 	}
+	nativeMetadataProjector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session", Resource: resource,
+		ColumnIDs:        []string{"namespace", "name"},
+		FilterExpression: `fieldSelector:"metadata.name=api"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tableObjectPolicy(nativeMetadataProjector); got != metav1.IncludeMetadata {
+		t.Fatalf("metadata native field policy = %q", got)
+	}
+	localMetadataProjector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session", Resource: resource,
+		ColumnIDs:        []string{"namespace", "name"},
+		FilterExpression: "field:metadata.name==api",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tableObjectPolicy(localMetadataProjector); got != metav1.IncludeMetadata {
+		t.Fatalf("metadata local field policy = %q", got)
+	}
 
 	for _, test := range []struct {
 		name   string

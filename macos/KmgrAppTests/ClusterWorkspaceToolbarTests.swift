@@ -712,179 +712,6 @@ struct ClusterWorkspaceToolbarTests {
         #expect(expandedWidth <= resourceRoot.bounds.width * 0.5 + 0.5)
     }
 
-    @Test("resource filter exposes native grammar completions without preselection")
-    func resourceFilterOffersUnselectedNativeCompletions() async throws {
-        let provider = FilterValidationWorkspaceResourceProvider()
-        let controller = makeWorkspace(provider: provider)
-        controller.showWindow(nil)
-        defer { controller.close() }
-        let root = try #require(controller.window?.contentView)
-        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
-            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
-
-        try await waitUntil { provider.streamRequestCount == 1 }
-        let editor = NSTextView()
-        editor.string = "n"
-        editor.setSelectedRange(NSRange(location: 1, length: 0))
-        let originalSelection = editor.selectedRange()
-        var selectedIndex = 0
-        let completions = withUnsafeMutablePointer(to: &selectedIndex) { pointer in
-            filter.delegate?.control?(
-                filter,
-                textView: editor,
-                completions: ["native-dictionary-word"],
-                forPartialWordRange: editor.rangeForUserCompletion,
-                indexOfSelectedItem: pointer
-            ) ?? []
-        }
-
-        #expect(completions.prefix(3) == ["namespace:", "name:", "ns:"])
-        #expect(selectedIndex == -1)
-        #expect(editor.string == "n")
-        #expect(editor.selectedRange() == originalSelection)
-        #expect(filter.accessibilityHelp()?.contains("Suggestions are best effort") == true)
-        #expect(filter.accessibilityHelp()?.contains("Return applies") == true)
-    }
-
-    @Test("field completion replaces only AppKit's relative partial word")
-    func resourceFilterCompletesRelativeFieldPath() async throws {
-        let provider = FilterValidationWorkspaceResourceProvider()
-        let controller = makeWorkspace(provider: provider)
-        controller.showWindow(nil)
-        defer { controller.close() }
-        let root = try #require(controller.window?.contentView)
-        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
-            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
-
-        try await waitUntil { provider.streamRequestCount == 1 }
-        let editor = NSTextView()
-        editor.string = "field:metadata."
-        editor.setSelectedRange(NSRange(
-            location: (editor.string as NSString).length,
-            length: 0
-        ))
-        let partialRange = editor.rangeForUserCompletion
-        var selectedIndex = 37
-        let completions = withUnsafeMutablePointer(to: &selectedIndex) { pointer in
-            filter.delegate?.control?(
-                filter,
-                textView: editor,
-                completions: [],
-                forPartialWordRange: partialRange,
-                indexOfSelectedItem: pointer
-            ) ?? []
-        }
-
-        #expect(partialRange == NSRange(location: 6, length: 9))
-        #expect(completions.first == "metadata.name")
-        #expect(completions.contains("metadata.namespace"))
-        #expect(completions.contains("status.phase") == false)
-        #expect(selectedIndex == -1)
-        #expect((editor.string as NSString).replacingCharacters(
-            in: partialRange,
-            with: try #require(completions.first)
-        ) == "field:metadata.name")
-        #expect(editor.string == "field:metadata.")
-    }
-
-    @Test("automatic completion trigger defers once per nonempty token")
-    func resourceFilterCompletionTriggerIsBoundedByToken() {
-        var deferred: [ResourceFilterCompletionTrigger.DeferredAction] = []
-        var presented: [String] = []
-        let trigger = ResourceFilterCompletionTrigger(
-            deferAction: { deferred.append($0) },
-            present: { presented.append($0.string) }
-        )
-        let editor = NSTextView()
-        let isCurrentEditor: @MainActor (NSTextView) -> Bool = { $0 === editor }
-        let hasCandidates: @MainActor (NSTextView) -> Bool = { _ in true }
-
-        editor.string = "n"
-        editor.setSelectedRange(NSRange(location: 1, length: 0))
-        trigger.textDidChange(
-            editor: editor,
-            isCurrentEditor: isCurrentEditor,
-            hasCandidates: hasCandidates
-        )
-        trigger.textDidChange(
-            editor: editor,
-            isCurrentEditor: isCurrentEditor,
-            hasCandidates: hasCandidates
-        )
-        #expect(deferred.count == 1)
-        #expect(presented.isEmpty)
-        deferred.removeFirst()()
-        #expect(presented == ["n"])
-
-        editor.string = "na"
-        editor.setSelectedRange(NSRange(location: 2, length: 0))
-        trigger.textDidChange(
-            editor: editor,
-            isCurrentEditor: isCurrentEditor,
-            hasCandidates: hasCandidates
-        )
-        #expect(deferred.isEmpty)
-
-        editor.string = "na "
-        editor.setSelectedRange(NSRange(location: 3, length: 0))
-        trigger.textDidChange(
-            editor: editor,
-            isCurrentEditor: isCurrentEditor,
-            hasCandidates: hasCandidates
-        )
-        editor.string = "na f"
-        editor.setSelectedRange(NSRange(location: 4, length: 0))
-        trigger.textDidChange(
-            editor: editor,
-            isCurrentEditor: isCurrentEditor,
-            hasCandidates: hasCandidates
-        )
-        #expect(deferred.count == 1)
-        deferred.removeFirst()()
-        #expect(presented == ["n", "na f"])
-    }
-
-    @Test("automatic completion trigger revalidates editor state after deferral")
-    func resourceFilterCompletionTriggerRejectsStalePresentation() {
-        var deferred: [ResourceFilterCompletionTrigger.DeferredAction] = []
-        var presentationCount = 0
-        let trigger = ResourceFilterCompletionTrigger(
-            deferAction: { deferred.append($0) },
-            present: { _ in presentationCount += 1 }
-        )
-        let editor = NSTextView()
-        editor.string = "n"
-        editor.setSelectedRange(NSRange(location: 1, length: 0))
-
-        trigger.textDidChange(
-            editor: editor,
-            isCurrentEditor: { _ in false },
-            hasCandidates: { _ in true }
-        )
-        #expect(deferred.count == 1)
-        deferred.removeFirst()()
-        #expect(presentationCount == 0)
-
-        editor.setSelectedRange(NSRange(location: 0, length: 1))
-        trigger.textDidChange(
-            editor: editor,
-            isCurrentEditor: { _ in true },
-            hasCandidates: { _ in true }
-        )
-        #expect(deferred.isEmpty)
-
-        editor.setSelectedRange(NSRange(location: 1, length: 0))
-        trigger.textDidChange(
-            editor: editor,
-            isCurrentEditor: { _ in true },
-            hasCandidates: { _ in true }
-        )
-        #expect(deferred.count == 1)
-        trigger.reset()
-        deferred.removeFirst()()
-        #expect(presentationCount == 0)
-    }
-
     @Test("Return applies a pending resource filter and restores table focus")
     func returnAppliesResourceFilterImmediately() async throws {
         let provider = FilterValidationWorkspaceResourceProvider()
@@ -919,8 +746,8 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
-    @Test("editing a relationship-scoped filter searches without native selectors")
-    func editingRelationshipFilterClearsNativeSelectorsOnCommit() async throws {
+    @Test("replacing a visible native query searches the replacement")
+    func replacingVisibleNativeQueryOnCommit() async throws {
         let provider = FilterValidationWorkspaceResourceProvider()
         let restoration = ClusterWindowRestorationRecord(
             id: "native-selector-filter",
@@ -928,8 +755,7 @@ struct ClusterWorkspaceToolbarTests {
                 contextName: "test-context",
                 gvr: GVR(group: "", version: "v1", resource: "pods"),
                 namespaceScope: .namespace("default"),
-                labelSelector: "app in (api,worker),!retired",
-                fieldSelector: "metadata.namespace=default"
+                filter: "labelSelector:\"app in (api,worker),!retired\" fieldSelector:\"metadata.namespace=default\""
             )
         )
         let controller = makeWorkspace(provider: provider, restoration: restoration)
@@ -955,19 +781,13 @@ struct ClusterWorkspaceToolbarTests {
             provider.streamRequestCount == 2
         }
         let requests = provider.streamRequests
-        #expect(requests.map(\.labelSelector) == [
-            "app in (api,worker),!retired",
-            "",
-        ])
-        #expect(requests.map(\.fieldSelector) == [
-            "metadata.namespace=default",
-            "",
-        ])
+        #expect(requests[0].filterExpression ==
+            "labelSelector:\"app in (api,worker),!retired\" fieldSelector:\"metadata.namespace=default\"")
         #expect(requests.last?.filterExpression == "status:Running")
     }
 
-    @Test("editing a relationship-scoped filter clears native selectors on debounce")
-    func editingRelationshipFilterClearsNativeSelectorsOnDebounce() async throws {
+    @Test("editing a visible native query uses the replacement on debounce")
+    func editingVisibleNativeQueryOnDebounce() async throws {
         let provider = FilterValidationWorkspaceResourceProvider()
         let controller = makeWorkspace(
             provider: provider,
@@ -976,7 +796,7 @@ struct ClusterWorkspaceToolbarTests {
                 state: ClusterWindowRestorationState(
                     contextName: "test-context",
                     gvr: GVR(group: "", version: "v1", resource: "pods"),
-                    labelSelector: "app=api"
+                    filter: "labelSelector:\"app=api\""
                 )
             )
         )
@@ -991,7 +811,6 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil(timeout: .seconds(1)) {
             provider.streamRequestCount == 2
         }
-        #expect(provider.streamRequests.last?.labelSelector.isEmpty == true)
         #expect(provider.streamRequests.last?.filterExpression == "label:tier==frontend")
     }
 
@@ -2072,8 +1891,6 @@ struct ClusterWorkspaceToolbarTests {
         let root = try #require(window.contentView)
         let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Kubernetes resources" })
-        let statusLine = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
-            .first { $0.identifier?.rawValue == "workspace-status-line" })
 
         try await waitUntil { provider.streamRequests.count == 1 && table.numberOfRows == 1 }
         try await selectResourceRow(0, in: table)
@@ -2083,10 +1900,7 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil { provider.streamRequests.count == 2 }
         var requests = provider.streamRequests
         #expect(requests[1].resource.resource == "pods")
-        #expect(requests[1].labelSelector == selector)
-        #expect(requests[1].filterExpression == "label:app==api")
-        #expect(statusLine.stringValue.contains("Kubernetes selector active"))
-        #expect(statusLine.toolTip?.contains("Label selector: \(selector)") == true)
+        #expect(requests[1].filterExpression == "labelSelector:\"\(selector)\"")
 
         controller.navigateBack(nil)
         try await waitUntil {
@@ -2096,14 +1910,13 @@ struct ClusterWorkspaceToolbarTests {
         }
         requests = provider.streamRequests
         #expect(requests[2].resource.resource == "deployments")
-        #expect(requests[2].labelSelector.isEmpty)
+        #expect(requests[2].filterExpression.isEmpty)
 
         controller.navigateForward(nil)
         try await waitUntil { provider.streamRequests.count == 4 }
         requests = provider.streamRequests
         #expect(requests[3].resource.resource == "pods")
-        #expect(requests[3].labelSelector == selector)
-        #expect(requests[3].filterExpression == "label:app==api")
+        #expect(requests[3].filterExpression == "labelSelector:\"\(selector)\"")
     }
 
     @Test("replacing a workload drill-down filter restores all Pods and selects Pods")
@@ -2149,14 +1962,12 @@ struct ClusterWorkspaceToolbarTests {
         controller.enterResource(nil)
         try await waitUntil { provider.streamRequests.count == 2 }
         #expect(provider.streamRequests[1].resource.resource == "pods")
-        #expect(provider.streamRequests[1].labelSelector == selector)
+        #expect(provider.streamRequests[1].filterExpression == "labelSelector:\"\(selector)\"")
 
         try triggerResourceFilterChange(in: window, value: "worker")
         try await waitUntil(timeout: .seconds(1)) { provider.streamRequests.count == 3 }
         let replacement = provider.streamRequests[2]
         #expect(replacement.resource.resource == "pods")
-        #expect(replacement.labelSelector.isEmpty)
-        #expect(replacement.fieldSelector.isEmpty)
         #expect(replacement.filterExpression == "worker")
         let selected = outline.selectedRow >= 0
             ? outline.item(atRow: outline.selectedRow) as? DiscoveredResource
@@ -2311,7 +2122,7 @@ struct ClusterWorkspaceToolbarTests {
         #expect(events.resource.resource == "events")
         #expect(!events.allNamespaces)
         #expect(events.namespaces == ["default"])
-        #expect(events.filterExpression == "field:involvedObject.uid==pod-api")
+        #expect(events.filterExpression == "fieldSelector:\"involvedObject.uid=pod-api\"")
 
         controller.navigateBack(nil)
         try await waitUntil { provider.streamRequests.count == 3 }

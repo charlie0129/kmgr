@@ -29,7 +29,7 @@ import Testing
     ))
 }
 
-@Test func workloadAndServiceDrillDownFillPodLabelFilters() {
+@Test func workloadAndServiceDrillDownWriteNativeQueryToSearchField() {
     for identity in [
         drillDownIdentity(group: "apps", resource: "deployments"),
         drillDownIdentity(resource: "services"),
@@ -53,14 +53,14 @@ import Testing
             ResourceDrillDownQuery(
                 group: "", version: "v1", resource: "pods",
                 namespaceScope: .namespace("default"),
-                labelSelector: "app=api,tier=frontend",
-                filterExpression: "label:app==api label:tier==frontend"
+                filterExpression:
+                    "labelSelector:\"app=api,tier=frontend\""
             )
         ))
     }
 }
 
-@Test func workloadMatchExpressionsRetainFullNativeSemantics() {
+@Test func workloadMatchExpressionsBecomeVisibleNativeQuery() {
     let deployment = drillDownIdentity(group: "apps", resource: "deployments")
     let detail = ObjectDetail(
         identity: deployment,
@@ -81,9 +81,8 @@ import Testing
         ResourceDrillDownQuery(
             group: "", version: "v1", resource: "pods",
             namespaceScope: .namespace("default"),
-            labelSelector:
-                "app=api,debug,!retired,track in (canary,stable),zone notin (east,west)",
-            filterExpression: "label:app==api"
+            filterExpression:
+                "labelSelector:\"app=api,debug,!retired,track in (canary,stable),zone notin (east,west)\""
         )
     ))
 }
@@ -96,7 +95,7 @@ import Testing
         ResourceDrillDownQuery(
             group: "", version: "v1", resource: "pods",
             namespaceScope: NamespaceSelection(),
-            filterExpression: "field:spec.nodeName==worker-1"
+            filterExpression: "fieldSelector:\"spec.nodeName=worker-1\""
         )
     ))
 
@@ -111,6 +110,12 @@ import Testing
             namespaceScope: .namespace("payments"), filterExpression: ""
         )
     ))
+}
+
+@Test func nativeFieldQueryEscapesKubernetesAndVisibleQuerySyntax() {
+    #expect(ResourceQueryExpression.nativeFieldSelector(
+        path: "metadata.name", equals: #"a\b,c=d"#
+    ) == #"fieldSelector:"metadata.name=a\\\\b\\,c\\=d""#)
 }
 
 @Test func unsupportedAndEmptyResourcesHaveNoDrillDown() {

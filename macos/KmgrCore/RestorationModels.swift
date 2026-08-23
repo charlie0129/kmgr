@@ -53,7 +53,7 @@ public struct RestorationValidationError: Error, LocalizedError, Hashable, Senda
 /// cached rows, terminal contents, logs, credentials, and mutation forms
 /// unrepresentable in the persisted model.
 public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
-    public static let schemaVersion = 3
+    public static let schemaVersion = 4
 
     public static let maximumContextNameBytes = 4 << 10
     public static let maximumQueryBytes = 64 << 10
@@ -65,8 +65,6 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
     public var contextReference: String
     public var gvr: GVR?
     public var namespaceScope: NamespaceScope
-    public var labelSelector: String
-    public var fieldSelector: String
     public var filter: String
     public var sort: [SortDescriptorState]
     public var isSidebarVisible: Bool
@@ -77,8 +75,6 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
         contextReference: String,
         gvr: GVR? = nil,
         namespaceScope: NamespaceScope = .all,
-        labelSelector: String = "",
-        fieldSelector: String = "",
         filter: String = "",
         sort: [SortDescriptorState] = [],
         isSidebarVisible: Bool = true,
@@ -89,8 +85,6 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
         self.contextReference = contextReference
         self.gvr = gvr
         self.namespaceScope = namespaceScope
-        self.labelSelector = labelSelector
-        self.fieldSelector = fieldSelector
         self.filter = filter
         self.sort = sort
         self.isSidebarVisible = isSidebarVisible
@@ -153,8 +147,6 @@ public struct ClusterWindowRestorationState: Hashable, Codable, Sendable {
             }
         }
         for (path, value) in [
-            ("labelSelector", labelSelector),
-            ("fieldSelector", fieldSelector),
             ("filter", filter),
         ] where value.utf8.count > Self.maximumQueryBytes || value.contains("\0") {
             issues.append(.init(

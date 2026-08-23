@@ -70,8 +70,8 @@ message SortDescriptor {
 message ViewSpec {
   ResourceType resource = 1;
   NamespaceScope namespace_scope = 2;
-  string label_selector = 3;
-  string field_selector = 4;
+  reserved 3, 4;
+  reserved "label_selector", "field_selector";
   string filter_expression = 5;
   uint64 filter_revision = 6;
   repeated string column_ids = 7;

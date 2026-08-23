@@ -1,5 +1,7 @@
-// Package filter implements kmgr's deliberately small resource-list filter
-// grammar. It performs no shell evaluation and compiles a query once for reuse.
+// Package filter implements kmgr's resource-list query grammar. Local terms
+// stay deliberately small; explicitly prefixed Kubernetes selectors delegate
+// their native syntax to the Kubernetes selector parsers. It performs no
+// shell evaluation and compiles a query once for reuse.
 package filter
 
 import (
@@ -7,6 +9,10 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 )
 
 type Kind uint8
@@ -18,6 +24,8 @@ const (
 	Label
 	Field
 	Status
+	NativeLabel
+	NativeField
 )
 
 type Term struct {
@@ -28,7 +36,14 @@ type Term struct {
 }
 
 type Filter struct {
-	terms []Term
+	terms    []Term
+	compiled []compiledTerm
+}
+
+type compiledTerm struct {
+	term          Term
+	labelSelector labels.Selector
+	fieldSelector fields.Selector
 }
 
 type ParseError struct {
@@ -54,13 +69,17 @@ func Compile(input string) (*Filter, error) {
 	if err != nil {
 		return nil, err
 	}
-	compiled := &Filter{terms: make([]Term, 0, len(tokens))}
+	compiled := &Filter{
+		terms:    make([]Term, 0, len(tokens)),
+		compiled: make([]compiledTerm, 0, len(tokens)),
+	}
 	for _, token := range tokens {
 		term, err := parseTerm(token)
 		if err != nil {
 			return nil, err
 		}
-		compiled.terms = append(compiled.terms, term)
+		compiled.terms = append(compiled.terms, term.term)
+		compiled.compiled = append(compiled.compiled, term)
 	}
 	return compiled, nil
 }
@@ -69,9 +88,87 @@ func (f *Filter) Terms() []Term {
 	return append([]Term(nil), f.terms...)
 }
 
+// NativeLabelSelectors returns the explicitly requested Kubernetes label
+// selectors in query order. Local label terms are deliberately excluded: the
+// visible query, rather than an inferred transport optimization, controls
+// which server-side predicates are applied.
+func (f *Filter) NativeLabelSelectors() []string {
+	if f == nil {
+		return nil
+	}
+	result := make([]string, 0)
+	for _, term := range f.compiled {
+		if term.labelSelector != nil {
+			result = append(result, term.term.Value)
+		}
+	}
+	return result
+}
+
+// NativeFieldSelectors returns the explicitly requested Kubernetes field
+// selectors in query order.
+func (f *Filter) NativeFieldSelectors() []string {
+	if f == nil {
+		return nil
+	}
+	result := make([]string, 0)
+	for _, term := range f.compiled {
+		if term.fieldSelector != nil {
+			result = append(result, term.fieldSelector.String())
+		}
+	}
+	return result
+}
+
+// FieldPaths returns every object path needed to evaluate local and native
+// field terms. The projection layer uses this to avoid fetching a broad raw
+// object merely because the query contains an explicit native field selector.
+func (f *Filter) FieldPaths() []string {
+	if f == nil {
+		return nil
+	}
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, term := range f.compiled {
+		paths := []string(nil)
+		switch term.term.Kind {
+		case Field:
+			paths = []string{term.term.Key}
+		case NativeField:
+			for _, requirement := range term.fieldSelector.Requirements() {
+				paths = append(paths, requirement.Field)
+			}
+		}
+		for _, path := range paths {
+			if _, exists := seen[path]; exists {
+				continue
+			}
+			seen[path] = struct{}{}
+			result = append(result, path)
+		}
+	}
+	return result
+}
+
 func (f *Filter) Match(candidate Candidate) bool {
-	for _, term := range f.terms {
-		if !termMatches(term, candidate) {
+	if f == nil {
+		return true
+	}
+	for _, term := range f.compiled {
+		switch term.term.Kind {
+		case NativeLabel:
+			if !term.labelSelector.Matches(labels.Set(candidate.Labels)) {
+				return false
+			}
+		case NativeField:
+			if !term.fieldSelector.Matches(fields.Set(candidate.Fields)) {
+				return false
+			}
+		case Text, Namespace, Name, Label, Field, Status:
+			if !termMatches(term.term, candidate) {
+				return false
+			}
+		default:
 			return false
 		}
 	}
@@ -135,29 +232,94 @@ func tokenize(input string) ([]token, error) {
 	return tokens, nil
 }
 
-func parseTerm(value token) (Term, error) {
+func parseTerm(value token) (compiledTerm, error) {
 	prefix, body, structured := strings.Cut(value.text, ":")
 	if !structured {
-		return Term{Kind: Text, Value: fold(value.text)}, nil
+		return compiledTerm{term: Term{Kind: Text, Value: fold(value.text)}}, nil
 	}
 	if body == "" {
-		return Term{}, &ParseError{Offset: value.offset + len(prefix) + 1, Message: "structured term has no value"}
+		return compiledTerm{}, &ParseError{Offset: value.offset + len(prefix) + 1, Message: "structured term has no value"}
 	}
 
 	switch strings.ToLower(prefix) {
 	case "namespace", "ns":
-		return Term{Kind: Namespace, Value: fold(body)}, nil
+		return compiledTerm{term: Term{Kind: Namespace, Value: fold(body)}}, nil
 	case "name":
-		return Term{Kind: Name, Value: fold(body)}, nil
+		return compiledTerm{term: Term{Kind: Name, Value: fold(body)}}, nil
 	case "status":
-		return Term{Kind: Status, Value: fold(body)}, nil
+		return compiledTerm{term: Term{Kind: Status, Value: fold(body)}}, nil
 	case "label":
-		return keyedTerm(Label, body, value.offset+len(prefix)+1)
+		term, err := keyedTerm(Label, body, value.offset+len(prefix)+1)
+		if err != nil {
+			return compiledTerm{}, err
+		}
+		return compiledTerm{term: term}, nil
 	case "field":
-		return keyedTerm(Field, body, value.offset+len(prefix)+1)
+		term, err := keyedTerm(Field, body, value.offset+len(prefix)+1)
+		if err != nil {
+			return compiledTerm{}, err
+		}
+		return compiledTerm{term: term}, nil
+	case "labelselector":
+		selector, err := labels.Parse(body)
+		if err != nil || selector.Empty() {
+			message := "Kubernetes label selector must not be empty"
+			if err != nil {
+				message = fmt.Sprintf("invalid Kubernetes label selector: %v", err)
+			}
+			return compiledTerm{}, &ParseError{
+				Offset:  value.offset + len(prefix) + 1,
+				Message: message,
+			}
+		}
+		return compiledTerm{
+			term:          Term{Kind: NativeLabel, Value: canonicalLabelSelector(selector)},
+			labelSelector: selector,
+		}, nil
+	case "fieldselector":
+		selector, err := fields.ParseSelector(body)
+		if err != nil || len(selector.Requirements()) == 0 {
+			message := "Kubernetes field selector must not be empty"
+			if err != nil {
+				message = fmt.Sprintf("invalid Kubernetes field selector: %v", err)
+			}
+			return compiledTerm{}, &ParseError{
+				Offset:  value.offset + len(prefix) + 1,
+				Message: message,
+			}
+		}
+		return compiledTerm{
+			term:          Term{Kind: NativeField, Value: selector.String()},
+			fieldSelector: selector,
+		}, nil
 	default:
-		return Term{}, &ParseError{Offset: value.offset, Message: fmt.Sprintf("unknown structured term %q", prefix)}
+		return compiledTerm{}, &ParseError{Offset: value.offset, Message: fmt.Sprintf("unknown structured term %q", prefix)}
 	}
+}
+
+func canonicalLabelSelector(selector labels.Selector) string {
+	if selector == nil {
+		return ""
+	}
+	requirements, selectable := selector.Requirements()
+	if !selectable {
+		return selector.String()
+	}
+	result := make([]string, 0, len(requirements))
+	for _, requirement := range requirements {
+		operator := requirement.Operator()
+		if operator == selection.DoubleEquals {
+			operator = selection.Equals
+		}
+		normalized, err := labels.NewRequirement(
+			requirement.Key(), operator, requirement.ValuesUnsorted(),
+		)
+		if err != nil {
+			return selector.String()
+		}
+		result = append(result, normalized.String())
+	}
+	return strings.Join(result, ",")
 }
 
 func keyedTerm(kind Kind, body string, offset int) (Term, error) {

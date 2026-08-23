@@ -253,8 +253,8 @@ the engine configuration.
 The complete external file schema and example, CEL activation, optional-field
 syntax, types, cost/output limits, Secret sanitization boundary, and exact
 huge-page/accelerator resource handling are documented in
-[docs/columns.md](docs/columns.md). The table filter grammar and structured
-terms are documented in
+[docs/columns.md](docs/columns.md). The table query language, including local
+terms and explicit Kubernetes selectors, is documented in
 [docs/filtering.md](docs/filtering.md).
 
 Metrics are optional enrichment. Pod and Node CPU/memory usage is fetched

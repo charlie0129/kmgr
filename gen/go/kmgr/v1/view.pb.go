@@ -565,8 +565,6 @@ type ViewSpec struct {
 	state                      protoimpl.MessageState `protogen:"open.v1"`
 	Resource                   *ResourceType          `protobuf:"bytes,1,opt,name=resource,proto3" json:"resource,omitempty"`
 	NamespaceScope             *NamespaceScope        `protobuf:"bytes,2,opt,name=namespace_scope,json=namespaceScope,proto3" json:"namespace_scope,omitempty"`
-	LabelSelector              string                 `protobuf:"bytes,3,opt,name=label_selector,json=labelSelector,proto3" json:"label_selector,omitempty"`
-	FieldSelector              string                 `protobuf:"bytes,4,opt,name=field_selector,json=fieldSelector,proto3" json:"field_selector,omitempty"`
 	FilterExpression           string                 `protobuf:"bytes,5,opt,name=filter_expression,json=filterExpression,proto3" json:"filter_expression,omitempty"`
 	FilterRevision             uint64                 `protobuf:"varint,6,opt,name=filter_revision,json=filterRevision,proto3" json:"filter_revision,omitempty"`
 	ColumnIds                  []string               `protobuf:"bytes,7,rep,name=column_ids,json=columnIds,proto3" json:"column_ids,omitempty"`
@@ -618,20 +616,6 @@ func (x *ViewSpec) GetNamespaceScope() *NamespaceScope {
 		return x.NamespaceScope
 	}
 	return nil
-}
-
-func (x *ViewSpec) GetLabelSelector() string {
-	if x != nil {
-		return x.LabelSelector
-	}
-	return ""
-}
-
-func (x *ViewSpec) GetFieldSelector() string {
-	if x != nil {
-		return x.FieldSelector
-	}
-	return ""
 }
 
 func (x *ViewSpec) GetFilterExpression() string {
@@ -3279,18 +3263,16 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"\tcolumn_id\x18\x01 \x01(\tR\bcolumnId\x124\n" +
 	"\tdirection\x18\x02 \x01(\x0e2\x16.kmgr.v1.SortDirectionR\tdirection\x12\x1f\n" +
 	"\vnulls_first\x18\x03 \x01(\bR\n" +
-	"nullsFirst\"\xb1\x03\n" +
+	"nullsFirst\"\x8f\x03\n" +
 	"\bViewSpec\x121\n" +
 	"\bresource\x18\x01 \x01(\v2\x15.kmgr.v1.ResourceTypeR\bresource\x12@\n" +
-	"\x0fnamespace_scope\x18\x02 \x01(\v2\x17.kmgr.v1.NamespaceScopeR\x0enamespaceScope\x12%\n" +
-	"\x0elabel_selector\x18\x03 \x01(\tR\rlabelSelector\x12%\n" +
-	"\x0efield_selector\x18\x04 \x01(\tR\rfieldSelector\x12+\n" +
+	"\x0fnamespace_scope\x18\x02 \x01(\v2\x17.kmgr.v1.NamespaceScopeR\x0enamespaceScope\x12+\n" +
 	"\x11filter_expression\x18\x05 \x01(\tR\x10filterExpression\x12'\n" +
 	"\x0ffilter_revision\x18\x06 \x01(\x04R\x0efilterRevision\x12\x1d\n" +
 	"\n" +
 	"column_ids\x18\a \x03(\tR\tcolumnIds\x12@\n" +
 	"\x1ccolumn_configuration_version\x18\b \x01(\tR\x1acolumnConfigurationVersion\x12+\n" +
-	"\x04sort\x18\t \x03(\v2\x17.kmgr.v1.SortDescriptorR\x04sort\"\xda\x01\n" +
+	"\x04sort\x18\t \x03(\v2\x17.kmgr.v1.SortDescriptorR\x04sortJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\x0elabel_selectorR\x0efield_selector\"\xda\x01\n" +
 	"\x0fOpenViewRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x17\n" +
 	"\aview_id\x18\x02 \x01(\tR\x06viewId\x12\x1e\n" +

@@ -34,10 +34,26 @@ func tableObjectPolicy(projector *Projector) metav1.IncludeObjectPolicy {
 	}
 	for _, term := range projector.filter.Terms() {
 		switch term.Kind {
-		case viewfilter.Text, viewfilter.Namespace, viewfilter.Name, viewfilter.Label:
-			// Bare text reads projected cells, including server Table cells; the
-			// remaining structured terms are all present in metadata.
+		case viewfilter.Text, viewfilter.Namespace, viewfilter.Name, viewfilter.Label,
+			viewfilter.NativeLabel:
+			// Bare text reads projected cells, including server Table cells; these
+			// terms use metadata or those projected cells.
+		case viewfilter.NativeField:
+			// Metadata-only native field selectors are checked below.
+		case viewfilter.Field:
+			// A local field term is metadata-safe when its path is covered by
+			// PartialObjectMetadata; the path check below handles the rest.
 		default:
+			return metav1.IncludeObject
+		}
+	}
+	// PartialObjectMetadata retains the complete metadata object, so native
+	// field selectors restricted to metadata can still be checked locally
+	// without promoting a large Table stream to full objects. Kubernetes field
+	// selectors over spec/status (for example spec.nodeName) still require the
+	// raw representation.
+	for _, path := range projector.filter.FieldPaths() {
+		if !strings.HasPrefix(path, "metadata.") {
 			return metav1.IncludeObject
 		}
 	}

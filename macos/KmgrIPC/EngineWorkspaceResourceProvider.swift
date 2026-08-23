@@ -761,8 +761,6 @@ public struct EngineWorkspaceResourceProvider: WorkspaceResourceProviding {
         rpcRequest.spec.resource = resource
         rpcRequest.spec.namespaceScope.allNamespaces = request.allNamespaces
         rpcRequest.spec.namespaceScope.namespaces = request.namespaces
-        rpcRequest.spec.labelSelector = request.labelSelector
-        rpcRequest.spec.fieldSelector = request.fieldSelector
         rpcRequest.spec.filterExpression = request.filterExpression
         rpcRequest.spec.filterRevision = request.filterRevision
         rpcRequest.spec.columnIds = request.columnIDs
