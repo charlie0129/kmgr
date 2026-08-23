@@ -116,6 +116,141 @@ struct ObjectDetailDataDraftTests {
         #expect(try valueText(in: table, row: 0) == "draft alpha")
     }
 
+    @Test("Data text editor applies YAML and nested JSON highlighting without binary colors")
+    func dataValueSyntaxHighlighting() async throws {
+        let fixture = detailFixture(resource: "configmaps", secret: false)
+        let yaml = "kind: Deployment\nreplicas: 3\n"
+        let json = "[{\"name\":\"api\",\"nested\":{\"enabled\":true}}]"
+        let plain = "ordinary text"
+        let entries = [
+            ObjectDataEntry(
+                key: "config.yaml",
+                kind: .text,
+                value: Data(yaml.utf8),
+                byteSize: UInt64(yaml.utf8.count),
+                contentHash: Data(repeating: 1, count: 32)
+            ),
+            ObjectDataEntry(
+                key: "payload",
+                kind: .text,
+                value: Data(json.utf8),
+                byteSize: UInt64(json.utf8.count),
+                contentHash: Data(repeating: 2, count: 32)
+            ),
+            ObjectDataEntry(
+                key: "plain",
+                kind: .text,
+                value: Data(plain.utf8),
+                byteSize: UInt64(plain.utf8.count),
+                contentHash: Data(repeating: 3, count: 32)
+            ),
+            ObjectDataEntry(
+                key: "archive",
+                kind: .binary,
+                value: Data([0x00, 0xFF, 0x10]),
+                byteSize: 3,
+                contentHash: Data(repeating: 4, count: 32)
+            ),
+        ]
+        let data = ObjectData(
+            identity: fixture.identity,
+            resourceVersion: "rv-1",
+            entries: entries,
+            secret: false
+        )
+        let controller = ObjectDataViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: data)
+        )
+        let window = NSWindow(contentViewController: controller)
+        window.setContentSize(NSSize(width: 1_000, height: 640))
+        window.makeKeyAndOrderFront(nil)
+        controller.viewDidAppear()
+        defer {
+            controller.stop()
+            window.contentViewController = nil
+            window.close()
+        }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        try await waitForDataRows(table, count: entries.count)
+        controller.view.layoutSubtreeIfNeeded()
+
+        select(row: try row(forKey: "config.yaml", in: table), in: table, controller: controller)
+        let yamlKeyLocation = (editor.string as NSString).range(of: "kind").location
+        try await waitForCondition {
+            temporaryColor(in: editor, at: yamlKeyLocation) == .systemPurple
+        }
+
+        select(row: try row(forKey: "payload", in: table), in: table, controller: controller)
+        let jsonKeyLocation = (editor.string as NSString).range(of: "\"name\"").location
+        let jsonBooleanLocation = (editor.string as NSString).range(of: "true").location
+        try await waitForCondition {
+            temporaryColor(in: editor, at: jsonKeyLocation) == .systemPurple
+                && temporaryColor(in: editor, at: jsonBooleanLocation) == .systemOrange
+        }
+
+        select(row: try row(forKey: "plain", in: table), in: table, controller: controller)
+        let plainLocation = (editor.string as NSString).range(of: "ordinary").location
+        try await waitForCondition {
+            temporaryColor(in: editor, at: plainLocation) == nil
+        }
+
+        select(row: try row(forKey: "archive", in: table), in: table, controller: controller)
+        #expect(temporaryColor(in: editor, at: 0) == nil)
+        #expect(editor.string.contains("00 FF 10"))
+    }
+
+    @Test("Secret syntax colors exist only while decoded text is revealed")
+    func secretValueSyntaxHighlightingFollowsReveal() async throws {
+        let fixture = detailFixture(resource: "secrets", secret: true)
+        let json = "[{\"token\":\"decoded-secret\"}]"
+        let data = ObjectData(
+            identity: fixture.identity,
+            resourceVersion: "rv-1",
+            entries: [ObjectDataEntry(
+                key: "payload",
+                kind: .text,
+                value: Data(json.utf8),
+                byteSize: UInt64(json.utf8.count),
+                contentHash: Data(repeating: 1, count: 32)
+            )],
+            secret: true
+        )
+        let controller = ObjectDataViewController(
+            identity: fixture.identity,
+            provider: DraftObjectDetailProvider(detail: fixture.detail, data: data)
+        )
+        let window = NSWindow(contentViewController: controller)
+        window.setContentSize(NSSize(width: 900, height: 620))
+        window.makeKeyAndOrderFront(nil)
+        controller.viewDidAppear()
+        defer {
+            controller.stop()
+            window.contentViewController = nil
+            window.close()
+        }
+
+        let table = try dataKeysTable(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
+        let reveal = try #require(dataButtons(in: controller.view)
+            .first { $0.title == "Show decoded values" })
+        try await waitForDataRows(table, count: 1)
+        #expect(editor.string.contains("concealed"))
+        #expect(temporaryColor(in: editor, at: 0) == nil)
+
+        reveal.performClick(nil)
+        let keyLocation = (editor.string as NSString).range(of: "\"token\"").location
+        try await waitForCondition {
+            temporaryColor(in: editor, at: keyLocation) == .systemPurple
+        }
+
+        reveal.performClick(nil)
+        #expect(editor.string.contains("decoded-secret") == false)
+        #expect(temporaryColor(in: editor, at: 0) == nil)
+    }
+
     @Test("Value column safely labels binary bytes and truncates long text")
     func binaryAndTruncatedValueColumnPreviews() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
@@ -1626,6 +1761,18 @@ private func applyDataSearch(_ query: String, field: NSSearchField) {
 @MainActor
 private func dataButtons(in root: NSView) -> [NSButton] {
     draftDescendants(of: root).compactMap { $0 as? NSButton }
+}
+
+@MainActor
+private func temporaryColor(in textView: NSTextView, at location: Int) -> NSColor? {
+    guard location != NSNotFound, location >= 0,
+        location < (textView.string as NSString).length
+    else { return nil }
+    return textView.layoutManager?.temporaryAttribute(
+        .foregroundColor,
+        atCharacterIndex: location,
+        effectiveRange: nil
+    ) as? NSColor
 }
 
 @MainActor

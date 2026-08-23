@@ -28,7 +28,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
 
     private let scrollView: NSScrollView
     private let textView: YAMLTextView
-    private var syntaxHighlighter: YAMLSyntaxHighlighter?
+    private var syntaxHighlighter: SyntaxHighlighter?
     private let targetLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "Ready")
     private let byteCountLabel = NSTextField(labelWithString: "No bytes received")
@@ -371,7 +371,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
         ])
         window?.contentView = root
-        syntaxHighlighter = YAMLSyntaxHighlighter(textView: textView, scrollView: scrollView)
+        syntaxHighlighter = SyntaxHighlighter(textView: textView, scrollView: scrollView)
         updateEditingControls()
     }
 

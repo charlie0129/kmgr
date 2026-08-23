@@ -332,7 +332,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
         return textView
     }()
-    private var yamlSyntaxHighlighter: YAMLSyntaxHighlighter?
+    private var yamlSyntaxHighlighter: SyntaxHighlighter?
     private let yamlContainerView = NSView()
     private let secretYAMLEncodingNotice = NSTextField(labelWithString:
         "Secret data values in YAML use Kubernetes base64 encoding. Use Data to edit decoded values."
@@ -753,7 +753,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             ))
         }
         NSLayoutConstraint.activate(constraints)
-        yamlSyntaxHighlighter = YAMLSyntaxHighlighter(
+        yamlSyntaxHighlighter = SyntaxHighlighter(
             textView: yamlTextView,
             scrollView: yamlScrollView
         )

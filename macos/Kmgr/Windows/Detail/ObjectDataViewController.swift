@@ -53,6 +53,8 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private let searchResultLabel = NSTextField(labelWithString: "")
     private let valueTextView = NSTextView()
     private let valueScroll = NSScrollView()
+    private var valueSyntaxHighlighter: SyntaxHighlighter?
+    private var valueSyntaxKey: String?
     private let selectedKeyLabel = NSTextField(labelWithString: "No key selected")
     private let selectedKeyDetailsLabel = NSTextField(labelWithString: "")
     private let revealButton = NSButton(
@@ -215,6 +217,8 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         recoveryTask = nil
         cancelDataFileOperation()
         cancelValueDiffReview()
+        valueSyntaxHighlighter?.setMode(.none)
+        valueSyntaxKey = nil
         conflictController?.close()
         conflictController = nil
         searchMatches.removeAll(keepingCapacity: false)
@@ -373,6 +377,11 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             valueTextView,
             in: valueScroll,
             wrapsToViewport: true
+        )
+        valueSyntaxHighlighter = SyntaxHighlighter(
+            textView: valueTextView,
+            scrollView: valueScroll,
+            mode: .none
         )
 
         addKeyButton.target = self
@@ -780,6 +789,8 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         selectedCanEditText = false
         valueTextView.string = message
         valueTextView.undoManager?.removeAllActions()
+        valueSyntaxHighlighter?.setMode(.none)
+        valueSyntaxKey = nil
         updateSelectedKeyHeader()
     }
 
@@ -924,9 +935,17 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func displaySelectedData() {
-        guard let data = objectData, let key = selectedKey else { return }
+        guard let data = objectData, let key = selectedKey else {
+            valueSyntaxHighlighter?.setMode(.none)
+            valueSyntaxKey = nil
+            return
+        }
         let draftMetadata = drafts.metadata(for: key)
-        guard selectedEntry != nil || draftMetadata != nil else { return }
+        guard selectedEntry != nil || draftMetadata != nil else {
+            valueSyntaxHighlighter?.setMode(.none)
+            valueSyntaxKey = nil
+            return
+        }
         let wasInstalling = isInstallingState
         isInstallingState = true
         defer { isInstallingState = wasInstalling }
@@ -937,6 +956,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             valueTextView.string = "Secret value concealed · \(count.formatted()) bytes"
             selectedCanEditText = false
             valueTextView.undoManager?.removeAllActions()
+            updateValueSyntaxHighlighting()
             updateControls()
             return
         }
@@ -956,8 +976,26 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             selectedCanEditText = false
         }
         valueTextView.undoManager?.removeAllActions()
+        updateValueSyntaxHighlighting()
         updateControls()
         if selectedEntry == nil { showMissingDraftStatus() }
+    }
+
+    private func updateValueSyntaxHighlighting() {
+        guard let valueSyntaxHighlighter else { return }
+        let source: NSString = valueTextView.textStorage?.mutableString
+            ?? (valueTextView.string as NSString)
+        let retainedMode = valueSyntaxKey == selectedKey
+            ? valueSyntaxHighlighter.mode
+            : .none
+        let mode = DataSyntaxHighlightingModeDetector.mode(
+            forKey: selectedKey ?? "",
+            isTextValue: selectedCanEditText,
+            source: source,
+            retaining: retainedMode
+        )
+        valueSyntaxHighlighter.setMode(mode)
+        valueSyntaxKey = selectedCanEditText ? selectedKey : nil
     }
 
     private func valuePreview(for row: KeyRow) -> ValueCellPresentation? {
@@ -1115,6 +1153,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         }
         let editedKey = selectedKey
         captureSelectedDraft()
+        updateValueSyntaxHighlighting()
         refreshRowsAfterDraftChange(for: editedKey)
     }
 
@@ -1201,6 +1240,8 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             valueTextView.string = ""
             valueTextView.undoManager?.removeAllActions()
         }
+        valueSyntaxHighlighter?.setMode(.none)
+        valueSyntaxKey = nil
     }
 
     private func captureSelectedDraft() {

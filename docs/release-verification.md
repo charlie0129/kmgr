@@ -94,10 +94,11 @@ gates above:
   user-authorized context.
 - Interactively validating logs, exec, and resilient port-forwards against real
   Pods and Services.
-- Validating YAML, searchable ConfigMap/Secret key-value editing and its
-  decoded value-only save review, scale, restart, metadata, and delete
-  mutations. These require separate authorization for disposable objects and
-  are not implied by permission to perform read-only checks.
+- Validating YAML, searchable ConfigMap/Secret key-value editing, bounded
+  YAML/JSON value highlighting, and the decoded value-only save review, plus
+  scale, restart, metadata, and delete mutations. These require separate
+  authorization for disposable objects and are not implied by permission to
+  perform read-only checks.
 - Recording Instruments and Go CPU/heap profiles for main-thread latency,
   sustained stream throughput, memory plateaus, hidden-window rendering, and
   idle CPU.

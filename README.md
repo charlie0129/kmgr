@@ -105,10 +105,11 @@ app-wide Port Forwards window.
   material JSON Patch before the semantic diff is shown. UID/resourceVersion
   test operations prevent retargeting or stale writes, unchanged unknown fields
   are preserved, and force field ownership is unsupported.
-- YAML viewing and editing use lightweight visible-range syntax colors for
-  common keys, strings, numbers, booleans, nulls, and comments. Highlighting
-  reads TextKit's existing backing store and caps each refresh independently of
-  total document size.
+- YAML viewing and editing use lightweight visible-range syntax colors. The
+  decoded Data value editor applies the same YAML colors to `.yml`/`.yaml`
+  keys, and best-effort JSON colors to object or array values, including nested
+  structures. Highlighting reads TextKit's existing backing store and caps
+  each refresh independently of total document size.
 - ConfigMap and Secret keys support text and raw binary values. Data search
   matches complete keys, text values, and unsaved drafts rather than only the
   bounded row preview. Save Key first opens a searchable, value-only review:
