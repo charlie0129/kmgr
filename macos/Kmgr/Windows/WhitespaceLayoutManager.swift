@@ -97,9 +97,7 @@ final class WhitespaceLayoutManager: NSLayoutManager {
             case 0x0A:
                 drawLineBreakGuide(
                     in: guidePath,
-                    x: x,
-                    lineRect: lineRect,
-                    origin: origin,
+                    startX: x,
                     centerY: centerY,
                     lineHeight: lineHeight
                 )
@@ -113,9 +111,7 @@ final class WhitespaceLayoutManager: NSLayoutManager {
                 }
                 drawLineBreakGuide(
                     in: guidePath,
-                    x: x,
-                    lineRect: lineRect,
-                    origin: origin,
+                    startX: x,
                     centerY: centerY,
                     lineHeight: lineHeight
                 )
@@ -141,8 +137,12 @@ final class WhitespaceLayoutManager: NSLayoutManager {
             }
         }
 
-        let markerColor = NSColor.tertiaryLabelColor.withAlphaComponent(0.78)
-        markerColor.set()
+        // Semantic label colors already carry their intended system alpha.
+        // Replacing that alpha would turn this muted color nearly black.
+        let markerColor = NSColor.tertiaryLabelColor
+        NSGraphicsContext.saveGraphicsState()
+        markerColor.setFill()
+        markerColor.setStroke()
         dotPath.fill()
         guidePath.stroke()
         for (picture, point, font) in controlPictures {
@@ -154,6 +154,7 @@ final class WhitespaceLayoutManager: NSLayoutManager {
                 ]
             )
         }
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     private func markerEndX(
@@ -208,26 +209,25 @@ final class WhitespaceLayoutManager: NSLayoutManager {
 
     private func drawLineBreakGuide(
         in path: NSBezierPath,
-        x: CGFloat,
-        lineRect: NSRect,
-        origin: NSPoint,
+        startX: CGFloat,
         centerY: CGFloat,
         lineHeight: CGFloat
     ) {
-        let leftBound = origin.x + lineRect.minX + 1
-        let stemX = x - 1
-        let arrowTip = max(leftBound, stemX - min(6.5, lineHeight * 0.48))
+        // The newline glyph starts immediately after the final visible glyph.
+        // Keep the complete marker on its right so the arrow cannot cover the
+        // final character, even on tightly kerned or proportionally set text.
+        let arrowTipX = startX + max(1.5, lineHeight * 0.1)
+        let stemX = arrowTipX + min(6.5, lineHeight * 0.48)
         let shaftY = centerY + 1
         let bottomY = centerY - min(3.5, max(2, lineHeight * 0.26))
         let arrowHead = min(2.2, max(1.5, lineHeight * 0.18))
 
-        guard arrowTip + arrowHead < stemX else { return }
         path.move(to: NSPoint(x: stemX, y: bottomY))
         path.line(to: NSPoint(x: stemX, y: shaftY))
-        path.line(to: NSPoint(x: arrowTip + arrowHead, y: shaftY))
-        path.move(to: NSPoint(x: arrowTip + arrowHead, y: shaftY))
-        path.line(to: NSPoint(x: arrowTip + arrowHead * 2, y: shaftY + arrowHead))
-        path.move(to: NSPoint(x: arrowTip + arrowHead, y: shaftY))
-        path.line(to: NSPoint(x: arrowTip + arrowHead * 2, y: shaftY - arrowHead))
+        path.line(to: NSPoint(x: arrowTipX, y: shaftY))
+        path.move(to: NSPoint(x: arrowTipX, y: shaftY))
+        path.line(to: NSPoint(x: arrowTipX + arrowHead, y: shaftY + arrowHead))
+        path.move(to: NSPoint(x: arrowTipX, y: shaftY))
+        path.line(to: NSPoint(x: arrowTipX + arrowHead, y: shaftY - arrowHead))
     }
 }

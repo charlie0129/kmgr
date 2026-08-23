@@ -204,42 +204,98 @@ struct SyntaxHighlighterTests {
             in: textContainer
         )
 
-        func render() throws -> Data {
-            let image = try #require(NSBitmapImageRep(
-                bitmapDataPlanes: nil,
-                pixelsWide: Int(textView.bounds.width),
-                pixelsHigh: Int(textView.bounds.height),
-                bitsPerSample: 8,
-                samplesPerPixel: 4,
-                hasAlpha: true,
-                isPlanar: false,
-                colorSpaceName: .deviceRGB,
-                bitmapFormat: [],
-                bytesPerRow: 0,
-                bitsPerPixel: 0
-            ))
-            let context = try #require(NSGraphicsContext(bitmapImageRep: image))
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = context
-            NSColor.white.setFill()
-            NSBezierPath(rect: textView.bounds).fill()
-            layoutManager.drawGlyphs(forGlyphRange: glyphRange, at: textView.textContainerOrigin)
-            context.flushGraphics()
-            NSGraphicsContext.restoreGraphicsState()
-            let byteCount = image.bytesPerRow * image.pixelsHigh
-            let bytes = try #require(image.bitmapData).withMemoryRebound(
-                to: UInt8.self,
-                capacity: byteCount
-            ) { Data(bytes: $0, count: byteCount) }
-            return bytes
-        }
-
-        let enabled = try render()
+        let enabled = try bitmapBytes(renderGlyphs(
+            in: textView,
+            layoutManager: layoutManager,
+            glyphRange: glyphRange
+        ))
         highlighter.setWhitespaceVisualization(false)
-        let disabled = try render()
+        let disabled = try bitmapBytes(renderGlyphs(
+            in: textView,
+            layoutManager: layoutManager,
+            glyphRange: glyphRange
+        ))
 
         #expect(enabled != disabled)
         #expect(textView.string == source)
+    }
+
+    @Test("newline markers are muted and stay clear of the final glyph")
+    func newlineMarkerStyle() throws {
+        let scrollView = NSTextView.scrollablePlainDocumentContentTextView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 120, height: 40)
+        let textView = try #require(scrollView.documentView as? NSTextView)
+        textView.font = .monospacedSystemFont(ofSize: 20, weight: .regular)
+        textView.string = "M\n"
+        TextDocumentGeometry.configure(
+            textView,
+            in: scrollView,
+            wrapsToViewport: true,
+            fallbackSize: scrollView.frame.size
+        )
+        let highlighter = SyntaxHighlighter(
+            textView: textView,
+            scrollView: scrollView,
+            mode: .yaml
+        )
+        let layoutManager = try #require(textView.layoutManager)
+        let textContainer = try #require(textView.textContainer)
+        layoutManager.ensureLayout(for: textContainer)
+        let glyphRange = layoutManager.glyphRange(for: textContainer)
+        let newlineRange = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: 1, length: 1),
+            actualCharacterRange: nil
+        )
+        let newlineGlyph = try #require(newlineRange.length == 1 ? newlineRange.location : nil)
+        let lineRect = layoutManager.lineFragmentRect(
+            forGlyphAt: newlineGlyph,
+            effectiveRange: nil,
+            withoutAdditionalLayout: true
+        )
+        let newlineLocation = layoutManager.location(forGlyphAt: newlineGlyph)
+        let newlineX = textView.textContainerOrigin.x + lineRect.minX + newlineLocation.x
+
+        let appearance = try #require(NSAppearance(named: .aqua))
+        let enabled = try renderGlyphs(
+            in: textView,
+            layoutManager: layoutManager,
+            glyphRange: glyphRange,
+            appearance: appearance
+        )
+        highlighter.setWhitespaceVisualization(false)
+        let disabled = try renderGlyphs(
+            in: textView,
+            layoutManager: layoutManager,
+            glyphRange: glyphRange,
+            appearance: appearance
+        )
+        var changedPixelCount = 0
+        var minimumChangedX = Int.max
+        var darkestMarkerLuminance = CGFloat(1)
+
+        for y in 0..<enabled.pixelsHigh {
+            for x in 0..<enabled.pixelsWide {
+                guard let enabledColor = enabled.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                    let disabledColor = disabled.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
+                else { continue }
+                let difference = max(
+                    abs(enabledColor.redComponent - disabledColor.redComponent),
+                    abs(enabledColor.greenComponent - disabledColor.greenComponent),
+                    abs(enabledColor.blueComponent - disabledColor.blueComponent)
+                )
+                guard difference > 0.01 else { continue }
+                changedPixelCount += 1
+                minimumChangedX = min(minimumChangedX, x)
+                let luminance = enabledColor.redComponent * 0.2126
+                    + enabledColor.greenComponent * 0.7152
+                    + enabledColor.blueComponent * 0.0722
+                darkestMarkerLuminance = min(darkestMarkerLuminance, luminance)
+            }
+        }
+
+        #expect(changedPixelCount > 0)
+        #expect(CGFloat(minimumChangedX) >= floor(newlineX))
+        #expect(darkestMarkerLuminance > 0.55)
     }
 
     @Test("large whitespace rendering stays within the visible range budget")
@@ -446,6 +502,55 @@ struct SyntaxHighlighterTests {
                 "A bounded YAML lexer pass exceeded one 60 Hz display frame."
             )
         }
+    }
+
+    private func renderGlyphs(
+        in textView: NSTextView,
+        layoutManager: NSLayoutManager,
+        glyphRange: NSRange,
+        appearance: NSAppearance? = nil
+    ) throws -> NSBitmapImageRep {
+        let image = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(textView.bounds.width),
+            pixelsHigh: Int(textView.bounds.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        let context = try #require(NSGraphicsContext(bitmapImageRep: image))
+        let draw = {
+            NSColor.white.setFill()
+            NSBezierPath(rect: textView.bounds).fill()
+            layoutManager.drawGlyphs(
+                forGlyphRange: glyphRange,
+                at: textView.textContainerOrigin
+            )
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        if let appearance {
+            appearance.performAsCurrentDrawingAppearance(draw)
+        } else {
+            draw()
+        }
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        return image
+    }
+
+    private func bitmapBytes(_ image: NSBitmapImageRep) throws -> Data {
+        let byteCount = image.bytesPerRow * image.pixelsHigh
+        return try #require(image.bitmapData).withMemoryRebound(
+            to: UInt8.self,
+            capacity: byteCount
+        ) { Data(bytes: $0, count: byteCount) }
     }
 
     private func texts(
