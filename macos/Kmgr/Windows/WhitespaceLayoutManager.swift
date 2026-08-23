@@ -5,15 +5,21 @@ import AppKit
 /// storage, so they cannot affect editing, selection, copy/paste, undo, or
 /// accessibility.
 final class WhitespaceLayoutManager: NSLayoutManager {
+    /// When non-nil, only whitespace characters whose UTF-16 positions fall
+    /// inside one of these ranges receive a marker. An empty array therefore
+    /// suppresses all markers, while nil preserves the ordinary editor-wide
+    /// visualization used by YAML and key-value editors.
+    var whitespaceVisualizationCharacterRanges: [NSRange]? {
+        didSet {
+            guard oldValue != whitespaceVisualizationCharacterRanges else { return }
+            invalidateWhitespaceVisualization()
+        }
+    }
+
     var whitespaceVisualizationEnabled = false {
         didSet {
             guard oldValue != whitespaceVisualizationEnabled else { return }
-            guard let textStorage else { return }
-            // This marks presentation dirty without generating glyphs or
-            // scanning the document. Actual drawing remains glyph-range bound.
-            invalidateDisplay(
-                forCharacterRange: NSRange(location: 0, length: textStorage.length)
-            )
+            invalidateWhitespaceVisualization()
         }
     }
 
@@ -40,6 +46,7 @@ final class WhitespaceLayoutManager: NSLayoutManager {
         let dotPath = NSBezierPath()
         let guidePath = NSBezierPath()
         var controlPictures: [(String, NSPoint, NSFont)] = []
+        let allowedRanges = whitespaceVisualizationCharacterRanges
         guidePath.lineWidth = 0.75
         guidePath.lineCapStyle = .round
         guidePath.lineJoinStyle = .round
@@ -49,6 +56,10 @@ final class WhitespaceLayoutManager: NSLayoutManager {
             guard characterIndex < documentLength else { continue }
 
             let character = source.character(at: characterIndex)
+            guard isWhitespaceMarkerAllowed(
+                atCharacterIndex: characterIndex,
+                in: allowedRanges
+            ) else { continue }
             guard character == 0x20
                 || character == 0x09
                 || character == 0x0A
@@ -155,6 +166,35 @@ final class WhitespaceLayoutManager: NSLayoutManager {
             )
         }
         NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func invalidateWhitespaceVisualization() {
+        guard let textStorage else { return }
+        // This marks presentation dirty without generating glyphs or scanning
+        // the document. Actual drawing remains glyph-range bound.
+        invalidateDisplay(
+            forCharacterRange: NSRange(location: 0, length: textStorage.length)
+        )
+    }
+
+    private func isWhitespaceMarkerAllowed(
+        atCharacterIndex characterIndex: Int,
+        in ranges: [NSRange]?
+    ) -> Bool {
+        guard let ranges else { return true }
+        var lowerBound = 0
+        var upperBound = ranges.count
+        while lowerBound < upperBound {
+            let middle = (lowerBound + upperBound) / 2
+            let range = ranges[middle]
+            if NSMaxRange(range) <= characterIndex {
+                lowerBound = middle + 1
+            } else {
+                upperBound = middle
+            }
+        }
+        guard lowerBound < ranges.count else { return false }
+        return NSLocationInRange(characterIndex, ranges[lowerBound])
     }
 
     private func markerEndX(

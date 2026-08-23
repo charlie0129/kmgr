@@ -10,9 +10,20 @@ enum DiffTextLineRole: Hashable, Sendable {
     case notice
 }
 
+enum DiffTextWhitespaceScope: Hashable, Sendable {
+    case none
+    /// Render markers across the complete line content. The line separator
+    /// remains excluded.
+    case content
+    /// Render markers in the source content after the unified-diff prefix.
+    /// The line separator itself is intentionally excluded.
+    case contentAfterDiffPrefix
+}
+
 struct DiffTextLine: Hashable, Sendable {
     var text: String
     var role: DiffTextLineRole
+    var whitespaceScope: DiffTextWhitespaceScope = .none
 }
 
 /// Suspends a diff review's async save flow while AppKit presents a regular
@@ -108,6 +119,11 @@ final class DiffTextDocument {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.textContainerInset = NSSize(width: 10, height: 10)
 
+        TextDocumentGeometry.configureWhitespaceVisualization(
+            textView,
+            enabled: true
+        )
+
         scrollView.identifier = .init("\(identifierPrefix)-scroll")
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
@@ -120,6 +136,7 @@ final class DiffTextDocument {
             wrapsToViewport: false
         )
         textView.textStorage?.setAttributedString(Self.attributedText(for: lines))
+        updateWhitespaceRanges(for: lines)
         TextDocumentGeometry.update(
             textView,
             in: scrollView,
@@ -147,10 +164,12 @@ final class DiffTextDocument {
 
     func clear() {
         textView.textStorage?.setAttributedString(NSAttributedString())
+        updateWhitespaceRanges(for: [])
     }
 
     func replace(lines: [DiffTextLine]) {
         textView.textStorage?.setAttributedString(Self.attributedText(for: lines))
+        updateWhitespaceRanges(for: lines)
         TextDocumentGeometry.update(
             textView,
             in: scrollView,
@@ -169,6 +188,41 @@ final class DiffTextDocument {
             }
         }
         return result
+    }
+
+    private func updateWhitespaceRanges(for lines: [DiffTextLine]) {
+        let ranges = Self.whitespaceRanges(for: lines)
+        (textView.layoutManager as? WhitespaceLayoutManager)?
+            .whitespaceVisualizationCharacterRanges = ranges
+    }
+
+    private static func whitespaceRanges(for lines: [DiffTextLine]) -> [NSRange] {
+        var ranges: [NSRange] = []
+        ranges.reserveCapacity(lines.count)
+        var location = 0
+        for (index, line) in lines.enumerated() {
+            let prefixLength: Int
+            switch line.whitespaceScope {
+            case .none:
+                prefixLength = -1
+            case .content:
+                prefixLength = 0
+            case .contentAfterDiffPrefix:
+                prefixLength = 1
+            }
+            if prefixLength >= 0, line.text.utf16.count > prefixLength {
+                // Exclude the synthetic newline joining this line to the next
+                // one. Unified-diff lines additionally exclude their leading
+                // context/addition/removal prefix.
+                ranges.append(NSRange(
+                    location: location + prefixLength,
+                    length: line.text.utf16.count - prefixLength
+                ))
+            }
+            location += line.text.utf16.count
+            if index != lines.indices.last { location += 1 }
+        }
+        return ranges
     }
 
     private static func attributes(

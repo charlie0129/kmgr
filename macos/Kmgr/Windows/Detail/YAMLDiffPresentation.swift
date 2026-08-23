@@ -105,7 +105,17 @@ struct YAMLDiffPresentation {
             } else {
                 role = .context
             }
-            return Line(text: line, role: role)
+            let whitespaceScope: DiffTextWhitespaceScope = switch role {
+            case .context, .addition, .removal:
+                .contentAfterDiffPrefix
+            default:
+                .none
+            }
+            return Line(
+                text: line,
+                role: role,
+                whitespaceScope: whitespaceScope
+            )
         }
     }
 
@@ -189,7 +199,13 @@ struct YAMLDiffPresentation {
                 role: role
             )]
             let bounded = boundedTextLines(value)
-            result.append(contentsOf: bounded.lines.map { Line(text: $0, role: role) })
+            result.append(contentsOf: bounded.lines.map {
+                Line(
+                    text: $0,
+                    role: role,
+                    whitespaceScope: .content
+                )
+            })
             if bounded.omittedByteCount > 0 {
                 result.append(Line(
                     text: "… \(byteCountText(bounded.omittedByteCount)) omitted "

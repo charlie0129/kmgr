@@ -159,6 +159,23 @@ struct YAMLDiffConfirmationWindowControllerTests {
         #expect(textView.isRichText)
         #expect(textView.usesFindBar)
         expectPreciseScrollingLayout(textView)
+        let whitespaceLayout = try #require(textView.layoutManager as? WhitespaceLayoutManager)
+        #expect(whitespaceLayout.whitespaceVisualizationEnabled)
+        let whitespaceRanges = try #require(
+            whitespaceLayout.whitespaceVisualizationCharacterRanges
+        )
+        let diffText = textView.string as NSString
+        let removalLine = diffText.range(of: "-mode: safe")
+        let fileHeader = diffText.range(of: "--- server")
+        let firstNewline = diffText.range(of: "\n")
+        #expect(whitespaceRanges.contains {
+            $0.location == removalLine.location + 1
+                && $0.length == removalLine.length - 1
+        })
+        #expect(whitespaceRanges.allSatisfy {
+            !NSLocationInRange(fileHeader.location, $0)
+                && !NSLocationInRange(firstNewline.location, $0)
+        })
         #expect(textView.isVerticallyResizable)
         #expect(textView.isHorizontallyResizable)
         #expect(textView.autoresizingMask.contains(.height))

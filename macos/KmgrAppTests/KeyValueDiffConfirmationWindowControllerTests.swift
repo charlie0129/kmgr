@@ -237,6 +237,34 @@ struct KeyValueDiffConfirmationWindowControllerTests {
         #expect(!textView.isEditable)
         #expect(textView.usesFindBar)
         expectPreciseScrollingLayout(textView)
+        let whitespaceLayout = try #require(textView.layoutManager as? WhitespaceLayoutManager)
+        #expect(whitespaceLayout.whitespaceVisualizationEnabled)
+        let whitespaceRanges = try #require(
+            whitespaceLayout.whitespaceVisualizationCharacterRanges
+        )
+        let diffText = textView.string as NSString
+        let removalLine = diffText.range(of: "-old-secret")
+        let removalNewline = diffText.range(
+            of: "\n",
+            options: [],
+            range: NSRange(
+                location: NSMaxRange(removalLine),
+                length: diffText.length - NSMaxRange(removalLine)
+            )
+        )
+        #expect(whitespaceRanges.contains {
+            $0.location == removalLine.location + 1
+                && $0.length == removalLine.length - 1
+        })
+        #expect(whitespaceRanges.allSatisfy {
+            !NSLocationInRange(removalLine.location, $0)
+        })
+        #expect(whitespaceRanges.allSatisfy {
+            removalNewline.location == NSNotFound || !NSLocationInRange(
+                removalNewline.location,
+                $0
+            )
+        })
         #expect(textView.isVerticallyResizable)
         #expect(textView.isHorizontallyResizable)
         #expect(textView.autoresizingMask.contains(.height))

@@ -159,7 +159,11 @@ struct KeyValueDiffPresentation: Sendable {
         var utf8ByteCount = 0
         var truncated = false
 
-        mutating func append(_ text: String, role: DiffTextLineRole) -> Bool {
+        mutating func append(
+            _ text: String,
+            role: DiffTextLineRole,
+            whitespaceScope: DiffTextWhitespaceScope = .none
+        ) -> Bool {
             guard !truncated else { return false }
             let separatorBytes = lines.isEmpty ? 0 : 1
             let requiredBytes = separatorBytes + text.utf8.count
@@ -171,7 +175,11 @@ struct KeyValueDiffPresentation: Sendable {
                 truncated = true
                 return false
             }
-            lines.append(DiffTextLine(text: text, role: role))
+            lines.append(DiffTextLine(
+                text: text,
+                role: role,
+                whitespaceScope: whitespaceScope
+            ))
             utf8ByteCount += requiredBytes
             return true
         }
@@ -278,7 +286,11 @@ struct KeyValueDiffPresentation: Sendable {
                     marker = "+"
                     role = .addition
                 }
-                guard builder.append(marker + event.line.content, role: role) else {
+                guard builder.append(
+                    marker + event.line.content,
+                    role: role,
+                    whitespaceScope: .contentAfterDiffPrefix
+                ) else {
                     break hunkLoop
                 }
                 if !event.line.synthetic, !event.line.hasNewline,
@@ -411,8 +423,16 @@ struct KeyValueDiffPresentation: Sendable {
             DiffTextLine(text: "--- saved value", role: .fileHeader),
             DiffTextLine(text: "+++ edited value", role: .fileHeader),
             DiffTextLine(text: "@@ bounded changed text region @@", role: .hunkHeader),
-            DiffTextLine(text: "-" + visibleExcerpt(beforeExcerpt.text), role: .removal),
-            DiffTextLine(text: "+" + visibleExcerpt(afterExcerpt.text), role: .addition),
+            DiffTextLine(
+                text: "-" + visibleExcerpt(beforeExcerpt.text),
+                role: .removal,
+                whitespaceScope: .contentAfterDiffPrefix
+            ),
+            DiffTextLine(
+                text: "+" + visibleExcerpt(afterExcerpt.text),
+                role: .addition,
+                whitespaceScope: .contentAfterDiffPrefix
+            ),
             DiffTextLine(
                 text: "Large or highly fragmented value; showing bounded context around the changed region.",
                 role: .notice

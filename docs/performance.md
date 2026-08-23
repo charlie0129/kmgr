@@ -179,6 +179,10 @@ attributes, renders whitespace through a visible-range TextKit layout-manager
 overlay, and does not place syntax colors or whitespace markers in the text
 storage.
 
+The shared `DiffTextDocument` uses the same visible-range overlay for bounded
+text portions of YAML and key-value review diffs. Its ranges exclude diff
+prefixes, synthetic line separators, headers, notices, and binary/hex rows.
+
 Run the Release diagnostic and opt-in one-frame lexer/apply budget with:
 
 ```sh
