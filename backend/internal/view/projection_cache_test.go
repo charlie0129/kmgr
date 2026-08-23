@@ -81,7 +81,7 @@ func TestProjectionCacheKeyMissesOnPresentationSemantics(t *testing.T) {
 		{name: "column order", mutate: func(spec *ProjectionSpec) {
 			spec.ColumnIDs[0], spec.ColumnIDs[1] = spec.ColumnIDs[1], spec.ColumnIDs[0]
 		}},
-		{name: "filter", mutate: func(spec *ProjectionSpec) { spec.FilterExpression = `name contains "worker"` }},
+		{name: "filter", mutate: func(spec *ProjectionSpec) { spec.FilterExpression = `name:worker` }},
 		{name: "sort column", mutate: func(spec *ProjectionSpec) { spec.Sort[0].ColumnID = "name" }},
 		{name: "sort direction", mutate: func(spec *ProjectionSpec) { spec.Sort[0].Descending = false }},
 		{name: "sort null placement", mutate: func(spec *ProjectionSpec) { spec.Sort[0].NullsFirst = true }},
@@ -273,7 +273,7 @@ func projectionCacheTestSpec(t *testing.T) ProjectionSpec {
 		},
 		NamespaceScope:   NamespaceScope{Namespaces: []string{"team-a", "team-b"}},
 		ColumnIDs:        []string{"name", "custom-a", "custom-b", "native-a", "native-b"},
-		FilterExpression: `name contains "api"`,
+		FilterExpression: `name:api`,
 		Sort: []SortDescriptor{
 			{ColumnID: "custom-a", Descending: true},
 			{ColumnID: "name", NullsFirst: true},

@@ -12,7 +12,7 @@ import Testing
             contextName: "production",
             gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
             namespaceScope: .namespaces(["api", "workers"]),
-            filter: "status == 'Ready'",
+            filter: "status:Ready",
             sort: [SortDescriptorState(columnID: "restarts", ascending: false)],
             isSidebarVisible: false,
             scrollAnchor: ScrollAnchor(
@@ -49,7 +49,7 @@ import Testing
     var record = ClusterWindowRestorationRecord(id: "window", contextName: "local")
 
     try store.upsert(record)
-    record.state.filter = "name contains 'api'"
+    record.state.filter = "name:api"
     try store.upsert(record)
     #expect(store.windows == [record])
 
@@ -317,7 +317,7 @@ import Testing
         id: "window",
         state: ClusterWindowRestorationState(
             contextName: "production",
-            filter: "metadata.name == 'safe-name'"
+            filter: "fieldSelector:\"metadata.name=safe-name\""
         )
     ))
 
