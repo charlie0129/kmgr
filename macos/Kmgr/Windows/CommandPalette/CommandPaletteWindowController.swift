@@ -94,7 +94,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
                 case .delete: "trash"
                 case .scale: "arrow.up.left.and.arrow.down.right"
                 case .restart: "arrow.clockwise"
-                case .editMetadata: "tag"
+                case .editLabels, .editAnnotations: "tag"
                 case .copyName, .copyNamespacedName, .copyReference: "doc.on.doc"
                 }
             case .result(.resource): "tablecells"

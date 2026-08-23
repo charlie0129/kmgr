@@ -135,6 +135,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var nodeShellConfigurationController: NodeShellConfigurationWindowController?
     private var deleteResourcesController: DeleteResourcesWindowController?
     private var resourceMutationController: ResourceMutationWindowController?
+    private var metadataEditorController: ResourceMetadataEditorWindowController?
     private var yamlSnapshotWindowControllers: [ResourceUID: YAMLSnapshotWindowController] = [:]
     private var didStartWorkspace = false
     private var isClosing = false
@@ -297,6 +298,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onMutate = { [weak self] identity, mutation in
             self?.showResourceMutation(identity, mutation: mutation)
         }
+        workspaceController.onEditMetadata = { [weak self] identity, kind, key in
+            self?.showMetadataEditor(identity, kind: kind, initialKey: key)
+        }
         workspaceController.onRestorationChanged = { [weak self] state in
             guard let self, !isClosing else { return }
             self.restoration.state = state
@@ -393,11 +397,13 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         nodeShellConfigurationController?.close()
         deleteResourcesController?.close()
         resourceMutationController?.close()
+        metadataEditorController?.dismissForEngineRecovery()
         portForwardConfigurationController = nil
         execConfigurationController = nil
         nodeShellConfigurationController = nil
         deleteResourcesController = nil
         resourceMutationController = nil
+        metadataEditorController = nil
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -776,7 +782,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         _ identity: ResourceIdentity,
         mutation: ResourceMutationWindowController.Mutation
     ) {
-        guard let window, resourceMutationController == nil else { NSSound.beep(); return }
+        guard let window, resourceMutationController == nil,
+            metadataEditorController == nil
+        else { NSSound.beep(); return }
         let controller = ResourceMutationWindowController(
             session: session,
             identity: identity,
@@ -790,6 +798,36 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             self?.resourceMutationController = nil
         }
         resourceMutationController = controller
+        controller.beginSheet(for: window)
+    }
+
+    private func showMetadataEditor(
+        _ identity: ResourceIdentity,
+        kind: ResourceMetadataKind,
+        initialKey: String?
+    ) {
+        guard let window, isAuthenticated,
+            identity.clusterSessionID == session.sessionID,
+            metadataEditorController == nil,
+            resourceMutationController == nil
+        else { NSSound.beep(); return }
+        let controller = ResourceMetadataEditorWindowController(
+            session: session,
+            identity: identity,
+            kind: kind,
+            initialKey: initialKey,
+            detailProvider: objectDetailProvider,
+            operationProvider: operationProvider,
+            tableLayoutStore: tableLayoutStore
+        )
+        controller.onSaved = { [weak workspaceController] in
+            workspaceController?.refreshDetailAfterMetadataMutation(identity)
+        }
+        controller.onDismiss = { [weak self, weak controller] in
+            guard self?.metadataEditorController === controller else { return }
+            self?.metadataEditorController = nil
+        }
+        metadataEditorController = controller
         controller.beginSheet(for: window)
     }
 
@@ -837,7 +875,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func deleteResourceSelection(_ sender: Any?) { workspaceController.deleteResourceSelection(sender) }
     @objc func scaleResourceSelection(_ sender: Any?) { workspaceController.scaleResourceSelection(sender) }
     @objc func restartResourceSelection(_ sender: Any?) { workspaceController.restartResourceSelection(sender) }
-    @objc func editResourceMetadata(_ sender: Any?) { workspaceController.editResourceMetadata(sender) }
+    @objc func editResourceLabels(_ sender: Any?) { workspaceController.editResourceLabels(sender) }
+    @objc func editResourceAnnotations(_ sender: Any?) {
+        workspaceController.editResourceAnnotations(sender)
+    }
     @objc func copyResourceCell(_ sender: Any?) { workspaceController.copyResourceCell(sender) }
     @objc func copyResourceName(_ sender: Any?) { workspaceController.copyResourceName(sender) }
     @objc func copyResourceNamespacedName(_ sender: Any?) {
@@ -874,7 +915,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(deleteResourceSelection(_:)): command = .delete
         case #selector(scaleResourceSelection(_:)): command = .scale
         case #selector(restartResourceSelection(_:)): command = .restart
-        case #selector(editResourceMetadata(_:)): command = .editMetadata
+        case #selector(editResourceLabels(_:)): command = .editLabels
+        case #selector(editResourceAnnotations(_:)): command = .editAnnotations
         case #selector(copyResourceName(_:)): command = .copyName
         case #selector(copyResourceNamespacedName(_:)): command = .copyNamespacedName
         case #selector(copyResourceReference(_:)): command = .copyReference
@@ -957,6 +999,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     var onConfigureNodeShell: ((NodeShellTarget) -> Void)?
     var onDelete: ((DeleteResourcesRequest) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
+    var onEditMetadata: ((ResourceIdentity, ResourceMetadataKind, String?) -> Void)?
     var onRestorationChanged: ((ClusterWindowRestorationState) -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
 
@@ -967,8 +1010,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         if let podContainerController {
             return podContainerController.contextualShortcutSnapshot
         }
-        if detailController != nil {
-            return ContextualShortcutCatalog.objectDetails
+        if let detailController {
+            return detailController.contextualShortcutSnapshot
         }
         return contentController.contextualShortcutSnapshot
     }
@@ -1113,6 +1156,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onMutate = { [weak self] identity, mutation in
             self?.onMutate?(identity, mutation)
+        }
+        contentController.onEditMetadata = { [weak self] identity, kind in
+            self?.onEditMetadata?(identity, kind, nil)
         }
         contentController.onRestorationChanged = { [weak self] in
             self?.checkpointRestoration()
@@ -1835,7 +1881,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func deleteResourceSelection(_ sender: Any?) { contentController.performCommand(.delete) }
     @objc func scaleResourceSelection(_ sender: Any?) { contentController.performCommand(.scale) }
     @objc func restartResourceSelection(_ sender: Any?) { contentController.performCommand(.restart) }
-    @objc func editResourceMetadata(_ sender: Any?) { contentController.performCommand(.editMetadata) }
+    @objc func editResourceLabels(_ sender: Any?) { contentController.performCommand(.editLabels) }
+    @objc func editResourceAnnotations(_ sender: Any?) {
+        contentController.performCommand(.editAnnotations)
+    }
     @objc func copyResourceCell(_ sender: Any?) {
         guard canCopyResourceCell else {
             NSSound.beep()
@@ -2280,10 +2329,20 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             tableLayoutStore: tableLayoutStore
         )
         controller.onBack = { [weak self] in self?.goBack() }
+        controller.onEditMetadata = { [weak self] identity, kind, key in
+            self?.onEditMetadata?(identity, kind, key)
+        }
+        controller.onContextualShortcutsChanged = { [weak self] in
+            self?.onContextualShortcutsChanged?()
+        }
         detailController = controller
         replaceMainContent(with: controller)
         view.window?.makeFirstResponder(controller.view)
         onContextualShortcutsChanged?()
+    }
+
+    func refreshDetailAfterMetadataMutation(_ identity: ResourceIdentity) {
+        detailController?.refreshAfterMetadataMutation(identity)
     }
 
     private func showResourceList(resume: Bool = true) {
@@ -3502,6 +3561,7 @@ private final class ResourceListViewController: NSViewController,
     var onConfigureNodeShell: ((NodeShellTarget) -> Void)?
     var onDelete: ((DeleteResourcesRequest) -> Void)?
     var onMutate: ((ResourceIdentity, ResourceMutationWindowController.Mutation) -> Void)?
+    var onEditMetadata: ((ResourceIdentity, ResourceMetadataKind) -> Void)?
     var onRestorationChanged: (() -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
 
@@ -4195,7 +4255,8 @@ private final class ResourceListViewController: NSViewController,
         addGroup([
             ("Scale…", .scale),
             ("Rollout Restart…", .restart),
-            ("Edit Labels / Annotations…", .editMetadata),
+            ("Edit Labels…", .editLabels),
+            ("Edit Annotations…", .editAnnotations),
         ])
         if !menu.items.isEmpty { menu.addItem(.separator()) }
         let copyCellItem = NSMenuItem(
@@ -8133,9 +8194,12 @@ private final class ResourceListViewController: NSViewController,
         case .restart:
             guard let identity = selected.only else { return }
             onMutate?(identity, .rolloutRestart)
-        case .editMetadata:
+        case .editLabels:
             guard let identity = selected.only else { return }
-            onMutate?(identity, .metadata)
+            onEditMetadata?(identity, .labels)
+        case .editAnnotations:
+            guard let identity = selected.only else { return }
+            onEditMetadata?(identity, .annotations)
         case .copyName:
             copyIdentities(selected) { $0.name }
         case .copyNamespacedName:
@@ -8630,7 +8694,7 @@ private final class ResourceListViewController: NSViewController,
         case .restart:
             return exactlyOne && group == "apps" && version == "v1"
                 && ["deployments", "statefulsets", "daemonsets"].contains(name)
-        case .editMetadata:
+        case .editLabels, .editAnnotations:
             return exactlyOne
         case .copyName, .copyNamespacedName, .copyReference:
             return nonempty
@@ -8669,7 +8733,7 @@ private final class ResourceListViewController: NSViewController,
             return selected.count == 1 && selected[0].group == "apps"
                 && selected[0].version == "v1"
                 && ["deployments", "statefulsets", "daemonsets"].contains(selected[0].resource)
-        case .editMetadata:
+        case .editLabels, .editAnnotations:
             return selected.count == 1
         case .copyName, .copyNamespacedName, .copyReference:
             return !selected.isEmpty
@@ -8683,7 +8747,7 @@ private enum ResourceTableCommand: Equatable {
     case focusFilter, enter, open, openYAML, openYAMLSnapshot, openEvents
     case openLogs, openPreviousLogs
     case openExec, configureExec
-    case startPortForward, selectAll, delete, scale, restart, editMetadata
+    case startPortForward, selectAll, delete, scale, restart, editLabels, editAnnotations
     case copyName, copyNamespacedName, copyReference, moveUp, moveDown, extendUp, extendDown
 }
 
@@ -8721,7 +8785,8 @@ private extension PaletteOperation {
         case .delete: .delete
         case .scale: .scale
         case .restart: .restart
-        case .editMetadata: .editMetadata
+        case .editLabels: .editLabels
+        case .editAnnotations: .editAnnotations
         case .copyName: .copyName
         case .copyNamespacedName: .copyNamespacedName
         case .copyReference: .copyReference

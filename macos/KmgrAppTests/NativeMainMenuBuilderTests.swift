@@ -216,6 +216,23 @@ struct NativeMainMenuBuilderTests {
         )
     }
 
+    @Test("labels and annotations have separate responder-chain commands")
+    func metadataCommands() throws {
+        let resource = try #require(submenu("Resource", in: makeMenu().main))
+        let labels = try #require(resource.item(withTitle: "Edit Labels…"))
+        expectResponderItem(
+            labels,
+            action: #selector(ClusterWorkspaceWindowController.editResourceLabels(_:)),
+            keyEquivalent: ""
+        )
+        let annotations = try #require(resource.item(withTitle: "Edit Annotations…"))
+        expectResponderItem(
+            annotations,
+            action: #selector(ClusterWorkspaceWindowController.editResourceAnnotations(_:)),
+            keyEquivalent: ""
+        )
+    }
+
     @Test("terminal defaults and configuration have distinct responder shortcuts")
     func terminalCommands() throws {
         let resource = try #require(submenu("Resource", in: makeMenu().main))

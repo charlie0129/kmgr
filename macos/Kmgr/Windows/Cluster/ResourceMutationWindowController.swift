@@ -9,13 +9,11 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     enum Mutation {
         case scale
         case rolloutRestart
-        case metadata
 
         var title: String {
             switch self {
             case .scale: "Scale Resource"
             case .rolloutRestart: "Rollout Restart"
-            case .metadata: "Edit Labels / Annotations"
             }
         }
     }
@@ -27,10 +25,6 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     private let detailProvider: any ObjectDetailProviding
     private let operationProvider: any ResourceOperationProviding
     private let replicasField = NSTextField()
-    private let labelsField = NSTextView()
-    private let annotationsField = NSTextView()
-    private let removeLabelsField = NSTextView()
-    private let removeAnnotationsField = NSTextView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let progress = NSProgressIndicator()
     private let primaryButton = NSButton(title: "Apply", target: nil, action: nil)
@@ -57,7 +51,6 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         let contentHeight: CGFloat = switch mutation {
         case .scale: 240
         case .rolloutRestart: 340
-        case .metadata: 510
         }
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: contentHeight),
@@ -127,32 +120,6 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
             warning.textColor = .systemOrange
             form.addArrangedSubview(warning)
             primaryButton.title = "Restart"
-        case .metadata:
-            let instructions = NSTextField(wrappingLabelWithString:
-                "Enter one key=value entry per line to set metadata, and one key per line to remove it."
-            )
-            instructions.textColor = .secondaryLabelColor
-            instructions.maximumNumberOfLines = 2
-            form.addArrangedSubview(instructions)
-            form.addArrangedSubview(row(
-                "Set labels",
-                metadataEditor(labelsField, accessibilityLabel: "Labels to set")
-            ))
-            form.addArrangedSubview(row(
-                "Set annotations",
-                metadataEditor(annotationsField, accessibilityLabel: "Annotations to set")
-            ))
-            form.addArrangedSubview(row(
-                "Remove labels",
-                metadataEditor(removeLabelsField, accessibilityLabel: "Label keys to remove")
-            ))
-            form.addArrangedSubview(row(
-                "Remove annotations",
-                metadataEditor(
-                    removeAnnotationsField,
-                    accessibilityLabel: "Annotation keys to remove"
-                )
-            ))
         }
         progress.style = .spinning
         progress.controlSize = .small
@@ -200,39 +167,6 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         row.alignment = field is NSScrollView ? .top : .centerY
         row.spacing = 8
         return row
-    }
-
-    private func metadataEditor(
-        _ textView: NSTextView,
-        accessibilityLabel: String
-    ) -> NSScrollView {
-        TextDocumentGeometry.prepareForPreciseScrolling(textView)
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        textView.isRichText = false
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isAutomaticTextReplacementEnabled = false
-        textView.isAutomaticSpellingCorrectionEnabled = false
-        textView.isContinuousSpellCheckingEnabled = false
-        textView.allowsUndo = true
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.textContainerInset = NSSize(width: 6, height: 5)
-        textView.textContainer?.widthTracksTextView = true
-        textView.setAccessibilityLabel(accessibilityLabel)
-        textView.setAccessibilityHelp(
-            accessibilityLabel.contains("remove")
-                ? "Enter one Kubernetes metadata key per line."
-                : "Enter one Kubernetes metadata key=value entry per line."
-        )
-
-        let scrollView = NSScrollView()
-        scrollView.borderType = .bezelBorder
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.documentView = textView
-        scrollView.heightAnchor.constraint(equalToConstant: 68).isActive = true
-        return scrollView
     }
 
     @objc private func apply() {
@@ -300,8 +234,6 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
                 note: "The Pod template will be updated after a fresh object identity and resource-version check."
             )
             alert.addButton(withTitle: "Restart")
-        case .metadata:
-            return nil
         }
         alert.addButton(withTitle: "Cancel")
         return alert
@@ -342,12 +274,6 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
                         identity: target.identity,
                         expectedResourceVersion: target.expectedResourceVersion
                     )
-                case .metadata(let changes):
-                    stream = try await operationProvider.updateMetadata(
-                        identity: target.identity,
-                        expectedResourceVersion: target.expectedResourceVersion,
-                        changes: changes
-                    )
                 }
                 for try await value in stream {
                     statusLabel.stringValue = "Applying… \(value.completedItems)/\(value.totalItems)"
@@ -379,7 +305,6 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     private enum MutationDraft {
         case scale(Int32)
         case restart
-        case metadata(ResourceMetadataChanges)
     }
 
     private func mutationDraft() throws -> MutationDraft {
@@ -391,13 +316,6 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         case .rolloutRestart:
             try ResourceMutationDraftValidator.validateRolloutRestart(identity)
             return .restart
-        case .metadata:
-            return .metadata(try ResourceMetadataDraftParser.changes(
-                labels: labelsField.string,
-                annotations: annotationsField.string,
-                removeLabels: removeLabelsField.string,
-                removeAnnotations: removeAnnotationsField.string
-            ))
         }
     }
 
@@ -426,7 +344,6 @@ private extension ResourceMutationWindowController.Mutation {
         switch self {
         case .scale: .scaling
         case .rolloutRestart: .workloadRestart
-        case .metadata: nil
         }
     }
 }

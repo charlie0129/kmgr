@@ -2,79 +2,97 @@ import Foundation
 import Testing
 @testable import KmgrCore
 
-@Test func metadataParserPreservesAnnotationValuesWithoutCommaOrEqualsAmbiguity() throws {
-    let changes = try ResourceMetadataDraftParser.changes(
-        labels: """
-            app.kubernetes.io/name=api
-            team=platform
-            empty=
-            """,
-        annotations: """
-            example.com/query=a=b,c=d
-            note= free form, including = signs␠
-            """,
-        removeLabels: "old.example.com/name\nlegacy",
-        removeAnnotations: "old.example.com/note"
+@Test func metadataDraftBuildsOneSparseKindSpecificMutation() throws {
+    var draft = ResourceMetadataDraft(
+        kind: .labels,
+        baselineValues: ["team": "platform", "legacy": "true"]
     )
+    draft.setValue("runtime", for: "team")
+    draft.removeKey("legacy")
+    try draft.addKey("app", value: "api")
+    try draft.renameKey("app", to: "app.kubernetes.io/name")
 
+    let changes = try draft.changes()
     #expect(changes.labels == [
         "app.kubernetes.io/name": "api",
-        "team": "platform",
-        "empty": "",
+        "team": "runtime",
     ])
-    #expect(changes.annotations["example.com/query"] == "a=b,c=d")
-    #expect(changes.annotations["note"] == " free form, including = signs␠")
-    #expect(changes.removeLabelKeys == ["old.example.com/name", "legacy"])
-    #expect(changes.removeAnnotationKeys == ["old.example.com/note"])
+    #expect(changes.removeLabelKeys == ["legacy"])
+    #expect(changes.annotations.isEmpty)
+    #expect(changes.removeAnnotationKeys.isEmpty)
 }
 
-@Test func metadataParserMatchesKubernetesQualifiedNameAndLabelRules() {
-    let invalid: [(String, ResourceMutationDraftError.Reason)] = [
-        ("Upper.Example/key=value", .invalidMetadataKey),
-        ("example.com/=value", .invalidMetadataKey),
-        ("bad key=value", .invalidMetadataKey),
-        ("team=contains spaces", .invalidLabelValue),
-        ("team=-leading", .invalidLabelValue),
-        ("team=trailing-", .invalidLabelValue),
-    ]
-    for (line, reason) in invalid {
+@Test func labelsAndAnnotationsKeepSameNamedKeysIndependent() throws {
+    var labels = ResourceMetadataDraft(
+        kind: .labels,
+        baselineValues: ["owner": "platform"]
+    )
+    var annotations = ResourceMetadataDraft(
+        kind: .annotations,
+        baselineValues: ["owner": "Platform Team"]
+    )
+    labels.setValue("runtime", for: "owner")
+    annotations.setValue("Runtime Team\nOn-call: SRE=a,b", for: "owner")
+
+    let labelChanges = try labels.changes()
+    let annotationChanges = try annotations.changes()
+    #expect(labelChanges.labels == ["owner": "runtime"])
+    #expect(labelChanges.annotations.isEmpty)
+    #expect(annotationChanges.labels.isEmpty)
+    #expect(annotationChanges.annotations == [
+        "owner": "Runtime Team\nOn-call: SRE=a,b",
+    ])
+}
+
+@Test func metadataDraftSupportsRenameDeleteAndPerKeyRevert() throws {
+    var draft = ResourceMetadataDraft(
+        kind: .annotations,
+        baselineValues: ["old.example.com/note": "before", "keep": "same"]
+    )
+    try draft.renameKey("old.example.com/note", to: "example.com/note")
+    #expect(draft.isDeleted("old.example.com/note"))
+    #expect(draft.isAdded("example.com/note"))
+    draft.revertKey("old.example.com/note")
+    draft.revertKey("example.com/note")
+    #expect(!draft.hasChanges)
+    #expect(throws: ResourceMutationDraftError.self) { try draft.changes() }
+}
+
+@Test func metadataDraftRejectsInvalidKeysDuplicatesAndValues() throws {
+    for key in ["Upper.Example/key", "example.com/", "bad key"] {
+        var draft = ResourceMetadataDraft(kind: .labels)
         do {
-            _ = try ResourceMetadataDraftParser.changes(
-                labels: line,
-                annotations: "",
-                removeLabels: "",
-                removeAnnotations: ""
-            )
-            Issue.record("Accepted invalid metadata line \(line)")
+            try draft.addKey(key)
+            Issue.record("Accepted invalid Kubernetes metadata key \(key)")
         } catch let error as ResourceMutationDraftError {
-            #expect(error.reason == reason)
-        } catch {
-            Issue.record("Unexpected error type \(error)")
+            #expect(error.reason == .invalidMetadataKey)
         }
     }
-}
 
-@Test func metadataParserRejectsDuplicatesConflictsAndEmptyDrafts() {
-    let cases: [(labels: String, remove: String, reason: ResourceMutationDraftError.Reason)] = [
-        ("team=one\nteam=two", "", .duplicateKey),
-        ("team=one", "team", .conflictingChange),
-        ("", "team\nteam", .duplicateKey),
-        ("", "", .noChanges),
-    ]
-    for value in cases {
+    var labels = ResourceMetadataDraft(
+        kind: .labels,
+        baselineValues: ["team": "platform"]
+    )
+    #expect(throws: ResourceMutationDraftError.self) {
+        try labels.addKey("team")
+    }
+    for value in ["contains spaces", "-leading", "trailing-"] {
+        labels.setValue(value, for: "team")
         do {
-            _ = try ResourceMetadataDraftParser.changes(
-                labels: value.labels,
-                annotations: "",
-                removeLabels: value.remove,
-                removeAnnotations: ""
-            )
-            Issue.record("Accepted invalid metadata draft")
+            _ = try labels.changes()
+            Issue.record("Accepted invalid Kubernetes label value \(value)")
         } catch let error as ResourceMutationDraftError {
-            #expect(error.reason == value.reason)
-        } catch {
-            Issue.record("Unexpected error type \(error)")
+            #expect(error.reason == .invalidLabelValue)
         }
+    }
+
+    var annotations = ResourceMetadataDraft(kind: .annotations)
+    try annotations.addKey("example.com/note", value: "bad\0value")
+    do {
+        _ = try annotations.changes()
+        Issue.record("Accepted a NUL annotation value")
+    } catch let error as ResourceMutationDraftError {
+        #expect(error.reason == .invalidAnnotationValue)
     }
 }
 

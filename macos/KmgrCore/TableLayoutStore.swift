@@ -9,6 +9,7 @@ public enum TableSurfaceID: String, CaseIterable, Codable, Hashable, Sendable {
     case objectSummary = "object-summary"
     case objectRelationships = "object-relationships"
     case objectDataKeys = "object-data-keys"
+    case objectMetadataKeys = "object-metadata-keys"
     case columnsManager = "columns-manager"
     case nativeColumnPicker = "native-column-picker"
     case portForwards = "port-forwards"

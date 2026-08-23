@@ -76,11 +76,13 @@ struct ContextualShortcutModelsTests {
             .items.map(\.keys) == ["\u{21E7}\u{2318}N", "Escape"])
         #expect(ContextualShortcutCatalog.dataEditor(secret: true)
             .items.map(\.keys) == [
-                "/ or \u{2318}F", "D", "\u{2318}S", "\u{21E7}\u{2318}N", "Escape",
+                "/ or \u{2318}F", "Return", "D", "\u{2318}S",
+                "\u{21E7}\u{2318}N", "Escape",
             ])
         #expect(ContextualShortcutCatalog.dataEditor(secret: false)
             .items.map(\.keys) == [
-                "/ or \u{2318}F", "\u{2318}S", "\u{21E7}\u{2318}N", "Escape",
+                "/ or \u{2318}F", "Return", "\u{2318}S",
+                "\u{21E7}\u{2318}N", "Escape",
             ])
     }
 
@@ -89,6 +91,30 @@ struct ContextualShortcutModelsTests {
         #expect(ContextualShortcutCatalog.logs.items.map(\.keys) == [
             "/", "F", "P", "W", "\u{2318}W",
         ])
+    }
+
+    @Test("metadata editor help exposes its shared key-value controls")
+    func metadataEditor() {
+        let snapshot = ContextualShortcutCatalog.metadataEditor(kind: .annotations)
+        #expect(snapshot.contextID == "resource-metadata-annotations")
+        #expect(snapshot.title == "Edit Annotations")
+        #expect(snapshot.items.map(\.keys) == [
+            "/ or \u{2318}F", "Return", "\u{2318}S", "Escape",
+        ])
+    }
+
+    @Test("Details help advertises Return metadata editing")
+    func objectDetails() {
+        let item = ContextualShortcutCatalog.objectDetails(
+            canEditSelectedMetadata: true
+        ).items.first {
+            $0.id == "details.edit-metadata"
+        }
+        #expect(item?.keys == "Return")
+        #expect(item?.action == "Edit the selected label or annotation")
+        #expect(ContextualShortcutCatalog.objectDetails(
+            canEditSelectedMetadata: false
+        ).items.contains { $0.id == "details.edit-metadata" } == false)
     }
 
     @Test("unknown dialogs never advertise resource table letters")

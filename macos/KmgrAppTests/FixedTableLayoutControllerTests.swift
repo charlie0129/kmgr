@@ -120,6 +120,39 @@ struct FixedTableLayoutControllerTests {
         expectFixedControllerLayout(layout, in: table)
     }
 
+    @Test("metadata editor restores its shared key table")
+    func metadataKeys() throws {
+        let fixture = try fixedControllerLayoutFixture()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suite) }
+        let layout = TableLayout(columns: [
+            .init(id: "state", width: 96),
+            .init(id: "key", width: 255),
+            .init(id: "value", width: 365),
+        ])
+        #expect(fixture.store.set(layout, for: .objectMetadataKeys))
+        let identity = fixedControllerIdentity(resource: "deployments", group: "apps")
+        let controller = ResourceMetadataEditorWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session",
+                contextName: "context",
+                clusterName: "cluster",
+                serverHostname: "api.example.invalid",
+                defaultNamespace: "default"
+            ),
+            identity: identity,
+            kind: .labels,
+            detailProvider: FixedControllerObjectProvider(),
+            operationProvider: FixedControllerOperationProvider(),
+            tableLayoutStore: fixture.store
+        )
+        let root = try #require(controller.window?.contentView)
+        let table = try fixedControllerTable(
+            labeled: "Labels keys and values",
+            beneath: root
+        )
+        expectFixedControllerLayout(layout, in: table)
+    }
+
     @Test("Columns manager and native picker use distinct fixed surfaces")
     func columnsSurfaces() throws {
         let fixture = try fixedControllerLayoutFixture()

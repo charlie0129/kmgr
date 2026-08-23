@@ -212,6 +212,7 @@ public enum ContextualShortcutCatalog {
     public static func dataEditor(secret: Bool) -> ContextualShortcutSnapshot {
         var items: [ContextualShortcutItem] = [
             item("data.search", "/ or ⌘F", "Search keys and values"),
+            item("data.edit-value", "Return", "Edit selected value"),
         ]
         if secret {
             items.append(item("data.reveal", "D", "Toggle decoded Secret values"))
@@ -223,6 +224,21 @@ public enum ContextualShortcutCatalog {
             contextID: "object-data",
             title: "Object Data",
             items: items
+        )
+    }
+
+    public static func metadataEditor(
+        kind: ResourceMetadataKind
+    ) -> ContextualShortcutSnapshot {
+        ContextualShortcutSnapshot(
+            contextID: "resource-metadata-\(kind.rawValue)",
+            title: "Edit \(kind.title)",
+            items: [
+                item("metadata.search", "/ or ⌘F", "Search keys and values"),
+                item("metadata.edit-value", "Return", "Edit selected value"),
+                item("metadata.save", "⌘S", "Save \(kind.title.lowercased())"),
+                item("metadata.cancel", "Escape", "Cancel editing"),
+            ]
         )
     }
 
@@ -238,16 +254,29 @@ public enum ContextualShortcutCatalog {
         ]
     )
 
-    public static let objectDetails = ContextualShortcutSnapshot(
-        contextID: "object-details",
-        title: "Object Details",
-        items: [
-            namespaceItem,
+    public static func objectDetails(
+        canEditSelectedMetadata: Bool
+    ) -> ContextualShortcutSnapshot {
+        var items: [ContextualShortcutItem] = []
+        if canEditSelectedMetadata {
+            items.append(item(
+                "details.edit-metadata",
+                "Return",
+                "Edit the selected label or annotation"
+            ))
+        }
+        items.append(namespaceItem)
+        items.append(contentsOf: [
             item("workspace.history", "\u{2318}[ / \u{2318}]", "Back / Forward"),
             item("workspace.palette", "\u{2318}K", "Open Command Palette"),
             item("window.close", "\u{2318}W", "Close window"),
-        ]
-    )
+        ])
+        return ContextualShortcutSnapshot(
+            contextID: "object-details",
+            title: "Object Details",
+            items: items
+        )
+    }
 
     /// Safe fallback for a sheet or child window that has not opted into
     /// contextual help. It intentionally contains no resource-table letters.

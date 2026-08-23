@@ -25,6 +25,8 @@ struct ObjectDetailSummaryRow: Hashable, Sendable {
     var copyValue: String
     var tooltip: String
     var severity: CellSeverity
+    var metadataKind: ResourceMetadataKind? = nil
+    var metadataKey: String? = nil
 }
 
 struct ObjectDetailSummarySection: Hashable, Sendable {
@@ -62,6 +64,10 @@ enum ObjectDetailSummaryPresentation {
                 sectionOrder.append(field.sectionID)
             }
             rowsBySection[field.sectionID, default: []].append(field)
+        }
+        for sectionID in ["labels", "annotations"] where rowsBySection[sectionID] == nil {
+            sectionOrder.append(sectionID)
+            rowsBySection[sectionID] = []
         }
         let originalOrder = Dictionary(uniqueKeysWithValues: sectionOrder.enumerated().map {
             ($0.element, $0.offset)
@@ -114,6 +120,7 @@ enum ObjectDetailSummaryPresentation {
         sectionID: String,
         values: [String: String]
     ) -> [ObjectDetailSummaryRow] {
+        let kind: ResourceMetadataKind = sectionID == "labels" ? .labels : .annotations
         let ordered = values.sorted { $0.key < $1.key }
         let visible = ordered.prefix(maximumMetadataEntriesPerSection)
         var rows = visible.map { key, value in
@@ -142,7 +149,9 @@ enum ObjectDetailSummaryPresentation {
                 tooltip: shortened
                     ? copyHint(forCharacterCount: normalizedValue.count)
                     : "",
-                severity: .normal
+                severity: .normal,
+                metadataKind: kind,
+                metadataKey: key
             )
         }
         let omitted = ordered.count - visible.count
@@ -155,7 +164,8 @@ enum ObjectDetailSummaryPresentation {
                 copyLabel: "Additional Entries",
                 copyValue: "\(omitted) not shown",
                 tooltip: "",
-                severity: .normal
+                severity: .normal,
+                metadataKind: kind
             ))
         }
         return rows
@@ -310,7 +320,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         action: nil
     )
     private let contentContainer = NSView()
-    private let summaryTable = CapturedCellTableView()
+    private let summaryTable = ObjectDetailSummaryTableView()
     private let summaryScrollView = NSScrollView()
     private let relationshipsTable = NSTableView()
     private let relationshipsScrollView = NSScrollView()
@@ -370,8 +380,18 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var terminalObjectState = false
 
     var onBack: (() -> Void)?
+    var onEditMetadata: ((ResourceIdentity, ResourceMetadataKind, String?) -> Void)?
+    var onContextualShortcutsChanged: (() -> Void)?
     private(set) var workspaceStatus = WorkspaceStatus("Loading…", busy: true)
     var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
+
+    var contextualShortcutSnapshot: ContextualShortcutSnapshot {
+        let summarySelected = segmented.selectedSegment
+            == ObjectDetailInitialTab.summary.segment
+        return ContextualShortcutCatalog.objectDetails(
+            canEditSelectedMetadata: summarySelected
+        )
+    }
 
     init(
         identity: ResourceIdentity,
@@ -487,6 +507,13 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relativeTimeRefreshID = nil
     }
 
+    func refreshAfterMetadataMutation(_ savedIdentity: ResourceIdentity) {
+        guard savedIdentity.uid == identity.uid, !terminalObjectState else { return }
+        loadTask?.cancel()
+        loadTask = nil
+        loadObject()
+    }
+
     /// Helper restart invalidates the session behind this detail. Keep any
     /// local editor buffer visible, but stop all work and disable mutation
     /// controls until the workspace fresh-GETs this exact UID in a new session.
@@ -585,6 +612,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         summaryTable.gridStyleMask = [.solidHorizontalGridLineMask]
         summaryTable.cellValueProvider = { [weak self] row, column in
             self?.summaryCellCopyValue(row: row, column: column)
+        }
+        summaryTable.onEditSelectedMetadata = { [weak self] in
+            self?.editSelectedMetadata() ?? false
         }
         summaryTable.toolTip = "Click a cell and press Command-C, or choose Copy Cell, to copy its full value."
         let summaryMenu = NSMenu()
@@ -893,7 +923,15 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             loadRelationshipsIfNeeded()
         default:
             show(summaryScrollView)
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                    self.segmented.selectedSegment == ObjectDetailInitialTab.summary.segment,
+                    self.view.window != nil
+                else { return }
+                self.view.window?.makeFirstResponder(self.summaryTable)
+            }
         }
+        onContextualShortcutsChanged?()
     }
 
     private func startObjectWatch(resourceVersion: String) {
@@ -1377,11 +1415,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             guard summaryItems.indices.contains(row) else { return nil }
             switch summaryItems[row] {
             case .section(let section):
-                let heading = NSTextField(labelWithString: section.title)
-                heading.identifier = .init("object-detail-summary-section")
-                heading.font = .systemFont(ofSize: 13, weight: .semibold)
-                heading.textColor = .secondaryLabelColor
-                return heading
+                return summarySectionView(section)
             case .row(let item):
                 guard let tableColumn else { return nil }
                 let isValue = tableColumn.identifier.rawValue == "value"
@@ -1435,6 +1469,76 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
         guard row.label != row.copyLabel else { return row.label }
         return "Field name shortened in Summary. Click the cell and press Command-C, or choose Copy Cell, to copy it."
+    }
+
+    private func summarySectionView(_ section: ObjectDetailSummarySection) -> NSView {
+        let container = NSView()
+        container.identifier = .init("object-detail-summary-section")
+        let heading = NSTextField(labelWithString: section.title)
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        heading.textColor = .secondaryLabelColor
+        heading.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(heading)
+        var constraints = [
+            heading.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            heading.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ]
+        if let kind = metadataKind(for: section.id) {
+            let button = NSButton(
+                title: "Edit \(kind.title)…",
+                target: self,
+                action: #selector(editMetadataSection(_:))
+            )
+            button.tag = kind == .labels ? 0 : 1
+            button.bezelStyle = .inline
+            button.controlSize = .small
+            button.identifier = .init("object-detail-edit-\(kind.rawValue)")
+            button.setAccessibilityLabel("Edit Kubernetes \(kind.title.lowercased())")
+            button.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(button)
+            constraints.append(contentsOf: [
+                button.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+                button.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                heading.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -8),
+            ])
+        } else {
+            constraints.append(heading.trailingAnchor.constraint(
+                lessThanOrEqualTo: container.trailingAnchor,
+                constant: -6
+            ))
+        }
+        NSLayoutConstraint.activate(constraints)
+        return container
+    }
+
+    @objc private func editMetadataSection(_ sender: NSButton) {
+        let kind: ResourceMetadataKind = sender.tag == 0 ? .labels : .annotations
+        openMetadataEditor(kind: kind, key: nil)
+    }
+
+    private func editSelectedMetadata() -> Bool {
+        guard summaryItems.indices.contains(summaryTable.selectedRow),
+            case .row(let row) = summaryItems[summaryTable.selectedRow],
+            let kind = row.metadataKind
+        else { return false }
+        openMetadataEditor(kind: kind, key: row.metadataKey)
+        return true
+    }
+
+    private func openMetadataEditor(kind: ResourceMetadataKind, key: String?) {
+        guard detail != nil, !terminalObjectState else {
+            NSSound.beep()
+            return
+        }
+        onEditMetadata?(identity, kind, key)
+    }
+
+    private func metadataKind(for sectionID: String) -> ResourceMetadataKind? {
+        switch sectionID {
+        case "labels": .labels
+        case "annotations": .annotations
+        default: nil
+        }
     }
 
     private func summaryValueColor(_ severity: CellSeverity) -> NSColor {
@@ -1551,4 +1655,21 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     @objc private func backPressed() { onBack?() }
 
+}
+
+@MainActor
+private final class ObjectDetailSummaryTableView: CapturedCellTableView {
+    var onEditSelectedMetadata: (() -> Bool)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([
+            .shift, .command, .control, .option,
+        ])
+        if event.keyCode == 36, modifiers.isEmpty,
+            onEditSelectedMetadata?() == true
+        {
+            return
+        }
+        super.keyDown(with: event)
+    }
 }

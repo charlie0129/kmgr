@@ -296,8 +296,13 @@ enum NativeMainMenuBuilder {
         )
         addResponderItem(
             to: menu,
-            title: "Edit Labels / Annotations…",
-            action: #selector(ClusterWorkspaceWindowController.editResourceMetadata(_:))
+            title: "Edit Labels…",
+            action: #selector(ClusterWorkspaceWindowController.editResourceLabels(_:))
+        )
+        addResponderItem(
+            to: menu,
+            title: "Edit Annotations…",
+            action: #selector(ClusterWorkspaceWindowController.editResourceAnnotations(_:))
         )
         menu.addItem(.separator())
         addResponderItem(

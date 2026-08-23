@@ -45,7 +45,7 @@ public struct ResourceMutationDraftError: Error, Hashable, Sendable {
         case unsupportedRolloutTarget
         case inputTooLarge
         case tooManyEntries
-        case malformedAssignment
+        case invalidAnnotationValue
         case invalidMetadataKey
         case invalidLabelValue
         case duplicateKey
@@ -125,119 +125,8 @@ public enum ResourceMutationDraftValidator {
     }
 }
 
-/// Strict text grammar for the native labels/annotations editor:
-///
-///     set entry:       qualified-key=value
-///     removal entry:   qualified-key
-///
-/// Entries are separated by newlines and blank lines are ignored. The first
-/// `=` separates key and value, so annotation values may contain `=` and
-/// commas without quoting or shell-like escaping. Annotation values are kept
-/// byte-for-byte; label values are validated using Kubernetes' label grammar.
-public enum ResourceMetadataDraftParser {
-    public static func changes(
-        labels: String,
-        annotations: String,
-        removeLabels: String,
-        removeAnnotations: String
-    ) throws -> ResourceMetadataChanges {
-        try validateInputSize([
-            ("labels", labels),
-            ("annotations", annotations),
-            ("removeLabelKeys", removeLabels),
-            ("removeAnnotationKeys", removeAnnotations),
-        ])
-        let changes = ResourceMetadataChanges(
-            labels: try assignments(labels, kind: .label),
-            annotations: try assignments(annotations, kind: .annotation),
-            removeLabelKeys: try removalKeys(removeLabels, field: "removeLabelKeys"),
-            removeAnnotationKeys: try removalKeys(
-                removeAnnotations, field: "removeAnnotationKeys"
-            )
-        )
-        return try changes.validatedForMutation()
-    }
-
-    private enum Kind {
-        case label
-        case annotation
-
-        var field: String { self == .label ? "labels" : "annotations" }
-    }
-
-    private static func assignments(_ text: String, kind: Kind) throws -> [String: String] {
-        let lines = meaningfulLines(text)
-        guard lines.count <= ResourceMutationDraftValidator.maximumMetadataEntries else {
-            throw tooManyEntries(field: kind.field)
-        }
-        var result: [String: String] = [:]
-        result.reserveCapacity(lines.count)
-        for (index, line) in lines.enumerated() {
-            guard let separator = line.firstIndex(of: "=") else {
-                throw ResourceMutationDraftError(
-                    reason: .malformedAssignment,
-                    field: "\(kind.field)[\(index)]",
-                    message: "Each \(kind.field) entry must use qualified-key=value on its own line."
-                )
-            }
-            let key = line[..<separator].trimmingCharacters(in: .whitespaces)
-            let value = String(line[line.index(after: separator)...])
-            try validateQualifiedName(key, field: "\(kind.field)[\(index)].key")
-            guard result[key] == nil else {
-                throw duplicate(key: key, field: "\(kind.field)[\(index)].key")
-            }
-            if kind == .label {
-                try validateLabelValue(value, field: "\(kind.field)[\(index)].value")
-            } else if value.contains("\0") {
-                throw ResourceMutationDraftError(
-                    reason: .malformedAssignment,
-                    field: "\(kind.field)[\(index)].value",
-                    message: "Annotation values cannot contain NUL bytes."
-                )
-            }
-            result[key] = value
-        }
-        return result
-    }
-
-    private static func removalKeys(_ text: String, field: String) throws -> [String] {
-        let lines = meaningfulLines(text)
-        guard lines.count <= ResourceMutationDraftValidator.maximumMetadataEntries else {
-            throw tooManyEntries(field: field)
-        }
-        var result: [String] = []
-        var seen: Set<String> = []
-        result.reserveCapacity(lines.count)
-        for (index, line) in lines.enumerated() {
-            let key = line.trimmingCharacters(in: .whitespaces)
-            try validateQualifiedName(key, field: "\(field)[\(index)]")
-            guard seen.insert(key).inserted else {
-                throw duplicate(key: key, field: "\(field)[\(index)]")
-            }
-            result.append(key)
-        }
-        return result
-    }
-
-    private static func meaningfulLines(_ text: String) -> [Substring] {
-        text.split(whereSeparator: \Character.isNewline).filter { line in
-            !line.allSatisfy(\.isWhitespace)
-        }
-    }
-
-    private static func validateInputSize(_ values: [(String, String)]) throws {
-        for (field, value) in values where
-            value.utf8.count > ResourceMutationDraftValidator.maximumMetadataInputBytes
-        {
-            throw ResourceMutationDraftError(
-                reason: .inputTooLarge,
-                field: field,
-                message: "\(field) input exceeds the \(ResourceMutationDraftValidator.maximumMetadataInputBytes)-byte limit."
-            )
-        }
-    }
-
-    fileprivate static func validateQualifiedName(_ key: String, field: String) throws {
+enum ResourceMetadataValidation {
+    static func validateQualifiedName(_ key: String, field: String) throws {
         let parts = key.split(separator: "/", omittingEmptySubsequences: false)
         let valid: Bool
         if parts.count == 1 {
@@ -256,7 +145,7 @@ public enum ResourceMetadataDraftParser {
         }
     }
 
-    fileprivate static func validateLabelValue(_ value: String, field: String) throws {
+    static func validateLabelValue(_ value: String, field: String) throws {
         let bytes = Array(value.utf8)
         let valid = bytes.isEmpty || (bytes.count <= 63 && isAlphaNumeric(bytes[0]) &&
             isAlphaNumeric(bytes[bytes.count - 1]) && bytes.allSatisfy(isNameByte))
@@ -298,22 +187,6 @@ public enum ResourceMetadataDraftParser {
     private static func isLowerAlphaNumeric(_ byte: UInt8) -> Bool {
         (97...122).contains(byte) || (48...57).contains(byte)
     }
-
-    private static func duplicate(key: String, field: String) -> ResourceMutationDraftError {
-        ResourceMutationDraftError(
-            reason: .duplicateKey,
-            field: field,
-            message: "Metadata key \(key.debugDescription) appears more than once."
-        )
-    }
-
-    private static func tooManyEntries(field: String) -> ResourceMutationDraftError {
-        ResourceMutationDraftError(
-            reason: .tooManyEntries,
-            field: field,
-            message: "\(field) may contain at most \(ResourceMutationDraftValidator.maximumMetadataEntries) entries."
-        )
-    }
 }
 
 public extension ResourceMetadataChanges {
@@ -337,14 +210,14 @@ public extension ResourceMetadataChanges {
             )
         }
         for (key, value) in labels {
-            try ResourceMetadataDraftParser.validateQualifiedName(key, field: "labels[\(key)]")
-            try ResourceMetadataDraftParser.validateLabelValue(value, field: "labels[\(key)]")
+            try ResourceMetadataValidation.validateQualifiedName(key, field: "labels[\(key)]")
+            try ResourceMetadataValidation.validateLabelValue(value, field: "labels[\(key)]")
         }
         for (key, value) in annotations {
-            try ResourceMetadataDraftParser.validateQualifiedName(key, field: "annotations[\(key)]")
+            try ResourceMetadataValidation.validateQualifiedName(key, field: "annotations[\(key)]")
             guard !value.contains("\0") else {
                 throw ResourceMutationDraftError(
-                    reason: .malformedAssignment,
+                    reason: .invalidAnnotationValue,
                     field: "annotations[\(key)]",
                     message: "Annotation values cannot contain NUL bytes."
                 )
@@ -379,7 +252,7 @@ public extension ResourceMetadataChanges {
     ) throws -> Set<String> {
         var seen: Set<String> = []
         for (index, key) in keys.enumerated() {
-            try ResourceMetadataDraftParser.validateQualifiedName(key, field: "\(field)[\(index)]")
+            try ResourceMetadataValidation.validateQualifiedName(key, field: "\(field)[\(index)]")
             guard seen.insert(key).inserted else {
                 throw ResourceMutationDraftError(
                     reason: .duplicateKey,
@@ -397,5 +270,172 @@ public extension ResourceMetadataChanges {
             field: field,
             message: "Metadata key \(key.debugDescription) cannot be set and removed in the same mutation."
         )
+    }
+}
+
+/// The two independently editable Kubernetes metadata maps. Keeping the kind
+/// explicit prevents a same-named label and annotation from colliding in an
+/// editor draft or in keyboard-driven actions.
+public enum ResourceMetadataKind: String, Hashable, Sendable {
+    case labels
+    case annotations
+
+    public var title: String {
+        switch self {
+        case .labels: "Labels"
+        case .annotations: "Annotations"
+        }
+    }
+
+    public var singularTitle: String {
+        switch self {
+        case .labels: "Label"
+        case .annotations: "Annotation"
+        }
+    }
+
+    public var setInstruction: String {
+        switch self {
+        case .labels:
+            "Label values must be valid Kubernetes label values."
+        case .annotations:
+            "Annotation values may contain spaces, newlines, and equals signs."
+        }
+    }
+
+    public func values(in detail: ObjectDetail) -> [String: String] {
+        switch self {
+        case .labels: detail.labels
+        case .annotations: detail.annotations
+        }
+    }
+
+    public func changes(
+        set: [String: String] = [:],
+        remove: [String] = []
+    ) throws -> ResourceMetadataChanges {
+        let changes: ResourceMetadataChanges
+        switch self {
+        case .labels:
+            changes = ResourceMetadataChanges(
+                labels: set,
+                removeLabelKeys: remove
+            )
+        case .annotations:
+            changes = ResourceMetadataChanges(
+                annotations: set,
+                removeAnnotationKeys: remove
+            )
+        }
+        return try changes.validatedForMutation()
+    }
+}
+
+/// A map-backed draft for one metadata kind. The editor keeps the authoritative
+/// baseline separate from the desired map, allowing additions, removals, and
+/// renames to become one sparse optimistic mutation without serializing the
+/// complete object.
+public struct ResourceMetadataDraft: Hashable, Sendable {
+    public let kind: ResourceMetadataKind
+    private let baselineValues: [String: String]
+    private var values: [String: String]
+
+    public init(
+        kind: ResourceMetadataKind,
+        baselineValues: [String: String] = [:]
+    ) {
+        self.kind = kind
+        self.baselineValues = baselineValues
+        self.values = baselineValues
+    }
+
+    public var hasChanges: Bool { values != baselineValues }
+
+    /// The union retains deleted keys long enough for the UI to show a
+    /// reversible draft row instead of silently dropping the user's action.
+    public var allKeys: [String] {
+        Set(baselineValues.keys).union(values.keys).sorted()
+    }
+
+    public func value(for key: String) -> String? { values[key] }
+
+    public func baselineValue(for key: String) -> String? {
+        baselineValues[key]
+    }
+
+    public func isDeleted(_ key: String) -> Bool {
+        baselineValues[key] != nil && values[key] == nil
+    }
+
+    public func isAdded(_ key: String) -> Bool {
+        baselineValues[key] == nil && values[key] != nil
+    }
+
+    public func isChanged(_ key: String) -> Bool {
+        baselineValues[key] != values[key]
+    }
+
+    public mutating func setValue(_ value: String, for key: String) {
+        values[key] = value
+    }
+
+    public mutating func addKey(_ key: String, value: String = "") throws {
+        try Self.validateKey(key, existingKeys: Set(allKeys))
+        values[key] = value
+    }
+
+    public mutating func renameKey(_ key: String, to newKey: String) throws {
+        guard key != newKey else { return }
+        guard let value = values[key] else { return }
+        try Self.validateKey(newKey, existingKeys: Set(allKeys))
+        values.removeValue(forKey: key)
+        values[newKey] = value
+    }
+
+    public mutating func removeKey(_ key: String) {
+        values.removeValue(forKey: key)
+    }
+
+    public mutating func revertKey(_ key: String) {
+        if let baseline = baselineValues[key] {
+            values[key] = baseline
+        } else {
+            values.removeValue(forKey: key)
+        }
+    }
+
+    public func changes() throws -> ResourceMetadataChanges {
+        var set: [String: String] = [:]
+        var remove: [String] = []
+        for key in allKeys {
+            switch (baselineValues[key], values[key]) {
+            case (let before?, let after?) where before == after:
+                continue
+            case (_, let after?):
+                set[key] = after
+            case (.some, nil):
+                remove.append(key)
+            case (nil, nil):
+                continue
+            }
+        }
+        return try kind.changes(set: set, remove: remove)
+    }
+
+    private static func validateKey(
+        _ key: String,
+        existingKeys: Set<String>
+    ) throws {
+        try ResourceMetadataValidation.validateQualifiedName(
+            key,
+            field: "metadata.key"
+        )
+        guard !existingKeys.contains(key) else {
+            throw ResourceMutationDraftError(
+                reason: .duplicateKey,
+                field: "metadata.key",
+                message: "Metadata key \(key.debugDescription) already exists."
+            )
+        }
     }
 }

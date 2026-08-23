@@ -260,7 +260,8 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
     case delete
     case scale
     case restart
-    case editMetadata
+    case editLabels
+    case editAnnotations
     case copyName
     case copyNamespacedName
     case copyReference
@@ -276,7 +277,8 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
         case .delete: .delete
         case .scale: .scale
         case .restart: .restart
-        case .editMetadata: .editMetadata
+        case .editLabels: .editLabels
+        case .editAnnotations: .editAnnotations
         case .copyName: .copyName
         case .copyNamespacedName: .copyNamespacedName
         case .copyReference: .copyReference
@@ -294,7 +296,8 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
         case .delete: "Delete…"
         case .scale: "Scale…"
         case .restart: "Rollout Restart…"
-        case .editMetadata: "Edit Labels / Annotations…"
+        case .editLabels: "Edit Labels…"
+        case .editAnnotations: "Edit Annotations…"
         case .copyName: "Copy Name"
         case .copyNamespacedName: "Copy Namespace/Name"
         case .copyReference: "Copy kubectl Reference"
@@ -312,7 +315,8 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
         case .delete: ["delete", "remove"]
         case .scale: ["scale", "replicas"]
         case .restart: ["rollout restart", "restart", "rollout"]
-        case .editMetadata: ["edit labels annotations", "metadata", "labels", "annotations"]
+        case .editLabels: ["edit labels", "metadata labels", "labels"]
+        case .editAnnotations: ["edit annotations", "metadata annotations", "annotations"]
         case .copyName: ["copy name", "name"]
         case .copyNamespacedName: ["copy namespace name", "namespace/name", "namespaced name"]
         case .copyReference: ["copy kubectl reference", "kubectl", "reference"]

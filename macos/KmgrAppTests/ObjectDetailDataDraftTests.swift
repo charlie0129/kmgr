@@ -465,8 +465,8 @@ struct ObjectDetailDataDraftTests {
         #expect(try valueText(in: table, row: 0).hasPrefix("Secret concealed"))
     }
 
-    @Test("slash and Command-F focus Data search from the key table")
-    func dataSearchKeyboardFocus() async throws {
+    @Test("Data key-table shortcuts focus search and the selected value")
+    func dataKeyTableKeyboardFocus() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
         let controller = ObjectDataViewController(
             identity: fixture.identity,
@@ -482,6 +482,7 @@ struct ObjectDetailDataDraftTests {
 
         let table = try dataKeysTable(in: controller.view)
         let search = try dataSearchField(in: controller.view)
+        let editor = try dataValueEditor(in: controller.view)
         try await waitForDataRows(table, count: 2)
         #expect(window.makeFirstResponder(table))
 
@@ -491,6 +492,10 @@ struct ObjectDetailDataDraftTests {
         #expect(window.makeFirstResponder(table))
         table.keyDown(with: try dataKeyEvent("f", modifiers: .command))
         #expect(search.currentEditor() != nil)
+
+        #expect(window.makeFirstResponder(table))
+        table.keyDown(with: try dataKeyEvent("\r", keyCode: 36))
+        #expect(window.firstResponder === editor)
     }
 
     @Test("ConfigMap text drafts survive key switches")
@@ -1790,7 +1795,8 @@ private func temporaryColor(in textView: NSTextView, at location: Int) -> NSColo
 @MainActor
 private func dataKeyEvent(
     _ characters: String,
-    modifiers: NSEvent.ModifierFlags = []
+    modifiers: NSEvent.ModifierFlags = [],
+    keyCode: UInt16 = 2
 ) throws -> NSEvent {
     try #require(NSEvent.keyEvent(
         with: .keyDown,
@@ -1802,7 +1808,7 @@ private func dataKeyEvent(
         characters: characters,
         charactersIgnoringModifiers: characters,
         isARepeat: false,
-        keyCode: 2
+        keyCode: keyCode
     ))
 }
 

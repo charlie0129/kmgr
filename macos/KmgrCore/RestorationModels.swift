@@ -276,7 +276,8 @@ public enum CommandID: String, Hashable, Codable, Sendable {
     case delete
     case scale
     case restart
-    case editMetadata
+    case editLabels
+    case editAnnotations
     case copyName
     case copyNamespacedName
     case copyReference
@@ -459,7 +460,8 @@ public enum CommandValidator {
             .focusFilter:
             break
         case .openDetails, .openYAML, .openEvents, .openLogs, .openExec,
-            .startPortForward, .delete, .scale, .restart, .editMetadata, .save:
+            .startPortForward, .delete, .scale, .restart,
+            .editLabels, .editAnnotations, .save:
             guard context.networkActionsAllowed else { return false }
         }
         switch command {
@@ -479,7 +481,7 @@ public enum CommandValidator {
         case .restart:
             return context.firstResponder == .resourceTable && count == 1
                 && supportsRestart(context)
-        case .editMetadata:
+        case .editLabels, .editAnnotations:
             return context.firstResponder == .resourceTable && count == 1
         case .copyName, .copyNamespacedName, .copyReference:
             return context.firstResponder == .resourceTable && count > 0

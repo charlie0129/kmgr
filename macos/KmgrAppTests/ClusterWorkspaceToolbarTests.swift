@@ -1148,6 +1148,104 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
+    @Test("resource-list label and annotation commands open the shared key-value editor")
+    func metadataCommandsOpenKeyValueEditor() async throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "test-session",
+            group: "apps",
+            version: "v1",
+            resource: "deployments",
+            namespace: "default",
+            name: "api",
+            uid: "deployment-api"
+        )
+        let controller = makeWorkspace(
+            provider: SingleObjectWorkspaceResourceProvider(
+                identity: identity,
+                kind: "Deployment"
+            ),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-1",
+                labels: ["team": "platform"],
+                annotations: ["example.com/owner": "Platform Team"]
+            )),
+            restoration: ClusterWindowRestorationRecord(
+                id: "metadata-editor-routing",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "apps", version: "v1", resource: "deployments"),
+                    namespaceScope: .namespace("default")
+                )
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourceTable = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        do {
+            try await waitUntil { resourceTable.numberOfRows == 1 }
+        } catch {
+            Issue.record("Metadata routing resource row count was \(resourceTable.numberOfRows)")
+            throw error
+        }
+        do {
+            try await waitUntil { resourceRowIsMaterialized(0, in: resourceTable) }
+        } catch {
+            Issue.record("Metadata routing resource row was not materialized")
+            throw error
+        }
+        let resourceDelegate = resourceTable.delegate
+        resourceTable.delegate = nil
+        resourceTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        resourceTable.delegate = resourceDelegate
+        resourceDelegate?.tableViewSelectionDidChange?(Notification(
+            name: NSTableView.selectionDidChangeNotification,
+            object: resourceTable
+        ))
+        #expect(resourceTable.selectedRow == 0)
+
+        for kind in [ResourceMetadataKind.labels, .annotations] {
+            window.makeKeyAndOrderFront(nil)
+            #expect(window.makeFirstResponder(resourceTable))
+            switch kind {
+            case .labels: controller.editResourceLabels(nil)
+            case .annotations: controller.editResourceAnnotations(nil)
+            }
+            do {
+                try await waitUntil { window.attachedSheet != nil }
+            } catch {
+                Issue.record("The resource-list \(kind.title) command did not open a sheet")
+                throw error
+            }
+            let sheet = try #require(window.attachedSheet)
+            #expect(sheet.title.contains("Edit \(kind.title)"))
+            let sheetContent = try #require(sheet.contentView)
+            let table = try #require(descendants(of: sheetContent)
+                .compactMap { $0 as? NSTableView }
+                .first { $0.accessibilityLabel() == "\(kind.title) keys and values" })
+            do {
+                try await waitUntil { table.numberOfRows == 1 }
+            } catch {
+                Issue.record("The \(kind.title) editor did not load its authoritative row")
+                throw error
+            }
+            let cancel = try #require(descendants(of: sheetContent)
+                .compactMap { $0 as? NSButton }
+                .first { $0.title == "Cancel" })
+            cancel.performClick(nil)
+            do {
+                try await waitUntil { window.attachedSheet == nil }
+            } catch {
+                Issue.record("The \(kind.title) editor sheet did not close")
+                throw error
+            }
+        }
+    }
+
     @Test("Forward restoration of Data fetches Data directly again")
     func forwardRestoresDataWithoutDetails() async throws {
         let identity = ResourceIdentity(
@@ -2266,7 +2364,8 @@ struct ClusterWorkspaceToolbarTests {
         #expect(menu.item(withTitle: "Open Logs…") == nil)
         #expect(menu.item(withTitle: "Rollout Restart…") == nil)
         #expect(menu.item(withTitle: "Start Port Forward…") != nil)
-        #expect(menu.item(withTitle: "Edit Labels / Annotations…") != nil)
+        #expect(menu.item(withTitle: "Edit Labels…") != nil)
+        #expect(menu.item(withTitle: "Edit Annotations…") != nil)
     }
 
     @Test("Edit Select All starts a fresh selection after the filter changes")

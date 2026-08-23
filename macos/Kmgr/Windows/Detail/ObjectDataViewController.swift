@@ -5,8 +5,7 @@ import KmgrCore
 /// UID-pinned Data GET and every decoded value remains process-memory-only.
 @MainActor
 final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
-    NSTableViewDelegate, @preconcurrency NSSplitViewDelegate, NSTextViewDelegate,
-    WorkspaceStatusPublishing
+    NSTableViewDelegate, NSTextViewDelegate, WorkspaceStatusPublishing
 {
     private struct SearchMatch {
         var keyMatched: Bool
@@ -47,8 +46,8 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     ) async -> DataValueDiffConfirmationWindowController.Choice)?
 
     private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
-    private let splitView = ObjectDataSplitView()
-    private let keysTable = ObjectDataKeysTableView()
+    private let splitView = KeyValueEditorSplitView()
+    private let keysTable = KeyValueEditorTableView()
     private let searchField = NSSearchField()
     private let searchResultLabel = NSTextField(labelWithString: "")
     private let valueTextView = NSTextView()
@@ -94,7 +93,6 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
     private var valueDiffTask: Task<Void, Never>?
     private var dataFileGeneration: UInt64 = 0
     private var authoritativeRefreshInFlight = false
-    private var establishedInitialSplitPosition = false
     private var conflictController: DataConflictWindowController?
     private var valueDiffController: DataValueDiffConfirmationWindowController?
 
@@ -198,7 +196,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        establishSplitPositionIfNeeded()
+        splitView.establishPositionIfNeeded()
         TextDocumentGeometry.update(
             valueTextView,
             in: valueScroll,
@@ -311,9 +309,20 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         splitView.isVertical = true
         splitView.dividerStyle = .thin
         splitView.identifier = .init("object-data-split")
-        splitView.delegate = self
         splitView.autosaveName = "kmgr.object-data-master-detail"
-        splitView.onResetDivider = { [weak self] in self?.resetSplitPosition() }
+        splitView.preferredLeadingFraction = 0.45
+        splitView.paneMinimumsProvider = { [weak self] in
+            self?.splitPaneMinimumWidths()
+                ?? KeyValueEditorSplitView.PaneMinimums(leading: 260, trailing: 340)
+        }
+        splitView.onDidResize = { [weak self] in
+            guard let self else { return }
+            TextDocumentGeometry.update(
+                self.valueTextView,
+                in: self.valueScroll,
+                wrapsToViewport: true
+            )
+        }
         let columns: [(String, String, CGFloat, CGFloat)] = [
             ("key", "Key", 175, 100),
             ("value", "Value", 300, 140),
@@ -341,9 +350,17 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             surface: .objectDataKeys,
             store: tableLayoutStore
         )
-        keysTable.onToggleReveal = { [weak self] in self?.toggleSecretReveal() }
+        keysTable.onUnmodifiedKey = { [weak self] key in
+            guard key == "d" else { return false }
+            self?.toggleSecretReveal()
+            return true
+        }
         keysTable.onBack = { [weak self] in self?.onBack?() }
         keysTable.onFocusSearch = { [weak self] in self?.focusSearch() }
+        keysTable.onActivateValue = { [weak self] in
+            guard let self, self.valueTextView.isEditable else { return }
+            self.view.window?.makeFirstResponder(self.valueTextView)
+        }
         let keyScroll = NSScrollView()
         keyScroll.identifier = .init("object-data-keys-scroll")
         keyScroll.documentView = keysTable
@@ -507,34 +524,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
         return "Search keys and values"
     }
 
-    private func establishSplitPositionIfNeeded() {
-        guard !establishedInitialSplitPosition,
-            splitView.arrangedSubviews.count == 2,
-            splitView.bounds.width > splitView.dividerThickness
-        else { return }
-        establishedInitialSplitPosition = true
-        let minimums = splitPaneMinimumWidths()
-        let leftWidth = splitView.arrangedSubviews[0].frame.width
-        let rightWidth = splitView.arrangedSubviews[1].frame.width
-        if leftWidth < minimums.left || rightWidth < minimums.right {
-            resetSplitPosition()
-        }
-    }
-
-    private func resetSplitPosition() {
-        guard splitView.arrangedSubviews.count == 2 else { return }
-        let available = max(0, splitView.bounds.width - splitView.dividerThickness)
-        guard available > 0 else { return }
-        let minimums = splitPaneMinimumWidths()
-        let preferred = available * 0.45
-        let position = min(
-            max(preferred, minimums.left),
-            max(minimums.left, available - minimums.right)
-        )
-        splitView.setPosition(position, ofDividerAt: 0)
-    }
-
-    private func splitPaneMinimumWidths() -> (left: CGFloat, right: CGFloat) {
+    private func splitPaneMinimumWidths() -> KeyValueEditorSplitView.PaneMinimums {
         let available = max(0, splitView.bounds.width - splitView.dividerThickness)
         var left = min(260, max(180, available * 0.30))
         var right = min(340, max(240, available * 0.38))
@@ -545,41 +535,10 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             left *= scale
             right *= scale
         }
-        return (left, right)
-    }
-
-    func splitView(
-        _ splitView: NSSplitView,
-        constrainMinCoordinate proposedMinimumPosition: CGFloat,
-        ofSubviewAt dividerIndex: Int
-    ) -> CGFloat {
-        guard splitView === self.splitView, dividerIndex == 0 else {
-            return proposedMinimumPosition
-        }
-        return max(proposedMinimumPosition, splitView.bounds.minX + splitPaneMinimumWidths().left)
-    }
-
-    func splitView(
-        _ splitView: NSSplitView,
-        constrainMaxCoordinate proposedMaximumPosition: CGFloat,
-        ofSubviewAt dividerIndex: Int
-    ) -> CGFloat {
-        guard splitView === self.splitView, dividerIndex == 0 else {
-            return proposedMaximumPosition
-        }
-        return min(proposedMaximumPosition, splitView.bounds.maxX - splitPaneMinimumWidths().right)
-    }
-
-    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
-        false
-    }
-
-    func splitView(
-        _ splitView: NSSplitView,
-        shouldCollapseSubview subview: NSView,
-        forDoubleClickOnDividerAt dividerIndex: Int
-    ) -> Bool {
-        false
+        return KeyValueEditorSplitView.PaneMinimums(
+            leading: left,
+            trailing: right
+        )
     }
 
     private func loadData(
@@ -1995,72 +1954,5 @@ extension ObjectDataViewController {
 
     private static func clusterIssue(from error: Error) -> ClusterManagerIssue? {
         error as? ClusterManagerIssue
-    }
-}
-
-@MainActor
-private final class ObjectDataSplitView: NSSplitView {
-    var onResetDivider: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            let location = convert(event.locationInWindow, from: nil)
-            if dividerIndex(at: location) != nil {
-                onResetDivider?()
-                return
-            }
-        }
-        super.mouseDown(with: event)
-    }
-
-    private func dividerIndex(at point: NSPoint) -> Int? {
-        guard arrangedSubviews.count > 1 else { return nil }
-        for index in 0..<(arrangedSubviews.count - 1) {
-            let preceding = arrangedSubviews[index].frame
-            let divider: NSRect
-            if isVertical {
-                divider = NSRect(
-                    x: preceding.maxX - 3,
-                    y: bounds.minY,
-                    width: dividerThickness + 6,
-                    height: bounds.height
-                )
-            } else {
-                divider = NSRect(
-                    x: bounds.minX,
-                    y: preceding.maxY - 3,
-                    width: bounds.width,
-                    height: dividerThickness + 6
-                )
-            }
-            if divider.contains(point) { return index }
-        }
-        return nil
-    }
-}
-
-@MainActor
-private final class ObjectDataKeysTableView: NSTableView {
-    var onToggleReveal: (() -> Void)?
-    var onBack: (() -> Void)?
-    var onFocusSearch: (() -> Void)?
-
-    override func keyDown(with event: NSEvent) {
-        guard currentEditor() == nil else { super.keyDown(with: event); return }
-        let modifiers = event.modifierFlags.intersection([
-            .shift, .command, .control, .option,
-        ])
-        switch (event.charactersIgnoringModifiers?.lowercased(), event.keyCode) {
-        case ("d", _) where modifiers.isEmpty:
-            onToggleReveal?()
-        case ("/", _) where modifiers.isEmpty:
-            onFocusSearch?()
-        case ("f", _) where modifiers == .command:
-            onFocusSearch?()
-        case (_, 53) where modifiers.isEmpty:
-            onBack?()
-        default:
-            super.keyDown(with: event)
-        }
     }
 }

@@ -202,6 +202,8 @@ import Testing
     #expect(PaletteOperation.openExec.title == "Open Terminal")
     #expect(valid.contains(.startPortForward))
     #expect(valid.contains(.delete))
+    #expect(valid.contains(.editLabels))
+    #expect(valid.contains(.editAnnotations))
     #expect(valid.contains(.copyReference))
     #expect(valid.contains(.scale) == false)
     #expect(valid.contains(.restart) == false)
@@ -224,6 +226,8 @@ import Testing
 
     #expect(PaletteOperationRanking.operations(query: "restart", context: context) == [.restart])
     #expect(PaletteOperationRanking.operations(query: "replicas", context: context) == [.scale])
+    #expect(PaletteOperationRanking.operations(query: "labels", context: context) == [.editLabels])
+    #expect(PaletteOperationRanking.operations(query: "annotations", context: context) == [.editAnnotations])
     #expect(PaletteOperationRanking.operations(query: "terminal", context: context).isEmpty)
 }
 

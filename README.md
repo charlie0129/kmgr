@@ -93,11 +93,14 @@ app-wide Port Forwards window.
   visible selection or changing the selected rows.
 - Details provide a structured Summary table where clicking a cell and pressing
   Command-C (or choosing Copy Cell from its context menu) copies the complete
-  value, plus YAML, Events, Relationships, Metrics where meaningful, and a
-  searchable master-detail Data editor for ConfigMaps and Secrets. Its
-  draggable key/value table keeps every key visible while the selected decoded
-  value uses a full multiline editor. Oversized Summary values stay available
-  through cell copy while their inline presentation remains bounded.
+  value. Labels and Annotations remain visible as separate sections even when
+  empty; each has its own editor, and Return on a selected metadata row opens
+  that kind with the key selected. The metadata and ConfigMap/Secret Data
+  editors share a searchable, draggable key/value split-view interaction while
+  keeping their validation and mutation semantics separate. Details also
+  provide YAML, Events, Relationships, Metrics where meaningful, and Data for
+  ConfigMaps and Secrets. Oversized Summary values stay available through cell
+  copy while their inline presentation remains bounded.
 - `Y` opens the selected object's editable YAML tab inside Details. Shift-Y
   opens an independent, UID-pinned YAML window with an exact received-byte
   count, explicit refresh, and the same validated edit/apply workflow.
@@ -145,9 +148,11 @@ app-wide Port Forwards window.
   deleted and a same-name Pod appears with a new UID, the forward stays
   **Failed** and never attaches to the replacement. Service forwards may
   resolve another eligible Pod.
-- Delete, scale, rollout restart, label/annotation editing, and copy actions
-  are exposed through native menus. Deletes carry UID preconditions and report
-  per-object partial failures.
+- Delete, scale, rollout restart, separate Edit Labels and Edit Annotations
+  actions, and copy actions are exposed through native menus. Metadata editors
+  load an authoritative UID/resourceVersion and submit one sparse optimistic
+  mutation. Deletes carry UID preconditions and report per-object partial
+  failures.
 
 ### Relationships and scan cost
 
@@ -169,9 +174,10 @@ Single-letter commands apply only while the resource table is first responder,
 so they do not steal input from filters, YAML/data editors, logs, or terminals.
 Kmgr also keeps one passive **Shortcuts** panel above its windows while the app
 is active. The panel follows the active leaf view (including resource filters,
-Pod containers, object Data, and the Cluster Manager), never takes keyboard
-focus, and hides when no supported context is active. It is shown by default on
-first launch. Close the panel or use **Window → Hide Shortcuts** to disable it;
+Pod containers, Data and metadata key/value editors, and the Cluster Manager),
+never takes keyboard focus, and hides when no supported context is active. It
+is shown by default on first launch. Close the panel or use
+**Window → Hide Shortcuts** to disable it;
 **Window → Show Shortcuts** enables it again. Kmgr remembers this choice
 globally across launches rather than per cluster.
 
@@ -183,7 +189,9 @@ globally across launches rather than per cluster.
 | Command-K | Open the current workspace's Command Palette |
 | Shift-Command-N | Open the current workspace's namespace picker |
 | `/` | Focus the resource filter |
-| `/` or Command-F in Data | Search ConfigMap/Secret keys and values |
+| `/` or Command-F in a key/value editor | Search keys and values |
+| Return in a key/value editor | Edit the selected value |
+| Return in Details Summary | Edit the selected label or annotation |
 | Up / Down, `K` / `J` | Move table selection |
 | Shift-click / Shift-Up / Shift-Down | Extend native selection |
 | Command-click | Toggle one selected row |
@@ -432,7 +440,9 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
    revealed Secret, edit one decoded key in each without handling base64,
    inspect and confirm each value-only diff, scroll a long diff smoothly with
    both a trackpad and mouse wheel, and exercise a YAML resource-version
-   conflict.
+   conflict. In Details, edit one label and one multiline annotation through
+   their separate key/value editors, including Return on the selected Summary
+   row, and verify each save refreshes that exact object's Summary.
 9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
 10. View both Pod and Node metrics, then compare their behavior with Metrics API
