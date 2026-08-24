@@ -52,12 +52,23 @@ struct ClusterIdentityPresentationTests {
             objectDetailProvider: objectProvider,
             coordinator: PortForwardCoordinator(provider: IdentityNoopPortForwardProvider())
         )
+        let nodeShell = NodeShellConfigurationWindowController(
+            session: session,
+            target: NodeShellTarget(node: nodeIdentity()),
+            image: "registry.example/helper:1",
+            namespace: "team-a",
+            usesClusterImageOverride: false,
+            execProvider: IdentityNoopExecProvider(),
+            saveClusterImage: { _ in }
+        )
 
         #expect(exec.window?.title == "cluster-a — production/admin@corp — Configure Terminal")
         #expect(forward.window?.title ==
             "cluster-a — production/admin@corp — Start Port Forward")
+        #expect(nodeShell.window?.title ==
+            "cluster-a — production/admin@corp — Configure Node Shell")
 
-        for controller in [exec, forward] as [NSWindowController] {
+        for controller in [exec, forward, nodeShell] as [NSWindowController] {
             let root = try #require(controller.window?.contentView)
             let values = identityDescendants(of: root)
                 .compactMap { ($0 as? NSTextField)?.stringValue }
@@ -83,6 +94,29 @@ struct ClusterIdentityPresentationTests {
         #expect(clusterLabel.alignment == .left)
         #expect(declaredLabel.alignment == .left)
         #expect(declaredPort.frame.width >= 260)
+
+        let nodeShellRoot = try #require(nodeShell.window?.contentView)
+        nodeShellRoot.layoutSubtreeIfNeeded()
+        let nodeShellLabels = identityDescendants(of: nodeShellRoot)
+            .compactMap { $0 as? NSTextField }
+        let helperImageLabel = try #require(nodeShellLabels.first {
+            $0.stringValue == "Helper image"
+        })
+        let helperNamespaceLabel = try #require(nodeShellLabels.first {
+            $0.stringValue == "Helper namespace"
+        })
+        #expect(helperImageLabel.alignment == .left)
+        #expect(helperNamespaceLabel.alignment == .left)
+        let helperImageFrame = nodeShellRoot.convert(
+            helperImageLabel.bounds,
+            from: helperImageLabel
+        )
+        let helperNamespaceFrame = nodeShellRoot.convert(
+            helperNamespaceLabel.bounds,
+            from: helperNamespaceLabel
+        )
+        #expect(helperImageFrame.minY > helperNamespaceFrame.maxY)
+        #expect(helperImageFrame.minY - helperNamespaceFrame.maxY <= 20)
     }
 
     @Test("mutation and conflict presentations include full immutable identity")
@@ -243,6 +277,18 @@ private func podIdentity() -> ResourceIdentity {
         namespace: "team-a",
         name: "api",
         uid: ResourceUID("pod-uid")
+    )
+}
+
+private func nodeIdentity() -> ResourceIdentity {
+    ResourceIdentity(
+        clusterSessionID: "session",
+        group: "",
+        version: "v1",
+        resource: "nodes",
+        namespace: "",
+        name: "worker-a",
+        uid: ResourceUID("node-uid")
     )
 }
 

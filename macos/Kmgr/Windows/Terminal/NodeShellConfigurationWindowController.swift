@@ -197,9 +197,11 @@ final class NodeShellConfigurationWindowController: NSWindowController,
         footer.spacing = 8
         let separator = NSBox()
         separator.boxType = .separator
+        // Keep surplus panel height below the form instead of stretching a grid row.
+        let flexibleSpace = NSView()
         let stack = NSStackView(views: [
             identityGrid, separator, optionsGrid, saveClusterImageButton,
-            warning, validationLabel, footer,
+            warning, validationLabel, flexibleSpace, footer,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -207,7 +209,7 @@ final class NodeShellConfigurationWindowController: NSWindowController,
         stack.translatesAutoresizingMaskIntoConstraints = false
         for child in [
             identityGrid, separator, optionsGrid, saveClusterImageButton,
-            warning, validationLabel, footer,
+            warning, validationLabel, flexibleSpace, footer,
         ] {
             child.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
@@ -228,14 +230,15 @@ final class NodeShellConfigurationWindowController: NSWindowController,
     private func configure(grid: NSGridView) {
         grid.rowSpacing = 9
         grid.columnSpacing = 12
-        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).xPlacement = .leading
         grid.column(at: 1).xPlacement = .fill
+        grid.setContentHuggingPriority(.required, for: .vertical)
         grid.translatesAutoresizingMaskIntoConstraints = false
     }
 
     private func gridRow(_ title: String, _ value: NSView) -> [NSView] {
         let label = NSTextField(labelWithString: title)
-        label.alignment = .right
+        label.alignment = .left
         label.textColor = .secondaryLabelColor
         return [label, value]
     }
