@@ -341,8 +341,22 @@ func TestProjectorShowsNodeSchedulingRolesTaintsAndDualStackIPs(t *testing.T) {
 		t.Fatalf("Node roles = %#v", roles)
 	}
 	if taints := cellByID(row, "taints"); taints.GetDisplayText() != "2" ||
-		taints.GetIntegerValue() != 2 {
+		taints.GetIntegerValue() != 2 ||
+		taints.GetSeverity() != kmgrv1.CellSeverity_CELL_SEVERITY_WARNING {
 		t.Fatalf("Node taints = %#v", taints)
+	}
+	node.Spec.Taints = nil
+	raw, err = runtime.DefaultUnstructuredConverter.ToUnstructured(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	untaintedRow, visible := projector.ProjectOne(&unstructured.Unstructured{Object: raw})
+	if !visible {
+		t.Fatal("untainted Node row was unexpectedly hidden")
+	}
+	if taints := cellByID(untaintedRow, "taints"); taints.GetIntegerValue() != 0 ||
+		taints.GetSeverity() != kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL {
+		t.Fatalf("untainted Node taints = %#v", taints)
 	}
 	if ip := cellByID(row, "internal-ip"); ip.GetDisplayText() != "10.0.0.10, fd00::10" ||
 		strings.Contains(ip.GetDisplayText(), "203.0.113.10") ||

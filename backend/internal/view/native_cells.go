@@ -95,7 +95,11 @@ func (p *Projector) nativeObjectCell(
 	case "roles":
 		return stringValue(strings.Join(nodeRoles(object), ", "))
 	case "taints":
-		setNativeInteger(cell, int64(len(nestedSliceNoCopy(object.Object, "spec", "taints"))))
+		value := int64(len(nestedSliceNoCopy(object.Object, "spec", "taints")))
+		setNativeInteger(cell, value)
+		if value > 0 {
+			cell.Severity = kmgrv1.CellSeverity_CELL_SEVERITY_WARNING
+		}
 		return cell, true
 	case "internal-ip":
 		return stringValue(strings.Join(nodeAddresses(object, "InternalIP"), ", "))
