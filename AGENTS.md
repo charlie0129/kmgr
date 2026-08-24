@@ -50,3 +50,7 @@
 - Run verification proportional to the change, including focused tests and the repository's canonical test command when practical.
 - Commit completed work. Use the commit message format: `<type>(<scope>): <description>`.
 - Do not include unrelated user changes in the commit.
+
+## Components
+
+- Prefer `TechnicalTextField` over `NSTextField` because it sets useful defaults and avoids possible stalls caused by text-checking/completion work.
