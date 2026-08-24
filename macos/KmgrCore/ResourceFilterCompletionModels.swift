@@ -85,6 +85,49 @@ public enum ResourceFilterCompletionCatalog {
         return result
     }
 
+    /// Builds the text and relative caret position for an accepted candidate.
+    /// Value-bearing prefixes receive paired quotes; the intermediate
+    /// `column:` prefix remains open so a column ID can be completed next.
+    public static func acceptedCompletion(
+        _ completion: String,
+        in expression: String,
+        partialWordRange: NSRange
+    ) -> (replacement: String, caretUTF16Offset: Int)? {
+        let expressionLength = expression.utf16.count
+        guard partialWordRange.location != NSNotFound,
+            partialWordRange.location >= 0,
+            partialWordRange.length >= 0,
+            partialWordRange.location <= expressionLength,
+            partialWordRange.length <= expressionLength - partialWordRange.location,
+            Range(partialWordRange, in: expression) != nil
+        else { return nil }
+
+        let completionLength = completion.utf16.count
+        guard completion.hasSuffix(":") else {
+            return (completion, completionLength)
+        }
+        let completed = (expression as NSString).replacingCharacters(
+            in: partialWordRange,
+            with: completion
+        ) as NSString
+        let completionEnd = partialWordRange.location + completionLength
+        guard completionEnd <= completed.length else { return nil }
+        let whitespace = completed.rangeOfCharacter(
+            from: .whitespacesAndNewlines,
+            options: .backwards,
+            range: NSRange(location: 0, length: completionEnd)
+        )
+        let tokenStart = whitespace.location == NSNotFound ? 0 : NSMaxRange(whitespace)
+        let completedToken = completed.substring(with: NSRange(
+            location: tokenStart,
+            length: completionEnd - tokenStart
+        ))
+        guard completedToken.caseInsensitiveCompare("column:") != .orderedSame else {
+            return (completion, completionLength)
+        }
+        return (completion + "\"\"", completionLength + 1)
+    }
+
     private static func candidates(
         for context: CompletionContext,
         columnIDs: [String]

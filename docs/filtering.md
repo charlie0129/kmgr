@@ -8,8 +8,10 @@ While typing, the search field can complete reserved query prefixes and the
 stable IDs of active projected columns. Completion is bounded to the current
 query token: Tab accepts a suggestion, arrow keys move through suggestions,
 Escape dismisses them, and Return keeps its normal apply-query behavior.
-Values are not looked up or suggested, and native selector bodies remain
-opaque.
+Accepting a value-bearing prefix inserts paired double quotes and leaves the
+cursor between them (for example, `status:""`). The intermediate `column:`
+prefix first completes a column ID, then inserts the quotes. Values are not
+looked up or suggested, and native selector bodies remain opaque.
 
 ## Local terms
 

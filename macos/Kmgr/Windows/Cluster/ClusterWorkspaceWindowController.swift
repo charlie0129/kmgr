@@ -4586,18 +4586,22 @@ private final class ResourceListViewController: NSViewController,
             self?.openStream(reason: .debouncedFilter)
             self?.onRestorationChanged?()
         }
+        let filterEditor = filterField.currentEditor() as? NSTextView
+        if let filterEditor {
+            if filterCompletionCandidates(in: filterEditor).isEmpty {
+                filterCompletionPopup.dismiss()
+            }
+        } else {
+            filterCompletionPopup.dismiss()
+        }
         filterCompletionTrigger.textDidChange(
-            editor: filterField.currentEditor() as? NSTextView,
+            editor: filterEditor,
             isCurrentEditor: { [weak self] editor in
                 self?.filterField.currentEditor() === editor
             },
             hasCandidates: { [weak self] editor in
                 guard let self else { return false }
-                return !ResourceFilterCompletionCatalog.completions(
-                    in: editor.string,
-                    partialWordRange: editor.rangeForUserCompletion,
-                    columnIDs: self.columnIDs
-                ).isEmpty
+                return !self.filterCompletionCandidates(in: editor).isEmpty
             }
         )
     }
@@ -4633,12 +4637,7 @@ private final class ResourceListViewController: NSViewController,
 
     private func presentFilterCompletions(in textView: NSTextView) {
         guard filterField.currentEditor() === textView else { return }
-        let candidates = ResourceFilterCompletionCatalog.completions(
-            in: textView.string,
-            partialWordRange: textView.rangeForUserCompletion,
-            columnIDs: columnIDs
-        )
-        filterCompletionPopup.present(values: candidates)
+        filterCompletionPopup.present(values: filterCompletionCandidates(in: textView))
     }
 
     private func acceptFilterCompletion(at index: Int) {
@@ -4646,19 +4645,21 @@ private final class ResourceListViewController: NSViewController,
             filterField.currentEditor() === textView
         else { return }
         let partialWordRange = textView.rangeForUserCompletion
-        let candidates = ResourceFilterCompletionCatalog.completions(
-            in: textView.string,
-            partialWordRange: partialWordRange,
-            columnIDs: columnIDs
-        )
+        let candidates = filterCompletionCandidates(in: textView)
         guard candidates.indices.contains(index) else {
             resetFilterCompletion()
             return
         }
         filterCompletionTrigger.reset()
         filterCompletionPopup.dismiss()
+        let candidate = candidates[index]
+        guard let acceptance = ResourceFilterCompletionCatalog.acceptedCompletion(
+            candidate,
+            in: textView.string,
+            partialWordRange: partialWordRange
+        ) else { return }
         let replacement = NSAttributedString(
-            string: candidates[index],
+            string: acceptance.replacement,
             attributes: textView.typingAttributes
         )
         guard textView.performValidatedReplacement(
@@ -4666,9 +4667,23 @@ private final class ResourceListViewController: NSViewController,
             with: replacement
         ) else { return }
         textView.setSelectedRange(NSRange(
-            location: partialWordRange.location + replacement.length,
+            location: partialWordRange.location + acceptance.caretUTF16Offset,
             length: 0
         ))
+    }
+
+    private func filterCompletionCandidates(in textView: NSTextView) -> [String] {
+        let selection = textView.selectedRange()
+        guard selection.location != NSNotFound,
+            selection.length == 0,
+            selection.location > 0,
+            !textView.hasMarkedText()
+        else { return [] }
+        return ResourceFilterCompletionCatalog.completions(
+            in: textView.string,
+            partialWordRange: textView.rangeForUserCompletion,
+            columnIDs: columnIDs
+        )
     }
 
     private func resetFilterCompletion() {

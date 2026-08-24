@@ -26,6 +26,11 @@ private func completionRange(
     )
     #expect(completions == ["status:"])
     #expect(ResourceFilterCompletionCatalog.completions(
+        in: "stt",
+        partialWordRange: completionRange("stt"),
+        columnIDs: completionColumns
+    ).isEmpty)
+    #expect(ResourceFilterCompletionCatalog.completions(
         in: "N",
         partialWordRange: completionRange("N"),
         columnIDs: completionColumns
@@ -48,6 +53,44 @@ private func completionRange(
         partialWordRange: completionRange("block:"),
         columnIDs: completionColumns
     ).isEmpty)
+}
+
+@Test func resourceFilterCompletionAcceptanceQuotesValuesAfterCompletePrefixes() throws {
+    let statusExpression = "api statu"
+    let statusRange = completionRange(statusExpression, "statu")
+    let status = try #require(ResourceFilterCompletionCatalog.acceptedCompletion(
+        "status:",
+        in: statusExpression,
+        partialWordRange: statusRange
+    ))
+    #expect(status.replacement == "status:\"\"")
+    #expect(status.caretUTF16Offset == "status:\"".utf16.count)
+    #expect((statusExpression as NSString).replacingCharacters(
+        in: statusRange,
+        with: status.replacement
+    ) == "api status:\"\"")
+
+    let intermediate = try #require(ResourceFilterCompletionCatalog.acceptedCompletion(
+        "column:",
+        in: "colu",
+        partialWordRange: completionRange("colu")
+    ))
+    #expect(intermediate.replacement == "column:")
+    #expect(intermediate.caretUTF16Offset == "column:".utf16.count)
+
+    let explicitExpression = "api column:na"
+    let explicitRange = completionRange(explicitExpression, "na")
+    let explicit = try #require(ResourceFilterCompletionCatalog.acceptedCompletion(
+        "name:",
+        in: explicitExpression,
+        partialWordRange: explicitRange
+    ))
+    #expect(explicit.replacement == "name:\"\"")
+    #expect(explicit.caretUTF16Offset == "name:\"".utf16.count)
+    #expect((explicitExpression as NSString).replacingCharacters(
+        in: explicitRange,
+        with: explicit.replacement
+    ) == "api column:name:\"\"")
 }
 
 @Test func resourceFilterCompletionNarrowsActiveNodeColumnPrefix() {

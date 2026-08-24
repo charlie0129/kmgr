@@ -761,10 +761,48 @@ struct ClusterWorkspaceToolbarTests {
             isARepeat: false,
             keyCode: 48
         )))
-        #expect(editor.string == "api status:")
-        #expect(filter.stringValue == "api status:")
+        #expect(editor.string == "api status:\"\"")
+        #expect(filter.stringValue == "api status:\"\"")
+        #expect(editor.selectedRange() == NSRange(
+            location: "api status:\"".utf16.count,
+            length: 0
+        ))
         #expect(!popup.isPresented)
         #expect(window.firstResponder === editor)
+    }
+
+    @Test("resource filter popup dismisses when the prefix no longer matches")
+    func resourceFilterCompletionDismissesStalePrefix() async throws {
+        let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+        let popup = try #require(descendants(of: root)
+            .compactMap { $0 as? ResourceFilterCompletionPopup }
+            .first)
+
+        filter.stringValue = "statu"
+        #expect(window.makeFirstResponder(filter))
+        let editor = try #require(filter.currentEditor() as? NSTextView)
+        editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+        filter.delegate?.controlTextDidChange?(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: filter
+        ))
+        try await waitUntil { popup.isPresented }
+        #expect(popup.visibleValues == ["status:"])
+
+        editor.string = "stt"
+        editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+        filter.delegate?.controlTextDidChange?(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: filter
+        ))
+
+        #expect(!popup.isPresented)
     }
 
     @Test("resource filter popup keeps arrow selection provisional until Tab")
@@ -809,7 +847,11 @@ struct ClusterWorkspaceToolbarTests {
         #expect(editor.string == "n")
 
         editor.doCommand(by: #selector(NSResponder.insertTab(_:)))
-        #expect(editor.string == "name:")
+        #expect(editor.string == "name:\"\"")
+        #expect(editor.selectedRange() == NSRange(
+            location: "name:\"".utf16.count,
+            length: 0
+        ))
         #expect(!popup.isPresented)
     }
 
@@ -853,7 +895,11 @@ struct ClusterWorkspaceToolbarTests {
             pressure: 1
         )))
 
-        #expect(editor.string == "status:")
+        #expect(editor.string == "status:\"\"")
+        #expect(editor.selectedRange() == NSRange(
+            location: "status:\"".utf16.count,
+            length: 0
+        ))
         #expect(!popup.isPresented)
         #expect(window.firstResponder === editor)
     }
