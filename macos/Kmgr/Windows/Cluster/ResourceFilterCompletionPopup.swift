@@ -115,6 +115,7 @@ final class ResourceFilterCompletionPopup: NSView, NSTableViewDataSource,
         setAccessibilityLabel("Resource query completions")
 
         tableView.headerView = nil
+        tableView.style = .plain
         tableView.rowHeight = Self.rowHeight
         tableView.intercellSpacing = .zero
         tableView.selectionHighlightStyle = .regular

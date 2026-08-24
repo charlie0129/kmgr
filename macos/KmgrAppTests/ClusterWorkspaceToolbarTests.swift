@@ -740,6 +740,14 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil { popup.isPresented }
         #expect(popup.visibleValues == ["status:"])
         #expect(editor.string == "api statu")
+        root.layoutSubtreeIfNeeded()
+        let completionTable = try #require(descendants(of: popup)
+            .compactMap { $0 as? NSTableView }.first)
+        let visibleRect = completionTable.visibleRect
+        let onlyRow = completionTable.rect(ofRow: 0)
+        #expect(completionTable.effectiveStyle == .plain)
+        #expect(abs(onlyRow.minY - visibleRect.minY) <= 0.5)
+        #expect(onlyRow.maxY <= visibleRect.maxY + 0.5)
 
         window.sendEvent(try #require(NSEvent.keyEvent(
             with: .keyDown,
@@ -783,6 +791,16 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil { popup.isPresented }
         #expect(popup.visibleValues.prefix(3) == ["namespace:", "name:", "ns:"])
         #expect(popup.selectedIndex == nil)
+        root.layoutSubtreeIfNeeded()
+        let completionTable = try #require(descendants(of: popup)
+            .compactMap { $0 as? NSTableView }.first)
+        let visibleRect = completionTable.visibleRect
+        let lastVisibleRow = min(
+            popup.visibleValues.count,
+            ResourceFilterCompletionPopup.maximumVisibleRows
+        ) - 1
+        #expect(abs(completionTable.rect(ofRow: 0).minY - visibleRect.minY) <= 0.5)
+        #expect(completionTable.rect(ofRow: lastVisibleRow).maxY <= visibleRect.maxY + 0.5)
 
         editor.doCommand(by: #selector(NSResponder.moveDown(_:)))
         #expect(popup.selectedIndex == 0)
