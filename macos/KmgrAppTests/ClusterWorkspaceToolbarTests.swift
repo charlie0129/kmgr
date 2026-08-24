@@ -747,6 +747,24 @@ struct ClusterWorkspaceToolbarTests {
             with: completions[0]
         ) == "api status:")
         #expect(editor.string == "api statu")
+
+        let handled = filter.delegate?.control?(
+            filter,
+            textView: editor,
+            doCommandBy: #selector(NSResponder.insertTab(_:))
+        )
+        #expect(handled == true)
+        #expect(editor.string == "api status:")
+
+        editor.string = "api zzz"
+        editor.setSelectedRange(NSRange(location: 7, length: 0))
+        let unmatchedTabHandled = filter.delegate?.control?(
+            filter,
+            textView: editor,
+            doCommandBy: #selector(NSResponder.insertTab(_:))
+        )
+        #expect(unmatchedTabHandled == false)
+        #expect(editor.string == "api zzz")
     }
 
     @Test("resource filter completion trigger refreshes when the token changes")

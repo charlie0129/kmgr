@@ -4578,8 +4578,9 @@ private final class ResourceListViewController: NSViewController,
         forPartialWordRange partialWordRange: NSRange,
         indexOfSelectedItem selectedIndex: UnsafeMutablePointer<Int>
     ) -> [String] {
-        // Do not preselect a candidate. Tab/arrow navigation remains explicit,
-        // while Return continues through the existing query-commit command.
+        // Keep candidates provisional until the user accepts one with Tab.
+        // Return is handled separately below and remains the explicit
+        // query-commit command.
         guard control === filterField else { return [] }
         selectedIndex.pointee = -1
         return ResourceFilterCompletionCatalog.completions(
@@ -4594,8 +4595,27 @@ private final class ResourceListViewController: NSViewController,
         textView: NSTextView,
         doCommandBy commandSelector: Selector
     ) -> Bool {
-        guard control === filterField,
-            commandSelector == #selector(NSResponder.insertNewline(_:))
+        guard control === filterField else { return false }
+
+        if commandSelector == #selector(NSResponder.insertTab(_:)) {
+            let partialWordRange = textView.rangeForUserCompletion
+            guard let completion = ResourceFilterCompletionCatalog.completions(
+                in: textView.string,
+                partialWordRange: partialWordRange,
+                columnIDs: columnIDs
+            ).first else { return false }
+
+            filterCompletionTrigger.reset()
+            textView.insertCompletion(
+                completion,
+                forPartialWordRange: partialWordRange,
+                movement: NSTextMovement.tab.rawValue,
+                isFinal: true
+            )
+            return true
+        }
+
+        guard commandSelector == #selector(NSResponder.insertNewline(_:))
         else { return false }
 
         // Do not make an explicit Return wait for the typing debounce. This
