@@ -11,7 +11,7 @@ final class ResourceUsageTableCellView: HighlightableResourceTableCellView {
         toolTip: String?,
         alignment: NSTextAlignment,
         textColor: NSColor,
-        emphasizedTerm: String? = nil,
+        emphasizedTerms: [String] = [],
         changeHighlight: ResourceCellHighlightPresentation? = nil
     ) {
         let baseFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
@@ -35,7 +35,7 @@ final class ResourceUsageTableCellView: HighlightableResourceTableCellView {
             textColor: textColor,
             alignment: alignment,
             toolTip: toolTip,
-            emphasizedTerm: emphasizedTerm,
+            emphasizedTerms: emphasizedTerms,
             changeHighlight: changeHighlight,
             textAccent: textAccent
         )

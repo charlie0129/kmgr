@@ -133,7 +133,7 @@ struct ResourceUsageTableCellViewTests {
             toolTip: nil,
             alignment: .right,
             textColor: .labelColor,
-            emphasizedTerm: "500M",
+            emphasizedTerms: ["500M"],
             changeHighlight: ResourceCellHighlightPresentation(
                 emphasis: .neutral,
                 strength: 0.5

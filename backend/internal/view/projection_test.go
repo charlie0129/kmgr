@@ -635,6 +635,76 @@ func TestProjectorEvaluatesCompiledCELAndSortsByTypedResult(t *testing.T) {
 	}
 }
 
+func TestProjectorFiltersByRenderedCustomColumnValue(t *testing.T) {
+	t.Parallel()
+	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program, err := compiler.Compile(viewcolumns.Definition{
+		ID: "block", Title: "Block", Expression: "object.spec.nodeName",
+		ResultType: viewcolumns.ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs:        []string{"name", "block"},
+		FilterExpression: "block:worker",
+		CELPrograms:      map[string]*viewcolumns.Program{"block": program},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matching := pod("uid-match", "ns", "api", "Running", 0, nil, time.Time{})
+	matching.Object["spec"].(map[string]any)["nodeName"] = "worker-1"
+	nonMatching := pod("uid-other", "ns", "other", "Running", 0, nil, time.Time{})
+	nonMatching.Object["spec"].(map[string]any)["nodeName"] = "node-2"
+	rows := projector.Project([]*unstructured.Unstructured{matching, nonMatching})
+	if len(rows) != 1 || rows[0].GetIdentity().GetUid() != "uid-match" {
+		t.Fatalf("column-qualified projection rows = %#v", rows)
+	}
+}
+
+func TestProjectorFiltersByRenderedServerColumnValue(t *testing.T) {
+	t.Parallel()
+	const serverColumnID = "server-U3RhdHVz"
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Group: "example.io", Version: "v1", Resource: "widgets", Kind: "Widget", Namespaced: true,
+		},
+		NamespaceScope:   NamespaceScope{All: true},
+		ColumnIDs:        []string{"name", serverColumnID},
+		FilterExpression: serverColumnID + ":ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matching := pod("uid-match", "ns", "api", "Running", 0, nil, time.Time{})
+	nonMatching := pod("uid-other", "ns", "other", "Running", 0, nil, time.Time{})
+	additional := map[string][]*kmgrv1.Cell{
+		"uid-match": {{ColumnId: serverColumnID, DisplayText: "Ready"}},
+		"uid-other": {{ColumnId: serverColumnID, DisplayText: "Pending"}},
+	}
+	rows, err := projector.ProjectContextWithAdditionalCells(
+		context.Background(),
+		[]*unstructured.Unstructured{matching, nonMatching},
+		additional,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].GetIdentity().GetUid() != "uid-match" {
+		t.Fatalf("server-column projection rows = %#v", rows)
+	}
+}
+
 func TestProjectorMutesOnlyActualMissingCELValues(t *testing.T) {
 	t.Parallel()
 	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
@@ -1037,6 +1107,14 @@ func TestMetricDependenciesSeparateDisplayOrderAndMembership(t *testing.T) {
 				FilterExpression: "status:Running label:app==api",
 			},
 			want: metricDependency{display: true},
+		},
+		{
+			name: "column filter can change metric membership",
+			spec: ProjectionSpec{
+				ColumnIDs:        []string{"name", PodCPUColumn},
+				FilterExpression: PodCPUColumn + ":500m",
+			},
+			want: metricDependency{display: true, membership: true},
 		},
 		{
 			name: "exact scheduler resource is not a metric display",

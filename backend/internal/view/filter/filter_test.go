@@ -171,6 +171,83 @@ func TestBareTextRemainsLocalKeywordSearch(t *testing.T) {
 	}
 }
 
+func TestColumnTermsUseActiveRenderedColumnText(t *testing.T) {
+	t.Parallel()
+	compiled, err := CompileForColumns(
+		`block:ready column:block:healthy`,
+		[]string{"name", "block"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := compiled.Terms(), []Term{
+		{Kind: Column, Key: "block", Value: "ready"},
+		{Kind: Column, Key: "block", Value: "healthy"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("column terms = %#v, want %#v", got, want)
+	}
+	if got, want := compiled.ColumnIDs(), []string{"block"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("column IDs = %#v, want %#v", got, want)
+	}
+	if !compiled.Match(Candidate{VisibleColumnTexts: []string{"api", "Ready and healthy"}}) {
+		t.Fatal("column terms did not match rendered column text")
+	}
+	if compiled.Match(Candidate{VisibleColumnTexts: []string{"Ready and healthy", "api"}}) {
+		t.Fatal("column term matched text from the wrong column")
+	}
+}
+
+func TestNativeSelectorAndColumnTermRemainConjunctive(t *testing.T) {
+	t.Parallel()
+	compiled, err := CompileForColumns(
+		`labelSelector:"app=api" block:ready`,
+		[]string{"name", "block"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matching := Candidate{
+		Labels:             map[string]string{"app": "api"},
+		VisibleColumnTexts: []string{"pod-api", "Ready"},
+	}
+	if !compiled.Match(matching) {
+		t.Fatal("mixed selector/column query did not match")
+	}
+	matching.VisibleColumnTexts[1] = "Pending"
+	if compiled.Match(matching) {
+		t.Fatal("column term matched a row with the wrong rendered value")
+	}
+}
+
+func TestColumnTermsReserveBuiltInPrefixesAndSupportIDsContainingColons(t *testing.T) {
+	t.Parallel()
+	compiled, err := CompileForColumns(
+		`name:api column:name:custom column:field:custom:value field:ignored`,
+		[]string{"name", "field", "field:custom"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Term{
+		{Kind: Name, Value: "api"},
+		{Kind: Column, Key: "name", Value: "custom"},
+		{Kind: Column, Key: "field:custom", Value: "value"},
+		{Kind: Field, Key: "ignored", Value: ""},
+	}
+	if got := compiled.Terms(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reserved/colon terms = %#v, want %#v", got, want)
+	}
+}
+
+func TestColumnTermsRequireAnActiveColumn(t *testing.T) {
+	t.Parallel()
+	for _, query := range []string{"block:ready", "column:block:ready", "column:block"} {
+		if _, err := CompileForColumns(query, []string{"name"}); err == nil {
+			t.Fatalf("query %q unexpectedly compiled", query)
+		}
+	}
+}
+
 func TestQuotesAndEscapes(t *testing.T) {
 	t.Parallel()
 	compiled, err := Compile(`"hello world" web\ server`)

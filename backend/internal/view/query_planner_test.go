@@ -71,6 +71,24 @@ func TestPlanViewQueryDoesNotPushBareOrLocalTerms(t *testing.T) {
 	}
 }
 
+func TestPlanViewQueryResolvesColumnTermsAgainstRequestedColumns(t *testing.T) {
+	t.Parallel()
+	plan, err := planViewQuery(&kmgrv1.ViewSpec{
+		Resource:         &kmgrv1.ResourceType{Version: "v1", Resource: "pods"},
+		ColumnIds:        []string{"name", "block"},
+		FilterExpression: `labelSelector:"app=api" block:ready`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := plan.filter.ColumnIDs(), []string{"block"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("column IDs = %#v, want %#v", got, want)
+	}
+	if got, want := plan.labelSelector, "app=api"; got != want {
+		t.Fatalf("label selector = %q, want %q", got, want)
+	}
+}
+
 func TestPlanViewQueryRejectsInvalidExplicitNativeSelectors(t *testing.T) {
 	t.Parallel()
 	for _, query := range []string{

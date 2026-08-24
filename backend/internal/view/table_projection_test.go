@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	viewcolumns "github.com/charlie0129/kmgr/backend/internal/view/columns"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -106,6 +107,28 @@ func TestTableObjectPolicyUsesMetadataOnlyForMetadataAndServerDependencies(t *te
 	}
 	if got := tableObjectPolicy(localMetadataProjector); got != metav1.IncludeMetadata {
 		t.Fatalf("metadata local field policy = %q", got)
+	}
+	compiler, err := viewcolumns.NewCompiler(viewcolumns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockProgram, err := compiler.Compile(viewcolumns.Definition{
+		ID: "block", Expression: "object.spec.nodeName",
+		ResultType: viewcolumns.ResultString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	customColumnProjector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session", Resource: resource,
+		ColumnIDs: []string{"name", "block"}, FilterExpression: "block:worker",
+		CELPrograms: map[string]*viewcolumns.Program{"block": blockProgram},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tableObjectPolicy(customColumnProjector); got != metav1.IncludeObject {
+		t.Fatalf("CEL column filter policy = %q, want %q", got, metav1.IncludeObject)
 	}
 
 	for _, test := range []struct {

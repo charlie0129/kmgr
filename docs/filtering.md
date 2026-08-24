@@ -30,6 +30,28 @@ Structured local terms are:
 Single or double quotes preserve spaces, and a backslash escapes the next
 character in local terms. Keys and field paths are exact and case-sensitive.
 
+## Column-qualified terms
+
+Bare terms search every selected column, including custom CEL, metric, and
+server columns. A projected column can also be addressed directly using its
+stable column ID:
+
+```text
+block:ready
+column:block:ready
+```
+
+The short form is available when the column ID does not conflict with a
+reserved query prefix (`namespace`/`ns`, `name`, `status`, `label`, `field`,
+the native selector prefixes, or `column`). The explicit `column:` form is
+always available for an active column, including IDs that conflict with a
+reserved prefix. Column terms perform a case-insensitive substring match
+against the column's rendered text and only address columns included in the
+current view. Column IDs are case-sensitive; column titles are not query
+names. Text-bearing terms (bare text, `name:`/`namespace:`/`status:`, and
+column-qualified values) are emphasized in matching rendered cells; selector
+bodies and local label/field predicates remain unstyled.
+
 ## Explicit Kubernetes selectors
 
 Native Kubernetes selectors use explicit prefixes. Their contents are parsed

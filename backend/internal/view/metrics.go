@@ -417,6 +417,12 @@ func metricDependencies(projector *Projector) metricDependency {
 			dependency.membership = true
 			break
 		}
+		if term.Kind == viewfilter.Column && metricColumnDependsOnProvider(projector, term.Key) {
+			// A column-qualified term reads one rendered cell. If that cell is
+			// metric-backed, sample availability can change projection membership.
+			dependency.membership = true
+			break
+		}
 	}
 	return dependency
 }

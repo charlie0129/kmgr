@@ -53,7 +53,7 @@ struct ResourceTableCellViewTests {
                 severity: .critical
             ),
             alignment: .left,
-            emphasizedTerm: "aPi"
+            emphasizedTerms: ["aPi"]
         )
 
         let attributed = try #require(cell.textField?.attributedStringValue)
@@ -68,6 +68,23 @@ struct ResourceTableCellViewTests {
         ))
     }
 
+    @Test("multiple query terms bold every matching literal range")
+    func boldsMultipleTerms() throws {
+        let cell = ResourceTextTableCellView()
+        cell.configure(
+            cell: Cell(columnID: "block", displayText: "Ready api ready"),
+            alignment: .left,
+            emphasizedTerms: ["api", "ready"]
+        )
+
+        let attributed = try #require(cell.textField?.attributedStringValue)
+        #expect(boldRanges(in: attributed) == [
+            NSRange(location: 0, length: 5),
+            NSRange(location: 6, length: 3),
+            NSRange(location: 10, length: 5),
+        ])
+    }
+
     @Test("bold emphasis preserves semantic severity color")
     func preservesSeverityColor() throws {
         let cell = ResourceTextTableCellView()
@@ -78,7 +95,7 @@ struct ResourceTableCellViewTests {
                 severity: .critical
             ),
             alignment: .center,
-            emphasizedTerm: "failed"
+            emphasizedTerms: ["failed"]
         )
 
         let attributed = try #require(cell.textField?.attributedStringValue)
@@ -247,7 +264,7 @@ struct ResourceTableCellViewTests {
                 severity: .critical
             ),
             alignment: .right,
-            emphasizedTerm: "fail",
+            emphasizedTerms: ["fail"],
             changeHighlight: ResourceCellHighlightPresentation(
                 emphasis: .neutral,
                 strength: 1

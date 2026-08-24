@@ -114,7 +114,8 @@ public struct ResourceViewRequest: Hashable, Sendable {
     public var namespaces: [String]
     /// The complete query visible in the resource search field. Kubernetes
     /// selectors are derived from its explicit labelSelector:/fieldSelector:
-    /// clauses by the engine.
+    /// clauses by the engine; column-qualified terms resolve against the
+    /// selected column IDs below.
     public var filterExpression: String
     public var filterRevision: UInt64
     public var columnIDs: [String]

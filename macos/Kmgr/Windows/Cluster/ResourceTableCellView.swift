@@ -111,16 +111,16 @@ class HighlightableResourceTableCellView: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
-    /// Installs complete text state. `emphasizedTerm` is deliberately one
-    /// already-validated simple term; complex filter interpretation remains
-    /// outside the AppKit renderer.
+    /// Installs complete text state. Terms are already parsed and scoped by
+    /// the query presentation layer; the AppKit renderer only applies the
+    /// bounded list of case-insensitive bold ranges it receives.
     func configureText(
         _ text: String,
         baseFont: NSFont,
         textColor: NSColor,
         alignment: NSTextAlignment,
         toolTip: String?,
-        emphasizedTerm: String?,
+        emphasizedTerms: [String],
         changeHighlight: ResourceCellHighlightPresentation?,
         textAccent: ResourceTableTextAccent? = nil
     ) {
@@ -130,7 +130,7 @@ class HighlightableResourceTableCellView: NSTableCellView {
             text,
             baseFont: baseFont,
             textColor: textColor,
-            emphasizedTerm: emphasizedTerm,
+            emphasizedTerms: emphasizedTerms,
             textAccent: textAccent
         )
         valueLabel.alignment = alignment
@@ -193,7 +193,7 @@ class HighlightableResourceTableCellView: NSTableCellView {
         _ text: String,
         baseFont: NSFont,
         textColor: NSColor,
-        emphasizedTerm: String?,
+        emphasizedTerms: [String],
         textAccent: ResourceTableTextAccent?
     ) -> NSAttributedString {
         let result = NSMutableAttributedString(
@@ -219,30 +219,34 @@ class HighlightableResourceTableCellView: NSTableCellView {
                 )
             }
         }
-        guard let emphasizedTerm, !emphasizedTerm.isEmpty, !text.isEmpty else {
+        guard !emphasizedTerms.isEmpty, !text.isEmpty else {
             return result
         }
 
         let source = text as NSString
-        let term = emphasizedTerm as NSString
         var remaining = NSRange(location: 0, length: source.length)
         let boldFont = NSFont.systemFont(
             ofSize: baseFont.pointSize,
             weight: .bold
         )
-        while remaining.length > 0 {
-            let match = source.range(
-                of: term as String,
-                options: [.caseInsensitive, .literal],
-                range: remaining
-            )
-            guard match.location != NSNotFound else { break }
-            result.addAttribute(.font, value: boldFont, range: match)
-            let nextLocation = NSMaxRange(match)
-            remaining = NSRange(
-                location: nextLocation,
-                length: source.length - nextLocation
-            )
+        for emphasizedTerm in emphasizedTerms {
+            guard !emphasizedTerm.isEmpty else { continue }
+            let term = emphasizedTerm as NSString
+            remaining = NSRange(location: 0, length: source.length)
+            while remaining.length > 0 {
+                let match = source.range(
+                    of: term as String,
+                    options: [.caseInsensitive, .literal],
+                    range: remaining
+                )
+                guard match.location != NSNotFound else { break }
+                result.addAttribute(.font, value: boldFont, range: match)
+                let nextLocation = NSMaxRange(match)
+                remaining = NSRange(
+                    location: nextLocation,
+                    length: source.length - nextLocation
+                )
+            }
         }
         return result
     }
@@ -257,7 +261,7 @@ final class ResourceTextTableCellView: HighlightableResourceTableCellView {
         cell: Cell?,
         placeholder: String = "—",
         alignment: NSTextAlignment,
-        emphasizedTerm: String? = nil,
+        emphasizedTerms: [String] = [],
         changeHighlight: ResourceCellHighlightPresentation? = nil
     ) {
         let text = cell?.displayText ?? placeholder
@@ -269,7 +273,7 @@ final class ResourceTextTableCellView: HighlightableResourceTableCellView {
             textColor: style.color,
             alignment: alignment,
             toolTip: toolTip,
-            emphasizedTerm: emphasizedTerm,
+            emphasizedTerms: emphasizedTerms,
             changeHighlight: changeHighlight
         )
     }

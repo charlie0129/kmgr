@@ -5,7 +5,9 @@
 package filter
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -24,6 +26,7 @@ const (
 	Label
 	Field
 	Status
+	Column
 	NativeLabel
 	NativeField
 )
@@ -36,14 +39,21 @@ type Term struct {
 }
 
 type Filter struct {
-	terms    []Term
-	compiled []compiledTerm
+	terms           []Term
+	compiled        []compiledTerm
+	columnTermCount int
 }
 
 type compiledTerm struct {
 	term          Term
 	labelSelector labels.Selector
 	fieldSelector fields.Selector
+	columnIndex   int
+}
+
+type columnMatcher struct {
+	id    string
+	index int
 }
 
 type ParseError struct {
@@ -62,21 +72,55 @@ type Candidate struct {
 	Labels      map[string]string
 	Fields      map[string]string
 	VisibleText []string
+	// VisibleColumnTexts is ordered exactly like the active column IDs supplied
+	// to CompileForColumns. It is populated only when the query contains a
+	// column-qualified term, keeping ordinary text filters allocation-light.
+	VisibleColumnTexts []string
 }
 
 func Compile(input string) (*Filter, error) {
+	return CompileForColumns(input, nil)
+}
+
+// CompileForColumns compiles one query with the currently projected column
+// IDs. Column-qualified terms use these IDs to resolve both the convenient
+// `<id>:<value>` spelling and the unambiguous `column:<id>:<value>` spelling.
+// The ordinary Compile entry point intentionally has no column context and
+// therefore rejects column-qualified terms.
+func CompileForColumns(input string, columnIDs []string) (*Filter, error) {
 	tokens, err := tokenize(input)
 	if err != nil {
 		return nil, err
 	}
+	columnIndexes := make(map[string]int, len(columnIDs))
+	columnMatchers := make([]columnMatcher, 0, len(columnIDs))
+	for index, id := range columnIDs {
+		if _, exists := columnIndexes[id]; exists {
+			continue
+		}
+		columnIndexes[id] = index
+		columnMatchers = append(columnMatchers, columnMatcher{id: id, index: index})
+	}
+	// Longest IDs win when a custom ID itself contains a colon and therefore
+	// shares a prefix with another ID. IDs remain case-sensitive, just like
+	// the column protocol identity.
+	slices.SortStableFunc(columnMatchers, func(left, right columnMatcher) int {
+		if len(left.id) != len(right.id) {
+			return cmp.Compare(len(right.id), len(left.id))
+		}
+		return cmp.Compare(left.id, right.id)
+	})
 	compiled := &Filter{
 		terms:    make([]Term, 0, len(tokens)),
 		compiled: make([]compiledTerm, 0, len(tokens)),
 	}
 	for _, token := range tokens {
-		term, err := parseTerm(token)
+		term, err := parseTerm(token, columnIndexes, columnMatchers)
 		if err != nil {
 			return nil, err
+		}
+		if term.term.Kind == Column {
+			compiled.columnTermCount++
 		}
 		compiled.terms = append(compiled.terms, term.term)
 		compiled.compiled = append(compiled.compiled, term)
@@ -86,6 +130,32 @@ func Compile(input string) (*Filter, error) {
 
 func (f *Filter) Terms() []Term {
 	return append([]Term(nil), f.terms...)
+}
+
+// ColumnIDs returns the column IDs referenced by column-qualified terms in
+// query order, without duplicates.
+func (f *Filter) ColumnIDs() []string {
+	if f == nil || f.columnTermCount == 0 {
+		return nil
+	}
+	result := make([]string, 0, f.columnTermCount)
+	seen := make(map[string]struct{}, f.columnTermCount)
+	for _, term := range f.terms {
+		if term.Kind != Column {
+			continue
+		}
+		if _, exists := seen[term.Key]; exists {
+			continue
+		}
+		seen[term.Key] = struct{}{}
+		result = append(result, term.Key)
+	}
+	return result
+}
+
+// HasColumnTerms reports whether matching requires projected column text.
+func (f *Filter) HasColumnTerms() bool {
+	return f != nil && f.columnTermCount != 0
 }
 
 // NativeLabelSelectors returns the explicitly requested Kubernetes label
@@ -166,6 +236,11 @@ func (f *Filter) Match(candidate Candidate) bool {
 			}
 		case Text, Namespace, Name, Label, Field, Status:
 			if !termMatches(term.term, candidate) {
+				return false
+			}
+		case Column:
+			if term.columnIndex < 0 || term.columnIndex >= len(candidate.VisibleColumnTexts) ||
+				!containsFold(candidate.VisibleColumnTexts[term.columnIndex], term.term.Value) {
 				return false
 			}
 		default:
@@ -264,10 +339,14 @@ func isNativeSelectorToken(input string) bool {
 	return false
 }
 
-func parseTerm(value token) (compiledTerm, error) {
+func parseTerm(
+	value token,
+	columnIndexes map[string]int,
+	columnMatchers []columnMatcher,
+) (compiledTerm, error) {
 	prefix, body, structured := strings.Cut(value.text, ":")
 	if !structured {
-		return compiledTerm{term: Term{Kind: Text, Value: fold(value.text)}}, nil
+		return compiledTerm{term: Term{Kind: Text, Value: fold(value.text)}, columnIndex: -1}, nil
 	}
 	if body == "" {
 		return compiledTerm{}, &ParseError{Offset: value.offset + len(prefix) + 1, Message: "structured term has no value"}
@@ -275,23 +354,30 @@ func parseTerm(value token) (compiledTerm, error) {
 
 	switch strings.ToLower(prefix) {
 	case "namespace", "ns":
-		return compiledTerm{term: Term{Kind: Namespace, Value: fold(body)}}, nil
+		return compiledTerm{term: Term{Kind: Namespace, Value: fold(body)}, columnIndex: -1}, nil
 	case "name":
-		return compiledTerm{term: Term{Kind: Name, Value: fold(body)}}, nil
+		return compiledTerm{term: Term{Kind: Name, Value: fold(body)}, columnIndex: -1}, nil
 	case "status":
-		return compiledTerm{term: Term{Kind: Status, Value: fold(body)}}, nil
+		return compiledTerm{term: Term{Kind: Status, Value: fold(body)}, columnIndex: -1}, nil
 	case "label":
 		term, err := keyedTerm(Label, body, value.offset+len(prefix)+1)
 		if err != nil {
 			return compiledTerm{}, err
 		}
-		return compiledTerm{term: term}, nil
+		return compiledTerm{term: term, columnIndex: -1}, nil
 	case "field":
 		term, err := keyedTerm(Field, body, value.offset+len(prefix)+1)
 		if err != nil {
 			return compiledTerm{}, err
 		}
-		return compiledTerm{term: term}, nil
+		return compiledTerm{term: term, columnIndex: -1}, nil
+	case "column":
+		return parseColumnTerm(
+			body,
+			value.offset+len(prefix)+1,
+			columnIndexes,
+			columnMatchers,
+		)
 	case "labelselector":
 		selector, err := labels.Parse(body)
 		if err != nil || selector.Empty() {
@@ -307,6 +393,7 @@ func parseTerm(value token) (compiledTerm, error) {
 		return compiledTerm{
 			term:          Term{Kind: NativeLabel, Value: canonicalLabelSelector(selector)},
 			labelSelector: selector,
+			columnIndex:   -1,
 		}, nil
 	case "fieldselector":
 		selector, err := fields.ParseSelector(body)
@@ -323,10 +410,62 @@ func parseTerm(value token) (compiledTerm, error) {
 		return compiledTerm{
 			term:          Term{Kind: NativeField, Value: selector.String()},
 			fieldSelector: selector,
+			columnIndex:   -1,
 		}, nil
 	default:
+		if id, index, columnValue, exists := matchColumnPrefix(value.text, columnMatchers); exists {
+			return columnTerm(id, columnValue, index, value.offset+len(id)+1)
+		}
 		return compiledTerm{}, &ParseError{Offset: value.offset, Message: fmt.Sprintf("unknown structured term %q", prefix)}
 	}
+}
+
+func parseColumnTerm(
+	body string,
+	offset int,
+	columnIndexes map[string]int,
+	columnMatchers []columnMatcher,
+) (compiledTerm, error) {
+	if id, index, columnValue, exists := matchColumnPrefix(body, columnMatchers); exists {
+		return columnTerm(id, columnValue, index, offset+len(id)+1)
+	}
+	// Keep an actionable distinction between a missing separator and a typo in
+	// the column ID. The latter is intentionally an inline query error.
+	columnID, _, hasSeparator := strings.Cut(body, ":")
+	if !hasSeparator || columnID == "" {
+		return compiledTerm{}, &ParseError{
+			Offset:  offset,
+			Message: "column term must be column:<id>:<value>",
+		}
+	}
+	if _, exists := columnIndexes[columnID]; !exists {
+		return compiledTerm{}, &ParseError{
+			Offset:  offset,
+			Message: fmt.Sprintf("unknown column %q", columnID),
+		}
+	}
+	return compiledTerm{}, &ParseError{Offset: offset, Message: "column term has no value"}
+}
+
+func matchColumnPrefix(value string, matchers []columnMatcher) (string, int, string, bool) {
+	for _, matcher := range matchers {
+		prefix := matcher.id + ":"
+		if !strings.HasPrefix(value, prefix) {
+			continue
+		}
+		return matcher.id, matcher.index, value[len(prefix):], true
+	}
+	return "", -1, "", false
+}
+
+func columnTerm(id, value string, index, offset int) (compiledTerm, error) {
+	if value == "" {
+		return compiledTerm{}, &ParseError{Offset: offset, Message: "column term has no value"}
+	}
+	return compiledTerm{
+		term:        Term{Kind: Column, Key: id, Value: fold(value)},
+		columnIndex: index,
+	}, nil
 }
 
 func canonicalLabelSelector(selector labels.Selector) string {

@@ -34,8 +34,10 @@ const (
 	defaultProjectionWorkerCap = 8
 )
 
-// ProjectionSpec contains only presentation choices. Server-side namespace
-// and Kubernetes selectors are applied by the caller's resource client.
+// ProjectionSpec contains presentation choices and the complete visible query.
+// Server-side namespace and Kubernetes selectors are applied by the caller's
+// resource client; local column terms are evaluated against the rendered cells
+// produced here.
 type ProjectionSpec struct {
 	ClusterSessionID                   string
 	Resource                           ResourceType
@@ -183,7 +185,10 @@ func NewProjector(spec ProjectionSpec) (*Projector, error) {
 	compiledFilter := spec.compiledFilter
 	if compiledFilter == nil {
 		var err error
-		compiledFilter, err = viewfilter.Compile(spec.FilterExpression)
+		compiledFilter, err = viewfilter.CompileForColumns(
+			spec.FilterExpression,
+			spec.ColumnIDs,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -408,6 +413,10 @@ func (p *Projector) projectOneAdmittedWithCells(
 
 	cells := make([]*kmgrv1.Cell, 0, len(p.spec.ColumnIDs)+len(additional))
 	visibleText := make([]string, 0, len(p.spec.ColumnIDs)+len(additional))
+	var visibleColumnTexts []string
+	if p.filter.HasColumnTerms() {
+		visibleColumnTexts = make([]string, 0, len(p.spec.ColumnIDs))
+	}
 	additionalByID := make(map[string]*kmgrv1.Cell, len(additional))
 	for _, cell := range additional {
 		if cell != nil && cell.GetColumnId() != "" {
@@ -436,6 +445,9 @@ func (p *Projector) projectOneAdmittedWithCells(
 		}
 		cells = append(cells, cell)
 		visibleText = append(visibleText, cell.GetDisplayText())
+		if visibleColumnTexts != nil {
+			visibleColumnTexts = append(visibleColumnTexts, cell.GetDisplayText())
+		}
 	}
 	for _, cell := range additional {
 		if cell == nil {
@@ -458,12 +470,13 @@ func (p *Projector) projectOneAdmittedWithCells(
 		}
 	}
 	if !p.filter.Match(viewfilter.Candidate{
-		Namespace:   object.GetNamespace(),
-		Name:        object.GetName(),
-		Status:      statusText(object),
-		Labels:      object.GetLabels(),
-		Fields:      fields,
-		VisibleText: visibleText,
+		Namespace:          object.GetNamespace(),
+		Name:               object.GetName(),
+		Status:             statusText(object),
+		Labels:             object.GetLabels(),
+		Fields:             fields,
+		VisibleText:        visibleText,
+		VisibleColumnTexts: visibleColumnTexts,
 	}) {
 		return nil, false, nil
 	}

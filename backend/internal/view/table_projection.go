@@ -38,6 +38,13 @@ func tableObjectPolicy(projector *Projector) metav1.IncludeObjectPolicy {
 			viewfilter.NativeLabel:
 			// Bare text reads projected cells, including server Table cells; these
 			// terms use metadata or those projected cells.
+		case viewfilter.Column:
+			// A column-qualified term can stay on the compact Table path only when
+			// the selected column is available from metadata or the server Table.
+			// CEL, metric, and object-backed native columns require the full object.
+			if !metadataTableColumn(projector, term.Key) {
+				return metav1.IncludeObject
+			}
 		case viewfilter.NativeField:
 			// Metadata-only native field selectors are checked below.
 		case viewfilter.Field:

@@ -25,7 +25,10 @@ func planViewQuery(spec *kmgrv1.ViewSpec) (queryPlan, error) {
 		return queryPlan{}, errors.New("view query requires a resource")
 	}
 
-	compiled, err := viewfilter.Compile(spec.GetFilterExpression())
+	compiled, err := viewfilter.CompileForColumns(
+		spec.GetFilterExpression(),
+		spec.GetColumnIds(),
+	)
 	if err != nil {
 		return queryPlan{}, err
 	}

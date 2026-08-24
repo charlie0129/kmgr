@@ -3400,8 +3400,8 @@ private final class ResourceListViewController: NSViewController,
     private var cellHighlightRefreshTask: Task<Void, Never>?
     private var cellHighlightRefreshRevision: UInt64 = 0
     private var isChangeDetectionArmed = false
-    private var requestedFilterHighlight: ResourceFilterHighlight?
-    private var activeFilterHighlight: ResourceFilterHighlight?
+    private var requestedFilterHighlights: [ResourceFilterHighlight] = []
+    private var activeFilterHighlights: [ResourceFilterHighlight] = []
     private var generationGate = GenerationSequenceGate()
     private var resource: DiscoveredResource?
     var currentResource: DiscoveredResource? { resource }
@@ -3755,7 +3755,8 @@ private final class ResourceListViewController: NSViewController,
         filterField.setAccessibilityLabel("Filter Kubernetes resources")
         filterField.setAccessibilityHelp(
             "Type keywords or structured filters. Use labelSelector or fieldSelector "
-                + "for explicit Kubernetes selectors. Return applies the query."
+                + "for explicit Kubernetes selectors, or column:<id>:<value> for a "
+                + "projected column. Return applies the query."
         )
         filterField.delegate = self
         filterField.sendsSearchStringImmediately = true
@@ -4748,8 +4749,9 @@ private final class ResourceListViewController: NSViewController,
         endProjectionRequest(outcome: "superseded")
         cancelCurrentStream(reason: "open-stream:\(reason.rawValue)")
         clearTransientCellPresentation()
-        requestedFilterHighlight = ResourceFilterHighlightParser.parse(
-            filterField.stringValue
+        requestedFilterHighlights = ResourceFilterHighlightParser.parse(
+            filterField.stringValue,
+            columnIDs: columnIDs
         )
         let nextStreamContext = ResourceWarmRowContext(
             sessionID: session.sessionID,
@@ -5942,11 +5944,11 @@ private final class ResourceListViewController: NSViewController,
         keepingRequestedFilterHighlight: Bool = false
     ) {
         let removedAddresses = cellHighlightStore.removeAll()
-        let removedFilterEmphasis = activeFilterHighlight != nil
+        let removedFilterEmphasis = !activeFilterHighlights.isEmpty
         isChangeDetectionArmed = false
-        activeFilterHighlight = nil
+        activeFilterHighlights = []
         if !keepingRequestedFilterHighlight {
-            requestedFilterHighlight = nil
+            requestedFilterHighlights = []
         }
         cancelCellHighlightRefresh()
         reloadVisibleCellPresentation(
@@ -5956,8 +5958,8 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func activateRequestedFilterHighlight() {
-        guard activeFilterHighlight != requestedFilterHighlight else { return }
-        activeFilterHighlight = requestedFilterHighlight
+        guard activeFilterHighlights != requestedFilterHighlights else { return }
+        activeFilterHighlights = requestedFilterHighlights
         reloadVisibleCellPresentation(at: [], reloadAllVisibleCells: true)
     }
 
@@ -7436,7 +7438,7 @@ private final class ResourceListViewController: NSViewController,
         }
         let uid = resourceRow.identity.uid
         let value = resourceRow[columnID]
-        let emphasizedTerm = activeFilterHighlight.flatMap {
+        let emphasizedTerms = activeFilterHighlights.compactMap {
             $0.applies(to: columnID) ? $0.term : nil
         }
         let changeHighlight = cellHighlightStore.presentation(
@@ -7463,7 +7465,7 @@ private final class ResourceListViewController: NSViewController,
                 toolTip: value.tooltip.isEmpty ? nil : value.tooltip,
                 alignment: textAlignment(alignment),
                 textColor: resourceUsageBaseTextColor(value.severity),
-                emphasizedTerm: emphasizedTerm,
+                emphasizedTerms: emphasizedTerms,
                 changeHighlight: changeHighlight
             )
             return cell
@@ -7486,7 +7488,7 @@ private final class ResourceListViewController: NSViewController,
         cell.configure(
             cell: value,
             alignment: textAlignment(alignment),
-            emphasizedTerm: emphasizedTerm,
+            emphasizedTerms: emphasizedTerms,
             changeHighlight: changeHighlight
         )
         return cell
