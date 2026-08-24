@@ -87,18 +87,6 @@ private struct ResourceColumnProjectionIdentity: Hashable {
     }
 }
 
-/// Gives workspace-owned keyboard actions one chance to handle a key before
-/// AppKit routes it into transient controls such as the completion panel.
-@MainActor
-private final class ClusterWorkspaceShortcutWindow: NSWindow {
-    var keyDownHandler: ((NSEvent) -> Bool)?
-
-    override func sendEvent(_ event: NSEvent) {
-        if event.type == .keyDown, keyDownHandler?(event) == true { return }
-        super.sendEvent(event)
-    }
-}
-
 @MainActor
 final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate,
     NSMenuItemValidation, ContextualShortcutProviding
@@ -219,7 +207,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.nodeShellPreferences = nodeShellPreferences
         self.saveNodeShellPreferences = saveNodeShellPreferences
 
-        let window = ClusterWorkspaceShortcutWindow(
+        let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -258,9 +246,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         )
         super.init(window: window)
         installWorkspaceCallbacks()
-        window.keyDownHandler = { [weak self] event in
-            self?.handleWorkspaceKeyDown(event) ?? false
-        }
         window.delegate = self
         window.contentViewController = workspaceController
         window.toolbar = workspaceController.makeToolbar()
@@ -324,17 +309,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onContextualShortcutsChanged = { [weak self] in
             self?.contextualShortcutsDidChange?()
         }
-    }
-
-    private func handleWorkspaceKeyDown(_ event: NSEvent) -> Bool {
-        let commandModifiers: NSEvent.ModifierFlags = [
-            .command, .control, .option, .shift,
-        ]
-        // 48 is AppKit's virtual key code for the physical Tab key.
-        guard event.keyCode == 48,
-            event.modifierFlags.intersection(commandModifiers).isEmpty
-        else { return false }
-        return workspaceController.acceptFirstResourceFilterCompletion()
     }
 
     @available(*, unavailable)
@@ -1880,9 +1854,6 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     @objc func focusResourceFilter(_ sender: Any?) { contentController.performCommand(.focusFilter) }
-    func acceptFirstResourceFilterCompletion() -> Bool {
-        contentController.acceptFirstFilterCompletion()
-    }
     @objc func moveResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.moveUp) }
     @objc func moveResourceSelectionDown(_ sender: Any?) { contentController.performCommand(.moveDown) }
     @objc func extendResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.extendUp) }
@@ -4607,9 +4578,8 @@ private final class ResourceListViewController: NSViewController,
         forPartialWordRange partialWordRange: NSRange,
         indexOfSelectedItem selectedIndex: UnsafeMutablePointer<Int>
     ) -> [String] {
-        // Keep candidates provisional until the user accepts one with Tab.
-        // Return is handled separately below and remains the explicit
-        // query-commit command.
+        // Do not preselect a candidate. Tab/arrow navigation remains explicit,
+        // while Return continues through the existing query-commit command.
         guard control === filterField else { return [] }
         selectedIndex.pointee = -1
         return ResourceFilterCompletionCatalog.completions(
@@ -4638,28 +4608,6 @@ private final class ResourceListViewController: NSViewController,
         onRestorationChanged?()
         setFilterShortcutContextActive(false)
         view.window?.makeFirstResponder(tableView)
-        return true
-    }
-
-    func acceptFirstFilterCompletion() -> Bool {
-        guard let textView = filterField.currentEditor() as? NSTextView,
-            view.window?.firstResponder === textView
-        else { return false }
-
-        let partialWordRange = textView.rangeForUserCompletion
-        guard let completion = ResourceFilterCompletionCatalog.completions(
-            in: textView.string,
-            partialWordRange: partialWordRange,
-            columnIDs: columnIDs
-        ).first else { return false }
-
-        filterCompletionTrigger.reset()
-        textView.insertCompletion(
-            completion,
-            forPartialWordRange: partialWordRange,
-            movement: NSTextMovement.tab.rawValue,
-            isFinal: true
-        )
         return true
     }
 
