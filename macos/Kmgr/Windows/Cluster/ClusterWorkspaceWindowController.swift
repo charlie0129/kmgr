@@ -140,6 +140,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var didStartWorkspace = false
     private var isClosing = false
     private var windowSizeCheckpointTask: Task<Void, Never>?
+    private let resourceFilterFieldEditor = ResourceFilterFieldEditor(frame: .zero)
 
     var restorationIdentifier: String { restoration.id }
     var isOpenForRestoration: Bool { !isClosing }
@@ -246,6 +247,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         )
         super.init(window: window)
         installWorkspaceCallbacks()
+        resourceFilterFieldEditor.commandHandler = { [weak self] selector in
+            self?.workspaceController.handleResourceFilterCommand(selector) ?? false
+        }
         window.delegate = self
         window.contentViewController = workspaceController
         window.toolbar = workspaceController.makeToolbar()
@@ -438,6 +442,15 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     func windowDidEndLiveResize(_ notification: Notification) {
         scheduleWindowSizeCheckpoint()
+    }
+
+    func windowWillReturnFieldEditor(
+        _ sender: NSWindow,
+        to client: Any?
+    ) -> Any? {
+        guard sender === window, workspaceController.isResourceFilter(client)
+        else { return nil }
+        return resourceFilterFieldEditor
     }
 
     private func scheduleWindowSizeCheckpoint() {
@@ -1854,6 +1867,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     @objc func focusResourceFilter(_ sender: Any?) { contentController.performCommand(.focusFilter) }
+    func isResourceFilter(_ client: Any?) -> Bool {
+        (client as AnyObject?) === contentController.resourceFilterControl
+    }
+    func handleResourceFilterCommand(_ selector: Selector) -> Bool {
+        contentController.handleResourceFilterCommand(selector)
+    }
     @objc func moveResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.moveUp) }
     @objc func moveResourceSelectionDown(_ sender: Any?) { contentController.performCommand(.moveDown) }
     @objc func extendResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.extendUp) }
@@ -3378,6 +3397,7 @@ private final class ResourceListViewController: NSViewController,
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let sortLabel = NSTextField(labelWithString: "Unsorted")
     private let filterField = NSSearchField()
+    private let filterCompletionPopup = ResourceFilterCompletionPopup()
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
     private struct InlineIssuePresentation: Hashable {
@@ -3445,6 +3465,7 @@ private final class ResourceListViewController: NSViewController,
     private var deferredColumnPresentationByResourceID: [
         String: DeferredColumnPresentationState
     ] = [:]
+    var resourceFilterControl: NSControl { filterField }
     private var suppressSortChanges = false
     private var lastStreamContext: ResourceWarmRowContext?
     private var rangeCache: ResourceViewRangeCache?
@@ -3761,6 +3782,12 @@ private final class ResourceListViewController: NSViewController,
                 + "Return applies the query."
         )
         filterField.delegate = self
+        filterCompletionTrigger.setPresenter { [weak self] editor in
+            self?.presentFilterCompletions(in: editor)
+        }
+        filterCompletionPopup.onAccept = { [weak self] index in
+            self?.acceptFilterCompletion(at: index)
+        }
         filterField.sendsSearchStringImmediately = true
         // The query is structured technical input. Disable language-driven
         // completion/checking; the bounded query catalog below is invoked
@@ -3836,10 +3863,14 @@ private final class ResourceListViewController: NSViewController,
         )
 
         root.addSubview(scrollView)
+        root.addSubview(filterCompletionPopup)
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             header.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            filterCompletionPopup.leadingAnchor.constraint(equalTo: filterField.leadingAnchor),
+            filterCompletionPopup.trailingAnchor.constraint(equalTo: filterField.trailingAnchor),
+            filterCompletionPopup.topAnchor.constraint(equalTo: filterField.bottomAnchor, constant: 3),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
@@ -4172,7 +4203,7 @@ private final class ResourceListViewController: NSViewController,
 
     @discardableResult
     func handleEscape() -> Bool {
-        filterCompletionTrigger.reset()
+        resetFilterCompletion()
         let firstResponder = view.window?.firstResponder
         let filterOwnsResponder = firstResponder === filterField
             || filterField.currentEditor() === firstResponder
@@ -4288,7 +4319,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func setFilter(_ value: String) {
-        filterCompletionTrigger.reset()
+        resetFilterCompletion()
         filterRevision &+= 1
         filterTask?.cancel()
         filterField.stringValue = value
@@ -4524,13 +4555,13 @@ private final class ResourceListViewController: NSViewController,
     func controlTextDidBeginEditing(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
         (filterField.currentEditor() as? NSTextView)?.configureAsTechnicalTextInput()
-        filterCompletionTrigger.reset()
+        resetFilterCompletion()
         setFilterShortcutContextActive(true)
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
-        filterCompletionTrigger.reset()
+        resetFilterCompletion()
         setFilterShortcutContextActive(false)
     }
 
@@ -4571,44 +4602,78 @@ private final class ResourceListViewController: NSViewController,
         )
     }
 
-    func control(
-        _ control: NSControl,
-        textView: NSTextView,
-        completions _: [String],
-        forPartialWordRange partialWordRange: NSRange,
-        indexOfSelectedItem selectedIndex: UnsafeMutablePointer<Int>
-    ) -> [String] {
-        // Do not preselect a candidate. Tab/arrow navigation remains explicit,
-        // while Return continues through the existing query-commit command.
-        guard control === filterField else { return [] }
-        selectedIndex.pointee = -1
-        return ResourceFilterCompletionCatalog.completions(
+    func handleResourceFilterCommand(_ commandSelector: Selector) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.moveUp(_:)):
+            return filterCompletionPopup.moveSelection(by: -1)
+        case #selector(NSResponder.moveDown(_:)):
+            return filterCompletionPopup.moveSelection(by: 1)
+        case #selector(NSResponder.insertTab(_:)):
+            return filterCompletionPopup.acceptSelectedOrFirst()
+        case #selector(NSResponder.cancelOperation(_:)):
+            guard filterCompletionPopup.isPresented else { return false }
+            resetFilterCompletion()
+            return true
+        case #selector(NSResponder.insertNewline(_:)):
+            // Do not make an explicit Return wait for the typing debounce.
+            // It always commits the literal visible query, never a popup row.
+            resetFilterCompletion()
+            filterTask?.cancel()
+            filterTask = nil
+            rememberCurrentFilter()
+            openStream(reason: .committedFilter)
+            onRestorationChanged?()
+            setFilterShortcutContextActive(false)
+            view.window?.makeFirstResponder(tableView)
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func presentFilterCompletions(in textView: NSTextView) {
+        guard filterField.currentEditor() === textView else { return }
+        let candidates = ResourceFilterCompletionCatalog.completions(
+            in: textView.string,
+            partialWordRange: textView.rangeForUserCompletion,
+            columnIDs: columnIDs
+        )
+        filterCompletionPopup.present(values: candidates)
+    }
+
+    private func acceptFilterCompletion(at index: Int) {
+        guard let textView = filterField.currentEditor() as? NSTextView,
+            filterField.currentEditor() === textView
+        else { return }
+        let partialWordRange = textView.rangeForUserCompletion
+        let candidates = ResourceFilterCompletionCatalog.completions(
             in: textView.string,
             partialWordRange: partialWordRange,
             columnIDs: columnIDs
         )
+        guard candidates.indices.contains(index) else {
+            resetFilterCompletion()
+            return
+        }
+        filterCompletionTrigger.reset()
+        filterCompletionPopup.dismiss()
+        let replacement = NSAttributedString(
+            string: candidates[index],
+            attributes: textView.typingAttributes
+        )
+        guard textView.performValidatedReplacement(
+            in: partialWordRange,
+            with: replacement
+        ) else { return }
+        textView.setSelectedRange(NSRange(
+            location: partialWordRange.location + replacement.length,
+            length: 0
+        ))
     }
 
-    func control(
-        _ control: NSControl,
-        textView: NSTextView,
-        doCommandBy commandSelector: Selector
-    ) -> Bool {
-        guard control === filterField,
-            commandSelector == #selector(NSResponder.insertNewline(_:))
-        else { return false }
-
-        // Do not make an explicit Return wait for the typing debounce. This
-        // also gives keyboard navigation back to the resource table.
+    private func resetFilterCompletion() {
         filterCompletionTrigger.reset()
-        filterTask?.cancel()
-        filterTask = nil
-        rememberCurrentFilter()
-        openStream(reason: .committedFilter)
-        onRestorationChanged?()
-        setFilterShortcutContextActive(false)
-        view.window?.makeFirstResponder(tableView)
-        return true
+        filterCompletionPopup.dismiss()
     }
 
     @objc private func scrollBoundsChanged(_ notification: Notification) {
@@ -7100,7 +7165,7 @@ private final class ResourceListViewController: NSViewController,
         resource = restored
         scope = restoration.namespaceScope.namespaceSelection
         pendingScrollAnchor = restoration.scrollAnchor
-        filterCompletionTrigger.reset()
+        resetFilterCompletion()
         filterField.stringValue = restoration.filter
         filterMemory.remember(restoration.filter, for: resourceGVR(for: restored))
         suppressPresentationCheckpoint = true
@@ -7194,7 +7259,7 @@ private final class ResourceListViewController: NSViewController,
     func applyRestoredShell(_ restoration: ClusterWindowRestorationState) {
         isAuthenticated = false
         scope = restoration.namespaceScope.namespaceSelection
-        filterCompletionTrigger.reset()
+        resetFilterCompletion()
         filterField.stringValue = restoration.filter
 
         let shell = RestoredWorkspaceShell(record: ClusterWindowRestorationRecord(
@@ -7254,7 +7319,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func installFilterForNavigation(_ filter: String, resourceGVR: GVR) {
-        filterCompletionTrigger.reset()
+        resetFilterCompletion()
         filterTask?.cancel()
         filterTask = nil
         if filterField.stringValue != filter {

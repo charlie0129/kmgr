@@ -1,6 +1,6 @@
 import AppKit
 
-/// Presents AppKit's native completion panel after a query token changes.
+/// Schedules a completion presentation after a query token changes.
 ///
 /// The trigger is deliberately small and stateful only for presentation
 /// lifetime. Query text and completion candidates remain owned by the search
@@ -13,7 +13,7 @@ final class ResourceFilterCompletionTrigger {
     typealias Presenter = @MainActor (NSTextView) -> Void
 
     private let deferAction: Deferrer
-    private let present: Presenter
+    private var present: Presenter
     private weak var editor: NSTextView?
     private var tokenState: TokenState?
     private var generation: UInt64 = 0
@@ -27,9 +27,13 @@ final class ResourceFilterCompletionTrigger {
         deferAction: @escaping Deferrer = { action in
             DispatchQueue.main.async { action() }
         },
-        present: @escaping Presenter = { editor in editor.complete(nil) }
+        present: @escaping Presenter = { _ in }
     ) {
         self.deferAction = deferAction
+        self.present = present
+    }
+
+    func setPresenter(_ present: @escaping Presenter) {
         self.present = present
     }
 

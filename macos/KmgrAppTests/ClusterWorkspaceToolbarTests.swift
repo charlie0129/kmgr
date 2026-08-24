@@ -712,41 +712,132 @@ struct ClusterWorkspaceToolbarTests {
         #expect(expandedWidth <= resourceRoot.bounds.width * 0.5 + 0.5)
     }
 
-    @Test("resource filter completion uses the visible query and active columns")
+    @Test("resource filter popup uses the visible query and accepts Tab")
     func resourceFilterCompletionUsesVisibleQuery() async throws {
         let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
         controller.showWindow(nil)
         defer { controller.close() }
+        let window = try #require(controller.window)
         let root = try #require(controller.window?.contentView)
         let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
             .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+        let popup = try #require(descendants(of: root)
+            .compactMap { $0 as? ResourceFilterCompletionPopup }
+            .first)
 
         #expect(!filter.isAutomaticTextCompletionEnabled)
-        let editor = NSTextView()
-        editor.string = "api statu"
+        filter.stringValue = "api statu"
+        #expect(window.makeFirstResponder(filter))
+        let editor = try #require(filter.currentEditor() as? NSTextView)
         editor.setSelectedRange(NSRange(
             location: (editor.string as NSString).length,
             length: 0
         ))
-        let partialRange = (editor.string as NSString).range(of: "statu")
-        var selectedIndex = 7
-        let completions = withUnsafeMutablePointer(to: &selectedIndex) { pointer in
-            filter.delegate?.control?(
-                filter,
-                textView: editor,
-                completions: ["dictionary-word"],
-                forPartialWordRange: partialRange,
-                indexOfSelectedItem: pointer
-            ) ?? []
-        }
-
-        #expect(completions == ["status:"])
-        #expect(selectedIndex == -1)
-        #expect((editor.string as NSString).replacingCharacters(
-            in: partialRange,
-            with: completions[0]
-        ) == "api status:")
+        filter.delegate?.controlTextDidChange?(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: filter
+        ))
+        try await waitUntil { popup.isPresented }
+        #expect(popup.visibleValues == ["status:"])
         #expect(editor.string == "api statu")
+
+        window.sendEvent(try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\t",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48
+        )))
+        #expect(editor.string == "api status:")
+        #expect(filter.stringValue == "api status:")
+        #expect(!popup.isPresented)
+        #expect(window.firstResponder === editor)
+    }
+
+    @Test("resource filter popup keeps arrow selection provisional until Tab")
+    func resourceFilterCompletionArrowSelection() async throws {
+        let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+        let popup = try #require(descendants(of: root)
+            .compactMap { $0 as? ResourceFilterCompletionPopup }
+            .first)
+
+        filter.stringValue = "n"
+        #expect(window.makeFirstResponder(filter))
+        let editor = try #require(filter.currentEditor() as? NSTextView)
+        editor.setSelectedRange(NSRange(location: 1, length: 0))
+        filter.delegate?.controlTextDidChange?(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: filter
+        ))
+        try await waitUntil { popup.isPresented }
+        #expect(popup.visibleValues.prefix(3) == ["namespace:", "name:", "ns:"])
+        #expect(popup.selectedIndex == nil)
+
+        editor.doCommand(by: #selector(NSResponder.moveDown(_:)))
+        #expect(popup.selectedIndex == 0)
+        editor.doCommand(by: #selector(NSResponder.moveDown(_:)))
+        #expect(popup.selectedIndex == 1)
+        #expect(editor.string == "n")
+
+        editor.doCommand(by: #selector(NSResponder.insertTab(_:)))
+        #expect(editor.string == "name:")
+        #expect(!popup.isPresented)
+    }
+
+    @Test("resource filter popup accepts a mouse click without taking focus")
+    func resourceFilterCompletionMouseSelection() async throws {
+        let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        window.makeKeyAndOrderFront(nil)
+        let root = try #require(window.contentView)
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+        let popup = try #require(descendants(of: root)
+            .compactMap { $0 as? ResourceFilterCompletionPopup }
+            .first)
+
+        filter.stringValue = "statu"
+        #expect(window.makeFirstResponder(filter))
+        let editor = try #require(filter.currentEditor() as? NSTextView)
+        editor.setSelectedRange(NSRange(location: 5, length: 0))
+        filter.delegate?.controlTextDidChange?(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: filter
+        ))
+        try await waitUntil { popup.isPresented }
+        root.layoutSubtreeIfNeeded()
+        let table = try #require(descendants(of: popup).compactMap { $0 as? NSTableView }.first)
+        let rowPoint = NSPoint(x: table.bounds.midX, y: table.rect(ofRow: 0).midY)
+        let windowPoint = table.convert(rowPoint, to: nil)
+
+        table.mouseDown(with: try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: windowPoint,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        )))
+
+        #expect(editor.string == "status:")
+        #expect(!popup.isPresented)
+        #expect(window.firstResponder === editor)
     }
 
     @Test("resource filter completion trigger refreshes when the token changes")
@@ -873,16 +964,13 @@ struct ClusterWorkspaceToolbarTests {
         ))
         #expect(provider.streamRequestCount == 1)
 
-        let handled = filter.delegate?.control?(
-            filter,
-            textView: NSTextView(),
-            doCommandBy: #selector(NSResponder.insertNewline(_:))
-        )
-        #expect(handled == true)
+        let editor = try #require(filter.currentEditor() as? ResourceFilterFieldEditor)
+        editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
         #expect(window.firstResponder === table)
         try await waitUntil(timeout: .milliseconds(120)) {
             provider.streamRequestCount == 2
         }
+        #expect(provider.streamRequests.last?.filterExpression == "name:api")
     }
 
     @Test("replacing a visible native query searches the replacement")
