@@ -22,7 +22,7 @@ enum KeyValueEditorKeyPrompt {
         let alert = NSAlert()
         alert.messageText = "\(actionTitle) \(request.singularTitle)"
         alert.informativeText = request.informativeText
-        let field = NSTextField(
+        let field = TechnicalTextField(
             frame: NSRect(x: 0, y: 0, width: 340, height: 24)
         )
         field.stringValue = request.currentValue ?? ""

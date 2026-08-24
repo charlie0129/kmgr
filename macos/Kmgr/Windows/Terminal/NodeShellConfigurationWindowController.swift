@@ -18,8 +18,8 @@ final class NodeShellConfigurationWindowController: NSWindowController,
     private let execProvider: any ExecSessionProviding
     private let saveClusterImage: (String?) throws -> Void
 
-    private let imageField = NSTextField()
-    private let namespaceField = NSTextField()
+    private let imageField = TechnicalTextField()
+    private let namespaceField = TechnicalTextField()
     private let saveClusterImageButton = NSButton(
         checkboxWithTitle: "Use this image as the default for this cluster",
         target: nil,
@@ -30,7 +30,7 @@ final class NodeShellConfigurationWindowController: NSWindowController,
         target: nil, action: nil
     )
     private let shellButton = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let executableField = NSTextField()
+    private let executableField = TechnicalTextField()
     private let argumentsScrollView = NSScrollView()
     private let argumentsTextView = NSTextView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
@@ -145,9 +145,7 @@ final class NodeShellConfigurationWindowController: NSWindowController,
 
         TextDocumentGeometry.prepareForPreciseScrolling(argumentsTextView)
         argumentsTextView.isRichText = false
-        argumentsTextView.isAutomaticQuoteSubstitutionEnabled = false
-        argumentsTextView.isAutomaticDashSubstitutionEnabled = false
-        argumentsTextView.isAutomaticTextReplacementEnabled = false
+        argumentsTextView.configureAsTechnicalTextInput()
         argumentsTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         argumentsTextView.textContainerInset = NSSize(width: 6, height: 6)
         argumentsTextView.delegate = self

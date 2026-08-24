@@ -24,7 +24,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     private let confirmationPreferences: ConfirmationPreferences
     private let detailProvider: any ObjectDetailProviding
     private let operationProvider: any ResourceOperationProviding
-    private let replicasField = NSTextField()
+    private let replicasField = TechnicalTextField()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let progress = NSProgressIndicator()
     private let primaryButton = NSButton(title: "Apply", target: nil, action: nil)

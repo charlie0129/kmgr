@@ -1145,7 +1145,9 @@ extension ObjectDataViewController {
         alert.informativeText = confirmationInformativeText(
             note: "The new key is created only if it still does not exist on the server."
         )
-        let nameField = NSTextField(frame: NSRect(x: 0, y: 32, width: 340, height: 24))
+        let nameField = TechnicalTextField(
+            frame: NSRect(x: 0, y: 32, width: 340, height: 24)
+        )
         nameField.placeholderString = "Key name"
         let kindButton = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 180, height: 26))
         kindButton.addItems(withTitles: ["Text", "Binary from File"])

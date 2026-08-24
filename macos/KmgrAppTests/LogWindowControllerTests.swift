@@ -638,6 +638,10 @@ struct LogWindowControllerTests {
         #expect(container.itemTitles == ["All Containers", "app", "sidecar"])
         #expect(tail.stringValue == "200")
         #expect(since.stringValue == "60")
+        #expect(tail is TechnicalTextField)
+        #expect(since is TechnicalTextField)
+        #expect(!tail.isAutomaticTextCompletionEnabled)
+        #expect(!since.isAutomaticTextCompletionEnabled)
         #expect(sources.stringValue.contains("Static workload Pod snapshot"))
         #expect(sources.stringValue.contains("reopen Logs to refresh"))
     }

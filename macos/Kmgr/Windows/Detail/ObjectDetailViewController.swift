@@ -687,8 +687,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         yamlTextView.isEditable = false
         yamlTextView.isSelectable = true
         yamlTextView.usesFindBar = true
-        yamlTextView.isAutomaticQuoteSubstitutionEnabled = false
-        yamlTextView.isAutomaticDashSubstitutionEnabled = false
+        yamlTextView.configureAsTechnicalTextInput()
         yamlTextView.allowsUndo = true
         yamlTextView.delegate = self
         yamlTextView.onPlainEditShortcut = { [weak self] in

@@ -841,8 +841,8 @@ final class NativeColumnPickerWindowController: NSWindowController,
     private let exactResourceSupported: Bool
     private let tableView = NSTableView()
     private let addSelectedButton = NSButton(title: "Add Disabled", target: nil, action: nil)
-    private let exactResourceField = NSTextField()
-    private let exactTitleField = NSTextField()
+    private let exactResourceField = TechnicalTextField()
+    private let exactTitleField = TechnicalTextField()
     private let addExactButton = NSButton(title: "Add Exact Resource Disabled", target: nil, action: nil)
     private let exactErrorLabel = NSTextField(wrappingLabelWithString: "")
     private let tableLayoutStore: TableLayoutStore
@@ -1174,13 +1174,13 @@ final class CELColumnEditorWindowController: NSWindowController,
     private let reservedIDs: Set<String>
     private let previewProvider: any ColumnPreviewProviding
     private let previewContext: ColumnPreviewContext
-    private let idField = NSTextField()
-    private let titleField = NSTextField()
+    private let idField = TechnicalTextField()
+    private let titleField = TechnicalTextField()
     private let expressionView = NSTextView()
     private let typeButton = NSPopUpButton()
     private let alignmentButton = NSPopUpButton()
-    private let missingField = NSTextField()
-    private let widthField = NSTextField()
+    private let missingField = TechnicalTextField()
+    private let widthField = TechnicalTextField()
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let examplesButton = NSButton()
     private let noSelectionTipLabel = NSTextField(wrappingLabelWithString: "")
@@ -1273,8 +1273,7 @@ final class CELColumnEditorWindowController: NSWindowController,
         expressionView.isVerticallyResizable = true
         expressionView.isHorizontallyResizable = false
         expressionView.autoresizingMask = [.width]
-        expressionView.isAutomaticQuoteSubstitutionEnabled = false
-        expressionView.isAutomaticDashSubstitutionEnabled = false
+        expressionView.configureAsTechnicalTextInput()
         expressionView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         expressionView.textContainerInset = NSSize(width: 6, height: 6)
         expressionView.textContainer?.widthTracksTextView = true

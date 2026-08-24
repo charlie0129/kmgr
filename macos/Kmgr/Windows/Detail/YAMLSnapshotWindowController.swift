@@ -272,8 +272,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         textView.isSelectable = true
         textView.isRichText = false
         textView.usesFindBar = true
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.configureAsTechnicalTextInput()
         textView.allowsUndo = true
         textView.textContainerInset = NSSize(width: 10, height: 10)
         textView.setAccessibilityLabel("Kubernetes YAML snapshot")

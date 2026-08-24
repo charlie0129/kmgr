@@ -25,7 +25,7 @@ final class ExecConfigurationWindowController: NSWindowController,
         target: nil, action: nil
     )
     private let shellButton = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let executableField = NSTextField()
+    private let executableField = TechnicalTextField()
     private let argumentsScrollView = NSScrollView()
     private let argumentsTextView = NSTextView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
@@ -127,9 +127,7 @@ final class ExecConfigurationWindowController: NSWindowController,
 
         TextDocumentGeometry.prepareForPreciseScrolling(argumentsTextView)
         argumentsTextView.isRichText = false
-        argumentsTextView.isAutomaticQuoteSubstitutionEnabled = false
-        argumentsTextView.isAutomaticDashSubstitutionEnabled = false
-        argumentsTextView.isAutomaticTextReplacementEnabled = false
+        argumentsTextView.configureAsTechnicalTextInput()
         argumentsTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         argumentsTextView.textContainerInset = NSSize(width: 6, height: 6)
         argumentsTextView.delegate = self

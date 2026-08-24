@@ -41,10 +41,10 @@ final class PortForwardConfigurationWindowController: NSWindowController,
     private let coordinator: PortForwardCoordinator
 
     private let declaredPortButton = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let remotePortField = NSTextField()
-    private let localPortField = NSTextField()
-    private let bindAddressField = NSTextField()
-    private let labelField = NSTextField()
+    private let remotePortField = TechnicalTextField()
+    private let localPortField = TechnicalTextField()
+    private let bindAddressField = TechnicalTextField()
+    private let labelField = TechnicalTextField()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let validationLabel = NSTextField(wrappingLabelWithString: "")
     private let progressIndicator = NSProgressIndicator()

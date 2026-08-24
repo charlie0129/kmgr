@@ -225,11 +225,7 @@ final class KeyValueEditorView: NSView {
         valueTextView.isEditable = false
         valueTextView.isSelectable = true
         valueTextView.allowsUndo = true
-        valueTextView.isAutomaticQuoteSubstitutionEnabled = false
-        valueTextView.isAutomaticDashSubstitutionEnabled = false
-        valueTextView.isAutomaticTextReplacementEnabled = false
-        valueTextView.isAutomaticSpellingCorrectionEnabled = false
-        valueTextView.isContinuousSpellCheckingEnabled = false
+        valueTextView.configureAsTechnicalTextInput()
         valueTextView.setAccessibilityLabel(configuration.valueAccessibilityLabel)
         valueScrollView.documentView = valueTextView
         valueScrollView.setAccessibilityLabel(configuration.valueAccessibilityLabel)
