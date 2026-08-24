@@ -1328,7 +1328,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
 /// Intercepts only log accelerators before the focused read-only text view
 /// receives them. Every unrecognized key continues through AppKit unchanged.
-private final class LogShortcutWindow: NSWindow {
+final class LogShortcutWindow: NSWindow {
     var keyDownHandler: ((NSEvent) -> Bool)?
 
     override func sendEvent(_ event: NSEvent) {

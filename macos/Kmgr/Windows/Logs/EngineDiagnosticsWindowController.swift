@@ -45,7 +45,7 @@ final class EngineDiagnosticsWindowController: NSWindowController,
         self.maximumDisplayedLineUTF8Bytes =
             displayConfiguration.maximumDisplayedLineUTF8Bytes
 
-        let window = NSWindow(
+        let window = LogShortcutWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -57,6 +57,9 @@ final class EngineDiagnosticsWindowController: NSWindowController,
         window.isRestorable = false
         super.init(window: window)
         window.delegate = self
+        window.keyDownHandler = { [weak self] event in
+            self?.performEngineDiagnosticsShortcut(event) ?? false
+        }
         configureContent(in: window)
     }
 
@@ -95,6 +98,25 @@ final class EngineDiagnosticsWindowController: NSWindowController,
 
     func controlTextDidChange(_ obj: Notification) {
         scheduleRender()
+    }
+
+    /// Routes the wrap accelerator through the same action as the checkbox.
+    /// Editable filter text retains every key press.
+    @discardableResult
+    func performEngineDiagnosticsShortcut(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+            LogWindowShortcut.action(
+                characters: event.charactersIgnoringModifiers,
+                modifiers: event.modifierFlags,
+                textIsEditable: (window?.firstResponder as? NSTextView)?.isEditable == true
+            ) == .toggleWrap
+        else { return false }
+        guard !event.isARepeat else { return true }
+        guard wrapButton.isEnabled else { return true }
+
+        wrapButton.state = wrapButton.state == .on ? .off : .on
+        toggleWrap()
+        return true
     }
 
     func applyDisplayConfiguration(_ configuration: LogDisplayConfiguration) {
@@ -139,6 +161,7 @@ final class EngineDiagnosticsWindowController: NSWindowController,
         wrapButton.target = self
         wrapButton.action = #selector(toggleWrap)
         wrapButton.setAccessibilityLabel("Wrap engine diagnostics")
+        wrapButton.toolTip = "Toggle line wrapping (W)"
 
         refreshButton.target = self
         refreshButton.action = #selector(refreshSnapshot)

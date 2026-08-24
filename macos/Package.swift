@@ -109,7 +109,7 @@ let package = Package(
         ),
         .testTarget(
             name: "KmgrAppTests",
-            dependencies: ["Kmgr"],
+            dependencies: ["Kmgr", "KmgrIPC"],
             path: "KmgrAppTests"
         )
     ]

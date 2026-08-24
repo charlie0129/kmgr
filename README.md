@@ -364,10 +364,10 @@ replaces it. Engine diagnostics are not written to disk and are not forwarded
 to OSLog.
 
 Open **Window → Engine Diagnostics…** to inspect the retained tail. The window
-supports filtering, wrapping, and refresh. After a successful recovery, the
-workspace footer shows a non-clickable **Engine restarted unexpectedly**
-warning with the same menu path. If restart recovery exhausts its attempts,
-Kmgr opens the diagnostics window automatically.
+supports filtering, wrapping, and refresh; press **W** to toggle line wrapping.
+After a successful recovery, the workspace footer shows a non-clickable
+**Engine restarted unexpectedly** warning with the same menu path. If restart
+recovery exhausts its attempts, Kmgr opens the diagnostics window automatically.
 
 To additionally mirror redacted helper RPC timing to a terminal, launch the
 app with an explicit log level:
