@@ -37,6 +37,7 @@ final class NodeShellConfigurationWindowController: NSWindowController,
     private let validationLabel = NSTextField(wrappingLabelWithString: "")
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let connectButton = NSButton(title: "Connect", target: nil, action: nil)
+    private var contentStack: NSStackView?
     private var didFinish = false
 
     var onOpenWindow: ((TerminalWindowController) -> Void)?
@@ -98,13 +99,6 @@ final class NodeShellConfigurationWindowController: NSWindowController,
 
     private func configureContent(in panel: NSPanel) {
         let node = target.node
-        let identityGrid = NSGridView(views: [
-            gridRow("Cluster", identityValue(session.clusterName)),
-            gridRow("Context", identityValue(session.contextName)),
-            gridRow("Node", identityValue(node.name)),
-            gridRow("UID", identityValue(node.uid.rawValue, monospaced: true)),
-        ])
-        configure(grid: identityGrid)
 
         imageField.placeholderString = NodeShellPreferences.defaultImage
         imageField.delegate = self
@@ -156,7 +150,14 @@ final class NodeShellConfigurationWindowController: NSWindowController,
         argumentsScrollView.borderType = .bezelBorder
         argumentsScrollView.heightAnchor.constraint(equalToConstant: 82).isActive = true
 
-        let optionsGrid = NSGridView(views: [
+        let separator = NSBox()
+        separator.boxType = .separator
+        let formGrid = NSGridView(views: [
+            gridRow("Cluster", identityValue(session.clusterName)),
+            gridRow("Context", identityValue(session.contextName)),
+            gridRow("Node", identityValue(node.name)),
+            gridRow("UID", identityValue(node.uid.rawValue, monospaced: true)),
+            [separator, NSView()],
             gridRow("Helper image", imageField),
             gridRow("Helper namespace", namespaceField),
             gridRow("Connect with", modeControl),
@@ -164,7 +165,12 @@ final class NodeShellConfigurationWindowController: NSWindowController,
             gridRow("Executable", executableField),
             gridRow("Arguments", argumentsScrollView),
         ])
-        configure(grid: optionsGrid)
+        formGrid.mergeCells(
+            inHorizontalRange: NSRange(location: 0, length: 2),
+            verticalRange: NSRange(location: 4, length: 1)
+        )
+        configure(grid: formGrid)
+        formGrid.cell(atColumnIndex: 0, rowIndex: 4).xPlacement = .fill
 
         let warning = NSTextField(wrappingLabelWithString:
             "This creates a temporary privileged Pod on the selected Node, enters PID 1's Linux namespaces with nsenter, and deletes the helper when the terminal ends. The image must contain nsenter."
@@ -180,6 +186,7 @@ final class NodeShellConfigurationWindowController: NSWindowController,
         validationLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         validationLabel.maximumNumberOfLines = 2
         validationLabel.setAccessibilityIdentifier("node-shell.validation")
+        validationLabel.isHidden = true
 
         cancelButton.target = self
         cancelButton.action = #selector(cancel)
@@ -195,24 +202,19 @@ final class NodeShellConfigurationWindowController: NSWindowController,
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
-        let separator = NSBox()
-        separator.boxType = .separator
-        // Keep surplus panel height below the form instead of stretching a grid row.
-        let flexibleSpace = NSView()
         let stack = NSStackView(views: [
-            identityGrid, separator, optionsGrid, saveClusterImageButton,
-            warning, validationLabel, flexibleSpace, footer,
+            formGrid, saveClusterImageButton, warning, validationLabel, footer,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
         for child in [
-            identityGrid, separator, optionsGrid, saveClusterImageButton,
-            warning, validationLabel, flexibleSpace, footer,
+            formGrid, saveClusterImageButton, warning, validationLabel, footer,
         ] {
             child.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
+        contentStack = stack
 
         let root = NSView()
         root.addSubview(stack)
@@ -324,7 +326,20 @@ final class NodeShellConfigurationWindowController: NSWindowController,
     private func validateForm() {
         let message = validationMessage()
         validationLabel.stringValue = message ?? ""
+        validationLabel.isHidden = message == nil
         connectButton.isEnabled = message == nil
+        resizeToFitContent()
+    }
+
+    private func resizeToFitContent() {
+        guard let panel = window, let contentStack,
+            let contentView = panel.contentView
+        else { return }
+        contentView.layoutSubtreeIfNeeded()
+        let targetHeight = ceil(contentStack.fittingSize.height + 34)
+        guard abs(contentView.bounds.height - targetHeight) > 0.5 else { return }
+        panel.setContentSize(NSSize(width: contentView.bounds.width, height: targetHeight))
+        contentView.layoutSubtreeIfNeeded()
     }
 
     @objc private func connect() {
@@ -360,6 +375,7 @@ final class NodeShellConfigurationWindowController: NSWindowController,
             statusLabel.stringValue = presentation.message
             statusLabel.toolTip = presentation.detailedText
             statusLabel.textColor = .systemRed
+            resizeToFitContent()
         }
     }
 

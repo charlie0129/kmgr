@@ -94,6 +94,19 @@ struct ClusterIdentityPresentationTests {
         #expect(clusterLabel.alignment == .left)
         #expect(declaredLabel.alignment == .left)
         #expect(declaredPort.frame.width >= 260)
+    }
+
+    @Test("node shell form shares columns and stays compact")
+    func nodeShellFormLayout() throws {
+        let nodeShell = NodeShellConfigurationWindowController(
+            session: identitySession(),
+            target: NodeShellTarget(node: nodeIdentity()),
+            image: "registry.example/helper:1",
+            namespace: "team-a",
+            usesClusterImageOverride: false,
+            execProvider: IdentityNoopExecProvider(),
+            saveClusterImage: { _ in }
+        )
 
         let nodeShellRoot = try #require(nodeShell.window?.contentView)
         nodeShellRoot.layoutSubtreeIfNeeded()
@@ -105,6 +118,24 @@ struct ClusterIdentityPresentationTests {
         let helperNamespaceLabel = try #require(nodeShellLabels.first {
             $0.stringValue == "Helper namespace"
         })
+        let clusterValue = try #require(nodeShellLabels.first {
+            $0.stringValue == "cluster-a"
+        })
+        let imageField = try #require(nodeShellLabels.first {
+            $0.accessibilityIdentifier() == "node-shell.image"
+        })
+        let warning = try #require(nodeShellLabels.first {
+            $0.stringValue.hasPrefix("This creates a temporary privileged Pod")
+        })
+        let validation = try #require(nodeShellLabels.first {
+            $0.accessibilityIdentifier() == "node-shell.validation"
+        })
+        let buttons = identityDescendants(of: nodeShellRoot).compactMap { $0 as? NSButton }
+        let cancel = try #require(buttons.first { $0.title == "Cancel" })
+        let connect = try #require(buttons.first {
+            $0.accessibilityIdentifier() == "node-shell.connect"
+        })
+
         #expect(helperImageLabel.alignment == .left)
         #expect(helperNamespaceLabel.alignment == .left)
         let helperImageFrame = nodeShellRoot.convert(
@@ -117,6 +148,41 @@ struct ClusterIdentityPresentationTests {
         )
         #expect(helperImageFrame.minY > helperNamespaceFrame.maxY)
         #expect(helperImageFrame.minY - helperNamespaceFrame.maxY <= 20)
+
+        let clusterValueFrame = nodeShellRoot.convert(clusterValue.bounds, from: clusterValue)
+        let imageFieldFrame = nodeShellRoot.convert(imageField.bounds, from: imageField)
+        let clusterValueLeading = clusterValueFrame.minX
+            + clusterValue.alignmentRectInsets.left
+        let imageFieldLeading = imageFieldFrame.minX
+            + imageField.alignmentRectInsets.left
+        #expect(abs(clusterValueLeading - imageFieldLeading) <= 1)
+
+        let warningFrame = nodeShellRoot.convert(warning.bounds, from: warning)
+        let cancelFrame = nodeShellRoot.convert(cancel.bounds, from: cancel)
+        #expect(warningFrame.minY > cancelFrame.maxY)
+        #expect(warningFrame.minY - cancelFrame.maxY <= 20)
+        #expect(nodeShellRoot.bounds.height < 520)
+
+        let compactHeight = nodeShellRoot.bounds.height
+        imageField.stringValue = ""
+        nodeShell.controlTextDidChange(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: imageField
+        ))
+        nodeShellRoot.layoutSubtreeIfNeeded()
+        #expect(!validation.isHidden)
+        #expect(!connect.isEnabled)
+        #expect(nodeShellRoot.bounds.height > compactHeight)
+
+        imageField.stringValue = "registry.example/helper:1"
+        nodeShell.controlTextDidChange(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: imageField
+        ))
+        nodeShellRoot.layoutSubtreeIfNeeded()
+        #expect(validation.isHidden)
+        #expect(connect.isEnabled)
+        #expect(abs(nodeShellRoot.bounds.height - compactHeight) <= 1)
     }
 
     @Test("mutation and conflict presentations include full immutable identity")
