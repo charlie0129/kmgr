@@ -48,6 +48,20 @@ private struct TerminalTargetPresentation {
     }
 }
 
+@MainActor
+private final class AppearanceAwareTerminalView: TerminalView {
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyNativeColors()
+    }
+
+    func applyNativeColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            configureNativeColors()
+        }
+    }
+}
+
 /// One remote process in one independent window. Reconnect always asks the
 /// provider to create a new generation; this controller never reuses a dead
 /// stream or persists terminal contents.
@@ -139,7 +153,7 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
 private final class RemoteTerminalViewController: NSViewController, @preconcurrency TerminalViewDelegate,
     NSToolbarDelegate
 {
-    let terminalView: TerminalView
+    let terminalView: AppearanceAwareTerminalView
     let targetDisplayName: String
     var onConfirmedEOFExit: (() -> Void)?
 
@@ -195,14 +209,14 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         options.rows = Int(request.initialSize?.rows ?? 24)
         options.scrollback = 10_000
         options.termName = "xterm-256color"
-        terminalView = TerminalView(
+        terminalView = AppearanceAwareTerminalView(
             frame: NSRect(x: 0, y: 0, width: 900, height: 550),
             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
             options: options
         )
         super.init(nibName: nil, bundle: nil)
         terminalView.terminalDelegate = self
-        terminalView.configureNativeColors()
+        terminalView.applyNativeColors()
         terminalView.setAccessibilityLabel(targetPresentation.accessibilityLabel)
     }
 

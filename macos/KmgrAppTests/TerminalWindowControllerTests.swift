@@ -8,6 +8,42 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Terminal windows", .serialized)
 struct TerminalWindowControllerTests {
+    @Test("terminal surface follows a dark window appearance")
+    func terminalSurfaceFollowsDarkAppearance() throws {
+        let application = NSApplication.shared
+        let originalAppearance = application.appearance
+        application.appearance = NSAppearance(named: .aqua)
+        defer { application.appearance = originalAppearance }
+
+        let controller = TerminalWindowController(
+            request: execRequest(command: ["/bin/sh"]),
+            provider: OrderedExecProvider()
+        )
+        defer { closeTerminal(controller) }
+        let window = try #require(controller.window)
+        window.appearance = NSAppearance(named: .aqua)
+        let root = try #require(window.contentViewController?.view)
+        root.layoutSubtreeIfNeeded()
+        let terminalSurface = try #require(root.subviews.first)
+
+        window.appearance = NSAppearance(named: .darkAqua)
+        root.layoutSubtreeIfNeeded()
+        let layerColor = try #require(terminalSurface.layer?.backgroundColor)
+        let background = try #require(
+            NSColor(cgColor: layerColor)?.usingColorSpace(.deviceRGB)
+        )
+        let maximumComponent = max(
+            background.redComponent,
+            max(background.greenComponent, background.blueComponent)
+        )
+
+        #expect(
+            terminalSurface.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+                == .darkAqua
+        )
+        #expect(maximumComponent < 0.5)
+    }
+
     @Test("long terminal identities do not widen the window")
     func longIdentityStaysWithinWindow() throws {
         let controller = TerminalWindowController(
