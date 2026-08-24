@@ -712,6 +712,110 @@ struct ClusterWorkspaceToolbarTests {
         #expect(expandedWidth <= resourceRoot.bounds.width * 0.5 + 0.5)
     }
 
+    @Test("resource filter completion uses the visible query and active columns")
+    func resourceFilterCompletionUsesVisibleQuery() async throws {
+        let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
+            .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+
+        #expect(!filter.isAutomaticTextCompletionEnabled)
+        let editor = NSTextView()
+        editor.string = "api statu"
+        editor.setSelectedRange(NSRange(
+            location: (editor.string as NSString).length,
+            length: 0
+        ))
+        let partialRange = (editor.string as NSString).range(of: "statu")
+        var selectedIndex = 7
+        let completions = withUnsafeMutablePointer(to: &selectedIndex) { pointer in
+            filter.delegate?.control?(
+                filter,
+                textView: editor,
+                completions: ["dictionary-word"],
+                forPartialWordRange: partialRange,
+                indexOfSelectedItem: pointer
+            ) ?? []
+        }
+
+        #expect(completions == ["status:"])
+        #expect(selectedIndex == -1)
+        #expect((editor.string as NSString).replacingCharacters(
+            in: partialRange,
+            with: completions[0]
+        ) == "api status:")
+        #expect(editor.string == "api statu")
+    }
+
+    @Test("resource filter completion trigger presents once per token")
+    func resourceFilterCompletionTriggerPresentsOncePerToken() {
+        var deferred: [ResourceFilterCompletionTrigger.DeferredAction] = []
+        var presented: [String] = []
+        let trigger = ResourceFilterCompletionTrigger(
+            deferAction: { deferred.append($0) },
+            present: { presented.append($0.string) }
+        )
+        let editor = NSTextView()
+        editor.string = "blo"
+        editor.setSelectedRange(NSRange(location: 3, length: 0))
+
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { $0 === editor },
+            hasCandidates: { _ in true }
+        )
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { $0 === editor },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.count == 1)
+        deferred.removeFirst()()
+        #expect(presented == ["blo"])
+
+        editor.string = "blo name"
+        editor.setSelectedRange(NSRange(location: 8, length: 0))
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { $0 === editor },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.count == 1)
+    }
+
+    @Test("resource filter completion trigger drops stale deferred panels")
+    func resourceFilterCompletionTriggerDropsStalePresentation() {
+        var deferred: [ResourceFilterCompletionTrigger.DeferredAction] = []
+        var presentationCount = 0
+        let trigger = ResourceFilterCompletionTrigger(
+            deferAction: { deferred.append($0) },
+            present: { _ in presentationCount += 1 }
+        )
+        let editor = NSTextView()
+        editor.string = "statu"
+        editor.setSelectedRange(NSRange(location: 5, length: 0))
+
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { _ in false },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.count == 1)
+        deferred.removeFirst()()
+        #expect(presentationCount == 0)
+
+        editor.setSelectedRange(NSRange(location: 0, length: 5))
+        trigger.reset()
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { _ in true },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.isEmpty)
+    }
+
     @Test("Return applies a pending resource filter and restores table focus")
     func returnAppliesResourceFilterImmediately() async throws {
         let provider = FilterValidationWorkspaceResourceProvider()

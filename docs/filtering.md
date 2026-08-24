@@ -4,6 +4,13 @@ The search field is the complete resource query. It is parsed once by
 `kmgr-engine`; no additional selector or relationship filter is stored behind
 the field. Whitespace-separated terms are combined with AND.
 
+While typing, the search field can complete reserved query prefixes and the
+stable IDs of active projected columns. Completion is bounded to the current
+query token: Tab accepts a suggestion, arrow keys move through suggestions,
+Escape dismisses them, and Return keeps its normal apply-query behavior.
+Values are not looked up or suggested, and native selector bodies remain
+opaque.
+
 ## Local terms
 
 Bare terms search the visible cells, name, namespace, and status using a

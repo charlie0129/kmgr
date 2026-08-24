@@ -3422,6 +3422,7 @@ private final class ResourceListViewController: NSViewController,
     private var optionalResourceOverlayState = OptionalResourceOverlayLifetimeState()
     private var filterTask: Task<Void, Never>?
     private var filterMemory = ResourceFilterMemory()
+    private let filterCompletionTrigger = ResourceFilterCompletionTrigger()
     private var isFilterShortcutContextActive = false
     private var lastPublishedShortcutSnapshot: ContextualShortcutSnapshot?
     private var suppressSelectionCallbacks = false
@@ -3756,10 +3757,15 @@ private final class ResourceListViewController: NSViewController,
         filterField.setAccessibilityHelp(
             "Type keywords or structured filters. Use labelSelector or fieldSelector "
                 + "for explicit Kubernetes selectors, or column:<id>:<value> for a "
-                + "projected column. Return applies the query."
+                + "projected column. Tab completes a query prefix or active column ID; "
+                + "Return applies the query."
         )
         filterField.delegate = self
         filterField.sendsSearchStringImmediately = true
+        // The query is structured technical input. Disable language-driven
+        // completion/checking; the bounded query catalog below is invoked
+        // explicitly and still supports manual Tab/arrow completion.
+        filterField.isAutomaticTextCompletionEnabled = false
         // Let the filter use roughly half of the resource surface for long
         // selectors, while yielding first when the status labels need room.
         filterField.setContentHuggingPriority(.init(200), for: .horizontal)
@@ -4166,6 +4172,7 @@ private final class ResourceListViewController: NSViewController,
 
     @discardableResult
     func handleEscape() -> Bool {
+        filterCompletionTrigger.reset()
         let firstResponder = view.window?.firstResponder
         let filterOwnsResponder = firstResponder === filterField
             || filterField.currentEditor() === firstResponder
@@ -4281,6 +4288,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func setFilter(_ value: String) {
+        filterCompletionTrigger.reset()
         filterRevision &+= 1
         filterTask?.cancel()
         filterField.stringValue = value
@@ -4515,11 +4523,14 @@ private final class ResourceListViewController: NSViewController,
 
     func controlTextDidBeginEditing(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
+        (filterField.currentEditor() as? NSTextView)?.configureAsTechnicalTextInput()
+        filterCompletionTrigger.reset()
         setFilterShortcutContextActive(true)
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
+        filterCompletionTrigger.reset()
         setFilterShortcutContextActive(false)
     }
 
@@ -4544,6 +4555,38 @@ private final class ResourceListViewController: NSViewController,
             self?.openStream(reason: .debouncedFilter)
             self?.onRestorationChanged?()
         }
+        filterCompletionTrigger.textDidChange(
+            editor: filterField.currentEditor() as? NSTextView,
+            isCurrentEditor: { [weak self] editor in
+                self?.filterField.currentEditor() === editor
+            },
+            hasCandidates: { [weak self] editor in
+                guard let self else { return false }
+                return !ResourceFilterCompletionCatalog.completions(
+                    in: editor.string,
+                    partialWordRange: editor.rangeForUserCompletion,
+                    columnIDs: self.columnIDs
+                ).isEmpty
+            }
+        )
+    }
+
+    func control(
+        _ control: NSControl,
+        textView: NSTextView,
+        completions _: [String],
+        forPartialWordRange partialWordRange: NSRange,
+        indexOfSelectedItem selectedIndex: UnsafeMutablePointer<Int>
+    ) -> [String] {
+        // Do not preselect a candidate. Tab/arrow navigation remains explicit,
+        // while Return continues through the existing query-commit command.
+        guard control === filterField else { return [] }
+        selectedIndex.pointee = -1
+        return ResourceFilterCompletionCatalog.completions(
+            in: textView.string,
+            partialWordRange: partialWordRange,
+            columnIDs: columnIDs
+        )
     }
 
     func control(
@@ -4557,6 +4600,7 @@ private final class ResourceListViewController: NSViewController,
 
         // Do not make an explicit Return wait for the typing debounce. This
         // also gives keyboard navigation back to the resource table.
+        filterCompletionTrigger.reset()
         filterTask?.cancel()
         filterTask = nil
         rememberCurrentFilter()
@@ -7056,6 +7100,7 @@ private final class ResourceListViewController: NSViewController,
         resource = restored
         scope = restoration.namespaceScope.namespaceSelection
         pendingScrollAnchor = restoration.scrollAnchor
+        filterCompletionTrigger.reset()
         filterField.stringValue = restoration.filter
         filterMemory.remember(restoration.filter, for: resourceGVR(for: restored))
         suppressPresentationCheckpoint = true
@@ -7149,6 +7194,7 @@ private final class ResourceListViewController: NSViewController,
     func applyRestoredShell(_ restoration: ClusterWindowRestorationState) {
         isAuthenticated = false
         scope = restoration.namespaceScope.namespaceSelection
+        filterCompletionTrigger.reset()
         filterField.stringValue = restoration.filter
 
         let shell = RestoredWorkspaceShell(record: ClusterWindowRestorationRecord(
@@ -7208,6 +7254,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func installFilterForNavigation(_ filter: String, resourceGVR: GVR) {
+        filterCompletionTrigger.reset()
         filterTask?.cancel()
         filterTask = nil
         if filterField.stringValue != filter {
