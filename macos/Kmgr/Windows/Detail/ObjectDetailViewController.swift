@@ -307,7 +307,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     )
     private let contentContainer = NSView()
     private let summaryTable = ObjectDetailSummaryTableView()
-    private let summaryScrollView = NSScrollView()
+    private let summaryScrollView = ObjectDetailSummaryScrollView()
     private let relationshipsTable = NSTableView()
     private let relationshipsScrollView = NSScrollView()
     private let relationshipsContainerView = NSView()
@@ -465,8 +465,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         updateSummaryTableGeometry()
     }
 
-    private func updateSummaryTableGeometry() {
-        let width = max(1, summaryScrollView.contentSize.width)
+    private func updateSummaryTableGeometry(availableWidth: CGFloat? = nil) {
+        let width = max(1, availableWidth ?? summaryScrollView.contentSize.width)
         summaryTableLayoutBinding?.fitLastColumn(to: width)
         let columnWidth = summaryTable.tableColumns.reduce(0) { $0 + $1.width }
             + summaryTable.intercellSpacing.width
@@ -616,6 +616,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             surface: .objectSummary,
             store: tableLayoutStore
         )
+        summaryScrollView.onViewportLayout = { [weak self] width in
+            self?.updateSummaryTableGeometry(availableWidth: width)
+        }
     }
 
     private func configureRelationships() {
@@ -1640,6 +1643,22 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     @objc private func backPressed() { onBack?() }
 
+}
+
+@MainActor
+private final class ObjectDetailSummaryScrollView: NSScrollView {
+    var onViewportLayout: ((CGFloat) -> Void)?
+    private var lastReportedViewportWidth: CGFloat = -1
+
+    override func layout() {
+        super.layout()
+        let width = contentSize.width
+        guard width.isFinite,
+            abs(width - lastReportedViewportWidth) > 0.5
+        else { return }
+        lastReportedViewportWidth = width
+        onViewportLayout?(width)
+    }
 }
 
 @MainActor

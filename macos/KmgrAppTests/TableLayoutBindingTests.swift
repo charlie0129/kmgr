@@ -88,8 +88,8 @@ struct TableLayoutBindingTests {
         #expect(fixture.store.successfulPersistenceCount == 1)
     }
 
-    @Test("adaptive sizing stays local until an explicit resize takes ownership")
-    func adaptiveSizingYieldsToUserResize() throws {
+    @Test("user widths become minimums while trailing viewport space stays adaptive")
+    func adaptiveSizingPreservesUserMinimums() throws {
         let fixture = try tableLayoutBindingFixture()
         defer { fixture.defaults.removePersistentDomain(forName: fixture.suite) }
         let first = fixedTable([("field", 180), ("value", 360)])
@@ -126,6 +126,12 @@ struct TableLayoutBindingTests {
         #expect(first.tableColumns[1].width > second.tableColumns[1].width)
 
         let userLayout = first.tableColumns.map(\.width)
+        let savedUserLayout = fixture.store.layout(for: .objectSummary)
+        firstBinding.fitLastColumn(to: 1_200)
+        #expect(first.tableColumns[0].width == userLayout[0])
+        #expect(first.tableColumns[1].width > userLayout[1])
+        #expect(fixture.store.layout(for: .objectSummary) == savedUserLayout)
+
         firstBinding.fitLastColumn(to: 420)
         #expect(first.tableColumns.map(\.width) == userLayout)
     }

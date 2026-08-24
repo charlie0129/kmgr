@@ -128,6 +128,92 @@ struct ObjectDetailMetadataEditingTests {
         #expect(buttonIDs.contains("object-detail-edit-labels"))
         #expect(buttonIDs.contains("object-detail-edit-annotations"))
     }
+
+    @Test("user-sized Summary columns still fill a wider viewport")
+    func userSizedColumnsFillWiderViewport() async throws {
+        let identity = detailMetadataIdentity()
+        let suite = "kmgr-detail-metadata-layout-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let tableLayoutStore = TableLayoutStore(
+            defaults: defaults,
+            persistenceDelay: .seconds(60)
+        )
+        let labels = Dictionary(uniqueKeysWithValues: (0..<64).map {
+            (String(format: "label-%02d", $0), "value-\($0)")
+        })
+        let controller = ObjectDetailViewController(
+            identity: identity,
+            provider: DetailMetadataProvider(detail: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-wide",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "identity",
+                    fieldID: "name",
+                    label: "Name",
+                    displayText: "api"
+                )],
+                labels: labels,
+                annotations: ["example.test/note": "owned"]
+            )),
+            tableLayoutStore: tableLayoutStore
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 800),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        let host = WorkspaceRightPaneViewController(
+            connectionActivityView: ClusterConnectionActivityView()
+        )
+        let placeholder = NSViewController()
+        placeholder.view = NSView()
+        host.setContent(placeholder, initialStatus: WorkspaceStatus("Ready"))
+        window.contentViewController = host
+        window.setContentSize(NSSize(width: 900, height: 800))
+        window.makeKeyAndOrderFront(nil)
+        host.setContent(controller, initialStatus: controller.workspaceStatus)
+        defer {
+            controller.stop()
+            window.orderOut(nil)
+        }
+
+        let table = try #require(detailMetadataDescendants(of: controller.view)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.identifier?.rawValue == "object-detail-summary-table" })
+        let scrollView = try #require(table.enclosingScrollView)
+        try await detailMetadataWaitUntil { table.numberOfRows >= 69 }
+        _ = table.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        table.tableColumns[0].width = 400
+        NotificationCenter.default.post(
+            name: NSTableView.columnDidResizeNotification,
+            object: table
+        )
+        window.setContentSize(NSSize(width: 1_500, height: 800))
+        window.layoutIfNeeded()
+        try await detailMetadataWaitUntil {
+            let width = table.tableColumns.reduce(0) { $0 + $1.width }
+                + table.intercellSpacing.width
+                    * CGFloat(max(0, table.tableColumns.count - 1))
+            return abs(width - scrollView.contentSize.width) <= 1
+        }
+
+        let button = try #require(detailMetadataDescendants(of: table)
+            .compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "object-detail-edit-labels" })
+        #expect(abs(table.frame.width - scrollView.contentSize.width) <= 1)
+        let columnWidth = table.tableColumns.reduce(0) { $0 + $1.width }
+            + table.intercellSpacing.width
+                * CGFloat(max(0, table.tableColumns.count - 1))
+        #expect(abs(columnWidth - scrollView.contentSize.width) <= 1)
+        let buttonFrame = button.convert(button.bounds, to: table)
+        let trailingGap = table.bounds.maxX - buttonFrame.maxX
+        #expect((0...32).contains(trailingGap))
+    }
 }
 }
 

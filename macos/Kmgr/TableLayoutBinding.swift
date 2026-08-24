@@ -13,7 +13,7 @@ final class TableLayoutBinding: NSObject {
     private var preferredLayout: TableLayout
     private var renderedWidths: [String: Double] = [:]
     private var adaptiveLastColumnAvailableWidth: Double?
-    private var adaptiveLastColumnWasReplacedByUser = false
+    private var lastColumnHasUserPreferredMinimum = false
     private var isApplyingStoreLayout = false
     private var isInvalidated = false
 
@@ -84,14 +84,12 @@ final class TableLayoutBinding: NSObject {
     }
 
     /// Fits the final column to one local viewport without changing the
-    /// persisted preferred widths. Summary uses this to keep its two-column
-    /// table flush with the viewport while differently sized windows continue
-    /// to share one stable user layout without synchronization feedback.
+    /// persisted preferred widths. After a user resize, those widths become
+    /// minimums: a wider viewport may add space to the final column, while a
+    /// narrower viewport preserves the user's layout and scrolls horizontally.
     func fitLastColumn(to availableWidth: CGFloat) {
         let width = Double(availableWidth)
-        guard width.isFinite, width > 0,
-            !adaptiveLastColumnWasReplacedByUser
-        else { return }
+        guard width.isFinite, width > 0 else { return }
         adaptiveLastColumnAvailableWidth = width
         renderPreferredLayout()
     }
@@ -104,12 +102,10 @@ final class TableLayoutBinding: NSObject {
         let endedAdaptiveFit = notification.name == NSTableView.columnDidResizeNotification
             && adaptiveLastColumnAvailableWidth != nil
         if endedAdaptiveFit {
-            // Once the user resizes any column, the complete visible layout is
-            // their preference. Persist it exactly and stop treating the last
-            // column as viewport-owned; otherwise every resize notification or
-            // data reload snaps that divider back under the pointer.
-            adaptiveLastColumnAvailableWidth = nil
-            adaptiveLastColumnWasReplacedByUser = true
+            // Persist the complete visible layout. Future viewport fitting may
+            // use otherwise-empty trailing space, but never shrinks the user's
+            // final-column width and therefore does not move their divider.
+            lastColumnHasUserPreferredMinimum = true
         }
         let preferredWidths = Dictionary(uniqueKeysWithValues:
             preferredLayout.columns.map { ($0.id, $0.width) }
@@ -144,7 +140,7 @@ final class TableLayoutBinding: NSObject {
         guard !isInvalidated, let tableView else { return }
         guard let saved else {
             adaptiveLastColumnAvailableWidth = nil
-            adaptiveLastColumnWasReplacedByUser = false
+            lastColumnHasUserPreferredMinimum = false
             preferredLayout = defaultLayout
             renderPreferredLayout()
             return
@@ -219,10 +215,19 @@ final class TableLayoutBinding: NSObject {
                 TableLayoutStore.maximumColumnWidth,
                 Double(last.maxWidth)
             )
-            last.width = CGFloat(min(
+            let fittedWidth = min(
                 max(available - preceding - spacing, minimum),
                 max(minimum, maximum)
-            ))
+            )
+            let preferredWidth = min(
+                max(preferredLayout.columns.last?.width ?? fittedWidth, minimum),
+                max(minimum, maximum)
+            )
+            last.width = CGFloat(
+                lastColumnHasUserPreferredMinimum
+                    ? max(preferredWidth, fittedWidth)
+                    : fittedWidth
+            )
         }
         renderedWidths = Dictionary(uniqueKeysWithValues:
             Self.capture(tableView).columns.map { ($0.id, $0.width) }
