@@ -749,8 +749,8 @@ struct ClusterWorkspaceToolbarTests {
         #expect(editor.string == "api statu")
     }
 
-    @Test("resource filter completion trigger presents once per token")
-    func resourceFilterCompletionTriggerPresentsOncePerToken() {
+    @Test("resource filter completion trigger refreshes when the token changes")
+    func resourceFilterCompletionTriggerRefreshesWhenTokenChanges() {
         var deferred: [ResourceFilterCompletionTrigger.DeferredAction] = []
         var presented: [String] = []
         let trigger = ResourceFilterCompletionTrigger(
@@ -775,6 +775,36 @@ struct ClusterWorkspaceToolbarTests {
         deferred.removeFirst()()
         #expect(presented == ["blo"])
 
+        editor.string = "blo n"
+        editor.setSelectedRange(NSRange(location: 5, length: 0))
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { $0 === editor },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.count == 1)
+        deferred.removeFirst()()
+        #expect(presented == ["blo", "blo n"])
+
+        // Repeated notifications for the same token state do not reopen the
+        // panel unnecessarily.
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { $0 === editor },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.isEmpty)
+
+        // Backspacing broadens the candidates and must refresh the panel too.
+        editor.string = "blo"
+        editor.setSelectedRange(NSRange(location: 3, length: 0))
+        trigger.textDidChange(
+            editor: editor,
+            isCurrentEditor: { $0 === editor },
+            hasCandidates: { _ in true }
+        )
+        #expect(deferred.count == 1)
+
         editor.string = "blo name"
         editor.setSelectedRange(NSRange(location: 8, length: 0))
         trigger.textDidChange(
@@ -782,7 +812,12 @@ struct ClusterWorkspaceToolbarTests {
             isCurrentEditor: { $0 === editor },
             hasCandidates: { _ in true }
         )
-        #expect(deferred.count == 1)
+        // The pending `blo` refresh is superseded by the new token state.
+        #expect(deferred.count == 2)
+        deferred.removeFirst()()
+        #expect(presented == ["blo", "blo n"])
+        deferred.removeFirst()()
+        #expect(presented == ["blo", "blo n", "blo name"])
     }
 
     @Test("resource filter completion trigger drops stale deferred panels")

@@ -50,6 +50,20 @@ private func completionRange(
     ).isEmpty)
 }
 
+@Test func resourceFilterCompletionNarrowsActiveNodeColumnPrefix() {
+    let columns = ["node"]
+    #expect(ResourceFilterCompletionCatalog.completions(
+        in: "n",
+        partialWordRange: completionRange("n"),
+        columnIDs: columns
+    ) == ["namespace:", "name:", "ns:", "node:"])
+    #expect(ResourceFilterCompletionCatalog.completions(
+        in: "no",
+        partialWordRange: completionRange("no"),
+        columnIDs: columns
+    ) == ["node:"])
+}
+
 @Test func resourceFilterCompletionUsesExplicitColumnForReservedIDs() {
     #expect(ResourceFilterCompletionCatalog.completions(
         in: "column:na",

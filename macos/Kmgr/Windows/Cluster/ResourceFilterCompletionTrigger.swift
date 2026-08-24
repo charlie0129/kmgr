@@ -15,8 +15,13 @@ final class ResourceFilterCompletionTrigger {
     private let deferAction: Deferrer
     private let present: Presenter
     private weak var editor: NSTextView?
-    private var tokenStart: Int?
+    private var tokenState: TokenState?
     private var generation: UInt64 = 0
+
+    private struct TokenState: Equatable {
+        var start: Int
+        var text: String
+    }
 
     init(
         deferAction: @escaping Deferrer = { action in
@@ -34,41 +39,51 @@ final class ResourceFilterCompletionTrigger {
         hasCandidates: @escaping @MainActor (NSTextView) -> Bool
     ) {
         guard let candidateEditor,
-            let candidateTokenStart = currentTokenStart(in: candidateEditor)
+            let candidateTokenState = currentTokenState(in: candidateEditor)
         else {
             reset()
             return
         }
-        if editor === candidateEditor, tokenStart == candidateTokenStart {
+        if editor === candidateEditor, tokenState == candidateTokenState {
             return
         }
 
         reset()
         editor = candidateEditor
-        tokenStart = candidateTokenStart
+        tokenState = candidateTokenState
         let expectedGeneration = generation
         deferAction { [weak self, weak candidateEditor] in
             guard let self, let candidateEditor,
-                generation == expectedGeneration,
-                editor === candidateEditor,
-                isCurrentEditor(candidateEditor),
-                currentTokenStart(in: candidateEditor) == candidateTokenStart,
-                hasCandidates(candidateEditor)
+                self.generation == expectedGeneration,
+                self.editor === candidateEditor,
+                self.tokenState == candidateTokenState
             else {
-                self?.reset()
                 return
             }
-            present(candidateEditor)
+            guard isCurrentEditor(candidateEditor) else {
+                self.reset()
+                return
+            }
+            guard self.currentTokenState(in: candidateEditor) == candidateTokenState
+            else {
+                self.reset()
+                return
+            }
+            guard hasCandidates(candidateEditor) else {
+                self.reset()
+                return
+            }
+            self.present(candidateEditor)
         }
     }
 
     func reset() {
         generation &+= 1
         editor = nil
-        tokenStart = nil
+        tokenState = nil
     }
 
-    private func currentTokenStart(in editor: NSTextView) -> Int? {
+    private func currentTokenState(in editor: NSTextView) -> TokenState? {
         let selection = editor.selectedRange()
         let text = editor.string as NSString
         guard selection.location != NSNotFound,
@@ -84,6 +99,13 @@ final class ResourceFilterCompletionTrigger {
             range: NSRange(location: 0, length: selection.location)
         )
         let start = whitespace.location == NSNotFound ? 0 : NSMaxRange(whitespace)
-        return start < selection.location ? start : nil
+        guard start < selection.location else { return nil }
+        return TokenState(
+            start: start,
+            text: text.substring(with: NSRange(
+                location: start,
+                length: selection.location - start
+            ))
+        )
     }
 }
