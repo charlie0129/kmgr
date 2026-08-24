@@ -725,7 +725,7 @@ struct ClusterWorkspaceToolbarTests {
         #expect(!filter.isAutomaticTextCompletionEnabled)
         filter.stringValue = "api statu"
         #expect(window.makeFirstResponder(filter))
-        let editor = try #require(filter.currentEditor() as? ResourceFilterFieldEditor)
+        let editor = try #require(filter.currentEditor() as? NSTextView)
         editor.setSelectedRange(NSRange(
             location: (editor.string as NSString).length,
             length: 0
@@ -752,8 +752,21 @@ struct ClusterWorkspaceToolbarTests {
 
         editor.complete(nil)
         #expect(editor.string == "api statu")
-        editor.doCommand(by: #selector(NSResponder.insertTab(_:)))
+        window.sendEvent(try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\t",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48
+        )))
         #expect(editor.string == "api status:")
+        #expect(filter.stringValue == "api status:")
+        #expect(window.firstResponder === editor)
     }
 
     @Test("resource filter completion trigger refreshes when the token changes")

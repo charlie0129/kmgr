@@ -87,6 +87,18 @@ private struct ResourceColumnProjectionIdentity: Hashable {
     }
 }
 
+/// Gives workspace-owned keyboard actions one chance to handle a key before
+/// AppKit routes it into transient controls such as the completion panel.
+@MainActor
+private final class ClusterWorkspaceShortcutWindow: NSWindow {
+    var keyDownHandler: ((NSEvent) -> Bool)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, keyDownHandler?(event) == true { return }
+        super.sendEvent(event)
+    }
+}
+
 @MainActor
 final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelegate,
     NSMenuItemValidation, ContextualShortcutProviding
@@ -140,7 +152,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var didStartWorkspace = false
     private var isClosing = false
     private var windowSizeCheckpointTask: Task<Void, Never>?
-    private let resourceFilterFieldEditor = ResourceFilterFieldEditor(frame: .zero)
 
     var restorationIdentifier: String { restoration.id }
     var isOpenForRestoration: Bool { !isClosing }
@@ -208,7 +219,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.nodeShellPreferences = nodeShellPreferences
         self.saveNodeShellPreferences = saveNodeShellPreferences
 
-        let window = NSWindow(
+        let window = ClusterWorkspaceShortcutWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -247,6 +258,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         )
         super.init(window: window)
         installWorkspaceCallbacks()
+        window.keyDownHandler = { [weak self] event in
+            self?.handleWorkspaceKeyDown(event) ?? false
+        }
         window.delegate = self
         window.contentViewController = workspaceController
         window.toolbar = workspaceController.makeToolbar()
@@ -310,6 +324,17 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onContextualShortcutsChanged = { [weak self] in
             self?.contextualShortcutsDidChange?()
         }
+    }
+
+    private func handleWorkspaceKeyDown(_ event: NSEvent) -> Bool {
+        let commandModifiers: NSEvent.ModifierFlags = [
+            .command, .control, .option, .shift,
+        ]
+        // 48 is AppKit's virtual key code for the physical Tab key.
+        guard event.keyCode == 48,
+            event.modifierFlags.intersection(commandModifiers).isEmpty
+        else { return false }
+        return workspaceController.acceptFirstResourceFilterCompletion()
     }
 
     @available(*, unavailable)
@@ -410,17 +435,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     func windowDidBecomeKey(_ notification: Notification) {
         guard didStartWorkspace, !isClosing else { return }
         _ = checkpointActiveWorkspace()
-    }
-
-    func windowWillReturnFieldEditor(
-        _ sender: NSWindow,
-        to client: Any?
-    ) -> Any? {
-        guard sender === window,
-            let filterField = client as? ResourceFilterSearchField
-        else { return nil }
-        resourceFilterFieldEditor.completionField = filterField
-        return resourceFilterFieldEditor
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -1866,6 +1880,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     @objc func focusResourceFilter(_ sender: Any?) { contentController.performCommand(.focusFilter) }
+    func acceptFirstResourceFilterCompletion() -> Bool {
+        contentController.acceptFirstFilterCompletion()
+    }
     @objc func moveResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.moveUp) }
     @objc func moveResourceSelectionDown(_ sender: Any?) { contentController.performCommand(.moveDown) }
     @objc func extendResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.extendUp) }
@@ -3389,7 +3406,7 @@ private final class ResourceListViewController: NSViewController,
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let sortLabel = NSTextField(labelWithString: "Unsorted")
-    private let filterField = ResourceFilterSearchField()
+    private let filterField = NSSearchField()
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
     private struct InlineIssuePresentation: Hashable {
@@ -3773,9 +3790,6 @@ private final class ResourceListViewController: NSViewController,
                 + "Return applies the query."
         )
         filterField.delegate = self
-        filterField.acceptFirstCompletion = { [weak self] editor in
-            self?.acceptFirstFilterCompletion(in: editor) ?? false
-        }
         filterField.sendsSearchStringImmediately = true
         // The query is structured technical input. Disable language-driven
         // completion/checking; the bounded query catalog below is invoked
@@ -4627,7 +4641,11 @@ private final class ResourceListViewController: NSViewController,
         return true
     }
 
-    private func acceptFirstFilterCompletion(in textView: NSTextView) -> Bool {
+    func acceptFirstFilterCompletion() -> Bool {
+        guard let textView = filterField.currentEditor() as? NSTextView,
+            view.window?.firstResponder === textView
+        else { return false }
+
         let partialWordRange = textView.rangeForUserCompletion
         guard let completion = ResourceFilterCompletionCatalog.completions(
             in: textView.string,
