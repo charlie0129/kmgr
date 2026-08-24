@@ -589,6 +589,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             summaryTable,
             columns: [("field", "Field", 220), ("value", "Value", 520)]
         )
+        summaryTable.style = .plain
         summaryTable.identifier = .init("object-detail-summary-table")
         summaryTable.setAccessibilityLabel("Kubernetes object summary")
         summaryTable.allowsMultipleSelection = false

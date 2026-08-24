@@ -129,8 +129,8 @@ struct ObjectDetailMetadataEditingTests {
         #expect(buttonIDs.contains("object-detail-edit-annotations"))
     }
 
-    @Test("user-sized Summary columns still fill a wider viewport")
-    func userSizedColumnsFillWiderViewport() async throws {
+    @Test("Summary rows and user-sized columns fill the viewport across resize")
+    func summaryRowsAndColumnsFillViewportAcrossResize() async throws {
         let identity = detailMetadataIdentity()
         let suite = "kmgr-detail-metadata-layout-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -185,8 +185,20 @@ struct ObjectDetailMetadataEditingTests {
             .first { $0.identifier?.rawValue == "object-detail-summary-table" })
         let scrollView = try #require(table.enclosingScrollView)
         try await detailMetadataWaitUntil { table.numberOfRows >= 69 }
-        _ = table.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        let section = try #require(
+            table.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        )
         window.contentView?.layoutSubtreeIfNeeded()
+
+        let button = try #require(detailMetadataDescendants(of: section)
+            .compactMap { $0 as? NSButton }
+            .first { $0.identifier?.rawValue == "object-detail-edit-labels" })
+        #expect(table.effectiveStyle == .plain)
+        assertSummarySectionFillsTable(
+            section: section,
+            button: button,
+            table: table
+        )
 
         table.tableColumns[0].width = 400
         NotificationCenter.default.post(
@@ -202,19 +214,32 @@ struct ObjectDetailMetadataEditingTests {
             return abs(width - scrollView.contentSize.width) <= 1
         }
 
-        let button = try #require(detailMetadataDescendants(of: table)
-            .compactMap { $0 as? NSButton }
-            .first { $0.identifier?.rawValue == "object-detail-edit-labels" })
         #expect(abs(table.frame.width - scrollView.contentSize.width) <= 1)
         let columnWidth = table.tableColumns.reduce(0) { $0 + $1.width }
             + table.intercellSpacing.width
                 * CGFloat(max(0, table.tableColumns.count - 1))
         #expect(abs(columnWidth - scrollView.contentSize.width) <= 1)
-        let buttonFrame = button.convert(button.bounds, to: table)
-        let trailingGap = table.bounds.maxX - buttonFrame.maxX
-        #expect((0...32).contains(trailingGap))
+        assertSummarySectionFillsTable(
+            section: section,
+            button: button,
+            table: table
+        )
     }
 }
+}
+
+@MainActor
+private func assertSummarySectionFillsTable(
+    section: NSView,
+    button: NSButton,
+    table: NSTableView
+) {
+    let sectionFrame = section.convert(section.bounds, to: table)
+    #expect(abs(sectionFrame.minX - table.bounds.minX) <= 1)
+    #expect(abs(sectionFrame.maxX - table.bounds.maxX) <= 1)
+
+    let buttonFrame = button.convert(button.bounds, to: table)
+    #expect(abs(table.bounds.maxX - buttonFrame.maxX - 8) <= 1)
 }
 
 private struct DetailMetadataProvider: ObjectDetailProviding {
