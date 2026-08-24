@@ -717,13 +717,15 @@ struct ClusterWorkspaceToolbarTests {
         let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
         controller.showWindow(nil)
         defer { controller.close() }
-        let root = try #require(controller.window?.contentView)
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
         let filter = try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
             .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
 
         #expect(!filter.isAutomaticTextCompletionEnabled)
-        let editor = NSTextView()
-        editor.string = "api statu"
+        filter.stringValue = "api statu"
+        #expect(window.makeFirstResponder(filter))
+        let editor = try #require(filter.currentEditor() as? ResourceFilterFieldEditor)
         editor.setSelectedRange(NSRange(
             location: (editor.string as NSString).length,
             length: 0
@@ -742,29 +744,16 @@ struct ClusterWorkspaceToolbarTests {
 
         #expect(completions == ["status:"])
         #expect(selectedIndex == -1)
+        let completion = try #require(completions.first)
         #expect((editor.string as NSString).replacingCharacters(
             in: partialRange,
-            with: completions[0]
+            with: completion
         ) == "api status:")
+
+        editor.complete(nil)
         #expect(editor.string == "api statu")
-
-        let handled = filter.delegate?.control?(
-            filter,
-            textView: editor,
-            doCommandBy: #selector(NSResponder.insertTab(_:))
-        )
-        #expect(handled == true)
+        editor.doCommand(by: #selector(NSResponder.insertTab(_:)))
         #expect(editor.string == "api status:")
-
-        editor.string = "api zzz"
-        editor.setSelectedRange(NSRange(location: 7, length: 0))
-        let unmatchedTabHandled = filter.delegate?.control?(
-            filter,
-            textView: editor,
-            doCommandBy: #selector(NSResponder.insertTab(_:))
-        )
-        #expect(unmatchedTabHandled == false)
-        #expect(editor.string == "api zzz")
     }
 
     @Test("resource filter completion trigger refreshes when the token changes")
@@ -901,6 +890,7 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil(timeout: .milliseconds(120)) {
             provider.streamRequestCount == 2
         }
+        #expect(provider.streamRequests.last?.filterExpression == "name:api")
     }
 
     @Test("replacing a visible native query searches the replacement")

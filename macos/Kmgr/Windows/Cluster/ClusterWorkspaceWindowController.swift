@@ -140,6 +140,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var didStartWorkspace = false
     private var isClosing = false
     private var windowSizeCheckpointTask: Task<Void, Never>?
+    private let resourceFilterFieldEditor = ResourceFilterFieldEditor(frame: .zero)
 
     var restorationIdentifier: String { restoration.id }
     var isOpenForRestoration: Bool { !isClosing }
@@ -409,6 +410,17 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     func windowDidBecomeKey(_ notification: Notification) {
         guard didStartWorkspace, !isClosing else { return }
         _ = checkpointActiveWorkspace()
+    }
+
+    func windowWillReturnFieldEditor(
+        _ sender: NSWindow,
+        to client: Any?
+    ) -> Any? {
+        guard sender === window,
+            let filterField = client as? ResourceFilterSearchField
+        else { return nil }
+        resourceFilterFieldEditor.completionField = filterField
+        return resourceFilterFieldEditor
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -3377,7 +3389,7 @@ private final class ResourceListViewController: NSViewController,
     private let titleLabel = NSTextField(labelWithString: "Resources")
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let sortLabel = NSTextField(labelWithString: "Unsorted")
-    private let filterField = NSSearchField()
+    private let filterField = ResourceFilterSearchField()
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
     private struct InlineIssuePresentation: Hashable {
@@ -3761,6 +3773,9 @@ private final class ResourceListViewController: NSViewController,
                 + "Return applies the query."
         )
         filterField.delegate = self
+        filterField.acceptFirstCompletion = { [weak self] editor in
+            self?.acceptFirstFilterCompletion(in: editor) ?? false
+        }
         filterField.sendsSearchStringImmediately = true
         // The query is structured technical input. Disable language-driven
         // completion/checking; the bounded query catalog below is invoked
@@ -4595,27 +4610,8 @@ private final class ResourceListViewController: NSViewController,
         textView: NSTextView,
         doCommandBy commandSelector: Selector
     ) -> Bool {
-        guard control === filterField else { return false }
-
-        if commandSelector == #selector(NSResponder.insertTab(_:)) {
-            let partialWordRange = textView.rangeForUserCompletion
-            guard let completion = ResourceFilterCompletionCatalog.completions(
-                in: textView.string,
-                partialWordRange: partialWordRange,
-                columnIDs: columnIDs
-            ).first else { return false }
-
-            filterCompletionTrigger.reset()
-            textView.insertCompletion(
-                completion,
-                forPartialWordRange: partialWordRange,
-                movement: NSTextMovement.tab.rawValue,
-                isFinal: true
-            )
-            return true
-        }
-
-        guard commandSelector == #selector(NSResponder.insertNewline(_:))
+        guard control === filterField,
+            commandSelector == #selector(NSResponder.insertNewline(_:))
         else { return false }
 
         // Do not make an explicit Return wait for the typing debounce. This
@@ -4628,6 +4624,24 @@ private final class ResourceListViewController: NSViewController,
         onRestorationChanged?()
         setFilterShortcutContextActive(false)
         view.window?.makeFirstResponder(tableView)
+        return true
+    }
+
+    private func acceptFirstFilterCompletion(in textView: NSTextView) -> Bool {
+        let partialWordRange = textView.rangeForUserCompletion
+        guard let completion = ResourceFilterCompletionCatalog.completions(
+            in: textView.string,
+            partialWordRange: partialWordRange,
+            columnIDs: columnIDs
+        ).first else { return false }
+
+        filterCompletionTrigger.reset()
+        textView.insertCompletion(
+            completion,
+            forPartialWordRange: partialWordRange,
+            movement: NSTextMovement.tab.rawValue,
+            isFinal: true
+        )
         return true
     }
 
