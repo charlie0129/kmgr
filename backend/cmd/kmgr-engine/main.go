@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -59,6 +60,10 @@ func run(arguments []string) int {
 	showVersion := flags.Bool("version", false, "print the engine version")
 	socketPath := flags.String("socket", "", "absolute path to the private Unix-domain socket")
 	launchToken := flags.String("token", "", "per-launch bearer token (at least 32 bytes)")
+	parentLivenessStdin := flags.Bool(
+		"parent-liveness-stdin", false,
+		"stop when the parent-owned standard-input pipe closes",
+	)
 	columnsPath := flags.String("columns", "", "path to the versioned programmable-columns configuration")
 	metricsRefresh := flags.Duration(
 		"metrics-refresh", metrics.DefaultRefreshInterval,
@@ -279,6 +284,12 @@ func run(arguments []string) int {
 		fmt.Printf("kmgr-engine %s\n", version)
 		return 0
 	}
+	if *parentLivenessStdin {
+		if err := validateParentLivenessInput(os.Stdin); err != nil {
+			fmt.Fprintln(os.Stderr, "kmgr-engine:", err)
+			return 2
+		}
+	}
 	if *socketPath == "" {
 		fmt.Fprintln(os.Stderr, "kmgr-engine: --socket is required")
 		return 2
@@ -364,6 +375,10 @@ func run(arguments []string) int {
 
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- server.Serve(endpoint.Listener()) }()
+	var parentExited <-chan struct{}
+	if *parentLivenessStdin {
+		parentExited = watchParentLiveness(os.Stdin)
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
@@ -379,6 +394,9 @@ func run(arguments []string) int {
 		}
 	case received := <-signals:
 		logger.Info("engine stopping", "cause", received.String())
+		server.RequestStop()
+	case <-parentExited:
+		logger.Info("engine stopping", "cause", "parent-exit")
 		server.RequestStop()
 	case <-server.Done():
 		logger.Info("engine stopping", "cause", "rpc")
@@ -397,6 +415,32 @@ func run(arguments []string) int {
 		return 1
 	}
 	return 0
+}
+
+func watchParentLiveness(input io.Reader) <-chan struct{} {
+	lost := make(chan struct{})
+	go func() {
+		// Kmgr never writes payload bytes. Discarding any bytes keeps the
+		// contract safe if a launcher does, while EOF or a read failure both
+		// mean that the explicitly enabled liveness channel is gone.
+		_, _ = io.Copy(io.Discard, input)
+		close(lost)
+	}()
+	return lost
+}
+
+func validateParentLivenessInput(input *os.File) error {
+	if input == nil {
+		return errors.New("--parent-liveness-stdin requires standard input to be a pipe")
+	}
+	info, err := input.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect parent liveness pipe: %w", err)
+	}
+	if info.Mode()&os.ModeNamedPipe == 0 {
+		return errors.New("--parent-liveness-stdin requires standard input to be a pipe")
+	}
+	return nil
 }
 
 func validateKubernetesRateLimit(qps float64, burst int) (float32, error) {

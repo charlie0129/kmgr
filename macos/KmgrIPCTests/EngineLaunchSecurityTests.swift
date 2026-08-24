@@ -16,6 +16,7 @@ struct EngineLaunchSecurityTests {
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
         #expect(endpoint.socketURL.deletingLastPathComponent() == endpoint.directoryURL)
         #expect(endpoint.socketURL.path.utf8.count <= EngineLaunchEndpoint.maximumSocketPathBytes)
+        #expect(endpoint.helperArguments.last == "--parent-liveness-stdin")
     }
 
     @Test("cleanup removes only the owned launch directory")

@@ -132,7 +132,11 @@ public struct EngineLaunchEndpoint: Sendable, Equatable {
     }
 
     var helperArguments: [String] {
-        ["--socket", socketURL.path, "--token", token.value]
+        [
+            "--socket", socketURL.path,
+            "--token", token.value,
+            "--parent-liveness-stdin",
+        ]
     }
 
     public func cleanup() throws {

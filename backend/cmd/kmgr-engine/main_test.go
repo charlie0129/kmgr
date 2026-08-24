@@ -1,8 +1,11 @@
 package main
 
 import (
+	"io"
 	"log/slog"
+	"os"
 	"testing"
+	"time"
 )
 
 func TestRunRejectsMissingLaunchConfiguration(t *testing.T) {
@@ -11,6 +14,55 @@ func TestRunRejectsMissingLaunchConfiguration(t *testing.T) {
 	}
 	if code := run([]string{"--socket", "/tmp/e.sock"}); code != 2 {
 		t.Fatalf("run(missing token) = %d, want usage error", code)
+	}
+}
+
+func TestWatchParentLivenessWaitsForEOF(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+	lost := watchParentLiveness(reader)
+
+	if _, err := writer.Write([]byte("ignored")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lost:
+		t.Fatal("parent liveness ended while its writer was still open")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lost:
+	case <-time.After(time.Second):
+		t.Fatal("parent liveness did not end after EOF")
+	}
+}
+
+func TestParentLivenessInputRequiresPipe(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+	if err := validateParentLivenessInput(reader); err != nil {
+		t.Fatalf("pipe rejected: %v", err)
+	}
+	regular, err := os.CreateTemp(t.TempDir(), "regular-input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = regular.Close() })
+	if err := validateParentLivenessInput(regular); err == nil {
+		t.Fatal("regular input was accepted as a parent liveness pipe")
 	}
 }
 

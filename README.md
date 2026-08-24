@@ -295,8 +295,13 @@ Kubernetes API server
 The app creates a short per-launch directory with mode `0700`, places a Unix
 socket inside it with user-only access, and gives the helper a random launch
 token. Every RPC carries that token. The GUI supervises one helper and removes
-the private endpoint on shutdown; a helper crash cannot corrupt the AppKit
-process. After an unexpected helper restart, visible workspaces reopen their
+the private endpoint on shutdown. Each supervised launch also opts into a
+parent-liveness standard-input pipe: if Kmgr crashes, is force-killed, or exits
+before its normal shutdown handshake, pipe EOF makes the engine run the same
+bounded cleanup used for signals and RPC shutdown. Standalone engine launches
+do not monitor standard input unless `--parent-liveness-stdin` is explicitly
+set. A helper crash cannot corrupt the AppKit process. After an unexpected
+helper restart, visible workspaces reopen their
 context through the normal authenticated probe and rebind safe resource and
 UID-pinned detail views to the new session. Cached table rows remain visibly
 disconnected and cannot perform network actions until a complete fresh UID
@@ -411,7 +416,8 @@ replaced a non-empty table with zero rows.
 `httptest` API fixtures, deterministic stream doubles, and AppKit-independent
 Swift reducers. It also launches a real Go helper through an isolated private
 Unix socket to verify Swift authentication, bad-token rejection, crash restart,
-and endpoint cleanup without reading kubeconfigs or contacting a cluster. This
+parent-death cleanup, standalone liveness opt-in, and endpoint cleanup without
+reading kubeconfigs or contacting a cluster. This
 includes LIST/WATCH continuity, 410 relists, cache
 retention/eviction, UID replacement safety, Secret sanitization, CEL limits,
 resource accounting, bounded streams, port-forward reconnects, and a 100,000

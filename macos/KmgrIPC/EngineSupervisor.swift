@@ -411,6 +411,7 @@ public final class EngineSupervisor {
             baseDirectoryURL: configuration.temporaryDirectoryURL
         )
         let process = Process()
+        let parentLivenessPipe = Pipe()
         let stderrPipe = Pipe()
         let exitWaiter = ProcessExitWaiter()
         process.executableURL = configuration.helperURL
@@ -418,17 +419,19 @@ public final class EngineSupervisor {
             appendingTo: endpoint.helperArguments
         )
         process.arguments = helperArguments
-        process.standardInput = FileHandle.nullDevice
+        process.standardInput = parentLivenessPipe.fileHandleForReading
         process.standardOutput = FileHandle.nullDevice
         process.standardError = stderrPipe
         process.terminationHandler = { process in
             exitWaiter.signal(status: process.terminationStatus)
         }
+        defer { try? parentLivenessPipe.fileHandleForWriting.close() }
 
         _ = await diagnosticsStore.beginGeneration()
         do {
             try process.run()
         } catch {
+            try? parentLivenessPipe.fileHandleForReading.close()
             _ = await diagnosticsStore.finishGeneration(
                 termination: nil,
                 unexpected: !shutdownRequested
@@ -436,6 +439,10 @@ public final class EngineSupervisor {
             try? endpoint.cleanup()
             throw error
         }
+        // Only Kmgr retains the write end. Closing this duplicate read end in
+        // the parent ensures an abrupt app exit produces EOF in the helper as
+        // soon as the operating system closes Kmgr's descriptors.
+        try? parentLivenessPipe.fileHandleForReading.close()
         currentProcess = process
 
         // Always drain the pipe so a noisy helper can never block on a full
