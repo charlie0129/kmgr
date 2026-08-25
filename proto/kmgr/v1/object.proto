@@ -31,9 +31,11 @@ message ObjectSummaryField {
   string display_text = 4;
   string tooltip = 5;
   CellSeverity severity = 6;
-  // Structured condition transition time. Zero means this field is not a
-  // condition or Kubernetes did not publish a valid timestamp.
-  int64 transition_time_unix_ms = 7;
+  // Structured timestamp kept separate from display_text so clients can
+  // refresh relative time locally. Zero means Kubernetes did not publish a
+  // valid timestamp for this field.
+  int64 timestamp_unix_ms = 7;
+  SummaryTimestampPresentation timestamp_presentation = 8;
 }
 
 enum PodContainerKind {
@@ -172,6 +174,12 @@ enum DataEntryKind {
   DATA_ENTRY_KIND_UNSPECIFIED = 0;
   DATA_ENTRY_KIND_TEXT = 1;
   DATA_ENTRY_KIND_BINARY = 2;
+}
+
+enum SummaryTimestampPresentation {
+  SUMMARY_TIMESTAMP_PRESENTATION_UNSPECIFIED = 0;
+  SUMMARY_TIMESTAMP_PRESENTATION_ELAPSED_SINCE = 1;
+  SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT = 2;
 }
 
 // value is intentionally bytes. For Secrets, Go decodes Kubernetes base64

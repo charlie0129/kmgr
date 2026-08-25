@@ -1,5 +1,10 @@
 import Foundation
 
+public enum ObjectSummaryTimestamp: Hashable, Sendable {
+    case elapsedSince(Date)
+    case occurredAt(Date)
+}
+
 public struct ObjectSummaryField: Hashable, Sendable {
     public var sectionID: String
     public var fieldID: String
@@ -7,7 +12,7 @@ public struct ObjectSummaryField: Hashable, Sendable {
     public var displayText: String
     public var tooltip: String
     public var severity: CellSeverity
-    public var transitionTime: Date?
+    public var timestamp: ObjectSummaryTimestamp?
 
     public init(
         sectionID: String,
@@ -16,7 +21,7 @@ public struct ObjectSummaryField: Hashable, Sendable {
         displayText: String,
         tooltip: String = "",
         severity: CellSeverity = .normal,
-        transitionTime: Date? = nil
+        timestamp: ObjectSummaryTimestamp? = nil
     ) {
         self.sectionID = sectionID
         self.fieldID = fieldID
@@ -24,7 +29,7 @@ public struct ObjectSummaryField: Hashable, Sendable {
         self.displayText = displayText
         self.tooltip = tooltip
         self.severity = severity
-        self.transitionTime = transitionTime
+        self.timestamp = timestamp
     }
 }
 

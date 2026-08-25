@@ -130,15 +130,15 @@ func TestPodSummaryIncludesMostRecentContainerRestartReason(t *testing.T) {
 	value.Object["status"] = map[string]any{
 		"containerStatuses": []any{
 			map[string]any{"lastState": map[string]any{"terminated": map[string]any{
-				"reason": "Error", "finishedAt": "2026-08-25T01:00:00Z",
+				"reason": "Error", "exitCode": int64(1), "finishedAt": "2026-08-25T01:00:00Z",
 			}}},
 			map[string]any{"lastState": map[string]any{"terminated": map[string]any{
-				"reason": "OOMKilled", "finishedAt": "2026-08-25T03:00:00Z",
+				"reason": "OOMKilled", "exitCode": int64(137), "finishedAt": "2026-08-25T03:00:00Z",
 			}}},
 		},
 		"initContainerStatuses": []any{
 			map[string]any{"lastState": map[string]any{"terminated": map[string]any{
-				"reason": "Completed", "finishedAt": "2026-08-25T02:00:00Z",
+				"reason": "Completed", "exitCode": int64(0), "finishedAt": "2026-08-25T02:00:00Z",
 			}}},
 		},
 	}
@@ -152,7 +152,10 @@ func TestPodSummaryIncludesMostRecentContainerRestartReason(t *testing.T) {
 		if field.ID != "lastRestartReason" {
 			continue
 		}
-		if field.Section != "status" || field.Label != "Last Restart Reason" || field.Value != "OOMKilled" {
+		if field.Section != "status" || field.Label != "Last Restart Reason" ||
+			field.Value != "OOMKilled · Exit code 137" ||
+			field.Timestamp.Format(time.RFC3339) != "2026-08-25T03:00:00Z" ||
+			field.TimestampPresentation != SummaryTimestampOccurredAt {
 			t.Fatalf("restart reason summary = %#v", field)
 		}
 		return
@@ -448,6 +451,30 @@ func TestDetailResponseCarriesPodLabelSelector(t *testing.T) {
 	}
 }
 
+func TestDetailResponseCarriesSummaryTimestampPresentation(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 8, 25, 3, 0, 0, 123_000_000, time.UTC)
+	response := detailResponse("request", &kmgrv1.ResourceIdentity{}, Detail{
+		Summary: []SummaryField{
+			{Timestamp: when, TimestampPresentation: SummaryTimestampElapsedSince},
+			{Timestamp: when, TimestampPresentation: SummaryTimestampOccurredAt},
+		},
+	})
+	if len(response.SummaryFields) != 2 {
+		t.Fatalf("summary fields = %#v", response.SummaryFields)
+	}
+	if response.SummaryFields[0].TimestampUnixMs != when.UnixMilli() ||
+		response.SummaryFields[0].TimestampPresentation !=
+			kmgrv1.SummaryTimestampPresentation_SUMMARY_TIMESTAMP_PRESENTATION_ELAPSED_SINCE {
+		t.Fatalf("elapsed timestamp = %#v", response.SummaryFields[0])
+	}
+	if response.SummaryFields[1].TimestampUnixMs != when.UnixMilli() ||
+		response.SummaryFields[1].TimestampPresentation !=
+			kmgrv1.SummaryTimestampPresentation_SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT {
+		t.Fatalf("occurrence timestamp = %#v", response.SummaryFields[1])
+	}
+}
+
 func TestWorkloadSummaryPreservesMaximumQualifiedSelectorKey(t *testing.T) {
 	t.Parallel()
 	prefix := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." +
@@ -508,7 +535,8 @@ func TestGenericSummaryIncludesConditionsOwnersAndWorkloadStatus(t *testing.T) {
 	if condition.Section != "conditions" || condition.Label != "Available" ||
 		!strings.Contains(condition.Value, "MinimumReplicasAvailable") ||
 		!strings.Contains(condition.Value, "Deployment has minimum availability") ||
-		condition.TransitionTime.Format(time.RFC3339) != "2026-08-14T02:03:04Z" ||
+		condition.Timestamp.Format(time.RFC3339) != "2026-08-14T02:03:04Z" ||
+		condition.TimestampPresentation != SummaryTimestampElapsedSince ||
 		strings.Contains(condition.Value, "2026-08-14") {
 		t.Errorf("condition summary = %#v", condition)
 	}

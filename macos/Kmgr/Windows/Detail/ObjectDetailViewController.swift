@@ -76,12 +76,12 @@ enum ObjectDetailSummaryPresentation {
 
     static func sections(
         for detail: ObjectDetail,
-        conditionTimeZone: TimeZone = .current,
+        timeZone: TimeZone = .current,
         now: Date = Date()
     ) -> [ObjectDetailSummarySection] {
-        let conditionTimestamps = ConditionTimestampFormatting(timeZone: conditionTimeZone)
+        let timestampFormatting = SummaryTimestampFormatting(timeZone: timeZone)
         let fields = detail.summaryFields.map {
-            summaryRow($0, conditionTimestamps: conditionTimestamps, now: now)
+            summaryRow($0, timestampFormatting: timestampFormatting, now: now)
         }
             + metadataRows(sectionID: "labels", values: detail.labels)
             + metadataRows(sectionID: "annotations", values: detail.annotations)
@@ -220,16 +220,20 @@ enum ObjectDetailSummaryPresentation {
 
     private static func summaryRow(
         _ field: ObjectSummaryField,
-        conditionTimestamps: ConditionTimestampFormatting,
+        timestampFormatting: SummaryTimestampFormatting,
         now: Date
     ) -> ObjectDetailSummaryRow {
         let label = normalizedText(field.label)
         let normalizedValue = normalizedText(field.displayText)
         let value: String
-        if field.sectionID == "conditions", let transitionTime = field.transitionTime {
-            let timing = "for \(compactAge(since: transitionTime, now: now)) (since \(conditionTimestamps.localized(transitionTime)))"
+        switch field.timestamp {
+        case .elapsedSince(let timestamp):
+            let timing = "for \(compactAge(since: timestamp, now: now)) (since \(timestampFormatting.localized(timestamp)))"
             value = normalizedValue.isEmpty ? timing : "\(normalizedValue) · \(timing)"
-        } else {
+        case .occurredAt(let timestamp):
+            let timing = "\(compactAge(since: timestamp, now: now)) ago (at \(timestampFormatting.localized(timestamp)))"
+            value = normalizedValue.isEmpty ? timing : "\(normalizedValue) · \(timing)"
+        case nil:
             value = normalizedValue
         }
         let shortened = value.count > maximumVisibleValueCharacters
@@ -316,7 +320,7 @@ enum ObjectDetailSummaryPresentation {
         return "\(hours / 24)d"
     }
 
-    private struct ConditionTimestampFormatting {
+    private struct SummaryTimestampFormatting {
         private let local: DateFormatter
 
         init(timeZone: TimeZone) {
@@ -367,7 +371,7 @@ enum ObjectDetailSummaryPresentation {
     }
 }
 
-/// All open Details surfaces share one minute ticker. Relative condition ages
+/// All open Details surfaces share one minute ticker. Relative Summary ages
 /// are presentation-only and never cause a Kubernetes request.
 @MainActor
 private final class ObjectDetailRelativeTimeRefreshCenter {
@@ -1029,7 +1033,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func synchronizeRelativeTimeRefresh(for detail: ObjectDetail) {
         let needsRefresh = detail.summaryFields.contains {
-            $0.sectionID == "conditions" && $0.transitionTime != nil
+            $0.timestamp != nil
         }
         if needsRefresh, relativeTimeRefreshID == nil {
             relativeTimeRefreshID = ObjectDetailRelativeTimeRefreshCenter.shared.add {

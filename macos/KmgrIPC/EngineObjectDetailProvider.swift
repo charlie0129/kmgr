@@ -624,9 +624,7 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                     displayText: field.displayText,
                     tooltip: field.tooltip,
                     severity: severity(field.severity),
-                    transitionTime: field.transitionTimeUnixMs == 0 ? nil : Date(
-                        timeIntervalSince1970: TimeInterval(field.transitionTimeUnixMs) / 1_000
-                    )
+                    timestamp: summaryTimestamp(field)
                 )
             },
             labels: Dictionary(
@@ -640,6 +638,20 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
             containers: response.containers.compactMap(container),
             podLabelSelector: response.podLabelSelector
         )
+    }
+
+    private static func summaryTimestamp(
+        _ field: Kmgr_V1_ObjectSummaryField
+    ) -> ObjectSummaryTimestamp? {
+        guard field.timestampUnixMs != 0 else { return nil }
+        let date = Date(
+            timeIntervalSince1970: TimeInterval(field.timestampUnixMs) / 1_000
+        )
+        switch field.timestampPresentation {
+        case .elapsedSince: return .elapsedSince(date)
+        case .occurredAt: return .occurredAt(date)
+        case .unspecified, .UNRECOGNIZED: return nil
+        }
     }
 
     private static func container(

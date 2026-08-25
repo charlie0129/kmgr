@@ -173,8 +173,16 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     condition.fieldID = "condition:0"
     condition.label = "Ready"
     condition.displayText = "True"
-    condition.transitionTimeUnixMs = 1_755_427_785_123
-    response.summaryFields = [condition]
+    condition.timestampUnixMs = 1_755_427_785_123
+    condition.timestampPresentation = .elapsedSince
+    var restart = Kmgr_V1_ObjectSummaryField()
+    restart.sectionID = "status"
+    restart.fieldID = "lastRestartReason"
+    restart.label = "Last Restart Reason"
+    restart.displayText = "OOMKilled · Exit code 137"
+    restart.timestampUnixMs = 1_755_428_985_000
+    restart.timestampPresentation = .occurredAt
+    response.summaryFields = [condition, restart]
     await rpc.installObject(response)
 
     let detail = try await EngineObjectDetailProvider(
@@ -185,8 +193,10 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
         detail.podLabelSelector
             == "app=api,debug,!deprecated,track in (canary,stable),zone notin (east,west)"
     )
-    #expect(detail.summaryFields.first?.transitionTime
-        == Date(timeIntervalSince1970: 1_755_427_785.123))
+    #expect(detail.summaryFields.map(\.timestamp) == [
+        .elapsedSince(Date(timeIntervalSince1970: 1_755_427_785.123)),
+        .occurredAt(Date(timeIntervalSince1970: 1_755_428_985)),
+    ])
     let request = await rpc.capturedObject()
     #expect(request?.includeYaml == true)
     #expect(request?.includeSummary == true)

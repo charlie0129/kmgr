@@ -93,8 +93,9 @@ app-wide Port Forwards window.
   visible selection or changing the selected rows.
 - Details provide a structured Summary table where clicking a cell and pressing
   Command-C (or choosing Copy Cell from its context menu) copies the complete
-  value. A Pod Summary reports the reason for its most recent container restart
-  when Kubernetes provides one.
+  value. A Pod Summary reports the reason, exit code, and relative and local
+  absolute finish times for its most recent container restart when Kubernetes
+  provides them.
   Labels and Annotations remain visible as separate sections even when empty;
   each has its own editor, and Return on a selected metadata row opens that kind
   with the key selected. The metadata and ConfigMap/Secret Data editors use the
@@ -473,7 +474,8 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
    In Details, edit one label and one multiline annotation through their
    separate key/value editors, including Return on the selected Summary row,
    review the staged changes, and verify each save refreshes that exact object's
-   Summary.
+   Summary. For a restarted Pod, verify Last Restart Reason includes its exit
+   code and both relative and absolute finish times.
 9. If mutation authorization was given, bulk-delete only approved disposable
    objects in `kmgr-smoke` and verify partial results/UID preconditions.
 10. View both Pod and Node metrics, then compare their behavior with Metrics API

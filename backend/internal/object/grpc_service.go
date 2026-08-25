@@ -569,8 +569,14 @@ func detailResponse(requestID string, identity *kmgrv1.ResourceIdentity, detail 
 			SectionId: field.Section, FieldId: field.ID, Label: field.Label,
 			DisplayText: field.Value, Severity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
 		}
-		if !field.TransitionTime.IsZero() {
-			value.TransitionTimeUnixMs = field.TransitionTime.UnixMilli()
+		if !field.Timestamp.IsZero() {
+			value.TimestampUnixMs = field.Timestamp.UnixMilli()
+			switch field.TimestampPresentation {
+			case SummaryTimestampElapsedSince:
+				value.TimestampPresentation = kmgrv1.SummaryTimestampPresentation_SUMMARY_TIMESTAMP_PRESENTATION_ELAPSED_SINCE
+			case SummaryTimestampOccurredAt:
+				value.TimestampPresentation = kmgrv1.SummaryTimestampPresentation_SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT
+			}
 		}
 		response.SummaryFields = append(response.SummaryFields, value)
 	}

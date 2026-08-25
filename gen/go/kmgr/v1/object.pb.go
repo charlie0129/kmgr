@@ -226,6 +226,55 @@ func (DataEntryKind) EnumDescriptor() ([]byte, []int) {
 	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{3}
 }
 
+type SummaryTimestampPresentation int32
+
+const (
+	SummaryTimestampPresentation_SUMMARY_TIMESTAMP_PRESENTATION_UNSPECIFIED   SummaryTimestampPresentation = 0
+	SummaryTimestampPresentation_SUMMARY_TIMESTAMP_PRESENTATION_ELAPSED_SINCE SummaryTimestampPresentation = 1
+	SummaryTimestampPresentation_SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT   SummaryTimestampPresentation = 2
+)
+
+// Enum value maps for SummaryTimestampPresentation.
+var (
+	SummaryTimestampPresentation_name = map[int32]string{
+		0: "SUMMARY_TIMESTAMP_PRESENTATION_UNSPECIFIED",
+		1: "SUMMARY_TIMESTAMP_PRESENTATION_ELAPSED_SINCE",
+		2: "SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT",
+	}
+	SummaryTimestampPresentation_value = map[string]int32{
+		"SUMMARY_TIMESTAMP_PRESENTATION_UNSPECIFIED":   0,
+		"SUMMARY_TIMESTAMP_PRESENTATION_ELAPSED_SINCE": 1,
+		"SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT":   2,
+	}
+)
+
+func (x SummaryTimestampPresentation) Enum() *SummaryTimestampPresentation {
+	p := new(SummaryTimestampPresentation)
+	*p = x
+	return p
+}
+
+func (x SummaryTimestampPresentation) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SummaryTimestampPresentation) Descriptor() protoreflect.EnumDescriptor {
+	return file_kmgr_v1_object_proto_enumTypes[4].Descriptor()
+}
+
+func (SummaryTimestampPresentation) Type() protoreflect.EnumType {
+	return &file_kmgr_v1_object_proto_enumTypes[4]
+}
+
+func (x SummaryTimestampPresentation) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SummaryTimestampPresentation.Descriptor instead.
+func (SummaryTimestampPresentation) EnumDescriptor() ([]byte, []int) {
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{4}
+}
+
 type GetObjectRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Context        *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
@@ -310,11 +359,13 @@ type ObjectSummaryField struct {
 	DisplayText string                 `protobuf:"bytes,4,opt,name=display_text,json=displayText,proto3" json:"display_text,omitempty"`
 	Tooltip     string                 `protobuf:"bytes,5,opt,name=tooltip,proto3" json:"tooltip,omitempty"`
 	Severity    CellSeverity           `protobuf:"varint,6,opt,name=severity,proto3,enum=kmgr.v1.CellSeverity" json:"severity,omitempty"`
-	// Structured condition transition time. Zero means this field is not a
-	// condition or Kubernetes did not publish a valid timestamp.
-	TransitionTimeUnixMs int64 `protobuf:"varint,7,opt,name=transition_time_unix_ms,json=transitionTimeUnixMs,proto3" json:"transition_time_unix_ms,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Structured timestamp kept separate from display_text so clients can
+	// refresh relative time locally. Zero means Kubernetes did not publish a
+	// valid timestamp for this field.
+	TimestampUnixMs       int64                        `protobuf:"varint,7,opt,name=timestamp_unix_ms,json=timestampUnixMs,proto3" json:"timestamp_unix_ms,omitempty"`
+	TimestampPresentation SummaryTimestampPresentation `protobuf:"varint,8,opt,name=timestamp_presentation,json=timestampPresentation,proto3,enum=kmgr.v1.SummaryTimestampPresentation" json:"timestamp_presentation,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *ObjectSummaryField) Reset() {
@@ -389,11 +440,18 @@ func (x *ObjectSummaryField) GetSeverity() CellSeverity {
 	return CellSeverity_CELL_SEVERITY_UNSPECIFIED
 }
 
-func (x *ObjectSummaryField) GetTransitionTimeUnixMs() int64 {
+func (x *ObjectSummaryField) GetTimestampUnixMs() int64 {
 	if x != nil {
-		return x.TransitionTimeUnixMs
+		return x.TimestampUnixMs
 	}
 	return 0
+}
+
+func (x *ObjectSummaryField) GetTimestampPresentation() SummaryTimestampPresentation {
+	if x != nil {
+		return x.TimestampPresentation
+	}
+	return SummaryTimestampPresentation_SUMMARY_TIMESTAMP_PRESENTATION_UNSPECIFIED
 }
 
 // PodContainerDetail is a bounded, display-safe projection of one declared
@@ -1513,7 +1571,7 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\bidentity\x18\x02 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12!\n" +
 	"\finclude_yaml\x18\x03 \x01(\bR\vincludeYaml\x12'\n" +
 	"\x0finclude_summary\x18\x04 \x01(\bR\x0eincludeSummary\x12'\n" +
-	"\x0finclude_metrics\x18\x05 \x01(\bR\x0eincludeMetrics\"\x8b\x02\n" +
+	"\x0finclude_metrics\x18\x05 \x01(\bR\x0eincludeMetrics\"\xde\x02\n" +
 	"\x12ObjectSummaryField\x12\x1d\n" +
 	"\n" +
 	"section_id\x18\x01 \x01(\tR\tsectionId\x12\x19\n" +
@@ -1521,8 +1579,9 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\x05label\x18\x03 \x01(\tR\x05label\x12!\n" +
 	"\fdisplay_text\x18\x04 \x01(\tR\vdisplayText\x12\x18\n" +
 	"\atooltip\x18\x05 \x01(\tR\atooltip\x121\n" +
-	"\bseverity\x18\x06 \x01(\x0e2\x15.kmgr.v1.CellSeverityR\bseverity\x125\n" +
-	"\x17transition_time_unix_ms\x18\a \x01(\x03R\x14transitionTimeUnixMs\"\xde\x02\n" +
+	"\bseverity\x18\x06 \x01(\x0e2\x15.kmgr.v1.CellSeverityR\bseverity\x12*\n" +
+	"\x11timestamp_unix_ms\x18\a \x01(\x03R\x0ftimestampUnixMs\x12\\\n" +
+	"\x16timestamp_presentation\x18\b \x01(\x0e2%.kmgr.v1.SummaryTimestampPresentationR\x15timestampPresentation\"\xde\x02\n" +
 	"\x12PodContainerDetail\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12-\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x19.kmgr.v1.PodContainerKindR\x04kind\x12\x16\n" +
@@ -1640,7 +1699,11 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\rDataEntryKind\x12\x1f\n" +
 	"\x1bDATA_ENTRY_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DATA_ENTRY_KIND_TEXT\x10\x01\x12\x1a\n" +
-	"\x16DATA_ENTRY_KIND_BINARY\x10\x022\xe4\x03\n" +
+	"\x16DATA_ENTRY_KIND_BINARY\x10\x02*\xb0\x01\n" +
+	"\x1cSummaryTimestampPresentation\x12.\n" +
+	"*SUMMARY_TIMESTAMP_PRESENTATION_UNSPECIFIED\x10\x00\x120\n" +
+	",SUMMARY_TIMESTAMP_PRESENTATION_ELAPSED_SINCE\x10\x01\x12.\n" +
+	"*SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT\x10\x022\xe4\x03\n" +
 	"\rObjectService\x12B\n" +
 	"\tGetObject\x12\x19.kmgr.v1.GetObjectRequest\x1a\x1a.kmgr.v1.GetObjectResponse\x12B\n" +
 	"\vWatchObject\x12\x1b.kmgr.v1.WatchObjectRequest\x1a\x14.kmgr.v1.ObjectEvent0\x01\x12W\n" +
@@ -1661,96 +1724,98 @@ func file_kmgr_v1_object_proto_rawDescGZIP() []byte {
 	return file_kmgr_v1_object_proto_rawDescData
 }
 
-var file_kmgr_v1_object_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_kmgr_v1_object_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
 var file_kmgr_v1_object_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_kmgr_v1_object_proto_goTypes = []any{
 	(PodContainerKind)(0),                 // 0: kmgr.v1.PodContainerKind
 	(ObjectEventType)(0),                  // 1: kmgr.v1.ObjectEventType
 	(RelationshipKind)(0),                 // 2: kmgr.v1.RelationshipKind
 	(DataEntryKind)(0),                    // 3: kmgr.v1.DataEntryKind
-	(*GetObjectRequest)(nil),              // 4: kmgr.v1.GetObjectRequest
-	(*ObjectSummaryField)(nil),            // 5: kmgr.v1.ObjectSummaryField
-	(*PodContainerDetail)(nil),            // 6: kmgr.v1.PodContainerDetail
-	(*GetObjectResponse)(nil),             // 7: kmgr.v1.GetObjectResponse
-	(*WatchObjectRequest)(nil),            // 8: kmgr.v1.WatchObjectRequest
-	(*ObjectEvent)(nil),                   // 9: kmgr.v1.ObjectEvent
-	(*GetRelationshipsRequest)(nil),       // 10: kmgr.v1.GetRelationshipsRequest
-	(*ResourceRelationship)(nil),          // 11: kmgr.v1.ResourceRelationship
-	(*GetRelationshipsResponse)(nil),      // 12: kmgr.v1.GetRelationshipsResponse
-	(*ScanRelationshipsRequest)(nil),      // 13: kmgr.v1.ScanRelationshipsRequest
-	(*CancelRelationshipScanRequest)(nil), // 14: kmgr.v1.CancelRelationshipScanRequest
-	(*RelationshipScanProgress)(nil),      // 15: kmgr.v1.RelationshipScanProgress
-	(*RelationshipScanEvent)(nil),         // 16: kmgr.v1.RelationshipScanEvent
-	(*DataEntry)(nil),                     // 17: kmgr.v1.DataEntry
-	(*GetDataRequest)(nil),                // 18: kmgr.v1.GetDataRequest
-	(*GetDataResponse)(nil),               // 19: kmgr.v1.GetDataResponse
-	(*RequestContext)(nil),                // 20: kmgr.v1.RequestContext
-	(*ResourceIdentity)(nil),              // 21: kmgr.v1.ResourceIdentity
-	(CellSeverity)(0),                     // 22: kmgr.v1.CellSeverity
-	(*ResourceUsageValue)(nil),            // 23: kmgr.v1.ResourceUsageValue
-	(*StringMapEntry)(nil),                // 24: kmgr.v1.StringMapEntry
-	(*StructuredError)(nil),               // 25: kmgr.v1.StructuredError
-	(*StreamCursor)(nil),                  // 26: kmgr.v1.StreamCursor
-	(*ResourceType)(nil),                  // 27: kmgr.v1.ResourceType
-	(*Acknowledgement)(nil),               // 28: kmgr.v1.Acknowledgement
+	(SummaryTimestampPresentation)(0),     // 4: kmgr.v1.SummaryTimestampPresentation
+	(*GetObjectRequest)(nil),              // 5: kmgr.v1.GetObjectRequest
+	(*ObjectSummaryField)(nil),            // 6: kmgr.v1.ObjectSummaryField
+	(*PodContainerDetail)(nil),            // 7: kmgr.v1.PodContainerDetail
+	(*GetObjectResponse)(nil),             // 8: kmgr.v1.GetObjectResponse
+	(*WatchObjectRequest)(nil),            // 9: kmgr.v1.WatchObjectRequest
+	(*ObjectEvent)(nil),                   // 10: kmgr.v1.ObjectEvent
+	(*GetRelationshipsRequest)(nil),       // 11: kmgr.v1.GetRelationshipsRequest
+	(*ResourceRelationship)(nil),          // 12: kmgr.v1.ResourceRelationship
+	(*GetRelationshipsResponse)(nil),      // 13: kmgr.v1.GetRelationshipsResponse
+	(*ScanRelationshipsRequest)(nil),      // 14: kmgr.v1.ScanRelationshipsRequest
+	(*CancelRelationshipScanRequest)(nil), // 15: kmgr.v1.CancelRelationshipScanRequest
+	(*RelationshipScanProgress)(nil),      // 16: kmgr.v1.RelationshipScanProgress
+	(*RelationshipScanEvent)(nil),         // 17: kmgr.v1.RelationshipScanEvent
+	(*DataEntry)(nil),                     // 18: kmgr.v1.DataEntry
+	(*GetDataRequest)(nil),                // 19: kmgr.v1.GetDataRequest
+	(*GetDataResponse)(nil),               // 20: kmgr.v1.GetDataResponse
+	(*RequestContext)(nil),                // 21: kmgr.v1.RequestContext
+	(*ResourceIdentity)(nil),              // 22: kmgr.v1.ResourceIdentity
+	(CellSeverity)(0),                     // 23: kmgr.v1.CellSeverity
+	(*ResourceUsageValue)(nil),            // 24: kmgr.v1.ResourceUsageValue
+	(*StringMapEntry)(nil),                // 25: kmgr.v1.StringMapEntry
+	(*StructuredError)(nil),               // 26: kmgr.v1.StructuredError
+	(*StreamCursor)(nil),                  // 27: kmgr.v1.StreamCursor
+	(*ResourceType)(nil),                  // 28: kmgr.v1.ResourceType
+	(*Acknowledgement)(nil),               // 29: kmgr.v1.Acknowledgement
 }
 var file_kmgr_v1_object_proto_depIdxs = []int32{
-	20, // 0: kmgr.v1.GetObjectRequest.context:type_name -> kmgr.v1.RequestContext
-	21, // 1: kmgr.v1.GetObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	22, // 2: kmgr.v1.ObjectSummaryField.severity:type_name -> kmgr.v1.CellSeverity
-	0,  // 3: kmgr.v1.PodContainerDetail.kind:type_name -> kmgr.v1.PodContainerKind
-	22, // 4: kmgr.v1.PodContainerDetail.status_severity:type_name -> kmgr.v1.CellSeverity
-	23, // 5: kmgr.v1.PodContainerDetail.metrics:type_name -> kmgr.v1.ResourceUsageValue
-	21, // 6: kmgr.v1.GetObjectResponse.identity:type_name -> kmgr.v1.ResourceIdentity
-	5,  // 7: kmgr.v1.GetObjectResponse.summary_fields:type_name -> kmgr.v1.ObjectSummaryField
-	24, // 8: kmgr.v1.GetObjectResponse.labels:type_name -> kmgr.v1.StringMapEntry
-	24, // 9: kmgr.v1.GetObjectResponse.annotations:type_name -> kmgr.v1.StringMapEntry
-	25, // 10: kmgr.v1.GetObjectResponse.error:type_name -> kmgr.v1.StructuredError
-	6,  // 11: kmgr.v1.GetObjectResponse.containers:type_name -> kmgr.v1.PodContainerDetail
-	20, // 12: kmgr.v1.WatchObjectRequest.context:type_name -> kmgr.v1.RequestContext
-	21, // 13: kmgr.v1.WatchObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	26, // 14: kmgr.v1.ObjectEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	1,  // 15: kmgr.v1.ObjectEvent.type:type_name -> kmgr.v1.ObjectEventType
-	7,  // 16: kmgr.v1.ObjectEvent.object:type_name -> kmgr.v1.GetObjectResponse
-	25, // 17: kmgr.v1.ObjectEvent.error:type_name -> kmgr.v1.StructuredError
-	20, // 18: kmgr.v1.GetRelationshipsRequest.context:type_name -> kmgr.v1.RequestContext
-	21, // 19: kmgr.v1.GetRelationshipsRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	2,  // 20: kmgr.v1.ResourceRelationship.kind:type_name -> kmgr.v1.RelationshipKind
-	21, // 21: kmgr.v1.ResourceRelationship.identity:type_name -> kmgr.v1.ResourceIdentity
-	11, // 22: kmgr.v1.GetRelationshipsResponse.relationships:type_name -> kmgr.v1.ResourceRelationship
-	25, // 23: kmgr.v1.GetRelationshipsResponse.error:type_name -> kmgr.v1.StructuredError
-	20, // 24: kmgr.v1.ScanRelationshipsRequest.context:type_name -> kmgr.v1.RequestContext
-	21, // 25: kmgr.v1.ScanRelationshipsRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	20, // 26: kmgr.v1.CancelRelationshipScanRequest.context:type_name -> kmgr.v1.RequestContext
-	27, // 27: kmgr.v1.RelationshipScanProgress.current_resource:type_name -> kmgr.v1.ResourceType
-	26, // 28: kmgr.v1.RelationshipScanEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	11, // 29: kmgr.v1.RelationshipScanEvent.relationships:type_name -> kmgr.v1.ResourceRelationship
-	15, // 30: kmgr.v1.RelationshipScanEvent.progress:type_name -> kmgr.v1.RelationshipScanProgress
-	25, // 31: kmgr.v1.RelationshipScanEvent.warning:type_name -> kmgr.v1.StructuredError
-	25, // 32: kmgr.v1.RelationshipScanEvent.error:type_name -> kmgr.v1.StructuredError
-	3,  // 33: kmgr.v1.DataEntry.kind:type_name -> kmgr.v1.DataEntryKind
-	20, // 34: kmgr.v1.GetDataRequest.context:type_name -> kmgr.v1.RequestContext
-	21, // 35: kmgr.v1.GetDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	21, // 36: kmgr.v1.GetDataResponse.identity:type_name -> kmgr.v1.ResourceIdentity
-	17, // 37: kmgr.v1.GetDataResponse.entries:type_name -> kmgr.v1.DataEntry
-	25, // 38: kmgr.v1.GetDataResponse.error:type_name -> kmgr.v1.StructuredError
-	4,  // 39: kmgr.v1.ObjectService.GetObject:input_type -> kmgr.v1.GetObjectRequest
-	8,  // 40: kmgr.v1.ObjectService.WatchObject:input_type -> kmgr.v1.WatchObjectRequest
-	10, // 41: kmgr.v1.ObjectService.GetRelationships:input_type -> kmgr.v1.GetRelationshipsRequest
-	13, // 42: kmgr.v1.ObjectService.ScanRelationships:input_type -> kmgr.v1.ScanRelationshipsRequest
-	14, // 43: kmgr.v1.ObjectService.CancelRelationshipScan:input_type -> kmgr.v1.CancelRelationshipScanRequest
-	18, // 44: kmgr.v1.ObjectService.GetData:input_type -> kmgr.v1.GetDataRequest
-	7,  // 45: kmgr.v1.ObjectService.GetObject:output_type -> kmgr.v1.GetObjectResponse
-	9,  // 46: kmgr.v1.ObjectService.WatchObject:output_type -> kmgr.v1.ObjectEvent
-	12, // 47: kmgr.v1.ObjectService.GetRelationships:output_type -> kmgr.v1.GetRelationshipsResponse
-	16, // 48: kmgr.v1.ObjectService.ScanRelationships:output_type -> kmgr.v1.RelationshipScanEvent
-	28, // 49: kmgr.v1.ObjectService.CancelRelationshipScan:output_type -> kmgr.v1.Acknowledgement
-	19, // 50: kmgr.v1.ObjectService.GetData:output_type -> kmgr.v1.GetDataResponse
-	45, // [45:51] is the sub-list for method output_type
-	39, // [39:45] is the sub-list for method input_type
-	39, // [39:39] is the sub-list for extension type_name
-	39, // [39:39] is the sub-list for extension extendee
-	0,  // [0:39] is the sub-list for field type_name
+	21, // 0: kmgr.v1.GetObjectRequest.context:type_name -> kmgr.v1.RequestContext
+	22, // 1: kmgr.v1.GetObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	23, // 2: kmgr.v1.ObjectSummaryField.severity:type_name -> kmgr.v1.CellSeverity
+	4,  // 3: kmgr.v1.ObjectSummaryField.timestamp_presentation:type_name -> kmgr.v1.SummaryTimestampPresentation
+	0,  // 4: kmgr.v1.PodContainerDetail.kind:type_name -> kmgr.v1.PodContainerKind
+	23, // 5: kmgr.v1.PodContainerDetail.status_severity:type_name -> kmgr.v1.CellSeverity
+	24, // 6: kmgr.v1.PodContainerDetail.metrics:type_name -> kmgr.v1.ResourceUsageValue
+	22, // 7: kmgr.v1.GetObjectResponse.identity:type_name -> kmgr.v1.ResourceIdentity
+	6,  // 8: kmgr.v1.GetObjectResponse.summary_fields:type_name -> kmgr.v1.ObjectSummaryField
+	25, // 9: kmgr.v1.GetObjectResponse.labels:type_name -> kmgr.v1.StringMapEntry
+	25, // 10: kmgr.v1.GetObjectResponse.annotations:type_name -> kmgr.v1.StringMapEntry
+	26, // 11: kmgr.v1.GetObjectResponse.error:type_name -> kmgr.v1.StructuredError
+	7,  // 12: kmgr.v1.GetObjectResponse.containers:type_name -> kmgr.v1.PodContainerDetail
+	21, // 13: kmgr.v1.WatchObjectRequest.context:type_name -> kmgr.v1.RequestContext
+	22, // 14: kmgr.v1.WatchObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	27, // 15: kmgr.v1.ObjectEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	1,  // 16: kmgr.v1.ObjectEvent.type:type_name -> kmgr.v1.ObjectEventType
+	8,  // 17: kmgr.v1.ObjectEvent.object:type_name -> kmgr.v1.GetObjectResponse
+	26, // 18: kmgr.v1.ObjectEvent.error:type_name -> kmgr.v1.StructuredError
+	21, // 19: kmgr.v1.GetRelationshipsRequest.context:type_name -> kmgr.v1.RequestContext
+	22, // 20: kmgr.v1.GetRelationshipsRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	2,  // 21: kmgr.v1.ResourceRelationship.kind:type_name -> kmgr.v1.RelationshipKind
+	22, // 22: kmgr.v1.ResourceRelationship.identity:type_name -> kmgr.v1.ResourceIdentity
+	12, // 23: kmgr.v1.GetRelationshipsResponse.relationships:type_name -> kmgr.v1.ResourceRelationship
+	26, // 24: kmgr.v1.GetRelationshipsResponse.error:type_name -> kmgr.v1.StructuredError
+	21, // 25: kmgr.v1.ScanRelationshipsRequest.context:type_name -> kmgr.v1.RequestContext
+	22, // 26: kmgr.v1.ScanRelationshipsRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	21, // 27: kmgr.v1.CancelRelationshipScanRequest.context:type_name -> kmgr.v1.RequestContext
+	28, // 28: kmgr.v1.RelationshipScanProgress.current_resource:type_name -> kmgr.v1.ResourceType
+	27, // 29: kmgr.v1.RelationshipScanEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	12, // 30: kmgr.v1.RelationshipScanEvent.relationships:type_name -> kmgr.v1.ResourceRelationship
+	16, // 31: kmgr.v1.RelationshipScanEvent.progress:type_name -> kmgr.v1.RelationshipScanProgress
+	26, // 32: kmgr.v1.RelationshipScanEvent.warning:type_name -> kmgr.v1.StructuredError
+	26, // 33: kmgr.v1.RelationshipScanEvent.error:type_name -> kmgr.v1.StructuredError
+	3,  // 34: kmgr.v1.DataEntry.kind:type_name -> kmgr.v1.DataEntryKind
+	21, // 35: kmgr.v1.GetDataRequest.context:type_name -> kmgr.v1.RequestContext
+	22, // 36: kmgr.v1.GetDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	22, // 37: kmgr.v1.GetDataResponse.identity:type_name -> kmgr.v1.ResourceIdentity
+	18, // 38: kmgr.v1.GetDataResponse.entries:type_name -> kmgr.v1.DataEntry
+	26, // 39: kmgr.v1.GetDataResponse.error:type_name -> kmgr.v1.StructuredError
+	5,  // 40: kmgr.v1.ObjectService.GetObject:input_type -> kmgr.v1.GetObjectRequest
+	9,  // 41: kmgr.v1.ObjectService.WatchObject:input_type -> kmgr.v1.WatchObjectRequest
+	11, // 42: kmgr.v1.ObjectService.GetRelationships:input_type -> kmgr.v1.GetRelationshipsRequest
+	14, // 43: kmgr.v1.ObjectService.ScanRelationships:input_type -> kmgr.v1.ScanRelationshipsRequest
+	15, // 44: kmgr.v1.ObjectService.CancelRelationshipScan:input_type -> kmgr.v1.CancelRelationshipScanRequest
+	19, // 45: kmgr.v1.ObjectService.GetData:input_type -> kmgr.v1.GetDataRequest
+	8,  // 46: kmgr.v1.ObjectService.GetObject:output_type -> kmgr.v1.GetObjectResponse
+	10, // 47: kmgr.v1.ObjectService.WatchObject:output_type -> kmgr.v1.ObjectEvent
+	13, // 48: kmgr.v1.ObjectService.GetRelationships:output_type -> kmgr.v1.GetRelationshipsResponse
+	17, // 49: kmgr.v1.ObjectService.ScanRelationships:output_type -> kmgr.v1.RelationshipScanEvent
+	29, // 50: kmgr.v1.ObjectService.CancelRelationshipScan:output_type -> kmgr.v1.Acknowledgement
+	20, // 51: kmgr.v1.ObjectService.GetData:output_type -> kmgr.v1.GetDataResponse
+	46, // [46:52] is the sub-list for method output_type
+	40, // [40:46] is the sub-list for method input_type
+	40, // [40:40] is the sub-list for extension type_name
+	40, // [40:40] is the sub-list for extension extendee
+	0,  // [0:40] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_object_proto_init() }
@@ -1764,7 +1829,7 @@ func file_kmgr_v1_object_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_object_proto_rawDesc), len(file_kmgr_v1_object_proto_rawDesc)),
-			NumEnums:      4,
+			NumEnums:      5,
 			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,

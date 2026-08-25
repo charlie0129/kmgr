@@ -189,6 +189,44 @@ public nonisolated enum Kmgr_V1_DataEntryKind: SwiftProtobuf.Enum, Swift.CaseIte
 
 }
 
+public nonisolated enum Kmgr_V1_SummaryTimestampPresentation: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case elapsedSince // = 1
+  case occurredAt // = 2
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .elapsedSince
+    case 2: self = .occurredAt
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .elapsedSince: return 1
+    case .occurredAt: return 2
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Kmgr_V1_SummaryTimestampPresentation] = [
+    .unspecified,
+    .elapsedSince,
+    .occurredAt,
+  ]
+
+}
+
 public nonisolated struct Kmgr_V1_GetObjectRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -243,9 +281,12 @@ public nonisolated struct Kmgr_V1_ObjectSummaryField: Sendable {
 
   public var severity: Kmgr_V1_CellSeverity = .unspecified
 
-  /// Structured condition transition time. Zero means this field is not a
-  /// condition or Kubernetes did not publish a valid timestamp.
-  public var transitionTimeUnixMs: Int64 = 0
+  /// Structured timestamp kept separate from display_text so clients can
+  /// refresh relative time locally. Zero means Kubernetes did not publish a
+  /// valid timestamp for this field.
+  public var timestampUnixMs: Int64 = 0
+
+  public var timestampPresentation: Kmgr_V1_SummaryTimestampPresentation = .unspecified
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -774,6 +815,10 @@ nonisolated extension Kmgr_V1_DataEntryKind: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0DATA_ENTRY_KIND_UNSPECIFIED\0\u{1}DATA_ENTRY_KIND_TEXT\0\u{1}DATA_ENTRY_KIND_BINARY\0")
 }
 
+nonisolated extension Kmgr_V1_SummaryTimestampPresentation: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SUMMARY_TIMESTAMP_PRESENTATION_UNSPECIFIED\0\u{1}SUMMARY_TIMESTAMP_PRESENTATION_ELAPSED_SINCE\0\u{1}SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT\0")
+}
+
 nonisolated extension Kmgr_V1_GetObjectRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".GetObjectRequest"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{1}identity\0\u{3}include_yaml\0\u{3}include_summary\0\u{3}include_metrics\0")
@@ -830,7 +875,7 @@ nonisolated extension Kmgr_V1_GetObjectRequest: SwiftProtobuf.Message, SwiftProt
 
 nonisolated extension Kmgr_V1_ObjectSummaryField: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ObjectSummaryField"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}section_id\0\u{3}field_id\0\u{1}label\0\u{3}display_text\0\u{1}tooltip\0\u{1}severity\0\u{3}transition_time_unix_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}section_id\0\u{3}field_id\0\u{1}label\0\u{3}display_text\0\u{1}tooltip\0\u{1}severity\0\u{3}timestamp_unix_ms\0\u{3}timestamp_presentation\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -844,7 +889,8 @@ nonisolated extension Kmgr_V1_ObjectSummaryField: SwiftProtobuf.Message, SwiftPr
       case 4: try { try decoder.decodeSingularStringField(value: &self.displayText) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.tooltip) }()
       case 6: try { try decoder.decodeSingularEnumField(value: &self.severity) }()
-      case 7: try { try decoder.decodeSingularInt64Field(value: &self.transitionTimeUnixMs) }()
+      case 7: try { try decoder.decodeSingularInt64Field(value: &self.timestampUnixMs) }()
+      case 8: try { try decoder.decodeSingularEnumField(value: &self.timestampPresentation) }()
       default: break
       }
     }
@@ -869,8 +915,11 @@ nonisolated extension Kmgr_V1_ObjectSummaryField: SwiftProtobuf.Message, SwiftPr
     if self.severity != .unspecified {
       try visitor.visitSingularEnumField(value: self.severity, fieldNumber: 6)
     }
-    if self.transitionTimeUnixMs != 0 {
-      try visitor.visitSingularInt64Field(value: self.transitionTimeUnixMs, fieldNumber: 7)
+    if self.timestampUnixMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.timestampUnixMs, fieldNumber: 7)
+    }
+    if self.timestampPresentation != .unspecified {
+      try visitor.visitSingularEnumField(value: self.timestampPresentation, fieldNumber: 8)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -882,7 +931,8 @@ nonisolated extension Kmgr_V1_ObjectSummaryField: SwiftProtobuf.Message, SwiftPr
     if lhs.displayText != rhs.displayText {return false}
     if lhs.tooltip != rhs.tooltip {return false}
     if lhs.severity != rhs.severity {return false}
-    if lhs.transitionTimeUnixMs != rhs.transitionTimeUnixMs {return false}
+    if lhs.timestampUnixMs != rhs.timestampUnixMs {return false}
+    if lhs.timestampPresentation != rhs.timestampPresentation {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

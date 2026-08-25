@@ -1070,7 +1070,7 @@ struct ObjectDetailYAMLPresentationTests {
                     fieldID: "condition:0",
                     label: "Progressing",
                     displayText: "True · NewReplicaSetAvailable",
-                    transitionTime: transitionTime
+                    timestamp: .elapsedSince(transitionTime)
                 ),
             ],
             labels: ["tier": "frontend", "app": "api"],
@@ -1228,10 +1228,10 @@ struct ObjectDetailYAMLPresentationTests {
                     fieldID: "condition:0",
                     label: "Ready",
                     displayText: "True · message since startup",
-                    transitionTime: transitionTime
+                    timestamp: .elapsedSince(transitionTime)
                 )]
             ),
-            conditionTimeZone: timeZone,
+            timeZone: timeZone,
             now: now
         )
         let condition = try #require(
@@ -1246,6 +1246,44 @@ struct ObjectDetailYAMLPresentationTests {
             since: transitionTime,
             now: transitionTime.addingTimeInterval(60)
         ) == "1m")
+    }
+
+    @Test("Summary restart shows exit code with relative and local time")
+    func summaryRestartTime() throws {
+        let identity = ResourceIdentity(
+            clusterSessionID: "session",
+            group: "",
+            version: "v1",
+            resource: "pods",
+            namespace: "dev",
+            name: "api",
+            uid: ResourceUID("uid")
+        )
+        let timeZone = try #require(TimeZone(secondsFromGMT: 8 * 60 * 60))
+        let finishedAt = Date(timeIntervalSince1970: 1_755_427_785.123)
+        let sections = ObjectDetailSummaryPresentation.sections(
+            for: ObjectDetail(
+                identity: identity,
+                resourceVersion: "rv-1",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "status",
+                    fieldID: "lastRestartReason",
+                    label: "Last Restart Reason",
+                    displayText: "OOMKilled · Exit code 137",
+                    timestamp: .occurredAt(finishedAt)
+                )]
+            ),
+            timeZone: timeZone,
+            now: finishedAt.addingTimeInterval(86_460)
+        )
+        let restart = try #require(
+            sections.first { $0.id == "status" }?.rows.first
+        )
+
+        #expect(restart.displayText
+            == "OOMKilled · Exit code 137 · 1d ago (at 2025-08-17 18:49:45 +08:00)")
+        #expect(restart.copyLabel == "Last Restart Reason")
+        #expect(restart.copyValue == restart.displayText)
     }
 
     @Test("Summary sections follow inspection priority with Conditions last")

@@ -339,12 +339,20 @@ type Detail struct {
 }
 
 type SummaryField struct {
-	Section        string
-	ID             string
-	Label          string
-	Value          string
-	TransitionTime time.Time
+	Section               string
+	ID                    string
+	Label                 string
+	Value                 string
+	Timestamp             time.Time
+	TimestampPresentation SummaryTimestampPresentation
 }
+
+type SummaryTimestampPresentation int
+
+const (
+	SummaryTimestampElapsedSince SummaryTimestampPresentation = iota + 1
+	SummaryTimestampOccurredAt
+)
 
 func (r *Reader) Detail(ctx context.Context, identity Identity, includeYAML, includeSummary bool) (Detail, error) {
 	value, err := r.Get(ctx, identity)
@@ -706,7 +714,8 @@ func conditionSummary(object map[string]any) []SummaryField {
 		}
 		result = append(result, SummaryField{
 			Section: "conditions", ID: fmt.Sprintf("condition:%d", index), Label: label,
-			Value: boundedSummaryText(strings.Join(parts, " · ")), TransitionTime: transitionTime,
+			Value: boundedSummaryText(strings.Join(parts, " · ")), Timestamp: transitionTime,
+			TimestampPresentation: SummaryTimestampElapsedSince,
 		})
 	}
 	if omitted := originalCount - len(conditions); omitted > 0 {
@@ -771,11 +780,14 @@ func podOverviewSummary(object map[string]any) []SummaryField {
 
 func podRestartSummary(object map[string]any) []SummaryField {
 	status, _ := object["status"].(map[string]any)
-	var (
-		fallbackReason string
-		latestReason   string
-		latestFinished time.Time
-	)
+	type termination struct {
+		reason      string
+		exitCode    int64
+		hasExitCode bool
+		finished    time.Time
+	}
+	var fallback, latest termination
+	hasFallback := false
 	for _, field := range []string{
 		"containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses",
 	} {
@@ -789,26 +801,40 @@ func podRestartSummary(object map[string]any) []SummaryField {
 			if reason == "" {
 				continue
 			}
-			if fallbackReason == "" {
-				fallbackReason = reason
-			}
 			finishedAt, _ := terminated["finishedAt"].(string)
 			finished, err := time.Parse(time.RFC3339Nano, finishedAt)
-			if err == nil && (latestFinished.IsZero() || finished.After(latestFinished)) {
-				latestFinished = finished
-				latestReason = reason
+			if err != nil {
+				finished = time.Time{}
+			}
+			exitCode, hasExitCode, _ := unstructured.NestedInt64(terminated, "exitCode")
+			candidate := termination{
+				reason: reason, exitCode: exitCode, hasExitCode: hasExitCode,
+				finished: finished,
+			}
+			if !hasFallback {
+				fallback = candidate
+				hasFallback = true
+			}
+			if !finished.IsZero() && (latest.finished.IsZero() || finished.After(latest.finished)) {
+				latest = candidate
 			}
 		}
 	}
-	if latestReason == "" {
-		latestReason = fallbackReason
+	selected := latest
+	if selected.reason == "" {
+		selected = fallback
 	}
-	if latestReason == "" {
+	if selected.reason == "" {
 		return nil
+	}
+	parts := []string{selected.reason}
+	if selected.hasExitCode {
+		parts = append(parts, fmt.Sprintf("Exit code %d", selected.exitCode))
 	}
 	return []SummaryField{{
 		Section: "status", ID: "lastRestartReason", Label: "Last Restart Reason",
-		Value: latestReason,
+		Value:     boundedSummaryText(strings.Join(parts, " · ")),
+		Timestamp: selected.finished, TimestampPresentation: SummaryTimestampOccurredAt,
 	}}
 }
 
