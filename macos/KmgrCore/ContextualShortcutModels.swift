@@ -38,6 +38,7 @@ public struct ContextualShortcutSnapshot: Hashable, Sendable {
 /// prevents it from growing a second, subtly different command validator.
 public struct ResourceListShortcutAvailability: Hashable, Sendable {
     public var canEnterSubresource: Bool
+    public var canShowNode: Bool
     public var canOpenDetails: Bool
     public var canOpenYAML: Bool
     public var canOpenEvents: Bool
@@ -49,6 +50,7 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
 
     public init(
         canEnterSubresource: Bool = false,
+        canShowNode: Bool = false,
         canOpenDetails: Bool = false,
         canOpenYAML: Bool = false,
         canOpenEvents: Bool = false,
@@ -59,6 +61,7 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
         canDelete: Bool = false
     ) {
         self.canEnterSubresource = canEnterSubresource
+        self.canShowNode = canShowNode
         self.canOpenDetails = canOpenDetails
         self.canOpenYAML = canOpenYAML
         self.canOpenEvents = canOpenEvents
@@ -101,6 +104,9 @@ public enum ContextualShortcutCatalog {
         ]
         if availability.canEnterSubresource {
             items.append(item("resource.enter", "Return", "Enter selected subresource"))
+        }
+        if availability.canShowNode {
+            items.append(item("resource.node", "O", "Show selected Pod's Node"))
         }
         if availability.canOpenDetails {
             items.append(item("resource.details", "D", "Describe selected object"))

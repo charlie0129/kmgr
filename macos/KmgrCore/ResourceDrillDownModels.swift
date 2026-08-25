@@ -53,6 +53,36 @@ public enum ResourceQueryExpression {
     }
 }
 
+/// Resolves the Node assigned to one UID-pinned Pod and expresses the target
+/// as an exact, server-side-filtered Node list. The Pod detail read remains the
+/// authority even when the configured Node column is not present in the table.
+public enum PodNodeNavigationPlanner {
+    public static func hasPotentialTarget(_ identity: ResourceIdentity) -> Bool {
+        identity.group.isEmpty && identity.version == "v1"
+            && identity.resource == "pods"
+    }
+
+    public static func plan(for detail: ObjectDetail) -> ResourceDrillDownQuery? {
+        guard hasPotentialTarget(detail.identity),
+            let nodeName = detail.summaryFields.first(where: {
+                $0.sectionID == "network" && $0.fieldID == "node"
+            })?.displayText.trimmingCharacters(in: .whitespacesAndNewlines),
+            !nodeName.isEmpty
+        else { return nil }
+
+        return ResourceDrillDownQuery(
+            group: "",
+            version: "v1",
+            resource: "nodes",
+            namespaceScope: NamespaceSelection(),
+            filterExpression: ResourceQueryExpression.nativeFieldSelector(
+                path: "metadata.name",
+                equals: nodeName
+            )
+        )
+    }
+}
+
 /// Maps a freshly fetched, UID-authoritative object to the useful child view
 /// entered by Return. Relationship selectors are written directly into the
 /// editable query so the field remains the only source of truth.

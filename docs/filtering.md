@@ -88,11 +88,13 @@ dropped or replaced with a broader query.
 
 ## Relationship drill-downs
 
-Opening a workload's Pods, a node's Pods, or an object's Events writes its
-complete native selector into the search field, for example:
+Opening a workload's Pods, a node's Pods, a Pod's assigned Node with `O`, or an
+object's Events writes its complete native selector into the search field, for
+example:
 
 ```text
 labelSelector:"app=api,track in (canary,stable)"
+fieldSelector:"metadata.name=worker-a"
 ```
 
 Editing or replacing that text edits the one query and therefore immediately

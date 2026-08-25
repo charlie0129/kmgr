@@ -118,6 +118,37 @@ import Testing
     ) == #"fieldSelector:"metadata.name=a\\b\,c\=d""#)
 }
 
+@Test func podNodeNavigationUsesExactClusterScopedNodeSelector() {
+    let pod = drillDownIdentity(resource: "pods")
+    let detail = ObjectDetail(
+        identity: pod,
+        resourceVersion: "rv-1",
+        summaryFields: [ObjectSummaryField(
+            sectionID: "network", fieldID: "node",
+            label: "Node", displayText: " worker-a "
+        )]
+    )
+
+    #expect(PodNodeNavigationPlanner.hasPotentialTarget(pod))
+    #expect(PodNodeNavigationPlanner.plan(for: detail) == ResourceDrillDownQuery(
+        group: "", version: "v1", resource: "nodes",
+        namespaceScope: NamespaceSelection(),
+        filterExpression: "fieldSelector:\"metadata.name=worker-a\""
+    ))
+}
+
+@Test func unscheduledPodHasNoNodeNavigationTarget() {
+    let pod = drillDownIdentity(resource: "pods")
+    #expect(PodNodeNavigationPlanner.plan(for: ObjectDetail(
+        identity: pod,
+        resourceVersion: "rv-1",
+        summaryFields: [ObjectSummaryField(
+            sectionID: "network", fieldID: "node",
+            label: "Node", displayText: "  "
+        )]
+    )) == nil)
+}
+
 @Test func unsupportedAndEmptyResourcesHaveNoDrillDown() {
     let pvc = drillDownIdentity(resource: "persistentvolumeclaims")
     #expect(!ResourceDrillDownPlanner.hasPotentialTarget(pvc))

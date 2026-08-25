@@ -1962,6 +1962,64 @@ struct ClusterWorkspaceToolbarTests {
         #expect(!renderedTableText(summary).contains("Events"))
     }
 
+    @Test("O shows the selected Pod's assigned Node")
+    func showAssignedNodeShortcut() async throws {
+        let pod = toolbarPodIdentity()
+        let provider = PodNodeDrillDownWorkspaceResourceProvider(pod: pod)
+        let controller = makeWorkspace(
+            provider: provider,
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: pod,
+                resourceVersion: "rv-node",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "network", fieldID: "node",
+                    label: "Node", displayText: "worker-a"
+                )]
+            )),
+            restoration: ClusterWindowRestorationRecord(
+                id: "pod-node-shortcut",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "", version: "v1", resource: "pods"),
+                    namespaceScope: .namespace("default")
+                )
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "workspace-status-line" })
+
+        try await waitUntil { provider.streamRequests.count == 1 && table.numberOfRows == 1 }
+        try await selectResourceRow(0, in: table)
+        #expect(window.makeFirstResponder(table))
+        try await waitUntil {
+            controller.contextualShortcutSnapshot?.items.map(\.keys).contains("O") == true
+        }
+
+        table.keyDown(with: try workspaceLetterKey("o"))
+
+        try await waitUntil {
+            provider.streamRequests.last?.resource.resource == "nodes"
+                && table.numberOfRows == 1
+                && resourceRowIsMaterialized(0, in: table)
+                && table.selectedRowIndexes == IndexSet(integer: 0)
+                && status.stringValue.contains("1 selected")
+        }
+        let request = try #require(provider.streamRequests.last)
+        #expect(request.resource.group.isEmpty)
+        #expect(request.resource.version == "v1")
+        #expect(request.resource.resource == "nodes")
+        #expect(request.allNamespaces)
+        #expect(request.namespaces.isEmpty)
+        #expect(request.filterExpression == "fieldSelector:\"metadata.name=worker-a\"")
+        #expect(window.firstResponder === table)
+    }
+
     @Test("R opens the single detailed rollout restart confirmation")
     func rolloutRestartShortcut() async throws {
         let deployment = ResourceIdentity(
@@ -4248,6 +4306,92 @@ private struct NamespaceDrillDownWorkspaceResourceProvider: RangeBackedTestWorks
 
     func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
     func closeSession(sessionID: String) async {}
+}
+
+private final class PodNodeDrillDownWorkspaceResourceProvider:
+    RangeBackedTestWorkspaceProviding, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let pod: ResourceIdentity
+    private var storedStreamRequests: [ResourceViewRequest] = []
+
+    init(pod: ResourceIdentity) {
+        self.pod = pod
+    }
+
+    var streamRequests: [ResourceViewRequest] {
+        lock.withLock { storedStreamRequests }
+    }
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult
+    {
+        .init(resources: [
+            DiscoveredResource(
+                group: "", version: "v1", resource: "pods", kind: "Pod",
+                namespaced: true, verbs: ["get", "list", "watch"]
+            ),
+            DiscoveredResource(
+                group: "", version: "v1", resource: "nodes", kind: "Node",
+                namespaced: false, verbs: ["list", "watch"]
+            ),
+        ])
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { ["default"] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error>
+    {
+        lock.withLock { storedStreamRequests.append(request) }
+        let rows: [ResourceRow]
+        switch request.resource.resource {
+        case "pods":
+            var rebound = pod
+            rebound.clusterSessionID = request.sessionID
+            rows = [row(identity: rebound)]
+        case "nodes" where request.filterExpression
+            == "fieldSelector:\"metadata.name=worker-a\"":
+            rows = [row(identity: ResourceIdentity(
+                clusterSessionID: request.sessionID,
+                group: "", version: "v1", resource: "nodes",
+                namespace: "", name: "worker-a", uid: "node-worker-a"
+            ))]
+        default:
+            rows = []
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: rows
+            ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                status: ResourceViewStatus(
+                    freshness: .watching, rowsVisible: UInt64(rows.count)
+                )
+            ))
+            if request.stageUntilReconciled {
+                continuation.yield(testReconciliation(
+                    request: request,
+                    sequence: 3
+                ))
+            }
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+
+    private func row(identity: ResourceIdentity) -> ResourceRow {
+        ResourceRow(identity: identity, cells: [Cell(
+            columnID: "name",
+            displayText: identity.name,
+            typedValue: .string(identity.name)
+        )])
+    }
 }
 
 private final class RelationshipDrillDownWorkspaceResourceProvider:

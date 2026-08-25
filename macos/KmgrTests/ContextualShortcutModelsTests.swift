@@ -9,6 +9,7 @@ struct ContextualShortcutModelsTests {
             title: "Pods",
             availability: ResourceListShortcutAvailability(
                 canEnterSubresource: true,
+                canShowNode: true,
                 canOpenDetails: true,
                 canOpenYAML: true,
                 canOpenEvents: true,
@@ -22,6 +23,7 @@ struct ContextualShortcutModelsTests {
 
         #expect(snapshot.title == "Pods")
         #expect(snapshot.items.map(\.keys).contains("Return"))
+        #expect(snapshot.items.map(\.keys).contains("O"))
         #expect(snapshot.items.map(\.keys).contains("D"))
         #expect(!snapshot.items.map(\.keys).contains("\u{2318}Return"))
         #expect(snapshot.items.map(\.keys).contains("Y"))
@@ -44,6 +46,7 @@ struct ContextualShortcutModelsTests {
             )
         )
         #expect(!incompatible.items.map(\.keys).contains("L"))
+        #expect(!incompatible.items.map(\.keys).contains("O"))
         #expect(!incompatible.items.map(\.keys).contains("\u{21E7}L"))
         #expect(!incompatible.items.map(\.keys).contains("S"))
         #expect(!incompatible.items.map(\.keys).contains("P"))

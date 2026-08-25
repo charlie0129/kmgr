@@ -859,6 +859,7 @@ public struct KeyboardShortcutReference: Hashable, Sendable {
         Self(keys: "⌘-click", action: "Toggle one selected object"),
         Self(keys: "⌘A", action: "Select all visible rows"),
         Self(keys: "Return", action: "Enter the selected object's subresource"),
+        Self(keys: "O", action: "Show the selected Pod's Node"),
         Self(keys: "D", action: "Describe the selected object"),
         Self(keys: "⌘[ / ⌘]", action: "Back / Forward"),
         Self(keys: "Escape", action: "Close transient UI, leave edit mode, clear filter, or return focus"),

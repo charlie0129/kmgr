@@ -873,6 +873,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.extendResourceSelectionDown(sender)
     }
     @objc func enterResource(_ sender: Any?) { workspaceController.enterResource(sender) }
+    @objc func showPodNode(_ sender: Any?) { workspaceController.showPodNode(sender) }
     @objc func openResourceDetails(_ sender: Any?) { workspaceController.openResourceDetails(sender) }
     @objc func openResourceYAML(_ sender: Any?) { workspaceController.openResourceYAML(sender) }
     @objc func openResourceYAMLSnapshot(_ sender: Any?) {
@@ -917,6 +918,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(extendResourceSelectionUp(_:)): command = .extendUp
         case #selector(extendResourceSelectionDown(_:)): command = .extendDown
         case #selector(enterResource(_:)): command = .enter
+        case #selector(showPodNode(_:)): command = .showNode
         case #selector(openResourceDetails(_:)): command = .open
         case #selector(openResourceYAML(_:)): command = .openYAML
         case #selector(openResourceYAMLSnapshot(_:)): command = .openYAMLSnapshot
@@ -1147,6 +1149,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         contentController.onEnterObject = { [weak self] identity in
             self?.enterObject(identity)
+        }
+        contentController.onShowPodNode = { [weak self] identity in
+            self?.showNode(forPod: identity)
         }
         contentController.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
@@ -1883,6 +1888,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func extendResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.extendUp) }
     @objc func extendResourceSelectionDown(_ sender: Any?) { contentController.performCommand(.extendDown) }
     @objc func enterResource(_ sender: Any?) { contentController.performCommand(.enter) }
+    @objc func showPodNode(_ sender: Any?) { contentController.performCommand(.showNode) }
     @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
     @objc func openResourceYAML(_ sender: Any?) { contentController.performCommand(.openYAML) }
     @objc func openResourceYAMLSnapshot(_ sender: Any?) {
@@ -2171,6 +2177,77 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
     }
 
+    private func showNode(forPod identity: ResourceIdentity) {
+        guard PodNodeNavigationPlanner.hasPotentialTarget(identity),
+            resources.contains(where: {
+                $0.group.isEmpty && $0.version == "v1"
+                    && $0.resource == "nodes" && $0.verbs.contains("list")
+            })
+        else {
+            publishWorkspaceOperation(WorkspaceStatus(
+                "The Node list is not available in this cluster's discovered resources.",
+                severity: .warning
+            ))
+            return
+        }
+        guard let returnState = contentController.captureNavigationState(),
+            let sourceSelectionTicket = contentController
+                .captureSelectionOperationTicket(for: identity)
+        else { return }
+
+        let revision = beginObjectOpenTask()
+        publishWorkspaceOperation(WorkspaceStatus(
+            "Finding the Node for \(identity.name)…",
+            busy: true
+        ))
+        objectOpenTask = Task { [weak self, objectDetailProvider] in
+            guard let self else { return }
+            defer {
+                if objectOpenRevision == revision { objectOpenTask = nil }
+            }
+            do {
+                let detail = try await objectDetailProvider.getObject(identity: identity)
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
+                publishWorkspaceOperation(nil)
+                guard detail.identity == identity,
+                    drillDownSourceIsCurrent(
+                        returnState: returnState,
+                        selectionTicket: sourceSelectionTicket
+                    )
+                else { return }
+                guard let query = PodNodeNavigationPlanner.plan(for: detail) else {
+                    publishWorkspaceOperation(WorkspaceStatus(
+                        "Pod \(identity.name) is not assigned to a Node.",
+                        severity: .warning
+                    ))
+                    return
+                }
+                guard openDrillDownResource(
+                    query,
+                    selectOnlyResult: true
+                ) else {
+                    publishWorkspaceOperation(WorkspaceStatus(
+                        "The Node list is no longer available in discovered resources.",
+                        severity: .warning
+                    ))
+                    return
+                }
+            } catch is CancellationError {
+                if objectOpenRevision == revision {
+                    publishWorkspaceOperation(nil)
+                }
+            } catch {
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
+                let presentation = UserFacingErrorPresentation(error)
+                publishWorkspaceOperation(WorkspaceStatus(
+                    presentation.inlineText,
+                    severity: .error,
+                    toolTip: presentation.detailedText
+                ))
+            }
+        }
+    }
+
     private func drillDownSourceIsCurrent(
         returnState: ResourceNavigationState,
         selectionTicket: ResourceSelectionOperationTicket
@@ -2201,23 +2278,29 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         return try await provider.getObject(identity: identity)
     }
 
-    private func openDrillDownResource(_ query: ResourceDrillDownQuery) {
+    @discardableResult
+    private func openDrillDownResource(
+        _ query: ResourceDrillDownQuery,
+        selectOnlyResult: Bool = false
+    ) -> Bool {
         publishWorkspaceOperation(nil)
         guard let target = resources.first(where: {
             $0.group == query.group && $0.version == query.version
                 && $0.resource == query.resource && $0.verbs.contains("list")
-        }) else { return }
+        }) else { return false }
         showResourceList(resume: false)
         applyNamespaceScopeSelection(query.namespaceScope)
         contentController.open(
             resource: target,
             scope: query.namespaceScope,
             initialFilter: query.filterExpression,
+            selectOnlyResult: selectOnlyResult,
             reason: .resourceDrillDown
         )
         sidebarController.selectResource(matchingCurrent: target.id)
         checkpointRestoration()
         view.window?.makeFirstResponder(contentController.tableResponder)
+        return true
     }
 
     private func openEvents(for identity: ResourceIdentity) {
@@ -3566,6 +3649,10 @@ private final class ResourceListViewController: NSViewController,
     private var retainedRowsLastSynchronizedAt: Date?
     private var pendingScrollAnchor: ScrollAnchor?
     private var pendingSelectionUIDs: Set<ResourceUID>?
+    /// Relationship drill-downs with an exact selector may request selection
+    /// of their sole result once its revision-pinned range is materialized.
+    private var pendingSelectOnlyResult = false
+    private var selectOnlyResultGeneration: UInt64?
     private var restorationCheckpointTask: Task<Void, Never>?
     private var freshnessAgeTask: Task<Void, Never>?
     private var resourceViewStatus: ResourceViewStatus?
@@ -3597,6 +3684,7 @@ private final class ResourceListViewController: NSViewController,
     private var projectionRequestGeneration: UInt64?
     var onShowCommandPalette: (() -> Void)?
     var onEnterObject: ((ResourceIdentity) -> Void)?
+    var onShowPodNode: ((ResourceIdentity) -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
     var onOpenEvents: ((ResourceIdentity) -> Void)?
     var onOpenYAMLSnapshot: ((ResourceIdentity) -> Void)?
@@ -3741,6 +3829,7 @@ private final class ResourceListViewController: NSViewController,
             title: title,
             availability: ResourceListShortcutAvailability(
                 canEnterSubresource: canUse(.enter),
+                canShowNode: canUse(.showNode),
                 canOpenDetails: canUse(.open),
                 canOpenYAML: canUse(.openYAML),
                 canOpenEvents: canUse(.openEvents),
@@ -3912,8 +4001,11 @@ private final class ResourceListViewController: NSViewController,
         resource: DiscoveredResource,
         scope: NamespaceSelection,
         initialFilter: String? = nil,
+        selectOnlyResult: Bool = false,
         reason: ResourceStreamOpenReason
     ) {
+        pendingSelectOnlyResult = selectOnlyResult
+        selectOnlyResultGeneration = nil
         traceResourceCache(
             "event=open_resource reason=\(reason.rawValue) target_gvr="
                 + resourceCacheGVRDescription(resourceGVR(for: resource))
@@ -3958,6 +4050,8 @@ private final class ResourceListViewController: NSViewController,
 
     func changeNamespaceScope(_ scope: NamespaceSelection) {
         guard self.scope != scope else { return }
+        pendingSelectOnlyResult = false
+        selectOnlyResultGeneration = nil
         traceResourceCache(
             "event=namespace_change from=\(resourceCacheScopeDescription(self.scope))"
                 + " to=\(resourceCacheScopeDescription(scope))"
@@ -4305,6 +4399,7 @@ private final class ResourceListViewController: NSViewController,
         }
         addGroup([
             ("Enter Subresource", .enter),
+            ("Show Node", .showNode),
             ("Open Details", .open),
             ("Open YAML in Details", .openYAML),
             ("Open YAML in New Window", .openYAMLSnapshot),
@@ -4348,6 +4443,8 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func setFilter(_ value: String) {
+        pendingSelectOnlyResult = false
+        selectOnlyResultGeneration = nil
         resetFilterCompletion()
         filterRevision &+= 1
         filterTask?.cancel()
@@ -4596,6 +4693,8 @@ private final class ResourceListViewController: NSViewController,
 
     func controlTextDidChange(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
+        pendingSelectOnlyResult = false
+        selectOnlyResultGeneration = nil
         clearTransientCellPresentation()
         filterRevision &+= 1
         filterTask?.cancel()
@@ -4919,6 +5018,8 @@ private final class ResourceListViewController: NSViewController,
         let historySelectionUIDs = reason == .historyRestore
             ? pendingSelectionUIDs : nil
         generation &+= 1
+        selectOnlyResultGeneration = pendingSelectOnlyResult ? generation : nil
+        pendingSelectOnlyResult = false
         if previousStreamContext == nextStreamContext {
             // A new generation has a new numeric ordering even when warm rows
             // are retained. Keep the immutable displayed token for UID
@@ -5939,8 +6040,28 @@ private final class ResourceListViewController: NSViewController,
                 + " index=\(range.revision.index)"
         )
         scheduleSelectionProjection()
+        selectOnlyResultIfPossible(in: range)
         if request != nil { updateStatusLine() }
         runPendingSelectionCommandIfReady()
+    }
+
+    private func selectOnlyResultIfPossible(in range: ResourceViewRange) {
+        guard selectOnlyResultGeneration == range.revision.generation else { return }
+        guard range.rowsVisible <= 1 else {
+            selectOnlyResultGeneration = nil
+            return
+        }
+        guard range.rowsVisible == 1,
+            range.startIndex == 0,
+            range.rows.count == 1
+        else { return }
+
+        selectOnlyResultGeneration = nil
+        _ = performSelectionGesture(ResourceTableSelectionGesture(
+            row: 0,
+            modifiers: [],
+            keyboardDirection: nil
+        ))
     }
 
     private func replayDeferredUIDSelectionGestures(
@@ -7201,6 +7322,8 @@ private final class ResourceListViewController: NSViewController,
         _ restoration: ClusterWindowRestorationState,
         discoveredResources: [DiscoveredResource]
     ) -> Bool {
+        pendingSelectOnlyResult = false
+        selectOnlyResultGeneration = nil
         guard let gvr = restoration.gvr,
             let restored = discoveredResources.first(where: {
                 $0.group == gvr.group && $0.version == gvr.version && $0.resource == gvr.resource
@@ -7319,6 +7442,8 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func restoreResource(_ state: ResourceNavigationState) {
+        pendingSelectOnlyResult = false
+        selectOnlyResultGeneration = nil
         traceResourceCache(
             "event=restore_resource target_gvr="
                 + resourceCacheGVRDescription(GVR(
@@ -8290,6 +8415,11 @@ private final class ResourceListViewController: NSViewController,
         case .enter:
             guard let identity = selected.only else { return }
             onEnterObject?(identity)
+        case .showNode:
+            guard let identity = selected.only,
+                PodNodeNavigationPlanner.hasPotentialTarget(identity)
+            else { return }
+            onShowPodNode?(identity)
         case .open:
             if capturedIdentities == nil {
                 openSelectedObjectFromTable()
@@ -8840,6 +8970,9 @@ private final class ResourceListViewController: NSViewController,
                 uid: "_"
             )
             return ResourceDrillDownPlanner.hasPotentialTarget(identity)
+        case .showNode:
+            return exactlyOne && group.isEmpty && version == "v1"
+                && name == "pods"
         case .open, .openYAML, .openYAMLSnapshot, .openEvents:
             return exactlyOne
         case .openLogs, .openPreviousLogs:
@@ -8883,6 +9016,9 @@ private final class ResourceListViewController: NSViewController,
         case .enter:
             return selected.count == 1
                 && ResourceDrillDownPlanner.hasPotentialTarget(selected[0])
+        case .showNode:
+            return selected.count == 1
+                && PodNodeNavigationPlanner.hasPotentialTarget(selected[0])
         case .open, .openYAML, .openYAMLSnapshot, .openEvents:
             return selected.count == 1
         case .openLogs, .openPreviousLogs:
@@ -9246,7 +9382,7 @@ private final class ObjectDetailRecentEventsController: ObjectDetailEventsContro
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, enter, open, openYAML, openYAMLSnapshot, openEvents
+    case focusFilter, enter, showNode, open, openYAML, openYAMLSnapshot, openEvents
     case openLogs, openPreviousLogs
     case openExec, configureExec
     case startPortForward, selectAll, delete, scale, restart, editLabels, editAnnotations
@@ -9349,6 +9485,7 @@ private final class ResourceTableView: CapturedCellTableView {
         case ("j", _, false): onCommand?(.moveDown)
         case ("k", _, false): onCommand?(.moveUp)
         case ("d", _, false) where unmodified: onCommand?(.open)
+        case ("o", _, false) where unmodified: onCommand?(.showNode)
         case (_, 36, false): onCommand?(.enter)
         case ("y", _, false):
             guard event.modifierFlags.intersection([.control, .option]).isEmpty else {

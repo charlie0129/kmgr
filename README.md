@@ -212,6 +212,7 @@ globally across launches rather than per cluster.
 | Command-click | Toggle one selected row |
 | Command-A | Select all visible rows |
 | Return | Enter a useful subresource, such as Pod containers or workload Pods |
+| `O` | Show the selected Pod's assigned Node in the Node list |
 | Command-Return | Open details for exactly one object |
 | Command-[ / Command-] | Back / Forward |
 | Escape | Clear selection or return focus to the table |
