@@ -47,6 +47,63 @@ enum LogWindowShortcut: Equatable {
     }
 }
 
+private struct InstalledLogDisplayBuffer {
+    struct PrefixRemoval {
+        var itemCount: Int
+        var utf16Length: Int
+    }
+
+    private var storage: [LogDisplayItem] = []
+    private var head = 0
+    private(set) var utf16Length = 0
+
+    var count: Int { storage.count - head }
+    var items: [LogDisplayItem] { Array(storage[head...]) }
+
+    func prefixRemoval(before firstSequence: UInt64?) -> PrefixRemoval {
+        guard let firstSequence else {
+            return PrefixRemoval(itemCount: count, utf16Length: utf16Length)
+        }
+        var index = head
+        var length = 0
+        while index < storage.count, storage[index].sequence < firstSequence {
+            length += storage[index].text.utf16.count
+            index += 1
+        }
+        return PrefixRemoval(itemCount: index - head, utf16Length: length)
+    }
+
+    mutating func replace(with items: [LogDisplayItem]) {
+        storage = items
+        head = 0
+        utf16Length = items.reduce(into: 0) { $0 += $1.text.utf16.count }
+    }
+
+    mutating func discardPrefix(_ removal: PrefixRemoval) {
+        precondition(removal.itemCount >= 0 && removal.itemCount <= count)
+        head += removal.itemCount
+        utf16Length -= removal.utf16Length
+        compactIfNeeded()
+    }
+
+    mutating func append(contentsOf items: [LogDisplayItem]) {
+        storage.append(contentsOf: items)
+        for item in items { utf16Length += item.text.utf16.count }
+    }
+
+    mutating func clear() {
+        storage.removeAll(keepingCapacity: true)
+        head = 0
+        utf16Length = 0
+    }
+
+    private mutating func compactIfNeeded() {
+        guard head >= 4_096, head >= storage.count / 2 else { return }
+        storage.removeFirst(head)
+        head = 0
+    }
+}
+
 @MainActor
 final class LogWindowController: NSWindowController, NSWindowDelegate,
     NSSearchFieldDelegate, ContextualShortcutProviding
@@ -90,13 +147,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var needsRenderWhenVisible = false
     private var keyVisibilityWakePending = false
     private var isClosing = false
-    private var latestStoreDrops: UInt64 = 0
+    private var latestStoreEvictions: UInt64 = 0
     private var latestStreamDrops: UInt64 = 0
     private var latestRenderOmissions = 0
     private var latestDisplayTruncatedLines = 0
     private var latestStreamState: LogStreamState = .connecting
-    private var renderedDisplayChunks: [String] = []
-    private var renderedExportChunks: [String] = []
+    private var displayCursor: LogDisplayCursor?
+    private var installedDisplay = InstalledLogDisplayBuffer()
     private var followsVisibleTail = true
     private var lastObservedViewportOrigin = NSPoint.zero
     private var pendingFollowTailRestore: Bool?
@@ -252,7 +309,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     /// as a rendering wake-up so an early, already-downloaded batch cannot sit
     /// buffered until a later occlusion change.
     func windowDidBecomeKey(_ notification: Notification) {
-        guard needsRenderWhenVisible else { return }
+        guard needsRenderWhenVisible, !defersIncomingDisplayWork else { return }
         keyVisibilityWakePending = true
         resumeRenderingIfVisible()
     }
@@ -266,8 +323,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         guard !isClosing, viewportTrackingSuppressionDepth == 0,
             origin != lastObservedViewportOrigin
         else { return }
+        let wasFollowingTail = followsVisibleTail
         followsVisibleTail = isAtTail
         updateFollowButtonPresentation()
+        if !followsVisibleTail, wasFollowingTail, options.follow {
+            cancelScheduledRender()
+        }
+        if followsVisibleTail, !wasFollowingTail, needsRenderWhenVisible, !isPaused {
+            scheduleRender()
+        }
     }
 
     func controlTextDidChange(_ obj: Notification) { scheduleRender() }
@@ -330,7 +394,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 revision: revision
             )
             guard !Task.isCancelled, revision == configurationRevision else { return }
-            latestStoreDrops = statistics.droppedRecords
+            latestStoreEvictions = statistics.droppedRecords
             updateStatusLabel()
             if !isPaused { scheduleRender() }
         }
@@ -514,6 +578,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             let previousTailState = followsVisibleTail
             followsVisibleTail = true
             scrollToTail()
+            if needsRenderWhenVisible, !isPaused { scheduleRender() }
             guard !options.follow else {
                 updateFollowButtonPresentation()
                 return
@@ -923,12 +988,14 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 "stored_records=\(statistics.recordCount) stored_bytes=\(statistics.byteCount) dropped_records=\(statistics.droppedRecords) cancelled=\(Task.isCancelled)"
             )
             guard !Task.isCancelled else { return }
-            streamingSourceIDs.formUnion(records.map(\.sourceID))
-            latestStoreDrops = statistics.droppedRecords
+            for record in records { streamingSourceIDs.insert(record.sourceID) }
+            latestStoreEvictions = statistics.droppedRecords
             updateStatusLabel()
             markStreamHealthyIfPossible()
             needsRenderWhenVisible = true
-            if !isPaused { scheduleRender() }
+            if !isPaused, !defersIncomingDisplayWork {
+                scheduleRender()
+            }
         case .status(let cursor, let status):
             latestStreamState = status.state
             latestStreamDrops = status.droppedRecords
@@ -980,9 +1047,17 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
 
     private func updateStatusLabel() {
         let state = latestStreamState.rawValue.capitalized
-        let drops = latestStreamDrops + latestStoreDrops
         var parts = [state]
-        if drops > 0 { parts.append("\(drops.formatted()) records dropped") }
+        if latestStreamDrops > 0 {
+            parts.append(latestStreamDrops == 1
+                ? "1 record lost before delivery"
+                : "\(latestStreamDrops.formatted()) records lost before delivery")
+        }
+        if latestStoreEvictions > 0 {
+            parts.append(latestStoreEvictions == 1
+                ? "1 older record evicted"
+                : "\(latestStoreEvictions.formatted()) older records evicted")
+        }
         if latestRenderOmissions > 0 {
             parts.append("\(latestRenderOmissions.formatted()) omitted from display")
         }
@@ -1045,83 +1120,89 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private func render() async {
         let selectedRange = logView.selectedRange()
         let filter = searchField.stringValue
-        let showLabels = availableSources.count > 1
-        let snapshot = await recordStore.snapshot()
-        let records = snapshot.records
-        let labels = sourceLabels
-        let byteLimit = maximumRenderedUTF8Bytes
-        let displayedLineByteLimit = maximumDisplayedLineUTF8Bytes
-        let previousChunks = renderedDisplayChunks
-        let previousProjection = logView.projection
-        let style = previousProjection.style
-        let result: (
-            rendered: RenderedLogText,
-            install: LogTextInstallPlan,
-            projection: LogViewportProjection
+        let configuration = currentDisplayRenderConfiguration
+        let formatInterval = logSignposter.beginInterval(
+            PerformanceSignpostCatalog.logTextFormat,
+            "output_byte_limit=\(configuration.maximumOutputUTF8Bytes) shows_labels=\(configuration.showSourceLabels) has_filter=\(!filter.isEmpty)"
         )
-        let renderer = Task.detached(priority: .userInitiated) { [logSignposter] in
-            let interval = logSignposter.beginInterval(
-                PerformanceSignpostCatalog.logTextFormat,
-                "input_records=\(records.count) output_byte_limit=\(byteLimit) shows_labels=\(showLabels) has_filter=\(!filter.isEmpty)"
+        let update: LogDisplayUpdate
+        do {
+            update = try await recordStore.renderDisplay(
+                configuration: configuration,
+                after: displayCursor
             )
-            do {
-                let rendered = try LogTextRenderer.render(
-                    records: records,
-                    sourceLabels: labels,
-                    showSourceLabels: showLabels,
-                    filter: filter,
-                    maximumOutputUTF8Bytes: byteLimit,
-                    maximumDisplayedLineUTF8Bytes: displayedLineByteLimit
-                )
-                let install = LogTextInstallPlanner.plan(
-                    previousChunks: previousChunks,
-                    currentChunks: rendered.displayChunks
-                )
-                let projection = try LogViewportProjection.make(
-                    chunks: rendered.displayChunks,
-                    previous: previousProjection,
-                    retainedChunkCount: install.retainedChunkCount,
+        } catch {
+            logSignposter.endInterval(
+                PerformanceSignpostCatalog.logTextFormat,
+                formatInterval,
+                "outcome=cancelled"
+            )
+            return
+        }
+        logSignposter.endInterval(
+            PerformanceSignpostCatalog.logTextFormat,
+            formatInterval,
+            "processed_records=\(update.processedRecordCount) rendered_records=\(update.renderedRecords) omitted_records=\(update.omittedRecords) logical_output_bytes=\(update.outputUTF8Bytes) display_output_bytes=\(update.displayOutputUTF8Bytes) truncated_lines=\(update.displayTruncatedLines) replaces_all=\(update.replacesAll)"
+        )
+
+        let appendedChunks = update.items.map(\.text)
+        let replacementProjection: LogViewportProjection?
+        if update.replacesAll {
+            let style = logView.projection.style
+            let builder = Task.detached(priority: .userInitiated) {
+                try LogViewportProjection.make(
+                    chunks: appendedChunks,
+                    previous: nil,
+                    retainedChunkCount: 0,
                     style: style,
                     highlightedText: filter
                 )
-                logSignposter.endInterval(
-                    PerformanceSignpostCatalog.logTextFormat,
-                    interval,
-                    "rendered_records=\(rendered.renderedRecords) omitted_records=\(rendered.omittedRecords) logical_output_bytes=\(rendered.outputUTF8Bytes) display_output_bytes=\(rendered.displayOutputUTF8Bytes) truncated_lines=\(rendered.displayTruncatedLines)"
-                )
-                return (
-                    rendered: rendered,
-                    install: install,
-                    projection: projection
-                )
+            }
+            do {
+                replacementProjection = try await withTaskCancellationHandler {
+                    try await builder.value
+                } onCancel: {
+                    builder.cancel()
+                }
             } catch {
-                logSignposter.endInterval(
-                    PerformanceSignpostCatalog.logTextFormat,
-                    interval,
-                    "outcome=cancelled"
-                )
-                throw error
+                return
             }
-        }
-        do {
-            result = try await withTaskCancellationHandler {
-                try await renderer.value
-            } onCancel: {
-                renderer.cancel()
-            }
-        } catch {
-            return
+        } else {
+            replacementProjection = nil
         }
         guard !Task.isCancelled, canRenderNow, !isPaused else {
             needsRenderWhenVisible = true
             return
         }
+
+        let removal = update.replacesAll
+            ? InstalledLogDisplayBuffer.PrefixRemoval(
+                itemCount: installedDisplay.count,
+                utf16Length: installedDisplay.utf16Length
+            )
+            : installedDisplay.prefixRemoval(before: update.firstSequence)
+        var appendedUTF16Length = 0
+        var appendedUTF8Length = 0
+        for chunk in appendedChunks {
+            appendedUTF16Length += chunk.utf16.count
+            appendedUTF8Length += chunk.utf8.count
+        }
+        let retainedUTF16Length = logView.projection.textUTF16Length
+            - removal.utf16Length
+        let install = LogTextInstallPlan(
+            removePrefixUTF16Length: removal.utf16Length,
+            resultUTF16Length: retainedUTF16Length + appendedUTF16Length,
+            retainedChunkCount: update.replacesAll
+                ? 0 : installedDisplay.count - removal.itemCount,
+            appendedChunkCount: appendedChunks.count,
+            appendedUTF8Length: appendedUTF8Length
+        )
         let shouldFollowTail = followsVisibleTail
         var viewportAnchor = shouldFollowTail ? nil : logView.verticalAnchor(
             at: scrollView.contentView.bounds.minY
         )
         if var anchor = viewportAnchor {
-            anchor.textIndex = result.install.remapSelection(NSRange(
+            anchor.textIndex = install.remapSelection(NSRange(
                 location: anchor.textIndex,
                 length: 0
             )).location
@@ -1129,20 +1210,42 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
         let installInterval = logSignposter.beginInterval(
             PerformanceSignpostCatalog.logTextInstall,
-            "logical_output_bytes=\(result.rendered.outputUTF8Bytes) display_output_bytes=\(result.rendered.displayOutputUTF8Bytes) rendered_records=\(result.rendered.renderedRecords) truncated_lines=\(result.rendered.displayTruncatedLines) removed_utf16=\(result.install.removePrefixUTF16Length) appended_utf8=\(result.install.appendedUTF8Length)"
+            "logical_output_bytes=\(update.outputUTF8Bytes) display_output_bytes=\(update.displayOutputUTF8Bytes) rendered_records=\(update.renderedRecords) truncated_lines=\(update.displayTruncatedLines) removed_utf16=\(install.removePrefixUTF16Length) appended_utf8=\(install.appendedUTF8Length) replaces_all=\(update.replacesAll)"
         )
-        withViewportTrackingSuppressed {
-            logView.install(
-                result.projection,
-                viewportSize: scrollView.contentSize
+        do {
+            try withViewportTrackingSuppressed {
+                if let replacementProjection {
+                    logView.install(
+                        replacementProjection,
+                        viewportSize: scrollView.contentSize
+                    )
+                } else {
+                    try logView.applyLineAlignedEdit(
+                        removePrefixChunkCount: removal.itemCount,
+                        appendChunks: appendedChunks,
+                        viewportSize: scrollView.contentSize
+                    )
+                }
+            }
+        } catch {
+            logSignposter.endInterval(
+                PerformanceSignpostCatalog.logTextInstall,
+                installInterval,
+                "outcome=cancelled"
             )
+            return
         }
-        renderedDisplayChunks = result.rendered.displayChunks
-        renderedExportChunks = result.rendered.chunks
-        latestRenderOmissions = result.rendered.omittedRecords
-        latestDisplayTruncatedLines = result.rendered.displayTruncatedLines
+        if update.replacesAll {
+            installedDisplay.replace(with: update.items)
+        } else {
+            installedDisplay.discardPrefix(removal)
+            installedDisplay.append(contentsOf: update.items)
+        }
+        displayCursor = update.cursor
+        latestRenderOmissions = update.omittedRecords
+        latestDisplayTruncatedLines = update.displayTruncatedLines
         updateStatusLabel()
-        logView.setSelectedRange(result.install.remapSelection(selectedRange))
+        logView.setSelectedRange(install.remapSelection(selectedRange))
         if shouldFollowTail { scrollToTail() }
         else if let viewportAnchor { restoreViewport(viewportAnchor) }
         else { updateLogViewportFrame() }
@@ -1151,6 +1254,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         logSignposter.endInterval(
             PerformanceSignpostCatalog.logTextInstall,
             installInterval
+        )
+    }
+
+    private var currentDisplayRenderConfiguration: LogDisplayRenderConfiguration {
+        LogDisplayRenderConfiguration(
+            sourceLabels: sourceLabels,
+            showSourceLabels: availableSources.count > 1,
+            filter: searchField.stringValue,
+            maximumOutputUTF8Bytes: maximumRenderedUTF8Bytes,
+            maximumDisplayedLineUTF8Bytes: maximumDisplayedLineUTF8Bytes
         )
     }
 
@@ -1235,7 +1348,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         Task { [weak self, recordStore] in
             _ = await recordStore.clear()
             guard let self else { return }
-            latestStoreDrops = 0
+            latestStoreEvictions = 0
             latestRenderOmissions = 0
             latestDisplayTruncatedLines = 0
             updateStatusLabel()
@@ -1246,8 +1359,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 viewportSize: scrollView.contentSize
             )
         }
-        renderedDisplayChunks.removeAll(keepingCapacity: true)
-        renderedExportChunks.removeAll(keepingCapacity: true)
+        displayCursor = nil
+        installedDisplay.clear()
         followsVisibleTail = true
         updateFollowButtonPresentation()
         updateLogViewportFrame()
@@ -1276,8 +1389,14 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func resumeRenderingIfVisible() {
-        guard canRenderNow, !isPaused, needsRenderWhenVisible else { return }
+        guard canRenderNow, !isPaused, needsRenderWhenVisible,
+            !defersIncomingDisplayWork
+        else { return }
         scheduleRender()
+    }
+
+    private var defersIncomingDisplayWork: Bool {
+        options.follow && !followsVisibleTail
     }
 
     @objc private func saveVisibleBuffer() {
@@ -1290,17 +1409,15 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
-    /// Normal rendered logs capture their immutable chunk array; joining,
-    /// UTF-8 encoding, and file I/O all stay off MainActor even for a
-    /// multi-megabyte logical line.
+    /// Captures shared raw record values for the installed display. Logical
+    /// line reconstruction, joining, UTF-8 encoding, and file I/O all stay off
+    /// MainActor and occur only after an explicit Save.
     func saveVisibleBufferSnapshot(to url: URL) {
-        let renderedUTF16Length = renderedDisplayChunks.reduce(into: 0) {
-            $0 += $1.utf16.count
-        }
-        let hasCurrentProjection = renderedUTF16Length
-            == logView.projection.textUTF16Length
-        let exportChunks = hasCurrentProjection ? renderedExportChunks : nil
+        let hasCurrentProjection = installedDisplay.count == logView.projection.chunkCount
+            && installedDisplay.utf16Length == logView.projection.textUTF16Length
+        let items = hasCurrentProjection ? installedDisplay.items : nil
         let fallbackValue = hasCurrentProjection ? nil : logView.string
+        let configuration = currentDisplayRenderConfiguration
         let writer = fileWriter
         statusLabel.stringValue = "Saving \(url.lastPathComponent)…"
         statusLabel.toolTip = nil
@@ -1308,7 +1425,16 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         Task { [weak self] in
             do {
                 try await Task.detached(priority: .utility) {
-                    let value = exportChunks?.joined() ?? fallbackValue ?? ""
+                    let value: String
+                    if let items {
+                        value = try LogTextRenderer.exportText(
+                            items: items,
+                            sourceLabels: configuration.sourceLabels,
+                            showSourceLabels: configuration.showSourceLabels
+                        )
+                    } else {
+                        value = fallbackValue ?? ""
+                    }
                     try writer(value, url)
                 }.value
                 guard let self, !isClosing else { return }

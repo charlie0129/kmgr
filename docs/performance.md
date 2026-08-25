@@ -208,6 +208,31 @@ non-color marker semantics. The Relationships detail test also pins the visible
 These checks catch programmatic accessibility regressions, but they do not
 replace a manual VoiceOver navigation/read-order pass in the packaged app.
 
+## Sustained log streaming
+
+The log window retains raw records in a record- and byte-bounded ring with
+monotonic in-memory sequence IDs. Once the initial display is built, normal
+tailing decodes and formats only records appended since the preceding pass.
+Evicted history advances queue heads in both the display cache and virtual
+viewport; retained text, line indexes, and unwrapped row geometry are not
+rescanned. A filter or display-limit change intentionally performs one bounded
+replacement. If the user scrolls away from a live tail, screen projection work
+is deferred until they return; raw bounded ingestion continues.
+
+The core regression runs 10,000 append/evict cycles against a full ring and
+asserts that every render processes one record. The AppKit regression applies
+10,000 edits to an 8,000-chunk viewport and asserts that each edit indexes only
+its rebuilt tail. Run both log suites with:
+
+```sh
+swift test --package-path macos --no-parallel --filter LogModelsTests
+swift test --package-path macos --no-parallel --filter LogWindowControllerTests
+```
+
+The status bar reports transport loss as `records lost before delivery` and
+normal local rolling-history pressure as `older records evicted`; these counts
+must not be combined.
+
 ## Instruments signposts
 
 Release builds contain local `OSSignposter` intervals under subsystem
@@ -223,8 +248,8 @@ text, cell values, log content, credentials, or IPC metadata.
 | `resource-table` | `ResourceModelApply` | one accepted snapshot/delta projected into compact table state on the main actor |
 | `resource-table` | `ResourceTableReload` | `NSTableView` reload plus UID-based selection and scroll restoration on the main actor |
 | `logs` | `LogStoreAppend` | appending a received batch to the bounded off-main-actor log ring |
-| `logs` | `LogTextFormat` | detached log filtering/formatting into a bounded string |
-| `logs` | `LogTextInstall` | incremental visible `NSTextStorage` prefix eviction/suffix append and selection/tail restoration on the main actor |
+| `logs` | `LogTextFormat` | actor-isolated filtering/formatting of the appended record delta, or one bounded replacement after configuration/cursor invalidation |
+| `logs` | `LogTextInstall` | virtual viewport prefix eviction/suffix append plus selection/tail restoration on the main actor |
 
 To record interactively:
 

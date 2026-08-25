@@ -74,6 +74,34 @@ struct LogWindowControllerTests {
         }
     }
 
+    @Test("sustained viewport edits index only the changed suffix")
+    func sustainedViewportEditsDoNotReindexOffscreenRows() throws {
+        let chunks = (0..<8_000).map { "line-\($0)\n" }
+        let (logView, scrollView) = makeLogViewport(frame: NSRect(
+            x: 0, y: 0, width: 700, height: 420
+        ))
+        let projection = try LogViewportProjection.make(
+            chunks: chunks,
+            previous: nil,
+            retainedChunkCount: 0,
+            style: logView.projection.style
+        )
+        logView.install(projection, viewportSize: scrollView.contentSize)
+
+        for index in 0..<10_000 {
+            try logView.applyLineAlignedEdit(
+                removePrefixChunkCount: 1,
+                appendChunks: ["appended-\(index)\n"],
+                viewportSize: scrollView.contentSize
+            )
+            #expect(logView.projection.chunkCount == 8_000)
+            #expect(logView.projection.lines.count == 8_001)
+            #expect(logView.lastProjectionIndexedLineCount == 2)
+        }
+        #expect(logView.string.hasPrefix("appended-2000\n"))
+        #expect(logView.string.hasSuffix("appended-9999\n"))
+    }
+
     @Test("newline controls never share one virtual row")
     func virtualRowsSegmentCRLFAcrossStreamingChunks() throws {
         let (logView, _) = makeLogViewport(frame: NSRect(
@@ -837,6 +865,54 @@ struct LogWindowControllerTests {
         })
     }
 
+    @Test("delivery loss and local history eviction are reported separately")
+    func deliveryLossIsDistinctFromHistoryEviction() async throws {
+        let provider = OrderedLogWindowProvider()
+        let source = logSource(pod: "api", uid: "api-uid", container: "app")
+        let controller = LogWindowController(
+            session: OpenedClusterSession(
+                sessionID: "session", contextName: "production", clusterName: "cluster",
+                serverHostname: "example.invalid", defaultNamespace: "default"
+            ),
+            sources: [source],
+            provider: provider,
+            displayConfiguration: LogDisplayConfiguration(
+                recordLimit: 2,
+                byteLimit: 1 << 20,
+                renderBatchMilliseconds: 1
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let logView = try #require(descendants(of: root)
+            .compactMap { $0 as? LogViewportView }.first)
+        let status = try #require(descendants(of: root).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "log-status" })
+        try await waitForLogWindowEvent(provider) { $0.contains("start:1") }
+
+        provider.emitStreaming(generation: 1, sequence: 1, droppedRecords: 3)
+        provider.emitRecords(
+            generation: 1,
+            sequence: 2,
+            records: ["old", "middle", "new"].map {
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data($0.utf8),
+                    endsWithNewline: true
+                )
+            }
+        )
+        try await waitForLogText(logView, waking: controller, in: window) {
+            $0.contains("new")
+        }
+        try await waitForLogStatus(status) {
+            $0.contains("3 records lost before delivery")
+                && $0.contains("1 older record evicted")
+        }
+    }
+
     @Test("long lines use the configured display limit and save losslessly")
     func longLineDisplayIsBoundedAndSaveIsLossless() async throws {
         let provider = OrderedLogWindowProvider()
@@ -1040,7 +1116,7 @@ struct LogWindowControllerTests {
         #expect(isActualLogTailFullyVisible(logView, in: scrollView))
     }
 
-    @Test("viewport scrolling pauses and resumes tail following")
+    @Test("viewport scrolling defers offscreen rendering and resumes at the tail")
     func viewportPositionControlsTailFollowing() async throws {
         let provider = OrderedLogWindowProvider()
         let source = logSource(pod: "api", uid: "api-uid", container: "app")
@@ -1109,17 +1185,13 @@ struct LogWindowControllerTests {
                 )
             }
         )
-        try await Task.sleep(for: .milliseconds(20))
-        window.makeKeyAndOrderFront(nil)
-        controller.windowDidBecomeKey(Notification(
-            name: NSWindow.didBecomeKeyNotification,
-            object: window
-        ))
-        try await waitForLogText(logView) { $0.contains("while-scrolled-away-99") }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!logView.string.contains("while-scrolled-away-99"))
         #expect(!isLogViewAtTail(logView, in: scrollView))
         #expect(clipView.bounds.origin == scrolledAwayOrigin)
 
         follow.performClick(nil)
+        try await waitForLogText(logView) { $0.contains("while-scrolled-away-99") }
         #expect(follow.state == .on)
         #expect(isLogViewAtTail(logView, in: scrollView))
         #expect(isActualLogTailFullyVisible(logView, in: scrollView))
@@ -1703,11 +1775,18 @@ private final class OrderedLogWindowProvider: LogStreamProviding, @unchecked Sen
         ))
     }
 
-    func emitStreaming(generation: UInt64, sequence: UInt64) {
+    func emitStreaming(
+        generation: UInt64,
+        sequence: UInt64,
+        droppedRecords: UInt64 = 0
+    ) {
         let continuation = lock.withLock { continuations[generation] }
         continuation?.yield(.status(
             cursor: StreamCursor(generation: generation, sequence: sequence),
-            status: LogStatus(state: .streaming)
+            status: LogStatus(
+                state: .streaming,
+                droppedRecords: droppedRecords
+            )
         ))
     }
 

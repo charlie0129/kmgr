@@ -702,6 +702,154 @@ private func isAccepted(_ disposition: StreamMessageDisposition) -> Bool {
     #expect(snapshot.statistics.droppedRecords == 2)
 }
 
+@Test func sustainedFullStoreRenderingProcessesOnlyTheAppendedDelta() async throws {
+    let store = LogRecordStore(recordLimit: 128, byteLimit: 1 << 20)
+    let configuration = LogDisplayRenderConfiguration(
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 20,
+        maximumDisplayedLineUTF8Bytes: 16 << 10
+    )
+    _ = await store.append(contentsOf: (0..<128).map { index in
+        LogRecord(
+            sourceID: "pod",
+            data: Data("initial-\(index)".utf8),
+            endsWithNewline: true
+        )
+    })
+    var update = try await store.renderDisplay(
+        configuration: configuration,
+        after: nil
+    )
+    #expect(update.replacesAll)
+    #expect(update.processedRecordCount == 128)
+    #expect(update.renderedRecords == 128)
+
+    for index in 0..<10_000 {
+        _ = await store.append(contentsOf: [LogRecord(
+            sourceID: "pod",
+            data: Data("sustained-\(index)".utf8),
+            endsWithNewline: true
+        )])
+        update = try await store.renderDisplay(
+            configuration: configuration,
+            after: update.cursor
+        )
+        #expect(!update.replacesAll)
+        #expect(update.processedRecordCount == 1)
+        #expect(update.items.count == 1)
+        #expect(update.renderedRecords == 128)
+    }
+    #expect(update.items.last?.text == "sustained-9999\n")
+}
+
+@Test func deferredDisplayReplacesOnceAfterItsRawCursorIsEvicted() async throws {
+    let store = LogRecordStore(recordLimit: 8, byteLimit: 1 << 20)
+    let configuration = LogDisplayRenderConfiguration(
+        sourceLabels: [:],
+        showSourceLabels: false,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 20,
+        maximumDisplayedLineUTF8Bytes: 16 << 10
+    )
+    _ = await store.append(contentsOf: (0..<8).map { index in
+        LogRecord(
+            sourceID: "pod",
+            data: Data("old-\(index)".utf8),
+            endsWithNewline: true
+        )
+    })
+    let old = try await store.renderDisplay(configuration: configuration, after: nil)
+    _ = await store.append(contentsOf: (0..<16).map { index in
+        LogRecord(
+            sourceID: "pod",
+            data: Data("new-\(index)".utf8),
+            endsWithNewline: true
+        )
+    })
+
+    let replacement = try await store.renderDisplay(
+        configuration: configuration,
+        after: old.cursor
+    )
+    #expect(replacement.replacesAll)
+    #expect(replacement.processedRecordCount == 8)
+    #expect(replacement.items.count == 8)
+    #expect(replacement.items.first?.text == "new-8\n")
+    #expect(replacement.items.last?.text == "new-15\n")
+}
+
+@Test func fragmentPrefixEvictionRestoresTruncatedLineContext() async throws {
+    let store = LogRecordStore(recordLimit: 2, byteLimit: 1 << 20)
+    let configuration = LogDisplayRenderConfiguration(
+        sourceLabels: ["pod": "api"],
+        showSourceLabels: true,
+        filter: "",
+        maximumOutputUTF8Bytes: 1 << 20,
+        maximumDisplayedLineUTF8Bytes: 16 << 10
+    )
+    _ = await store.append(contentsOf: [
+        LogRecord(
+            sourceID: "pod",
+            data: Data("first ".utf8),
+            startsLine: true,
+            endsWithNewline: false
+        ),
+        LogRecord(
+            sourceID: "pod",
+            data: Data("continued".utf8),
+            startsLine: false,
+            endsWithNewline: true
+        ),
+    ])
+    let initial = try await store.renderDisplay(configuration: configuration, after: nil)
+    #expect(initial.items.map(\.text).joined() == "[api] first continued\n")
+
+    _ = await store.append(contentsOf: [LogRecord(
+        sourceID: "pod",
+        data: Data("next".utf8),
+        endsWithNewline: true
+    )])
+    let replacement = try await store.renderDisplay(
+        configuration: configuration,
+        after: initial.cursor
+    )
+    #expect(replacement.replacesAll)
+    #expect(replacement.items.map(\.text).joined() == "[api] … continued\n[api] next\n")
+}
+
+@Test func displaySnapshotExportPreservesFilteredSequenceGaps() throws {
+    let items = [
+        LogDisplayItem(
+            sequence: 10,
+            text: "",
+            record: LogRecord(
+                sourceID: "pod",
+                data: Data("first".utf8),
+                startsLine: true,
+                endsWithNewline: false
+            )
+        ),
+        LogDisplayItem(
+            sequence: 12,
+            text: "",
+            record: LogRecord(
+                sourceID: "pod",
+                data: Data("last".utf8),
+                startsLine: false,
+                endsWithNewline: true
+            )
+        ),
+    ]
+    let exported = try LogTextRenderer.exportText(
+        items: items,
+        sourceLabels: ["pod": "api"],
+        showSourceLabels: true
+    )
+    #expect(exported == "[api] first\n[api] … last\n")
+}
+
 @Test func logRendererBoundsInvalidUTF8ExpansionAndKeepsNewestRecords() throws {
     let records = [
         LogRecord(sourceID: "old", data: Data("old line".utf8), endsWithNewline: true),

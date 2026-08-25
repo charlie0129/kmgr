@@ -434,6 +434,11 @@ public struct LogRecord: Hashable, Sendable {
     }
 }
 
+fileprivate struct SequencedLogRecord: Sendable {
+    var sequence: UInt64
+    var record: LogRecord
+}
+
 public enum LogStreamState: String, Hashable, Sendable {
     case connecting
     case streaming
@@ -526,11 +531,12 @@ public struct LogStreamGenerationGate: Hashable, Sendable {
 /// A byte-bounded ring which never assumes one Kubernetes log record is a
 /// complete UTF-8 line. Oldest records are discarded first under pressure.
 public struct LogRecordRing: Sendable {
-    public let recordLimit: Int
-    public let byteLimit: Int
-    public let fragmentByteLimit: Int
-    private var storage: [LogRecord] = []
+    public private(set) var recordLimit: Int
+    public private(set) var byteLimit: Int
+    public private(set) var fragmentByteLimit: Int
+    private var storage: [SequencedLogRecord] = []
     private var head = 0
+    private var nextSequence: UInt64 = 1
     public private(set) var byteCount = 0
     public private(set) var droppedRecords: UInt64 = 0
     public private(set) var droppedBytes: UInt64 = 0
@@ -547,10 +553,18 @@ public struct LogRecordRing: Sendable {
     }
 
     public var records: [LogRecord] {
-        head == storage.count ? [] : Array(storage[head...])
+        head == storage.count ? [] : storage[head...].map(\.record)
     }
 
     public var recordCount: Int { storage.count - head }
+
+    fileprivate var firstSequence: UInt64 {
+        head == storage.count ? nextSequence : storage[head].sequence
+    }
+
+    fileprivate var sequencedRecords: ArraySlice<SequencedLogRecord> {
+        storage[head...]
+    }
 
     public mutating func append(contentsOf newRecords: [LogRecord]) {
         for record in newRecords {
@@ -575,40 +589,45 @@ public struct LogRecordRing: Sendable {
         storage.removeAll(keepingCapacity: true)
         head = 0
         byteCount = 0
+        droppedRecords = 0
+        droppedBytes = 0
     }
 
-    /// Rebuilds the ring under new bounds so an already-open log view can
-    /// adopt saved preferences. Appending oldest-to-newest retains the newest
-    /// possible records (and newest fragments of an oversized record), while
-    /// seeding the counters preserves all drops observed before the resize.
+    /// Applies new bounds in place so stable record sequences survive a live
+    /// Settings update. Only the oldest records are evicted.
     public mutating func resize(recordLimit: Int, byteLimit: Int) {
         precondition(recordLimit > 0 && byteLimit > 0)
         guard recordLimit != self.recordLimit || byteLimit != self.byteLimit else { return }
-
-        var replacement = LogRecordRing(
-            recordLimit: recordLimit,
-            byteLimit: byteLimit,
-            fragmentByteLimit: fragmentByteLimit
-        )
-        replacement.droppedRecords = droppedRecords
-        replacement.droppedBytes = droppedBytes
-        replacement.append(contentsOf: records)
-        self = replacement
+        self.recordLimit = recordLimit
+        self.byteLimit = byteLimit
+        fragmentByteLimit = min(fragmentByteLimit, byteLimit)
+        while recordCount > 0 && (recordCount > recordLimit || byteCount > byteLimit) {
+            evictFirst()
+        }
+        compactStorageIfNeeded()
     }
 
     private mutating func appendOne(_ record: LogRecord) {
         let size = record.data.count
         while recordCount > 0 && (recordCount >= recordLimit || byteCount + size > byteLimit) {
-            let removed = storage[head]
-            storage[head] = LogRecord(sourceID: "", data: Data(), endsWithNewline: false)
-            head += 1
-            byteCount -= removed.data.count
-            droppedRecords &+= 1
-            droppedBytes &+= UInt64(removed.data.count)
+            evictFirst()
         }
-        storage.append(record)
+        storage.append(SequencedLogRecord(sequence: nextSequence, record: record))
+        nextSequence &+= 1
         byteCount += size
         compactStorageIfNeeded()
+    }
+
+    private mutating func evictFirst() {
+        let removed = storage[head]
+        storage[head] = SequencedLogRecord(
+            sequence: removed.sequence,
+            record: LogRecord(sourceID: "", data: Data(), endsWithNewline: false)
+        )
+        head += 1
+        byteCount -= removed.record.data.count
+        droppedRecords &+= 1
+        droppedBytes &+= UInt64(removed.record.data.count)
     }
 
     /// Eviction advances an index instead of repeatedly shifting every record.
@@ -689,11 +708,96 @@ public struct LogRecordRingSnapshot: Sendable {
     }
 }
 
+/// Immutable display inputs for one log window. A change intentionally starts
+/// a new display revision; sustained rendering otherwise consumes only records
+/// appended since the previous pass.
+public struct LogDisplayRenderConfiguration: Equatable, Sendable {
+    public var sourceLabels: [String: String]
+    public var showSourceLabels: Bool
+    public var filter: String
+    public var maximumOutputUTF8Bytes: Int
+    public var maximumDisplayedLineUTF8Bytes: Int
+
+    public init(
+        sourceLabels: [String: String],
+        showSourceLabels: Bool,
+        filter: String,
+        maximumOutputUTF8Bytes: Int,
+        maximumDisplayedLineUTF8Bytes: Int
+    ) {
+        precondition(maximumOutputUTF8Bytes > 0 && maximumDisplayedLineUTF8Bytes > 0)
+        self.sourceLabels = sourceLabels
+        self.showSourceLabels = showSourceLabels
+        self.filter = filter
+        self.maximumOutputUTF8Bytes = maximumOutputUTF8Bytes
+        self.maximumDisplayedLineUTF8Bytes = maximumDisplayedLineUTF8Bytes
+    }
+}
+
+public struct LogDisplayCursor: Hashable, Sendable {
+    public var revision: UInt64
+    public var firstSequence: UInt64?
+    public var lastSequence: UInt64?
+
+    public init(
+        revision: UInt64,
+        firstSequence: UInt64?,
+        lastSequence: UInt64?
+    ) {
+        self.revision = revision
+        self.firstSequence = firstSequence
+        self.lastSequence = lastSequence
+    }
+}
+
+/// One independently evictable screen fragment. Adjacent fragments retain
+/// their display-line state, so an oversized logical line is still truncated
+/// and indexed as one line.
+public struct LogDisplayItem: Hashable, Sendable {
+    public var sequence: UInt64
+    public var text: String
+    /// Shared immutable bytes used only when the user explicitly saves the
+    /// currently installed display snapshot.
+    public var record: LogRecord
+
+    public init(sequence: UInt64, text: String, record: LogRecord) {
+        self.sequence = sequence
+        self.text = text
+        self.record = record
+    }
+}
+
+public struct LogDisplayUpdate: Sendable {
+    /// A replacement occurs for the first render, a display-configuration
+    /// change, or when deferred rendering falls behind the bounded raw ring.
+    public var replacesAll: Bool
+    /// Current first displayed sequence. An incremental consumer removes its
+    /// installed prefix up to this sequence before appending `items`.
+    public var firstSequence: UInt64?
+    /// All items for a replacement, otherwise only the appended suffix.
+    public var items: [LogDisplayItem]
+    public var cursor: LogDisplayCursor
+    public var renderedRecords: Int
+    public var omittedRecords: Int
+    public var omittedSourceBytes: UInt64
+    public var outputUTF8Bytes: Int
+    public var displayOutputUTF8Bytes: Int
+    public var displayTruncatedLines: Int
+    /// Records decoded or filter-tested by this pass. This is an enduring
+    /// diagnostic contract for sustained-stream regression tests.
+    public var processedRecordCount: Int
+}
+
 /// Serializes ring mutations away from AppKit's main actor. The actor never
-/// decodes log bytes and exposes only bounded snapshots for batched rendering.
+/// performs AppKit work. Its display cache decodes only the newly appended
+/// suffix during normal tailing and remains bounded by the raw and rendered
+/// limits.
 public actor LogRecordStore {
     private var ring: LogRecordRing
     private var latestConfigurationRevision: UInt64 = 0
+    private var contentRevision: UInt64 = 1
+    private var nextDisplayRevision: UInt64 = 1
+    private var displayCache: LogDisplayCache?
 
     public init(
         recordLimit: Int = 20_000,
@@ -716,6 +820,8 @@ public actor LogRecordStore {
     @discardableResult
     public func clear() -> LogRecordRingStatistics {
         ring.clear()
+        contentRevision &+= 1
+        displayCache = nil
         return statistics(for: ring)
     }
 
@@ -746,6 +852,25 @@ public actor LogRecordStore {
 
     public func snapshot() -> LogRecordRingSnapshot {
         LogRecordRingSnapshot(records: ring.records, statistics: statistics(for: ring))
+    }
+
+    public func renderDisplay(
+        configuration: LogDisplayRenderConfiguration,
+        after cursor: LogDisplayCursor?
+    ) throws -> LogDisplayUpdate {
+        if displayCache?.configuration != configuration
+            || displayCache?.contentRevision != contentRevision
+        {
+            displayCache = LogDisplayCache(
+                configuration: configuration,
+                contentRevision: contentRevision,
+                revision: nextDisplayRevision
+            )
+            nextDisplayRevision &+= 1
+        }
+        guard let cache = displayCache else { preconditionFailure("display cache") }
+        let processed = try cache.synchronize(with: ring)
+        return cache.makeUpdate(after: cursor, processedRecordCount: processed)
     }
 
     private func statistics(for ring: LogRecordRing) -> LogRecordRingStatistics {
@@ -1041,26 +1166,108 @@ public enum LogTextRenderer {
         )
     }
 
-    private struct DisplayProjection {
+    /// Reconstructs the exact logical text for an already selected display
+    /// snapshot. Stable sequences preserve gaps introduced by filtering,
+    /// retention, or the rendered-byte budget without doing this work during
+    /// normal streaming.
+    public static func exportText(
+        items: [LogDisplayItem],
+        sourceLabels: [String: String],
+        showSourceLabels: Bool
+    ) throws -> String {
+        var chunks: [String] = []
+        chunks.reserveCapacity(items.count * 3)
+        var cachedSourcePrefixes: [String: String] = [:]
+        let timestampFormatter: ISO8601DateFormatter? = items.contains {
+            $0.record.timestampUnixMilliseconds != nil
+        } ? {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            return formatter
+        }() : nil
+        var previousSourceID: String?
+        var previousSequence: UInt64?
+        var previousLineOpen = false
+
+        for (offset, item) in items.enumerated() {
+            if offset & 63 == 0 { try Task.checkCancellation() }
+            let record = item.record
+            let continuesPreviousFragment = !record.startsLine
+                && previousLineOpen
+                && previousSourceID == record.sourceID
+                && previousSequence.map { $0 &+ 1 == item.sequence } == true
+            let truncatedStart = !record.startsLine && !continuesPreviousFragment
+            let beginsSegment = record.startsLine || truncatedStart
+            if previousLineOpen && !continuesPreviousFragment { chunks.append("\n") }
+            if beginsSegment, showSourceLabels {
+                if let cached = cachedSourcePrefixes[record.sourceID] {
+                    chunks.append(cached)
+                } else {
+                    let label = sourceLabels[record.sourceID] ?? record.sourceID
+                    let prefix = "[\(displaySafeLabel(label))] "
+                    cachedSourcePrefixes[record.sourceID] = prefix
+                    chunks.append(prefix)
+                }
+            }
+            if beginsSegment,
+                let milliseconds = record.timestampUnixMilliseconds,
+                let timestampFormatter
+            {
+                chunks.append(timestampFormatter.string(
+                    from: Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+                ) + " ")
+            }
+            if truncatedStart { chunks.append("… ") }
+            chunks.append(String(decoding: record.data, as: UTF8.self))
+            if record.endsWithNewline { chunks.append("\n") }
+
+            previousSourceID = record.sourceID
+            previousSequence = item.sequence
+            previousLineOpen = !record.endsWithNewline
+        }
+        try Task.checkCancellation()
+        return chunks.joined()
+    }
+
+    fileprivate struct DisplayProjection {
         var chunks: [String]
         var outputUTF8Bytes: Int
         var truncatedLines: Int
+    }
+
+    fileprivate struct DisplayProjectionState: Equatable {
+        var displayedLineUTF8Bytes = 0
+        var lineIsTruncated = false
     }
 
     /// Produces a bounded screen projection without joining or reshaping a
     /// pathological logical line. Newline controls remain exact so Save can
     /// use the untouched logical chunks and the viewport can retain stable
     /// display chunks between streaming updates.
-    private static func makeDisplayProjection(
+    fileprivate static func makeDisplayProjection(
         chunks: [String],
+        maximumLineUTF8Bytes: Int,
+        truncationMarker: String
+    ) throws -> DisplayProjection {
+        var state = DisplayProjectionState()
+        return try appendDisplayProjection(
+            chunks: chunks,
+            state: &state,
+            maximumLineUTF8Bytes: maximumLineUTF8Bytes,
+            truncationMarker: truncationMarker
+        )
+    }
+
+    fileprivate static func appendDisplayProjection(
+        chunks: [String],
+        state: inout DisplayProjectionState,
         maximumLineUTF8Bytes: Int,
         truncationMarker: String
     ) throws -> DisplayProjection {
         var result: [String] = []
         result.reserveCapacity(chunks.count)
         var outputUTF8Bytes = 0
-        var displayedLineUTF8Bytes = 0
-        var lineIsTruncated = false
         var truncatedLines = 0
         let newlineCharacters = CharacterSet.newlines
 
@@ -1083,7 +1290,7 @@ public enum LogTextRenderer {
                 let segmentEnd = newline.location == NSNotFound
                     ? value.length
                     : newline.location
-                if segmentEnd > cursor, !lineIsTruncated {
+                if segmentEnd > cursor, !state.lineIsTruncated {
                     let segment = cursor == 0 && segmentEnd == value.length
                         ? chunk
                         : value.substring(with: NSRange(
@@ -1093,26 +1300,26 @@ public enum LogTextRenderer {
                     let segmentUTF8Bytes = segment.utf8.count
                     let remaining = max(
                         0,
-                        maximumLineUTF8Bytes - displayedLineUTF8Bytes
+                        maximumLineUTF8Bytes - state.displayedLineUTF8Bytes
                     )
                     if segmentUTF8Bytes <= remaining {
                         append(segment)
-                        displayedLineUTF8Bytes += segmentUTF8Bytes
+                        state.displayedLineUTF8Bytes += segmentUTF8Bytes
                     } else {
                         let prefix = utf8Prefix(segment, maximumBytes: remaining)
                         append(prefix)
-                        displayedLineUTF8Bytes += prefix.utf8.count
-                        if displayedLineUTF8Bytes > 0 { append(" ") }
+                        state.displayedLineUTF8Bytes += prefix.utf8.count
+                        if state.displayedLineUTF8Bytes > 0 { append(" ") }
                         append(truncationMarker)
-                        lineIsTruncated = true
+                        state.lineIsTruncated = true
                         truncatedLines += 1
                     }
                 }
 
                 guard newline.location != NSNotFound else { break }
                 append(value.substring(with: newline))
-                displayedLineUTF8Bytes = 0
-                lineIsTruncated = false
+                state.displayedLineUTF8Bytes = 0
+                state.lineIsTruncated = false
                 cursor = NSMaxRange(newline)
             }
         }
@@ -1123,7 +1330,7 @@ public enum LogTextRenderer {
         )
     }
 
-    private static func utf8Prefix(_ value: String, maximumBytes: Int) -> String {
+    fileprivate static func utf8Prefix(_ value: String, maximumBytes: Int) -> String {
         guard maximumBytes > 0 else { return "" }
         let utf8 = value.utf8
         guard utf8.count > maximumBytes else { return value }
@@ -1135,9 +1342,382 @@ public enum LogTextRenderer {
         return String(value[..<stringEnd])
     }
 
-    private static func displaySafeLabel(_ value: String) -> String {
+    fileprivate static func displaySafeLabel(_ value: String) -> String {
         String(value.unicodeScalars.map { scalar in
             CharacterSet.controlCharacters.contains(scalar) ? "�" : String(scalar)
         }.joined().prefix(512))
+    }
+}
+
+/// Actor-confined incremental screen projection. Candidate records advance in
+/// one direction, so normal updates consist only of a prefix eviction and a
+/// formatted suffix append. Arrays use advancing heads to avoid shifting the
+/// retained history on every batch.
+private final class LogDisplayCache {
+    private struct ProcessedRecord {
+        var sequence: UInt64
+        var matched: Bool
+        var sourceBytes: Int
+    }
+
+    private struct Candidate {
+        var sequence: UInt64
+        var item: LogDisplayItem
+        var estimatedOutputUTF8Bytes: Int
+        var logicalOutputUTF8Bytes: Int
+        var displayOutputUTF8Bytes: Int
+        var displayTruncatedLines: Int
+        var displayState: LogTextRenderer.DisplayProjectionState
+        var dependsOnPrevious: Bool
+    }
+
+    let configuration: LogDisplayRenderConfiguration
+    let contentRevision: UInt64
+    private(set) var revision: UInt64
+    private let foldedFilter: String
+    private var processedRecords: [ProcessedRecord] = []
+    private var processedHead = 0
+    private var candidates: [Candidate] = []
+    private var candidateHead = 0
+    private var candidatePrefixNeedsRepair = false
+    private var lastProcessedSequence: UInt64?
+    private var matchingRecordCount = 0
+    private var matchingSourceBytes: UInt64 = 0
+    private var candidateSourceBytes: UInt64 = 0
+    private var candidateEstimatedOutputUTF8Bytes = 0
+    private var candidateLogicalOutputUTF8Bytes = 0
+    private var candidateDisplayOutputUTF8Bytes = 0
+    private var candidateDisplayTruncatedLines = 0
+    private var sourcePrefixes: [String: String] = [:]
+    private lazy var timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+
+    init(
+        configuration: LogDisplayRenderConfiguration,
+        contentRevision: UInt64,
+        revision: UInt64
+    ) {
+        self.configuration = configuration
+        self.contentRevision = contentRevision
+        self.revision = revision << 32
+        foldedFilter = configuration.filter.lowercased()
+    }
+
+    func synchronize(with ring: LogRecordRing) throws -> Int {
+        if let lastProcessedSequence,
+            lastProcessedSequence &+ 1 < ring.firstSequence
+        {
+            resetContents()
+        }
+
+        discardRecords(olderThan: ring.firstSequence)
+        var processedCount = 0
+        let after = lastProcessedSequence ?? 0
+        for entry in ring.sequencedRecords where entry.sequence > after {
+            if processedCount & 63 == 0 { try Task.checkCancellation() }
+            try append(entry)
+            lastProcessedSequence = entry.sequence
+            processedCount += 1
+        }
+        if candidatePrefixNeedsRepair {
+            if candidateHead < candidates.count,
+                candidates[candidateHead].dependsOnPrevious
+            {
+                try repairCandidatePrefix()
+            }
+            candidatePrefixNeedsRepair = false
+        }
+        compactIfNeeded()
+        return processedCount
+    }
+
+    func makeUpdate(
+        after cursor: LogDisplayCursor?,
+        processedRecordCount: Int
+    ) -> LogDisplayUpdate {
+        let activeCount = candidates.count - candidateHead
+        let firstSequence = activeCount == 0 ? nil : candidates[candidateHead].sequence
+        let lastSequence = activeCount == 0 ? nil : candidates[candidates.count - 1].sequence
+        let currentCursor = LogDisplayCursor(
+            revision: revision,
+            firstSequence: firstSequence,
+            lastSequence: lastSequence
+        )
+
+        let replacesAll: Bool
+        let items: [LogDisplayItem]
+        if cursor?.revision != revision {
+            replacesAll = true
+            items = candidates[candidateHead...].map(\.item)
+        } else if activeCount == 0 {
+            replacesAll = false
+            items = []
+        } else if let installedLast = cursor?.lastSequence,
+            let overlapIndex = candidateIndex(for: installedLast)
+        {
+            replacesAll = false
+            let suffixStart = overlapIndex + 1
+            items = suffixStart < candidates.count
+                ? candidates[suffixStart...].map(\.item)
+                : []
+        } else {
+            replacesAll = true
+            items = candidates[candidateHead...].map(\.item)
+        }
+
+        return LogDisplayUpdate(
+            replacesAll: replacesAll,
+            firstSequence: firstSequence,
+            items: items,
+            cursor: currentCursor,
+            renderedRecords: activeCount,
+            omittedRecords: max(0, matchingRecordCount - activeCount),
+            omittedSourceBytes: matchingSourceBytes >= candidateSourceBytes
+                ? matchingSourceBytes - candidateSourceBytes : 0,
+            outputUTF8Bytes: candidateLogicalOutputUTF8Bytes,
+            displayOutputUTF8Bytes: candidateDisplayOutputUTF8Bytes,
+            displayTruncatedLines: candidateDisplayTruncatedLines,
+            processedRecordCount: processedRecordCount
+        )
+    }
+
+    private func append(_ entry: SequencedLogRecord) throws {
+        let record = entry.record
+        let decoded = String(decoding: record.data, as: UTF8.self)
+        let matches = foldedFilter.isEmpty
+            || decoded.lowercased().contains(foldedFilter)
+        guard matches else {
+            processedRecords.append(ProcessedRecord(
+                sequence: entry.sequence,
+                matched: false,
+                sourceBytes: record.data.count
+            ))
+            return
+        }
+
+        let sourcePrefix = sourcePrefix(for: record.sourceID)
+        let timestampPrefix = timestampPrefix(for: record)
+        let continuationPrefix = record.startsLine ? "" : "… "
+        let logical = sourcePrefix + timestampPrefix + continuationPrefix + decoded
+        // Preserve the renderer's conservative budget while allowing the
+        // actual display formatter below to join contiguous line fragments.
+        let estimate = logical.utf8.count + 1
+            + (record.endsWithNewline ? 1 : 0)
+        if estimate > configuration.maximumOutputUTF8Bytes {
+            processedRecords.append(ProcessedRecord(
+                sequence: entry.sequence,
+                matched: true,
+                sourceBytes: record.data.count
+            ))
+            matchingRecordCount += 1
+            matchingSourceBytes &+= UInt64(record.data.count)
+            return
+        }
+
+        let candidate = try makeCandidate(
+            sequence: entry.sequence,
+            record: record,
+            decoded: decoded,
+            estimate: estimate,
+            previous: candidateHead < candidates.count ? candidates.last : nil
+        )
+        processedRecords.append(ProcessedRecord(
+            sequence: entry.sequence,
+            matched: true,
+            sourceBytes: record.data.count
+        ))
+        matchingRecordCount += 1
+        matchingSourceBytes &+= UInt64(record.data.count)
+        candidates.append(candidate)
+        candidateSourceBytes &+= UInt64(record.data.count)
+        candidateEstimatedOutputUTF8Bytes += estimate
+        candidateLogicalOutputUTF8Bytes += candidate.logicalOutputUTF8Bytes
+        candidateDisplayOutputUTF8Bytes += candidate.displayOutputUTF8Bytes
+        candidateDisplayTruncatedLines += candidate.displayTruncatedLines
+
+        while candidateHead < candidates.count,
+            candidateEstimatedOutputUTF8Bytes > configuration.maximumOutputUTF8Bytes
+        {
+            discardFirstCandidate()
+        }
+    }
+
+    private func makeCandidate(
+        sequence: UInt64,
+        record: LogRecord,
+        decoded: String,
+        estimate: Int,
+        previous: Candidate?
+    ) throws -> Candidate {
+        let previousRecord = previous?.item.record
+        let previousLineOpen = previousRecord.map { !$0.endsWithNewline } ?? false
+        let continuesPreviousVisibleFragment = !record.startsLine
+            && previousLineOpen
+            && previousRecord?.sourceID == record.sourceID
+            && previous?.sequence == sequence - 1
+        let truncatedStart = !record.startsLine && !continuesPreviousVisibleFragment
+        let beginsVisibleSegment = record.startsLine || truncatedStart
+        let separator = previousLineOpen && !continuesPreviousVisibleFragment
+            ? "\n" : ""
+        let prefix = beginsVisibleSegment ? sourcePrefix(for: record.sourceID) : ""
+        let timestamp = beginsVisibleSegment ? timestampPrefix(for: record) : ""
+        let truncation = truncatedStart ? "… " : ""
+        let logicalPrefix = separator + prefix + timestamp + truncation
+        var chunks: [String] = []
+        if !logicalPrefix.isEmpty { chunks.append(logicalPrefix) }
+        chunks.append(decoded)
+        if record.endsWithNewline { chunks.append("\n") }
+
+        var displayState = previous?.displayState
+            ?? LogTextRenderer.DisplayProjectionState()
+        let display = try LogTextRenderer.appendDisplayProjection(
+            chunks: chunks,
+            state: &displayState,
+            maximumLineUTF8Bytes: configuration.maximumDisplayedLineUTF8Bytes,
+            truncationMarker: LogTextRenderer.displayTruncationMarker
+        )
+        return Candidate(
+            sequence: sequence,
+            item: LogDisplayItem(
+                sequence: sequence,
+                text: display.chunks.joined(),
+                record: record
+            ),
+            estimatedOutputUTF8Bytes: estimate,
+            logicalOutputUTF8Bytes: chunks.reduce(into: 0) {
+                $0 += $1.utf8.count
+            },
+            displayOutputUTF8Bytes: display.outputUTF8Bytes,
+            displayTruncatedLines: display.truncatedLines,
+            displayState: displayState,
+            dependsOnPrevious: previousLineOpen
+        )
+    }
+
+    /// Prefix eviction can expose a fragment whose old screen chunk depended
+    /// on an evicted open line. Reformat only through that logical line; the
+    /// first newline resets every downstream display dependency.
+    private func repairCandidatePrefix() throws {
+        var previous: Candidate?
+        var changed = false
+        var index = candidateHead
+        while index < candidates.count {
+            let old = candidates[index]
+            let rebuilt = try makeCandidate(
+                sequence: old.sequence,
+                record: old.item.record,
+                decoded: String(decoding: old.item.record.data, as: UTF8.self),
+                estimate: old.estimatedOutputUTF8Bytes,
+                previous: previous
+            )
+            candidateLogicalOutputUTF8Bytes += rebuilt.logicalOutputUTF8Bytes
+                - old.logicalOutputUTF8Bytes
+            candidateDisplayOutputUTF8Bytes += rebuilt.displayOutputUTF8Bytes
+                - old.displayOutputUTF8Bytes
+            candidateDisplayTruncatedLines += rebuilt.displayTruncatedLines
+                - old.displayTruncatedLines
+            if rebuilt.item.text != old.item.text
+                || rebuilt.displayState != old.displayState
+                || rebuilt.logicalOutputUTF8Bytes != old.logicalOutputUTF8Bytes
+            {
+                changed = true
+            }
+            candidates[index] = rebuilt
+            previous = rebuilt
+            index += 1
+            if rebuilt.item.record.endsWithNewline { break }
+        }
+        if changed { revision &+= 1 }
+    }
+
+    private func sourcePrefix(for sourceID: String) -> String {
+        guard configuration.showSourceLabels else { return "" }
+        if let cached = sourcePrefixes[sourceID] { return cached }
+        let label = configuration.sourceLabels[sourceID] ?? sourceID
+        let prefix = "[\(LogTextRenderer.displaySafeLabel(label))] "
+        sourcePrefixes[sourceID] = prefix
+        return prefix
+    }
+
+    private func timestampPrefix(for record: LogRecord) -> String {
+        guard let milliseconds = record.timestampUnixMilliseconds else { return "" }
+        return timestampFormatter.string(
+            from: Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+        ) + " "
+    }
+
+    private func discardRecords(olderThan firstSequence: UInt64) {
+        while processedHead < processedRecords.count,
+            processedRecords[processedHead].sequence < firstSequence
+        {
+            let removed = processedRecords[processedHead]
+            processedHead += 1
+            if removed.matched {
+                matchingRecordCount -= 1
+                matchingSourceBytes -= UInt64(removed.sourceBytes)
+            }
+        }
+        while candidateHead < candidates.count,
+            candidates[candidateHead].sequence < firstSequence
+        {
+            discardFirstCandidate()
+        }
+    }
+
+    private func discardFirstCandidate() {
+        let removed = candidates[candidateHead]
+        candidateHead += 1
+        candidateSourceBytes -= UInt64(removed.item.record.data.count)
+        candidateEstimatedOutputUTF8Bytes -= removed.estimatedOutputUTF8Bytes
+        candidateLogicalOutputUTF8Bytes -= removed.logicalOutputUTF8Bytes
+        candidateDisplayOutputUTF8Bytes -= removed.displayOutputUTF8Bytes
+        candidateDisplayTruncatedLines -= removed.displayTruncatedLines
+        candidatePrefixNeedsRepair = true
+    }
+
+    private func candidateIndex(for sequence: UInt64) -> Int? {
+        var low = candidateHead
+        var high = candidates.count
+        while low < high {
+            let middle = (low + high) / 2
+            if candidates[middle].sequence < sequence {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+        return low < candidates.count && candidates[low].sequence == sequence
+            ? low : nil
+    }
+
+    private func resetContents() {
+        processedRecords.removeAll(keepingCapacity: true)
+        processedHead = 0
+        candidates.removeAll(keepingCapacity: true)
+        candidateHead = 0
+        candidatePrefixNeedsRepair = false
+        lastProcessedSequence = nil
+        matchingRecordCount = 0
+        matchingSourceBytes = 0
+        candidateSourceBytes = 0
+        candidateEstimatedOutputUTF8Bytes = 0
+        candidateLogicalOutputUTF8Bytes = 0
+        candidateDisplayOutputUTF8Bytes = 0
+        candidateDisplayTruncatedLines = 0
+    }
+
+    private func compactIfNeeded() {
+        if processedHead >= 4_096, processedHead >= processedRecords.count / 2 {
+            processedRecords.removeFirst(processedHead)
+            processedHead = 0
+        }
+        if candidateHead >= 4_096, candidateHead >= candidates.count / 2 {
+            candidates.removeFirst(candidateHead)
+            candidateHead = 0
+        }
     }
 }

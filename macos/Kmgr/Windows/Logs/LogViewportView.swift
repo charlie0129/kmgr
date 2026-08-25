@@ -29,6 +29,55 @@ struct LogViewportTextStyle: Hashable, Sendable {
     }
 }
 
+/// A bounded random-access queue. Prefix eviction advances an index instead of
+/// shifting every offscreen chunk or line; occasional compaction keeps the
+/// backing allocation proportional to retained content.
+fileprivate struct LogHeadBuffer<Element: Sendable>: RandomAccessCollection, Sendable {
+    typealias Index = Int
+
+    private var storage: [Element]
+    private var head: Int
+
+    init(_ elements: [Element] = []) {
+        storage = elements
+        head = 0
+    }
+
+    var startIndex: Int { 0 }
+    var endIndex: Int { storage.count - head }
+
+    subscript(position: Int) -> Element {
+        precondition(indices.contains(position))
+        return storage[head + position]
+    }
+
+    mutating func append(_ element: Element) {
+        storage.append(element)
+    }
+
+    mutating func append<S: Sequence>(contentsOf elements: S) where S.Element == Element {
+        storage.append(contentsOf: elements)
+    }
+
+    mutating func discardFirst(_ count: Int) {
+        precondition(count >= 0 && count <= self.count)
+        head += count
+        compactIfNeeded()
+    }
+
+    mutating func discardLast(_ count: Int = 1) {
+        precondition(count >= 0 && count <= self.count)
+        storage.removeLast(count)
+        if storage.isEmpty { head = 0 }
+    }
+
+    private mutating func compactIfNeeded() {
+        guard head >= 4_096, head >= storage.count / 2 else { return }
+        storage.removeFirst(head)
+        head = 0
+    }
+}
+
 private struct LogViewportCellBoundary: Sendable {
     /// Cell boundary after a grapheme whose UTF-16 length was not one.
     var cellBoundary: Int
@@ -126,9 +175,34 @@ struct LogViewportLine: Sendable {
     }
 }
 
+/// Presents absolute stored line ranges in the projection's current local text
+/// coordinate space without rewriting every retained range after eviction.
+struct LogViewportLines: RandomAccessCollection, Sendable {
+    typealias Index = Int
+
+    fileprivate var storage: LogHeadBuffer<LogViewportLine>
+    fileprivate var textOrigin: Int
+
+    var startIndex: Int { storage.startIndex }
+    var endIndex: Int { storage.endIndex }
+
+    subscript(position: Int) -> LogViewportLine {
+        var line = storage[position]
+        line.textRange.location -= textOrigin
+        return line
+    }
+}
+
 struct LogViewportJSONHighlight {
     var tokens: [SyntaxToken]
     var scannedUTF16Length: Int
+}
+
+struct LogViewportProjectionEditResult {
+    var removedLineCount: Int
+    /// The previous open final line is replaced by this many rebuilt lines
+    /// when a suffix is appended.
+    var rebuiltTailLineCount: Int
 }
 
 /// Main-actor-independent text and cell index. It contains no glyphs, pixel
@@ -140,12 +214,19 @@ struct LogViewportProjection: Sendable {
     private static let jsonHighlightLookaheadCells = 4 * 1_024
 
     var style: LogViewportTextStyle
-    var chunks: [String]
-    var chunkStarts: [Int]
-    var lines: [LogViewportLine]
+    private var chunkStorage: LogHeadBuffer<String>
+    private var chunkStartStorage: LogHeadBuffer<Int>
+    private var lineStorage: LogHeadBuffer<LogViewportLine>
+    private var textOrigin: Int
     var textUTF16Length: Int
     var maximumCellCount: Int
     var highlightedText: String
+
+    var lines: LogViewportLines {
+        LogViewportLines(storage: lineStorage, textOrigin: textOrigin)
+    }
+
+    var chunkCount: Int { chunkStorage.count }
 
     var maximumWidth: Double {
         Double(maximumCellCount) * style.cellWidth
@@ -157,15 +238,16 @@ struct LogViewportProjection: Sendable {
     ) -> Self {
         Self(
             style: style,
-            chunks: [],
-            chunkStarts: [],
-            lines: [LogViewportLine(
+            chunkStorage: LogHeadBuffer(),
+            chunkStartStorage: LogHeadBuffer(),
+            lineStorage: LogHeadBuffer([LogViewportLine(
                 textRange: NSRange(location: 0, length: 0),
                 cellCount: 0,
                 isASCII: true,
                 hasJSONObjectBoundaries: false,
                 variableBoundaries: []
-            )],
+            )]),
+            textOrigin: 0,
             textUTF16Length: 0,
             maximumCellCount: 0,
             highlightedText: highlightedText
@@ -173,8 +255,8 @@ struct LogViewportProjection: Sendable {
     }
 
     /// Reuses the immutable line index for an unchanged projection and only
-    /// rebuilds its open final line for a pure append. Prefix eviction and a
-    /// filter replacement take the bounded full-index path.
+    /// rebuilds its open final line for a pure append. Live log rendering uses
+    /// `applyLineAlignedEdit` below so prefix eviction also remains incremental.
     static func make(
         chunks: [String],
         previous: Self?,
@@ -188,11 +270,11 @@ struct LogViewportProjection: Sendable {
         } ?? 0
 
         if let previous,
-            retainedChunkCount == previous.chunks.count,
-            chunks.count >= previous.chunks.count,
-            zip(previous.chunks, chunks).allSatisfy(==)
+            retainedChunkCount == previous.chunkStorage.count,
+            chunks.count >= previous.chunkStorage.count,
+            zip(previous.chunkStorage, chunks).allSatisfy(==)
         {
-            if chunks.count == previous.chunks.count {
+            if chunks.count == previous.chunkStorage.count {
                 var replacement = previous
                 replacement.style = style
                 replacement.highlightedText = highlightedText
@@ -211,7 +293,7 @@ struct LogViewportProjection: Sendable {
                 location: rebuildStart,
                 length: previous.textUTF16Length - rebuildStart
             ))]
-            suffix.append(contentsOf: chunks.dropFirst(previous.chunks.count))
+            suffix.append(contentsOf: chunks.dropFirst(previous.chunkStorage.count))
             var builder = LineIndexBuilder(
                 startOffset: rebuildStart,
                 precedingTerminatorWasCarriageReturn: previous.codeUnitBeforeEnd == 0x000d
@@ -222,9 +304,10 @@ struct LogViewportProjection: Sendable {
             let lines = Array(previous.lines.dropLast()) + rebuiltLines
             return Self(
                 style: style,
-                chunks: chunks,
-                chunkStarts: chunkStarts,
-                lines: lines,
+                chunkStorage: LogHeadBuffer(chunks),
+                chunkStartStorage: LogHeadBuffer(chunkStarts),
+                lineStorage: LogHeadBuffer(lines),
+                textOrigin: 0,
                 textUTF16Length: textUTF16Length,
                 maximumCellCount: lines.lazy.map(\.cellCount).max() ?? 0,
                 highlightedText: highlightedText
@@ -236,17 +319,95 @@ struct LogViewportProjection: Sendable {
         let lines = try builder.finish()
         return Self(
             style: style,
-            chunks: chunks,
-            chunkStarts: chunkStarts,
-            lines: lines,
+            chunkStorage: LogHeadBuffer(chunks),
+            chunkStartStorage: LogHeadBuffer(chunkStarts),
+            lineStorage: LogHeadBuffer(lines),
+            textOrigin: 0,
             textUTF16Length: textUTF16Length,
             maximumCellCount: lines.lazy.map(\.cellCount).max() ?? 0,
             highlightedText: highlightedText
         )
     }
 
+    /// Applies the normal live-log edit without touching retained chunks or
+    /// line metadata. Chunk starts and line ranges remain absolute internally;
+    /// advancing `textOrigin` makes prefix eviction O(evicted + appended).
+    mutating func applyLineAlignedEdit(
+        removePrefixChunkCount: Int,
+        appendChunks: [String]
+    ) throws -> LogViewportProjectionEditResult {
+        precondition(
+            removePrefixChunkCount >= 0
+                && removePrefixChunkCount <= chunkStorage.count
+        )
+        var removedUTF16Length = 0
+        for index in 0..<removePrefixChunkCount {
+            removedUTF16Length += chunkStorage[index].utf16.count
+        }
+        let replacementOrigin = textOrigin + removedUTF16Length
+        chunkStorage.discardFirst(removePrefixChunkCount)
+        chunkStartStorage.discardFirst(removePrefixChunkCount)
+
+        var removedLineCount = 0
+        while removedLineCount < lineStorage.count,
+            lineStorage[removedLineCount].textRange.location < replacementOrigin
+        {
+            removedLineCount += 1
+        }
+        lineStorage.discardFirst(removedLineCount)
+        textOrigin = replacementOrigin
+        textUTF16Length -= removedUTF16Length
+
+        guard !appendChunks.isEmpty else {
+            return LogViewportProjectionEditResult(
+                removedLineCount: removedLineCount,
+                rebuiltTailLineCount: 0
+            )
+        }
+
+        let finalLine = lines.last ?? LogViewportLine(
+            textRange: NSRange(location: textUTF16Length, length: 0),
+            cellCount: 0,
+            isASCII: true,
+            hasJSONObjectBoundaries: false,
+            variableBoundaries: []
+        )
+        let rebuildStart = textOrigin + finalLine.textRange.location
+        let retainedOpenSuffix = substring(in: finalLine.textRange)
+        let precedingTerminatorWasCarriageReturn = codeUnitBeforeEnd == 0x000d
+            && finalLine.textRange.location == textUTF16Length
+        lineStorage.discardLast()
+
+        var absoluteEnd = textOrigin + textUTF16Length
+        for chunk in appendChunks {
+            chunkStartStorage.append(absoluteEnd)
+            chunkStorage.append(chunk)
+            let length = chunk.utf16.count
+            absoluteEnd += length
+            textUTF16Length += length
+        }
+
+        var builder = LineIndexBuilder(
+            startOffset: rebuildStart,
+            precedingTerminatorWasCarriageReturn:
+                precedingTerminatorWasCarriageReturn
+        )
+        if !retainedOpenSuffix.isEmpty { builder.append(retainedOpenSuffix) }
+        try builder.append(contentsOf: appendChunks)
+        let rebuiltLines = try builder.finish()
+        lineStorage.append(contentsOf: rebuiltLines)
+        maximumCellCount = max(
+            maximumCellCount,
+            rebuiltLines.lazy.map(\.cellCount).max() ?? 0
+        )
+        return LogViewportProjectionEditResult(
+            removedLineCount: removedLineCount,
+            rebuiltTailLineCount: rebuiltLines.count
+        )
+    }
+
     func joinedText() -> String {
-        chunks.joined()
+        chunkStorage.joined()
     }
 
     func substring(in requestedRange: NSRange) -> String {
@@ -267,15 +428,17 @@ struct LogViewportProjection: Sendable {
         var chunkIndex = chunkIndex(containingOrFollowing: start)
         var result = String()
         result.reserveCapacity(end - start)
-        while chunkIndex < chunks.count {
-            let chunkStart = chunkStarts[chunkIndex]
-            let chunk = chunks[chunkIndex]
+        let absoluteStart = textOrigin + start
+        let absoluteEnd = textOrigin + end
+        while chunkIndex < chunkStorage.count {
+            let chunkStart = chunkStartStorage[chunkIndex]
+            let chunk = chunkStorage[chunkIndex]
             let chunkLength = chunk.utf16.count
             let chunkEnd = chunkStart + chunkLength
-            if chunkStart >= end { break }
-            if chunkEnd > start {
-                let localStart = max(0, start - chunkStart)
-                let localEnd = min(chunkLength, end - chunkStart)
+            if chunkStart >= absoluteEnd { break }
+            if chunkEnd > absoluteStart {
+                let localStart = max(0, absoluteStart - chunkStart)
+                let localEnd = min(chunkLength, absoluteEnd - chunkStart)
                 if localEnd > localStart {
                     result += (chunk as NSString).substring(with: NSRange(
                         location: localStart,
@@ -413,20 +576,21 @@ struct LogViewportProjection: Sendable {
     }
 
     private func chunkIndex(containingOrFollowing textIndex: Int) -> Int {
-        guard !chunks.isEmpty else { return 0 }
+        guard !chunkStorage.isEmpty else { return 0 }
+        let absoluteIndex = textOrigin + textIndex
         var low = 0
-        var high = chunkStarts.count
+        var high = chunkStartStorage.count
         while low < high {
             let middle = (low + high) / 2
-            if chunkStarts[middle] <= textIndex {
+            if chunkStartStorage[middle] <= absoluteIndex {
                 low = middle + 1
             } else {
                 high = middle
             }
         }
         var index = max(0, low - 1)
-        while index < chunks.count,
-            chunkStarts[index] + chunks[index].utf16.count <= textIndex
+        while index < chunkStorage.count,
+            chunkStartStorage[index] + chunkStorage[index].utf16.count <= absoluteIndex
         {
             index += 1
         }
@@ -710,9 +874,16 @@ private struct LogViewportVisualRow {
 private struct LogViewportGeometry {
     var wrapsLines: Bool
     var columnCapacity: Int
-    var lineRowStarts: [Int]
+    private var lineRowStarts: LogHeadBuffer<Int>
+    private(set) var lineCount: Int
 
-    var visualRowCount: Int { lineRowStarts.last ?? 1 }
+    var visualRowCount: Int {
+        guard wrapsLines else { return max(1, lineCount) }
+        guard let first = lineRowStarts.first, let last = lineRowStarts.last else {
+            return 1
+        }
+        return max(1, last - first)
+    }
 
     init(
         projection: LogViewportProjection,
@@ -729,16 +900,44 @@ private struct LogViewportGeometry {
             ))
         )
         var starts = [0]
-        starts.reserveCapacity(projection.lines.count + 1)
+        if wrapsLines { starts.reserveCapacity(projection.lines.count + 1) }
         var total = 0
-        for line in projection.lines {
-            let rows = wrapsLines
-                ? max(1, (line.cellCount + columnCapacity - 1) / columnCapacity)
-                : 1
-            total += rows
-            starts.append(total)
+        if wrapsLines {
+            for line in projection.lines {
+                total += max(1, (line.cellCount + columnCapacity - 1) / columnCapacity)
+                starts.append(total)
+            }
         }
-        lineRowStarts = starts
+        lineRowStarts = LogHeadBuffer(starts)
+        lineCount = projection.lines.count
+    }
+
+    mutating func apply(
+        _ edit: LogViewportProjectionEditResult,
+        projection: LogViewportProjection
+    ) {
+        defer { lineCount = projection.lines.count }
+        guard wrapsLines else { return }
+        if edit.removedLineCount > 0 {
+            lineRowStarts.discardFirst(edit.removedLineCount)
+        }
+        guard edit.rebuiltTailLineCount > 0 else { return }
+
+        // The old open final line contributed the last endpoint. Retain its
+        // start and append endpoints for only the rebuilt tail.
+        lineRowStarts.discardLast()
+        var total = lineRowStarts.last ?? 0
+        for line in projection.lines.suffix(edit.rebuiltTailLineCount) {
+            total += rows(for: line)
+            lineRowStarts.append(total)
+        }
+    }
+
+    func rowStart(forLine lineIndex: Int) -> Int {
+        guard wrapsLines, let origin = lineRowStarts.first else {
+            return lineIndex
+        }
+        return lineRowStarts[lineIndex] - origin
     }
 
     func visualRow(
@@ -746,11 +945,21 @@ private struct LogViewportGeometry {
         projection: LogViewportProjection
     ) -> LogViewportVisualRow {
         let row = max(0, min(requestedRow, max(0, visualRowCount - 1)))
+        guard wrapsLines else {
+            let lineIndex = min(row, projection.lines.count - 1)
+            let line = projection.lines[lineIndex]
+            return LogViewportVisualRow(
+                lineIndex: lineIndex,
+                cells: 0..<line.cellCount
+            )
+        }
+
+        let absoluteRow = (lineRowStarts.first ?? 0) + row
         var low = 0
-        var high = max(0, lineRowStarts.count - 1)
+        var high = max(0, lineCount - 1)
         while low < high {
             let middle = (low + high + 1) / 2
-            if lineRowStarts[middle] <= row {
+            if lineRowStarts[middle] <= absoluteRow {
                 low = middle
             } else {
                 high = middle - 1
@@ -758,16 +967,14 @@ private struct LogViewportGeometry {
         }
         let lineIndex = min(low, projection.lines.count - 1)
         let line = projection.lines[lineIndex]
-        guard wrapsLines else {
-            return LogViewportVisualRow(
-                lineIndex: lineIndex,
-                cells: 0..<line.cellCount
-            )
-        }
-        let rowWithinLine = row - lineRowStarts[lineIndex]
+        let rowWithinLine = absoluteRow - lineRowStarts[lineIndex]
         let start = min(line.cellCount, rowWithinLine * columnCapacity)
         let end = min(line.cellCount, start + columnCapacity)
         return LogViewportVisualRow(lineIndex: lineIndex, cells: start..<end)
+    }
+
+    private func rows(for line: LogViewportLine) -> Int {
+        max(1, (line.cellCount + columnCapacity - 1) / columnCapacity)
     }
 }
 
@@ -791,6 +998,9 @@ final class LogViewportView: NSView, NSMenuItemValidation {
     private(set) var lastDrawnUnicodeCellCount = 0
     private(set) var lastJSONTokenCount = 0
     private(set) var lastJSONScannedUTF16Length = 0
+    /// Lines indexed by the most recent projection installation. Sustained
+    /// updates should report only their appended suffix, never retained rows.
+    private(set) var lastProjectionIndexedLineCount = 0
 
     var selectedRangeValue = NSRange(location: 0, length: 0) {
         didSet { setNeedsDisplay(visibleRect) }
@@ -849,8 +1059,25 @@ final class LogViewportView: NSView, NSMenuItemValidation {
         viewportSize: NSSize
     ) {
         projection = replacement
+        lastProjectionIndexedLineCount = replacement.lines.count
         setSelectedRange(selectedRangeValue)
         rebuildGeometry(viewportSize: viewportSize)
+        updateFrame(for: viewportSize)
+        setNeedsDisplay(visibleRect)
+    }
+
+    func applyLineAlignedEdit(
+        removePrefixChunkCount: Int,
+        appendChunks: [String],
+        viewportSize: NSSize
+    ) throws {
+        let edit = try projection.applyLineAlignedEdit(
+            removePrefixChunkCount: removePrefixChunkCount,
+            appendChunks: appendChunks
+        )
+        lastProjectionIndexedLineCount = edit.rebuiltTailLineCount
+        geometry.apply(edit, projection: projection)
+        setSelectedRange(selectedRangeValue)
         updateFrame(for: viewportSize)
         setNeedsDisplay(visibleRect)
     }
@@ -871,7 +1098,7 @@ final class LogViewportView: NSView, NSMenuItemValidation {
         let capacity = columnCapacity(for: viewportSize.width)
         if geometry.wrapsLines != wrapsLines
             || (wrapsLines && oldCapacity != capacity)
-            || geometry.lineRowStarts.count != projection.lines.count + 1
+            || geometry.lineCount != projection.lines.count
         {
             rebuildGeometry(viewportSize: viewportSize)
         }
@@ -906,7 +1133,7 @@ final class LogViewportView: NSView, NSMenuItemValidation {
             roundingUp: false
         )
         let rowWithinLine = wrapsLines ? cell / geometry.columnCapacity : 0
-        let row = geometry.lineRowStarts[lineIndex] + rowWithinLine
+        let row = geometry.rowStart(forLine: lineIndex) + rowWithinLine
         return textContainerInset.height
             + CGFloat(row) * CGFloat(projection.style.lineHeight)
             + CGFloat(anchor.offsetWithinRow)
