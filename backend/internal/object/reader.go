@@ -592,6 +592,7 @@ func summarize(value *unstructured.Unstructured) []SummaryField {
 
 	switch value.GetKind() {
 	case "Pod":
+		fields = append(fields, podRestartSummary(value.Object)...)
 		fields = append(fields, podOverviewSummary(value.Object)...)
 		fields = append(fields, podContainerSummary(value.Object)...)
 	case "Service":
@@ -766,6 +767,49 @@ func podOverviewSummary(object map[string]any) []SummaryField {
 		}
 	}
 	return result
+}
+
+func podRestartSummary(object map[string]any) []SummaryField {
+	status, _ := object["status"].(map[string]any)
+	var (
+		fallbackReason string
+		latestReason   string
+		latestFinished time.Time
+	)
+	for _, field := range []string{
+		"containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses",
+	} {
+		statuses, _ := status[field].([]any)
+		for _, raw := range statuses {
+			containerStatus, _ := raw.(map[string]any)
+			lastState, _ := containerStatus["lastState"].(map[string]any)
+			terminated, _ := lastState["terminated"].(map[string]any)
+			reason, _ := terminated["reason"].(string)
+			reason = boundedSummaryText(reason)
+			if reason == "" {
+				continue
+			}
+			if fallbackReason == "" {
+				fallbackReason = reason
+			}
+			finishedAt, _ := terminated["finishedAt"].(string)
+			finished, err := time.Parse(time.RFC3339Nano, finishedAt)
+			if err == nil && (latestFinished.IsZero() || finished.After(latestFinished)) {
+				latestFinished = finished
+				latestReason = reason
+			}
+		}
+	}
+	if latestReason == "" {
+		latestReason = fallbackReason
+	}
+	if latestReason == "" {
+		return nil
+	}
+	return []SummaryField{{
+		Section: "status", ID: "lastRestartReason", Label: "Last Restart Reason",
+		Value: latestReason,
+	}}
 }
 
 func serviceOverviewSummary(object map[string]any) []SummaryField {

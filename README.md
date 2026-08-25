@@ -93,10 +93,12 @@ app-wide Port Forwards window.
   visible selection or changing the selected rows.
 - Details provide a structured Summary table where clicking a cell and pressing
   Command-C (or choosing Copy Cell from its context menu) copies the complete
-  value. Labels and Annotations remain visible as separate sections even when
-  empty; each has its own editor, and Return on a selected metadata row opens
-  that kind with the key selected. The metadata and ConfigMap/Secret Data
-  editors use the same searchable, draggable key/value split view, keyboard
+  value. A Pod Summary reports the reason for its most recent container restart
+  when Kubernetes provides one.
+  Labels and Annotations remain visible as separate sections even when empty;
+  each has its own editor, and Return on a selected metadata row opens that kind
+  with the key selected. The metadata and ConfigMap/Secret Data editors use the
+  same searchable, draggable key/value split view, keyboard
   behavior, structured-text highlighting, whitespace markers, staged row
   states, and save review while keeping their validation rules separate. Details also
   provide YAML, Events, Relationships, Metrics where meaningful, and Data for

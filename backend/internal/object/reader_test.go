@@ -124,6 +124,42 @@ func TestPodSummaryIncludesBoundedContainerChoicesAndDeclaredPorts(t *testing.T)
 	}
 }
 
+func TestPodSummaryIncludesMostRecentContainerRestartReason(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "uid")
+	value.Object["status"] = map[string]any{
+		"containerStatuses": []any{
+			map[string]any{"lastState": map[string]any{"terminated": map[string]any{
+				"reason": "Error", "finishedAt": "2026-08-25T01:00:00Z",
+			}}},
+			map[string]any{"lastState": map[string]any{"terminated": map[string]any{
+				"reason": "OOMKilled", "finishedAt": "2026-08-25T03:00:00Z",
+			}}},
+		},
+		"initContainerStatuses": []any{
+			map[string]any{"lastState": map[string]any{"terminated": map[string]any{
+				"reason": "Completed", "finishedAt": "2026-08-25T02:00:00Z",
+			}}},
+		},
+	}
+	detail, err := testReader(t, value).Detail(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "pods", Namespace: "ns", Name: "pod", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range detail.Summary {
+		if field.ID != "lastRestartReason" {
+			continue
+		}
+		if field.Section != "status" || field.Label != "Last Restart Reason" || field.Value != "OOMKilled" {
+			t.Fatalf("restart reason summary = %#v", field)
+		}
+		return
+	}
+	t.Fatalf("restart reason missing from summary: %#v", detail.Summary)
+}
+
 func TestServiceSummaryIncludesDeclaredAndTargetPorts(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Service", "services", "ns", "web", "uid")
