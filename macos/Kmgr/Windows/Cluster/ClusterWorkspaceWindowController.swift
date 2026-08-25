@@ -3988,6 +3988,18 @@ private final class ResourceListViewController: NSViewController,
             name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(resourceTableUserDidScroll(_:)),
+            name: NSScrollView.willStartLiveScrollNotification,
+            object: scrollView
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(resourceTableUserDidScroll(_:)),
+            name: NSScrollView.didLiveScrollNotification,
+            object: scrollView
+        )
 
         root.addSubview(scrollView)
         root.addSubview(filterCompletionPopup)
@@ -4831,6 +4843,13 @@ private final class ResourceListViewController: NSViewController,
     @objc private func scrollBoundsChanged(_ notification: Notification) {
         scheduleRestorationCheckpoint()
         scheduleViewportUpdate()
+    }
+
+    /// Saved and history-backed anchors are provisional until their first
+    /// exact range arrives. Once the user scrolls, their viewport takes
+    /// precedence over that pending restoration.
+    @objc private func resourceTableUserDidScroll(_ notification: Notification) {
+        pendingScrollAnchor = nil
     }
 
     private func scheduleRestorationCheckpoint() {

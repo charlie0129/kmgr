@@ -17,6 +17,51 @@ struct ResourceViewportVirtualizationTests {
         #expect(ResourceViewportTiming.production.scrollDebounce == .milliseconds(80))
     }
 
+    @Test("user scrolling supersedes a pending restored row")
+    func userScrollSupersedesPendingRestoration() async throws {
+        let provider = ControlledViewportWorkspaceProvider(rowCount: 100)
+        provider.delayNextRange()
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "scroll-restoration",
+            restorationState: ClusterWindowRestorationState(
+                contextName: "viewport-context",
+                gvr: GVR(group: "", version: "v1", resource: "pods"),
+                scrollAnchor: ScrollAnchor(
+                    uid: "viewport-pod-1",
+                    pixelOffsetFromTop: 0,
+                    priorRowIndex: 1
+                )
+            )
+        )
+        controller.showWindow(nil)
+        defer {
+            provider.releaseDelayedRange()
+            controller.close()
+        }
+
+        let table = try resourceTable(in: controller)
+        let scrollView = try #require(table.enclosingScrollView)
+        try await waitForViewport {
+            table.numberOfRows == 100 && provider.delayedRequest != nil
+        }
+
+        NotificationCenter.default.post(
+            name: NSScrollView.willStartLiveScrollNotification,
+            object: scrollView
+        )
+        scroll(table, to: 0)
+        let topY = table.visibleRect.minY
+
+        provider.releaseDelayedRange()
+        try await waitForViewport {
+            self.cellText(in: table, row: 0) == "pod-0"
+        }
+
+        #expect(table.rows(in: table.visibleRect).location == 0)
+        #expect(abs(table.visibleRect.minY - topY) < 0.5)
+    }
+
     @Test("absolute table rows use bounded raced ranges and refreshed metric interest")
     func virtualizedScrollingViewport() async throws {
         let provider = ControlledViewportWorkspaceProvider(rowCount: 10_000)
@@ -1211,7 +1256,8 @@ struct ResourceViewportVirtualizationTests {
         provider: ControlledViewportWorkspaceProvider,
         suffix: String,
         objectDetailProvider: (any ObjectDetailProviding)? = nil,
-        operationProvider: (any ResourceOperationProviding)? = nil
+        operationProvider: (any ResourceOperationProviding)? = nil,
+        restorationState: ClusterWindowRestorationState? = nil
     ) -> ClusterWorkspaceWindowController {
         makeColumnPropagationWorkspace(
             session: OpenedClusterSession(
@@ -1231,7 +1277,8 @@ struct ResourceViewportVirtualizationTests {
             resourceViewportTiming: ResourceViewportTiming(
                 scrollDebounce: .milliseconds(10),
                 metricInterestRefresh: .seconds(30)
-            )
+            ),
+            restorationState: restorationState
         )
     }
 
