@@ -1853,11 +1853,6 @@ struct ClusterWorkspaceToolbarTests {
         try await waitUntil { opened != nil }
         #expect(opened?.window?.title.contains("worker-a") == true)
         #expect(opened?.window?.subtitle == "Node worker-a · helper namespace default")
-        let targetItem = try #require(opened?.window?.toolbar?.items.first {
-            $0.itemIdentifier.rawValue == "terminal.identity"
-        })
-        #expect((targetItem.view as? NSTextField)?.toolTip?
-            .contains("registry.example/cluster:2") == true)
 
         table.keyDown(with: try workspaceLetterKey("s", modifiers: [.shift]))
         try await waitUntil { window.attachedSheet != nil }

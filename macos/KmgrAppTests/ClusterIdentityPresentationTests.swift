@@ -249,13 +249,6 @@ struct ClusterIdentityPresentationTests {
         #expect(window.title ==
             "cluster-a — production/admin@corp — Terminal — api")
         #expect(window.subtitle == "team-a/api · app")
-        let toolbarIdentity = try #require(window.toolbar?.items.first {
-            $0.itemIdentifier.rawValue == "terminal.identity"
-        }?.view as? NSTextField)
-        #expect(toolbarIdentity.stringValue.contains(
-            "cluster-a — production/admin@corp"
-        ))
-        #expect(toolbarIdentity.stringValue.contains("team-a/api · app"))
 
         let closeText = TerminalWindowController.closeConfirmationInformativeText(
             for: request

@@ -5,10 +5,7 @@ import SwiftTerm
 private struct TerminalTargetPresentation {
     var titleName: String
     var subtitle: String
-    var displayName: String
     var accessibilityLabel: String
-    var toolbarText: String
-    var toolbarToolTip: String
     var closeDetails: String
 
     init(request: ExecSessionRequest) {
@@ -23,10 +20,7 @@ private struct TerminalTargetPresentation {
                 ? pod.name : "\(pod.namespace)/\(pod.name)"
             titleName = pod.name
             subtitle = "\(qualifiedName) · \(destination.container)"
-            displayName = qualifiedName
             accessibilityLabel = "Terminal for Pod \(qualifiedName), container \(destination.container)"
-            toolbarText = "\(cluster.titlePrefix) · \(qualifiedName) · \(destination.container)"
-            toolbarToolTip = "\(cluster.labeledInline), Pod \(qualifiedName), container \(destination.container)"
             closeDetails = """
             \(cluster.targetDetails(pod))
             Container: \(destination.container)
@@ -35,10 +29,7 @@ private struct TerminalTargetPresentation {
             let node = destination.node
             titleName = node.name
             subtitle = "Node \(node.name) · helper namespace \(destination.namespace)"
-            displayName = "node/\(node.name)"
             accessibilityLabel = "Terminal for Node \(node.name)"
-            toolbarText = "\(cluster.titlePrefix) · node/\(node.name) · host shell"
-            toolbarToolTip = "\(cluster.labeledInline), Node \(node.name), helper namespace \(destination.namespace), image \(destination.image)"
             closeDetails = """
             \(cluster.targetDetails(node))
             Helper namespace: \(destination.namespace)
@@ -156,12 +147,10 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     NSToolbarDelegate
 {
     let terminalView: AppearanceAwareTerminalView
-    let targetDisplayName: String
     var initialContentSize: NSSize { terminalView.getOptimalFrameSize().size }
     var onConfirmedEOFExit: (() -> Void)?
 
     private let baseRequest: ExecSessionRequest
-    private let targetPresentation: TerminalTargetPresentation
     private let provider: any ExecSessionProviding
     private let fallbackShellCommand: [String]?
     private let statusLabel = NSTextField(labelWithString: "Not connected")
@@ -201,12 +190,10 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     ) {
         baseRequest = request
         let targetPresentation = TerminalTargetPresentation(request: request)
-        self.targetPresentation = targetPresentation
         self.provider = provider
         self.fallbackShellCommand = fallbackShellCommand
         generation = request.generation
         activeCommand = request.command
-        targetDisplayName = targetPresentation.displayName
         var options = TerminalOptions.default
         options.cols = Int(
             request.initialSize?.columns ?? TerminalSize.defaultShellWindow.columns
@@ -667,11 +654,11 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
     func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.identity, .flexibleSpace, .status, .reconnect]
+        [.flexibleSpace, .status, .reconnect]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.identity, .flexibleSpace, .status, .reconnect]
+        [.flexibleSpace, .status, .reconnect]
     }
 
     func toolbar(
@@ -680,16 +667,6 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
         switch itemIdentifier {
-        case .identity:
-            let label = NSTextField(
-                labelWithString: targetPresentation.toolbarText
-            )
-            label.lineBreakMode = .byTruncatingMiddle
-            label.toolTip = targetPresentation.toolbarToolTip
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Target"
-            item.view = label
-            return item
         case .status:
             statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -725,7 +702,6 @@ private enum TerminalCommand: Sendable {
 }
 
 private extension NSToolbarItem.Identifier {
-    static let identity = Self("terminal.identity")
     static let status = Self("terminal.status")
     static let reconnect = Self("terminal.reconnect")
 }

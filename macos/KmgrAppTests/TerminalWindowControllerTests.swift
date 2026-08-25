@@ -44,31 +44,6 @@ struct TerminalWindowControllerTests {
         #expect(maximumComponent < 0.5)
     }
 
-    @Test("long terminal identities do not widen the window")
-    func longIdentityStaysWithinWindow() throws {
-        let controller = TerminalWindowController(
-            request: execRequest(
-                command: ["/bin/sh"],
-                contextName: String(repeating: "context-", count: 80),
-                clusterName: String(repeating: "cluster-", count: 30),
-                namespace: String(repeating: "n", count: 63),
-                podName: String(repeating: "p", count: 63),
-                container: String(repeating: "c", count: 63)
-            ),
-            provider: OrderedExecProvider()
-        )
-        defer { closeTerminal(controller) }
-        let window = try #require(controller.window)
-        window.contentView?.layoutSubtreeIfNeeded()
-        window.toolbar?.validateVisibleItems()
-        let identity = try #require(window.toolbar?.items.first {
-            $0.itemIdentifier.rawValue == "terminal.identity"
-        }?.view as? NSTextField)
-
-        #expect(window.contentLayoutRect.width <= 900.5)
-        #expect(identity.lineBreakMode == .byTruncatingMiddle)
-    }
-
     @Test("default terminal grid is 110 columns by 30 rows")
     func defaultTerminalGridSize() async throws {
         let provider = OrderedExecProvider()
