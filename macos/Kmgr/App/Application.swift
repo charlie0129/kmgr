@@ -777,31 +777,6 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         workspace?.showCommandPalette(sender)
     }
 
-    @objc private func cycleWindowsForward(_ sender: Any?) {
-        cycleKeyWindow(backward: false, sender: sender)
-    }
-
-    @objc private func cycleWindowsBackward(_ sender: Any?) {
-        cycleKeyWindow(backward: true, sender: sender)
-    }
-
-    private func cycleKeyWindow(backward: Bool, sender: Any?) {
-        let candidates = NSApp.orderedWindows.filter {
-            $0.isVisible && $0.canBecomeKey && $0.parent == nil
-                && !$0.collectionBehavior.contains(.ignoresCycle)
-        }
-        guard candidates.count > 1 else { return }
-
-        if backward {
-            candidates.last?.makeKeyAndOrderFront(sender)
-        } else {
-            let current = NSApp.keyWindow
-            let next = candidates.first { $0 !== current }
-            current?.orderBack(sender)
-            next?.makeKeyAndOrderFront(sender)
-        }
-    }
-
     private func applyAppearance(_ preference: AppearancePreference) {
         switch preference {
         case .system: NSApp.appearance = nil
@@ -818,9 +793,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             showCommandPalette: #selector(showCommandPalette(_:)),
             showEngineDiagnostics: #selector(showEngineDiagnostics(_:)),
             showPortForwards: #selector(showPortForwards(_:)),
-            toggleShortcuts: #selector(toggleShortcuts(_:)),
-            cycleWindowsForward: #selector(cycleWindowsForward(_:)),
-            cycleWindowsBackward: #selector(cycleWindowsBackward(_:))
+            toggleShortcuts: #selector(toggleShortcuts(_:))
         )
         let menu = NativeMainMenuBuilder.make(actions: actions)
         NSApp.windowsMenu = menu.window

@@ -72,7 +72,7 @@ struct NativeMainMenuBuilderTests {
         #expect(find.item(withTitle: "Find Previous")?.keyEquivalent == "g")
     }
 
-    @Test("window cycling is discoverable without replacing navigation commands")
+    @Test("window navigation remains discoverable")
     func windowCommands() throws {
         let target = MenuTarget()
         let built = makeMenu(target: target)
@@ -90,18 +90,6 @@ struct NativeMainMenuBuilderTests {
             action: #selector(ClusterWorkspaceWindowController.navigateForward(_:)),
             keyEquivalent: "]"
         )
-
-        let cycle = try #require(window.item(withTitle: "Cycle Through Windows"))
-        #expect(cycle.target === target)
-        #expect(cycle.action == #selector(MenuTarget.cycleForward(_:)))
-        #expect(cycle.keyEquivalent == "`")
-        #expect(cycle.keyEquivalentModifierMask == .command)
-
-        let cycleBack = try #require(window.item(withTitle: "Cycle Back Through Windows"))
-        #expect(cycleBack.target === target)
-        #expect(cycleBack.action == #selector(MenuTarget.cycleBackward(_:)))
-        #expect(cycleBack.keyEquivalent == "`")
-        #expect(cycleBack.keyEquivalentModifierMask == [.command, .shift])
 
         #expect(submenu("Resource", in: built.main) != nil)
         #expect(window.item(withTitle: "Command Palette…") != nil)
@@ -267,9 +255,7 @@ struct NativeMainMenuBuilderTests {
             showCommandPalette: #selector(MenuTarget.palette(_:)),
             showEngineDiagnostics: #selector(MenuTarget.diagnostics(_:)),
             showPortForwards: #selector(MenuTarget.forwards(_:)),
-            toggleShortcuts: #selector(MenuTarget.shortcuts(_:)),
-            cycleWindowsForward: #selector(MenuTarget.cycleForward(_:)),
-            cycleWindowsBackward: #selector(MenuTarget.cycleBackward(_:))
+            toggleShortcuts: #selector(MenuTarget.shortcuts(_:))
         ))
     }
 
@@ -299,6 +285,4 @@ private final class MenuTarget: NSObject {
     @objc func diagnostics(_ sender: Any?) {}
     @objc func forwards(_ sender: Any?) {}
     @objc func shortcuts(_ sender: Any?) {}
-    @objc func cycleForward(_ sender: Any?) {}
-    @objc func cycleBackward(_ sender: Any?) {}
 }

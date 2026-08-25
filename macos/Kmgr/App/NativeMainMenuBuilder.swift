@@ -13,8 +13,6 @@ struct NativeMainMenuActions {
     let showEngineDiagnostics: Selector
     let showPortForwards: Selector
     let toggleShortcuts: Selector
-    let cycleWindowsForward: Selector
-    let cycleWindowsBackward: Selector
 }
 
 @MainActor
@@ -395,22 +393,9 @@ enum NativeMainMenuBuilder {
             keyEquivalent: "",
             actions: actions
         )
+        // AppKit owns Command-` window cycling. Binding those key equivalents
+        // here would replace its native cycle ordering.
         menu.addItem(.separator())
-        addApplicationItem(
-            to: menu,
-            title: "Cycle Through Windows",
-            action: actions.cycleWindowsForward,
-            keyEquivalent: "`",
-            actions: actions
-        )
-        addApplicationItem(
-            to: menu,
-            title: "Cycle Back Through Windows",
-            action: actions.cycleWindowsBackward,
-            keyEquivalent: "`",
-            modifiers: [.command, .shift],
-            actions: actions
-        )
         addResponderItem(
             to: menu,
             title: "Bring All to Front",
