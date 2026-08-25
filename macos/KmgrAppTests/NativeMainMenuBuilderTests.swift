@@ -6,6 +6,51 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Native main menu")
 struct NativeMainMenuBuilderTests {
+    @Test("application menu exposes native macOS commands and Services")
+    func applicationCommands() throws {
+        let target = MenuTarget()
+        let built = makeMenu(target: target)
+        let menu = try #require(built.main.items.first?.submenu)
+
+        expectResponderItem(
+            try #require(menu.item(withTitle: "About Kmgr")),
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: "",
+            modifiers: []
+        )
+
+        let settings = try #require(menu.item(withTitle: "Settings…"))
+        #expect(settings.target === target)
+        #expect(settings.action == #selector(MenuTarget.settings(_:)))
+        #expect(settings.keyEquivalent == ",")
+
+        let services = try #require(menu.item(withTitle: "Services"))
+        #expect(services.submenu === built.services)
+
+        expectResponderItem(
+            try #require(menu.item(withTitle: "Hide Kmgr")),
+            action: #selector(NSApplication.hide(_:)),
+            keyEquivalent: "h"
+        )
+        expectResponderItem(
+            try #require(menu.item(withTitle: "Hide Others")),
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h",
+            modifiers: [.command, .option]
+        )
+        expectResponderItem(
+            try #require(menu.item(withTitle: "Show All")),
+            action: #selector(NSApplication.unhideAllApplications(_:)),
+            keyEquivalent: "",
+            modifiers: []
+        )
+        expectResponderItem(
+            try #require(menu.item(withTitle: "Quit Kmgr")),
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+    }
+
     @Test("standard document and editing commands use the responder chain")
     func responderChainCommands() throws {
         let built = makeMenu()
@@ -50,6 +95,55 @@ struct NativeMainMenuBuilderTests {
         )
     }
 
+    @Test("View and Help expose native window commands")
+    func viewAndHelpCommands() throws {
+        let target = MenuTarget()
+        let built = makeMenu(target: target)
+        let view = try #require(submenu("View", in: built.main))
+
+        let commands: [(String, Selector, String, NSEvent.ModifierFlags)] = [
+            (
+                "Show Toolbar",
+                #selector(NSWindow.toggleToolbarShown(_:)),
+                "t",
+                [.command, .option]
+            ),
+            (
+                "Customize Toolbar…",
+                #selector(NSWindow.runToolbarCustomizationPalette(_:)),
+                "",
+                []
+            ),
+            (
+                "Show Sidebar",
+                #selector(NSSplitViewController.toggleSidebar(_:)),
+                "s",
+                [.command, .control]
+            ),
+            (
+                "Enter Full Screen",
+                #selector(NSWindow.toggleFullScreen(_:)),
+                "f",
+                [.command, .control]
+            ),
+        ]
+        for (title, action, keyEquivalent, modifiers) in commands {
+            expectResponderItem(
+                try #require(view.item(withTitle: title)),
+                action: action,
+                keyEquivalent: keyEquivalent,
+                modifiers: modifiers
+            )
+        }
+
+        #expect(submenu("Help", in: built.main) === built.help)
+        let help = try #require(built.help.item(withTitle: "Kmgr Help"))
+        #expect(help.target === target)
+        #expect(help.action == #selector(MenuTarget.help(_:)))
+        #expect(help.keyEquivalent == "?")
+        #expect(help.keyEquivalentModifierMask == .command)
+    }
+
     @Test("find commands carry native panel actions and key equivalents")
     func findCommands() throws {
         let built = makeMenu()
@@ -77,6 +171,18 @@ struct NativeMainMenuBuilderTests {
         let target = MenuTarget()
         let built = makeMenu(target: target)
         let window = built.window
+
+        expectResponderItem(
+            try #require(window.item(withTitle: "Minimize")),
+            action: #selector(NSWindow.performMiniaturize(_:)),
+            keyEquivalent: "m"
+        )
+        expectResponderItem(
+            try #require(window.item(withTitle: "Zoom")),
+            action: #selector(NSWindow.performZoom(_:)),
+            keyEquivalent: "",
+            modifiers: []
+        )
 
         let back = try #require(window.item(withTitle: "Back"))
         expectResponderItem(
@@ -255,7 +361,8 @@ struct NativeMainMenuBuilderTests {
             showCommandPalette: #selector(MenuTarget.palette(_:)),
             showEngineDiagnostics: #selector(MenuTarget.diagnostics(_:)),
             showPortForwards: #selector(MenuTarget.forwards(_:)),
-            toggleShortcuts: #selector(MenuTarget.shortcuts(_:))
+            toggleShortcuts: #selector(MenuTarget.shortcuts(_:)),
+            showHelp: #selector(MenuTarget.help(_:))
         ))
     }
 
@@ -285,4 +392,5 @@ private final class MenuTarget: NSObject {
     @objc func diagnostics(_ sender: Any?) {}
     @objc func forwards(_ sender: Any?) {}
     @objc func shortcuts(_ sender: Any?) {}
+    @objc func help(_ sender: Any?) {}
 }

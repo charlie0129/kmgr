@@ -13,21 +13,26 @@ struct NativeMainMenuActions {
     let showEngineDiagnostics: Selector
     let showPortForwards: Selector
     let toggleShortcuts: Selector
+    let showHelp: Selector
 }
 
 @MainActor
 struct NativeMainMenu {
     let main: NSMenu
+    let services: NSMenu
     let window: NSMenu
+    let help: NSMenu
 }
 
 @MainActor
 enum NativeMainMenuBuilder {
     static func make(actions: NativeMainMenuActions) -> NativeMainMenu {
         let mainMenu = NSMenu()
-        mainMenu.addItem(appMenu(actions: actions))
+        let servicesMenu = NSMenu(title: "Services")
+        mainMenu.addItem(appMenu(actions: actions, servicesMenu: servicesMenu))
         mainMenu.addItem(fileMenu(actions: actions))
         mainMenu.addItem(editMenu())
+        mainMenu.addItem(viewMenu())
         mainMenu.addItem(resourceMenu())
 
         let windowItem = NSMenuItem()
@@ -35,12 +40,32 @@ enum NativeMainMenuBuilder {
         windowItem.submenu = windowMenu
         mainMenu.addItem(windowItem)
 
-        return NativeMainMenu(main: mainMenu, window: windowMenu)
+        let helpItem = NSMenuItem()
+        let helpMenu = makeHelpMenu(actions: actions)
+        helpItem.submenu = helpMenu
+        mainMenu.addItem(helpItem)
+
+        return NativeMainMenu(
+            main: mainMenu,
+            services: servicesMenu,
+            window: windowMenu,
+            help: helpMenu
+        )
     }
 
-    private static func appMenu(actions: NativeMainMenuActions) -> NSMenuItem {
+    private static func appMenu(
+        actions: NativeMainMenuActions,
+        servicesMenu: NSMenu
+    ) -> NSMenuItem {
         let item = NSMenuItem()
-        let menu = NSMenu()
+        let menu = NSMenu(title: Product.applicationName)
+        addResponderItem(
+            to: menu,
+            title: "About \(Product.applicationName)",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            modifiers: []
+        )
+        menu.addItem(.separator())
         addApplicationItem(
             to: menu,
             title: "Settings…",
@@ -49,8 +74,37 @@ enum NativeMainMenuBuilder {
             actions: actions
         )
         menu.addItem(.separator())
-        menu.addItem(
-            withTitle: "Quit \(Product.applicationName)",
+        let servicesItem = NSMenuItem(
+            title: "Services",
+            action: nil,
+            keyEquivalent: ""
+        )
+        servicesItem.submenu = servicesMenu
+        menu.addItem(servicesItem)
+        menu.addItem(.separator())
+        addResponderItem(
+            to: menu,
+            title: "Hide \(Product.applicationName)",
+            action: #selector(NSApplication.hide(_:)),
+            keyEquivalent: "h"
+        )
+        addResponderItem(
+            to: menu,
+            title: "Hide Others",
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h",
+            modifiers: [.command, .option]
+        )
+        addResponderItem(
+            to: menu,
+            title: "Show All",
+            action: #selector(NSApplication.unhideAllApplications(_:)),
+            modifiers: []
+        )
+        menu.addItem(.separator())
+        addResponderItem(
+            to: menu,
+            title: "Quit \(Product.applicationName)",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
@@ -159,6 +213,41 @@ enum NativeMainMenuBuilder {
         findItem.submenu = findMenu
         menu.addItem(findItem)
 
+        item.submenu = menu
+        return item
+    }
+
+    private static func viewMenu() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "View")
+        addResponderItem(
+            to: menu,
+            title: "Show Toolbar",
+            action: #selector(NSWindow.toggleToolbarShown(_:)),
+            keyEquivalent: "t",
+            modifiers: [.command, .option]
+        )
+        addResponderItem(
+            to: menu,
+            title: "Customize Toolbar…",
+            action: #selector(NSWindow.runToolbarCustomizationPalette(_:)),
+            modifiers: []
+        )
+        menu.addItem(.separator())
+        addResponderItem(
+            to: menu,
+            title: "Show Sidebar",
+            action: #selector(NSSplitViewController.toggleSidebar(_:)),
+            keyEquivalent: "s",
+            modifiers: [.command, .control]
+        )
+        addResponderItem(
+            to: menu,
+            title: "Enter Full Screen",
+            action: #selector(NSWindow.toggleFullScreen(_:)),
+            keyEquivalent: "f",
+            modifiers: [.command, .control]
+        )
         item.submenu = menu
         return item
     }
@@ -350,6 +439,12 @@ enum NativeMainMenuBuilder {
             action: #selector(NSWindow.performMiniaturize(_:)),
             keyEquivalent: "m"
         )
+        addResponderItem(
+            to: menu,
+            title: "Zoom",
+            action: #selector(NSWindow.performZoom(_:)),
+            modifiers: []
+        )
         menu.addItem(.separator())
         addResponderItem(
             to: menu,
@@ -400,6 +495,18 @@ enum NativeMainMenuBuilder {
             to: menu,
             title: "Bring All to Front",
             action: #selector(NSApplication.arrangeInFront(_:))
+        )
+        return menu
+    }
+
+    private static func makeHelpMenu(actions: NativeMainMenuActions) -> NSMenu {
+        let menu = NSMenu(title: "Help")
+        addApplicationItem(
+            to: menu,
+            title: "\(Product.applicationName) Help",
+            action: actions.showHelp,
+            keyEquivalent: "?",
+            actions: actions
         )
         return menu
     }

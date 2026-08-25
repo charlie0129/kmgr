@@ -199,6 +199,10 @@ globally across launches rather than per cluster.
 | Binding | Action |
 | --- | --- |
 | Command-N | Open a new Cluster Manager window |
+| Command-H | Hide Kmgr |
+| Command-? | Open Kmgr Help |
+| Control-Command-S | Show or hide the current workspace's sidebar |
+| Control-Command-F | Enter or leave full screen |
 | Command-O | Add kubeconfig files from Cluster Manager |
 | `/` in Cluster Manager | Search kubeconfig contexts |
 | Command-K | Open the current workspace's Command Palette |

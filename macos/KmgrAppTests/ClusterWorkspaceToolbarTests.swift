@@ -35,6 +35,26 @@ struct ClusterWorkspaceToolbarTests {
         ])
     }
 
+    @Test("sidebar toolbar uses the native action and checkpoints visibility")
+    func sidebarUsesNativeToggle() throws {
+        let controller = makeWorkspace()
+        let window = try #require(controller.window)
+        let splitController = try #require(
+            window.contentViewController as? NSSplitViewController
+        )
+        let sidebar = try #require(window.toolbar?.items.first {
+            $0.itemIdentifier.rawValue == "workspace.sidebar"
+        })
+        var checkpoint: ClusterWindowRestorationRecord?
+        controller.onRestorationCheckpoint = { checkpoint = $0 }
+
+        #expect(sidebar.action == #selector(NSSplitViewController.toggleSidebar(_:)))
+        #expect(!splitController.splitViewItems[0].isCollapsed)
+        #expect(NSApp.sendAction(sidebar.action!, to: sidebar.target, from: sidebar))
+        #expect(splitController.splitViewItems[0].isCollapsed)
+        #expect(checkpoint?.state.isSidebarVisible == false)
+    }
+
     @Test("namespace picker returns keyboard focus to the resource list")
     func namespacePickerRestoresResourceListFocus() async throws {
         var didPresentPicker = false

@@ -793,15 +793,27 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             showCommandPalette: #selector(showCommandPalette(_:)),
             showEngineDiagnostics: #selector(showEngineDiagnostics(_:)),
             showPortForwards: #selector(showPortForwards(_:)),
-            toggleShortcuts: #selector(toggleShortcuts(_:))
+            toggleShortcuts: #selector(toggleShortcuts(_:)),
+            showHelp: #selector(showHelp(_:))
         )
         let menu = NativeMainMenuBuilder.make(actions: actions)
-        NSApp.windowsMenu = menu.window
         NSApp.mainMenu = menu.main
+        NSApp.servicesMenu = menu.services
+        NSApp.windowsMenu = menu.window
+        NSApp.helpMenu = menu.help
     }
 
     @objc private func toggleShortcuts(_ sender: Any?) {
         contextualShortcutsCoordinator.toggle()
+    }
+
+    @objc private func showHelp(_ sender: Any?) {
+        guard let url = URL(string: "https://github.com/charlie0129/kmgr"),
+            NSWorkspace.shared.open(url)
+        else {
+            NSSound.beep()
+            return
+        }
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {

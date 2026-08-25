@@ -1726,7 +1726,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle Sidebar")
             item.isNavigational = true
             item.target = self
-            item.action = #selector(toggleWorkspaceSidebar)
+            item.action = #selector(NSSplitViewController.toggleSidebar(_:))
             return item
         case .back, .forward:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -1795,8 +1795,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
     }
 
-    @objc private func toggleWorkspaceSidebar() {
-        splitViewItems[0].animator().isCollapsed.toggle()
+    override func toggleSidebar(_ sender: Any?) {
+        super.toggleSidebar(sender)
         checkpointRestoration()
     }
 
