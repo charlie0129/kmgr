@@ -66,6 +66,8 @@ public enum ExecSessionTarget: Hashable, Sendable {
 }
 
 public struct TerminalSize: Hashable, Sendable {
+    public static let defaultShellWindow = TerminalSize(columns: 110, rows: 30)
+
     public var columns: UInt32
     public var rows: UInt32
 
@@ -98,7 +100,7 @@ public struct ExecSessionRequest: Hashable, Sendable {
         command: [String],
         tty: Bool = true,
         stdin: Bool = true,
-        initialSize: TerminalSize? = TerminalSize(columns: 80, rows: 24)
+        initialSize: TerminalSize? = .defaultShellWindow
     ) {
         self.sessionID = sessionID
         self.execSessionID = execSessionID

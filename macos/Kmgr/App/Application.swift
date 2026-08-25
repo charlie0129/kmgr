@@ -478,6 +478,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             nodeShellPreferences: { [weak self] in
                 self?.preferencesStore.current.nodeShell ?? NodeShellPreferences()
             },
+            terminalPreferences: { [weak self] in
+                self?.preferencesStore.current.terminal ?? TerminalPreferences()
+            },
             saveNodeShellPreferences: { [weak self] nodeShell in
                 guard let self else { return }
                 var preferences = preferencesStore.current

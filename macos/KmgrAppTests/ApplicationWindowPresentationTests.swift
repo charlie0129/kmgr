@@ -32,6 +32,43 @@ struct ApplicationWindowPresentationTests {
         #expect(!AppPreferencesStore(defaults: defaults).current.restoreOpenClusterWindows)
     }
 
+    @Test("terminal size defaults to 110 by 30 and persists from Settings")
+    func terminalSizeSettings() throws {
+        let suite = "kmgr-app-terminal-settings-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AppPreferencesStore(defaults: defaults)
+        let settings = SettingsWindowController(
+            preferencesStore: store,
+            frameAutosaveName: "Settings-terminal-\(UUID().uuidString)"
+        )
+        let root = try #require(settings.window?.contentView)
+        let fields = descendants(of: root).compactMap { $0 as? NSTextField }
+        let columns = try #require(fields.first {
+            $0.accessibilityIdentifier() == "settings.terminal.initialColumns"
+        })
+        let rows = try #require(fields.first {
+            $0.accessibilityIdentifier() == "settings.terminal.initialRows"
+        })
+
+        #expect(columns.integerValue == 110)
+        #expect(rows.integerValue == 30)
+        #expect(fields.contains {
+            $0.stringValue.contains("new Pod terminals and Node shells")
+        })
+
+        columns.stringValue = "132"
+        rows.stringValue = "40"
+        try #require(button(titled: "Apply", beneath: root)).performClick(nil)
+
+        #expect(store.current.terminal == TerminalPreferences(
+            initialColumns: 132,
+            initialRows: 40
+        ))
+        #expect(AppPreferencesStore(defaults: defaults).current.terminal ==
+            store.current.terminal)
+    }
+
     @Test("Advanced Performance exposes cache and Kubernetes engine tunables")
     func advancedPerformanceSettings() throws {
         let suite = "kmgr-app-performance-settings-\(UUID().uuidString)"

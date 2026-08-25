@@ -97,6 +97,7 @@ import Testing
     #expect(plan.fallbackShellCommand == ["/bin/sh"])
     #expect(destination.pod.uid == ResourceUID("pod-uid"))
     #expect(plan.request.execSessionID == "exec-1")
+    #expect(plan.request.initialSize == .defaultShellWindow)
 }
 
 @Test func automaticExecUsesSpecOrderAndPinsExplicitContainerRows() throws {
@@ -202,6 +203,7 @@ import Testing
         target: NodeShellTarget(node: node),
         image: "registry.example/node-shell:1",
         namespace: "ops-tools",
+        initialSize: TerminalSize(columns: 132, rows: 40),
         execSessionID: "node-exec-1"
     )
     guard case .nodeShell(let destination) = plan.request.target else {
@@ -212,6 +214,7 @@ import Testing
     #expect(destination.namespace == "ops-tools")
     #expect(destination.image == "registry.example/node-shell:1")
     #expect(plan.request.command == ["bash", "-l"])
+    #expect(plan.request.initialSize == TerminalSize(columns: 132, rows: 40))
     #expect(plan.fallbackShellCommand == ["sh", "-l"])
     #expect(plan.request.target.operationDescription == "open Node shell")
     #expect(NodeShellLaunchPlanner.defaultNamespace(for: session) == "default")

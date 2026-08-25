@@ -69,6 +69,39 @@ struct TerminalWindowControllerTests {
         #expect(identity.lineBreakMode == .byTruncatingMiddle)
     }
 
+    @Test("default terminal grid is 110 columns by 30 rows")
+    func defaultTerminalGridSize() async throws {
+        let provider = OrderedExecProvider()
+        let controller = TerminalWindowController(
+            request: execRequest(command: ["/bin/sh"]),
+            provider: provider
+        )
+        controller.showWindow(nil)
+        defer { closeTerminal(controller) }
+        try await waitForExecEvent(provider) { $0.contains("opened:1") }
+
+        let request = try #require(provider.request(generation: 1))
+        #expect(request.initialSize == TerminalSize(columns: 110, rows: 30))
+    }
+
+    @Test("configured terminal grid is used for the initial remote process")
+    func configuredTerminalGridSize() async throws {
+        let provider = OrderedExecProvider()
+        let controller = TerminalWindowController(
+            request: execRequest(
+                command: ["/bin/sh"],
+                initialSize: TerminalSize(columns: 132, rows: 40)
+            ),
+            provider: provider
+        )
+        controller.showWindow(nil)
+        defer { closeTerminal(controller) }
+        try await waitForExecEvent(provider) { $0.contains("opened:1") }
+
+        let request = try #require(provider.request(generation: 1))
+        #expect(request.initialSize == TerminalSize(columns: 132, rows: 40))
+    }
+
     @Test("fallback waits for server acceptance before retiring the previous generation")
     func fallbackReplacesLiveLease() async throws {
         let provider = OrderedExecProvider()
@@ -296,7 +329,8 @@ private func execRequest(
     clusterName: String = "cluster-a",
     namespace: String = "team-a",
     podName: String = "api",
-    container: String = "app"
+    container: String = "app",
+    initialSize: TerminalSize = .defaultShellWindow
 ) -> ExecSessionRequest {
     ExecSessionRequest(
         sessionID: "cluster-session",
@@ -316,7 +350,8 @@ private func execRequest(
         )),
         contextName: contextName,
         clusterName: clusterName,
-        command: command
+        command: command,
+        initialSize: initialSize
     )
 }
 

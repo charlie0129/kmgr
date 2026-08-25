@@ -159,6 +159,7 @@ public enum AutomaticExecLaunchPlanner {
         session: OpenedClusterSession,
         target: PodExecTarget,
         detail: ObjectDetail,
+        initialSize: TerminalSize = .defaultShellWindow,
         execSessionID: String
     ) throws -> AutomaticExecLaunchPlan {
         let pod = target.pod
@@ -203,7 +204,8 @@ public enum AutomaticExecLaunchPlanner {
             target: .pod(PodExecDestination(pod: pod, container: candidate.name)),
             contextName: session.contextName,
             clusterName: session.clusterName,
-            command: ["/bin/bash"]
+            command: ["/bin/bash"],
+            initialSize: initialSize
         )
         return AutomaticExecLaunchPlan(
             request: request,
@@ -230,6 +232,7 @@ public enum NodeShellLaunchPlanner {
         namespace: String,
         command: [String] = ["bash", "-l"],
         fallbackShellCommand: [String]? = ["sh", "-l"],
+        initialSize: TerminalSize = .defaultShellWindow,
         execSessionID: String
     ) throws -> NodeShellLaunchPlan {
         let node = target.node
@@ -265,7 +268,8 @@ public enum NodeShellLaunchPlanner {
             )),
             contextName: session.contextName,
             clusterName: session.clusterName,
-            command: validatedCommand
+            command: validatedCommand,
+            initialSize: initialSize
         )
         return NodeShellLaunchPlan(
             request: request,

@@ -25,6 +25,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
     private let defaultDeleteConcurrencyField = TechnicalTextField()
     private let nodeShellImageField = TechnicalTextField()
     private let nodeShellStartupTimeoutField = TechnicalTextField()
+    private let terminalColumnsField = TechnicalTextField()
+    private let terminalRowsField = TechnicalTextField()
     private let metricsRefreshField = TechnicalTextField()
     private let viewportOverscanField = TechnicalTextField()
     private let viewReleaseGraceField = TechnicalTextField()
@@ -124,6 +126,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             maximumRenderedLogTextField, maximumDisplayedLogLineField,
             completedOperationHistoryLimitField, defaultDeleteConcurrencyField,
             nodeShellImageField, nodeShellStartupTimeoutField,
+            terminalColumnsField, terminalRowsField,
             metricsRefreshField,
             viewportOverscanField,
             viewReleaseGraceField, projectionWorkerLimitField,
@@ -147,7 +150,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
             logRecordLimitField, logByteLimitField, renderBatchField,
             maximumRenderedLogTextField, maximumDisplayedLogLineField,
             completedOperationHistoryLimitField, defaultDeleteConcurrencyField,
-            nodeShellStartupTimeoutField, metricsRefreshField,
+            nodeShellStartupTimeoutField, terminalColumnsField, terminalRowsField,
+            metricsRefreshField,
             viewportOverscanField,
             viewReleaseGraceField, projectionWorkerLimitField,
             globalWarmViewLimitField, globalWarmObjectLimitField,
@@ -252,6 +256,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         nodeShellStartupTimeoutField.setAccessibilityIdentifier(
             "settings.nodeShell.startupTimeoutSeconds"
         )
+        terminalColumnsField.setAccessibilityIdentifier(
+            "settings.terminal.initialColumns"
+        )
+        terminalRowsField.setAccessibilityIdentifier(
+            "settings.terminal.initialRows"
+        )
         nodeShellImageField.lineBreakMode = .byTruncatingMiddle
         nodeShellImageField.widthAnchor.constraint(
             greaterThanOrEqualToConstant: 360
@@ -271,6 +281,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 labeledRow("Default namespace", control: namespaceButton),
                 labeledRow("Metrics refresh", control: metricsRefreshField, suffix: "seconds"),
                 restoreWindowsButton,
+            ]
+        )
+        let terminalHelp = NSTextField(wrappingLabelWithString:
+            "The initial grid applies to new Pod terminals and Node shells. Open terminal windows remain independently resizable."
+        )
+        terminalHelp.textColor = .secondaryLabelColor
+        terminalHelp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let terminal = section(
+            title: "Terminal",
+            rows: [
+                labeledRow(
+                    "Initial columns",
+                    control: terminalColumnsField,
+                    suffix: "\(TerminalPreferences.initialColumnsRange.lowerBound)–\(TerminalPreferences.initialColumnsRange.upperBound)"
+                ),
+                labeledRow(
+                    "Initial rows",
+                    control: terminalRowsField,
+                    suffix: "\(TerminalPreferences.initialRowsRange.lowerBound)–\(TerminalPreferences.initialRowsRange.upperBound)"
+                ),
+                terminalHelp,
             ]
         )
         let logsHelp = NSTextField(wrappingLabelWithString:
@@ -511,8 +542,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         let shortcuts = section(title: "Keyboard Shortcuts", rows: [shortcutGrid])
 
         let contentStack = NSStackView(views: [
-            general, logs, diagnostics, resourceOperations, nodeShell, advancedPerformance,
-            confirmations, columns, shortcuts,
+            general, terminal, logs, diagnostics, resourceOperations, nodeShell,
+            advancedPerformance, confirmations, columns, shortcuts,
         ])
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
@@ -520,8 +551,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         contentStack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         for section in [
-            general, logs, diagnostics, resourceOperations, nodeShell, advancedPerformance,
-            confirmations, columns, shortcuts,
+            general, terminal, logs, diagnostics, resourceOperations, nodeShell,
+            advancedPerformance, confirmations, columns, shortcuts,
         ] {
             section.widthAnchor.constraint(equalTo: contentStack.widthAnchor, constant: -32).isActive = true
         }
@@ -660,6 +691,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         nodeShellImageField.stringValue = preferences.nodeShell.globalImage
         nodeShellStartupTimeoutField.integerValue =
             preferences.nodeShell.startupTimeoutSeconds
+        terminalColumnsField.integerValue = preferences.terminal.initialColumns
+        terminalRowsField.integerValue = preferences.terminal.initialRows
         metricsRefreshField.integerValue = preferences.metricsRefreshSeconds
         viewportOverscanField.integerValue =
             preferences.advancedPerformance.viewportOverscanScreensPerSide
@@ -754,6 +787,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
                 clusterImagesByContextReference: preferencesStore.current.nodeShell
                     .clusterImagesByContextReference,
                 startupTimeoutSeconds: parsedInteger(nodeShellStartupTimeoutField)
+            ),
+            terminal: TerminalPreferences(
+                initialColumns: parsedInteger(terminalColumnsField),
+                initialRows: parsedInteger(terminalRowsField)
             ),
             advancedPerformance: AdvancedPerformancePreferences(
                 viewportOverscanScreensPerSide: parsedInteger(
@@ -943,6 +980,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate,
         }
         if delta.contains(.defaultNamespace) {
             messages.append("The default namespace applies to new cluster windows.")
+        }
+        if delta.contains(.terminal) {
+            messages.append("New terminal windows will use the updated initial size.")
         }
         let relaunchChanges = delta.changes(activated: .applicationRelaunch)
         if !relaunchChanges.isEmpty {

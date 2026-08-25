@@ -82,8 +82,9 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             provider: provider,
             fallbackShellCommand: fallbackShellCommand
         )
+        let initialContentSize = terminalController.initialContentSize
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 590),
+            contentRect: NSRect(origin: .zero, size: initialContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -98,11 +99,12 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         window.minSize = NSSize(width: 560, height: 360)
         window.tabbingMode = .disallowed
         window.isRestorable = false
-        window.center()
         super.init(window: window)
         window.delegate = self
         window.contentViewController = terminalController
         window.toolbar = terminalController.makeToolbar()
+        window.setContentSize(initialContentSize)
+        window.center()
         terminalController.onConfirmedEOFExit = { [weak self] in
             self?.window?.performClose(nil)
         }
@@ -155,6 +157,7 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
 {
     let terminalView: AppearanceAwareTerminalView
     let targetDisplayName: String
+    var initialContentSize: NSSize { terminalView.getOptimalFrameSize().size }
     var onConfirmedEOFExit: (() -> Void)?
 
     private let baseRequest: ExecSessionRequest
@@ -205,12 +208,16 @@ private final class RemoteTerminalViewController: NSViewController, @preconcurre
         activeCommand = request.command
         targetDisplayName = targetPresentation.displayName
         var options = TerminalOptions.default
-        options.cols = Int(request.initialSize?.columns ?? 80)
-        options.rows = Int(request.initialSize?.rows ?? 24)
+        options.cols = Int(
+            request.initialSize?.columns ?? TerminalSize.defaultShellWindow.columns
+        )
+        options.rows = Int(
+            request.initialSize?.rows ?? TerminalSize.defaultShellWindow.rows
+        )
         options.scrollback = 10_000
         options.termName = "xterm-256color"
         terminalView = AppearanceAwareTerminalView(
-            frame: NSRect(x: 0, y: 0, width: 900, height: 550),
+            frame: .zero,
             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
             options: options
         )

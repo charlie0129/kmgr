@@ -17,6 +17,7 @@ final class NodeShellConfigurationWindowController: NSWindowController,
     private let target: NodeShellTarget
     private let execProvider: any ExecSessionProviding
     private let saveClusterImage: (String?) throws -> Void
+    private let initialSize: TerminalSize
 
     private let imageField = TechnicalTextField()
     private let namespaceField = TechnicalTextField()
@@ -50,11 +51,13 @@ final class NodeShellConfigurationWindowController: NSWindowController,
         namespace: String,
         usesClusterImageOverride: Bool,
         execProvider: any ExecSessionProviding,
+        initialSize: TerminalSize = .defaultShellWindow,
         saveClusterImage: @escaping (String?) throws -> Void
     ) {
         self.session = session
         self.target = target
         self.execProvider = execProvider
+        self.initialSize = initialSize
         self.saveClusterImage = saveClusterImage
 
         let panel = NSPanel(
@@ -362,6 +365,7 @@ final class NodeShellConfigurationWindowController: NSWindowController,
                 command: command,
                 fallbackShellCommand: selectedMode == .shell
                     && shellButton.indexOfSelectedItem == 0 ? ["sh", "-l"] : nil,
+                initialSize: initialSize,
                 execSessionID: UUID().uuidString.lowercased()
             )
             onOpenWindow?(TerminalWindowController(

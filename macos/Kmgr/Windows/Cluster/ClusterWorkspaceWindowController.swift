@@ -123,6 +123,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let confirmationPreferences: @MainActor () -> ConfirmationPreferences
     private let resourceOperationPreferences: @MainActor () -> ResourceOperationPreferences
     private let nodeShellPreferences: @MainActor () -> NodeShellPreferences
+    private let terminalPreferences: @MainActor () -> TerminalPreferences
     private let saveNodeShellPreferences: @MainActor (NodeShellPreferences) throws -> Void
     private let workspaceController: ClusterWorkspaceViewController
     private var restoration: ClusterWindowRestorationRecord
@@ -176,6 +177,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         nodeShellPreferences: @escaping @MainActor () -> NodeShellPreferences = {
             NodeShellPreferences()
         },
+        terminalPreferences: @escaping @MainActor () -> TerminalPreferences = {
+            TerminalPreferences()
+        },
         saveNodeShellPreferences: @escaping @MainActor (NodeShellPreferences) throws -> Void = {
             _ in
         },
@@ -206,6 +210,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.confirmationPreferences = confirmationPreferences
         self.resourceOperationPreferences = resourceOperationPreferences
         self.nodeShellPreferences = nodeShellPreferences
+        self.terminalPreferences = terminalPreferences
         self.saveNodeShellPreferences = saveNodeShellPreferences
 
         let window = NSWindow(
@@ -653,7 +658,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                     session: session,
                     target: target,
                     objectDetailProvider: objectDetailProvider,
-                    execProvider: execProvider
+                    execProvider: execProvider,
+                    initialSize: terminalPreferences().initialSize
                 )
                 guard !Task.isCancelled,
                     automaticExecOpenRevision == revision,
@@ -696,7 +702,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             podIdentity: target.pod,
             preferredContainer: target.preferredContainer,
             objectDetailProvider: objectDetailProvider,
-            execProvider: execProvider
+            execProvider: execProvider,
+            initialSize: terminalPreferences().initialSize
         )
         controller.onOpenWindow = { [weak self] in self?.onOpenTerminalWindow?($0) }
         controller.onDismiss = { [weak self, weak controller] in
@@ -721,6 +728,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                     contextReference: session.contextReference
                 ),
                 namespace: NodeShellLaunchPlanner.defaultNamespace(for: session),
+                initialSize: terminalPreferences().initialSize,
                 execSessionID: UUID().uuidString.lowercased()
             )
             onOpenTerminalWindow?(TerminalWindowController(
@@ -750,6 +758,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                 contextReference
             ] != nil,
             execProvider: execProvider,
+            initialSize: terminalPreferences().initialSize,
             saveClusterImage: { [weak self] image in
                 guard let self else { return }
                 var updated = nodeShellPreferences()

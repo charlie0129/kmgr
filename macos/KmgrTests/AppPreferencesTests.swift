@@ -27,6 +27,7 @@ import Testing
         ],
         startupTimeoutSeconds: 90
     )
+    preferences.terminal = TerminalPreferences(initialColumns: 132, initialRows: 40)
     preferences.metricsRefreshSeconds = 30
     preferences.defaultNamespace = .allNamespaces
     preferences.restoreOpenClusterWindows = false
@@ -68,6 +69,7 @@ import Testing
     #expect(reloaded.current.logs.maximumDisplayedLineUTF8Bytes == 12 << 10)
     #expect(reloaded.current.diagnostics.completedOperationHistoryLimit == 4_000)
     #expect(reloaded.current.nodeShell == preferences.nodeShell)
+    #expect(reloaded.current.terminal == preferences.terminal)
     #expect(reloaded.current.metricsRefreshSeconds == 30)
     #expect(reloaded.current.defaultNamespace == .allNamespaces)
     #expect(!reloaded.current.restoreOpenClusterWindows)
@@ -126,6 +128,7 @@ import Testing
     preferences.columnsConfigurationPath = "relative/columns.yaml"
     preferences.resourceOperations.defaultDeleteConcurrency = 17
     preferences.nodeShell.startupTimeoutSeconds = 0
+    preferences.terminal = TerminalPreferences(initialColumns: 79, initialRows: 101)
     preferences.advancedPerformance = AdvancedPerformancePreferences(
         viewportOverscanScreensPerSide: 101,
         viewReleaseGraceSeconds: 301,
@@ -163,6 +166,8 @@ import Testing
         "columnsConfigurationPath",
         "resourceOperations.defaultDeleteConcurrency",
         "nodeShell.startupTimeoutSeconds",
+        "terminal.initialColumns",
+        "terminal.initialRows",
         "advancedPerformance.viewportOverscanScreensPerSide",
         "advancedPerformance.viewReleaseGraceSeconds",
         "advancedPerformance.projectionWorkerLimit",
@@ -220,6 +225,25 @@ import Testing
     #expect(preferences.validationIssues().contains {
         $0.field == "logs.maximumDisplayedLineUTF8Bytes"
     })
+}
+
+@Test func terminalPreferencesUseA110By30BoundedDefault() {
+    let preferences = TerminalPreferences()
+    #expect(preferences.initialSize == TerminalSize(columns: 110, rows: 30))
+
+    var app = AppPreferences()
+    for columns in [80, 300] {
+        app.terminal.initialColumns = columns
+        #expect(!app.validationIssues().contains {
+            $0.field == "terminal.initialColumns"
+        })
+    }
+    for rows in [20, 100] {
+        app.terminal.initialRows = rows
+        #expect(!app.validationIssues().contains {
+            $0.field == "terminal.initialRows"
+        })
+    }
 }
 
 @Test func viewerTextBudgetCannotExceedRawLogBuffer() {
@@ -348,6 +372,7 @@ import Testing
     updated.diagnostics.completedOperationHistoryLimit += 1
     updated.nodeShell.globalImage = "registry.example/node-shell:2"
     updated.nodeShell.startupTimeoutSeconds = 90
+    updated.terminal = TerminalPreferences(initialColumns: 132, initialRows: 40)
     updated.confirmations.confirmScaling.toggle()
     updated.resourceOperations.defaultDeleteConcurrency = 8
     updated.defaultNamespace = .allNamespaces
@@ -361,7 +386,7 @@ import Testing
 
     #expect(delta.changes(activated: .immediate) == [
         .appearance, .logDisplay, .confirmations, .resourceOperations,
-        .operationHistory, .nodeShell,
+        .operationHistory, .nodeShell, .terminal,
     ])
     #expect(delta.changes(activated: .newWorkspace) == [
         .defaultNamespace, .viewportOverscan,

@@ -96,7 +96,7 @@ private actor ExecRPCCapture: ExecRPC {
     #expect(start.container == "main")
     #expect(start.command == ["/bin/sh"])
     #expect(start.tty && start.stdin)
-    #expect(start.initialColumns == 80 && start.initialRows == 24)
+    #expect(start.initialColumns == 110 && start.initialRows == 30)
     #expect(sent.map(\.sequence) == [1, 2, 3, 4])
     #expect(sent[1].stdin == Data([0, 0xff, 0x61]))
     #expect(sent[2].resize.columns == 132 && sent[2].resize.rows == 50)
