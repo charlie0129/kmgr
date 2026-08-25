@@ -66,7 +66,7 @@ public enum ExecSessionTarget: Hashable, Sendable {
 }
 
 public struct TerminalSize: Hashable, Sendable {
-    public static let defaultShellWindow = TerminalSize(columns: 110, rows: 30)
+    public static let defaultShellWindow = TerminalSize(columns: 120, rows: 35)
 
     public var columns: UInt32
     public var rows: UInt32
