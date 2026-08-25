@@ -62,6 +62,35 @@ struct ResourceViewportVirtualizationTests {
         #expect(abs(table.visibleRect.minY - topY) < 0.5)
     }
 
+    @Test("live reordering keeps the resource list pinned to its top boundary")
+    func liveReorderKeepsTopBoundaryPinned() async throws {
+        let provider = ControlledViewportWorkspaceProvider(rowCount: 100)
+        let controller = makeViewportWorkspace(
+            provider: provider,
+            suffix: "top-reorder"
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+
+        let table = try resourceTable(in: controller)
+        try await waitForViewport {
+            table.numberOfRows == 100
+                && self.cellText(in: table, row: 0) == "pod-0"
+        }
+        scroll(table, to: 0)
+        let topY = table.visibleRect.minY
+
+        provider.swapFirstTwoRows()
+        provider.emitInvalidation(presentationRevision: 2, indexRevision: 2)
+        try await waitForViewport {
+            self.cellText(in: table, row: 0) == "pod-1"
+                && self.cellText(in: table, row: 1) == "pod-0"
+        }
+
+        #expect(table.rows(in: table.visibleRect).location == 0)
+        #expect(abs(table.visibleRect.minY - topY) < 0.5)
+    }
+
     @Test("absolute table rows use bounded raced ranges and refreshed metric interest")
     func virtualizedScrollingViewport() async throws {
         let provider = ControlledViewportWorkspaceProvider(rowCount: 10_000)
@@ -1489,6 +1518,7 @@ private final class ControlledViewportWorkspaceProvider:
     private let discoveredResources: [DiscoveredResource]
     private let namespaceNames: [String]
     private let rowNames: [Int: String]
+    private var rowOrder: [Int]
     private var storedStreamRequests: [ResourceViewRequest] = []
     private var storedFetchRequests: [ResourceViewRangeRequest] = []
     private var storedMetricInterests: [ResourceMetricInterestRequest] = []
@@ -1551,6 +1581,7 @@ private final class ControlledViewportWorkspaceProvider:
         self.discoveredResources = discoveredResources
         self.namespaceNames = namespaceNames
         self.rowNames = rowNames
+        rowOrder = Array(0..<rowCount)
     }
 
     var streamRequests: [ResourceViewRequest] {
@@ -1603,6 +1634,13 @@ private final class ControlledViewportWorkspaceProvider:
 
     func failNextRange(_ error: ClusterManagerIssue) {
         lock.withLock { nextRangeError = error }
+    }
+
+    func swapFirstTwoRows() {
+        lock.withLock {
+            guard rowOrder.count > 1 else { return }
+            rowOrder.swapAt(0, 1)
+        }
     }
 
     func releaseDelayedRange() {
@@ -1735,13 +1773,17 @@ private final class ControlledViewportWorkspaceProvider:
     func fetchViewRange(
         request: ResourceViewRangeRequest
     ) async throws -> ResourceViewRange {
-        let (delay, injectedError) = lock.withLock { () -> (Bool, ClusterManagerIssue?) in
+        let (delay, injectedError, order) = lock.withLock { () -> (
+            Bool, ClusterManagerIssue?, [Int]
+        ) in
             storedFetchRequests.append(request)
             let injectedError = nextRangeError
             nextRangeError = nil
-            guard shouldDelayNextRange else { return (false, injectedError) }
+            guard shouldDelayNextRange else {
+                return (false, injectedError, rowOrder)
+            }
             shouldDelayNextRange = false
-            return (true, injectedError)
+            return (true, injectedError, rowOrder)
         }
         if delay {
             await withCheckedContinuation { continuation in
@@ -1769,7 +1811,7 @@ private final class ControlledViewportWorkspaceProvider:
             revision: request.revision,
             startIndex: request.startIndex,
             rowsVisible: UInt64(rowCount),
-            rows: (start..<end).map(resourceRow)
+            rows: (start..<end).map { resourceRow(order[$0]) }
         )
     }
 
@@ -1988,7 +2030,7 @@ private final class ControlledViewportWorkspaceProvider:
             let items = ordered[start..<end].map { index in
                 ResourceSelectionPageItem(
                     pinnedIndex: UInt64(index),
-                    identity: resourceRow(index).identity
+                    identity: resourceRow(rowOrder[index]).identity
                 )
             }
             return ResourceSelectionPage(

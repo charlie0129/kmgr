@@ -13,7 +13,10 @@ enum ResourceTableAppKitProjection {
         modelRowOffset: Int = 0
     ) -> ResourceTableUpdateCapture {
         let firstTableRow = tableView.rows(in: tableView.visibleRect).location
-        let firstModelRow = firstTableRow == NSNotFound
+        // At the absolute beginning, the list boundary owns the viewport.
+        // Following row zero's identity through a live reorder would move the
+        // viewport to its new index and hide the new first row.
+        let firstModelRow = firstTableRow == NSNotFound || firstTableRow == 0
             ? NSNotFound : firstTableRow - modelRowOffset
         let uid = model.orderedVisibleUIDs.indices.contains(firstModelRow)
             ? model.orderedVisibleUIDs[firstModelRow] : nil
