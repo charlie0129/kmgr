@@ -103,18 +103,26 @@ struct ContextualShortcutModelsTests {
         ])
     }
 
-    @Test("Details help advertises Return metadata editing")
+    @Test("Details help advertises its available Summary actions")
     func objectDetails() {
         let item = ContextualShortcutCatalog.objectDetails(
-            canEditSelectedMetadata: true
+            canEditSelectedMetadata: true,
+            canOpenEvents: false
         ).items.first {
             $0.id == "details.edit-metadata"
         }
         #expect(item?.keys == "Return")
         #expect(item?.action == "Edit the selected label or annotation")
         #expect(ContextualShortcutCatalog.objectDetails(
-            canEditSelectedMetadata: false
+            canEditSelectedMetadata: false,
+            canOpenEvents: false
         ).items.contains { $0.id == "details.edit-metadata" } == false)
+        let events = ContextualShortcutCatalog.objectDetails(
+            canEditSelectedMetadata: false,
+            canOpenEvents: true
+        ).items.first { $0.id == "details.events" }
+        #expect(events?.keys == "E")
+        #expect(events?.action == "Open complete Events list for this object")
     }
 
     @Test("unknown dialogs never advertise resource table letters")

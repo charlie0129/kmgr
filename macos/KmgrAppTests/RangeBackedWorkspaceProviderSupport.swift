@@ -9,7 +9,7 @@ extension RangeBackedTestWorkspaceProviding {
     func fetchViewRange(
         request: ResourceViewRangeRequest
     ) async throws -> ResourceViewRange {
-        try TestResourceViewRangeStore.shared.fetch(request)
+        try fetchTestResourceViewRange(request)
     }
 
     func updateMetricInterest(
@@ -69,6 +69,12 @@ extension RangeBackedTestWorkspaceProviding {
             limit: limit
         )
     }
+}
+
+func fetchTestResourceViewRange(
+    _ request: ResourceViewRangeRequest
+) throws -> ResourceViewRange {
+    try TestResourceViewRangeStore.shared.fetch(request)
 }
 
 func testSnapshotInvalidation(

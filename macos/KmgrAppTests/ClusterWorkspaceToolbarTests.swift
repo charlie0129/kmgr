@@ -1952,6 +1952,14 @@ struct ClusterWorkspaceToolbarTests {
                         && control.selectedSegment == 0
                 }
         }
+        let summary = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes object summary" })
+        try await waitUntil {
+            let text = renderedTableText(summary)
+            return text.contains("Container") && text.contains("api")
+        }
+        #expect(!renderedTableText(summary).contains("Events"))
     }
 
     @Test("R opens the single detailed rollout restart confirmation")
@@ -2422,6 +2430,119 @@ struct ClusterWorkspaceToolbarTests {
         #expect(requests[2].allNamespaces == requests[0].allNamespaces)
         #expect(requests[2].namespaces == requests[0].namespaces)
         #expect(requests[2].filterExpression == requests[0].filterExpression)
+    }
+
+    @Test("Details lazily lists recent Events in Summary and E opens all Events")
+    func detailsLazilyListsEvents() async throws {
+        let provider = EventsNavigationWorkspaceResourceProvider(
+            holdEventRanges: true
+        )
+        let pod = toolbarPodIdentity()
+        let detailGate = DelayedDetailGate(blockedRequests: [1])
+        let controller = makeWorkspace(
+            provider: provider,
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: toolbarPodDetail(pod),
+                gate: detailGate
+            )
+        )
+        controller.showWindow(nil)
+        defer {
+            provider.releaseEventRanges()
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let resourcesTable = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil {
+            provider.streamRequests.count == 1 && resourcesTable.numberOfRows == 1
+        }
+        try await selectResourceRow(0, in: resourcesTable)
+        #expect(window.makeFirstResponder(resourcesTable))
+        resourcesTable.keyDown(with: try workspaceLetterKey("d"))
+
+        try await waitUntilAsync { await detailGate.requestCount == 1 }
+        #expect(provider.streamRequests.count == 1)
+        await detailGate.releaseAll()
+
+        try await waitUntil {
+            descendants(of: root).compactMap { $0 as? NSTableView }
+                .contains {
+                    $0.accessibilityLabel() == "Kubernetes object summary"
+                }
+        }
+        let summary = try #require(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes object summary" })
+        try await waitUntil {
+            let text = renderedTableText(summary)
+            return provider.eventRangeRequests.count == 1
+                && text.contains("Container")
+                && text.contains("api")
+                && text.contains("Events")
+                && text.contains("Loading recent events…")
+        }
+        #expect(descendants(of: root)
+            .compactMap { $0 as? NSTableView }
+            .filter { $0.accessibilityLabel() == "Kubernetes object summary" }
+            .count == 1)
+
+        let embedded = try #require(provider.streamRequests.first {
+            $0.resource.group.isEmpty
+                && $0.resource.version == "v1"
+                && $0.resource.resource == "events"
+        })
+        #expect(!embedded.allNamespaces)
+        #expect(embedded.namespaces == ["default"])
+        #expect(embedded.filterExpression
+            == "fieldSelector:\"involvedObject.uid=pod-api\"")
+        #expect(embedded.columnIDs == [
+            "last-seen", "first-seen", "event-type", "reason", "message",
+            "event-count", "event-name",
+        ])
+        #expect(embedded.sort == [
+            ResourceSortDescriptor(columnID: "last-seen", direction: .descending),
+            ResourceSortDescriptor(columnID: "first-seen", direction: .descending),
+            ResourceSortDescriptor(columnID: "event-name", direction: .ascending),
+        ])
+        let boundedRange = try #require(provider.eventRangeRequests.first)
+        #expect(boundedRange.startIndex == 0)
+        #expect(boundedRange.length == 10)
+
+        provider.releaseEventRanges()
+        try await waitUntil {
+            let text = renderedTableText(summary)
+            return text.contains("Events")
+                && text.contains { $0.contains("BackOff") }
+                && text.contains {
+                    $0.contains("Back-off restarting failed container api")
+                }
+                && text.contains("Additional Events")
+                && text.contains {
+                    $0.contains("2 more") && $0.contains("Press E")
+                }
+        }
+        #expect(controller.contextualShortcutSnapshot?.items.contains {
+            $0.id == "details.events" && $0.keys == "E"
+        } == true)
+
+        #expect(window.makeFirstResponder(summary))
+        summary.keyDown(with: try workspaceLetterKey("e"))
+        try await waitUntil {
+            provider.streamRequests.count == 3
+                && provider.cancelledViews.contains {
+                    $0.viewID == embedded.viewID
+                        && $0.generation == embedded.generation
+                }
+        }
+        let complete = provider.streamRequests[2]
+        #expect(complete.resource.id == embedded.resource.id)
+        #expect(complete.allNamespaces == embedded.allNamespaces)
+        #expect(complete.namespaces == embedded.namespaces)
+        #expect(complete.filterExpression == embedded.filterExpression)
     }
 
     @Test("incompatible resource actions are hidden while valid actions remain")
@@ -3855,14 +3976,69 @@ private struct SingleObjectWorkspaceResourceProvider: RangeBackedTestWorkspacePr
     func closeSession(sessionID: String) async {}
 }
 
+private final class TestAsyncGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen: Bool
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(isOpen: Bool) {
+        self.isOpen = isOpen
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock {
+                if isOpen { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if shouldResume { continuation.resume() }
+        }
+    }
+
+    func release() {
+        let pending = lock.withLock {
+            isOpen = true
+            let pending = waiters
+            waiters.removeAll(keepingCapacity: false)
+            return pending
+        }
+        for waiter in pending { waiter.resume() }
+    }
+}
+
 private final class EventsNavigationWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding,
     @unchecked Sendable
 {
+    struct CancelledView: Sendable {
+        var viewID: String
+        var generation: UInt64
+    }
+
     private let lock = NSLock()
+    private let eventRangeGate: TestAsyncGate
     private var storedStreamRequests: [ResourceViewRequest] = []
+    private var storedEventRangeRequests: [ResourceViewRangeRequest] = []
+    private var storedCancelledViews: [CancelledView] = []
+
+    init(holdEventRanges: Bool = false) {
+        eventRangeGate = TestAsyncGate(isOpen: !holdEventRanges)
+    }
 
     var streamRequests: [ResourceViewRequest] {
         lock.withLock { storedStreamRequests }
+    }
+
+    var eventRangeRequests: [ResourceViewRangeRequest] {
+        lock.withLock { storedEventRangeRequests }
+    }
+
+    var cancelledViews: [CancelledView] {
+        lock.withLock { storedCancelledViews }
+    }
+
+    func releaseEventRanges() {
+        eventRangeGate.release()
     }
 
     func discoverResources(sessionID: String, refresh: Bool) async throws
@@ -3898,15 +4074,24 @@ private final class EventsNavigationWorkspaceResourceProvider: RangeBackedTestWo
                     Cell(columnID: "name", displayText: "api", typedValue: .string("api")),
                 ])]
             } else {
-                rows = []
+                rows = Self.eventRows(sessionID: request.sessionID)
             }
             continuation.yield(testSnapshotInvalidation(
                 request: request,
                 sequence: 1,
                 rows: rows
             ))
+            if request.resource.resource == "events" {
+                continuation.yield(testDeltaInvalidation(
+                    request: request,
+                    sequence: 2
+                ))
+            }
             continuation.yield(.status(
-                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                cursor: StreamCursor(
+                    generation: request.generation,
+                    sequence: request.resource.resource == "events" ? 3 : 2
+                ),
                 status: ResourceViewStatus(
                     freshness: .watching, rowsVisible: UInt64(rows.count)
                 )
@@ -3915,8 +4100,97 @@ private final class EventsNavigationWorkspaceResourceProvider: RangeBackedTestWo
         }
     }
 
-    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func fetchViewRange(
+        request: ResourceViewRangeRequest
+    ) async throws -> ResourceViewRange {
+        let isEventRange = lock.withLock {
+            let isEventRange = storedStreamRequests.contains {
+                $0.viewID == request.viewID
+                    && $0.generation == request.revision.generation
+                    && $0.resource.group.isEmpty
+                    && $0.resource.version == "v1"
+                    && $0.resource.resource == "events"
+            }
+            if isEventRange { storedEventRangeRequests.append(request) }
+            return isEventRange
+        }
+        if isEventRange { await eventRangeGate.wait() }
+        return try fetchTestResourceViewRange(request)
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {
+        lock.withLock {
+            storedCancelledViews.append(CancelledView(
+                viewID: viewID,
+                generation: generation
+            ))
+        }
+    }
     func closeSession(sessionID: String) async {}
+
+    private static func eventRows(sessionID: String) -> [ResourceRow] {
+        (0..<12).map { index in
+            let warning = index == 0
+            let reason = warning ? "BackOff" : "Scheduled \(index)"
+            let message = warning
+                ? "Back-off restarting failed container api"
+                : "Assigned default/api to worker-\(index)"
+            let count: Int64 = warning ? 4 : 1
+            let identity = ResourceIdentity(
+                clusterSessionID: sessionID,
+                group: "", version: "v1", resource: "events",
+                namespace: "default", name: "api.\(index)",
+                uid: ResourceUID("event-api-\(index)")
+            )
+            return ResourceRow(identity: identity, cells: [
+                Cell(
+                    columnID: "last-seen",
+                    displayText: "\(index + 2)m",
+                    typedValue: .timestampUnixMilliseconds(
+                        1_000_000 - Int64(index * 1_000)
+                    )
+                ),
+                Cell(
+                    columnID: "first-seen",
+                    displayText: "\(index + 3)m",
+                    typedValue: .timestampUnixMilliseconds(
+                        900_000 - Int64(index * 1_000)
+                    )
+                ),
+                Cell(
+                    columnID: "event-type",
+                    displayText: warning ? "Warning" : "Normal",
+                    typedValue: .string(warning ? "Warning" : "Normal"),
+                    severity: warning ? .warning : .normal
+                ),
+                Cell(
+                    columnID: "reason",
+                    displayText: reason,
+                    typedValue: .string(reason)
+                ),
+                Cell(
+                    columnID: "involved-object",
+                    displayText: "Pod/api",
+                    typedValue: .string("Pod/api")
+                ),
+                Cell(
+                    columnID: "message",
+                    displayText: message,
+                    typedValue: .string(message)
+                ),
+                Cell(
+                    columnID: "event-count",
+                    displayText: "\(count)",
+                    typedValue: .integer(count)
+                ),
+                Cell(
+                    columnID: "event-name",
+                    displayText: identity.name,
+                    typedValue: .string(identity.name)
+                ),
+            ])
+        }
+    }
 }
 
 private struct NamespaceDrillDownWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding {
@@ -4148,6 +4422,22 @@ private struct ServiceWorkspaceResourceProvider: RangeBackedTestWorkspaceProvidi
 @MainActor
 private func descendants(of root: NSView) -> [NSView] {
     [root] + root.subviews.flatMap(descendants(of:))
+}
+
+@MainActor
+private func renderedTableText(_ table: NSTableView) -> [String] {
+    (0..<table.numberOfRows).flatMap { row in
+        table.tableColumns.indices.flatMap { column in
+            guard let view = table.view(
+                atColumn: column,
+                row: row,
+                makeIfNecessary: true
+            ) else { return [String]() }
+            return descendants(of: view).compactMap {
+                ($0 as? NSTextField)?.stringValue
+            }
+        }
+    }
 }
 
 @MainActor

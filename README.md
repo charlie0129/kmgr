@@ -105,6 +105,10 @@ app-wide Port Forwards window.
   ConfigMaps and Secrets. Oversized Summary values, including metadata values,
   stay available through cell copy while their inline presentation remains
   bounded to one line.
+- When core/v1 Events are listable, Details appends up to the 10 most recent
+  UID-filtered Events to Summary. They load after the object Summary is visible
+  and never block it. Press `E` to open the complete sortable, virtualized live
+  Events list as a separate navigation destination.
 - `Y` opens the selected object's editable YAML tab inside Details. Shift-Y
   opens an independent, UID-pinned YAML window with an exact received-byte
   count, explicit refresh, and the same validated edit/apply workflow.
@@ -468,9 +472,11 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
     object-local allocatable/capacity values, exact huge-page/accelerator
     columns appear after the base snapshot, and opening Nodes starts no Pod
     LIST/WATCH.
-11. In Relationships, verify cached results are labeled potentially incomplete;
-    run **Scan All Resources…** only against a cluster where that read load is
-    acceptable.
+11. In Details, verify Summary appears before its bounded recent Events section,
+    then press `E` and confirm the complete list contains only the UID-pinned
+    object's Events. In Relationships, verify cached results are labeled
+    potentially incomplete; run **Scan All Resources…** only against a cluster
+    where that read load is acceptable.
 12. While a safe resource or detail view is visible, terminate the helper and
     verify the workspace shows a disconnected state, reopens through a fresh
     authenticated session, and does not replay mutations, exec commands, or

@@ -1002,6 +1002,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     /// until the toolbar's menu is populated so its default item cannot
     /// overwrite the restored namespace.
     private var pendingNamespaceScope: NamespaceSelection?
+    private struct ObjectEventsTarget {
+        var resource: DiscoveredResource
+        var scope: NamespaceSelection
+        var filter: String
+    }
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenYAMLSnapshot: ((ResourceIdentity) -> Void)?
@@ -2216,29 +2221,40 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     private func openEvents(for identity: ResourceIdentity) {
-        guard let target = resources.first(where: {
-            $0.group.isEmpty && $0.version == "v1" && $0.resource == "events"
-                && $0.verbs.contains("list")
-        }) else {
+        guard let target = objectEventsTarget(for: identity) else {
             NSSound.beep()
             return
         }
-        let targetScope = identity.namespace.isEmpty
-            ? NamespaceSelection() : .namespace(identity.namespace)
         invalidateObjectOpenTask()
         showResourceList(resume: false)
-        applyNamespaceScopeSelection(targetScope)
+        applyNamespaceScopeSelection(target.scope)
         contentController.open(
-            resource: target,
-            scope: targetScope,
-            initialFilter: ResourceQueryExpression.nativeFieldSelector(
-                path: "involvedObject.uid", equals: identity.uid.rawValue
-            ),
+            resource: target.resource,
+            scope: target.scope,
+            initialFilter: target.filter,
             reason: .resourceDrillDown
         )
-        sidebarController.selectResource(matchingCurrent: target.id)
+        sidebarController.selectResource(matchingCurrent: target.resource.id)
         checkpointRestoration()
         view.window?.makeFirstResponder(contentController.tableResponder)
+    }
+
+    private func objectEventsTarget(
+        for identity: ResourceIdentity
+    ) -> ObjectEventsTarget? {
+        guard let resource = resources.first(where: {
+            $0.group.isEmpty && $0.version == "v1" && $0.resource == "events"
+                && $0.verbs.contains("list")
+        }) else { return nil }
+        return ObjectEventsTarget(
+            resource: resource,
+            scope: identity.namespace.isEmpty
+                ? NamespaceSelection() : .namespace(identity.namespace),
+            filter: ResourceQueryExpression.nativeFieldSelector(
+                path: "involvedObject.uid",
+                equals: identity.uid.rawValue
+            )
+        )
     }
 
     private func showPodContainers(
@@ -2333,16 +2349,29 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         dataController = nil
         podContainerController = nil
         contentController.suspend()
+        let eventsController = objectEventsTarget(for: identity).map { target in
+            ObjectDetailRecentEventsController(
+                session: session,
+                provider: provider,
+                resource: target.resource,
+                scope: target.scope,
+                filter: target.filter
+            )
+        }
         let controller = ObjectDetailViewController(
             identity: identity,
             provider: objectDetailProvider,
             initialTab: initialTab,
             session: session,
-            tableLayoutStore: tableLayoutStore
+            tableLayoutStore: tableLayoutStore,
+            eventsController: eventsController
         )
         controller.onBack = { [weak self] in self?.goBack() }
         controller.onEditMetadata = { [weak self] identity, kind, key in
             self?.onEditMetadata?(identity, kind, key)
+        }
+        controller.onOpenEvents = { [weak self] identity in
+            self?.openEvents(for: identity)
         }
         controller.onContextualShortcutsChanged = { [weak self] in
             self?.onContextualShortcutsChanged?()
@@ -8881,6 +8910,337 @@ private final class ResourceListViewController: NSViewController,
             return !selected.isEmpty
         case .focusFilter, .selectAll, .moveDown, .moveUp, .extendDown, .extendUp:
             return true
+        }
+    }
+}
+
+@MainActor
+private final class ObjectDetailRecentEventsController: ObjectDetailEventsControlling {
+    static let maximumEvents = ObjectDetailSummaryPresentation.maximumRecentEvents
+    private static let columnIDs = [
+        "last-seen", "first-seen", "event-type", "reason", "message",
+        "event-count", "event-name",
+    ]
+
+    private var session: OpenedClusterSession
+    private let provider: any WorkspaceResourceProviding
+    private let resource: DiscoveredResource
+    private let scope: NamespaceSelection
+    private let filter: String
+    private let viewID = UUID().uuidString.lowercased()
+    private var generation: UInt64 = 0
+    private var lastCancelledGeneration: UInt64 = 0
+    private var isActive = false
+    private var streamTask: Task<Void, Never>?
+    private var rangeTask: Task<Void, Never>?
+    private var rangeFetchTicket: UInt64 = 0
+    private var rangeCache: ResourceViewRangeCache?
+    private var sequenceGate = GenerationSequenceGate()
+    private var lastSnapshot: ObjectDetailEventsSnapshot?
+
+    init(
+        session: OpenedClusterSession,
+        provider: any WorkspaceResourceProviding,
+        resource: DiscoveredResource,
+        scope: NamespaceSelection,
+        filter: String
+    ) {
+        self.session = session
+        self.provider = provider
+        self.resource = resource
+        self.scope = scope
+        self.filter = filter
+    }
+
+    var onSnapshotChanged: ((ObjectDetailEventsSnapshot) -> Void)?
+
+    func activate() {
+        guard !isActive else { return }
+        isActive = true
+        publish(.loading)
+        openStream()
+    }
+
+    func deactivate() {
+        guard isActive else { return }
+        isActive = false
+        cancelCurrentView()
+    }
+
+    func stop() {
+        deactivate()
+    }
+
+    func engineDidDisconnect() {
+        deactivate()
+        publish(.failed(
+            message: "Events unavailable while the engine reconnects",
+            toolTip: "The Kubernetes engine disconnected. Recent Events will reload after this object's Summary reconnects."
+        ))
+    }
+
+    func recover(session recoveredSession: OpenedClusterSession) {
+        let shouldReactivate = isActive
+        deactivate()
+        session = recoveredSession
+        if shouldReactivate { activate() }
+    }
+
+    private func openStream() {
+        generation &+= 1
+        sequenceGate.reset()
+        cancelRangeFetches()
+        rangeCache = ResourceViewRangeCache(
+            sessionID: session.sessionID,
+            viewID: viewID,
+            generation: generation,
+            maximumCachedRows: Self.maximumEvents
+        )
+        let request = ResourceViewRequest(
+            sessionID: session.sessionID,
+            viewID: viewID,
+            generation: generation,
+            resource: resource,
+            allNamespaces: scope.allNamespaces,
+            namespaces: scope.namespaces,
+            filterExpression: filter,
+            columnIDs: Self.columnIDs,
+            sort: [
+                ResourceSortDescriptor(
+                    columnID: "last-seen",
+                    direction: .descending
+                ),
+                ResourceSortDescriptor(
+                    columnID: "first-seen",
+                    direction: .descending
+                ),
+                ResourceSortDescriptor(
+                    columnID: "event-name",
+                    direction: .ascending
+                ),
+            ]
+        )
+        let provider = self.provider
+        streamTask = Task { @MainActor [weak self, provider] in
+            do {
+                for try await message in provider.streamView(request: request) {
+                    guard !Task.isCancelled else { return }
+                    self?.receive(message, request: request)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.show(error: error, generation: request.generation)
+            }
+        }
+    }
+
+    private func receive(
+        _ message: ResourceViewMessage,
+        request: ResourceViewRequest
+    ) {
+        guard isActive,
+            request.generation == generation,
+            message.cursor.generation == generation
+        else { return }
+        let disposition = sequenceGate.accept(message.cursor)
+        guard disposition == .acceptedNewGeneration
+            || disposition == .acceptedNextSequence
+        else { return }
+
+        switch message {
+        case .invalidation(let cursor, let invalidation):
+            receive(cursor: cursor, invalidation: invalidation)
+        case .reconciled(let cursor, let reconciliation)
+            where reconciliation.rowsVisible == 0
+                && rangeCache?.matches(
+                    cursor: cursor,
+                    reconciliation: reconciliation
+                ) == true:
+            publish(.loaded(events: [], totalCount: 0))
+        case .failure(_, let issue):
+            let presentation = issue.userFacingPresentation
+            publish(.failed(
+                message: presentation.inlineText,
+                toolTip: presentation.detailedText
+            ))
+        case .schema, .status, .reconciled:
+            break
+        }
+    }
+
+    private func receive(
+        cursor: StreamCursor,
+        invalidation: ResourceViewInvalidation
+    ) {
+        guard var cache = rangeCache else { return }
+        let disposition = cache.receive(cursor: cursor, invalidation: invalidation)
+        guard disposition != .rejectedStale else { return }
+        guard disposition != .rejectedInvalid else {
+            publishInvalidRangeContract()
+            return
+        }
+        if disposition != .hintsOnly {
+            cancelRangeFetches()
+        }
+        let length = min(Self.maximumEvents, Int(clamping: cache.rowsVisible))
+        guard length > 0 else {
+            _ = cache.retain(0..<0)
+            rangeCache = cache
+            publish(.loaded(events: [], totalCount: cache.rowsVisible))
+            return
+        }
+        let target = UInt64(0)..<UInt64(length)
+        let requests = cache.retain(target)
+        rangeCache = cache
+        if let rows = cache.rows(in: target) {
+            publish(rows: rows, totalCount: cache.rowsVisible)
+            return
+        }
+        guard !requests.isEmpty else { return }
+        startRangeFetches(requests)
+    }
+
+    private func startRangeFetches(
+        _ requests: [ResourceViewRangeRequest]
+    ) {
+        guard rangeTask == nil else { return }
+        rangeFetchTicket &+= 1
+        let ticket = rangeFetchTicket
+        let provider = self.provider
+        rangeTask = Task { @MainActor [weak self, provider] in
+            defer { self?.finishRangeFetches(ticket: ticket) }
+            for request in requests {
+                guard !Task.isCancelled else { return }
+                do {
+                    let range = try await provider.fetchViewRange(request: request)
+                    guard !Task.isCancelled else { return }
+                    self?.receive(range: range, for: request)
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self?.receiveRangeError(error, for: request)
+                }
+            }
+        }
+    }
+
+    private func finishRangeFetches(ticket: UInt64) {
+        guard ticket == rangeFetchTicket else { return }
+        rangeTask = nil
+    }
+
+    private func cancelRangeFetches() {
+        rangeFetchTicket &+= 1
+        rangeTask?.cancel()
+        rangeTask = nil
+    }
+
+    private func receiveRangeError(
+        _ error: Error,
+        for request: ResourceViewRangeRequest
+    ) {
+        guard request.revision.generation == generation else { return }
+        if var cache = rangeCache {
+            cache.release(request)
+            rangeCache = cache
+        }
+        if let issue = error as? ClusterManagerIssue,
+            issue.isStaleResourceViewRequest
+        {
+            return
+        }
+        show(error: error, generation: request.revision.generation)
+    }
+
+    private func receive(
+        range: ResourceViewRange,
+        for request: ResourceViewRangeRequest
+    ) {
+        guard isActive, request.revision.generation == generation,
+            var cache = rangeCache
+        else { return }
+        let reception = cache.receive(range, for: request)
+        rangeCache = cache
+        guard reception != .rejectedRace else { return }
+        guard reception != .rejectedInvalid else {
+            publishInvalidRangeContract()
+            return
+        }
+        let length = min(Self.maximumEvents, Int(clamping: cache.rowsVisible))
+        let target = UInt64(0)..<UInt64(length)
+        guard let rows = cache.rows(in: target) else { return }
+        publish(rows: rows, totalCount: cache.rowsVisible)
+    }
+
+    private func publish(rows: [ResourceRow], totalCount: UInt64) {
+        let events = rows.map { row in
+            let count: Int64
+            if case .integer(let value)? = row["event-count"]?.typedValue {
+                count = value
+            } else {
+                count = Int64(row["event-count"]?.displayText ?? "") ?? 0
+            }
+            let typeCell = row["event-type"]
+            return ObjectDetailEventSummary(
+                uid: row.identity.uid,
+                type: typeCell?.displayText ?? "",
+                reason: row["reason"]?.displayText ?? "",
+                message: row["message"]?.displayText ?? "",
+                lastSeen: row["last-seen"]?.displayText ?? "",
+                count: count,
+                severity: typeCell?.severity ?? .normal
+            )
+        }
+        publish(.loaded(events: events, totalCount: totalCount))
+    }
+
+    private func publishInvalidRangeContract() {
+        let issue = ClusterManagerIssue(
+            category: .internalFailure,
+            reason: "InvalidRecentEventsRange",
+            message: "The engine returned an invalid recent Events range.",
+            operation: "load recent object Events"
+        )
+        let presentation = issue.userFacingPresentation
+        publish(.failed(
+            message: presentation.inlineText,
+            toolTip: presentation.detailedText
+        ))
+    }
+
+    private func show(error: Error, generation: UInt64) {
+        guard isActive, generation == self.generation else { return }
+        let presentation = UserFacingErrorPresentation(error)
+        publish(.failed(
+            message: presentation.inlineText,
+            toolTip: presentation.detailedText
+        ))
+    }
+
+    private func publish(_ snapshot: ObjectDetailEventsSnapshot) {
+        guard snapshot != lastSnapshot else { return }
+        lastSnapshot = snapshot
+        onSnapshotChanged?(snapshot)
+    }
+
+    private func cancelCurrentView() {
+        streamTask?.cancel()
+        streamTask = nil
+        cancelRangeFetches()
+        rangeCache = nil
+        let cancelledGeneration = generation
+        guard cancelledGeneration > 0,
+            cancelledGeneration != lastCancelledGeneration
+        else { return }
+        lastCancelledGeneration = cancelledGeneration
+        let provider = self.provider
+        let sessionID = session.sessionID
+        let viewID = self.viewID
+        Task {
+            await provider.cancelView(
+                sessionID: sessionID,
+                viewID: viewID,
+                generation: cancelledGeneration
+            )
         }
     }
 }

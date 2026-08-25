@@ -255,7 +255,8 @@ public enum ContextualShortcutCatalog {
     )
 
     public static func objectDetails(
-        canEditSelectedMetadata: Bool
+        canEditSelectedMetadata: Bool,
+        canOpenEvents: Bool
     ) -> ContextualShortcutSnapshot {
         var items: [ContextualShortcutItem] = []
         if canEditSelectedMetadata {
@@ -263,6 +264,13 @@ public enum ContextualShortcutCatalog {
                 "details.edit-metadata",
                 "Return",
                 "Edit the selected label or annotation"
+            ))
+        }
+        if canOpenEvents {
+            items.append(item(
+                "details.events",
+                "E",
+                "Open complete Events list for this object"
             ))
         }
         items.append(namespaceItem)

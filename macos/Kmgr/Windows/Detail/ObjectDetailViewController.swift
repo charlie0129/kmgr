@@ -16,6 +16,33 @@ enum ObjectDetailInitialTab {
     }
 }
 
+@MainActor
+protocol ObjectDetailEventsControlling: AnyObject {
+    var onSnapshotChanged: ((ObjectDetailEventsSnapshot) -> Void)? { get set }
+
+    func activate()
+    func deactivate()
+    func stop()
+    func engineDidDisconnect()
+    func recover(session: OpenedClusterSession)
+}
+
+struct ObjectDetailEventSummary: Hashable, Sendable {
+    var uid: ResourceUID
+    var type: String
+    var reason: String
+    var message: String
+    var lastSeen: String
+    var count: Int64
+    var severity: CellSeverity
+}
+
+enum ObjectDetailEventsSnapshot: Hashable, Sendable {
+    case loading
+    case loaded(events: [ObjectDetailEventSummary], totalCount: UInt64)
+    case failed(message: String, toolTip: String)
+}
+
 struct ObjectDetailSummaryRow: Hashable, Sendable {
     var sectionID: String
     var fieldID: String
@@ -43,6 +70,7 @@ enum ObjectDetailSummaryTableItem: Hashable, Sendable {
 
 enum ObjectDetailSummaryPresentation {
     static let maximumMetadataEntriesPerSection = 64
+    static let maximumRecentEvents = 10
     static let maximumVisibleKeyCharacters = 120
     static let maximumVisibleValueCharacters = 180
 
@@ -85,6 +113,109 @@ enum ObjectDetailSummaryPresentation {
                 rows: rowsBySection[sectionID] ?? []
             )
         }
+    }
+
+    static func eventsSection(
+        for snapshot: ObjectDetailEventsSnapshot
+    ) -> ObjectDetailSummarySection {
+        let rows: [ObjectDetailSummaryRow]
+        switch snapshot {
+        case .loading:
+            rows = [eventStatusRow(
+                fieldID: "loading",
+                text: "Loading recent events…",
+                severity: .muted
+            )]
+        case .failed(let message, let toolTip):
+            rows = [ObjectDetailSummaryRow(
+                sectionID: "events",
+                fieldID: "failure",
+                label: "Status",
+                displayText: visibleValue(normalizedText(message)),
+                copyLabel: "Status",
+                copyValue: normalizedText(message),
+                tooltip: toolTip,
+                severity: .critical
+            )]
+        case .loaded(let events, let totalCount):
+            if events.isEmpty {
+                rows = [eventStatusRow(
+                    fieldID: "empty",
+                    text: "No recent events",
+                    severity: .muted
+                )]
+            } else {
+                let visibleEvents = events.prefix(maximumRecentEvents)
+                var eventRows = visibleEvents.map(eventRow)
+                let shown = UInt64(visibleEvents.count)
+                let representedTotal = max(totalCount, UInt64(events.count))
+                if representedTotal > shown {
+                    let omitted = representedTotal - shown
+                    let value = "\(omitted.formatted()) more · Press E to open the complete Events list"
+                    eventRows.append(ObjectDetailSummaryRow(
+                        sectionID: "events",
+                        fieldID: "additional",
+                        label: "Additional Events",
+                        displayText: value,
+                        copyLabel: "Additional Events",
+                        copyValue: value,
+                        tooltip: "",
+                        severity: .informational
+                    ))
+                }
+                rows = eventRows
+            }
+        }
+        return ObjectDetailSummarySection(id: "events", title: "Events", rows: rows)
+    }
+
+    private static func eventRow(
+        _ event: ObjectDetailEventSummary
+    ) -> ObjectDetailSummaryRow {
+        let reason = normalizedText(event.reason)
+        let type = normalizedText(event.type)
+        var label = reason.isEmpty ? (type.isEmpty ? "Event" : type) : reason
+        if !type.isEmpty, label.caseInsensitiveCompare(type) != .orderedSame {
+            label += " · \(type)"
+        }
+        let message = normalizedText(event.message)
+        var parts = message.isEmpty ? ["No message"] : [message]
+        let lastSeen = normalizedText(event.lastSeen)
+        if !lastSeen.isEmpty {
+            parts.append("last seen \(lastSeen) ago")
+        }
+        if event.count > 1 {
+            parts.append("\(event.count.formatted()) occurrences")
+        }
+        let value = parts.joined(separator: " · ")
+        return ObjectDetailSummaryRow(
+            sectionID: "events",
+            fieldID: "event:\(event.uid.rawValue)",
+            label: bounded(label, maximumCharacters: maximumVisibleKeyCharacters),
+            displayText: visibleValue(value),
+            copyLabel: label,
+            copyValue: value,
+            tooltip: value.count > maximumVisibleValueCharacters
+                ? copyHint(forCharacterCount: value.count) : "",
+            severity: event.severity
+        )
+    }
+
+    private static func eventStatusRow(
+        fieldID: String,
+        text: String,
+        severity: CellSeverity
+    ) -> ObjectDetailSummaryRow {
+        ObjectDetailSummaryRow(
+            sectionID: "events",
+            fieldID: fieldID,
+            label: "Status",
+            displayText: text,
+            copyLabel: "Status",
+            copyValue: text,
+            tooltip: "",
+            severity: severity
+        )
     }
 
     private static func summaryRow(
@@ -297,6 +428,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private let provider: any ObjectDetailProviding
     private let tableLayoutStore: TableLayoutStore
     private let initialTab: ObjectDetailInitialTab
+    private let eventsController: (any ObjectDetailEventsControlling)?
     private let yamlPresentationBuilder:
         @Sendable (Data) -> YAMLManagedFieldsPresentation
     private let segmented = NSSegmentedControl(
@@ -356,6 +488,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var recoveryTask: Task<Void, Never>?
     private var isEditingYAML = false
     private var summaryItems: [ObjectDetailSummaryTableItem] = []
+    private var eventsSnapshot = ObjectDetailEventsSnapshot.loading
     private var relativeTimeRefreshID: UUID?
     private var relationships: [ObjectRelationship] = []
     private var relationshipsLoaded = false
@@ -366,6 +499,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var terminalObjectState = false
 
     var onBack: (() -> Void)?
+    var onOpenEvents: ((ResourceIdentity) -> Void)?
     var onEditMetadata: ((ResourceIdentity, ResourceMetadataKind, String?) -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
     private(set) var workspaceStatus = WorkspaceStatus("Loading…", busy: true)
@@ -375,7 +509,10 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         let summarySelected = segmented.selectedSegment
             == ObjectDetailInitialTab.summary.segment
         return ContextualShortcutCatalog.objectDetails(
-            canEditSelectedMetadata: summarySelected
+            canEditSelectedMetadata: summarySelected,
+            canOpenEvents: summarySelected
+                && eventsController != nil
+                && onOpenEvents != nil
         )
     }
 
@@ -385,6 +522,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         initialTab: ObjectDetailInitialTab = .automatic,
         session: OpenedClusterSession? = nil,
         tableLayoutStore: TableLayoutStore? = nil,
+        eventsController: (any ObjectDetailEventsControlling)? = nil,
         yamlPresentationBuilder: @escaping @Sendable (Data)
             -> YAMLManagedFieldsPresentation = {
             YAMLManagedFieldsPresentation(yamlUTF8: $0)
@@ -395,6 +533,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         self.provider = provider
         self.initialTab = initialTab
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
+        self.eventsController = eventsController
         self.yamlPresentationBuilder = yamlPresentationBuilder
         super.init(nibName: nil, bundle: nil)
     }
@@ -444,6 +583,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             contentContainer.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
             contentContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
+        if let eventsController {
+            eventsController.onSnapshotChanged = { [weak self] snapshot in
+                self?.install(eventsSnapshot: snapshot)
+            }
+        }
         configureSummary()
         configureRelationships()
         configureYAML()
@@ -487,6 +631,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         relationshipScanTask?.cancel()
         operationTask?.cancel()
         recoveryTask?.cancel()
+        eventsController?.stop()
         cancelYAMLPresentationPreparation()
         recoveryTask = nil
         ObjectDetailRelativeTimeRefreshCenter.shared.remove(relativeTimeRefreshID)
@@ -516,6 +661,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         operationTask = nil
         recoveryTask?.cancel()
         recoveryTask = nil
+        eventsController?.engineDidDisconnect()
         cancelYAMLPresentationPreparation()
         activeRelationshipScan = nil
         publishStatus(WorkspaceStatus(
@@ -538,6 +684,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     ) {
         guard recoveryTask == nil else { return }
         session = recoveredSession
+        eventsController?.recover(session: recoveredSession)
         var reboundIdentity = identity
         reboundIdentity.clusterSessionID = recoveredSession.sessionID
         publishStatus(WorkspaceStatus("Reopening this UID…", busy: true))
@@ -602,6 +749,9 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
         summaryTable.onEditSelectedMetadata = { [weak self] in
             self?.editSelectedMetadata() ?? false
+        }
+        summaryTable.onOpenEvents = { [weak self] in
+            self?.openEvents() ?? false
         }
         summaryTable.toolTip = "Click a cell and press Command-C, or choose Copy Cell, to copy its full value."
         let summaryMenu = NSMenu()
@@ -801,6 +951,7 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         renderSummary(detail)
         publishStatus(WorkspaceStatus("Resource version \(detail.resourceVersion)"))
         startObjectWatch(resourceVersion: detail.resourceVersion)
+        updateEventsActivation()
     }
 
     private func installRecovery(detail updatedDetail: ObjectDetail) throws {
@@ -849,7 +1000,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             else { return nil }
             return "\(row.sectionID)\u{0}\(row.fieldID)"
         })
-        let sections = ObjectDetailSummaryPresentation.sections(for: detail)
+        var sections = ObjectDetailSummaryPresentation.sections(for: detail)
+        if eventsController != nil {
+            sections.append(ObjectDetailSummaryPresentation.eventsSection(
+                for: eventsSnapshot
+            ))
+        }
         summaryItems = sections.flatMap { section in
             [.section(section)] + section.rows.map(ObjectDetailSummaryTableItem.row)
         }
@@ -863,6 +1019,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         if !restored.isEmpty {
             summaryTable.selectRowIndexes(restored, byExtendingSelection: false)
         }
+    }
+
+    private func install(eventsSnapshot: ObjectDetailEventsSnapshot) {
+        self.eventsSnapshot = eventsSnapshot
+        guard let detail else { return }
+        renderSummary(detail)
     }
 
     private func synchronizeRelativeTimeRefresh(for detail: ObjectDetail) {
@@ -894,7 +1056,11 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func tabChanged() {
-        switch segmented.selectedSegment {
+        let selectedSegment = segmented.selectedSegment
+        if selectedSegment != ObjectDetailInitialTab.summary.segment {
+            eventsController?.deactivate()
+        }
+        switch selectedSegment {
         case 1:
             show(yamlContainerView)
             // Cmd-F is provided by NSTextView's find bar. When Y opens this
@@ -907,11 +1073,12 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 else { return }
                 self.view.window?.makeFirstResponder(self.yamlTextView)
             }
-        case 2:
+        case ObjectDetailInitialTab.relationships.segment:
             show(relationshipsContainerView)
             loadRelationshipsIfNeeded()
         default:
             show(summaryScrollView)
+            updateEventsActivation()
             DispatchQueue.main.async { [weak self] in
                 guard let self,
                     self.segmented.selectedSegment == ObjectDetailInitialTab.summary.segment,
@@ -921,6 +1088,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             }
         }
         onContextualShortcutsChanged?()
+    }
+
+    private func updateEventsActivation() {
+        guard detail != nil,
+            segmented.selectedSegment == ObjectDetailInitialTab.summary.segment
+        else {
+            eventsController?.deactivate()
+            return
+        }
+        eventsController?.activate()
     }
 
     private func startObjectWatch(resourceVersion: String) {
@@ -1522,6 +1699,16 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         onEditMetadata?(identity, kind, key)
     }
 
+    private func openEvents() -> Bool {
+        guard eventsController != nil, detail != nil, !terminalObjectState,
+            let onOpenEvents
+        else {
+            return false
+        }
+        onOpenEvents(identity)
+        return true
+    }
+
     private func metadataKind(for sectionID: String) -> ResourceMetadataKind? {
         switch sectionID {
         case "labels": .labels
@@ -1665,6 +1852,7 @@ private final class ObjectDetailSummaryScrollView: NSScrollView {
 @MainActor
 private final class ObjectDetailSummaryTableView: CapturedCellTableView {
     var onEditSelectedMetadata: (() -> Bool)?
+    var onOpenEvents: (() -> Bool)?
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([
@@ -1672,6 +1860,12 @@ private final class ObjectDetailSummaryTableView: CapturedCellTableView {
         ])
         if event.keyCode == 36, modifiers.isEmpty,
             onEditSelectedMetadata?() == true
+        {
+            return
+        }
+        if event.charactersIgnoringModifiers?.lowercased() == "e",
+            modifiers.isEmpty,
+            onOpenEvents?() == true
         {
             return
         }
