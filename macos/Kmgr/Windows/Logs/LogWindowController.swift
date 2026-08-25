@@ -147,6 +147,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private var needsRenderWhenVisible = false
     private var keyVisibilityWakePending = false
     private var isClosing = false
+    private var tailedLineCount: UInt64 = 0
     private var latestStoreEvictions: UInt64 = 0
     private var latestStreamDrops: UInt64 = 0
     private var latestRenderOmissions = 0
@@ -988,7 +989,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
                 "stored_records=\(statistics.recordCount) stored_bytes=\(statistics.byteCount) dropped_records=\(statistics.droppedRecords) cancelled=\(Task.isCancelled)"
             )
             guard !Task.isCancelled else { return }
-            for record in records { streamingSourceIDs.insert(record.sourceID) }
+            for record in records {
+                streamingSourceIDs.insert(record.sourceID)
+                if record.startsLine { tailedLineCount &+= 1 }
+            }
             latestStoreEvictions = statistics.droppedRecords
             updateStatusLabel()
             markStreamHealthyIfPossible()
@@ -1048,6 +1052,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private func updateStatusLabel() {
         let state = latestStreamState.rawValue.capitalized
         var parts = [state]
+        parts.append(tailedLineCount == 1
+            ? "1 line tailed"
+            : "\(tailedLineCount.formatted()) lines tailed")
         if latestStreamDrops > 0 {
             parts.append(latestStreamDrops == 1
                 ? "1 record lost before delivery"

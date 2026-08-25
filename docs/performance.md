@@ -229,9 +229,11 @@ swift test --package-path macos --no-parallel --filter LogModelsTests
 swift test --package-path macos --no-parallel --filter LogWindowControllerTests
 ```
 
-The status bar reports transport loss as `records lost before delivery` and
-normal local rolling-history pressure as `older records evicted`; these counts
-must not be combined.
+The status bar increments its cumulative logical `lines tailed` count directly
+from each incoming record's line-start marker, without scanning retained or
+visible history. It reports transport loss as `records lost before delivery`
+and normal local rolling-history pressure as `older records evicted`; these
+counts must not be combined.
 
 ## Instruments signposts
 

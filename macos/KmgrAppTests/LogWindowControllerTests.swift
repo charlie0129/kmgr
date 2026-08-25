@@ -865,8 +865,8 @@ struct LogWindowControllerTests {
         })
     }
 
-    @Test("delivery loss and local history eviction are reported separately")
-    func deliveryLossIsDistinctFromHistoryEviction() async throws {
+    @Test("logical tailed lines, delivery loss, and local eviction stay distinct")
+    func statusDistinguishesTailedLinesDeliveryLossAndHistoryEviction() async throws {
         let provider = OrderedLogWindowProvider()
         let source = logSource(pod: "api", uid: "api-uid", container: "app")
         let controller = LogWindowController(
@@ -896,19 +896,33 @@ struct LogWindowControllerTests {
         provider.emitRecords(
             generation: 1,
             sequence: 2,
-            records: ["old", "middle", "new"].map {
+            records: [
                 LogRecord(
                     sourceID: source.sourceID,
-                    data: Data($0.utf8),
+                    data: Data("old ".utf8),
+                    startsLine: true,
+                    endsWithNewline: false
+                ),
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data("continued".utf8),
+                    startsLine: false,
                     endsWithNewline: true
-                )
-            }
+                ),
+                LogRecord(
+                    sourceID: source.sourceID,
+                    data: Data("new".utf8),
+                    startsLine: true,
+                    endsWithNewline: true
+                ),
+            ]
         )
         try await waitForLogText(logView, waking: controller, in: window) {
             $0.contains("new")
         }
         try await waitForLogStatus(status) {
-            $0.contains("3 records lost before delivery")
+            $0.contains("2 lines tailed")
+                && $0.contains("3 records lost before delivery")
                 && $0.contains("1 older record evicted")
         }
     }
@@ -1284,7 +1298,7 @@ struct LogWindowControllerTests {
                 endsWithNewline: true
             )]
         )
-        try await waitForLogStatus(status) { $0 == "Streaming" }
+        try await waitForLogStatus(status) { $0 == "Streaming · 1 line tailed" }
         controller.close()
     }
 
@@ -1415,7 +1429,7 @@ struct LogWindowControllerTests {
 
         // The prior generation remains admitted by the unchanged stream gate.
         provider.emitStreaming(generation: 1, sequence: 2)
-        try await waitForLogStatus(status) { $0 == "Streaming" }
+        try await waitForLogStatus(status) { $0 == "Streaming · 0 lines tailed" }
         events = provider.snapshot()
         #expect(!events.contains("cancel:1"))
         #expect(!events.contains("terminated:1"))
