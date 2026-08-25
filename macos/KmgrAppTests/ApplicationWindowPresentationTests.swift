@@ -32,7 +32,7 @@ struct ApplicationWindowPresentationTests {
         #expect(!AppPreferencesStore(defaults: defaults).current.restoreOpenClusterWindows)
     }
 
-    @Test("terminal size defaults to 110 by 30 and persists from Settings")
+    @Test("terminal size defaults to 120 by 35 and persists from Settings")
     func terminalSizeSettings() throws {
         let suite = "kmgr-app-terminal-settings-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -51,8 +51,8 @@ struct ApplicationWindowPresentationTests {
             $0.accessibilityIdentifier() == "settings.terminal.initialRows"
         })
 
-        #expect(columns.integerValue == 110)
-        #expect(rows.integerValue == 30)
+        #expect(columns.integerValue == 120)
+        #expect(rows.integerValue == 35)
         #expect(fields.contains {
             $0.stringValue.contains("new Pod terminals and Node shells")
         })

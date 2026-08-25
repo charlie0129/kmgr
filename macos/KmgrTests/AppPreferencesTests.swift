@@ -227,9 +227,9 @@ import Testing
     })
 }
 
-@Test func terminalPreferencesUseA110By30BoundedDefault() {
+@Test func terminalPreferencesUseA120By35BoundedDefault() {
     let preferences = TerminalPreferences()
-    #expect(preferences.initialSize == TerminalSize(columns: 110, rows: 30))
+    #expect(preferences.initialSize == TerminalSize(columns: 120, rows: 35))
 
     var app = AppPreferences()
     for columns in [80, 300] {

@@ -239,7 +239,7 @@ current logs, Shift-L opens its previous container instance's logs, `S` opens
 its terminal, Shift-S configures its terminal, and `P` starts a port-forward
 for the UID-pinned parent Pod.
 
-New Pod terminals and Node shells open at 110 columns by 30 rows by default.
+New Pod terminals and Node shells open at 120 columns by 35 rows by default.
 Settings can choose an initial size from 80–300 columns and 20–100 rows;
 already-open terminal windows keep their current independently resizable size.
 

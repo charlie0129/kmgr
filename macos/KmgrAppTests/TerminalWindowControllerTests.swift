@@ -44,7 +44,7 @@ struct TerminalWindowControllerTests {
         #expect(maximumComponent < 0.5)
     }
 
-    @Test("default terminal grid is 110 columns by 30 rows")
+    @Test("default terminal grid is 120 columns by 35 rows")
     func defaultTerminalGridSize() async throws {
         let provider = OrderedExecProvider()
         let controller = TerminalWindowController(
@@ -56,7 +56,7 @@ struct TerminalWindowControllerTests {
         try await waitForExecEvent(provider) { $0.contains("opened:1") }
 
         let request = try #require(provider.request(generation: 1))
-        #expect(request.initialSize == TerminalSize(columns: 110, rows: 30))
+        #expect(request.initialSize == TerminalSize(columns: 120, rows: 35))
     }
 
     @Test("configured terminal grid is used for the initial remote process")
