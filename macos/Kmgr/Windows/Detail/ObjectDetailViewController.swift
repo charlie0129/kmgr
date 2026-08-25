@@ -72,7 +72,7 @@ enum ObjectDetailSummaryPresentation {
     static let maximumMetadataEntriesPerSection = 64
     static let maximumRecentEvents = 10
     static let maximumVisibleKeyCharacters = 120
-    static let maximumVisibleValueCharacters = 180
+    static let maximumVisibleValueCharacters = 512
 
     static func sections(
         for detail: ObjectDetail,
